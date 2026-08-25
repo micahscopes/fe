@@ -38,6 +38,7 @@ use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
 use mandelbrot_proof_kernel::{EscapeAirWordStream, EscapesByQ12}
+use canonical_words::CanonicalWords
 use parallel_ntt_webgpu::{
     finish_batched_stage_grid_into,
     forward_batched_stage_grid_lane,
@@ -62,6 +63,19 @@ use poseidon_baby_bear::{
     poseidon2_workgroup_lane_with_round_constant,
 }
 use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
+use region_layout::{
+    Region,
+    RegionIndex,
+    RegionSchema,
+    RegionSchemaProvider,
+    cyclic_region_index,
+    load_region_indexed_word,
+    load_region_word,
+    region_bounds,
+    store_region_indexed_word,
+    store_region_word,
+    subregion,
+}
 
 const TRACE: usize = 4
 const LDE: usize = 16
@@ -73,30 +87,125 @@ const OUTPUT_LANES: usize = LDE / 2
 const INPUT_GRID_LANES: usize = COLUMN_COUNT * INPUT_LANES
 const OUTPUT_GRID_LANES: usize = COLUMN_COUNT * OUTPUT_LANES
 const DIGEST_FIELDS: usize = 8
-const LDE_START: u32 = 16
-const CLEAN_ROOT: u32 = 80
-const OBSERVED_ROOT: u32 = 88
-const TRACE_VALID: u32 = 96
-const STEP_LDE_VALID: u32 = 97
-const MAGNITUDE_LDE_VALID: u32 = 98
-const ACTIVE_LDE_VALID: u32 = 99
-const TERMINAL_LDE_VALID: u32 = 100
-const ROOTS_EQUAL: u32 = 101
-const MODE_CORRECT: u32 = 102
-const TRACE_COLOR: u32 = 103
-const LDE_COLOR: u32 = 104
-const ROOT_COLOR: u32 = 105
-const MODE_COLOR: u32 = 106
-const CLEAN_COMMIT_STATE: u32 = 107
 const COMMIT_STATE_WORDS: usize = 80
-const COMMIT_PRIMARY: u32 = 0
-const COMMIT_SECONDARY: u32 = 16
-const COMMIT_CURSOR: u32 = 32
-const COMMIT_BLOCK: u32 = 48
-const COMMIT_VALID: u32 = 64
-const OBSERVED_COMMIT_STATE: u32 = CLEAN_COMMIT_STATE + COMMIT_STATE_WORDS.downcast_truncate()
-const PARAMETER_START: u32 = 267
-const PROOF_WORDS: usize = 267 + ROUND_CONSTANT_COUNT
+const STATUS_WORDS: usize = 11
+const PROOF_WORDS: usize = TRACE_WORDS
+    + LDE_WORDS
+    + 2 * DIGEST_FIELDS
+    + STATUS_WORDS
+    + 2 * COMMIT_STATE_WORDS
+    + ROUND_CONSTANT_COUNT
+
+struct ProofTapeRegions {
+    trace: Region<ProofTapeRegions, [u32; TRACE_WORDS]>,
+    lde: Region<ProofTapeRegions, [u32; LDE_WORDS]>,
+    clean_root: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    observed_root: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    status: Region<ProofTapeRegions, [u32; STATUS_WORDS]>,
+    clean_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
+    observed_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
+    parameters: Region<ProofTapeRegions, [u32; ROUND_CONSTANT_COUNT]>,
+}
+impl core::marker::Copy for ProofTapeRegions {}
+derive RegionSchema for ProofTapeRegions using RegionSchemaProvider
+
+struct TraceRegions {
+    step: Region<TraceRegions, [u32; TRACE]>,
+    magnitude: Region<TraceRegions, [u32; TRACE]>,
+    active: Region<TraceRegions, [u32; TRACE]>,
+    terminal: Region<TraceRegions, [u32; TRACE]>,
+}
+impl core::marker::Copy for TraceRegions {}
+derive RegionSchema for TraceRegions using RegionSchemaProvider
+
+struct StatusRegions {
+    trace_valid: Region<StatusRegions, u32>,
+    lde_valid: Region<StatusRegions, [u32; COLUMN_COUNT]>,
+    roots_equal: Region<StatusRegions, u32>,
+    mode_correct: Region<StatusRegions, u32>,
+    trace_color: Region<StatusRegions, u32>,
+    lde_color: Region<StatusRegions, u32>,
+    root_color: Region<StatusRegions, u32>,
+    mode_color: Region<StatusRegions, u32>,
+}
+impl core::marker::Copy for StatusRegions {}
+derive RegionSchema for StatusRegions using RegionSchemaProvider
+
+struct CommitmentRegions {
+    primary: Region<CommitmentRegions, [u32; POSEIDON_LANES]>,
+    secondary: Region<CommitmentRegions, [u32; POSEIDON_LANES]>,
+    cursor: Region<CommitmentRegions, [u32; POSEIDON_LANES]>,
+    block: Region<CommitmentRegions, [u32; POSEIDON_LANES]>,
+    valid: Region<CommitmentRegions, [u32; POSEIDON_LANES]>,
+}
+impl core::marker::Copy for CommitmentRegions {}
+derive RegionSchema for CommitmentRegions using RegionSchemaProvider
+
+const fn proof_tape_regions() -> ProofTapeRegions {
+    <ProofTapeRegions as RegionSchema>::regions()
+}
+
+const fn trace_regions() -> TraceRegions {
+    <TraceRegions as RegionSchema>::regions()
+}
+
+const fn status_regions() -> StatusRegions {
+    <StatusRegions as RegionSchema>::regions()
+}
+
+const fn commitment_regions() -> CommitmentRegions {
+    <CommitmentRegions as RegionSchema>::regions()
+}
+
+#[inline(always)]
+fn proof_load<T: CanonicalWords, const STORAGE_WORDS: usize>(
+    _ tape: ProofTape<u32, STORAGE_WORDS>,
+    _ region: Region<ProofTapeRegions, T>,
+    _ index: u32,
+) -> u32
+where
+    STORAGE_WORDS > 0,
+{
+    load_region_word(tape, region, index).value
+}
+
+#[inline(always)]
+fn proof_store<T: CanonicalWords, const STORAGE_WORDS: usize>(
+    _ tape: ProofTape<u32, STORAGE_WORDS>,
+    _ region: Region<ProofTapeRegions, T>,
+    _ index: u32,
+    _ value: u32,
+) -> bool
+where
+    STORAGE_WORDS > 0,
+{
+    store_region_word(tape, region, index, value)
+}
+
+#[inline(always)]
+fn proof_load_indexed<T: CanonicalWords, const STORAGE_WORDS: usize>(
+    _ tape: ProofTape<u32, STORAGE_WORDS>,
+    _ region: Region<ProofTapeRegions, T>,
+    _ index: RegionIndex<T>,
+) -> u32
+where
+    STORAGE_WORDS > 0,
+{
+    load_region_indexed_word(tape, region, index)
+}
+
+#[inline(always)]
+fn proof_store_indexed<T: CanonicalWords, const STORAGE_WORDS: usize>(
+    _ tape: ProofTape<u32, STORAGE_WORDS>,
+    _ region: Region<ProofTapeRegions, T>,
+    _ index: RegionIndex<T>,
+    _ value: u32,
+)
+where
+    STORAGE_WORDS > 0,
+{
+    store_region_indexed_word(tape, region, index, value)
+}
 
 type ProofLdeColumns = RBin<Pair, 2>
 type ProofLdeInputPlan = RBin<Pair, 2>
@@ -111,7 +220,13 @@ static_assert(INPUT_STAGES == 2)
 static_assert(OUTPUT_STAGES == 4)
 static_assert(INPUT_GRID_LANES == 8)
 static_assert(OUTPUT_GRID_LANES == 32)
-static_assert(LDE_START + LDE_WORDS.downcast_truncate() == CLEAN_ROOT)
+static_assert(<ProofTapeRegions as RegionSchema>::WORDS == PROOF_WORDS.downcast_truncate())
+static_assert(<TraceRegions as RegionSchema>::WORDS == TRACE_WORDS.downcast_truncate())
+static_assert(<StatusRegions as RegionSchema>::WORDS == STATUS_WORDS.downcast_truncate())
+static_assert(
+    <CommitmentRegions as RegionSchema>::WORDS
+        == COMMIT_STATE_WORDS.downcast_truncate()
+)
 
 type CommitmentDependencies = RBin<Pair, 1>
 const COMMITMENT_LANES: usize =
@@ -178,7 +293,7 @@ fn status_word(_ ok: bool, _ tampered: bool) -> u32 {
 #[inline(always)]
 fn load_lde_fields<const N: usize>(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ start: u32,
+    _ region: Region<ProofTapeRegions, [u32; LDE_WORDS]>,
 ) -> [BabyBear; N]
     where N <= 2147483648
 {
@@ -187,8 +302,10 @@ fn load_lde_fields<const N: usize>(
     let count = fields.len()
     let mut index: usize = 0
     while index < count {
-        fields[index] = BabyBear::from_u32(tape.load(
-            index: LDE_START + start + index.downcast_truncate(),
+        fields[index] = BabyBear::from_u32(proof_load(
+            tape,
+            region,
+            index.downcast_truncate(),
         ))
         index = index + 1
     }
@@ -198,15 +315,16 @@ fn load_lde_fields<const N: usize>(
 #[inline(always)]
 fn load_commitment_buffer(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ state_offset: u32,
-    _ buffer_offset: u32,
+    _ state: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
+    _ buffer: Region<CommitmentRegions, [u32; POSEIDON_LANES]>,
 ) -> [u32; POSEIDON_LANES] {
+    let region = subregion(state, buffer)
     let mut lanes = [0; 16]
     let mut lane: usize = 0
     while lane < POSEIDON_LANES {
-        lanes[lane] = tape.load(
-            index: state_offset + buffer_offset + lane.downcast_truncate(),
-        )
+        let index: RegionIndex<[u32; POSEIDON_LANES]> =
+            cyclic_region_index(lane.downcast_truncate())
+        lanes[lane] = proof_load_indexed(tape, region, index)
         lane = lane + 1
     }
     lanes
@@ -215,22 +333,29 @@ fn load_commitment_buffer(
 #[inline(always)]
 fn store_initial_commitment(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ offset: u32,
+    _ state: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     _ permutation: ref Poseidon2FieldPermutation,
 ) {
+    let layout = commitment_regions()
+    let primary = subregion(state, layout.primary)
+    let secondary = subregion(state, layout.secondary)
+    let cursor = subregion(state, layout.cursor)
+    let block = subregion(state, layout.block)
+    let valid = subregion(state, layout.valid)
     let mut lane: usize = 0
     while lane < POSEIDON_LANES {
         let lane_word: u32 = lane.downcast_truncate()
-        tape.store(
-            index: offset + COMMIT_PRIMARY + lane_word,
-            value: permutation.lane_word(lane: lane_word),
-        )
-        tape.store(index: offset + COMMIT_SECONDARY + lane_word, value: 0)
-        tape.store(index: offset + COMMIT_CURSOR + lane_word, value: 0)
-        tape.store(index: offset + COMMIT_BLOCK + lane_word, value: 0)
-        tape.store(
-            index: offset + COMMIT_VALID + lane_word,
-            value: if permutation.is_valid() { 1 } else { 0 },
+        let index: RegionIndex<[u32; POSEIDON_LANES]> =
+            cyclic_region_index(lane_word)
+        proof_store_indexed(tape, primary, index, permutation.lane_word(lane: lane_word))
+        proof_store_indexed(tape, secondary, index, 0)
+        proof_store_indexed(tape, cursor, index, 0)
+        proof_store_indexed(tape, block, index, 0)
+        proof_store_indexed(
+            tape,
+            valid,
+            index,
+            if permutation.is_valid() { 1 } else { 0 },
         )
         lane = lane + 1
     }
@@ -239,20 +364,26 @@ fn store_initial_commitment(
 #[inline(always)]
 fn commitment_state_valid(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ offset: u32,
+    _ state: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
 ) -> bool {
+    let layout = commitment_regions()
+    let cursor = subregion(state, layout.cursor)
+    let block = subregion(state, layout.block)
+    let valid = subregion(state, layout.valid)
     let mut lane: usize = 0
     while lane < POSEIDON_LANES {
         let lane_word: u32 = lane.downcast_truncate()
-        if tape.load(index: offset + COMMIT_CURSOR + lane_word) != 0 {
+        let index: RegionIndex<[u32; POSEIDON_LANES]> =
+            cyclic_region_index(lane_word)
+        if proof_load_indexed(tape, cursor, index) != 0 {
             return false
         }
-        if tape.load(index: offset + COMMIT_BLOCK + lane_word)
+        if proof_load_indexed(tape, block, index)
             != DONE_BLOCK.downcast_truncate()
         {
             return false
         }
-        if tape.load(index: offset + COMMIT_VALID + lane_word) != 1 {
+        if proof_load_indexed(tape, valid, index) != 1 {
             return false
         }
         lane = lane + 1
@@ -263,12 +394,12 @@ fn commitment_state_valid(
 #[inline(always)]
 fn load_digest(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ offset: u32,
+    _ region: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
 ) -> Poseidon2Digest {
     let mut words = [0; DIGEST_FIELDS]
     let mut field: usize = 0
     while field < DIGEST_FIELDS {
-        words[field] = tape.load(index: offset + field.downcast_truncate())
+        words[field] = proof_load(tape, region, field.downcast_truncate())
         field = field + 1
     }
     Poseidon2Digest::from_u32s(words)
@@ -295,6 +426,17 @@ actor MandelbrotProofGpuCheckpoint uses (
     }
 
     fn derive_witness(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let regions = proof_tape_regions()
+        let trace_layout = trace_regions()
+        let trace_step = subregion(regions.trace, trace_layout.step)
+        let trace_magnitude = subregion(regions.trace, trace_layout.magnitude)
+        let trace_active = subregion(regions.trace, trace_layout.active)
+        let trace_terminal = subregion(regions.trace, trace_layout.terminal)
+        let trace_valid_region = subregion(
+            regions.status,
+            status_regions().trace_valid,
+        )
+
         // c = 0.75 + 0i escapes on row three, giving an exact four-row
         // power-of-two trace. This first fixed-size GPU checkpoint spells out
         // the four stream positions so the call-free SPIR-V legality pass can
@@ -304,35 +446,40 @@ actor MandelbrotProofGpuCheckpoint uses (
         let mut stream = EscapeAirWordStream::new(claim)
 
         let row0 = stream.current_proof_row()
-        self.proof.store(index: 0, value: row0.air.step)
-        self.proof.store(index: 4, value: row0.air.magnitude)
-        self.proof.store(index: 8, value: row0.active)
-        self.proof.store(index: 12, value: row0.terminal)
+        proof_store(self.proof, trace_step, 0, row0.air.step)
+        proof_store(self.proof, trace_magnitude, 0, row0.air.magnitude)
+        proof_store(self.proof, trace_active, 0, row0.active)
+        proof_store(self.proof, trace_terminal, 0, row0.terminal)
 
         stream.advance()
         let row1 = stream.current_proof_row()
-        self.proof.store(index: 1, value: row1.air.step)
-        self.proof.store(index: 5, value: row1.air.magnitude)
-        self.proof.store(index: 9, value: row1.active)
-        self.proof.store(index: 13, value: row1.terminal)
+        proof_store(self.proof, trace_step, 1, row1.air.step)
+        proof_store(self.proof, trace_magnitude, 1, row1.air.magnitude)
+        proof_store(self.proof, trace_active, 1, row1.active)
+        proof_store(self.proof, trace_terminal, 1, row1.terminal)
 
         stream.advance()
         let row2 = stream.current_proof_row()
-        self.proof.store(index: 2, value: row2.air.step)
-        self.proof.store(index: 6, value: row2.air.magnitude)
-        self.proof.store(index: 10, value: row2.active)
-        self.proof.store(index: 14, value: row2.terminal)
+        proof_store(self.proof, trace_step, 2, row2.air.step)
+        proof_store(self.proof, trace_magnitude, 2, row2.air.magnitude)
+        proof_store(self.proof, trace_active, 2, row2.active)
+        proof_store(self.proof, trace_terminal, 2, row2.terminal)
 
         stream.advance()
         let row3 = stream.current_proof_row()
-        self.proof.store(index: 3, value: row3.air.step)
-        self.proof.store(index: 7, value: row3.air.magnitude)
-        self.proof.store(index: 11, value: row3.active)
-        self.proof.store(index: 15, value: row3.terminal)
+        proof_store(self.proof, trace_step, 3, row3.air.step)
+        proof_store(self.proof, trace_magnitude, 3, row3.air.magnitude)
+        proof_store(self.proof, trace_active, 3, row3.active)
+        proof_store(self.proof, trace_terminal, 3, row3.terminal)
 
         let trace_valid = stream.is_valid()
             && stream.is_terminal()
-        self.proof.store(index: TRACE_VALID, value: if trace_valid { 1 } else { 0 })
+        proof_store(
+            self.proof,
+            trace_valid_region,
+            0,
+            if trace_valid { 1 } else { 0 },
+        )
 
         // Derive the canonical Grain parameter stream once on the GPU. The
         // repeated proof schedule reads this typed storage region, so no round
@@ -340,9 +487,11 @@ actor MandelbrotProofGpuCheckpoint uses (
         let mut parameters = Poseidon2ParameterStream::begin()
         let mut parameter: usize = 0
         while parameter < ROUND_CONSTANT_COUNT {
-            self.proof.store(
-                index: PARAMETER_START + parameter.downcast_truncate(),
-                value: parameters.next(),
+            proof_store(
+                self.proof,
+                regions.parameters,
+                parameter.downcast_truncate(),
+                parameters.next(),
             )
             parameter = parameter + 1
         }
@@ -351,6 +500,7 @@ actor MandelbrotProofGpuCheckpoint uses (
     fn prepare_lde_inverse(self, invocation: ComputeInvocation)
         uses (Prove<Threads<INPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
     {
+        let trace_start = region_bounds(proof_tape_regions().trace).start
         prepare_batched_stage_grid<
             COLUMN_COUNT,
             TRACE,
@@ -360,7 +510,7 @@ actor MandelbrotProofGpuCheckpoint uses (
             INPUT_GRID_LANES,
         >(
             self.proof,
-            0,
+            trace_start,
             self.lde_inverse_values,
             self.lde_inverse_progress,
             invocation,
@@ -444,6 +594,9 @@ actor MandelbrotProofGpuCheckpoint uses (
     fn finish_lde(self, invocation: ComputeInvocation)
         uses (Prove<Threads<OUTPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
     {
+        let regions = proof_tape_regions()
+        let lde_start = region_bounds(regions.lde).start
+        let lde_valid = subregion(regions.status, status_regions().lde_valid)
         let finish = finish_batched_stage_grid_into<
             COLUMN_COUNT,
             LDE,
@@ -458,33 +611,36 @@ actor MandelbrotProofGpuCheckpoint uses (
             self.lde_progress,
             self.lde_coset_valid,
             self.proof,
-            LDE_START,
+            lde_start,
             invocation,
         )
         if finish.active && finish.lane == 0 {
-            self.proof.store(
-                index: STEP_LDE_VALID + finish.batch,
-                value: if finish.valid { 1 } else { 0 },
+            proof_store(
+                self.proof,
+                lde_valid,
+                finish.batch,
+                if finish.valid { 1 } else { 0 },
             )
         }
     }
 
     fn initialize_commitments(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let regions = proof_tape_regions()
         // The static assertions above tie these concrete array types to the
         // sponge-derived rate while Fe const-alias generic arguments mature.
-        let fields = load_lde_fields<6>(tape: self.proof, start: 0)
+        let fields = load_lde_fields<6>(tape: self.proof, region: regions.lde)
         let sponge = Poseidon2FieldSponge::begin<MandelbrotGpuLdeV1>(
             expected: LDE_WORDS.downcast_truncate(),
         )
         let permutation = sponge.begin_permutation<6>(fields: ref fields)
         store_initial_commitment(
             tape: self.proof,
-            offset: CLEAN_COMMIT_STATE,
+            state: regions.clean_commitment,
             permutation: ref permutation,
         )
         store_initial_commitment(
             tape: self.proof,
-            offset: OBSERVED_COMMIT_STATE,
+            state: regions.observed_commitment,
             permutation: ref permutation,
         )
     }
@@ -497,30 +653,36 @@ actor MandelbrotProofGpuCheckpoint uses (
             >
         )
     {
+        let regions = proof_tape_regions()
+        let state_layout = commitment_regions()
         let poseidon_lanes: u32 = POSEIDON_LANES.downcast_truncate()
         let commitment_lane = invocation.local.x / poseidon_lanes
         let field_lane = invocation.local.x % poseidon_lanes
+        let field_index: RegionIndex<[u32; POSEIDON_LANES]> =
+            cyclic_region_index(field_lane)
         let observed = commitment_lane == 1
-        let state_offset = if observed {
-            OBSERVED_COMMIT_STATE
+        let state = if observed {
+            regions.observed_commitment
         } else {
-            CLEAN_COMMIT_STATE
+            regions.clean_commitment
         }
-        let cursor_offset = state_offset + COMMIT_CURSOR + field_lane
-        let block_offset = state_offset + COMMIT_BLOCK + field_lane
-        let valid_offset = state_offset + COMMIT_VALID + field_lane
-        let cursor = self.proof.load(index: cursor_offset)
-        let block = self.proof.load(index: block_offset)
-        let mut valid = self.proof.load(index: valid_offset)
+        let primary_region = subregion(state, state_layout.primary)
+        let secondary_region = subregion(state, state_layout.secondary)
+        let cursor_region = subregion(state, state_layout.cursor)
+        let block_region = subregion(state, state_layout.block)
+        let valid_region = subregion(state, state_layout.valid)
+        let cursor = proof_load_indexed(self.proof, cursor_region, field_index)
+        let block = proof_load_indexed(self.proof, block_region, field_index)
+        let mut valid = proof_load_indexed(self.proof, valid_region, field_index)
         let primary = load_commitment_buffer(
             tape: self.proof,
-            state_offset: state_offset,
-            buffer_offset: COMMIT_PRIMARY,
+            state: state,
+            buffer: state_layout.primary,
         )
         let secondary = load_commitment_buffer(
             tape: self.proof,
-            state_offset: state_offset,
-            buffer_offset: COMMIT_SECONDARY,
+            state: state,
+            buffer: state_layout.secondary,
         )
         let mut checked: usize = 0
         while checked < POSEIDON_LANES {
@@ -533,16 +695,16 @@ actor MandelbrotProofGpuCheckpoint uses (
             <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
         if cursor < transition {
             let destination = poseidon2_workgroup_destination(cursor)
-            let output_offset = if destination == 0 {
-                COMMIT_PRIMARY
+            let output = if destination == 0 {
+                primary_region
             } else {
-                COMMIT_SECONDARY
+                secondary_region
             }
             let mut round_constant: u32 = 0
             if cursor != 0 && ((cursor - 1) & 1) == 0 {
                 let phase = (cursor - 1) / 2
                 let index = poseidon2_round_constant_index(phase, field_lane)
-                round_constant = self.proof.load(index: PARAMETER_START + index)
+                round_constant = proof_load(self.proof, regions.parameters, index)
             }
             let value = if valid == 1 {
                 poseidon2_workgroup_lane_with_round_constant(
@@ -555,21 +717,20 @@ actor MandelbrotProofGpuCheckpoint uses (
             } else {
                 0
             }
-            self.proof.store(
-                index: state_offset + output_offset + field_lane,
-                value: value,
-            )
-            self.proof.store(index: cursor_offset, value: cursor + 1)
-            self.proof.store(index: block_offset, value: block)
-            self.proof.store(index: valid_offset, value: valid)
+            proof_store_indexed(self.proof, output, field_index, value)
+            proof_store_indexed(self.proof, cursor_region, field_index, cursor + 1)
+            proof_store_indexed(self.proof, block_region, field_index, block)
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
         } else if cursor == transition && block < FINAL_FULL_BLOCK.downcast_truncate() {
             let first_block_fields: u32 = FIRST_BLOCK_FIELDS.downcast_truncate()
             let sponge_rate: u32 = SPONGE_RATE.downcast_truncate()
             let start = first_block_fields + block * sponge_rate
             let mut value = secondary[field_lane as usize]
             if field_lane < sponge_rate {
-                value = BabyBear::from_u32(self.proof.load(
-                    index: LDE_START + start + field_lane,
+                value = BabyBear::from_u32(proof_load(
+                    self.proof,
+                    regions.lde,
+                    start + field_lane,
                 )).to_montgomery_word()
             }
             if observed && self.tamper >= 0.5
@@ -579,73 +740,102 @@ actor MandelbrotProofGpuCheckpoint uses (
                 value = (BabyBear::from_montgomery_word(value) + BabyBear::one())
                     .to_montgomery_word()
             }
-            self.proof.store(
-                index: state_offset + COMMIT_PRIMARY + field_lane,
-                value: if valid == 1 { value } else { 0 },
+            proof_store_indexed(
+                self.proof,
+                primary_region,
+                field_index,
+                if valid == 1 { value } else { 0 },
             )
-            self.proof.store(index: cursor_offset, value: 0)
-            self.proof.store(index: block_offset, value: block + 1)
-            self.proof.store(index: valid_offset, value: valid)
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(self.proof, block_region, field_index, block + 1)
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
         } else if cursor == transition && block == FINAL_FULL_BLOCK.downcast_truncate() {
             let mut value = secondary[field_lane as usize]
             if field_lane < 2 {
-                value = BabyBear::from_u32(self.proof.load(
-                    index: LDE_START + (LDE_WORDS - 2).downcast_truncate() + field_lane,
+                let final_field_start: u32 =
+                    (LDE_WORDS - 2).downcast_truncate()
+                value = BabyBear::from_u32(proof_load(
+                    self.proof,
+                    regions.lde,
+                    final_field_start + field_lane,
                 )).to_montgomery_word()
             }
-            self.proof.store(
-                index: state_offset + COMMIT_PRIMARY + field_lane,
-                value: if valid == 1 { value } else { 0 },
+            proof_store_indexed(
+                self.proof,
+                primary_region,
+                field_index,
+                if valid == 1 { value } else { 0 },
             )
-            self.proof.store(index: cursor_offset, value: 0)
-            self.proof.store(
-                index: block_offset,
-                value: FINAL_PARTIAL_BLOCK.downcast_truncate(),
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(
+                self.proof,
+                block_region,
+                field_index,
+                FINAL_PARTIAL_BLOCK.downcast_truncate(),
             )
-            self.proof.store(index: valid_offset, value: valid)
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
         } else if cursor == transition && block == FINAL_PARTIAL_BLOCK.downcast_truncate() {
             if field_lane < DIGEST_FIELDS.downcast_truncate() {
-                self.proof.store(
-                    index: (if observed { OBSERVED_ROOT } else { CLEAN_ROOT }) + field_lane,
-                    value: BabyBear::from_montgomery_word(
+                let root = if observed {
+                    regions.observed_root
+                } else {
+                    regions.clean_root
+                }
+                proof_store(
+                    self.proof,
+                    root,
+                    field_lane,
+                    BabyBear::from_montgomery_word(
                         secondary[field_lane as usize]
                     ).to_u32(),
                 )
             }
-            self.proof.store(
-                index: state_offset + COMMIT_PRIMARY + field_lane,
-                value: secondary[field_lane as usize],
+            proof_store_indexed(
+                self.proof,
+                primary_region,
+                field_index,
+                secondary[field_lane as usize],
             )
-            self.proof.store(index: cursor_offset, value: 0)
-            self.proof.store(
-                index: block_offset,
-                value: if valid == 1 {
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(
+                self.proof,
+                block_region,
+                field_index,
+                if valid == 1 {
                     DONE_BLOCK.downcast_truncate()
                 } else {
                     0
                 },
             )
-            self.proof.store(index: valid_offset, value: valid)
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
         } else {
-            self.proof.store(index: cursor_offset, value: 0)
-            self.proof.store(index: block_offset, value: 0)
-            self.proof.store(index: valid_offset, value: 0)
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(self.proof, block_region, field_index, 0)
+            proof_store_indexed(self.proof, valid_region, field_index, 0)
         }
     }
 
     fn finalize_commitments(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let clean_root = load_digest(tape: self.proof, offset: CLEAN_ROOT)
-        let observed_root = load_digest(tape: self.proof, offset: OBSERVED_ROOT)
+        let regions = proof_tape_regions()
+        let status_layout = status_regions()
+        let clean_root = load_digest(tape: self.proof, region: regions.clean_root)
+        let observed_root = load_digest(tape: self.proof, region: regions.observed_root)
         let tampered = self.tamper >= 0.5
         let roots_equal = clean_root.equals(observed_root)
-        let trace_valid = stored_flag(self.proof, TRACE_VALID)
-        let lde_valid = all_lde_columns_valid(self.proof)
+        let trace_valid = stored_flag(
+            self.proof,
+            subregion(regions.status, status_layout.trace_valid),
+        )
+        let lde_valid = all_lde_columns_valid(
+            self.proof,
+            subregion(regions.status, status_layout.lde_valid),
+        )
         let commitments_valid = commitment_state_valid(
             tape: self.proof,
-            offset: CLEAN_COMMIT_STATE,
+            state: regions.clean_commitment,
         ) && commitment_state_valid(
             tape: self.proof,
-            offset: OBSERVED_COMMIT_STATE,
+            state: regions.observed_commitment,
         )
         let root_nonzero = commitments_valid
             && !clean_root.equals(Poseidon2Digest::zero())
@@ -653,37 +843,81 @@ actor MandelbrotProofGpuCheckpoint uses (
             if tampered { !roots_equal } else { roots_equal }
         )
 
-        self.proof.store(index: ROOTS_EQUAL, value: if roots_equal { 1 } else { 0 })
-        self.proof.store(index: MODE_CORRECT, value: if mode_correct { 1 } else { 0 })
-        self.proof.store(index: TRACE_COLOR, value: status_word(trace_valid, false))
-        self.proof.store(index: LDE_COLOR, value: status_word(lde_valid, false))
-        self.proof.store(index: ROOT_COLOR, value: status_word(root_nonzero, false))
-        self.proof.store(index: MODE_COLOR, value: status_word(mode_correct, tampered))
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.roots_equal),
+            0,
+            if roots_equal { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.mode_correct),
+            0,
+            if mode_correct { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.trace_color),
+            0,
+            status_word(trace_valid, false),
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.lde_color),
+            0,
+            status_word(lde_valid, false),
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.root_color),
+            0,
+            status_word(root_nonzero, false),
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.mode_color),
+            0,
+            status_word(mode_correct, tampered),
+        )
     }
 
     fn display(self, px: i32, py: i32) -> i32 uses (Display) {
+        let regions = proof_tape_regions()
+        let status_layout = status_regions()
         let u = from_i32(px) / self.res
         let v = from_i32(py) / self.res
         let tampered = self.tamper >= 0.5
 
         if v < 0.18 {
-            let color_index = if u < 0.25 {
-                TRACE_COLOR
+            let color = if u < 0.25 {
+                status_layout.trace_color
             } else {
                 if u < 0.5 {
-                    LDE_COLOR
+                    status_layout.lde_color
                 } else {
-                    if u < 0.75 { ROOT_COLOR } else { MODE_COLOR }
+                    if u < 0.75 {
+                        status_layout.root_color
+                    } else {
+                        status_layout.mode_color
+                    }
                 }
             }
-            return self.proof.load(index: color_index).downcast_truncate()
+            return proof_load(
+                self.proof,
+                subregion(regions.status, color),
+                0,
+            ).downcast_truncate()
         }
         if v > 0.82 {
-            return self.proof.load(index: MODE_COLOR).downcast_truncate()
+            return proof_load(
+                self.proof,
+                subregion(regions.status, status_layout.mode_color),
+                0,
+            ).downcast_truncate()
         }
 
         let sample_i = to_i32(u * 64.0).downcast_unchecked()
-        let sample = self.proof.load(index: LDE_START + sample_i)
+        let sample = proof_load(self.proof, regions.lde, sample_i)
         let red = 54 + (sample & 127)
         let green = 42 + ((sample >> 8) & 95)
         let blue = 96 + ((sample >> 16) & 127)
@@ -693,14 +927,20 @@ actor MandelbrotProofGpuCheckpoint uses (
     }
 }
 
-fn all_lde_columns_valid(_ tape: ProofTape<u32, PROOF_WORDS>) -> bool {
-    stored_flag(tape, STEP_LDE_VALID)
-        && stored_flag(tape, MAGNITUDE_LDE_VALID)
-        && stored_flag(tape, ACTIVE_LDE_VALID)
-        && stored_flag(tape, TERMINAL_LDE_VALID)
+fn all_lde_columns_valid(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ region: Region<ProofTapeRegions, [u32; COLUMN_COUNT]>,
+) -> bool {
+    proof_load(tape, region, 0) == 1
+        && proof_load(tape, region, 1) == 1
+        && proof_load(tape, region, 2) == 1
+        && proof_load(tape, region, 3) == 1
 }
 
-fn stored_flag(_ tape: ProofTape<u32, PROOF_WORDS>, _ index: u32) -> bool {
-    let word: i32 = tape.load(index: index).downcast_truncate()
+fn stored_flag(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ region: Region<ProofTapeRegions, u32>,
+) -> bool {
+    let word: i32 = proof_load(tape, region, 0).downcast_truncate()
     word == 1
 }

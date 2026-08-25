@@ -451,8 +451,8 @@ fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &
 }
 
 /// Execute one initialized mixed-scalar QCGA scene transition and return its
-/// decoded semantic leaves. Independent solver and analytic-root oracles—not
-/// comparison to the retired raster renderer—establish mathematical results.
+/// decoded semantic leaves. Independent solver and analytic-root oracles, not
+/// comparison to the retired raster renderer, establish mathematical results.
 fn qcga_scene_receipt(bundle: &WebBundle, event: SurfaceEventFixture) -> Vec<wasmtime::Val> {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("QCGA control Wasm module");
@@ -1376,9 +1376,23 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
     assert_typed_surface_quality(&bundle);
     assert_typed_surface_recovery(&bundle);
     assert_initial_param(&bundle, "tamper", 0.0);
-    assert_eq!(bundle.manifest.resources.len(), 1);
-    assert_eq!(bundle.manifest.resources[0].name, "proof");
-    assert_eq!(bundle.manifest.passes.len(), 6);
+    assert_eq!(
+        bundle
+            .manifest
+            .resources
+            .iter()
+            .map(|resource| (resource.name.as_str(), resource.length))
+            .collect::<Vec<_>>(),
+        [
+            ("proof", 408),
+            ("lde_inverse_values", 16),
+            ("lde_inverse_progress", 8),
+            ("lde_values", 64),
+            ("lde_progress", 32),
+            ("lde_coset_valid", 4),
+        ]
+    );
+    assert_eq!(bundle.manifest.passes.len(), 10);
     assert_eq!(
         bundle
             .manifest
@@ -1388,7 +1402,11 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             .collect::<Vec<_>>(),
         [
             "derive_witness",
-            "extend_columns",
+            "prepare_lde_inverse",
+            "advance_lde_inverse",
+            "prepare_lde_forward",
+            "advance_lde_forward",
+            "finish_lde",
             "initialize_commitments",
             "advance_commitment_rounds",
             "finalize_commitments",
@@ -1424,16 +1442,20 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
         bundle.manifest.passes[largest_index].source_entry,
     );
     assert!(
-        bundle.pass_wgsl[3].source.contains("2013265921"),
+        bundle.pass_wgsl[7].source.contains("2013265921"),
         "the bounded commitment-round kernel must contain the BabyBear modulus"
     );
 
     let authored = include_str!("../../../demos/sketches/mandelbrot_proof_gpu/src/lib.fe");
     for shared_surface in [
         "EscapeAirWordStream",
-        "ContiguousRadix2Columns",
+        "RegionSchemaProvider",
+        "subregion",
+        "cyclic_region_index",
         "RBin<Pair, 2>",
-        "write_radix2_coset_lde",
+        "prepare_batched_stage_grid",
+        "prepare_batched_coset_extension",
+        "forward_batched_stage_grid_lane",
         "RepeatedDispatch as Repeat",
         "Poseidon2WorkgroupSchedule",
         "Poseidon2ParameterStream",
@@ -1445,16 +1467,20 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             "browser checkpoint must consume the shared Fe `{shared_surface}` surface"
         );
     }
-    assert_eq!(bundle.manifest.passes[1].layout.workgroup_size, [4, 1, 1]);
+    assert_eq!(bundle.manifest.passes[1].layout.workgroup_size, [8, 1, 1]);
     assert_eq!(bundle.manifest.passes[1].dispatch, Some([1, 1, 1]));
-    let lde_trap = bundle.manifest.passes[1]
-        .layout
-        .bindings
-        .iter()
-        .find(|binding| binding.name == "trap")
-        .expect("parallel LDE pass uses checked private arrays");
-    assert_eq!(lde_trap.span, 4 * 4);
-    let commitment = &bundle.manifest.passes[3];
+    assert_eq!(bundle.manifest.passes[2].repeat, 2);
+    assert_eq!(bundle.manifest.passes[2].layout.workgroup_size, [8, 1, 1]);
+    assert_eq!(bundle.manifest.passes[4].repeat, 4);
+    assert_eq!(bundle.manifest.passes[4].layout.workgroup_size, [32, 1, 1]);
+    assert!(
+        bundle.manifest.passes[1..=5]
+            .iter()
+            .flat_map(|pass| &pass.layout.bindings)
+            .all(|binding| binding.name != "trap"),
+        "the staged parallel LDE must remain in typed storage without a private heap",
+    );
+    let commitment = &bundle.manifest.passes[7];
     assert_eq!(commitment.layout.workgroup_size, [32, 1, 1]);
     assert_eq!(commitment.dispatch, Some([1, 1, 1]));
     assert_eq!(commitment.repeat, 396);
@@ -1463,10 +1489,15 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
         "fn extend_magnitude",
         "fn extend_active",
         "fn extend_terminal",
+        "const LDE_START",
+        "const CLEAN_ROOT",
+        "const PARAMETER_START",
+        "self.proof.load",
+        "self.proof.store",
     ] {
         assert!(
             !authored.contains(manual),
-            "parallel LDE schedule regressed to manual pass `{manual}`"
+            "proof checkpoint regressed to manual placement `{manual}`"
         );
     }
 }
