@@ -107,8 +107,20 @@ existing Definition of done, not a second campaign checklist:
   an out-of-region write to reach the next region. The production Mandelbrot
   proof tape still uses application constants, so migration and a full
   receipt-wide independent decoder remain before this gate can close.
-- [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
+- [~] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
+  The current process-isolated exact gate executes a 20,413,169-byte
+  zero-import Fe prover, copies only its canonical receipt bytes into a fresh
+  8,703,961-byte zero-import Fe verifier, and accepts the clean receipt. A
+  test-only Fe structural interpreter then mutates the typed decoded carrier,
+  without host-owned offsets: the base root and transcript chain, an
+  authenticated AIR value, its Merkle sibling, a composition opening, and the
+  recursively located terminal FRI evaluation all reject. A raw canonical
+  validity-word mutation also rejects. The gate passes 1/1 in 5,401.40 seconds;
+  its verifier child finishes in 708.27 seconds. Claim, domain, sampled-query,
+  and malformed-encoding coverage still relies on focused layer gates, so the
+  assembled boundary remains partial until those mutations and the
+  security-sized receipt execute there.
 - [~] **G-RECURSE:** the field-neutral multi-limb carrier already merges only
   ordered adjacent iteration intervals with identical statements and shared
   boundary commitments. `VerifiedRecursiveInterval<L>` now makes the
@@ -1645,10 +1657,19 @@ existing Definition of done, not a second campaign checklist:
   was the hard module cap rather than runaway proof allocation.
   This closes the executed production sparse receipt and canonical transport
   boundary for the current one-transition `L = 4` checkpoint. It is not yet a
-  succinct recursive proof or a security claim. Targeted transcript, opening,
-  path, and fold mutations still rely on the established layer-specific
-  independent bigint gates; they must be added at this assembled canonical
-  boundary. Commits `a3b42c545`, `135daa0ff`, and `4a0e3240d` now derive the
+  succinct recursive proof or a security claim. A subsequent process-isolated
+  exact gate executes a 20,413,169-byte zero-import Fe prover and a fresh
+  8,703,961-byte zero-import Fe verifier. The verifier accepts the clean
+  canonical receipt, then rejects Fe-side typed mutations to the base root and
+  transcript chain, an authenticated AIR value, its Merkle sibling, a
+  composition opening, and the recursively located terminal FRI evaluation;
+  it also rejects a raw canonical validity-word mutation. The host owns only
+  receipt bytes and mutation selectors, never field offsets or a receipt
+  schema. The complete gate passes 1/1 in 5,401.40 seconds, with the verifier
+  child finishing in 708.27 seconds. Focused independent bigint gates remain
+  the semantic truth, and claim, domain, sampled-query, and malformed-encoding
+  mutations must still execute at this assembled boundary. Commits
+  `a3b42c545`, `135daa0ff`, and `4a0e3240d` now derive the
   first explicit production query policy in Fe. The conservative Q16
   direct-domain policy selects 103 queries for a conjectured 100-bit leaf and
   114 queries when reserving a union-bound budget for at most 1,024 composed

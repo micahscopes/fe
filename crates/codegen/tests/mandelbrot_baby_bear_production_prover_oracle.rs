@@ -252,7 +252,11 @@ fn verify_canonical_receipt_entry(path: &Path, entry: &str, zero_means_valid: bo
 }
 
 fn verify_canonical_receipt(path: &Path) {
-    verify_canonical_receipt_entry(path, "audit_production_zero_interval_recursive_leaf", true);
+    verify_canonical_receipt_entry(
+        path,
+        "audit_production_zero_interval_receipt_matrix",
+        true,
+    );
 }
 
 fn verify_direct_canonical_receipt(path: &Path) {

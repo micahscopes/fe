@@ -1736,9 +1736,14 @@ All four are focused ingots and may remain so permanently.
   through the complete query, transcript, FRI, and recursive receipt layout,
   with an independent decoder for that complete receipt.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
-  AIR, commitments, LDE, FRI fold chain, and mutation oracles exist. Complete
-  authenticated queries, ordered Fiat-Shamir sampling, canonical encoding,
-  and final accept/reject evidence for the production BabyBear receipt remain.
+  AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
+  Fiat-Shamir sampling, and canonical encoding exist. A process-isolated exact
+  gate now executes the production prover, accepts its copied canonical bytes
+  in a fresh Fe verifier, and rejects typed Fe-side root/transcript, AIR value,
+  Merkle path, composition opening, terminal FRI, and raw validity-word
+  mutations without a host receipt schema. Complete assembled claim, domain,
+  sampled-query, and malformed-encoding mutations, the widened production AIR,
+  and the security-sized query plan remain.
 - **G-RECURSE, partial.** The field-neutral multi-limb carrier commits exact
   one-step leaves and merges only ordered adjacent intervals with identical
   statements and shared boundary commitments. The new

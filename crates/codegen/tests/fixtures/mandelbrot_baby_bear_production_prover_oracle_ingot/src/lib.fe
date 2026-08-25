@@ -5,6 +5,8 @@
 
 use core::BrowserBytes
 use mandelbrot_proof_baby_bear::{
+    FriMultiQueryEnd,
+    FriMultiQueryFold,
     composition_multi_opening_power_of_two,
 }
 use mandelbrot_proof_fixed_air_prover_baby_bear::{
@@ -30,8 +32,49 @@ use mandelbrot_proof_recursive_verifier_baby_bear::{
     merge_verified_recursive_intervals,
     verify_production_sparse_recursive_leaf,
 }
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
+
+/// Test-only structural interpreter for the schedule-derived FRI carrier.
+/// The mutation follows the recursive carrier type to its terminal evaluation,
+/// so this gate does not repeat the production schedule depth or field path.
+trait MutateFriTerminal {
+    fn mutate_fri_terminal(mut self)
+}
+
+impl<const ROUND: u32> MutateFriTerminal for FriMultiQueryEnd<ROUND> {
+    fn mutate_fri_terminal(mut self) {
+        self.evaluation = self.evaluation + BabyBearExt4::one()
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Tail: core::marker::Copy + MutateFriTerminal,
+> MutateFriTerminal for FriMultiQueryFold<
+    ROUND,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+    Tail,
+> {
+    fn mutate_fri_terminal(mut self) {
+        self.tail.mutate_fri_terminal()
+    }
+}
+
+fn mutate_digest(_ digest: Poseidon2Digest) -> Poseidon2Digest {
+    let mut words = [0; DIGEST_FIELDS]
+    let mut index: u32 = 0
+    while index < DIGEST_FIELDS.downcast_truncate() {
+        words[index as usize] = digest.field(index).to_u32()
+        index = index + 1
+    }
+    words[0] = (digest.field(0) + BabyBear::one()).to_u32()
+    Poseidon2Digest::from_u32s(words)
+}
 
 fn production_zero_claim() -> HighPrecisionEscapeClaim<4> {
     HighPrecisionEscapeClaim {
@@ -138,6 +181,49 @@ pub fn verify_production_zero_interval_receipt(_ bytes: BrowserBytes) -> bool {
     )
 }
 
+/// Verify one canonical production receipt after a semantic Fe-side mutation.
+/// Mutation zero is the clean control. The remaining modes target the root and
+/// transcript chain, an authenticated AIR value, its Merkle path, a committed
+/// composition value, and the schedule-derived terminal FRI evaluation. The
+/// host knows only the mutation selector and never owns a receipt offset.
+pub fn verify_production_zero_interval_receipt_mutation(
+    _ bytes: BrowserBytes,
+    _ mutation: u32,
+) -> bool {
+    let mut receipt = empty_production_sparse_baby_bear_receipt()
+    if !decode_production_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return false
+    }
+    let one = BabyBear::one()
+    match mutation {
+        0 => {}
+        1 => {
+            receipt.base_root.value = mutate_digest(receipt.base_root.value)
+        }
+        2 => {
+            if receipt.base.path.leaf_count == 0 { return false }
+            receipt.base.values[0][0] = receipt.base.values[0][0] + one
+        }
+        3 => {
+            if receipt.base.path.sibling_count == 0 { return false }
+            receipt.base.path.siblings[0]
+                = mutate_digest(receipt.base.path.siblings[0])
+        }
+        4 => {
+            if receipt.fri.composition.path.leaf_count == 0 { return false }
+            receipt.fri.composition.values[0]
+                = receipt.fri.composition.values[0] + BabyBearExt4::one()
+        }
+        5 => { receipt.fri.layers.mutate_fri_terminal() }
+        _ => { return false }
+    }
+    verify_production_sparse_baby_bear_receipt(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    )
+}
+
 /// Admit the same canonical receipt through the recursive authority boundary.
 /// The returned carrier must remain the exact one-step interval committed by
 /// the production verifier, not a host-provided validity bit.
@@ -198,6 +284,22 @@ pub fn audit_production_zero_interval_recursive_leaf(
     if !committed.start.valid { return 9 }
     if !committed.end.valid { return 10 }
     11
+}
+
+/// Complete assembled-receipt mutation matrix. Each mutation is expressed in
+/// Fe against the typed carrier after canonical decoding. Zero is the only
+/// success result, while nonzero values identify the first acceptance error.
+pub fn audit_production_zero_interval_receipt_matrix(
+    _ bytes: BrowserBytes,
+) -> u32 {
+    if !verify_production_zero_interval_recursive_leaf(bytes) { return 1 }
+    if !verify_production_zero_interval_receipt_mutation(bytes, 0) { return 2 }
+    if verify_production_zero_interval_receipt_mutation(bytes, 1) { return 3 }
+    if verify_production_zero_interval_receipt_mutation(bytes, 2) { return 4 }
+    if verify_production_zero_interval_receipt_mutation(bytes, 3) { return 5 }
+    if verify_production_zero_interval_receipt_mutation(bytes, 4) { return 6 }
+    if verify_production_zero_interval_receipt_mutation(bytes, 5) { return 7 }
+    0
 }
 
 /// Decode and verify two real adjacent production receipts before minting and
