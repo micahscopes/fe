@@ -27,28 +27,61 @@ use mandelbrot_proof_recursive::{
     initial_boundary,
 }
 use mandelbrot_proof_recursive_verifier_baby_bear::{
+    merge_verified_recursive_intervals,
     verify_production_sparse_recursive_leaf,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
 
-fn production_zero_interval() -> OrbitInterval<4> {
-    let claim: HighPrecisionEscapeClaim<4> = HighPrecisionEscapeClaim {
+fn production_zero_claim() -> HighPrecisionEscapeClaim<4> {
+    HighPrecisionEscapeClaim {
         point: ComplexFixed {
             real: Fixed::zero(),
             imaginary: Fixed::zero(),
         },
         bound: 8,
     }
-    let evaluated = evaluate_chunk(claim, initial_boundary<4>(), 1)
-    if !evaluated.valid || evaluated.leaves != 1 {
-        return OrbitInterval {
-            claim: claim,
-            start: initial_boundary<4>(),
-            end: initial_boundary<4>(),
-        }
+}
+
+fn invalid_production_zero_interval(
+    _ claim: HighPrecisionEscapeClaim<4>,
+) -> OrbitInterval<4> {
+    OrbitInterval {
+        claim: claim,
+        start: initial_boundary<4>(),
+        end: initial_boundary<4>(),
     }
-    evaluated.interval
+}
+
+fn production_zero_interval_at(_ leaf: u32) -> OrbitInterval<4> {
+    let claim = production_zero_claim()
+    let initial = initial_boundary<4>()
+    if leaf == 0 {
+        let evaluated = evaluate_chunk(claim, initial, 1)
+        if evaluated.valid && evaluated.leaves == 1 {
+            return evaluated.interval
+        }
+        return invalid_production_zero_interval(claim)
+    }
+    if leaf != 1 { return invalid_production_zero_interval(claim) }
+
+    let first = evaluate_chunk(claim, initial, 1)
+    if !first.valid || first.leaves != 1 {
+        return invalid_production_zero_interval(claim)
+    }
+    let second = evaluate_chunk(claim, first.interval.end, 1)
+    if !second.valid || second.leaves != 1 {
+        return invalid_production_zero_interval(claim)
+    }
+    second.interval
+}
+
+fn production_zero_interval() -> OrbitInterval<4> {
+    production_zero_interval_at(0)
+}
+
+fn production_zero_second_interval() -> OrbitInterval<4> {
+    production_zero_interval_at(1)
 }
 
 /// Prove the single exact transition `z_0 = 0` to `z_1 = 0` for `c = 0`.
@@ -57,6 +90,19 @@ fn production_zero_interval() -> OrbitInterval<4> {
 pub fn production_zero_interval_receipt() -> BrowserBytes {
     prove_production_sparse_interval(
         production_zero_interval(),
+        BabyBear::from_u32(7),
+    )
+}
+
+/// Prove either exact adjacent transition for the two-leaf recursive gate.
+/// The leaf index selects public statement data; it does not select a second
+/// proof implementation or host-provided witness.
+pub fn production_zero_adjacent_interval_receipt(
+    _ leaf: u32,
+) -> BrowserBytes {
+    if leaf > 1 { return BrowserBytes { ptr: 0, len: 0 } }
+    prove_production_sparse_interval(
+        production_zero_interval_at(leaf),
         BabyBear::from_u32(7),
     )
 }
@@ -152,4 +198,83 @@ pub fn audit_production_zero_interval_recursive_leaf(
     if !committed.start.valid { return 9 }
     if !committed.end.valid { return 10 }
     11
+}
+
+/// Decode and verify two real adjacent production receipts before minting and
+/// merging their private recursive authorities.
+pub fn verify_and_merge_production_zero_adjacent_recursive_leaves(
+    _ left_bytes: BrowserBytes,
+    _ right_bytes: BrowserBytes,
+) -> bool {
+    let mut left_receipt = empty_production_sparse_baby_bear_receipt()
+    let mut right_receipt = empty_production_sparse_baby_bear_receipt()
+    if !decode_production_sparse_baby_bear_receipt(left_bytes, mut left_receipt)
+        || !decode_production_sparse_baby_bear_receipt(right_bytes, mut right_receipt)
+    {
+        return false
+    }
+    let left = verify_production_sparse_recursive_leaf(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref left_receipt,
+    )
+    let right = verify_production_sparse_recursive_leaf(
+        production_zero_second_interval(),
+        BabyBear::from_u32(7),
+        ref right_receipt,
+    )
+    let merged = merge_verified_recursive_intervals(left, right)
+    let committed = merged.commitment()
+    merged.is_valid()
+        && committed.valid
+        && committed.leaves == 2
+        && committed.start_iteration == 0
+        && committed.end_iteration == 2
+        && committed.statement.valid
+        && committed.start.valid
+        && committed.end.valid
+}
+
+/// Failure-localizing projection for the exact two-receipt merge gate. Zero is
+/// the only success value; all other values identify a rejected boundary.
+pub fn audit_production_zero_adjacent_recursive_merge(
+    _ left_bytes: BrowserBytes,
+    _ right_bytes: BrowserBytes,
+) -> u32 {
+    if verify_and_merge_production_zero_adjacent_recursive_leaves(
+        left_bytes,
+        right_bytes,
+    ) { return 0 }
+
+    let mut left_receipt = empty_production_sparse_baby_bear_receipt()
+    let mut right_receipt = empty_production_sparse_baby_bear_receipt()
+    if !decode_production_sparse_baby_bear_receipt(left_bytes, mut left_receipt) {
+        return 1
+    }
+    if !decode_production_sparse_baby_bear_receipt(right_bytes, mut right_receipt) {
+        return 2
+    }
+    let left = verify_production_sparse_recursive_leaf(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref left_receipt,
+    )
+    if !left.is_valid() { return 3 }
+    let right = verify_production_sparse_recursive_leaf(
+        production_zero_second_interval(),
+        BabyBear::from_u32(7),
+        ref right_receipt,
+    )
+    if !right.is_valid() { return 4 }
+    let merged = merge_verified_recursive_intervals(left, right)
+    if !merged.is_valid() { return 5 }
+    let committed = merged.commitment()
+    if !committed.valid { return 6 }
+    if committed.leaves != 2 { return 7 }
+    if committed.start_iteration != 0 { return 8 }
+    if committed.end_iteration != 2 { return 9 }
+    if !committed.statement.valid { return 10 }
+    if !committed.start.valid { return 11 }
+    if !committed.end.valid { return 12 }
+    13
 }

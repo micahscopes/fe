@@ -118,9 +118,13 @@ existing Definition of done, not a second campaign checklist:
   construction. A process-isolated exact gate against the committed dependency
   snapshot generated a 46,656-byte canonical production receipt, admitted its
   exact `0 -> 1` interval, and rejected a mutated validity word. This is an
-  in-memory trusted relation, not recursive cryptography. Two real adjacent
-  receipt leaves, their end-to-end authority merge, the fixed-size recursive
-  proof/provider and encoding, and the bounded disk claim remain.
+  in-memory trusted relation, not recursive cryptography. A second exact gate
+  uses one leaf-indexed Fe prover to emit real `0 -> 1` and `1 -> 2` receipts of
+  46,656 and 46,808 bytes. A fresh Fe verifier admits both, mints their private
+  authorities, and merges exactly two leaves over `0 -> 2`; duplicate-left,
+  swapped-order, and mutated-right inputs all fail closed. The fixed-size
+  recursive proof/provider and encoding, logarithmic aggregation evidence, and
+  bounded disk claim remain.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private

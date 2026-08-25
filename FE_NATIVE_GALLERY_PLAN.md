@@ -1716,11 +1716,16 @@ All four are focused ingots and may remain so permanently.
   gate generated a 46,656-byte canonical production receipt from the committed
   dependency snapshot, admitted its exact `0 -> 1` interval through this
   authority, and rejected a mutated validity word; prover and verifier compiler
-  arenas never overlap. This is deliberately an in-memory trusted relation,
-  not recursive cryptography or a serializable recursive proof. Closure still
-  requires two real adjacent receipt leaves merged end to end, the fixed-size
-  recursive proof/provider, multi-chunk receipt encoding, and the bounded disk
-  claim.
+  arenas never overlap. A second exact gate compiles one leaf-indexed Fe prover,
+  only 4,463 Wasm bytes larger than the single-leaf artifact, resets its Fe
+  arena between calls, and emits real `0 -> 1` and `1 -> 2` receipts of 46,656
+  and 46,808 bytes. A fresh Fe verifier admits both, mints their private
+  authorities, and merges exactly two leaves over `0 -> 2`; duplicate-left,
+  swapped-order, and mutated-right inputs all fail closed. This is deliberately
+  an in-memory trusted relation, not recursive cryptography or a serializable
+  recursive proof. Closure still requires the fixed-size recursive
+  proof/provider, multi-chunk proof encoding, logarithmic aggregation evidence,
+  and the bounded disk claim.
 - **G-BROWSER, partial.** Fe-authored staged WebGPU witness, LDE, and
   commitment execution runs on llvmpipe with Wasm control. Interactive point
   and disk selection, full browser proof generation, Wasm verification, and
