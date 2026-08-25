@@ -1,19 +1,27 @@
 //! Executable structural receipts for exact factor-tree policies.
 
-use parallel_structure::{Bush, Comp, Dif, Dit, FactorTree, Pair}
+use parallel_structure::{Bush, Comp, Dif, Dit, FactorTree, Pair, Unit}
+use std::conal::RBin
 
 type Irregular16 = Comp<Pair, Comp<Dit<1>, Dit<2>>>
 
 // These acceptors make the recursive type-function normal forms part of the
 // compilation gate. No runtime receipt can compensate for a wrong normal form.
 fn accept_dit4(
-    _ value: Comp<Comp<Comp<Pair, Pair>, Pair>, Pair>,
+    _ value: Comp<Comp<Comp<Comp<Unit, Pair>, Pair>, Pair>, Pair>,
 ) {}
 
 fn prove_dit4_normal_form(_ value: Dit<4>) { accept_dit4(value) }
 
+// `Dit` is a policy name over the established Conal vocabulary. Its canonical
+// left-associated form must be definitionally identical to the existing
+// library-resident `RBin`, not merely have the same numeric receipt.
+fn accept_rbin4(_ value: RBin<Pair, 4>) {}
+
+fn prove_dit4_is_conal_rbin(_ value: Dit<4>) { accept_rbin4(value) }
+
 fn accept_dif4(
-    _ value: Comp<Pair, Comp<Pair, Comp<Pair, Pair>>>,
+    _ value: Comp<Pair, Comp<Pair, Comp<Pair, Comp<Pair, Unit>>>>,
 ) {}
 
 fn prove_dif4_normal_form(_ value: Dif<4>) { accept_dif4(value) }

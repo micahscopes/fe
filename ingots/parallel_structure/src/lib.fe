@@ -10,25 +10,20 @@
 //! interpret the same type independently. Reassociation is only sound for a
 //! consumer that proves the required algebraic law.
 
-/// The identity factor. It denotes one value and no radix-two stage.
-pub struct Unit {}
-
-/// One radix-two factor.
-pub struct Pair {}
-
-/// Ordered composition of two factor structures.
-pub struct Comp<Left, Right> {}
+// Reuse the canonical Conal constructor vocabulary. `Unit` is the
+// factor-structure name for Conal's one-leaf `Par`; `Pair` and `Comp` are the
+// exact same nominal types consumed by `RBin`, not parallel lookalikes.
+pub use std::conal::{Par as Unit, Pair, Comp}
 
 /// Left-associated radix-two factorization.
 ///
-/// `Dit<4>` normalizes to
-/// `Comp<Comp<Comp<Pair, Pair>, Pair>, Pair>` and denotes sixteen
+/// `Dit<4>` is definitionally `std::conal::RBin<Pair, 4>` and normalizes to
+/// `Comp<Comp<Comp<Comp<Unit, Pair>, Pair>, Pair>, Pair>`. It denotes sixteen
 /// points. The name records the intended decimation-in-time interpretation;
 /// the factor tree itself does not prescribe storage placement.
 pub recursive type fn Dit<const DEPTH: usize>() -> (*) {
     match DEPTH {
         0 => Unit
-        1 => Pair
         _ => Comp<Dit<{DEPTH - 1}>, Pair>
     }
 }
@@ -41,7 +36,6 @@ pub recursive type fn Dit<const DEPTH: usize>() -> (*) {
 pub recursive type fn Dif<const DEPTH: usize>() -> (*) {
     match DEPTH {
         0 => Unit
-        1 => Pair
         _ => Comp<Pair, Dif<{DEPTH - 1}>>
     }
 }

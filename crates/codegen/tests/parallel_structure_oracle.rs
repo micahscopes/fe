@@ -85,10 +85,10 @@ fn expected(points: u32, factors: u32, tree_depth: u32, nodes: u32) -> [u32; 9] 
 
 #[test]
 fn named_and_irregular_factor_trees_derive_independent_structural_receipts() {
-    assert_eq!(receipt("dit4_receipt"), expected(16, 4, 3, 3));
-    assert_eq!(receipt("dif4_receipt"), expected(16, 4, 3, 3));
+    assert_eq!(receipt("dit4_receipt"), expected(16, 4, 4, 4));
+    assert_eq!(receipt("dif4_receipt"), expected(16, 4, 4, 4));
     assert_eq!(receipt("bush2_receipt"), expected(16, 4, 2, 3));
-    assert_eq!(receipt("irregular16_receipt"), expected(16, 4, 3, 3));
+    assert_eq!(receipt("irregular16_receipt"), expected(16, 4, 4, 5));
 
     assert_ne!(
         receipt("dit4_receipt")[5],
