@@ -116,6 +116,35 @@ fn reflected_regions_match_an_independent_declaration_order_decoder() {
             "relative query coordinate {index}",
         );
     }
+    for (index, expected) in [
+        (0, vec![1, 6]),
+        (3, vec![1, 9]),
+        (4, vec![0, 0]),
+        (u32::MAX, vec![0, 0]),
+    ] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "second_query_address",
+                &[Val::I32(index as i32)],
+                2,
+            ),
+            expected,
+            "relative coordinate in a nested query region {index}",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "oversized_query_region_valid",
+            &[],
+            1,
+        ),
+        vec![0],
+        "an oversized child layout must fail closed",
+    );
 }
 
 #[test]

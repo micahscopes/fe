@@ -4,6 +4,7 @@ use region_layout::{
     RegionSchema,
     RegionSchemaProvider,
     store_region_word,
+    subregion,
 }
 use std::webgpu::StorageBuffer
 
@@ -22,15 +23,20 @@ struct ProofRegions {
 }
 derive RegionSchema for ProofRegions using RegionSchemaProvider
 
+struct QueryRegions { first: Region<Query>, second: Region<Query> }
+derive RegionSchema for QueryRegions using RegionSchemaProvider
+
 /// One physical invocation writes semantic regions through checked relative
 /// coordinates. The rejected query write must leave digest word seven intact.
 pub fn write_regions(_ tape: StorageBuffer<u32, 18>) {
     let regions = <ProofRegions as RegionSchema>::regions()
+    let query_regions = <QueryRegions as RegionSchema>::regions()
+    let second_query = subregion(regions.queries, query_regions.second)
     let header_ok = store_region_word(tape, regions.header, 0, 101)
         && store_region_word(tape, regions.header, 1, 102)
     let query_ok = store_region_word(tape, regions.queries, 0, 201)
-        && store_region_word(tape, regions.queries, 7, 208)
-    let rejected = store_region_word(tape, regions.queries, 8, 999)
+        && store_region_word(tape, second_query, 3, 208)
+    let rejected = store_region_word(tape, second_query, 4, 999)
     let digest_ok = store_region_word(tape, regions.digest, 0, 301)
         && store_region_word(tape, regions.digest, 7, 308)
     store_region_word(

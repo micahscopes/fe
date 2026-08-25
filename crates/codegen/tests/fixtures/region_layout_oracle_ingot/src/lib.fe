@@ -5,6 +5,7 @@ use region_layout::{
     RegionSchemaProvider,
     region_address,
     region_bounds,
+    subregion,
 }
 
 struct Header { valid: bool, count: u32 }
@@ -22,6 +23,12 @@ struct ProofRegions {
 }
 impl core::marker::Copy for ProofRegions {}
 derive RegionSchema for ProofRegions using RegionSchemaProvider
+
+struct QueryRegions { first: Region<Query>, second: Region<Query> }
+derive RegionSchema for QueryRegions using RegionSchemaProvider
+
+struct OversizedQueryRegion { all: Region<[Query; 3]> }
+derive RegionSchema for OversizedQueryRegion using RegionSchemaProvider
 
 /// Returns start/width pairs for all three fields followed by total words.
 pub fn layout_receipt() -> (u32, u32, u32, u32, u32, u32, u32) {
@@ -43,4 +50,22 @@ pub fn query_address(_ index: u32) -> (u32, u32) {
     let regions = <ProofRegions as RegionSchema>::regions()
     let address = region_address(regions.queries, index)
     (if address.valid { 1 } else { 0 }, address.absolute)
+}
+
+/// The same query storage viewed through a derived child schema. The second
+/// query begins four words into the eight-word parent region.
+pub fn second_query_address(_ index: u32) -> (u32, u32) {
+    let regions = <ProofRegions as RegionSchema>::regions()
+    let queries = <QueryRegions as RegionSchema>::regions()
+    let second = subregion(regions.queries, queries.second)
+    let address = region_address(second, index)
+    (if address.valid { 1 } else { 0 }, address.absolute)
+}
+
+/// A twelve-word child layout cannot be composed into an eight-word parent.
+pub fn oversized_query_region_valid() -> u32 {
+    let regions = <ProofRegions as RegionSchema>::regions()
+    let oversized = <OversizedQueryRegion as RegionSchema>::regions()
+    let child = subregion(regions.queries, oversized.all)
+    if region_bounds(child).valid { 1 } else { 0 }
 }
