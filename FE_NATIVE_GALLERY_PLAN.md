@@ -1683,6 +1683,40 @@ for field-generic transform interpreters, `region_layout` for reflected typed
 storage regions, and `proof_transcript` for ordered absorb/challenge typestate.
 All four are focused ingots and may remain so permanently.
 
+### Six-gate campaign ledger (2026-08-25)
+
+- **G-NTT, partial.** Scalar DIT, DIF, Bush, and irregular factor trees share
+  one exact denotation with the portable staged WebGPU interpretation. The
+  N=16 base-field and quartic-extension gates compare against direct
+  polynomial evaluation, and the production checkpoint's four batched LDEs
+  execute on llvmpipe. Larger proof domains, fused workgroup placement,
+  barriers/shared memory, optional subgroups, and external Chrome hardware
+  parity remain.
+- **G-LAYOUT, partial.** Commits `5400eff03` and `36f52db3b` make region
+  coordinates schema-branded, require nested layouts to fit through const
+  predicates, and make reusable cyclic lane indices unforgeable. The
+  production GPU checkpoint derives its 408-word tape from Fe record schemas,
+  contains no raw proof offsets or direct storage access, and passes the
+  independent layout, lavapipe, direct-DFT, and all-word clean/tampered receipt
+  gates. The largest commitment shader is 156,769 bytes, below the unchanged
+  160 KiB browser-risk cap. Closure still requires carrying the same authority
+  through the complete query, transcript, FRI, and recursive receipt layout,
+  with an independent decoder for that complete receipt.
+- **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
+  AIR, commitments, LDE, FRI fold chain, and mutation oracles exist. Complete
+  authenticated queries, ordered Fiat-Shamir sampling, canonical encoding,
+  and final accept/reject evidence for the production BabyBear receipt remain.
+- **G-RECURSE, pending.** Implement exact adjacent chunk leaves, boundary
+  equality, ordered parent aggregation, and a fixed-size recursive receipt.
+  Multi-limb orbit boundaries and the bounded disk claim belong to this gate.
+- **G-BROWSER, partial.** Fe-authored staged WebGPU witness, LDE, and
+  commitment execution runs on llvmpipe with Wasm control. Interactive point
+  and disk selection, full browser proof generation, Wasm verification, and
+  revm-Wasm verification remain.
+- **G-INSPECT, partial.** The Fe SourceInspector and generated artifact views
+  exist. `SourceAtlas` must still expose authored, semantic, placement, layout,
+  artifact, and evidence layers without a runtime JSON manifest.
+
 Consume that architecture through six named gates in the authoritative
 campaign SSOT: G-NTT, G-LAYOUT, G-RECEIPT, G-RECURSE, G-BROWSER, and G-INSPECT.
 New implementation notes attach beneath one of those gates instead of growing
