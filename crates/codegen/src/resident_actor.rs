@@ -320,28 +320,6 @@ fn actor_for_nominal_ty<'a, 'db>(
     actors.iter().find(|actor| actor.state == state)
 }
 
-fn canonical_mailbox_scalar_value(ty: &CanonicalType) -> bool {
-    match ty {
-        CanonicalType::Bool
-        | CanonicalType::U8
-        | CanonicalType::I32
-        | CanonicalType::U32
-        | CanonicalType::I64
-        | CanonicalType::U64
-        | CanonicalType::F32 => true,
-        CanonicalType::Record(fields) => fields
-            .iter()
-            .all(|field| canonical_mailbox_scalar_value(&field.ty)),
-        CanonicalType::Variant(variants) => variants.iter().all(|variant| {
-            variant
-                .fields
-                .iter()
-                .all(|field| canonical_mailbox_scalar_value(&field.ty))
-        }),
-        CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. } => false,
-    }
-}
-
 /// Prove that each parent mailbox import denotes one actual behavior on the
 /// nominal supervised child. The public `Handles` bound is useful authoring
 /// evidence, but this compiler check deliberately does not trust a manually
@@ -442,14 +420,6 @@ fn validate_actor_mailbox_requests(
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
         let response_value = canonical_type_from_semantic(db, response, "worker_mailbox_response")
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
-        if !canonical_mailbox_scalar_value(&request_value)
-            || !canonical_mailbox_scalar_value(&response_value)
-        {
-            return Err(ResidentActorError::Contract(
-                "typed child mailbox currently requires owned scalar value trees; bytes, strings, and lists need the canonical post-return memory bridge"
-                    .to_owned(),
-            ));
-        }
         let import = mir::host_import_name(db, instance).ok_or_else(|| {
             ResidentActorError::Contract("typed child mailbox has no generated import".to_owned())
         })?;

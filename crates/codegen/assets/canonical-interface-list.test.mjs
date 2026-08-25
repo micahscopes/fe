@@ -297,19 +297,25 @@ test("actor mailboxes derive nested scalar variants with canonical inactive lane
     () => mailbox.liftRequest([1, 7, 0, 4]),
     /inactive lane is not canonical zero/,
   );
+  const weighted = mailbox.createResponseSession();
   assert.deepEqual(
-    mailbox.lowerResponse({
+    weighted.lower({
       tag: "apply",
       value: 11,
       mode: { tag: "weighted", factor: 5 },
     }),
     [1, 11, 1, 5],
   );
-  assert.deepEqual(mailbox.lowerResponse({ tag: "none" }), [0, 0, 0, 0]);
+  weighted.release();
+  const none = mailbox.createResponseSession();
+  assert.deepEqual(none.lower({ tag: "none" }), [0, 0, 0, 0]);
+  none.release();
+  const malformed = mailbox.createResponseSession();
   assert.throws(
-    () => mailbox.lowerResponse({ tag: "none", value: 1 }),
+    () => malformed.lower({ tag: "none", value: 1 }),
     /unexpected or missing fields/,
   );
+  malformed.release();
 });
 
 test("manifest rejects unsafe list vocabulary", () => {

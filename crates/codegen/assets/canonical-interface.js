@@ -580,7 +580,7 @@ function canonicalActorValidator(codec, name) {
   };
 }
 
-function mailboxScalarWidth(layout, path) {
+function mailboxValueWidth(layout, path) {
   switch (layout.kind) {
     case "bool":
     case "u8":
@@ -589,30 +589,92 @@ function mailboxScalarWidth(layout, path) {
     case "i64":
     case "u64":
     case "f32": return 1;
+    case "bytes":
+    case "string":
+    case "list": return 2;
     case "record": return layout.fields.reduce(
-      (width, field) => width + mailboxScalarWidth(field.layout, `${path}.${field.name}`),
+      (width, field) => width + mailboxValueWidth(field.layout, `${path}.${field.name}`),
       0,
     );
     case "variant": return 1 + layout.variants.reduce(
       (width, variant) => width + variant.fields.reduce(
         (variantWidth, field) => variantWidth
-          + mailboxScalarWidth(field.layout, `${path}.${variant.name}.${field.name}`),
+          + mailboxValueWidth(field.layout, `${path}.${variant.name}.${field.name}`),
         0,
       ),
       0,
     );
     default:
-      throw new TypeError(
-        `${path} is not an owned scalar mailbox value; canonical memory transport is required`,
-      );
+      throw new TypeError(`${path} is not a canonical mailbox value`);
   }
 }
 
-function liftMailboxScalar(layout, carriers, state, path) {
+function mailboxHasDescriptors(layout) {
+  if (layout.kind === "bytes" || layout.kind === "string" || layout.kind === "list") {
+    return true;
+  }
+  if (layout.kind === "record") {
+    return layout.fields.some(field => mailboxHasDescriptors(field.layout));
+  }
+  if (layout.kind === "variant") {
+    return layout.variants.some(variant =>
+      variant.fields.some(field => mailboxHasDescriptors(field.layout)));
+  }
+  return false;
+}
+
+function mailboxCarrier(carriers, state, path) {
+  if (state.index >= carriers.length) throw new TypeError(`${path} has no Wasm carrier`);
+  return carriers[state.index++];
+}
+
+function mailboxU32Carrier(carriers, state, path) {
+  const raw = mailboxCarrier(carriers, state, path);
+  if (!Number.isInteger(raw)) throw new TypeError(`${path} is not a Fe u32`);
+  return raw >>> 0;
+}
+
+function mailboxMemory(binding, path) {
+  if (!(binding.memory instanceof WebAssembly.Memory)) {
+    throw new TypeError(`${path} requires an attached parent task Wasm memory`);
+  }
+  return new Uint8Array(binding.memory.buffer);
+}
+
+function liftMailboxDescriptor(layout, carriers, state, binding, path) {
+  const pointer = mailboxU32Carrier(carriers, state, `${path}.ptr`);
+  const length = mailboxU32Carrier(carriers, state, `${path}.len`);
+  const memory = mailboxMemory(binding, path);
+  if (layout.kind === "list") {
+    if (length > layout.max) {
+      throw new RangeError(`${path} exceeds maximum length ${layout.max}`);
+    }
+    if (length !== 0 && pointer % layout.stride !== 0) {
+      throw new RangeError(`${path} descriptor pointer is misaligned`);
+    }
+    const byteLength = length * layout.stride;
+    checkedEnd(pointer, byteLength, memory, `${path} descriptor`);
+    const result = new (listClass(layout))(length);
+    const payload = new DataView(
+      memory.buffer, memory.byteOffset + pointer, byteLength,
+    );
+    for (let index = 0; index < length; index += 1) {
+      result[index] = layout.element === "u32"
+        ? payload.getUint32(index * 4, true)
+        : payload.getFloat32(index * 4, true);
+    }
+    return result;
+  }
+  const end = checkedEnd(pointer, length, memory, `${path} descriptor`);
+  const copy = memory.slice(pointer, end);
+  return layout.kind === "string" ? textDecoder.decode(copy) : copy;
+}
+
+function liftMailboxValue(layout, carriers, state, binding, path) {
   if (layout.kind === "record") {
     return Object.fromEntries(layout.fields.map((field) => [
       field.name,
-      liftMailboxScalar(field.layout, carriers, state, `${path}.${field.name}`),
+      liftMailboxValue(field.layout, carriers, state, binding, `${path}.${field.name}`),
     ]));
   }
   if (layout.kind === "variant") {
@@ -627,18 +689,20 @@ function liftMailboxScalar(layout, carriers, state, path) {
       for (const field of variant.fields) {
         const fieldPath = `${path}.${variant.name}.${field.name}`;
         if (variant.tag === rawTag) {
-          value[field.name] = liftMailboxScalar(field.layout, carriers, state, fieldPath);
+          value[field.name] = liftMailboxValue(
+            field.layout, carriers, state, binding, fieldPath,
+          );
         } else {
-          consumeMailboxZeros(field.layout, carriers, state, fieldPath);
+          consumeMailboxZeros(field.layout, carriers, state, binding, fieldPath);
         }
       }
     }
     return value;
   }
-  if (state.index >= carriers.length) {
-    throw new TypeError(`${path} has no Wasm carrier`);
+  if (layout.kind === "bytes" || layout.kind === "string" || layout.kind === "list") {
+    return liftMailboxDescriptor(layout, carriers, state, binding, path);
   }
-  const raw = carriers[state.index++];
+  const raw = mailboxCarrier(carriers, state, path);
   switch (layout.kind) {
     case "bool":
       if (raw !== 0 && raw !== 1) throw new TypeError(`${path} is not a Fe bool`);
@@ -665,14 +729,14 @@ function liftMailboxScalar(layout, carriers, state, path) {
       if (typeof raw !== "number") throw new TypeError(`${path} is not a Fe f32`);
       return Math.fround(raw);
     default:
-      throw new TypeError(`${path} is not a scalar mailbox value`);
+      throw new TypeError(`${path} is not a canonical mailbox value`);
   }
 }
 
-function consumeMailboxZeros(layout, carriers, state, path) {
+function consumeMailboxZeros(layout, carriers, state, binding, path) {
   if (layout.kind === "record") {
     for (const field of layout.fields) {
-      consumeMailboxZeros(field.layout, carriers, state, `${path}.${field.name}`);
+      consumeMailboxZeros(field.layout, carriers, state, binding, `${path}.${field.name}`);
     }
     return;
   }
@@ -686,13 +750,22 @@ function consumeMailboxZeros(layout, carriers, state, path) {
           field.layout,
           carriers,
           state,
+          binding,
           `${path}.${variant.name}.${field.name}`,
         );
       }
     }
     return;
   }
-  const value = liftMailboxScalar(layout, carriers, state, path);
+  if (layout.kind === "bytes" || layout.kind === "string" || layout.kind === "list") {
+    const pointer = mailboxU32Carrier(carriers, state, `${path}.ptr`);
+    const length = mailboxU32Carrier(carriers, state, `${path}.len`);
+    if (pointer !== 0 || length !== 0) {
+      throw new TypeError(`${path} inactive descriptor is not canonical zero`);
+    }
+    return;
+  }
+  const value = liftMailboxValue(layout, carriers, state, binding, path);
   if (value !== false && value !== 0 && value !== 0n) {
     throw new TypeError(`${path} inactive lane is not canonical zero`);
   }
@@ -713,14 +786,77 @@ function appendMailboxZeros(layout, output) {
     }
     return;
   }
+  if (layout.kind === "bytes" || layout.kind === "string" || layout.kind === "list") {
+    output.push(0, 0);
+    return;
+  }
   output.push(layout.kind === "i64" || layout.kind === "u64" ? 0n : 0);
 }
 
-function lowerMailboxScalar(layout, value, output, path) {
+function allocateMailboxPayload(binding, byteLength, align, allocations, path) {
+  if (byteLength === 0) return 0;
+  if (typeof binding.realloc !== "function" || typeof binding.postReturn !== "function") {
+    throw new TypeError(`${path} requires an attached canonical allocation stack`);
+  }
+  const rawPointer = binding.realloc(0, 0, align, byteLength);
+  if (!Number.isInteger(rawPointer)) {
+    throw new TypeError(`${path} canonical allocator returned a non-integer pointer`);
+  }
+  const pointer = rawPointer >>> 0;
+  allocations.push(Object.freeze({ align, pointer, size: byteLength }));
+  checkedEnd(pointer, byteLength, mailboxMemory(binding, path), `${path} allocation`);
+  return pointer;
+}
+
+function lowerMailboxDescriptor(layout, value, output, binding, allocations, path) {
+  if (layout.kind === "list") {
+    const Expected = listClass(layout);
+    if (!(value instanceof Expected)) {
+      throw new TypeError(`${path} must be a ${Expected.name}`);
+    }
+    if (value.length > layout.max) {
+      throw new RangeError(`${path} exceeds maximum length ${layout.max}`);
+    }
+    const byteLength = value.length * layout.stride;
+    const pointer = allocateMailboxPayload(
+      binding, byteLength, layout.stride, allocations, path,
+    );
+    if (byteLength !== 0) {
+      const memory = mailboxMemory(binding, path);
+      const payload = new DataView(
+        memory.buffer, memory.byteOffset + pointer, byteLength,
+      );
+      for (let index = 0; index < value.length; index += 1) {
+        if (layout.element === "u32") payload.setUint32(index * 4, value[index], true);
+        else payload.setFloat32(index * 4, value[index], true);
+      }
+    }
+    output.push(pointer, value.length);
+    return;
+  }
+  const bytes = layout.kind === "string"
+    ? (() => {
+        if (typeof value !== "string") throw new TypeError(`${path} must be a string`);
+        return textEncoder.encode(value);
+      })()
+    : (() => {
+        if (!(value instanceof Uint8Array)) {
+          throw new TypeError(`${path} must be a Uint8Array`);
+        }
+        return value;
+      })();
+  const pointer = allocateMailboxPayload(binding, bytes.byteLength, 1, allocations, path);
+  if (bytes.byteLength !== 0) mailboxMemory(binding, path).set(bytes, pointer);
+  output.push(pointer, bytes.byteLength);
+}
+
+function lowerMailboxValue(layout, value, output, binding, allocations, path) {
   if (layout.kind === "record") {
     exactKeys(value, layout.fields.map((field) => field.name), path);
     for (const field of layout.fields) {
-      lowerMailboxScalar(field.layout, value[field.name], output, `${path}.${field.name}`);
+      lowerMailboxValue(
+        field.layout, value[field.name], output, binding, allocations, `${path}.${field.name}`,
+      );
     }
     return;
   }
@@ -732,10 +868,12 @@ function lowerMailboxScalar(layout, value, output, path) {
     for (const variant of layout.variants) {
       for (const field of variant.fields) {
         if (variant.tag === active.tag) {
-          lowerMailboxScalar(
+          lowerMailboxValue(
             field.layout,
             value[field.name],
             output,
+            binding,
+            allocations,
             `${path}.${variant.name}.${field.name}`,
           );
         } else {
@@ -743,6 +881,10 @@ function lowerMailboxScalar(layout, value, output, path) {
         }
       }
     }
+    return;
+  }
+  if (layout.kind === "bytes" || layout.kind === "string" || layout.kind === "list") {
+    lowerMailboxDescriptor(layout, value, output, binding, allocations, path);
     return;
   }
   switch (layout.kind) {
@@ -770,24 +912,62 @@ function lowerMailboxScalar(layout, value, output, path) {
       if (typeof value !== "number") throw new TypeError(`${path} must be a number`);
       output.push(Math.fround(value)); return;
     default:
-      throw new TypeError(`${path} is not a scalar mailbox value`);
+      throw new TypeError(`${path} is not a canonical mailbox value`);
   }
 }
 
-// Compile the scalar parent-Wasm to canonical child-value bridge from the
-// same interface which owns the child Wasm ABI. No request name, field list,
-// response width, or lane selector is supplied by application JavaScript.
+function createMailboxResponseSession(layout, width, binding, path) {
+  const allocations = [];
+  let lowered = false;
+  let released = false;
+  return Object.freeze({
+    lower(value) {
+      if (lowered) throw new TypeError(`${path} was lowered more than once`);
+      lowered = true;
+      const output = [];
+      lowerMailboxValue(layout, value, output, binding, allocations, path);
+      if (output.length !== width) {
+        throw new TypeError(`${path} canonical width drifted`);
+      }
+      return output;
+    },
+    release() {
+      if (released) throw new TypeError(`${path} allocations were released more than once`);
+      released = true;
+      while (allocations.length !== 0) {
+        const allocation = allocations.pop();
+        binding.postReturn(allocation.pointer, allocation.size, allocation.align);
+      }
+    },
+  });
+}
+
+// Compile the parent-Wasm to canonical child-value bridge from the same
+// interface which owns the child Wasm ABI. No request name, field list,
+// response width, memory layout, or lane selector is supplied by application
+// JavaScript.
 export function compileCanonicalActorMailbox(manifest) {
   if (!manifest || !Array.isArray(manifest.lanes)) {
     throw new TypeError("canonical actor interface required");
   }
   const lanes = Object.create(null);
+  const binding = {
+    memory: undefined,
+    postReturn: undefined,
+    realloc: undefined,
+    exports: undefined,
+  };
+  let needsMemory = false;
+  let needsAllocation = false;
   for (const lane of manifest.lanes) {
     if (Object.hasOwn(lanes, lane.name)) {
       throw new TypeError(`duplicate canonical mailbox lane ${lane.name}`);
     }
-    const requestWidth = mailboxScalarWidth(lane.request, `${lane.name} request`);
-    const responseWidth = mailboxScalarWidth(lane.response, `${lane.name} response`);
+    const requestWidth = mailboxValueWidth(lane.request, `${lane.name} request`);
+    const responseWidth = mailboxValueWidth(lane.response, `${lane.name} response`);
+    needsMemory ||= mailboxHasDescriptors(lane.request);
+    needsMemory ||= mailboxHasDescriptors(lane.response);
+    needsAllocation ||= mailboxHasDescriptors(lane.response);
     lanes[lane.name] = Object.freeze({
       requestWidth,
       responseWidth,
@@ -798,24 +978,52 @@ export function compileCanonicalActorMailbox(manifest) {
           );
         }
         const state = { index: 0 };
-        const value = liftMailboxScalar(
-          lane.request, carriers, state, `${lane.name} request`,
+        const value = liftMailboxValue(
+          lane.request, carriers, state, binding, `${lane.name} request`,
         );
         if (state.index !== carriers.length) {
           throw new TypeError(`${lane.name} request left unconsumed Wasm carriers`);
         }
         return value;
       },
-      lowerResponse(value) {
-        const output = [];
-        lowerMailboxScalar(lane.response, value, output, `${lane.name} response`);
-        if (output.length !== responseWidth) {
-          throw new TypeError(`${lane.name} response scalar width drifted`);
-        }
-        return output;
+      createResponseSession() {
+        return createMailboxResponseSession(
+          lane.response, responseWidth, binding, `${lane.name} response`,
+        );
       },
     });
   }
+  Object.defineProperty(lanes, "attach", {
+    enumerable: false,
+    value(exports) {
+      if (!exports || typeof exports !== "object" || Array.isArray(exports)) {
+        throw new TypeError("canonical mailbox attachment requires Wasm exports");
+      }
+      if (binding.exports !== undefined && binding.exports !== exports) {
+        throw new TypeError("canonical mailbox cannot be rebound to another Wasm instance");
+      }
+      if (needsMemory && !(exports.memory instanceof WebAssembly.Memory)) {
+        throw new TypeError("canonical mailbox parent task exports no Wasm memory");
+      }
+      const canonicalRealloc = exports.cabi_realloc;
+      const arenaAlloc = exports.fe_cabi_alloc;
+      const realloc = typeof canonicalRealloc === "function"
+        ? canonicalRealloc
+        : typeof arenaAlloc === "function"
+          ? (_oldPointer, _oldSize, align, size) => arenaAlloc(size, align)
+          : undefined;
+      if (needsAllocation && typeof realloc !== "function") {
+        throw new TypeError("canonical mailbox parent task exports no canonical allocator");
+      }
+      if (needsAllocation && typeof exports.fe_cabi_post_return !== "function") {
+        throw new TypeError("canonical mailbox parent task exports no post-return stack release");
+      }
+      binding.exports = exports;
+      binding.memory = exports.memory;
+      binding.realloc = realloc;
+      binding.postReturn = exports.fe_cabi_post_return;
+    },
+  });
   return Object.freeze(lanes);
 }
 

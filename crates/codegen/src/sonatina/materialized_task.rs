@@ -9,11 +9,13 @@
 use std::collections::HashSet;
 
 use compiler_db::DriverDataBase;
-use hir::{
-    analysis::ty::{adt_def::AdtRef, ty_def::TyId},
-    hir_def::HostType,
-};
+use hir::{analysis::ty::adt_def::AdtRef, hir_def::HostType};
 use mir::{Layout, LayoutId, RuntimeClass, RuntimeLinkage, RuntimePackage, ScalarRepr, ScalarRole};
+
+use crate::{
+    CanonicalType, canonical_interface::semantic_type_retains_borrowed_host_storage,
+    canonical_type_from_semantic,
+};
 
 use super::{LowerError, lower_runtime::assign_sonatina_function_symbols};
 
@@ -147,6 +149,99 @@ fn scalar_lane(
     })
 }
 
+fn canonical_descriptor_pointer_lane(
+    class: &RuntimeClass<'_>,
+    path: &str,
+) -> Result<WasmTaskScalar, LowerError> {
+    match class {
+        RuntimeClass::Scalar(scalar)
+            if matches!(
+                scalar.repr,
+                ScalarRepr::Int {
+                    bits: 32,
+                    signed: false
+                } | ScalarRepr::Address { bits: 32 }
+            ) =>
+        {
+            Ok(WasmTaskScalar::Unsigned { bits: 32 })
+        }
+        RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
+            Ok(WasmTaskScalar::Unsigned { bits: 32 })
+        }
+        _ => Err(unsupported(format!(
+            "explicit canonical descriptor `{path}` has no wasm32 pointer carrier"
+        ))),
+    }
+}
+
+fn canonical_descriptor_length_lane(
+    class: &RuntimeClass<'_>,
+    path: &str,
+) -> Result<WasmTaskScalar, LowerError> {
+    let RuntimeClass::Scalar(scalar) = class else {
+        return Err(unsupported(format!(
+            "explicit canonical descriptor `{path}` has no u32 length carrier"
+        )));
+    };
+    if !matches!(
+        scalar.repr,
+        ScalarRepr::Int {
+            bits: 32,
+            signed: false
+        }
+    ) {
+        return Err(unsupported(format!(
+            "explicit canonical descriptor `{path}` has no u32 length carrier"
+        )));
+    }
+    Ok(WasmTaskScalar::Unsigned { bits: 32 })
+}
+
+fn canonical_descriptor_lanes<'db>(
+    db: &'db DriverDataBase,
+    layout: LayoutId<'db>,
+) -> Result<Option<[WasmTaskScalar; 2]>, LowerError> {
+    let Layout::Struct(layout) = layout.data(db) else {
+        return Ok(None);
+    };
+    let source_ty = layout.source_ty.as_view(db).unwrap_or(layout.source_ty);
+    let Some(AdtRef::Struct(struct_)) = source_ty.adt_def(db).map(|adt| adt.adt_ref(db)) else {
+        return Ok(None);
+    };
+    let Some(host_type) = struct_
+        .scope()
+        .attrs(db)
+        .and_then(|attrs| attrs.host_type(db))
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        host_type,
+        HostType::Bytes | HostType::String | HostType::List
+    ) {
+        return Ok(None);
+    }
+    let descriptor = canonical_type_from_semantic(db, source_ty, "task_descriptor")
+        .map_err(|error| unsupported(error.to_string()))?;
+    if !matches!(
+        descriptor,
+        CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. }
+    ) {
+        return Err(LowerError::Internal(
+            "explicit browser host type did not derive a canonical descriptor".to_owned(),
+        ));
+    }
+    let [pointer, length] = layout.fields.as_ref() else {
+        return Err(unsupported(
+            "explicit canonical descriptor must contain exactly pointer and length fields",
+        ));
+    };
+    Ok(Some([
+        canonical_descriptor_pointer_lane(pointer, "task_descriptor.ptr")?,
+        canonical_descriptor_length_lane(length, "task_descriptor.len")?,
+    ]))
+}
+
 fn flatten_class<'db>(
     db: &'db DriverDataBase,
     class: &RuntimeClass<'db>,
@@ -156,6 +251,10 @@ fn flatten_class<'db>(
     match class {
         RuntimeClass::Scalar(scalar) => output.push(scalar_lane(scalar, db)?),
         RuntimeClass::AggregateValue { layout } => {
+            if let Some(lanes) = canonical_descriptor_lanes(db, *layout)? {
+                output.extend(lanes);
+                return Ok(());
+            }
             if !active.insert(*layout) {
                 return Err(unsupported("recursive aggregate value layout"));
             }
@@ -204,49 +303,6 @@ fn flatten_classes<'db>(
     Ok(output)
 }
 
-fn retains_borrowed_host_storage<'db>(
-    db: &'db DriverDataBase,
-    ty: TyId<'db>,
-    active: &mut HashSet<TyId<'db>>,
-) -> bool {
-    let ty = ty.as_view(db).unwrap_or(ty);
-    if !active.insert(ty) {
-        return false;
-    }
-    let retained = match ty.adt_def(db).map(|adt| adt.adt_ref(db)) {
-        Some(AdtRef::Struct(struct_)) => {
-            if matches!(
-                struct_
-                    .scope()
-                    .attrs(db)
-                    .and_then(|attrs| attrs.host_type(db)),
-                Some(HostType::Bytes | HostType::String | HostType::List)
-            ) {
-                true
-            } else {
-                ty.field_types(db)
-                    .into_iter()
-                    .any(|field| retains_borrowed_host_storage(db, field, active))
-            }
-        }
-        Some(AdtRef::Enum(enum_)) => {
-            let args = ty.generic_args(db);
-            enum_.variants(db).any(|variant| {
-                variant.field_tys(db).into_iter().any(|field| {
-                    retains_borrowed_host_storage(db, field.instantiate(db, args), active)
-                })
-            })
-        }
-        None => ty
-            .generic_args(db)
-            .iter()
-            .copied()
-            .any(|arg| retains_borrowed_host_storage(db, arg, active)),
-    };
-    active.remove(&ty);
-    retained
-}
-
 fn reject_borrowed_host_frame<'db>(
     db: &'db DriverDataBase,
     plan: &mir::RuntimeResumableBodyPlan<'db>,
@@ -254,14 +310,13 @@ fn reject_borrowed_host_frame<'db>(
     task: &str,
     state: u32,
 ) -> Result<(), LowerError> {
-    let mut active = HashSet::new();
     for local in live_values {
         let semantic_ty = plan
             .flattened_body
             .local(*local)
             .ok_or_else(|| LowerError::Internal("live runtime local is missing".to_owned()))?
             .semantic_ty;
-        if retains_borrowed_host_storage(db, semantic_ty, &mut active) {
+        if semantic_type_retains_borrowed_host_storage(db, semantic_ty) {
             return Err(unsupported(format!(
                 "task `{task}` continuation {state} retains borrowed browser storage; copy it into Fe-owned storage before suspending again"
             )));

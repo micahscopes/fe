@@ -1,0 +1,148 @@
+use core::{
+    BrowserBytes, BrowserList, BrowserPtr, BrowserString, Worker, alloc_browser_bytes,
+    alloc_browser_object,
+}
+use core::actor::{
+    ActorMailbox, InitialState, ProjectState, ResidentTransition, ScopedTask,
+}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+
+pub struct RichRequest {
+    pub text: BrowserString,
+    pub payload: BrowserBytes,
+    pub values: BrowserList<u32, 4>,
+    pub seed: u32,
+}
+
+pub struct RichResponse {
+    pub text: BrowserString,
+    pub payload: BrowserBytes,
+    pub values: BrowserList<u32, 4>,
+    pub receipt: u32,
+}
+
+pub struct ParentEvent { pub value: u32 }
+pub struct ParentState { pub value: u32 }
+pub struct ParentProjection { pub value: u32 }
+
+fn byte_at(ptr: u32, index: u32) -> BrowserPtr<u8> {
+    BrowserPtr::from_u32(ptr + index)
+}
+
+fn list_at(ptr: BrowserPtr<u32>, index: u32) -> u32 {
+    BrowserPtr::from_u32(ptr.address() + index * 4).read()
+}
+
+actor RichChild {
+    fn echo(request: RichRequest) -> RichResponse uses (Worker) {
+        let receipt = request.seed
+            + list_at(ptr: request.values.ptr, index: 0)
+            + list_at(ptr: request.values.ptr, index: 1)
+            + list_at(ptr: request.values.ptr, index: 2)
+        RichResponse {
+            text: request.text,
+            payload: request.payload,
+            values: request.values,
+            receipt,
+        }
+    }
+}
+
+fn request_echo(_ request: own RichRequest) -> TaskOutcome<u32, RichResponse>
+uses (
+    mailbox: mut ActorMailbox<WasmBackend, RichChild>,
+    suspend: Suspend<WasmBackend, u32>,
+)
+{
+    let pending: Pending<WasmBackend, RichResponse> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
+actor Parent {
+    value: u32,
+
+    fn initial() -> ParentState uses (InitialState) {
+        ParentState { value: 7 }
+    }
+
+    fn receive(self, event: ParentEvent) -> ParentState uses (ResidentTransition) {
+        ParentState { value: self.value + event.value }
+    }
+
+    fn project(self) -> ParentProjection uses (ProjectState) {
+        ParentProjection { value: self.value }
+    }
+
+    fn supervise() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(
+            child: RichChild {},
+            max_restarts: 1,
+            window_ms: 1000,
+            backoff_ms: 1,
+            startup_timeout_ms: 1000,
+        ) {
+            ChildScopeExit::Cancelled(epoch) => epoch
+            ChildScopeExit::Exhausted(epoch, _) => epoch
+            ChildScopeExit::TransportFailure(epoch, _) => epoch
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch
+        }
+    }
+
+    fn calculate(self) -> u32 uses (ScopedTask) {
+        let text = alloc_browser_bytes(3)
+        byte_at(ptr: text.address(), index: 0).write(102)
+        byte_at(ptr: text.address(), index: 1).write(195)
+        byte_at(ptr: text.address(), index: 2).write(169)
+
+        let payload = alloc_browser_bytes(3)
+        byte_at(ptr: payload.address(), index: 0).write(3)
+        byte_at(ptr: payload.address(), index: 1).write(1)
+        byte_at(ptr: payload.address(), index: 2).write(4)
+
+        let values = alloc_browser_object<[u32; 3]>()
+        let values_ptr: BrowserPtr<u32> = BrowserPtr::from_u32(values.address())
+        values_ptr.write(5)
+        let second: BrowserPtr<u32> = BrowserPtr::from_u32(values_ptr.address() + 4)
+        let third: BrowserPtr<u32> = BrowserPtr::from_u32(values_ptr.address() + 8)
+        second.write(8)
+        third.write(13)
+
+        let response = with (
+            ActorMailbox<WasmBackend, RichChild> = BrowserActorMailbox<RichChild> {},
+            Suspend<WasmBackend, u32> = Resumable {},
+        ) {
+            request_echo(RichRequest {
+                text: BrowserString { ptr: text.address(), len: 3 },
+                payload: BrowserBytes { ptr: payload.address(), len: 3 },
+                values: BrowserList { ptr: values_ptr, len: 3 },
+                seed: self.value,
+            })
+        }
+        match response {
+            TaskOutcome::Success(value,) => {
+                let text_ok = value.text.len == 3
+                    && byte_at(ptr: value.text.ptr, index: 0).read() == 102
+                    && byte_at(ptr: value.text.ptr, index: 1).read() == 195
+                    && byte_at(ptr: value.text.ptr, index: 2).read() == 169
+                let payload_ok = value.payload.len == 3
+                    && byte_at(ptr: value.payload.ptr, index: 0).read() == 3
+                    && byte_at(ptr: value.payload.ptr, index: 1).read() == 1
+                    && byte_at(ptr: value.payload.ptr, index: 2).read() == 4
+                let values_ok = value.values.len == 3
+                    && list_at(ptr: value.values.ptr, index: 0) == 5
+                    && list_at(ptr: value.values.ptr, index: 1) == 8
+                    && list_at(ptr: value.values.ptr, index: 2) == 13
+                if text_ok && payload_ok && values_ok && value.receipt == 33 {
+                    533
+                } else {
+                    9001
+                }
+            }
+            TaskOutcome::Failure(error,) => 9100 + error
+            TaskOutcome::Cancelled => 9200
+        }
+    }
+}

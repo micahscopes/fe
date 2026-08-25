@@ -189,6 +189,18 @@ fn two_structured_children_fixture() -> (DriverDataBase, common::file::File) {
     (db, file)
 }
 
+fn rich_structured_child_fixture() -> (DriverDataBase, common::file::File) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///web_component_rich_structured_child.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(include_str!("fixtures/rich_structured_child.fe").to_owned()),
+    );
+    let file = db.workspace().get(&db, &url).unwrap();
+    (db, file)
+}
+
 fn nested_structured_children_fixture() -> (DriverDataBase, common::file::File) {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///web_component_nested_structured_children.fe").unwrap();
@@ -1018,6 +1030,7 @@ const mailboxImports = createCanonicalWorkerMailboxImports({{
 }});
 const imports = Object.assign({{}}, broker.imports, mailboxImports);
 ({{ instance }} = await WebAssembly.instantiate(parentBytes, imports));
+mailboxImports.attach(instance.exports);
 const initialized = instance.exports.fe_actor_initialize_v1();
 const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
 if (initialValue !== 21) throw new Error(`bad resident initial state ${{initialized}}`);
@@ -1056,6 +1069,171 @@ scope.close(0);
     assert!(
         output.status.success(),
         "typed mailbox round trip failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn resident_actor_rich_mailbox_round_trips_owned_values_through_compiled_fe() {
+    if !std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let (db, file) = rich_structured_child_fixture();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "rich structured-child diagnostics:\n{diagnostics}"
+    );
+    let artifact = compile_resident_actor(&db, top_mod)
+        .expect("resident actor plus rich structured child contract")
+        .expect("role-selected rich resident actor");
+    let [child] = artifact.structured_children.as_slice() else {
+        panic!("expected one compiler-derived rich child artifact")
+    };
+    let [lane] = child.interface.lanes.as_slice() else {
+        panic!("expected exactly one canonical rich child lane")
+    };
+    assert_eq!(lane.request.size, 28);
+    assert_eq!(lane.response.size, 28);
+
+    let directory = tempfile::tempdir().expect("rich mailbox execution directory");
+    let parent_wasm = directory.path().join("parent.wasm");
+    let child_wasm = directory.path().join("child.wasm");
+    let task_adapter = directory.path().join("tasks.mjs");
+    let task_runtime = directory.path().join("materialized-task.js");
+    let host_runtime = directory.path().join("host-completion.js");
+    let interface = directory.path().join("interface.js");
+    std::fs::write(&parent_wasm, &artifact.wasm).unwrap();
+    std::fs::write(&child_wasm, &child.wasm).unwrap();
+    std::fs::write(
+        &task_adapter,
+        emit_materialized_task_adapter_js(&artifact.scoped_tasks, "./materialized-task.js")
+            .expect("emit rich mailbox tasks")
+            .expect("rich mailbox tasks exist"),
+    )
+    .unwrap();
+    std::fs::write(&task_runtime, fe_codegen::MATERIALIZED_TASK_RUNTIME_JS).unwrap();
+    std::fs::write(&host_runtime, fe_codegen::HOST_COMPLETION_RUNTIME_JS).unwrap();
+    std::fs::write(
+        &interface,
+        emit_canonical_interface_js(&child.interface).expect("emit rich child interface"),
+    )
+    .unwrap();
+    for (relative, source) in browser_actor_runtime_files() {
+        let path = directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+
+    let runner = directory.path().join("run-rich-mailbox.mjs");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"
+import {{ createMaterializedTaskRegistry }} from {tasks:?};
+import {{ createHostCompletionBroker }} from {host:?};
+import {{ createCanonicalWorkerMailboxImports }} from "./runtime/actor-client.js";
+import {{ createInterfaceCaller, compileActorMailbox }} from "./interface.js";
+
+const parentBytes = await Bun.file({parent_wasm:?}).arrayBuffer();
+const childBytes = await Bun.file({child_wasm:?}).arrayBuffer();
+const child = await WebAssembly.instantiate(childBytes, {{}});
+const caller = createInterfaceCaller(child.instance.exports);
+const mailbox = compileActorMailbox();
+const lane = {lane:?};
+const requests = [];
+const scope = Object.freeze({{
+  async spawn() {{}},
+  failure(_epoch, signal) {{
+    return new Promise((_, reject) => signal.addEventListener(
+      "abort",
+      () => reject(new DOMException("cancelled", "AbortError")),
+      {{ once: true }},
+    ));
+  }},
+  close() {{}},
+  request(actualLane, payload, signal) {{
+    if (signal?.aborted) throw new DOMException("cancelled", "AbortError");
+    if (actualLane !== lane || payload.text !== "fé"
+        || JSON.stringify(Array.from(payload.payload)) !== "[3,1,4]"
+        || !(payload.values instanceof Uint32Array)
+        || JSON.stringify(Array.from(payload.values)) !== "[5,8,13]"
+        || payload.seed !== 7) {{
+      throw new Error("compiled Fe rich request drifted before the child boundary");
+    }}
+    requests.push(payload);
+    return caller.call(actualLane, payload);
+  }},
+}});
+
+const broker = createHostCompletionBroker({{
+  workerScopes: [Object.freeze({{
+    scope,
+    spawn: {scope_spawn:?},
+    failure: {scope_failure:?},
+    close: {scope_close:?},
+  }})],
+}});
+const mailboxImports = createCanonicalWorkerMailboxImports({{
+  scope,
+  completions: broker.completions,
+  mailbox,
+}});
+const {{ instance }} = await WebAssembly.instantiate(
+  parentBytes,
+  Object.assign({{}}, broker.imports, mailboxImports),
+);
+mailboxImports.attach(instance.exports);
+const initialized = instance.exports.fe_actor_initialize_v1();
+const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
+if (initialValue !== 7) throw new Error(`bad rich parent initial state ${{initialized}}`);
+
+const probeBefore = instance.exports.cabi_realloc(0, 0, 1, 1);
+if (probeBefore !== 1040) {{
+  throw new Error(`rich parent canonical stack began at ${{probeBefore}} instead of 1040`);
+}}
+instance.exports.fe_cabi_post_return(probeBefore, 1, 1);
+
+const tasks = createMaterializedTaskRegistry(instance.exports);
+const output = await broker.run(tasks.calculate, [initialValue]);
+if (output.length !== 1 || output[0] !== 533 || requests.length !== 1) {{
+  throw new Error(
+    `compiled Fe rich mailbox semantics drifted: ${{JSON.stringify({{ output, requests: requests.length }})}}`,
+  );
+}}
+if (broker.activeCount() !== 0) throw new Error("rich mailbox leaked completion tokens");
+const probeAfter = instance.exports.cabi_realloc(0, 0, 1, 1);
+if (probeAfter !== 1040) {{
+  throw new Error(`rich mailbox leaked parent canonical memory through ${{probeAfter}}`);
+}}
+instance.exports.fe_cabi_post_return(probeAfter, 1, 1);
+"#,
+            tasks = Url::from_file_path(&task_adapter).unwrap().to_string(),
+            host = Url::from_file_path(&host_runtime).unwrap().to_string(),
+            parent_wasm = parent_wasm.display().to_string(),
+            child_wasm = child_wasm.display().to_string(),
+            lane = lane.name,
+            scope_spawn = child.scope.spawn,
+            scope_failure = child.scope.failure,
+            scope_close = child.scope.close,
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(&runner)
+        .output()
+        .expect("run rich mailbox round trip under Bun");
+    assert!(
+        output.status.success(),
+        "rich mailbox round trip failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1253,6 +1431,7 @@ const broker = createHostCompletionBroker({{
 const mailboxImports = createStructuredWorkerMailboxes(scopes, broker.completions);
 const imports = Object.assign({{}}, broker.imports, mailboxImports);
 ({{ instance }} = await WebAssembly.instantiate(parentBytes, imports));
+mailboxImports.attach(instance.exports);
 const initialized = instance.exports.fe_actor_initialize_v1();
 const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
 if (initialValue !== 7) throw new Error(`bad two-child initial state ${{initialized}}`);
@@ -1487,6 +1666,7 @@ const parentBytes = await Bun.file({parent_wasm:?}).arrayBuffer();
   parentBytes,
   Object.assign({{}}, broker.imports, mailboxImports),
 ));
+mailboxImports.attach(instance.exports);
 const initialized = instance.exports.fe_actor_initialize_v1();
 const initialValue = Array.isArray(initialized) ? initialized[0] : initialized;
 if (initialValue !== 5) throw new Error(`bad nested initial state ${{initialized}}`);

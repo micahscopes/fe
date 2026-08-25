@@ -1335,6 +1335,26 @@ done; do not derive a second master checklist from its historical ledger.
   and passes the combined real Chromium gallery/SourceInspector/Event Studio
   tape. Payload-enum memory, general target-sized metadata, and the ideal
   const-generic queue backing remain separate work.
+- Rich values now cross compiler-derived structured-child mailboxes without a
+  field-order schema in JavaScript. Semantic `#[host_type]` metadata lowers
+  `BrowserString`, `BrowserBytes`, and bounded `BrowserList<T, N>` to their
+  canonical descriptor lanes; request lifting copies owned values out of the
+  parent Wasm memory, structured transfer preserves typed ArrayBuffer
+  ownership, and response sessions allocate through the parent's checked
+  canonical stack. The exact Fe continuation consumes the response before
+  generated post-return release. Resumable Wasm arena reclamation is derived
+  from semantic descriptor identity, exact suspension liveness, pending-token
+  SSA lineage, a closed pure-callee graph, and the nominal `AskBegin` effect.
+  Borrowed descriptors in a persisted frame or completed rich helper result
+  remain ineligible, while a public task that consumes them before returning
+  reclaims both its entry and continuation segment allocations. The executed
+  rich parent/child gate sends UTF-8 text, bytes, and a bounded u32 list through
+  Fe, validates every value in Fe, returns receipt `533`, and observes the
+  allocator at its exact baseline with no completion-token leak. Release gates
+  pass for all 13 resident-actor cases, both Worker-mailbox cases, the generated
+  rich WebIDL continuation, nine canonical-interface cases, and all 37 fixed
+  completion-broker cases. Rich `MessagePort` attachment and the render-owned
+  DEC Chromium path remain separate placement gates.
 - The first deterministic-time and sharing policy set now executes as ordinary
   host-free Fe values. `VirtualTime` rejects rewind, leading `Throttle` records
   only admitted instants, trailing `Debounce<T>` replaces and explicitly
@@ -2224,10 +2244,12 @@ and tested in Fe; JavaScript merely supplies frame/GPU-completion facts.
 1. Finish canonical allocator/PostReturn and rich-record transport. Landed:
    nested records and fieldless enums cross resumable Wasm as flattened values;
    private fluent `mut self` helpers use internal object storage; whole nested
-   assignment is target-layout-derived; and Event Studio carries actual nominal
-   browser facts with an executed rich-mailbox regression. Remaining:
-   payload-enum memory, nested const-generic arrays, and portable target-sized
-   metadata. Do not replace those gaps with packed integers or field IDs.
+   assignment is target-layout-derived; Event Studio carries actual nominal
+   browser facts; and strings, bytes, and bounded typed lists cross structured
+   child mailboxes with checked continuation-local arena release. Remaining:
+   payload-enum memory, nested const-generic arrays, portable target-sized
+   metadata, and rich `MessagePort` placement. Do not replace those gaps with
+   packed integers or field IDs.
 2. Connect generated WebIDL callback adapters to compiled Fe callback bodies.
 3. Add the MIR suspension/re-entry transform for resumable Fe tasks.
 4. Make actor state resident in a live Fe instance instead of couriered in

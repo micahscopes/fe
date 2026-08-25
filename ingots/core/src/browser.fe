@@ -75,9 +75,9 @@ pub struct AllocatedBrowserBytes {
 /// wrapper-owned arena storage before publishing the descriptor.
 #[host_type(list)]
 pub struct BrowserList<T, const MAX: usize> {
-    // The typed pointer preserves Fe's memory-provider semantics while the
-    // canonical wasm32 boundary carries its physical address as one i32 word.
-    pub ptr: MemPtr<T>,
+    // BrowserPtr preserves typed memory-provider semantics while keeping the
+    // authored and canonical wasm32 carrier exactly one u32 address word.
+    pub ptr: BrowserPtr<T>,
     pub len: u32,
 }
 

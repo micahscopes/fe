@@ -4,7 +4,10 @@
 //! their deterministic wasm32 layout. It deliberately does not emit Wasm
 //! memory or allocate storage.
 
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+};
 
 use hir::{
     analysis::{
@@ -866,6 +869,61 @@ pub fn canonical_type_from_semantic<'db>(
         ));
     }
     Ok(CanonicalType::Record(fields))
+}
+
+/// Whether a semantic browser value borrows payload storage from linear
+/// memory. A resumable Wasm segment may copy and inspect these descriptors,
+/// but it must not retain one across suspension or rewind storage returned to
+/// its caller.
+pub(crate) fn semantic_type_retains_borrowed_host_storage<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> bool {
+    fn visit<'db>(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        active: &mut HashSet<TyId<'db>>,
+    ) -> bool {
+        let ty = ty.as_view(db).unwrap_or(ty);
+        if !active.insert(ty) {
+            return false;
+        }
+        let retained = match ty.adt_def(db).map(|adt| adt.adt_ref(db)) {
+            Some(AdtRef::Struct(struct_)) => {
+                if matches!(
+                    struct_
+                        .scope()
+                        .attrs(db)
+                        .and_then(|attrs| attrs.host_type(db)),
+                    Some(HostType::Bytes | HostType::String | HostType::List)
+                ) {
+                    true
+                } else {
+                    ty.field_types(db)
+                        .into_iter()
+                        .any(|field| visit(db, field, active))
+                }
+            }
+            Some(AdtRef::Enum(enum_)) => {
+                let args = ty.generic_args(db);
+                enum_.variants(db).any(|variant| {
+                    variant
+                        .field_tys(db)
+                        .into_iter()
+                        .any(|field| visit(db, field.instantiate(db, args), active))
+                })
+            }
+            None => ty
+                .generic_args(db)
+                .iter()
+                .copied()
+                .any(|arg| visit(db, arg, active)),
+        };
+        active.remove(&ty);
+        retained
+    }
+
+    visit(db, ty, &mut HashSet::new())
 }
 
 /// Verify the complete milestone-1 canonical ABI against emitted Wasm.

@@ -1602,6 +1602,7 @@ async function run(element) {
       const instance = await WebAssembly.instantiate(module, imports);
       selectedAdapter?.attach(instance);
       if (scopedTasks) {
+        scopedTasks.imports?.attach(instance.exports);
         const registry = scopedTasks.taskModule.createMaterializedTaskRegistry(instance.exports);
         scopedTasks.machines = Object.values(registry);
         if (scopedTasks.machines.length === 0) {

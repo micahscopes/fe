@@ -163,6 +163,7 @@ import {
     throw new TypeError("structured Worker mailboxes require compiler-derived scopes");
   }
   const imports = Object.create(null);
+  const bridges = [];
   const merge = additions => {
     for (const [lane, operation] of Object.entries(additions["fe:worker-mailbox"] ?? {})) {
       if (Object.hasOwn(imports, lane)) {
@@ -185,17 +186,29 @@ import {
                 r#"  if (scopes[{index}]?.spawn !== "{}" || scopes[{index}]?.failure !== "{}" || scopes[{index}]?.close !== "{}") {{
     throw new TypeError("structured Worker scope differs from its compiler-derived interface");
   }}
-  merge(createCanonicalWorkerMailboxImports({{
+  const bridge{index} = createCanonicalWorkerMailboxImports({{
     scope: scopes[{index}].scope,
     completions,
     mailbox: compileActorMailbox{index}(),
-  }}));"#,
+  }});
+  bridges.push(bridge{index});
+  merge(bridge{index});"#,
                 child.scope.spawn, child.scope.failure, child.scope.close,
             )
             .map_err(|_| package_error("structured child mailbox could not be generated"))?;
         }
         entry.push_str(
-            "\n  return Object.freeze({ \"fe:worker-mailbox\": Object.freeze(imports) });\n}\n",
+            r#"
+  const bridge = { "fe:worker-mailbox": Object.freeze(imports) };
+  Object.defineProperty(bridge, "attach", {
+    enumerable: false,
+    value(exports) {
+      for (const child of bridges) child.attach(exports);
+    },
+  });
+  return Object.freeze(bridge);
+}
+"#,
         );
 
         for child in structured_children {

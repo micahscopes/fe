@@ -268,8 +268,9 @@ existing Definition of done, not a second campaign checklist:
   `RequestInit.signal`; it must not be smuggled into a handwritten fetch case.
   This gate admits no permanent handwritten `fe:web-fetch` import whose
   JavaScript mirrors Fe field order or success-lane widths.
-- [ ] Attach opaque ports through Fe-owned spawn/Worker placement, then derive
-  rich canonical message payloads from Fe types.
+- [~] Compiler-derived rich values now cross typed structured-child mailboxes.
+  Attach opaque ports through Fe-owned spawn/Worker placement and carry those
+  canonical values through the general `MessagePort` source next.
 - [~] Add structured child scopes, admission, supervision, and restart/backoff
   policy. The fixed Module Worker runtime no longer owns clocks, retry windows,
   backoff, or automatic recovery. Ordinary `std::runtime` Fe types and the
@@ -335,14 +336,33 @@ existing Definition of done, not a second campaign checklist:
   receives a `ScaleResult` variant, preserves the semantic
   `7 -> 14 -> 19 -> 26` result, proves inactive response-union bytes were
   scrubbed after arena reuse, and still finishes with zero live tokens.
-  Variants containing bytes, strings, or lists remain fail-closed pending the
-  canonical post-return memory bridge. The 16-test canonical-interface suite,
+  Variants containing bytes, strings, or lists remained fail-closed at this
+  checkpoint. The 16-test canonical-interface suite,
   ten-test resident-actor suite, four-test DEC suite, 53-test fixed browser and
   codec suite, and focused scoped-task publication verifier pass. The canonical
   interface guide now documents nominal role selection, typed mailbox edges,
   private generated transport names, fixed resident exports, the remaining
   spelling-based render compatibility paths, and the possible future omission
   of semantically unnecessary behavior names.
+  Descriptor-bearing structured-child values are now landed as the next
+  canonical bridge. `BrowserString`, `BrowserBytes`, and bounded
+  `BrowserList<T, N>` derive two Wasm lanes from nominal semantic metadata,
+  requests are copied out of the parent Wasm memory into owned transferable
+  values, and response sessions allocate through the parent's checked
+  canonical stack. Generated post-return release runs only after the exact Fe
+  continuation consumes the response. The Wasm compiler admits segment-local
+  arena rewind only when semantic descriptor recursion, exact suspension
+  liveness, pending-token SSA lineage, a closed pure-callee graph, and the
+  nominal `AskBegin` edge jointly prove that no borrowed address escapes.
+  Private helpers which return a rich `TaskOutcome` remain ineligible, while
+  the public consuming task rewinds entry and continuation segments to their
+  exact incoming cursors. The executed Fe parent/child gate carries UTF-8,
+  bytes, and a bounded u32 list, returns receipt `533`, and finishes with the
+  canonical allocator at baseline and zero completion tokens. The release
+  evidence is 13/13 resident actors, 2/2 Worker mailbox cases, the generated
+  rich WebIDL continuation, 9/9 canonical-interface cases, and 37/37 fixed
+  completion-broker cases. No request field schema, response-width table,
+  actor selector, or runtime manifest was added.
   Recursive nominal scopes now compose through arbitrary acyclic package
   depth. The compiler follows each child actor's own `ScopedTask` roots,
   recursively derives its nominal children, materializes the nested package
@@ -362,8 +382,9 @@ existing Definition of done, not a second campaign checklist:
   constants in synthesized task entry and continuation bodies, matching the
   ordinary authored-body path instead of leaking target-specific `ConstRef`
   handles into portable lowering.
-  Remaining: attach opaque ports, derive rich descriptor-bearing canonical
-  message values, and run the render-owned DEC task path in real Chromium.
+  Remaining: attach opaque ports, carry rich canonical values through that
+  `MessagePort` placement, and run the render-owned DEC task path in real
+  Chromium.
   Recursive resumable SCCs must remain explicitly refused until linked affine
   frames are sound.
 

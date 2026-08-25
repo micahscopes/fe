@@ -55,17 +55,16 @@ const prepareCanonicalWorkerTasks = async (taskWasm, taskModule) => {
   const broker = taskModule.createHostCompletionBroker(brokerOptions);
   const imports = Object.create(null);
   mergeImports(imports, broker.imports);
+  let mailboxBridge;
   if (needsWorkerMailbox) {
     if (typeof taskModule.createStructuredWorkerMailboxes !== "function") {
       throw new Error("nested Worker mailbox effects require compiler-derived adapters");
     }
-    mergeImports(
-      imports,
-      taskModule.createStructuredWorkerMailboxes(
-        structuredWorkerScopes,
-        broker.completions,
-      ),
+    mailboxBridge = taskModule.createStructuredWorkerMailboxes(
+      structuredWorkerScopes,
+      broker.completions,
     );
+    mergeImports(imports, mailboxBridge);
   }
   for (const value of required) {
     if (!Object.hasOwn(imports, value.module)
@@ -74,6 +73,7 @@ const prepareCanonicalWorkerTasks = async (taskWasm, taskModule) => {
     }
   }
   const exports = await instantiateCanonicalWasm(wasm, imports);
+  mailboxBridge?.attach(exports);
 
   return {
     start(fail) {

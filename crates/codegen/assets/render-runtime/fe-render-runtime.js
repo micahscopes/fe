@@ -2357,11 +2357,12 @@ export class FeSurfaceElement extends HTMLElement {
         throw new Error(`missing Wasm import: ${value.module}.${value.name}`);
       }
     }
-    return { taskModule, broker, imports };
+    return { taskModule, broker, imports, mailboxes: mailboxImports };
   }
 
   _attachScopedTasks(scopedTasks, instance) {
     if (!scopedTasks) return;
+    scopedTasks.mailboxes?.attach(instance.exports);
     const registry = scopedTasks.taskModule.createMaterializedTaskRegistry(instance.exports);
     const machines = Object.values(registry);
     if (machines.length === 0) {

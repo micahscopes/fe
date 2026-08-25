@@ -73,8 +73,9 @@ export function createCanonicalBrowserWorkerScope(options) {
   });
 }
 
-// Bind compiler-derived scalar mailbox edges to the same structured Worker
-// scope. Lane names and codecs come only from the generated child interface.
+// Bind compiler-derived canonical mailbox edges to the same structured Worker
+// scope. Lane names, value layouts, ownership, and codecs come only from the
+// generated child interface.
 export function createCanonicalWorkerMailboxImports({ scope, completions, mailbox }) {
   if (!scope || typeof scope.request !== "function") {
     throw new TypeError("canonical Worker mailbox requires a structured scope");
@@ -92,19 +93,30 @@ export function createCanonicalWorkerMailboxImports({ scope, completions, mailbo
         || !Number.isSafeInteger(codec?.requestWidth) || codec.requestWidth < 0
         || !Number.isSafeInteger(codec?.responseWidth) || codec.responseWidth < 0
         || typeof codec.liftRequest !== "function"
-        || typeof codec.lowerResponse !== "function") {
+        || typeof codec.createResponseSession !== "function") {
       throw new TypeError("canonical Worker mailbox lane is malformed");
     }
     imports[lane] = (...carriers) => {
       const request = codec.liftRequest(carriers);
+      const response = codec.createResponseSession();
       return completions.begin(
         `worker-mailbox/${lane}`,
         signal => scope.request(lane, request, signal),
         codec.responseWidth,
-        value => codec.lowerResponse(value),
-        () => {},
+        value => response.lower(value),
+        committed => response.release(committed),
       );
     };
   }
-  return Object.freeze({ "fe:worker-mailbox": Object.freeze(imports) });
+  const bridge = { "fe:worker-mailbox": Object.freeze(imports) };
+  Object.defineProperty(bridge, "attach", {
+    enumerable: false,
+    value(exports) {
+      if (typeof mailbox.attach !== "function") {
+        throw new TypeError("canonical Worker mailbox has no compiler-derived attachment");
+      }
+      mailbox.attach(exports);
+    },
+  });
+  return Object.freeze(bridge);
 }

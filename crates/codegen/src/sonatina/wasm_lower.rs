@@ -45,7 +45,7 @@ use hir::{
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
-    hir_def::{ArithBinOp, BinOp, CompBinOp, GpuIntrinsic, GpuResource, UnOp},
+    hir_def::{ArithBinOp, BinOp, CompBinOp, GpuIntrinsic, GpuResource, HostType, UnOp},
 };
 use mir::{
     AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
@@ -81,6 +81,11 @@ use sonatina_ir::{
     module::{FuncRef, ModuleCtx},
 };
 use sonatina_triple::{Architecture, OperatingSystem, TargetTriple, Vendor};
+
+use crate::{
+    CanonicalType, canonical_interface::semantic_type_retains_borrowed_host_storage,
+    canonical_type_from_semantic,
+};
 
 use super::LowerError;
 use super::lower_runtime::{
@@ -3548,6 +3553,86 @@ fn normalize_portable_body<'db>(
     drop_dead_scalar_constants_and_copies(body);
 }
 
+/// A materialized continuation may rewind its segment-local arena only when
+/// no returned value or persisted frame can name that storage. Canonical
+/// strings, bytes, and lists are scalar-shaped descriptors at the Wasm ABI,
+/// so their semantic identity must supplement the runtime transport class.
+fn resumable_plan_can_rewind_segment_arena<'db>(
+    db: &'db DriverDataBase,
+    plan: &mir::RuntimeResumableBodyPlan<'db>,
+) -> Result<(), String> {
+    let local_rejection = |local: RLocalId| {
+        let Some(value) = plan.flattened_body.local(local) else {
+            return Some(format!("local {local:?} is missing"));
+        };
+        let Some(class) = plan.flattened_body.value_class(local) else {
+            return Some(format!("local {local:?} has no runtime class"));
+        };
+        if semantic_type_retains_borrowed_host_storage(db, value.semantic_ty) {
+            return Some(format!(
+                "local {local:?} retains borrowed canonical storage in semantic type {}",
+                value.semantic_ty.pretty_print(db),
+            ));
+        }
+        if class.contains_transport(db) {
+            return Some(format!("local {local:?} retains transport class {class:?}"));
+        }
+        None
+    };
+    for point in &plan.points {
+        for local in &point.live_values {
+            if let Some(reason) = local_rejection(*local) {
+                return Err(format!(
+                    "continuation {} frame {reason}",
+                    point.continuation_state,
+                ));
+            }
+        }
+    }
+    for block in &plan.flattened_body.blocks {
+        if let RTerminator::Return(Some(local)) = block.terminator
+            && let Some(reason) = local_rejection(local)
+        {
+            return Err(format!("completed result {reason}"));
+        }
+    }
+    Ok(())
+}
+
+/// Recover the exact SSA lineage of a token consumed by `Suspend`. Portable
+/// normalization may preserve a scalar newtype through ordinary copies or a
+/// one-field aggregate projection, so the call destination which minted the
+/// token need not be the final local passed to the control effect.
+fn collect_pending_producer_lineage(
+    body: &RuntimeBody<'_>,
+    local: RLocalId,
+    lineage: &mut HashSet<RLocalId>,
+) {
+    if !lineage.insert(local) {
+        return;
+    }
+    for stmt in body.blocks.iter().flat_map(|block| &block.stmts) {
+        let RStmt::Assign { dst, expr } = stmt else {
+            continue;
+        };
+        if *dst != local {
+            continue;
+        }
+        match expr {
+            RExpr::Use(source)
+            | RExpr::Cast { value: source, .. }
+            | RExpr::Bitcast { value: source, .. }
+            | RExpr::AggregateExtract { value: source, .. } => {
+                collect_pending_producer_lineage(body, *source, lineage);
+            }
+            RExpr::AggregateMake { fields, .. } if fields.len() == 1 => {
+                collect_pending_producer_lineage(body, fields[0], lineage);
+            }
+            _ => {}
+        }
+    }
+}
+
 struct PortableModuleLowerer<'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -3584,6 +3669,22 @@ where
     /// Only the Wasm lowering enables these scopes. Shader and native paths do
     /// not emit arena-control instructions their backends cannot realize.
     scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
+    /// Pure Fe bodies admitted below an enclosing resumable segment's arena
+    /// checkpoint. These callees may manipulate borrowed memory pointers, but
+    /// may not cross a host/effect boundary or persist a typed transport.
+    resumable_arena_safe_bodies: HashSet<RuntimeInstance<'db>>,
+    /// Closed Fe wrappers which return one scalar pending token minted by the
+    /// nominal actor AskBegin effect. The wrapper chain may inspect or forward
+    /// the borrowed request while the enclosing segment is live, but cannot
+    /// cross any other effect boundary or persist that transport.
+    resumable_pending_producer_bodies: HashSet<RuntimeInstance<'db>>,
+    /// Exact SSA lineages of pending tokens followed by a compiler-materialized
+    /// suspension. Only nominal actor AskBegin producer chains may borrow
+    /// request storage that the enclosing segment later rewinds.
+    resumable_pending_producers: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
+    /// Owners whose complete result and every persisted suspension frame are
+    /// free of borrowed canonical storage and transport addresses.
+    resumable_rewind_safe_owners: HashSet<RuntimeInstance<'db>>,
     /// Private bodies proven not to let an arena-backed value or reference
     /// escape. Unlike whole-function reclamation, this proof follows only call
     /// edges that actually carry an arena address, so unrelated scalar helpers
@@ -3674,6 +3775,8 @@ where
             ))
         })?;
         let mut resumable_continuations = Vec::new();
+        let mut resumable_pending_producers = FxHashMap::default();
+        let mut resumable_rewind_safe_owners = HashSet::new();
         for plan in &plans {
             let continuation_linkage = package
                 .functions(db)
@@ -3700,6 +3803,29 @@ where
                 .get(&plan.body)
                 .cloned()
                 .unwrap_or_else(|| mir::runtime_instance_symbol_key(db, plan.body));
+            resumable_pending_producers.insert(plan.body, {
+                let mut lineage = HashSet::new();
+                for point in &plan.points {
+                    if let mir::RuntimeSuspensionCause::Effect { pending } = point.cause {
+                        collect_pending_producer_lineage(
+                            &plan.flattened_body,
+                            pending,
+                            &mut lineage,
+                        );
+                    }
+                }
+                lineage
+            });
+            match resumable_plan_can_rewind_segment_arena(db, plan) {
+                Ok(()) => {
+                    resumable_rewind_safe_owners.insert(plan.body);
+                }
+                Err(reason) => wasm_lower_trace_detail(|| {
+                    format!(
+                        "reject resumable owner from segment rewind, symbol={authored_symbol}, reason={reason}",
+                    )
+                }),
+            }
             let start_symbol = format!("__fe_task_start_{authored_symbol}");
             func_symbols.insert(plan.body, start_symbol);
             let mut entry_body = machine.entry.body;
@@ -3746,6 +3872,10 @@ where
             wrapped_lane_names,
             validate_host_enum_params,
             scoped_arena_bodies: HashSet::new(),
+            resumable_arena_safe_bodies: HashSet::new(),
+            resumable_pending_producer_bodies: HashSet::new(),
+            resumable_pending_producers,
+            resumable_rewind_safe_owners,
             indirect_aggregate_safe_bodies: HashSet::new(),
             arena_owned_locals: FxHashMap::default(),
         };
@@ -3761,6 +3891,9 @@ where
                 lowerer.derive_indirect_aggregate_safe_bodies();
             wasm_lower_trace(|| "derive scoped arena bodies".to_owned());
             lowerer.scoped_arena_bodies = lowerer.derive_scoped_arena_bodies();
+            lowerer.resumable_arena_safe_bodies = lowerer.derive_resumable_arena_safe_bodies();
+            lowerer.resumable_pending_producer_bodies =
+                lowerer.derive_resumable_pending_producer_bodies();
             wasm_lower_trace(|| {
                 format!(
                     "derived scoped arena bodies, scoped={}",
@@ -4368,7 +4501,8 @@ where
             let validate_enum_params = self.validate_host_enum_params
                 && function.linkage(self.db) == RuntimeLinkage::Internal
                 && !self.wrapped_lane_names.contains(&symbol);
-            let scoped_arena = self.scoped_arena_bodies.contains(&instance);
+            let scoped_arena = self.scoped_arena_bodies.contains(&instance)
+                || self.resumable_segment_uses_scoped_arena(&body);
             let indirect_aggregate_params = self
                 .indirect_aggregate_params
                 .get(&instance)
@@ -4408,6 +4542,9 @@ where
         for index in 0..self.resumable_continuations.len() {
             let symbol = self.resumable_continuations[index].symbol.clone();
             let body = self.resumable_continuations[index].body.clone();
+            let trace_body = std::env::var_os("FE_WASM_LOWER_TRACE")
+                .is_some()
+                .then(|| mir::format_runtime_body(self.db, &body));
             let func_ref = self.resumable_continuations[index]
                 .func_ref
                 .ok_or_else(|| {
@@ -4415,17 +4552,29 @@ where
                         "Wasm continuation `{symbol}` lowered before declaration"
                     ))
                 })?;
-            PortableFunctionLowerer::new(self, body, func_ref, true, false, HashSet::new(), false)?
-                .lower()
-                .map_err(|error| match error {
-                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                        "{message}; while lowering compiler-derived Wasm continuation `{symbol}`"
-                    )),
-                    LowerError::Internal(message) => LowerError::Internal(format!(
-                        "{message}; while lowering compiler-derived Wasm continuation `{symbol}`"
-                    )),
-                    other => other,
-                })?;
+            let scoped_arena = self.resumable_segment_uses_scoped_arena(&body);
+            let lowered = PortableFunctionLowerer::new(
+                self,
+                body,
+                func_ref,
+                true,
+                scoped_arena,
+                HashSet::new(),
+                false,
+            )?
+            .lower();
+            if let (Err(error), Some(body)) = (&lowered, trace_body) {
+                eprintln!("Fe Wasm lowering failed for continuation `{symbol}`: {error:?}\n{body}");
+            }
+            lowered.map_err(|error| match error {
+                LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                    "{message}; while lowering compiler-derived Wasm continuation `{symbol}`"
+                )),
+                LowerError::Internal(message) => LowerError::Internal(format!(
+                    "{message}; while lowering compiler-derived Wasm continuation `{symbol}`"
+                )),
+                other => other,
+            })?;
         }
         Ok(())
     }
@@ -6952,6 +7101,351 @@ where
         safe
     }
 
+    /// Derive pure callees that may execute under an enclosing resumable
+    /// segment checkpoint. Unlike an ordinary function-local scope, the outer
+    /// segment owns allocations returned by these helpers until it emits its
+    /// typed step. The closed call graph still rejects host/effect boundaries,
+    /// effectful builtins, and typed transports persisted through memory.
+    fn derive_resumable_arena_safe_bodies(&self) -> HashSet<RuntimeInstance<'db>> {
+        let resumable_owners = self
+            .resumable_continuations
+            .iter()
+            .map(|continuation| continuation.body.owner)
+            .collect::<HashSet<_>>();
+        let analyses = self
+            .prepared_bodies
+            .iter()
+            .filter(|(instance, _)| !resumable_owners.contains(instance))
+            .filter_map(|(instance, body)| {
+                self.analyze_resumable_arena_body(body, None)
+                    .ok()
+                    .map(|analysis| (*instance, analysis))
+            })
+            .collect::<FxHashMap<_, _>>();
+        let mut safe = analyses.keys().copied().collect::<HashSet<_>>();
+        loop {
+            let rejected = safe
+                .iter()
+                .copied()
+                .filter(|instance| {
+                    analyses[instance]
+                        .callees
+                        .iter()
+                        .any(|callee| !safe.contains(callee))
+                })
+                .collect::<Vec<_>>();
+            if rejected.is_empty() {
+                break;
+            }
+            for instance in rejected {
+                safe.remove(&instance);
+            }
+        }
+        safe
+    }
+
+    /// Admit the ordinary Fe mailbox/provider wrappers between a task and the
+    /// nominal AskBegin import. This is deliberately a dataflow proof rather
+    /// than a symbol-name exception: every exit must return a token produced
+    /// by AskBegin (possibly through another admitted wrapper), and every
+    /// other call must already belong to the pure resumable arena closure.
+    fn derive_resumable_pending_producer_bodies(&self) -> HashSet<RuntimeInstance<'db>> {
+        let resumable_owners = self
+            .resumable_continuations
+            .iter()
+            .map(|continuation| continuation.body.owner)
+            .collect::<HashSet<_>>();
+        let mut admitted = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (instance, body) in &self.prepared_bodies {
+                if resumable_owners.contains(instance) || admitted.contains(instance) {
+                    continue;
+                }
+                if self.resumable_pending_producer_body_is_safe(body, &admitted) {
+                    admitted.insert(*instance);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        admitted
+    }
+
+    fn resumable_pending_producer_body_is_safe(
+        &self,
+        body: &RuntimeBody<'db>,
+        admitted: &HashSet<RuntimeInstance<'db>>,
+    ) -> bool {
+        if body.blocks.is_empty() {
+            return false;
+        }
+        let persisted_transport = |local: RLocalId| {
+            body.local(local).is_none_or(|value| {
+                semantic_type_retains_borrowed_host_storage(self.db, value.semantic_ty)
+                    || body
+                        .value_class(local)
+                        .is_none_or(|class| class.contains_transport(self.db))
+            })
+        };
+        let producer_call = |callee: RuntimeInstance<'db>| {
+            mir::runtime_actor_effect_kind(self.db, callee)
+                == Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+                || admitted.contains(&callee)
+        };
+        let mut exits = 0_usize;
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                match stmt {
+                    RStmt::Assign { expr, .. } => match expr {
+                        RExpr::Call { callee, .. } if producer_call(*callee) => {}
+                        RExpr::Call { callee, .. }
+                            if self.resumable_arena_safe_bodies.contains(callee) => {}
+                        RExpr::Builtin(builtin) if scoped_arena_builtin_is_pure(builtin) => {}
+                        RExpr::Call { .. } | RExpr::Placeholder { .. } | RExpr::Builtin(_) => {
+                            return false;
+                        }
+                        _ => {}
+                    },
+                    RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } => {
+                        if !self.scoped_arena_place_is_local(body, dst, true)
+                            && persisted_transport(*src)
+                        {
+                            return false;
+                        }
+                    }
+                    RStmt::EnumWriteVariant { root, fields, .. } => {
+                        if !self.scoped_arena_writable_ref(body, *root)
+                            && fields.iter().copied().any(&persisted_transport)
+                        {
+                            return false;
+                        }
+                    }
+                    RStmt::EnumAssertVariant { .. } | RStmt::EnumSetTag { .. } => {}
+                }
+            }
+            match block.terminator {
+                RTerminator::Return(Some(local)) => {
+                    if !self.resumable_local_is_pending_product(
+                        body,
+                        local,
+                        admitted,
+                        &mut HashSet::new(),
+                    ) {
+                        return false;
+                    }
+                    exits += 1;
+                }
+                RTerminator::TerminalCall { callee, .. } if producer_call(callee) => {
+                    exits += 1;
+                }
+                RTerminator::Return(None)
+                | RTerminator::TerminalCall { .. }
+                | RTerminator::ReturnData { .. }
+                | RTerminator::Revert { .. }
+                | RTerminator::SelfDestruct { .. }
+                | RTerminator::Stop => return false,
+                RTerminator::Goto(_)
+                | RTerminator::Branch { .. }
+                | RTerminator::SwitchScalar { .. }
+                | RTerminator::MatchEnumTag { .. }
+                | RTerminator::Trap => {}
+            }
+        }
+        exits != 0
+    }
+
+    fn resumable_local_is_pending_product(
+        &self,
+        body: &RuntimeBody<'db>,
+        local: RLocalId,
+        admitted: &HashSet<RuntimeInstance<'db>>,
+        visiting: &mut HashSet<RLocalId>,
+    ) -> bool {
+        if !visiting.insert(local) {
+            return false;
+        }
+        let result =
+            body.blocks
+                .iter()
+                .flat_map(|block| &block.stmts)
+                .any(|stmt| {
+                    let RStmt::Assign { dst, expr } = stmt else {
+                        return false;
+                    };
+                    if *dst != local {
+                        return false;
+                    }
+                    match expr {
+                        RExpr::Call { callee, .. } => {
+                            mir::runtime_actor_effect_kind(self.db, *callee)
+                                == Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+                                || admitted.contains(callee)
+                        }
+                        RExpr::Use(source) => self
+                            .resumable_local_is_pending_product(body, *source, admitted, visiting),
+                        _ => false,
+                    }
+                });
+        visiting.remove(&local);
+        result
+    }
+
+    fn resumable_segment_uses_scoped_arena(&self, body: &RuntimeBody<'db>) -> bool {
+        if !self.resumable_rewind_safe_owners.contains(&body.owner) {
+            return false;
+        }
+        let Some(pending) = self.resumable_pending_producers.get(&body.owner) else {
+            return false;
+        };
+        match self.analyze_resumable_arena_body(body, Some(pending)) {
+            Ok(analysis)
+                if analysis
+                    .callees
+                    .iter()
+                    .all(|callee| self.resumable_arena_safe_bodies.contains(callee)) =>
+            {
+                true
+            }
+            Ok(analysis) => {
+                let mut missing = analysis
+                    .callees
+                    .iter()
+                    .filter(|callee| !self.resumable_arena_safe_bodies.contains(callee))
+                    .map(|callee| self.function_symbol(*callee))
+                    .collect::<Vec<_>>();
+                missing.sort();
+                wasm_lower_trace_detail(|| {
+                    format!(
+                        "reject resumable segment from scoped arena, symbol={}, missing_safe_callees={missing:?}",
+                        self.function_symbol(body.owner),
+                    )
+                });
+                false
+            }
+            Err(reason) => {
+                wasm_lower_trace_detail(|| {
+                    format!(
+                        "reject resumable segment from scoped arena, symbol={}, reason={reason}",
+                        self.function_symbol(body.owner),
+                    )
+                });
+                false
+            }
+        }
+    }
+
+    fn analyze_resumable_arena_body(
+        &self,
+        body: &RuntimeBody<'db>,
+        pending_producers: Option<&HashSet<RLocalId>>,
+    ) -> Result<ScopedArenaAnalysis<'db>, &'static str> {
+        if body.blocks.is_empty()
+            || body.signature.params.iter().any(|param| {
+                body.local(param.local)
+                    .is_none_or(|local| semantic_gpu_resource(self.db, local.semantic_ty))
+            })
+        {
+            return Err("resumable segment has an inadmissible parameter boundary");
+        }
+        let persisted_transport = |local: RLocalId| {
+            body.local(local).is_none_or(|value| {
+                semantic_type_retains_borrowed_host_storage(self.db, value.semantic_ty)
+                    || body
+                        .value_class(local)
+                        .is_none_or(|class| class.contains_transport(self.db))
+            })
+        };
+        let mut analysis = ScopedArenaAnalysis {
+            allocates: false,
+            callees: HashSet::new(),
+        };
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                match stmt {
+                    RStmt::Assign { dst, expr } => match expr {
+                        RExpr::AllocObject { .. }
+                        | RExpr::MaterializeToObject { .. }
+                        | RExpr::MaterializePlaceToObject { .. }
+                        | RExpr::Builtin(RuntimeBuiltin::Malloc { .. }) => {
+                            analysis.allocates = true;
+                        }
+                        RExpr::Call { callee, .. } => {
+                            let copied_actor_request = pending_producers
+                                .is_some_and(|pending| pending.contains(dst))
+                                && (mir::runtime_actor_effect_kind(self.db, *callee)
+                                    == Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+                                    || self.resumable_pending_producer_bodies.contains(callee));
+                            if copied_actor_request {
+                                if body
+                                    .value_class(*dst)
+                                    .is_none_or(|class| class.contains_transport(self.db))
+                                {
+                                    return Err(
+                                        "actor request does not produce a scalar pending token",
+                                    );
+                                }
+                                continue;
+                            }
+                            if mir::host_import_name(self.db, *callee).is_some()
+                                || mir::runtime_control_effect_kind(self.db, *callee).is_some()
+                                || gpu_intrinsic(self.db, *callee).is_some()
+                            {
+                                return Err("resumable call crosses an unowned effect boundary");
+                            }
+                            if self
+                                .prepared_bodies
+                                .get(callee)
+                                .is_none_or(|callee_body| callee_body.blocks.is_empty())
+                            {
+                                return Err("resumable call target has no prepared body");
+                            }
+                            analysis.callees.insert(*callee);
+                        }
+                        RExpr::Builtin(builtin) if scoped_arena_builtin_is_pure(builtin) => {}
+                        RExpr::Builtin(_) => {
+                            return Err("effectful builtin remains in resumable segment");
+                        }
+                        RExpr::Placeholder { .. } => {
+                            return Err("placeholder remains in resumable segment");
+                        }
+                        _ => {}
+                    },
+                    RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } => {
+                        if !self.scoped_arena_place_is_local(body, dst, true)
+                            && persisted_transport(*src)
+                        {
+                            return Err("resumable segment persists a typed transport");
+                        }
+                    }
+                    RStmt::EnumWriteVariant { root, fields, .. } => {
+                        if !self.scoped_arena_writable_ref(body, *root)
+                            && fields
+                                .iter()
+                                .copied()
+                                .any(|field| persisted_transport(field))
+                        {
+                            return Err("resumable segment persists a typed enum transport");
+                        }
+                    }
+                    RStmt::EnumAssertVariant { .. } | RStmt::EnumSetTag { .. } => {}
+                }
+            }
+            if matches!(
+                block.terminator,
+                RTerminator::TerminalCall { .. }
+                    | RTerminator::ReturnData { .. }
+                    | RTerminator::Revert { .. }
+                    | RTerminator::SelfDestruct { .. }
+            ) {
+                return Err("effectful terminal remains in resumable segment");
+            }
+        }
+        Ok(analysis)
+    }
+
     fn analyze_scoped_arena_body(
         &self,
         body: &RuntimeBody<'db>,
@@ -7083,6 +7577,9 @@ where
                     return Err("place materialization reads a nonlocal place");
                 }
             }
+            RExpr::Builtin(RuntimeBuiltin::Malloc { .. }) => {
+                analysis.allocates = true;
+            }
             RExpr::Builtin(builtin) if scoped_arena_builtin_is_pure(builtin) => {}
             RExpr::Call { callee, args } => {
                 if mir::host_import_name(self.db, *callee).is_some()
@@ -7113,6 +7610,16 @@ where
                         class.contains_transport(self.db) || self.flat_shape(class).is_none()
                     })
                 {
+                    wasm_lower_trace_detail(|| {
+                        format!(
+                            "scoped arena call rejected, caller={}, callee={}, args={}, params={}, ret={:?}",
+                            self.function_symbol(body.owner),
+                            self.function_symbol(*callee),
+                            args.len(),
+                            callee_body.signature.params.len(),
+                            callee_body.signature.ret,
+                        )
+                    });
                     return Err("call boundary can carry an escaping reference");
                 }
                 analysis.allocates |= self.indirect_aggregate_returns.contains(callee)
@@ -7333,15 +7840,78 @@ where
             .then_some(*layout)
     }
 
+    /// Recognize the only aggregate transport shape that may be copied into
+    /// ordinary Wasm arena storage. The nominal `#[host_type(...)]` annotation
+    /// and canonical-interface derivation are the authority; an arbitrary
+    /// two-word struct containing a pointer does not qualify.
+    fn canonical_descriptor_layout(&self, layout: LayoutId<'db>) -> bool {
+        let Layout::Struct(struct_layout) = layout.data(self.db) else {
+            return false;
+        };
+        let source_ty = struct_layout
+            .source_ty
+            .as_view(self.db)
+            .unwrap_or(struct_layout.source_ty);
+        let Some(AdtRef::Struct(struct_)) =
+            source_ty.adt_def(self.db).map(|adt| adt.adt_ref(self.db))
+        else {
+            return false;
+        };
+        if !matches!(
+            struct_
+                .scope()
+                .attrs(self.db)
+                .and_then(|attrs| attrs.host_type(self.db)),
+            Some(HostType::Bytes | HostType::String | HostType::List)
+        ) {
+            return false;
+        }
+        if !matches!(
+            canonical_type_from_semantic(self.db, source_ty, "wasm_descriptor"),
+            Ok(CanonicalType::Bytes | CanonicalType::String | CanonicalType::List { .. })
+        ) {
+            return false;
+        }
+        let [pointer, length] = struct_layout.fields.as_ref() else {
+            return false;
+        };
+        let pointer_is_wasm32 = matches!(
+            pointer,
+            RuntimeClass::Scalar(ScalarClass {
+                repr: ScalarRepr::Int {
+                    bits: 32,
+                    signed: false,
+                } | ScalarRepr::Address { bits: 32 },
+                ..
+            }) | RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                ..
+            }
+        );
+        let length_is_u32 = matches!(
+            length,
+            RuntimeClass::Scalar(ScalarClass {
+                repr: ScalarRepr::Int {
+                    bits: 32,
+                    signed: false,
+                },
+                ..
+            })
+        );
+        pointer_is_wasm32 && length_is_u32
+    }
+
     /// Whether an aggregate value's every scalar leaf passes the R1 scalar
     /// envelope (so it can be stored/loaded through typed Mload/Mstore at i32
     /// addresses). Structs recurse over their fields, arrays over their element;
-    /// enums (tagged union memory layout) and nested transports (ref/raw-addr
-    /// leaves) fail closed in slice 1.
+    /// enums (tagged union memory layout) and arbitrary nested transports fail
+    /// closed. Nominal canonical browser descriptors admit their one owned
+    /// wasm32 pointer lane as a narrow exception.
     fn aggregate_is_memory_lowerable(&self, class: &RuntimeClass<'db>) -> bool {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar).is_ok(),
             RuntimeClass::AggregateValue { layout } => match layout.data(self.db) {
+                Layout::Struct(_) if self.canonical_descriptor_layout(*layout) => true,
                 Layout::Struct(struct_layout) => struct_layout
                     .fields
                     .iter()
@@ -7747,15 +8317,29 @@ where
                             module.ty_for_class(class)?
                         };
                         vars.insert(local_id, fb.declare_var(ty));
-                    } else if body
-                        .signature
-                        .params
-                        .iter()
-                        .any(|param| param.local == local_id)
-                        && module.scalar_tuple_element_tys(class).is_some()
-                    {
-                        vars.insert(local_id, fb.declare_var(Type::I32));
-                        materialized_param_slots.insert(local_id);
+                    } else if let Some(elem_tys) = module.scalar_tuple_element_tys(class) {
+                        if body
+                            .signature
+                            .params
+                            .iter()
+                            .any(|param| param.local == local_id)
+                        {
+                            vars.insert(local_id, fb.declare_var(Type::I32));
+                            materialized_param_slots.insert(local_id);
+                        } else {
+                            // Conditional and continuation joins are represented
+                            // by MIR Slots even when they are only assigned and
+                            // consumed as complete values. Promote that closed
+                            // use to the same recursively flattened SSA lanes as
+                            // an ordinary aggregate local. Any later AddrOf,
+                            // projected Load/Store, or other place operation still
+                            // fails closed because tuple_vars supplies no address.
+                            let elem_vars = elem_tys
+                                .iter()
+                                .map(|ty| fb.declare_var(*ty))
+                                .collect::<Vec<_>>();
+                            tuple_vars.insert(local_id, elem_vars);
+                        }
                     }
                     continue;
                 }
@@ -8765,6 +9349,24 @@ where
                         "aggregate field materialization did not consume every leaf".to_owned(),
                     ));
                 }
+                Ok(())
+            }
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                ..
+            } => {
+                let value = self.local_value(source)?;
+                if self.fb.type_of(value) != Type::I32 {
+                    return Err(LowerError::Internal(
+                        "canonical descriptor pointer escaped its wasm32 carrier".to_owned(),
+                    ));
+                }
+                self.fb.insert_inst_no_result(Mstore::new(
+                    self.inst_set(),
+                    destination,
+                    value,
+                    Type::I32,
+                ));
                 Ok(())
             }
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
@@ -9984,9 +10586,33 @@ where
                     Ok(())
                 }
             },
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                ..
+            } => {
+                let value = *leaves.get(*cursor).ok_or_else(|| {
+                    LowerError::Internal(
+                        "materialized descriptor is missing its pointer leaf".to_owned(),
+                    )
+                })?;
+                if self.fb.type_of(value) != Type::I32 {
+                    return Err(LowerError::Internal(
+                        "materialized descriptor pointer escaped its wasm32 carrier".to_owned(),
+                    ));
+                }
+                self.fb.insert_inst_no_result(Mstore::new(
+                    self.inst_set(),
+                    pointer,
+                    value,
+                    Type::I32,
+                ));
+                *cursor += 1;
+                Ok(())
+            }
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
                 Err(LowerError::Unsupported(
-                    "wasm target: materialized aggregate contains a transport leaf".to_owned(),
+                    "wasm target: materialized aggregate contains a noncanonical transport leaf"
+                        .to_owned(),
                 ))
             }
         }
@@ -10064,6 +10690,16 @@ where
         match (class, shape) {
             (RuntimeClass::Scalar(_), FlatShape::Leaf(ty)) => {
                 values.push(self.load_memory_scalar(pointer, *ty));
+                Ok(())
+            }
+            (
+                RuntimeClass::RawAddr {
+                    space: AddressSpaceKind::Memory,
+                    ..
+                },
+                FlatShape::Leaf(Type::I32),
+            ) => {
+                values.push(self.load_memory_scalar(pointer, Type::I32));
                 Ok(())
             }
             (RuntimeClass::AggregateValue { layout }, FlatShape::Leaf(Type::I32))
@@ -11798,9 +12434,26 @@ where
 
     fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
         self.vars.get(&local).copied().ok_or_else(|| {
+            let details = self
+                .body
+                .local(local)
+                .map(|data| {
+                    format!(
+                        "parameter {}, semantic `{}`, root {:?}, class {:?}",
+                        self.body
+                            .signature
+                            .params
+                            .iter()
+                            .any(|param| param.local == local),
+                        data.semantic_ty.pretty_print(self.module.db),
+                        data.root,
+                        data.carrier,
+                    )
+                })
+                .unwrap_or_else(|| "missing local".to_owned());
             LowerError::Unsupported(format!(
                 "wasm target (R1): local {local:?} is not a value-carried scalar \
-                 (address-taken/aggregate locals are R2)"
+                 (address-taken/aggregate locals are R2); {details}"
             ))
         })
     }
