@@ -1,0 +1,83 @@
+//! Proof-backed authority for recursive BabyBear Mandelbrot intervals.
+//!
+//! This ingot does not claim to implement recursive cryptography. It defines
+//! the exact trusted relation that a later recursive interpreter must prove:
+//! a production sparse receipt verifies one interval, and two verified
+//! adjacent intervals merge only when their statement and shared boundary
+//! commitments agree.
+
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    PRODUCTION_LIMBS,
+    ProductionSparseBabyBearReceipt,
+    verify_production_sparse_baby_bear_receipt,
+}
+use mandelbrot_proof_recursive::OrbitInterval
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveCommittedInterval,
+    commit_recursive_leaf_statement,
+    invalid_recursive_committed_interval,
+    merge_recursive_committed_intervals,
+}
+use precision::baby_bear::BabyBear
+
+/// An in-memory authority that cannot be constructed by downstream Fe code.
+/// A valid value exists only after receipt verification or an ordered merge of
+/// two previously verified authorities. It is not a serializable proof.
+pub struct VerifiedRecursiveInterval<const L: usize> {
+    committed: RecursiveCommittedInterval<L>,
+}
+
+impl<const L: usize> core::marker::Copy for VerifiedRecursiveInterval<L> {}
+
+fn rejected_interval<const L: usize>() -> VerifiedRecursiveInterval<L> {
+    VerifiedRecursiveInterval {
+        committed: invalid_recursive_committed_interval<L>(),
+    }
+}
+
+impl<const L: usize> VerifiedRecursiveInterval<L> {
+    pub fn is_valid(self) -> bool { self.committed.valid }
+
+    pub fn commitment(self) -> RecursiveCommittedInterval<L> {
+        self.committed
+    }
+}
+
+/// Verify one production sparse AIR/FRI receipt and mint recursive authority
+/// for exactly the public interval bound into that receipt.
+pub fn verify_production_sparse_recursive_leaf(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSparseBabyBearReceipt,
+) -> VerifiedRecursiveInterval<{PRODUCTION_LIMBS}> {
+    if !verify_production_sparse_baby_bear_receipt(
+        interval,
+        shift,
+        receipt,
+    ) {
+        return rejected_interval<{PRODUCTION_LIMBS}>()
+    }
+    let committed = commit_recursive_leaf_statement(interval)
+    if !committed.valid {
+        return rejected_interval<{PRODUCTION_LIMBS}>()
+    }
+    VerifiedRecursiveInterval { committed: committed }
+}
+
+/// Merge two proof-backed interval authorities. The shared recursive carrier
+/// enforces statement identity, exact adjacency, boundary equality, and
+/// overflow-safe leaf counts.
+pub fn merge_verified_recursive_intervals<const L: usize>(
+    _ left: VerifiedRecursiveInterval<L>,
+    _ right: VerifiedRecursiveInterval<L>,
+) -> VerifiedRecursiveInterval<L> {
+    if !left.is_valid() || !right.is_valid() {
+        return rejected_interval<L>()
+    }
+    let merged = merge_recursive_committed_intervals(
+        left.commitment(),
+        right.commitment(),
+    )
+    if !merged.valid { return rejected_interval<L>() }
+    VerifiedRecursiveInterval { committed: merged }
+}

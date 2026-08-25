@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_proof_recursive_verifier_baby_bear"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+mandelbrot_proof_fixed_air_receipt_baby_bear = "../fixed-air-receipt-baby-bear"
+mandelbrot_proof_recursive = "../recursive"
+mandelbrot_proof_recursive_baby_bear = "../recursive-baby-bear"
+precision = "../../../sketches/precision"

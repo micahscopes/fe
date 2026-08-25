@@ -26,6 +26,9 @@ use mandelbrot_proof_recursive::{
     evaluate_chunk,
     initial_boundary,
 }
+use mandelbrot_proof_recursive_verifier_baby_bear::{
+    verify_production_sparse_recursive_leaf,
+}
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
 
@@ -87,4 +90,66 @@ pub fn verify_production_zero_interval_receipt(_ bytes: BrowserBytes) -> bool {
         BabyBear::from_u32(7),
         ref receipt,
     )
+}
+
+/// Admit the same canonical receipt through the recursive authority boundary.
+/// The returned carrier must remain the exact one-step interval committed by
+/// the production verifier, not a host-provided validity bit.
+pub fn verify_production_zero_interval_recursive_leaf(
+    _ bytes: BrowserBytes,
+) -> bool {
+    let mut receipt = empty_production_sparse_baby_bear_receipt()
+    if !decode_production_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return false
+    }
+    let leaf = verify_production_sparse_recursive_leaf(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    )
+    let committed = leaf.commitment()
+    leaf.is_valid()
+        && committed.valid
+        && committed.leaves == 1
+        && committed.start_iteration == 0
+        && committed.end_iteration == 1
+        && committed.statement.valid
+        && committed.start.valid
+        && committed.end.valid
+}
+
+/// Test-only diagnostic projection for the recursive authority boundary. Zero
+/// means the public boolean verifier accepted. Nonzero values identify the
+/// first independently replayed boundary that failed after that rejection.
+pub fn audit_production_zero_interval_recursive_leaf(
+    _ bytes: BrowserBytes,
+) -> u32 {
+    if verify_production_zero_interval_recursive_leaf(bytes) { return 0 }
+
+    let mut receipt = empty_production_sparse_baby_bear_receipt()
+    if !decode_production_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return 1
+    }
+    if !verify_production_sparse_baby_bear_receipt(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    ) {
+        return 2
+    }
+    let leaf = verify_production_sparse_recursive_leaf(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    )
+    if !leaf.is_valid() { return 3 }
+    let committed = leaf.commitment()
+    if !committed.valid { return 4 }
+    if committed.leaves != 1 { return 5 }
+    if committed.start_iteration != 0 { return 6 }
+    if committed.end_iteration != 1 { return 7 }
+    if !committed.statement.valid { return 8 }
+    if !committed.start.valid { return 9 }
+    if !committed.end.valid { return 10 }
+    11
 }

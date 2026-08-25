@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_recursive_verified_forge_rejected_gate"
+version = "0.1.0"
+
+[dependencies]
+mandelbrot_proof_recursive_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-baby-bear"
+mandelbrot_proof_recursive_verifier_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-verifier-baby-bear"

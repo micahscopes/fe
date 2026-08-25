@@ -72,7 +72,7 @@ pub struct RecursiveCommittedInterval<const L: usize> {
 impl<const L: usize> core::marker::Copy for RecursiveCommittedInterval<L> {}
 derive CanonicalWords for RecursiveCommittedInterval<L> using CanonicalWordsProvider
 
-fn invalid_recursive_committed_interval<const L: usize>() -> RecursiveCommittedInterval<L> {
+pub fn invalid_recursive_committed_interval<const L: usize>() -> RecursiveCommittedInterval<L> {
     RecursiveCommittedInterval {
         valid: false,
         leaves: 0,

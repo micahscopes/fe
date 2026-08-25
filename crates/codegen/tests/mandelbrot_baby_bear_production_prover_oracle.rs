@@ -4,8 +4,12 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{WasmCompileOptions, compile_runtime_package_wasm_with_options};
 use hir::hir_def::HirIngot;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 use url::Url;
+
+const CHILD_MODE: &str = "FE_MANDELBROT_PRODUCTION_GATE_CHILD";
+const RECEIPT_PATH: &str = "FE_MANDELBROT_PRODUCTION_GATE_RECEIPT";
 
 fn compile_gate(entry: &str) -> Vec<u8> {
     eprintln!("production prover gate: initialize Fe ingot for {entry}");
@@ -83,11 +87,10 @@ fn production_composition_opening_executes_with_compact_local_storage() {
     );
 }
 
-#[test]
-fn production_prover_executes_and_its_canonical_receipt_verifies() {
+fn produce_canonical_receipt(path: &Path) {
+    let engine = wasmtime::Engine::default();
     let prover_wasm = compile_gate("production_zero_interval_receipt");
     eprintln!("production prover gate: instantiate zero-import Wasm");
-    let engine = wasmtime::Engine::default();
     let prover_module =
         wasmtime::Module::new(&engine, prover_wasm).expect("prover Wasm module should load");
     assert!(prover_module.imports().next().is_none());
@@ -125,8 +128,14 @@ fn production_prover_executes_and_its_canonical_receipt_verifies() {
         .read(&prover_store, pointer as usize, &mut receipt)
         .expect("canonical receipt must be readable");
     assert_eq!(u32::from_le_bytes(receipt[0..4].try_into().unwrap()), 1);
+    std::fs::write(path, receipt).expect("canonical receipt should persist between gate processes");
+}
 
-    let verifier_wasm = compile_gate("verify_production_zero_interval_receipt");
+fn verify_canonical_receipt_entry(path: &Path, entry: &str, zero_means_valid: bool) {
+    let receipt = std::fs::read(path).expect("prover child must persist its canonical receipt");
+    let length = i32::try_from(receipt.len()).expect("canonical receipt length should fit i32");
+    let engine = wasmtime::Engine::default();
+    let verifier_wasm = compile_gate(entry);
     let verifier_module =
         wasmtime::Module::new(&engine, verifier_wasm).expect("verifier Wasm module should load");
     assert!(verifier_module.imports().next().is_none());
@@ -150,19 +159,23 @@ fn production_prover_executes_and_its_canonical_receipt_verifies() {
         .write(&mut verifier_store, verifier_pointer as usize, &receipt)
         .expect("canonical receipt must fit verifier memory");
     let verify = verifier
-        .get_typed_func::<(i32, i32), i32>(
-            &mut verifier_store,
-            "verify_production_zero_interval_receipt",
-        )
+        .get_typed_func::<(i32, i32), i32>(&mut verifier_store, entry)
         .expect("production receipt verifier export");
     eprintln!("production prover gate: verify and mutate canonical receipt");
-    assert_ne!(
-        verify
-            .call(&mut verifier_store, (verifier_pointer, length))
-            .expect("production receipt verifier should execute"),
-        0,
-        "the emitted receipt must verify through the canonical decoder",
-    );
+    let clean = verify
+        .call(&mut verifier_store, (verifier_pointer, length))
+        .expect("production receipt verifier should execute");
+    if zero_means_valid {
+        assert_eq!(
+            clean, 0,
+            "the emitted receipt must verify and mint the exact recursive leaf authority",
+        );
+    } else {
+        assert_ne!(
+            clean, 0,
+            "the emitted receipt must pass the direct production verifier",
+        );
+    }
 
     verifier_memory
         .write(
@@ -171,11 +184,86 @@ fn production_prover_executes_and_its_canonical_receipt_verifies() {
             &0_u32.to_le_bytes(),
         )
         .expect("receipt mutation should fit memory");
-    assert_eq!(
-        verify
-            .call(&mut verifier_store, (verifier_pointer, length))
-            .expect("mutated production receipt verifier should execute"),
-        0,
-        "changing the receipt validity word must fail closed",
-    );
+    let mutated = verify
+        .call(&mut verifier_store, (verifier_pointer, length))
+        .expect("mutated production receipt verifier should execute");
+    if zero_means_valid {
+        assert_ne!(
+            mutated, 0,
+            "changing the receipt validity word must fail closed",
+        );
+    } else {
+        assert_eq!(
+            mutated, 0,
+            "changing the receipt validity word must fail closed",
+        );
+    }
+}
+
+fn verify_canonical_receipt(path: &Path) {
+    verify_canonical_receipt_entry(path, "audit_production_zero_interval_recursive_leaf", true);
+}
+
+fn verify_direct_canonical_receipt(path: &Path) {
+    verify_canonical_receipt_entry(path, "verify_production_zero_interval_receipt", false);
+}
+
+fn child_receipt_path() -> PathBuf {
+    std::env::var_os(RECEIPT_PATH)
+        .map(PathBuf::from)
+        .expect("production gate child requires its receipt path")
+}
+
+fn run_gate_child(mode: &str, receipt_path: &Path) -> ExitStatus {
+    Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("production_prover_executes_and_its_canonical_receipt_verifies")
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--quiet")
+        .env(CHILD_MODE, mode)
+        .env(RECEIPT_PATH, receipt_path)
+        .status()
+        .unwrap_or_else(|error| panic!("production gate {mode} child should start: {error}"))
+}
+
+#[test]
+fn production_prover_executes_and_its_canonical_receipt_verifies() {
+    if let Ok(mode) = std::env::var(CHILD_MODE) {
+        let path = child_receipt_path();
+        match mode.as_str() {
+            "prove" => produce_canonical_receipt(&path),
+            "verify" => verify_canonical_receipt(&path),
+            "verify-direct" => verify_direct_canonical_receipt(&path),
+            _ => panic!("unknown production gate child mode {mode}"),
+        }
+        return;
+    }
+
+    // Compiler databases retain large allocation arenas for their process
+    // lifetime. Run proving and verification as separate test processes so the
+    // operating system reclaims the prover arena before verifier lowering.
+    let scratch_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fe-test-scratch");
+    std::fs::create_dir_all(&scratch_root).expect("workspace test scratch directory");
+    let scratch = tempfile::Builder::new()
+        .prefix("production-proof-gate-")
+        .tempdir_in(scratch_root)
+        .expect("workspace-backed production gate scratch directory");
+    let receipt_path = scratch.path().join("receipt.bin");
+
+    let prove_status = run_gate_child("prove", &receipt_path);
+    if !prove_status.success() {
+        let retained = scratch.keep();
+        panic!(
+            "production gate prove child failed; retained evidence at {}",
+            retained.display(),
+        );
+    }
+    let verify_status = run_gate_child("verify", &receipt_path);
+    if !verify_status.success() {
+        let retained = scratch.keep();
+        panic!(
+            "production gate verify child failed; retained evidence at {}",
+            retained.display(),
+        );
+    }
 }

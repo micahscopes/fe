@@ -1706,9 +1706,21 @@ All four are focused ingots and may remain so permanently.
   AIR, commitments, LDE, FRI fold chain, and mutation oracles exist. Complete
   authenticated queries, ordered Fiat-Shamir sampling, canonical encoding,
   and final accept/reject evidence for the production BabyBear receipt remain.
-- **G-RECURSE, pending.** Implement exact adjacent chunk leaves, boundary
-  equality, ordered parent aggregation, and a fixed-size recursive receipt.
-  Multi-limb orbit boundaries and the bounded disk claim belong to this gate.
+- **G-RECURSE, partial.** The field-neutral multi-limb carrier commits exact
+  one-step leaves and merges only ordered adjacent intervals with identical
+  statements and shared boundary commitments. The new
+  `VerifiedRecursiveInterval<L>` adds an unforgeable proof-backed authority:
+  its carrier is private, and only the production sparse receipt verifier or a
+  merge of two already verified authorities can mint a valid value. A negative
+  Fe compilation gate rejects direct construction. The process-isolated exact
+  gate generated a 46,656-byte canonical production receipt from the committed
+  dependency snapshot, admitted its exact `0 -> 1` interval through this
+  authority, and rejected a mutated validity word; prover and verifier compiler
+  arenas never overlap. This is deliberately an in-memory trusted relation,
+  not recursive cryptography or a serializable recursive proof. Closure still
+  requires two real adjacent receipt leaves merged end to end, the fixed-size
+  recursive proof/provider, multi-chunk receipt encoding, and the bounded disk
+  claim.
 - **G-BROWSER, partial.** Fe-authored staged WebGPU witness, LDE, and
   commitment execution runs on llvmpipe with Wasm control. Interactive point
   and disk selection, full browser proof generation, Wasm verification, and

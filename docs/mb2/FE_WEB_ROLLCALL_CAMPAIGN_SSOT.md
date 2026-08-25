@@ -109,8 +109,18 @@ existing Definition of done, not a second campaign checklist:
   receipt-wide independent decoder remain before this gate can close.
 - [ ] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
-- [ ] **G-RECURSE:** adjacent typed iteration chunks merge through the fixed
-  recursive interval topology, rejecting boundary and order mutations.
+- [~] **G-RECURSE:** the field-neutral multi-limb carrier already merges only
+  ordered adjacent iteration intervals with identical statements and shared
+  boundary commitments. `VerifiedRecursiveInterval<L>` now makes the
+  proof-backed layer nominally unforgeable: its carrier is private, and only
+  the production sparse receipt verifier or an ordered merge of two verified
+  authorities can mint a valid value. A negative Fe gate rejects direct
+  construction. A process-isolated exact gate against the committed dependency
+  snapshot generated a 46,656-byte canonical production receipt, admitted its
+  exact `0 -> 1` interval, and rejected a mutated validity word. This is an
+  in-memory trusted relation, not recursive cryptography. Two real adjacent
+  receipt leaves, their end-to-end authority merge, the fixed-size recursive
+  proof/provider and encoding, and the bounded disk claim remain.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private

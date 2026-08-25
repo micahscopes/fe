@@ -1,0 +1,10 @@
+use mandelbrot_proof_recursive_baby_bear::invalid_recursive_committed_interval
+use mandelbrot_proof_recursive_verifier_baby_bear::VerifiedRecursiveInterval
+
+/// Ordinary Fe code must not turn a public commitment-shaped carrier into
+/// proof-backed recursive authority.
+pub fn forge_verified_interval() -> VerifiedRecursiveInterval<4> {
+    VerifiedRecursiveInterval {
+        committed: invalid_recursive_committed_interval<4>(),
+    }
+}
