@@ -1,0 +1,8 @@
+[ingot]
+name = "region_layout_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../../ingots/canonical_words"
+core = "../../../../../ingots/core"
+region_layout = "../../../../../ingots/region_layout"

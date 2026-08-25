@@ -587,6 +587,29 @@ impl<'db> PathRes<'db> {
     }
 
     pub fn is_visible_from(&self, db: &'db dyn HirAnalysisDb, from_scope: ScopeId<'db>) -> bool {
+        if self.is_directly_visible_from(db, from_scope) {
+            return true;
+        }
+
+        // Provider-generated bodies use mixed-site hygiene. Their arguments,
+        // receiver, and target fields belong to the derive site, while helper
+        // paths authored by the provider retain the provider definition's
+        // privacy authority. This is what lets an FCO provider expose a safe
+        // public facade without publishing its representation constructors.
+        // Provenance reconstruction fails closed when a provider cannot be
+        // identified uniquely, so ordinary code and ambiguous derives gain no
+        // additional visibility.
+        let Some(provider_scope) = provider_definition_scope(db, from_scope) else {
+            return false;
+        };
+        self.is_directly_visible_from(db, provider_scope)
+    }
+
+    fn is_directly_visible_from(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        from_scope: ScopeId<'db>,
+    ) -> bool {
         match self {
             PathRes::Ty(ty) | PathRes::Func(ty) => is_ty_visible_from(db, *ty, from_scope),
             PathRes::Const(const_, _) => is_scope_visible_from(db, const_.scope(), from_scope),
@@ -682,6 +705,24 @@ impl<'db> PathRes<'db> {
             PathRes::Method(..) => "method",
         }
     }
+}
+
+/// The definition-site scope that authored a provider-generated impl body.
+/// Hand-written impls and derives with ambiguous reconstructed provenance have
+/// no fallback authority.
+fn provider_definition_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    from_scope: ScopeId<'db>,
+) -> Option<ScopeId<'db>> {
+    let mut cursor = Some(from_scope);
+    while let Some(scope) = cursor {
+        if let Some(ItemKind::ImplTrait(impl_trait)) = scope.to_item() {
+            return crate::core::lower::derived_impl_provenance(db, impl_trait)
+                .map(|provenance| provenance.provider.scope());
+        }
+        cursor = scope.parent(db);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]

@@ -1,0 +1,28 @@
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use region_layout::{Region, RegionSchema, RegionSchemaProvider}
+
+struct Header { value: u32 }
+impl core::marker::Copy for Header {}
+derive CanonicalWords for Header using CanonicalWordsProvider
+
+struct Query { values: [u32; 2] }
+impl core::marker::Copy for Query {}
+derive CanonicalWords for Query using CanonicalWordsProvider
+
+struct Regions { header: Region<Header>, query: Region<Query> }
+derive RegionSchema for Regions using RegionSchemaProvider
+
+fn require_header(_ region: Region<Header>) {}
+
+pub fn forge_raw_offset() -> Region<Header> {
+    Region { offset: 7 }
+}
+
+pub fn forge_private_constructor() -> Region<Header> {
+    Region<Header>::from_derived_offset(7)
+}
+
+pub fn confuse_region_types() {
+    let regions = <Regions as RegionSchema>::regions()
+    require_header(regions.query)
+}

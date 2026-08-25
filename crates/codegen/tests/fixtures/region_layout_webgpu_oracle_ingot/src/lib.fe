@@ -1,0 +1,42 @@
+use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use region_layout::{
+    Region,
+    RegionSchema,
+    RegionSchemaProvider,
+    store_region_word,
+}
+use std::webgpu::StorageBuffer
+
+struct Header { valid: bool, count: u32 }
+impl core::marker::Copy for Header {}
+derive CanonicalWords for Header using CanonicalWordsProvider
+
+struct Query { index: u32, values: [u32; 3] }
+impl core::marker::Copy for Query {}
+derive CanonicalWords for Query using CanonicalWordsProvider
+
+struct ProofRegions {
+    header: Region<Header>,
+    queries: Region<[Query; 2]>,
+    digest: Region<[u32; 8]>,
+}
+derive RegionSchema for ProofRegions using RegionSchemaProvider
+
+/// One physical invocation writes semantic regions through checked relative
+/// coordinates. The rejected query write must leave digest word seven intact.
+pub fn write_regions(_ tape: StorageBuffer<u32, 18>) {
+    let regions = <ProofRegions as RegionSchema>::regions()
+    let header_ok = store_region_word(tape, regions.header, 0, 101)
+        && store_region_word(tape, regions.header, 1, 102)
+    let query_ok = store_region_word(tape, regions.queries, 0, 201)
+        && store_region_word(tape, regions.queries, 7, 208)
+    let rejected = store_region_word(tape, regions.queries, 8, 999)
+    let digest_ok = store_region_word(tape, regions.digest, 0, 301)
+        && store_region_word(tape, regions.digest, 7, 308)
+    store_region_word(
+        tape,
+        regions.digest,
+        1,
+        if header_ok && query_ok && !rejected && digest_ok { 1 } else { 0 },
+    )
+}

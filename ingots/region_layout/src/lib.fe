@@ -1,0 +1,174 @@
+//! Reflection-derived, nominal word regions.
+//!
+//! A schema is an ordinary Fe record whose fields are `Region<T>` values.
+//! Reflection assigns each field a contiguous offset using `T`'s canonical
+//! word width. The offset remains private, so consumers select a semantic
+//! region rather than constructing application tape coordinates.
+
+use canonical_words::CanonicalWords
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use std::webgpu::StorageBuffer
+
+/// One compiler-derived contiguous region containing canonical words for `T`.
+/// The private offset can only be minted by this ingot's schema provider.
+pub struct Region<T> { offset: u32 }
+
+impl<T> core::marker::Copy for Region<T> {}
+
+impl<T: CanonicalWords> Region<T> {
+    /// Safe public reflection over the payload's canonical width.
+    pub const fn word_width() -> u32 { T::WORDS }
+
+    /// Authority boundary for physical coordinates. The derive provider below
+    /// resolves this private constructor where it is defined; downstream Fe
+    /// code cannot name it or initialize the private field directly.
+    const fn from_derived_offset(_ offset: u32) -> Self {
+        Self { offset: offset }
+    }
+}
+
+/// Exact packed layout of an ordinary record of typed regions.
+pub trait RegionSchema {
+    const WORDS: u32
+    const fn regions() -> Self
+}
+
+/// Derives contiguous offsets and the total width from canonical payload
+/// widths. Declaration order is retained exactly.
+pub struct RegionSchemaProvider {}
+
+impl Derive<RegionSchema> for RegionSchemaProvider {
+    const fn derive<T>(ev: own Evidence<RegionSchema<T>>)
+        -> Evidence<RegionSchema<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<RegionSchema<T>>,
+        )
+    {
+        let mut regions = builder.struct_init()
+        let mut offset = builder.int(0)
+        for field in reflect.fields() {
+            regions = builder.with_field(
+                regions,
+                field,
+                builder.static_call(
+                    field.ty(),
+                    "from_derived_offset",
+                    offset,
+                ),
+            )
+            offset = builder.add(
+                offset,
+                builder.static_call(field.ty(), "word_width"),
+            )
+        }
+        builder.emit_const("WORDS", builder.ty<u32>(), offset)
+        builder.emit_method("regions", regions)
+        builder.finish()
+        ev
+    }
+}
+
+/// Inspectable bounds for documentation, layout gates, and independent
+/// decoders. `valid` rejects the only possible packed-u32 overflow.
+pub struct RegionBounds {
+    pub valid: bool,
+    pub start: u32,
+    pub words: u32,
+    pub end: u32,
+}
+
+impl core::marker::Copy for RegionBounds {}
+
+pub const fn region_bounds<T: CanonicalWords>(_ region: Region<T>)
+    -> RegionBounds {
+    let end = region.offset + T::WORDS
+    RegionBounds {
+        valid: end >= region.offset,
+        start: region.offset,
+        words: T::WORDS,
+        end: end,
+    }
+}
+
+pub const fn region_contains<T: CanonicalWords>(
+    _ region: Region<T>,
+    _ index: u32,
+) -> bool {
+    let bounds = region_bounds(region)
+    bounds.valid && index < bounds.words
+}
+
+/// A checked word coordinate derived from a typed region and a relative index.
+pub struct RegionAddress {
+    pub valid: bool,
+    pub absolute: u32,
+}
+
+impl core::marker::Copy for RegionAddress {}
+
+pub const fn region_address<T: CanonicalWords>(
+    _ region: Region<T>,
+    _ index: u32,
+) -> RegionAddress {
+    let bounds = region_bounds(region)
+    if !bounds.valid || index >= bounds.words {
+        return RegionAddress { valid: false, absolute: 0 }
+    }
+    RegionAddress { valid: true, absolute: bounds.start + index }
+}
+
+/// Checked result of reading one canonical word from a typed GPU region.
+pub struct RegionWordRead {
+    pub valid: bool,
+    pub value: u32,
+}
+
+impl core::marker::Copy for RegionWordRead {}
+
+pub fn load_region_word<
+    T: CanonicalWords,
+    const STORAGE_WORDS: usize,
+>(
+    _ storage: StorageBuffer<u32, STORAGE_WORDS>,
+    _ region: Region<T>,
+    _ index: u32,
+) -> RegionWordRead
+where
+    STORAGE_WORDS > 0,
+{
+    let address = region_address(region, index)
+    if !address.valid
+        || address.absolute >= STORAGE_WORDS.downcast_truncate()
+    {
+        return RegionWordRead { valid: false, value: 0 }
+    }
+    RegionWordRead {
+        valid: true,
+        value: storage.load(index: address.absolute),
+    }
+}
+
+/// Store one canonical word through a typed GPU region. Invalid relative or
+/// resource coordinates fail closed without touching storage.
+pub fn store_region_word<
+    T: CanonicalWords,
+    const STORAGE_WORDS: usize,
+>(
+    _ storage: StorageBuffer<u32, STORAGE_WORDS>,
+    _ region: Region<T>,
+    _ index: u32,
+    _ value: u32,
+) -> bool
+where
+    STORAGE_WORDS > 0,
+{
+    let address = region_address(region, index)
+    if !address.valid
+        || address.absolute >= STORAGE_WORDS.downcast_truncate()
+    {
+        return false
+    }
+    storage.store(index: address.absolute, value: value)
+    true
+}
