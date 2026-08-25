@@ -1,0 +1,9 @@
+[ingot]
+name = "parallel_ntt_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"
+parallel_ntt = "../parallel_ntt"
+parallel_structure = "../parallel_structure"
+precision = "../../demos/sketches/precision"

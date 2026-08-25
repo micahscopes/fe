@@ -1,0 +1,234 @@
+//! Portable WebGPU placement for a type-derived radix-two stage grid.
+//!
+//! A caller supplies one `FactorTree` plan and compiler-derived dispatch
+//! dimensions. Each physical butterfly lane owns one progress word. Repeated
+//! dispatches therefore advance the exact ordered stages without a host stage
+//! table, a contended global cursor, or an intra-dispatch storage race. Every
+//! stage is a disjoint matching; the queue boundary between repeated dispatches
+//! provides the dependency boundary before the next matching runs.
+
+use parallel_ntt::{
+    Radix2Stage,
+    StageGrid,
+    bit_reversed_index,
+    portable_stage,
+}
+use precision::polynomial::{Radix2Field, radix2_field_domain_supported, radix2_log}
+use precision::word_field::{WordField, WordTwoAdicPrime}
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+
+/// A u32-resident radix-two field usable through WebGPU storage resources.
+/// The blanket implementation keeps BabyBear a parameter instance rather than
+/// a distinct shader algorithm.
+pub trait StorageRadix2Field: Radix2Field {
+    fn from_storage(_ word: u32) -> Self
+    fn to_storage(self) -> u32
+}
+
+impl<M: WordTwoAdicPrime> StorageRadix2Field for WordField<M> {
+    fn from_storage(_ word: u32) -> Self { Self::from_u32(word) }
+    fn to_storage(self) -> u32 { self.to_u32() }
+}
+
+/// Observable result of one physical lane in one repeated stage dispatch.
+/// Tests and higher-level proof actors may retain this receipt without making
+/// it part of the transform's semantic state.
+pub struct StageGridStep {
+    pub active: bool,
+    pub valid: bool,
+    pub stage: Radix2Stage,
+}
+
+impl core::marker::Copy for StageGridStep {}
+
+fn inactive_stage() -> Radix2Stage {
+    Radix2Stage {
+        index: 0,
+        width: 0,
+        half: 0,
+        blocks: 0,
+        butterflies: 0,
+        valid: false,
+    }
+}
+
+fn inactive_step() -> StageGridStep {
+    StageGridStep {
+        active: false,
+        valid: true,
+        stage: inactive_stage(),
+    }
+}
+
+/// Copy one source domain into bit-reversed working storage and reset every
+/// butterfly lane's private stage cursor. Two values per lane cover the whole
+/// transform while retaining one invocation per later butterfly.
+pub fn prepare_stage_grid<
+    const N: usize,
+    const LANES: usize,
+>(
+    _ source: StorageBuffer<u32, N>,
+    _ values: StorageBuffer<u32, N>,
+    _ progress: StorageBuffer<u32, LANES>,
+    _ invocation: ComputeInvocation,
+) where
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+{
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+
+    let second = lane + LANES.downcast_truncate()
+    values.store(
+        index: bit_reversed_index<N>(lane),
+        value: source.load(index: lane),
+    )
+    values.store(
+        index: bit_reversed_index<N>(second),
+        value: source.load(index: second),
+    )
+    progress.store(index: lane, value: 0)
+}
+
+fn apply_stage_grid_lane<
+    const N: usize,
+    const LANES: usize,
+    F: StorageRadix2Field,
+    Plan: StageGrid,
+>(
+    _ values: StorageBuffer<u32, N>,
+    _ progress: StorageBuffer<u32, LANES>,
+    _ invocation: ComputeInvocation,
+    _ inverse: bool,
+) -> StageGridStep
+where
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+    { radix2_field_domain_supported<N, F>() },
+    { Plan::POINTS == N },
+{
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return inactive_step() }
+
+    let cursor = progress.load(index: lane)
+    let stage = portable_stage<N, Plan>(cursor)
+    if !stage.valid || stage.butterflies != LANES.downcast_truncate() {
+        return StageGridStep { active: true, valid: false, stage: stage }
+    }
+
+    let block = lane / stage.half
+    let offset = lane % stage.half
+    let left_index = block * stage.width + offset
+    let right_index = left_index + stage.half
+
+    let mut root = F::radix2_root(radix2_log<N>())
+    if inverse { root = root.radix2_inverse_or_zero() }
+    let points: u32 = N.downcast_truncate()
+    let twiddle_step = points / stage.width
+    let twiddle = root.radix2_pow(twiddle_step).radix2_pow(offset)
+    let left = F::from_storage(values.load(index: left_index))
+    let right = F::from_storage(values.load(index: right_index))
+        .radix2_mul(twiddle)
+    values.store(
+        index: left_index,
+        value: left.radix2_add(right).to_storage(),
+    )
+    values.store(
+        index: right_index,
+        value: left.radix2_sub(right).to_storage(),
+    )
+    progress.store(index: lane, value: cursor + 1)
+    StageGridStep { active: true, valid: true, stage: stage }
+}
+
+/// Execute one forward NTT stage for every active physical butterfly lane.
+/// The enclosing `RepeatedDispatch` count must be `Plan::FACTORS`.
+pub fn forward_stage_grid_lane<
+    const N: usize,
+    const LANES: usize,
+    F: StorageRadix2Field,
+    Plan: StageGrid,
+>(
+    _ values: StorageBuffer<u32, N>,
+    _ progress: StorageBuffer<u32, LANES>,
+    _ invocation: ComputeInvocation,
+) -> StageGridStep
+where
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+    { radix2_field_domain_supported<N, F>() },
+    { Plan::POINTS == N },
+{
+    apply_stage_grid_lane<N, LANES, F, Plan>(
+        values,
+        progress,
+        invocation,
+        false,
+    )
+}
+
+/// Execute one inverse NTT butterfly stage. A subsequent call to
+/// `finish_inverse_stage_grid` applies the required domain-size inverse.
+pub fn inverse_stage_grid_lane<
+    const N: usize,
+    const LANES: usize,
+    F: StorageRadix2Field,
+    Plan: StageGrid,
+>(
+    _ values: StorageBuffer<u32, N>,
+    _ progress: StorageBuffer<u32, LANES>,
+    _ invocation: ComputeInvocation,
+) -> StageGridStep
+where
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+    { radix2_field_domain_supported<N, F>() },
+    { Plan::POINTS == N },
+{
+    apply_stage_grid_lane<N, LANES, F, Plan>(
+        values,
+        progress,
+        invocation,
+        true,
+    )
+}
+
+/// Apply `N^-1` after the inverse stage grid. Each lane owns two values, so no
+/// storage location is shared within the dispatch.
+pub fn finish_inverse_stage_grid<
+    const N: usize,
+    const LANES: usize,
+    F: StorageRadix2Field,
+>(
+    _ values: StorageBuffer<u32, N>,
+    _ invocation: ComputeInvocation,
+) where
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+{
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    let scale = F::from_storage(N.downcast_truncate())
+        .radix2_inverse_or_zero()
+    let second = lane + LANES.downcast_truncate()
+    values.store(
+        index: lane,
+        value: F::from_storage(values.load(index: lane))
+            .radix2_mul(scale).to_storage(),
+    )
+    values.store(
+        index: second,
+        value: F::from_storage(values.load(index: second))
+            .radix2_mul(scale).to_storage(),
+    )
+}

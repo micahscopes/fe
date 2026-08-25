@@ -1,0 +1,139 @@
+//! Browser-profile stage-grid interpretation of one factor-tree NTT.
+//!
+//! `Dit<4>` derives four ordered dispatches. Each dispatch places eight
+//! independent butterflies across two workgroups, proving that the portable
+//! baseline does not rely on one fused workgroup or shared memory.
+
+use parallel_ntt_webgpu::{
+    finish_inverse_stage_grid,
+    forward_stage_grid_lane,
+    inverse_stage_grid_lane,
+    prepare_stage_grid,
+}
+use parallel_structure::{Dit, FactorTree}
+use precision::baby_bear::BabyBear
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    RepeatedDispatch as Repeat,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+const POINTS: usize = 16
+const BUTTERFLIES: usize = POINTS / 2
+const THREADS: usize = 4
+const WORKGROUPS: usize = (BUTTERFLIES + THREADS - 1) / THREADS
+type Plan = Dit<4>
+const STAGES: usize = <Plan as FactorTree>::FACTORS
+const STAGE_RECEIPT_WORDS: usize = STAGES * BUTTERFLIES
+
+static_assert(<Plan as FactorTree>::POINTS == POINTS)
+static_assert(STAGES == 4)
+static_assert(BUTTERFLIES == 8)
+static_assert(WORKGROUPS == 2)
+
+actor PortableNttGrid uses (Program<WebGpuBackend>) {
+    source: Shared<u32, POINTS>,
+    values: Shared<u32, POINTS>,
+    progress: Shared<u32, BUTTERFLIES>,
+    valid: Shared<u32, BUTTERFLIES>,
+    stage_receipt: Shared<u32, STAGE_RECEIPT_WORDS>,
+    roundtrip: Shared<u32, POINTS>,
+    inverse_progress: Shared<u32, BUTTERFLIES>,
+    inverse_valid: Shared<u32, BUTTERFLIES>,
+
+    fn prepare(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        prepare_stage_grid<POINTS, BUTTERFLIES>(
+            self.source,
+            self.values,
+            self.progress,
+            invocation,
+        )
+        if invocation.global.x < BUTTERFLIES.downcast_truncate() {
+            self.valid.store(index: invocation.global.x, value: 1)
+        }
+    }
+
+    fn advance(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<WORKGROUPS, 1, 1, STAGES>,
+            >
+        )
+    {
+        let step = forward_stage_grid_lane<POINTS, BUTTERFLIES, BabyBear, Plan>(
+            self.values,
+            self.progress,
+            invocation,
+        )
+        if step.active {
+            self.valid.store(
+                index: invocation.global.x,
+                value: if step.valid { 1 } else { 0 },
+            )
+            if step.valid {
+                self.stage_receipt.store(
+                    index: step.stage.index * BUTTERFLIES.downcast_truncate()
+                        + invocation.global.x,
+                    value: step.stage.index * 65536 + step.stage.width,
+                )
+            }
+        }
+    }
+
+    fn prepare_inverse(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        prepare_stage_grid<POINTS, BUTTERFLIES>(
+            self.values,
+            self.roundtrip,
+            self.inverse_progress,
+            invocation,
+        )
+        if invocation.global.x < BUTTERFLIES.downcast_truncate() {
+            self.inverse_valid.store(index: invocation.global.x, value: 1)
+        }
+    }
+
+    fn advance_inverse(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<WORKGROUPS, 1, 1, STAGES>,
+            >
+        )
+    {
+        let step = inverse_stage_grid_lane<POINTS, BUTTERFLIES, BabyBear, Plan>(
+            self.roundtrip,
+            self.inverse_progress,
+            invocation,
+        )
+        if step.active {
+            self.inverse_valid.store(
+                index: invocation.global.x,
+                value: if step.valid { 1 } else { 0 },
+            )
+        }
+    }
+
+    fn finish_inverse(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        finish_inverse_stage_grid<POINTS, BUTTERFLIES, BabyBear>(
+            self.roundtrip,
+            invocation,
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.values.load(index: 0).downcast_truncate()
+    }
+}

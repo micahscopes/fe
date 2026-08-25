@@ -7,14 +7,115 @@
 //! an indexed outer stage loop. Loops inside one stage enumerate its independent
 //! butterflies and remain placement-neutral.
 //!
-//! This is the scalar interpretation of the shared denotation. A portable
-//! stage-grid WebGPU interpretation must consume the same `FactorTree`, not a
-//! copied list of widths or dispatches.
+//! This is the scalar interpretation of the shared denotation. The portable
+//! stage-grid interpreter in `parallel_ntt_webgpu` consumes the same
+//! `FactorTree`, not a copied list of widths or dispatches.
 
 use parallel_structure::{Comp, FactorTree, Pair, Unit}
 use precision::polynomial::{Radix2Field, radix2_field_domain_supported, radix2_log}
 
 pub use parallel_structure::FactorAnalysis
+
+/// One exact radix-two stage selected from a factor tree. `index` is the
+/// stage's global dependency position, while `width` and `half` determine the
+/// disjoint butterfly matching over `butterflies` independent lanes.
+pub struct Radix2Stage {
+    pub index: u32,
+    pub width: u32,
+    pub half: u32,
+    pub blocks: u32,
+    pub butterflies: u32,
+    pub valid: bool,
+}
+
+impl core::marker::Copy for Radix2Stage {}
+
+fn invalid_stage() -> Radix2Stage {
+    Radix2Stage {
+        index: 0,
+        width: 0,
+        half: 0,
+        blocks: 0,
+        butterflies: 0,
+        valid: false,
+    }
+}
+
+fn stage_width(_ index: u32) -> u32 {
+    let mut width: u32 = 2
+    let mut remaining = index
+    while remaining != 0 {
+        width = width << 1
+        remaining = remaining - 1
+    }
+    width
+}
+
+fn radix2_stage(_ index: u32, _ points: u32) -> Radix2Stage {
+    let width = stage_width(index)
+    Radix2Stage {
+        index: index,
+        width: width,
+        half: width >> 1,
+        blocks: points / width,
+        butterflies: points >> 1,
+        valid: width <= points,
+    }
+}
+
+/// Structural interpretation of a factor tree as an ordered portable stage
+/// grid. Implementations recurse over `Unit`, `Pair`, and `Comp`; callers never
+/// author a parallel table of stage widths or dispatch indices.
+pub trait StageGrid: FactorTree {
+    fn stage(_ index: u32, _ base: u32, _ points: u32) -> Radix2Stage
+}
+
+impl StageGrid for Unit {
+    fn stage(_ index: u32, _ base: u32, _ points: u32) -> Radix2Stage {
+        invalid_stage()
+    }
+}
+
+impl StageGrid for Pair {
+    fn stage(_ index: u32, _ base: u32, _ points: u32) -> Radix2Stage {
+        if index != 0 { return invalid_stage() }
+        radix2_stage(base, points)
+    }
+}
+
+impl<Left: StageGrid, Right: StageGrid> StageGrid for Comp<Left, Right> {
+    fn stage(_ index: u32, _ base: u32, _ points: u32) -> Radix2Stage {
+        let left_stages: u32 = Left::FACTORS.downcast_truncate()
+        if index < left_stages {
+            return <Left as StageGrid>::stage(
+                index: index,
+                base: base,
+                points: points,
+            )
+        }
+        <Right as StageGrid>::stage(
+            index: index - left_stages,
+            base: base + left_stages,
+            points: points,
+        )
+    }
+}
+
+/// Select one stage from a type-derived plan for a fixed transform domain.
+pub fn portable_stage<const N: usize, Plan: StageGrid>(
+    _ index: u32,
+) -> Radix2Stage
+where
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { Plan::POINTS == N },
+{
+    <Plan as StageGrid>::stage(
+        index: index,
+        base: 0,
+        points: N.downcast_truncate(),
+    )
+}
 
 fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
     let mut source = value
@@ -28,6 +129,16 @@ fn reverse_low_bits(_ value: usize, _ width: u32) -> usize {
     reversed
 }
 
+/// Bit-reversed destination for one fixed radix-two domain. Scalar and
+/// parallel interpreters share this exact placement rule.
+pub fn bit_reversed_index<const N: usize>(_ index: u32) -> u32
+where
+    N > 0,
+    { (N & (N - 1)) == 0 },
+{
+    reverse_low_bits(index as usize, radix2_log<N>()).downcast_truncate()
+}
+
 fn bit_reverse_permute<const N: usize, F: Radix2Field>(
     _ values: mut [F; N],
 )
@@ -35,10 +146,9 @@ where
     N > 0,
     { (N & (N - 1)) == 0 },
 {
-    let log_n = radix2_log<N>()
     let mut index: usize = 0
     while index < N {
-        let reversed = reverse_low_bits(index, log_n)
+        let reversed = bit_reversed_index<N>(index.downcast_truncate()) as usize
         if reversed > index {
             let value = values[index]
             values[index] = values[reversed]
@@ -63,9 +173,9 @@ fn field_natural<F: Radix2Field>(_ value: u32) -> F {
 fn apply_stage<const N: usize, F: Radix2Field>(
     _ values: mut [F; N],
     _ root: F,
-    _ stage: usize,
+    _ descriptor: Radix2Stage,
 ) {
-    let width: usize = (1 as usize) << (stage + 1)
+    let width: usize = descriptor.width as usize
     let half = width >> 1
     let twiddle_step: u32 = (N / width).downcast_truncate()
     let stage_root = root.radix2_pow(twiddle_step)
@@ -101,7 +211,11 @@ impl<const N: usize, F: Radix2Field> ScalarStages<N, F> for Unit {
 
 impl<const N: usize, F: Radix2Field> ScalarStages<N, F> for Pair {
     fn apply(_ values: mut [F; N], _ root: F, _ stage: usize) -> usize {
-        apply_stage<N, F>(mut values, root, stage)
+        apply_stage<N, F>(
+            mut values,
+            root,
+            radix2_stage(stage.downcast_truncate(), N.downcast_truncate()),
+        )
         stage + 1
     }
 }
@@ -126,7 +240,7 @@ where
     N > 0,
     { (N & (N - 1)) == 0 },
     { radix2_field_domain_supported<N, F>() },
-    Plan: FactorTree + ScalarStages<N, F>,
+    Plan: FactorTree + StageGrid + ScalarStages<N, F>,
 {
     if Plan::POINTS != N { return [F::radix2_zero(); N] }
     let mut values = values
@@ -159,7 +273,7 @@ where
     { (N & (N - 1)) == 0 },
     { radix2_field_domain_supported<N, F>() },
     { Plan::POINTS == N },
-    Plan: FactorTree + ScalarStages<N, F>,
+    Plan: FactorTree + StageGrid + ScalarStages<N, F>,
 {
     transform<N, F, Plan>(coefficients, false)
 }
@@ -173,7 +287,7 @@ where
     { (N & (N - 1)) == 0 },
     { radix2_field_domain_supported<N, F>() },
     { Plan::POINTS == N },
-    Plan: FactorTree + ScalarStages<N, F>,
+    Plan: FactorTree + StageGrid + ScalarStages<N, F>,
 {
     transform<N, F, Plan>(evaluations, true)
 }
@@ -203,8 +317,8 @@ where
     { (OUT % N) == 0 },
     { InputPlan::POINTS == N },
     { OutputPlan::POINTS == OUT },
-    InputPlan: FactorTree + ScalarStages<N, F>,
-    OutputPlan: FactorTree + ScalarStages<OUT, F>,
+    InputPlan: FactorTree + StageGrid + ScalarStages<N, F>,
+    OutputPlan: FactorTree + StageGrid + ScalarStages<OUT, F>,
 {
     let zero = F::radix2_zero()
     let one = F::radix2_root(0)
@@ -251,7 +365,7 @@ impl<Plan> ScalarTransform<Plan> {
         { (N & (N - 1)) == 0 },
         { radix2_field_domain_supported<N, F>() },
         { Plan::POINTS == N },
-        Plan: FactorTree + ScalarStages<N, F>,
+        Plan: FactorTree + StageGrid + ScalarStages<N, F>,
     {
         scalar_ntt<N, F, Plan>(values)
     }
@@ -265,7 +379,7 @@ impl<Plan> ScalarTransform<Plan> {
         { (N & (N - 1)) == 0 },
         { radix2_field_domain_supported<N, F>() },
         { Plan::POINTS == N },
-        Plan: FactorTree + ScalarStages<N, F>,
+        Plan: FactorTree + StageGrid + ScalarStages<N, F>,
     {
         scalar_intt<N, F, Plan>(values)
     }
