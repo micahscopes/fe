@@ -4698,7 +4698,9 @@ impl WebBundle {
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
         if !scoped_tasks.is_empty() {
-            wasm_options = wasm_options.with_canonical_stack_memory(["fe_cabi_post_return"]);
+            wasm_options = wasm_options
+                .with_canonical_stack_memory(["fe_cabi_post_return"])
+                .with_canonical_scoped_host_borrows();
         }
         if let Some(contract) = typed_transition.as_ref() {
             wasm_options = with_typed_surface_export(

@@ -593,8 +593,9 @@ fn compile_structured_children_with_ancestry<'db>(
                 optimize,
                 &child_ancestry,
             )?;
-            let task_options =
-                WasmCompileOptions::default().with_canonical_stack_memory(["fe_cabi_post_return"]);
+            let task_options = WasmCompileOptions::default()
+                .with_canonical_stack_memory(["fe_cabi_post_return"])
+                .with_canonical_scoped_host_borrows();
             let task_options = if optimize {
                 task_options.with_optimization()
             } else {
@@ -1188,7 +1189,9 @@ pub fn compile_resident_actor_with_optimization(
     let options = if scoped_tasks.is_empty() {
         WasmCompileOptions::default()
     } else {
-        WasmCompileOptions::default().with_canonical_stack_memory(["fe_cabi_post_return"])
+        WasmCompileOptions::default()
+            .with_canonical_stack_memory(["fe_cabi_post_return"])
+            .with_canonical_scoped_host_borrows()
     }
     .with_resident_actor_transition_checked(
         &contract.source_entry,

@@ -52,6 +52,7 @@ function validateLane(value, lane, name) {
       return integer(value, -half, half - 1, name);
     }
     case "unsigned":
+    case "borrowed_pointer":
     case "fixed_bytes":
     case "enum_tag": {
       if (lane.bits === 64) return bigint(value, lane.bits, false, name);
@@ -74,6 +75,7 @@ function encodeLane(value, lane, name) {
   switch (lane.kind) {
     case "bool": return checked ? 1 : 0;
     case "unsigned":
+    case "borrowed_pointer":
     case "fixed_bytes":
     case "enum_tag":
       return lane.bits === 64 ? BigInt.asIntN(64, checked) : checked | 0;
@@ -96,6 +98,7 @@ function decodeLane(value, lane, name) {
       if (!Number.isInteger(value)) throw new TypeError(`${name} is not an integer`);
       return lane.bits === 32 ? value | 0 : (value << (32 - lane.bits)) >> (32 - lane.bits);
     case "unsigned":
+    case "borrowed_pointer":
     case "fixed_bytes":
     case "enum_tag": {
       let decoded;
@@ -133,6 +136,132 @@ function vector(value, lanes, name, encode) {
     throw new TypeError(`${name} must contain exactly ${lanes.length} lanes`);
   }
   return value.map((lane, index) => encode(lane, lanes[index], `${name}[${index}]`));
+}
+
+function descriptorLengthSchema(schemas, index, name) {
+  const length = schemas[index + 1];
+  if (length?.kind !== "unsigned" || length.bits !== 32) {
+    throw new TypeError(`${name}[${index}] borrowed pointer is not followed by a u32 length`);
+  }
+  return length;
+}
+
+function descriptorSize(length, pointerSchema, name) {
+  const checked = integer(length, 0, pointerSchema.max, `${name} length`);
+  const size = checked * pointerSchema.stride;
+  if (!Number.isSafeInteger(size) || size > 0xffff_ffff) {
+    throw new TypeError(`${name} byte length exceeds wasm32 memory`);
+  }
+  return { length: checked, size };
+}
+
+function memoryRange(memory, pointer, size, align, name) {
+  const checkedPointer = integer(pointer, 0, 0xffff_ffff, `${name} pointer`);
+  if (size === 0) return checkedPointer;
+  if (checkedPointer === 0 || checkedPointer % align !== 0) {
+    throw new TypeError(`${name} pointer is null or misaligned`);
+  }
+  const end = checkedPointer + size;
+  if (!Number.isSafeInteger(end) || end > memory.buffer.byteLength) {
+    throw new RangeError(`${name} payload is outside wasm memory`);
+  }
+  return checkedPointer;
+}
+
+function createBorrowedFrameStorage(wasmExports, required) {
+  if (!required) return undefined;
+  if (!wasmExports || typeof wasmExports !== "object" || Array.isArray(wasmExports)) {
+    throw new TypeError("borrowed task frames require their Wasm exports");
+  }
+  const { memory } = wasmExports;
+  if (!(memory instanceof WebAssembly.Memory)) {
+    throw new TypeError("borrowed task frames require Wasm memory");
+  }
+  const canonicalRealloc = wasmExports.cabi_realloc;
+  const arenaAlloc = wasmExports.fe_cabi_alloc;
+  const checkpoint = wasmExports.fe_cabi_checkpoint;
+  const rewind = wasmExports.fe_cabi_rewind;
+  const realloc = typeof canonicalRealloc === "function"
+    ? (_size, align) => canonicalRealloc(0, 0, align, _size)
+    : typeof arenaAlloc === "function"
+      ? (size, align) => arenaAlloc(size, align)
+      : undefined;
+  if (realloc === undefined || typeof wasmExports.fe_cabi_post_return !== "function"
+      || typeof checkpoint !== "function" || typeof rewind !== "function") {
+    throw new TypeError(
+      "borrowed task frames require canonical allocation, post-return, checkpoint, and rewind",
+    );
+  }
+
+  return Object.freeze({
+    invoke(action) {
+      const cursor = integer(
+        Number(checkpoint()) >>> 0, 0, 0xffff_ffff, "task arena checkpoint",
+      );
+      try {
+        return action();
+      } finally {
+        rewind(cursor);
+      }
+    },
+    capture(values, schemas, name) {
+      const captured = [...values];
+      for (let index = 0; index < schemas.length; index += 1) {
+        const pointerSchema = schemas[index];
+        if (pointerSchema.kind !== "borrowed_pointer") continue;
+        descriptorLengthSchema(schemas, index, name);
+        const { length, size } = descriptorSize(values[index + 1], pointerSchema, name);
+        const pointer = memoryRange(
+          memory, values[index], size, pointerSchema.align, `${name}[${index}]`,
+        );
+        const bytes = size === 0
+          ? new Uint8Array()
+          : new Uint8Array(memory.buffer, pointer, size).slice();
+        captured[index] = Object.freeze({ bytes, length });
+        captured[index + 1] = length;
+        index += 1;
+      }
+      return captured;
+    },
+    lower(values, schemas, allocations, name) {
+      const lowered = [];
+      for (let index = 0; index < schemas.length; index += 1) {
+        const pointerSchema = schemas[index];
+        if (pointerSchema.kind !== "borrowed_pointer") {
+          lowered.push(encodeLane(values[index], pointerSchema, `${name}[${index}]`));
+          continue;
+        }
+        descriptorLengthSchema(schemas, index, name);
+        const owned = values[index];
+        if (!owned || typeof owned !== "object" || Array.isArray(owned)
+            || !(owned.bytes instanceof Uint8Array)) {
+          throw new TypeError(`${name}[${index}] is not runtime-owned borrowed storage`);
+        }
+        const { length, size } = descriptorSize(owned.length, pointerSchema, name);
+        if (owned.bytes.byteLength !== size) {
+          throw new TypeError(`${name}[${index}] payload length drifted`);
+        }
+        let pointer = 0;
+        if (size !== 0) {
+          pointer = Number(realloc(size, pointerSchema.align)) >>> 0;
+          memoryRange(memory, pointer, size, pointerSchema.align, `${name}[${index}]`);
+          new Uint8Array(memory.buffer, pointer, size).set(owned.bytes);
+          allocations.push(Object.freeze({ pointer, size, align: pointerSchema.align }));
+        }
+        lowered.push(pointer, length);
+        index += 1;
+      }
+      return lowered;
+    },
+    release(allocations) {
+      while (allocations.length !== 0) {
+        const allocation = allocations.pop();
+        wasmExports.fe_cabi_post_return(
+          allocation.pointer, allocation.size, allocation.align,
+        );
+      }
+    },
+  });
 }
 
 function resultVector(value, lanes, name) {
@@ -436,12 +565,20 @@ export function materializeTaskOutcome(pending, trace) {
   );
 }
 
-export function createMaterializedTaskMachine(definition) {
+export function createMaterializedTaskMachine(definition, wasmExports) {
   validateDefinition(definition);
   const byState = new Map(definition.continuations.map(continuation => [continuation.state, {
     ...continuation,
     handler: Object.freeze({}),
   }]));
+  const frameHasBorrowedStorage = continuation => definition.step.slice(
+    continuation.frame.start,
+    continuation.frame.start + continuation.frame.count,
+  ).some(lane => lane.kind === "borrowed_pointer");
+  const frameStorage = createBorrowedFrameStorage(
+    wasmExports,
+    definition.continuations.some(frameHasBorrowedStorage),
+  );
 
   const decodeStep = (raw) => {
     const lanes = resultVector(raw, definition.step, "task step");
@@ -476,12 +613,19 @@ export function createMaterializedTaskMachine(definition) {
     });
     pendingDetails.set(pending, continuation);
     const frame = Object.freeze({});
+    const frameSchemas = definition.step.slice(
+      continuation.frame.start,
+      continuation.frame.start + continuation.frame.count,
+    );
+    const frameLanes = lanes.slice(
+      continuation.frame.start,
+      continuation.frame.start + continuation.frame.count,
+    );
     frameDetails.set(frame, {
       continuation,
-      lanes: lanes.slice(
-        continuation.frame.start,
-        continuation.frame.start + continuation.frame.count,
-      ),
+      lanes: frameHasBorrowedStorage(continuation)
+        ? frameStorage.capture(frameLanes, frameSchemas, "task frame")
+        : frameLanes,
     });
     return Object.freeze({ kind: "suspended", pending, frame });
   };
@@ -493,7 +637,8 @@ export function createMaterializedTaskMachine(definition) {
     },
     start(input) {
       const lanes = vector(input, definition.input, "task input", encodeLane);
-      return decodeStep(definition.start(...lanes));
+      const invoke = () => decodeStep(definition.start(...lanes));
+      return frameStorage === undefined ? invoke() : frameStorage.invoke(invoke);
     },
     resume(frame, outcome) {
       const saved = frameDetails.get(frame);
@@ -523,8 +668,16 @@ export function createMaterializedTaskMachine(definition) {
         continuation.frame.start,
         continuation.frame.start + continuation.frame.count,
       );
-      const encodedFrame = vector(frameLanes, frameSchemas, "task frame", encodeLane);
-      return decodeStep(continuation.invoke(...encodedFrame, ...encoded));
+      const allocations = [];
+      try {
+        const encodedFrame = frameHasBorrowedStorage(continuation)
+          ? frameStorage.lower(frameLanes, frameSchemas, allocations, "task frame")
+          : vector(frameLanes, frameSchemas, "task frame", encodeLane);
+        const invoke = () => decodeStep(continuation.invoke(...encodedFrame, ...encoded));
+        return frameStorage === undefined ? invoke() : frameStorage.invoke(invoke);
+      } finally {
+        frameStorage?.release(allocations);
+      }
     },
   });
 }

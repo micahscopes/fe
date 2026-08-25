@@ -1345,16 +1345,29 @@ done; do not derive a second master checklist from its historical ledger.
   generated post-return release. Resumable Wasm arena reclamation is derived
   from semantic descriptor identity, exact suspension liveness, pending-token
   SSA lineage, a closed pure-callee graph, and the nominal `AskBegin` effect.
-  Borrowed descriptors in a persisted frame or completed rich helper result
-  remain ineligible, while a public task that consumes them before returning
-  reclaims both its entry and continuation segment allocations. The executed
+  A descriptor may now persist through a later suspension without retaining
+  its Wasm allocation. The compiler marks its pointer lane from semantic
+  `#[host_type]` identity and derives byte stride, alignment, and maximum length
+  from the canonical type. The fixed adapter copies the payload into private
+  owned bytes before the host response is released, then re-lowers it only for
+  the exact synchronous continuation call. Sonatina commit `48b3ba7e` exposes
+  opaque checkpoint/rewind authority only when the frontend enables scoped
+  host borrows. The adapter checkpoints after any input allocation, captures
+  the returned rich frame, rewinds every segment-local allocation on success,
+  malformed output, trap, or cancellation, and finally releases the input in
+  checked LIFO order. No Wasm pointer survives an await and no global arena
+  reset, application schema, field name, or JSON protocol was added. Completed
+  rich task outputs still require the same ownership projection before they
+  can become a general parent-task payload. The executed
   rich parent/child gate sends UTF-8 text, bytes, and a bounded u32 list through
   Fe, validates every value in Fe, returns receipt `533`, and observes the
   allocator at its exact baseline with no completion-token leak. Release gates
   pass for all 13 resident-actor cases, both Worker-mailbox cases, the generated
-  rich WebIDL continuation, nine canonical-interface cases, and all 37 fixed
-  completion-broker cases. Rich `MessagePort` attachment and the render-owned
-  DEC Chromium path remain separate placement gates.
+  rich WebIDL continuation across two concurrent nested suspensions plus
+  cancellation, nine canonical-interface cases, all nine materialized-task
+  mechanics cases, and all 37 fixed completion-broker cases. Rich task outputs,
+  rich `MessagePort` attachment, and the render-owned DEC Chromium path remain
+  separate placement gates.
 - The first deterministic-time and sharing policy set now executes as ordinary
   host-free Fe values. `VirtualTime` rejects rewind, leading `Throttle` records
   only admitted instants, trailing `Debounce<T>` replaces and explicitly

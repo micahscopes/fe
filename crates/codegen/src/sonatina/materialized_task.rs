@@ -12,10 +12,7 @@ use compiler_db::DriverDataBase;
 use hir::{analysis::ty::adt_def::AdtRef, hir_def::HostType};
 use mir::{Layout, LayoutId, RuntimeClass, RuntimeLinkage, RuntimePackage, ScalarRepr, ScalarRole};
 
-use crate::{
-    CanonicalType, canonical_interface::semantic_type_retains_borrowed_host_storage,
-    canonical_type_from_semantic,
-};
+use crate::{CanonicalType, canonical_type_from_semantic};
 
 use super::{LowerError, lower_runtime::assign_sonatina_function_symbols};
 
@@ -29,6 +26,7 @@ pub enum WasmTaskScalar {
     Bool,
     Signed { bits: u16 },
     Unsigned { bits: u16 },
+    BorrowedPointer { stride: u32, align: u32, max: u32 },
     FixedBytes { bits: u16 },
     F32,
     EnumTag { bits: u16, variants: u32 },
@@ -40,6 +38,9 @@ impl WasmTaskScalar {
             Self::Bool => "{ kind: \"bool\", bits: 1 }".to_owned(),
             Self::Signed { bits } => format!("{{ kind: \"signed\", bits: {bits} }}"),
             Self::Unsigned { bits } => format!("{{ kind: \"unsigned\", bits: {bits} }}"),
+            Self::BorrowedPointer { stride, align, max } => format!(
+                "{{ kind: \"borrowed_pointer\", bits: 32, stride: {stride}, align: {align}, max: {max} }}"
+            ),
             Self::FixedBytes { bits } => {
                 format!("{{ kind: \"fixed_bytes\", bits: {bits} }}")
             }
@@ -151,9 +152,10 @@ fn scalar_lane(
 
 fn canonical_descriptor_pointer_lane(
     class: &RuntimeClass<'_>,
+    descriptor: &CanonicalType,
     path: &str,
 ) -> Result<WasmTaskScalar, LowerError> {
-    match class {
+    let valid = match class {
         RuntimeClass::Scalar(scalar)
             if matches!(
                 scalar.repr,
@@ -163,15 +165,26 @@ fn canonical_descriptor_pointer_lane(
                 } | ScalarRepr::Address { bits: 32 }
             ) =>
         {
-            Ok(WasmTaskScalar::Unsigned { bits: 32 })
+            true
         }
-        RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
-            Ok(WasmTaskScalar::Unsigned { bits: 32 })
-        }
-        _ => Err(unsupported(format!(
+        RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => true,
+        _ => false,
+    };
+    if !valid {
+        return Err(unsupported(format!(
             "explicit canonical descriptor `{path}` has no wasm32 pointer carrier"
-        ))),
+        )));
     }
+    let (stride, align, max) = match descriptor {
+        CanonicalType::Bytes | CanonicalType::String => (1, 1, u32::MAX),
+        CanonicalType::List { max, .. } => (4, 4, *max),
+        _ => {
+            return Err(LowerError::Internal(
+                "borrowed pointer metadata requested for a scalar canonical type".to_owned(),
+            ));
+        }
+    };
+    Ok(WasmTaskScalar::BorrowedPointer { stride, align, max })
 }
 
 fn canonical_descriptor_length_lane(
@@ -237,7 +250,7 @@ fn canonical_descriptor_lanes<'db>(
         ));
     };
     Ok(Some([
-        canonical_descriptor_pointer_lane(pointer, "task_descriptor.ptr")?,
+        canonical_descriptor_pointer_lane(pointer, &descriptor, "task_descriptor.ptr")?,
         canonical_descriptor_length_lane(length, "task_descriptor.len")?,
     ]))
 }
@@ -301,28 +314,6 @@ fn flatten_classes<'db>(
         flatten_class(db, class, &mut active, &mut output)?;
     }
     Ok(output)
-}
-
-fn reject_borrowed_host_frame<'db>(
-    db: &'db DriverDataBase,
-    plan: &mir::RuntimeResumableBodyPlan<'db>,
-    live_values: &[mir::RLocalId],
-    task: &str,
-    state: u32,
-) -> Result<(), LowerError> {
-    for local in live_values {
-        let semantic_ty = plan
-            .flattened_body
-            .local(*local)
-            .ok_or_else(|| LowerError::Internal("live runtime local is missing".to_owned()))?
-            .semantic_ty;
-        if semantic_type_retains_borrowed_host_storage(db, semantic_ty) {
-            return Err(unsupported(format!(
-                "task `{task}` continuation {state} retains borrowed browser storage; copy it into Fe-owned storage before suspending again"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn delivery_layout<'db>(
@@ -449,13 +440,6 @@ pub fn materialized_task_adapters<'db>(
             .zip(machine.continuations.iter())
             .zip(variant_ranges.into_iter().skip(1))
         {
-            reject_borrowed_host_frame(
-                db,
-                &plan,
-                &point.live_values,
-                &name,
-                point.continuation_state,
-            )?;
             let pending_class = plan
                 .flattened_body
                 .value_class(match point.cause {
@@ -595,7 +579,7 @@ pub fn emit_materialized_task_adapter_js(
                 continuation.delivery.success.javascript(),
             ));
         }
-        source.push_str("    ],\n  });\n");
+        source.push_str("    ],\n  }, wasmExports);\n");
     }
     source.push_str("  return Object.freeze(registry);\n}\n");
     Ok(Some(source))

@@ -363,6 +363,22 @@ existing Definition of done, not a second campaign checklist:
   rich WebIDL continuation, 9/9 canonical-interface cases, and 37/37 fixed
   completion-broker cases. No request field schema, response-width table,
   actor selector, or runtime manifest was added.
+  Rich values may now remain live through a second suspension without retaining
+  canonical Wasm storage. Semantic `#[host_type]` identity makes the compiler
+  emit a borrowed descriptor lane with derived stride, alignment, and maximum
+  length. The fixed task adapter copies the returned bytes synchronously into
+  private owned storage, while Sonatina commit `48b3ba7e` supplies an opt-in
+  opaque checkpoint/rewind pair for this generated protocol. Each start or
+  resume checkpoints after live input allocations, captures a returned rich
+  frame, rewinds the segment-local suffix, and then releases any re-lowered
+  input through checked post-return. No pointer, Wasm allocation, field schema,
+  or JSON survives the await. Fixed mechanics reject missing cleanup authority,
+  invalid lengths, null, misaligned, and out-of-bounds descriptors. The compiled
+  release gate runs two different UTF-8 values concurrently through a later
+  timer suspension, then cancels a third task during that later suspension;
+  values remain exact, broker tokens return to zero, and the allocator returns
+  to its byte-exact baseline. The 9/9 task-machine and 37/37 completion-broker
+  suites are green. General owned rich task results remain open.
   Recursive nominal scopes now compose through arbitrary acyclic package
   depth. The compiler follows each child actor's own `ScopedTask` roots,
   recursively derives its nominal children, materializes the nested package

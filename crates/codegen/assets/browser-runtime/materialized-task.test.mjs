@@ -15,6 +15,51 @@ const state = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const outcome = Object.freeze({ kind: "enum_tag", bits: 8, variants: 3 });
 const race = Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 });
 const select = Object.freeze({ kind: "enum_tag", bits: 8, variants: 6 });
+const borrowedBytes = Object.freeze({
+  kind: "borrowed_pointer", bits: 32, stride: 1, align: 1, max: 16,
+});
+
+function scopedWasm() {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const allocations = [];
+  let cursor = 1024;
+  const allocate = (size, align) => {
+    const pointer = Math.ceil(cursor / align) * align;
+    const previous = cursor;
+    cursor = pointer + size;
+    allocations.push({ pointer, size, align, previous });
+    return pointer;
+  };
+  return {
+    exports: {
+      memory,
+      cabi_realloc(oldPointer, oldSize, align, newSize) {
+        if (oldPointer !== 0 || oldSize !== 0 || newSize === 0) {
+          throw new Error("fake canonical allocator only accepts fresh allocations");
+        }
+        return allocate(newSize, align);
+      },
+      fe_cabi_post_return(pointer, size, align) {
+        const top = allocations.pop();
+        if (top === undefined || top.pointer !== pointer || top.size !== size || top.align !== align) {
+          throw new Error("fake canonical post-return is not LIFO");
+        }
+        cursor = top.previous;
+      },
+      fe_cabi_checkpoint() { return cursor; },
+      fe_cabi_rewind(checkpoint) {
+        if (!Number.isInteger(checkpoint) || checkpoint < 1024 || checkpoint > cursor) {
+          throw new Error("fake canonical rewind rejected its checkpoint");
+        }
+        while (allocations.at(-1)?.pointer >= checkpoint) allocations.pop();
+        cursor = checkpoint;
+      },
+    },
+    allocate,
+    bytes(pointer, values) { new Uint8Array(memory.buffer, pointer, values.length).set(values); },
+    cursor() { return cursor; },
+  };
+}
 
 function definition(overrides = {}) {
   return {
@@ -128,6 +173,83 @@ describe("compiler-materialized browser task machine", () => {
       start: () => [3, 0, 0, 0, 0, 0, 0],
     }));
     expect(() => badTag.start([1, 2, 3])).toThrow(/declared Fe enum variant/);
+  });
+
+  test("copies borrowed frames and rewinds every synchronous Wasm segment", () => {
+    const wasm = scopedWasm();
+    let expected = [11, 22, 33];
+    const rich = {
+      input: [],
+      step: [Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 }), u32, u32,
+        borrowedBytes, u32],
+      complete: { start: 1, count: 1 },
+      start() {
+        const pointer = wasm.allocate(expected.length, 1);
+        wasm.bytes(pointer, expected);
+        return [1, 0, 41, pointer, expected.length];
+      },
+      continuations: [{
+        state: 1,
+        range: { start: 2, count: 3 },
+        pending: { start: 2, count: 1 },
+        frame: { start: 3, count: 2 },
+        delivery: {
+          lanes: [outcome, u32, u32],
+          failure: { start: 1, count: 1 },
+          success: { start: 2, count: 1 },
+        },
+        invoke(pointer, length, tag, error, value) {
+          const actual = [...new Uint8Array(wasm.exports.memory.buffer, pointer, length)];
+          expect(actual).toEqual(expected);
+          const transient = wasm.allocate(23, 1);
+          wasm.bytes(transient, new Array(23).fill(99));
+          return [0, tag === 1 ? actual.reduce((sum, byte) => sum + byte, value) : error, 0, 0, 0];
+        },
+      }],
+    };
+    const machine = createMaterializedTaskMachine(rich, wasm.exports);
+    const suspended = machine.start([]);
+    expect(wasm.cursor()).toBe(1024);
+    expected = [11, 22, 33];
+    new Uint8Array(wasm.exports.memory.buffer).fill(0, 1024, 1100);
+    expect(machine.resume(suspended.frame, taskSuccess([4]))).toEqual({
+      kind: "complete",
+      output: [70],
+    });
+    expect(wasm.cursor()).toBe(1024);
+  });
+
+  test("rich-frame capture fails closed and still rewinds", () => {
+    const wasm = scopedWasm();
+    const bad = definition({
+      input: [],
+      step: [Object.freeze({ kind: "enum_tag", bits: 8, variants: 2 }), u32, u32,
+        borrowedBytes, u32],
+      complete: { start: 1, count: 1 },
+      start() {
+        wasm.allocate(19, 1);
+        return [1, 0, 41, 0xffff_fff8, 16];
+      },
+      continuations: [{
+        state: 1,
+        range: { start: 2, count: 3 },
+        pending: { start: 2, count: 1 },
+        frame: { start: 3, count: 2 },
+        delivery: {
+          lanes: [outcome, u32, u32],
+          failure: { start: 1, count: 1 },
+          success: { start: 2, count: 1 },
+        },
+        invoke() { return [0, 0, 0, 0, 0]; },
+      }],
+    });
+    const machine = createMaterializedTaskMachine(bad, wasm.exports);
+    expect(() => machine.start([])).toThrow(/outside wasm memory/);
+    expect(wasm.cursor()).toBe(1024);
+    expect(() => createMaterializedTaskMachine(bad, {
+      ...wasm.exports,
+      fe_cabi_checkpoint: undefined,
+    })).toThrow(/checkpoint, and rewind/);
   });
 
   test("same-payload races are packed from the continuation schema", () => {

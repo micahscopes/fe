@@ -162,6 +162,7 @@ pub(crate) struct WasmResidentPolicy {
 pub struct WasmCompileOptions {
     canonical_arena: bool,
     canonical_stack_post_returns: Vec<String>,
+    canonical_stack_scoped_host_borrows: bool,
     canonical_lanes: Vec<crate::CanonicalLane>,
     /// At most one compiler-lowered resident actor transition. Its underlying
     /// authored Fe behavior stays private; the fixed wrapper and state-seeding
@@ -203,6 +204,14 @@ impl WasmCompileOptions {
         post_returns: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.canonical_stack_post_returns = post_returns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Let a compiler-generated synchronous host adapter checkpoint the
+    /// canonical stack, copy borrowed task results, and rewind the exact
+    /// invocation suffix. This is not a general application allocator API.
+    pub fn with_canonical_scoped_host_borrows(mut self) -> Self {
+        self.canonical_stack_scoped_host_borrows = true;
         self
     }
 
@@ -415,11 +424,15 @@ pub fn compile_runtime_package_wasm_with_options(
     // `BackendKind::Wasm` driver scan in `backend.rs`. A no-alloc module stays
     // byte-identical to the pre-arena default, preserving the opt-in assertions.
     let backend = if !options.canonical_stack_post_returns.is_empty() {
-        backend.with_canonical_stack_memory(
-            sonatina_codegen::isa::wasm::CanonicalStackMemoryManifest::new(
-                options.canonical_stack_post_returns,
-            ),
-        )
+        let manifest = sonatina_codegen::isa::wasm::CanonicalStackMemoryManifest::new(
+            options.canonical_stack_post_returns,
+        );
+        let manifest = if options.canonical_stack_scoped_host_borrows {
+            manifest.with_scoped_host_borrows()
+        } else {
+            manifest
+        };
+        backend.with_canonical_stack_memory(manifest)
     } else if options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module) {
         backend.with_canonical_arena()
     } else {
