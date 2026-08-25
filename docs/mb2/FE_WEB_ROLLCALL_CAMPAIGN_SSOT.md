@@ -102,12 +102,16 @@ existing Definition of done, not a second campaign checklist:
   recursive interval topology, rejecting boundary and order mutations.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
-  mutation, timing, and device-loss evidence. Its first honest public claim is
-  existential and finite: a private parameter `c` lies inside the user-drawn
-  disk and its critical orbit remains bounded through public iteration bound
-  `N`. The receipt must not relabel this as full Mandelbrot membership or
-  convergence. A later attracting-fixed-point mode may instead prove a
-  rigorous invariant-neighborhood and contraction certificate.
+  mutation, timing, and device-loss evidence. A click selects one private
+  parameter and therefore a zero-radius public disk; optional dragging expands
+  the public disk around that witness. The user selects one of two existential
+  predicates: the hidden point's critical orbit survives through public bound
+  `N`, or it escapes by `N`. The receipt binds the disk, bound, and predicate,
+  while the point and orbit may remain private. Escape is a definitive
+  non-membership certificate; survival is only a finite bounded-prefix claim
+  and must not be relabeled as full membership or convergence. A later
+  attracting-fixed-point mode may instead prove a rigorous invariant-
+  neighborhood and contraction certificate.
 - [ ] **G-INSPECT:** the Fe SourceInspector presents authored, semantic,
   analysis, placement, ABI/layout, artifact, and evidence views from one
   content-addressed `SourceAtlas`, with no gallery `docs.json` or runtime render
@@ -1846,9 +1850,10 @@ existing Definition of done, not a second campaign checklist:
   plan, not a fresh NTT implementation.
 - [ ] Build and run the complete recursive proof experience in the canonical
   gallery after the BabyBear prover exists. The Fe-authored component lets a
-  user draw a disk, selects a private high-precision Mandelbrot parameter
-  inside it, and proves that its critical orbit remains bounded through a
-  public iteration bound. It schedules leaf chunks progressively on WebGPU,
+  user click a private high-precision Mandelbrot parameter, optionally drag to
+  expand a public disk around it, and prove either survival through a public
+  iteration bound or escape by that bound. It schedules leaf chunks
+  progressively on WebGPU,
   recursively merges adjacent certified intervals, presents the typed receipt
   plus proof-size and timing evidence, and verifies it in-browser through Fe.
   The circle relation and orbit witness remain inside the same proof rather
