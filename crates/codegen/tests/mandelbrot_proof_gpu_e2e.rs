@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
-    WebScalarKind, resolve_web_entry,
+    resolve_web_entry, WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle,
+    WebBundleMode, WebScalarKind,
 };
 use hir::hir_def::HirIngot;
 use p3_baby_bear::{
-    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL,
-    BABYBEAR_POSEIDON2_RC_16_INTERNAL, BabyBear, default_babybear_poseidon2_16,
+    default_babybear_poseidon2_16, BabyBear, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL,
+    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, BABYBEAR_POSEIDON2_RC_16_INTERNAL,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
@@ -46,6 +46,8 @@ const PARAMETER_START: usize = 267;
 const PROOF_WORDS: usize = PARAMETER_START + ROUND_CONSTANT_COUNT;
 const TAMPER_LDE_FIELD: usize = 17;
 const DOMAIN: [u8; 4] = *b"MGDL";
+const COMPUTE_PASSES: usize = 9;
+const COMMITMENT_PASS: usize = 7;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -134,10 +136,15 @@ struct BoundPass {
     buffers: Vec<(u32, WebBindingRole, wgpu::Buffer)>,
 }
 
+struct DeviceResource {
+    name: String,
+    buffer: wgpu::Buffer,
+}
+
 fn compile_kernels(device: &wgpu::Device, bundle: &WebBundle) -> Vec<ComputeKernel> {
-    bundle.manifest.passes[..5]
+    bundle.manifest.passes[..COMPUTE_PASSES]
         .iter()
-        .zip(&bundle.pass_wgsl[..5])
+        .zip(&bundle.pass_wgsl[..COMPUTE_PASSES])
         .map(|(pass, shader)| {
             let entries = pass
                 .layout
@@ -178,6 +185,33 @@ fn compile_kernels(device: &wgpu::Device, bundle: &WebBundle) -> Vec<ComputeKern
             ComputeKernel { layout, pipeline }
         })
         .collect()
+}
+
+fn allocate_resources(device: &wgpu::Device, bundle: &WebBundle) -> Vec<DeviceResource> {
+    bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| DeviceResource {
+            name: resource.name.clone(),
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(resource.name.as_str()),
+                size: u64::from(resource.length) * 4,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        })
+        .collect()
+}
+
+fn resource<'a>(resources: &'a [DeviceResource], name: &str) -> &'a wgpu::Buffer {
+    &resources
+        .iter()
+        .find(|resource| resource.name == name)
+        .unwrap_or_else(|| panic!("missing actor resource `{name}`"))
+        .buffer
 }
 
 fn largest_wgsl_functions(source: &str, count: usize) -> Vec<(&str, usize)> {
@@ -225,10 +259,10 @@ fn bind_case(
     queue: &wgpu::Queue,
     bundle: &WebBundle,
     kernels: &[ComputeKernel],
-    proof: &wgpu::Buffer,
+    resources: &[DeviceResource],
     tamper: f32,
 ) -> Vec<BoundPass> {
-    bundle.manifest.passes[..5]
+    bundle.manifest.passes[..COMPUTE_PASSES]
         .iter()
         .zip(kernels)
         .map(|(pass, kernel)| {
@@ -267,8 +301,7 @@ fn bind_case(
                 .iter()
                 .map(|binding| {
                     let resource = if binding.role == WebBindingRole::Resource {
-                        assert_eq!(binding.name, "proof");
-                        proof.as_entire_binding()
+                        resource(resources, binding.name.as_str()).as_entire_binding()
                     } else {
                         buffers
                             .iter()
@@ -333,15 +366,9 @@ fn execute_case(
     tamper: f32,
 ) -> ExecutionReceipt {
     let proof_bytes = (PROOF_WORDS * 4) as u64;
-    let proof = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Fe Mandelbrot proof tape"),
-        size: proof_bytes,
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let bound = bind_case(device, queue, bundle, kernels, &proof, tamper);
+    let resources = allocate_resources(device, bundle);
+    let proof = resource(&resources, "proof");
+    let bound = bind_case(device, queue, bundle, kernels, &resources, tamper);
     let trap_bytes = bound
         .iter()
         .flat_map(|pass| &pass.buffers)
@@ -358,8 +385,10 @@ fn execute_case(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Fe Mandelbrot proof graph"),
     });
-    for ((manifest_pass, kernel), resources) in
-        bundle.manifest.passes[..5].iter().zip(kernels).zip(&bound)
+    for ((manifest_pass, kernel), resources) in bundle.manifest.passes[..COMPUTE_PASSES]
+        .iter()
+        .zip(kernels)
+        .zip(&bound)
     {
         let dispatch = manifest_pass.dispatch.expect("compute dispatch");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -561,12 +590,35 @@ fn assert_receipt(receipt: &ExecutionReceipt, tampered: bool, expected_lde: &[u3
 #[test]
 fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
     let bundle = compile_proof_graph();
-    assert_eq!(bundle.manifest.resources.len(), 1);
-    assert_eq!(bundle.manifest.resources[0].name, "proof");
-    assert_eq!(bundle.manifest.resources[0].length, PROOF_WORDS as u32);
-    assert_eq!(bundle.manifest.passes.len(), 6);
-    assert_eq!(bundle.manifest.passes[3].repeat, 396);
-    assert_eq!(bundle.manifest.passes[3].layout.workgroup_size, [32, 1, 1]);
+    assert_eq!(bundle.manifest.resources.len(), 6);
+    assert_eq!(
+        bundle
+            .manifest
+            .resources
+            .iter()
+            .map(|resource| (resource.name.as_str(), resource.length))
+            .collect::<Vec<_>>(),
+        vec![
+            ("proof", PROOF_WORDS as u32),
+            ("lde_inverse_values", 16),
+            ("lde_inverse_progress", 8),
+            ("lde_values", 64),
+            ("lde_progress", 32),
+            ("lde_coset_valid", 4),
+        ]
+    );
+    assert_eq!(bundle.manifest.passes.len(), COMPUTE_PASSES + 1);
+    assert_eq!(bundle.manifest.passes[2].repeat, 2);
+    assert_eq!(bundle.manifest.passes[2].layout.workgroup_size, [8, 1, 1]);
+    assert_eq!(bundle.manifest.passes[4].repeat, 4);
+    assert_eq!(bundle.manifest.passes[4].layout.workgroup_size, [32, 1, 1]);
+    assert_eq!(bundle.manifest.passes[COMMITMENT_PASS].repeat, 396);
+    assert_eq!(
+        bundle.manifest.passes[COMMITMENT_PASS]
+            .layout
+            .workgroup_size,
+        [32, 1, 1]
+    );
 
     let Some((adapter, device, queue)) = request_browser_profile_device() else {
         return;
@@ -587,7 +639,7 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
     );
     eprintln!(
         "  Mandelbrot proof largest commitment functions: {:?}",
-        largest_wgsl_functions(&bundle.pass_wgsl[3].source, 12)
+        largest_wgsl_functions(&bundle.pass_wgsl[COMMITMENT_PASS].source, 12)
     );
     let pipeline_started = std::time::Instant::now();
     let kernels = compile_kernels(&device, &bundle);

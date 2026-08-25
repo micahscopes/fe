@@ -6,5 +6,7 @@ version = "0.1.0"
 core = { path = "../../../ingots/core" }
 fmath = { path = "../fmath" }
 mandelbrot_proof_kernel = { path = "../../capstones/mandelbrot-proof/kernel" }
+parallel_ntt_webgpu = { path = "../../../ingots/parallel_ntt_webgpu" }
+parallel_structure = { path = "../../../ingots/parallel_structure" }
 poseidon_baby_bear = { path = "../../../ingots/poseidon_baby_bear" }
 precision = { path = "../precision" }

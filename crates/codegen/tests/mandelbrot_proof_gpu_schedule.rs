@@ -1,21 +1,21 @@
-//! Executed exactness gate for the first balanced Mandelbrot proof workgroup.
+//! Focused execution gate for the staged Mandelbrot proof LDE.
 //!
-//! The Fe schedule type derives four independent LDE tasks. This test compiles
-//! only that actor behavior, executes its four physical lanes through WebGPU,
-//! and compares every output against a direct inverse DFT plus polynomial
-//! evaluation. The oracle deliberately does not replay Fe's radix-2
+//! The test initializes only the four trace columns, executes the five
+//! Fe-authored LDE passes in manifest order, and compares every output with a
+//! direct inverse DFT plus polynomial evaluation. It also checks the exact
+//! Conal-derived repeat counts, private stage cursors, coset predicates, and
+//! compiler trap lanes. The oracle deliberately does not replay Fe's radix-two
 //! butterflies.
 
 use std::path::{Path, PathBuf};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::compile_runtime_package_spirv_compute_with_interface;
-use hir::hir_def::HirIngot;
-use sonatina_codegen::isa::spirv::{
-    Access, Role, SpirvBuiltinArgument, SpirvBuiltinSource, SpirvExternalResource,
-    SpirvResourceElement, SpirvScalarKind,
+use fe_codegen::{
+    resolve_web_entry, WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle,
+    WebBundleMode,
 };
+use hir::hir_def::HirIngot;
 use url::Url;
 
 const MODULUS: u32 = 2_013_265_921;
@@ -23,9 +23,11 @@ const TWO_ADICITY: u32 = 27;
 const TRACE_ROWS: usize = 4;
 const LDE_ROWS: usize = 16;
 const COLUMN_COUNT: usize = 4;
-const PROOF_WORDS: usize = 139;
+const PROOF_WORDS: usize = 408;
 const LDE_START: usize = 16;
 const LDE_VALID_START: usize = 97;
+const LDE_FIRST_PASS: usize = 1;
+const LDE_PASS_COUNT: usize = 5;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -35,33 +37,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn invocation_builtins() -> Vec<SpirvBuiltinArgument> {
-    use SpirvBuiltinSource as Source;
-    [
-        Source::GlobalInvocationIdX,
-        Source::GlobalInvocationIdY,
-        Source::GlobalInvocationIdZ,
-        Source::LocalInvocationIdX,
-        Source::LocalInvocationIdY,
-        Source::LocalInvocationIdZ,
-        Source::WorkgroupIdX,
-        Source::WorkgroupIdY,
-        Source::WorkgroupIdZ,
-        Source::NumWorkgroupsX,
-        Source::NumWorkgroupsY,
-        Source::NumWorkgroupsZ,
-        Source::LocalInvocationIndex,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(arg_index, source)| SpirvBuiltinArgument {
-        arg_index: arg_index as u32,
-        source,
-    })
-    .collect()
-}
-
-fn compile_lde_workgroup() -> sonatina_codegen::isa::spirv::SpirvArtifact {
+fn compile_lde_graph() -> WebBundle {
     let dir = repo_root().join("demos/sketches/mandelbrot_proof_gpu");
     let mut db = DriverDataBase::default();
     let url = Url::from_directory_path(&dir)
@@ -80,28 +56,15 @@ fn compile_lde_workgroup() -> sonatina_codegen::isa::spirv::SpirvArtifact {
         diagnostics.is_empty(),
         "Mandelbrot proof GPU source diagnostics:\n{diagnostics}"
     );
-
-    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "extend_columns")
-        .expect("balanced LDE behavior should build a runtime package");
-    let proof = SpirvExternalResource {
-        arg_index: 13,
-        group: 0,
-        binding: 0,
-        name: "proof".to_owned(),
-        access: Access::ReadWrite,
-        element: SpirvResourceElement::Scalar(SpirvScalarKind::U32),
-        stride: 4,
-        length: PROOF_WORDS as u32,
-    };
-    compile_runtime_package_spirv_compute_with_interface(
+    let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)
+        .expect("the actor should derive its typed WebGPU entry");
+    assert_eq!(mode, WebBundleMode::Render);
+    WebBundle::compile(
         &db,
-        &package,
-        [COLUMN_COUNT as u32, 1, 1],
-        [1, 1, 1],
-        &[proof],
-        &invocation_builtins(),
+        top_mod,
+        WebBuildOptions::render(entry, Some("demos/sketches/mandelbrot_proof_gpu".into())),
     )
-    .expect("balanced LDE behavior should lower to browser WebGPU")
+    .expect("Mandelbrot proof actor should compile into a WebBundle")
 }
 
 fn request_browser_profile_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
@@ -114,11 +77,11 @@ fn request_browser_profile_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu
     })) {
         Ok(adapter) => adapter,
         Err(error) if allow_skip => {
-            eprintln!("  balanced LDE SKIPPED (MB2_ALLOW_GPU_SKIP): {error:?}");
+            eprintln!("  staged LDE SKIPPED (MB2_ALLOW_GPU_SKIP): {error:?}");
             return None;
         }
         Err(error) => panic!(
-            "balanced LDE has no WebGPU adapter ({error:?}). Set up Vulkan/lavapipe, or set \
+            "staged LDE has no WebGPU adapter ({error:?}). Set up Vulkan/lavapipe, or set \
              MB2_ALLOW_GPU_SKIP to record an explicit non-execution."
         ),
     };
@@ -129,12 +92,178 @@ fn request_browser_profile_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu
         })) {
             Ok(pair) => pair,
             Err(error) if allow_skip => {
-                eprintln!("  balanced LDE SKIPPED (MB2_ALLOW_GPU_SKIP): {error:?}");
+                eprintln!("  staged LDE SKIPPED (MB2_ALLOW_GPU_SKIP): {error:?}");
                 return None;
             }
-            Err(error) => panic!("balanced LDE browser-profile device request failed: {error:?}"),
+            Err(error) => panic!("staged LDE browser-profile device request failed: {error:?}"),
         };
     Some((adapter, device, queue))
+}
+
+fn buffer_type(binding: &WebBinding) -> wgpu::BufferBindingType {
+    wgpu::BufferBindingType::Storage {
+        read_only: binding.access == WebBindingAccess::Read,
+    }
+}
+
+struct DeviceResource {
+    name: String,
+    buffer: wgpu::Buffer,
+}
+
+struct LdePass {
+    pipeline: wgpu::ComputePipeline,
+    group: wgpu::BindGroup,
+    auxiliary: Vec<(WebBindingRole, wgpu::Buffer)>,
+}
+
+fn resource<'a>(resources: &'a [DeviceResource], name: &str) -> &'a wgpu::Buffer {
+    &resources
+        .iter()
+        .find(|resource| resource.name == name)
+        .unwrap_or_else(|| panic!("missing actor resource `{name}`"))
+        .buffer
+}
+
+fn allocate_resources(device: &wgpu::Device, bundle: &WebBundle) -> Vec<DeviceResource> {
+    bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| DeviceResource {
+            name: resource.name.clone(),
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(resource.name.as_str()),
+                size: u64::from(resource.length) * 4,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        })
+        .collect()
+}
+
+fn compile_lde_passes(
+    device: &wgpu::Device,
+    bundle: &WebBundle,
+    resources: &[DeviceResource],
+) -> Vec<LdePass> {
+    let end = LDE_FIRST_PASS + LDE_PASS_COUNT;
+    bundle.manifest.passes[LDE_FIRST_PASS..end]
+        .iter()
+        .zip(&bundle.pass_wgsl[LDE_FIRST_PASS..end])
+        .map(|(pass, shader)| {
+            let module = naga::front::wgsl::parse_str(&shader.source)
+                .unwrap_or_else(|error| panic!("{} WGSL should parse: {error}", pass.source_entry));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{} WGSL should validate: {error}", pass.source_entry));
+
+            let entries = pass
+                .layout
+                .bindings
+                .iter()
+                .map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding: binding.binding,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: buffer_type(binding),
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                })
+                .collect::<Vec<_>>();
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(pass.source_entry.as_str()),
+                entries: &entries,
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(pass.source_entry.as_str()),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(pass.source_entry.as_str()),
+                source: wgpu::ShaderSource::Wgsl(shader.source.as_str().into()),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(pass.source_entry.as_str()),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let auxiliary = pass
+                .layout
+                .bindings
+                .iter()
+                .filter(|binding| binding.role != WebBindingRole::Resource)
+                .map(|binding| {
+                    let usage = match binding.role {
+                        WebBindingRole::Input => {
+                            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+                        }
+                        WebBindingRole::Output => {
+                            wgpu::BufferUsages::STORAGE
+                                | wgpu::BufferUsages::COPY_SRC
+                                | wgpu::BufferUsages::COPY_DST
+                        }
+                        WebBindingRole::Resource => unreachable!(),
+                    };
+                    (
+                        binding.role,
+                        device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(binding.name.as_str()),
+                            size: u64::from(binding.span),
+                            usage,
+                            mapped_at_creation: false,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let bind_entries =
+                pass.layout
+                    .bindings
+                    .iter()
+                    .map(|binding| {
+                        let buffer =
+                            if binding.role == WebBindingRole::Resource {
+                                resource(resources, binding.name.as_str())
+                            } else {
+                                &auxiliary
+                                    .iter()
+                                    .zip(pass.layout.bindings.iter().filter(|candidate| {
+                                        candidate.role != WebBindingRole::Resource
+                                    }))
+                                    .find(|(_, candidate)| candidate.binding == binding.binding)
+                                    .expect("owned pass binding")
+                                    .0
+                                     .1
+                            };
+                        wgpu::BindGroupEntry {
+                            binding: binding.binding,
+                            resource: buffer.as_entire_binding(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(pass.source_entry.as_str()),
+                layout: &layout,
+                entries: &bind_entries,
+            });
+            LdePass {
+                pipeline,
+                group,
+                auxiliary,
+            }
+        })
+        .collect()
 }
 
 fn pow_mod(mut base: u64, mut exponent: u32) -> u32 {
@@ -220,160 +349,7 @@ fn words(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
-#[test]
-fn balanced_lde_schedule_matches_direct_dft_on_webgpu() {
-    let artifact = compile_lde_workgroup();
-    assert_eq!(artifact.layout.workgroup_size, [4, 1, 1]);
-    assert_eq!(artifact.layout.builtin_inputs.len(), 13);
-    let wgsl = artifact.wgsl.as_deref().expect("balanced LDE browser WGSL");
-    eprintln!("  balanced LDE browser WGSL: {} bytes", wgsl.len());
-    let module = naga::front::wgsl::parse_str(wgsl).expect("balanced LDE WGSL should parse");
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::default(),
-    )
-    .validate(&module)
-    .expect("balanced LDE WGSL should validate in the browser profile");
-
-    let proof_binding = artifact
-        .layout
-        .bindings
-        .iter()
-        .find(|binding| binding.role == Role::Resource && binding.name == "proof")
-        .expect("Fe proof tape storage binding");
-    let trap_binding = artifact
-        .layout
-        .bindings
-        .iter()
-        .find(|binding| binding.role == Role::Output && binding.name == "trap")
-        .expect("one compiler trap word per physical LDE lane");
-    let input_binding = artifact
-        .layout
-        .bindings
-        .iter()
-        .find(|binding| binding.role == Role::Input)
-        .expect("actor scalar-state broadcast binding");
-    assert_eq!(proof_binding.resource_length, Some(PROOF_WORDS as u32));
-    assert_eq!(trap_binding.span, (COLUMN_COUNT * 4) as u32);
-    assert_eq!(input_binding.span, 8, "tamper and resolution state words");
-
-    let Some((adapter, device, queue)) = request_browser_profile_device() else {
-        return;
-    };
-    eprintln!(
-        "  balanced LDE WebGPU adapter (no required features): {}",
-        adapter.get_info().name
-    );
-
-    let proof_bytes = (PROOF_WORDS * 4) as u64;
-    let trap_bytes = u64::from(trap_binding.span);
-    let proof = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Fe balanced LDE proof tape"),
-        size: proof_bytes,
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let trap = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Fe balanced LDE trap lanes"),
-        size: trap_bytes,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let input = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Fe balanced LDE scalar state"),
-        size: u64::from(input_binding.span),
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("balanced LDE test-only readback"),
-        size: proof_bytes + trap_bytes,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let columns = trace_columns();
-    let trace_words = columns.into_iter().flatten().collect::<Vec<_>>();
-    let trace_bytes = trace_words
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect::<Vec<_>>();
-    queue.write_buffer(&proof, 0, &trace_bytes);
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("balanced LDE bindings"),
-        entries: &artifact
-            .layout
-            .bindings
-            .iter()
-            .map(|binding| wgpu::BindGroupLayoutEntry {
-                binding: binding.binding,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage {
-                        read_only: binding.access == Access::Read,
-                    },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            })
-            .collect::<Vec<_>>(),
-    });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("balanced LDE pipeline layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
-        immediate_size: 0,
-    });
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Fe balanced LDE WGSL"),
-        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Fe balanced LDE pipeline"),
-        layout: Some(&pipeline_layout),
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Fe balanced LDE resources"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: proof_binding.binding,
-                resource: proof.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: trap_binding.binding,
-                resource: trap.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: input_binding.binding,
-                resource: input.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("balanced LDE execution"),
-    });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("four Fe-derived LDE tasks"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
-    encoder.copy_buffer_to_buffer(&proof, 0, &staging, 0, proof_bytes);
-    encoder.copy_buffer_to_buffer(&trap, 0, &staging, proof_bytes, trap_bytes);
-    queue.submit(Some(encoder.finish()));
-
+fn mapped_bytes(device: &wgpu::Device, staging: &wgpu::Buffer) -> Vec<u8> {
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -384,32 +360,152 @@ fn balanced_lde_schedule_matches_direct_dft_on_webgpu() {
             submission_index: None,
             timeout: Some(std::time::Duration::from_secs(180)),
         })
-        .expect("balanced LDE WebGPU submission should complete");
+        .expect("staged LDE submission should complete");
     rx.recv()
         .expect("map callback should fire")
         .expect("test-only staging buffer should map");
-    let data = slice.get_mapped_range();
-    let result = words(&data);
+    let bytes = slice.get_mapped_range().to_vec();
+    staging.unmap();
+    bytes
+}
 
+#[test]
+fn staged_lde_schedule_matches_direct_dft_on_webgpu() {
+    let bundle = compile_lde_graph();
+    let end = LDE_FIRST_PASS + LDE_PASS_COUNT;
+    let passes = &bundle.manifest.passes[LDE_FIRST_PASS..end];
+    assert_eq!(
+        passes
+            .iter()
+            .map(|pass| (
+                pass.source_entry.as_str(),
+                pass.repeat,
+                pass.layout.workgroup_size
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("prepare_lde_inverse", 1, [8, 1, 1]),
+            ("advance_lde_inverse", 2, [8, 1, 1]),
+            ("prepare_lde_forward", 1, [32, 1, 1]),
+            ("advance_lde_forward", 4, [32, 1, 1]),
+            ("finish_lde", 1, [32, 1, 1]),
+        ]
+    );
+
+    let Some((adapter, device, queue)) = request_browser_profile_device() else {
+        return;
+    };
+    eprintln!(
+        "  staged LDE WebGPU adapter (no required features): {}",
+        adapter.get_info().name
+    );
+    let resources = allocate_resources(&device, &bundle);
+    let lde_passes = compile_lde_passes(&device, &bundle, &resources);
+
+    let trace_words = trace_columns().into_iter().flatten().collect::<Vec<_>>();
+    let trace_bytes = trace_words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
+    queue.write_buffer(resource(&resources, "proof"), 0, &trace_bytes);
+
+    let copied = [
+        ("proof", PROOF_WORDS),
+        ("lde_inverse_progress", 8),
+        ("lde_values", 64),
+        ("lde_progress", 32),
+        ("lde_coset_valid", 4),
+    ];
+    let resource_bytes = copied.iter().map(|(_, words)| words * 4).sum::<usize>();
+    let trap_bytes = lde_passes
+        .iter()
+        .flat_map(|pass| &pass.auxiliary)
+        .filter(|(role, _)| *role == WebBindingRole::Output)
+        .map(|(_, buffer)| buffer.size() as usize)
+        .sum::<usize>();
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("staged LDE test-only readback"),
+        size: (resource_bytes + trap_bytes) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("staged LDE execution"),
+    });
+    for ((manifest_pass, shader_pass), pass) in passes
+        .iter()
+        .zip(&bundle.pass_wgsl[LDE_FIRST_PASS..end])
+        .zip(&lde_passes)
+    {
+        eprintln!(
+            "  staged LDE pass {}: {} bytes, repeat {}",
+            manifest_pass.source_entry,
+            shader_pass.source.len(),
+            manifest_pass.repeat
+        );
+        let dispatch = manifest_pass.dispatch.expect("compute dispatch");
+        let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(manifest_pass.source_entry.as_str()),
+            timestamp_writes: None,
+        });
+        compute.set_pipeline(&pass.pipeline);
+        compute.set_bind_group(0, &pass.group, &[]);
+        for _ in 0..manifest_pass.repeat {
+            compute.dispatch_workgroups(dispatch[0], dispatch[1], dispatch[2]);
+        }
+    }
+
+    let mut offset = 0u64;
+    for (name, word_count) in copied {
+        let bytes = (word_count * 4) as u64;
+        encoder.copy_buffer_to_buffer(resource(&resources, name), 0, &staging, offset, bytes);
+        offset += bytes;
+    }
+    for (_, buffer) in lde_passes
+        .iter()
+        .flat_map(|pass| &pass.auxiliary)
+        .filter(|(role, _)| *role == WebBindingRole::Output)
+    {
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, offset, buffer.size());
+        offset += buffer.size();
+    }
+    assert_eq!(offset as usize, resource_bytes + trap_bytes);
+    queue.submit(Some(encoder.finish()));
+
+    let result = words(&mapped_bytes(&device, &staging));
     let expected = trace_columns()
         .iter()
         .flat_map(|column| direct_coset_lde(column, LDE_ROWS, 7))
         .collect::<Vec<_>>();
+    let mut cursor = 0usize;
+    let proof = &result[cursor..cursor + PROOF_WORDS];
+    cursor += PROOF_WORDS;
+    let inverse_progress = &result[cursor..cursor + 8];
+    cursor += 8;
+    let lde_values = &result[cursor..cursor + 64];
+    cursor += 64;
+    let forward_progress = &result[cursor..cursor + 32];
+    cursor += 32;
+    let coset_valid = &result[cursor..cursor + 4];
+    cursor += 4;
+    let traps = &result[cursor..];
+
     assert_eq!(
-        &result[LDE_START..LDE_START + COLUMN_COUNT * LDE_ROWS],
+        &proof[LDE_START..LDE_START + COLUMN_COUNT * LDE_ROWS],
         expected.as_slice(),
-        "workgroup LDE words must match the independent direct DFT"
+        "staged LDE proof words must match the independent direct DFT"
     );
+    assert_eq!(lde_values, expected.as_slice());
+    assert_eq!(inverse_progress, &[2; 8]);
+    assert_eq!(forward_progress, &[4; 32]);
+    assert_eq!(coset_valid, &[1; COLUMN_COUNT]);
     assert_eq!(
-        &result[LDE_VALID_START..LDE_VALID_START + COLUMN_COUNT],
-        &[1; COLUMN_COUNT],
-        "each Fe-derived schedule leaf must report a valid radix-2 plan"
+        &proof[LDE_VALID_START..LDE_VALID_START + COLUMN_COUNT],
+        &[1; COLUMN_COUNT]
     );
-    assert_eq!(
-        &result[PROOF_WORDS..],
-        &[0; COLUMN_COUNT],
-        "one clean trap lane per physical LDE task"
+    assert!(
+        traps.iter().all(|word| *word == 0),
+        "every staged LDE invocation must remain trap-free: {traps:?}"
     );
-    drop(data);
-    staging.unmap();
 }

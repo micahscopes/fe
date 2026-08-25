@@ -1,21 +1,23 @@
 //! First browser-executed BabyBear proof placement checkpoint.
 //!
 //! The compute pass derives a four-row Q12 Mandelbrot witness through the
-//! production proof kernel, interprets the shared generic radix-2 plan as four
-//! 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values with
-//! the production Poseidon2 sponge. Two commitments by sixteen field lanes
-//! advance through one bounded workgroup kernel. Its Fe dispatch type
-//! derives the exact ordered repetition count, so browser WebGPU implementations
-//! never receive one crash-shaped megashader. A Fe-authored mutation mode changes one LDE
-//! value after the clean root is fixed and requires the second commitment to
-//! differ. The fragment pass visualizes the retained codeword and status words.
+//! production proof kernel, interprets one Conal factor vocabulary as four
+//! staged 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values
+//! with the production Poseidon2 sponge. Inverse butterflies, coset lifting,
+//! and forward butterflies are separate typed placements over disjoint lanes.
+//! Two commitments by sixteen field lanes then advance through one bounded
+//! workgroup kernel. Fe dispatch types derive every ordered repetition count,
+//! so browser WebGPU implementations never receive one crash-shaped
+//! megashader. A Fe-authored mutation mode changes one LDE value after the clean
+//! root is fixed and requires the second commitment to differ. The fragment
+//! pass visualizes the retained codeword and status words.
 //!
 //! This is a mixed placement checkpoint. The four independent LDE columns use
-//! the first balanced workgroup-map interpretation of a Conal schedule type.
-//! The paired commitment states are a second workgroup-map interpretation.
-//! Witness generation and final comparison remain scalar passes. This is not
-//! yet a shared-memory butterfly interpreter, an authenticated FRI receipt, or
-//! a recursive proof.
+//! the portable stage-grid interpretation of canonical Conal factor trees. The
+//! paired commitment states are a second workgroup-map interpretation. Witness
+//! generation and final comparison remain scalar passes. This is not yet a
+//! shared-memory butterfly interpreter, an authenticated FRI receipt, or a
+//! recursive proof.
 
 use std::webgpu::{
     ComputeInvocation,
@@ -36,6 +38,14 @@ use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
 use mandelbrot_proof_kernel::{EscapeAirWordStream, EscapesByQ12}
+use parallel_ntt_webgpu::{
+    finish_batched_stage_grid_into,
+    forward_batched_stage_grid_lane,
+    inverse_batched_stage_grid_lane,
+    prepare_batched_coset_extension,
+    prepare_batched_stage_grid,
+}
+use parallel_structure::FactorTree
 use poseidon_baby_bear::{
     ROUND_CONSTANT_COUNT,
     SPONGE_RATE,
@@ -52,14 +62,16 @@ use poseidon_baby_bear::{
     poseidon2_workgroup_lane_with_round_constant,
 }
 use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
-use precision::polynomial::{
-    ContiguousRadix2Columns, Radix2ColumnPlan, write_radix2_coset_lde,
-}
 
 const TRACE: usize = 4
 const LDE: usize = 16
 const COLUMN_COUNT: usize = 4
+const TRACE_WORDS: usize = COLUMN_COUNT * TRACE
 const LDE_WORDS: usize = COLUMN_COUNT * LDE
+const INPUT_LANES: usize = TRACE / 2
+const OUTPUT_LANES: usize = LDE / 2
+const INPUT_GRID_LANES: usize = COLUMN_COUNT * INPUT_LANES
+const OUTPUT_GRID_LANES: usize = COLUMN_COUNT * OUTPUT_LANES
 const DIGEST_FIELDS: usize = 8
 const LDE_START: u32 = 16
 const CLEAN_ROOT: u32 = 80
@@ -86,10 +98,20 @@ const OBSERVED_COMMIT_STATE: u32 = CLEAN_COMMIT_STATE + COMMIT_STATE_WORDS.downc
 const PARAMETER_START: u32 = 267
 const PROOF_WORDS: usize = 267 + ROUND_CONSTANT_COUNT
 
-type ProofLdeDependencies = RBin<Pair, 2>
-type ProofLdePlan = ContiguousRadix2Columns<ProofLdeDependencies, TRACE, LDE>
-const LDE_TASKS: usize = <ProofLdePlan as Radix2ColumnPlan>::TASKS
+type ProofLdeColumns = RBin<Pair, 2>
+type ProofLdeInputPlan = RBin<Pair, 2>
+type ProofLdeOutputPlan = RBin<Pair, 4>
+const LDE_TASKS: usize = <ProofLdeColumns as BalancedBinarySchedule>::LEAVES
+const INPUT_STAGES: usize = <ProofLdeInputPlan as FactorTree>::FACTORS
+const OUTPUT_STAGES: usize = <ProofLdeOutputPlan as FactorTree>::FACTORS
 static_assert(LDE_TASKS == COLUMN_COUNT)
+static_assert(<ProofLdeInputPlan as FactorTree>::POINTS == TRACE)
+static_assert(<ProofLdeOutputPlan as FactorTree>::POINTS == LDE)
+static_assert(INPUT_STAGES == 2)
+static_assert(OUTPUT_STAGES == 4)
+static_assert(INPUT_GRID_LANES == 8)
+static_assert(OUTPUT_GRID_LANES == 32)
+static_assert(LDE_START + LDE_WORDS.downcast_truncate() == CLEAN_ROOT)
 
 type CommitmentDependencies = RBin<Pair, 1>
 const COMMITMENT_LANES: usize =
@@ -135,44 +157,6 @@ struct ProofParams { tamper: Param, res: Param }
 
 const fn proof_params() -> ProofParams {
     ProofParams { tamper: Param::range(min: 0.0, max: 1.0, init: 0.0), res: Param::extent_x() }
-}
-
-#[inline(always)]
-fn store_lde_column(_ tape: ProofTape<u32, PROOF_WORDS>, _ column: [BabyBear; LDE], _ offset: u32) {
-    let mut index: usize = 0
-    while index < LDE {
-        tape.store(
-            index: offset + index.downcast_truncate(),
-            value: column[index].to_u32(),
-        )
-        index = index + 1
-    }
-}
-
-#[inline(always)]
-fn extend_column(
-    _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ base_offset: u32,
-    _ output_offset: u32,
-) -> bool {
-    let zero = BabyBear::zero()
-    let mut base = [zero; TRACE]
-    let mut row: usize = 0
-    while row < TRACE {
-        base[row] = BabyBear::from_u32(tape.load(
-            index: base_offset + row.downcast_truncate(),
-        ))
-        row = row + 1
-    }
-
-    let mut extended = [zero; LDE]
-    let ok = write_radix2_coset_lde<TRACE, LDE, BabyBear>(
-        ref base,
-        BabyBear::from_u32(7),
-        mut extended,
-    )
-    store_lde_column(tape, extended, output_offset)
-    ok
 }
 
 fn packed_rgba(_ red: u32, _ green: u32, _ blue: u32) -> i32 {
@@ -295,6 +279,11 @@ actor MandelbrotProofGpuCheckpoint uses (
     SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     proof: ProofTape<u32, PROOF_WORDS>,
+    lde_inverse_values: ProofTape<u32, TRACE_WORDS>,
+    lde_inverse_progress: ProofTape<u32, INPUT_GRID_LANES>,
+    lde_values: ProofTape<u32, LDE_WORDS>,
+    lde_progress: ProofTape<u32, OUTPUT_GRID_LANES>,
+    lde_coset_valid: ProofTape<u32, COLUMN_COUNT>,
     tamper: f32,
     res: f32,
 
@@ -359,19 +348,125 @@ actor MandelbrotProofGpuCheckpoint uses (
         }
     }
 
-    fn extend_columns(self, invocation: ComputeInvocation)
-        uses (Prove<Threads<LDE_TASKS, 1, 1>, Once<1, 1, 1>>)
+    fn prepare_lde_inverse(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<INPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
     {
-        let task = <ProofLdePlan as Radix2ColumnPlan>::task(invocation.local.x)
-        let ok = extend_column(
-            tape: self.proof,
-            base_offset: task.input_offset,
-            output_offset: LDE_START + task.output_offset,
+        prepare_batched_stage_grid<
+            COLUMN_COUNT,
+            TRACE,
+            INPUT_LANES,
+            PROOF_WORDS,
+            TRACE_WORDS,
+            INPUT_GRID_LANES,
+        >(
+            self.proof,
+            0,
+            self.lde_inverse_values,
+            self.lde_inverse_progress,
+            invocation,
         )
-        self.proof.store(
-            index: STEP_LDE_VALID + task.index,
-            value: if ok { 1 } else { 0 },
+    }
+
+    fn advance_lde_inverse(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<INPUT_GRID_LANES, 1, 1>,
+                Repeat<1, 1, 1, INPUT_STAGES>,
+            >
         )
+    {
+        inverse_batched_stage_grid_lane<
+            COLUMN_COUNT,
+            TRACE,
+            INPUT_LANES,
+            TRACE_WORDS,
+            INPUT_GRID_LANES,
+            BabyBear,
+            ProofLdeInputPlan,
+        >(
+            self.lde_inverse_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn prepare_lde_forward(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<OUTPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        prepare_batched_coset_extension<
+            COLUMN_COUNT,
+            TRACE,
+            LDE,
+            INPUT_LANES,
+            OUTPUT_LANES,
+            TRACE_WORDS,
+            INPUT_GRID_LANES,
+            LDE_WORDS,
+            OUTPUT_GRID_LANES,
+            COLUMN_COUNT,
+            BabyBear,
+            ProofLdeInputPlan,
+            ProofLdeOutputPlan,
+        >(
+            self.lde_inverse_values,
+            self.lde_inverse_progress,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_coset_valid,
+            BabyBear::from_u32(7),
+            invocation,
+        )
+    }
+
+    fn advance_lde_forward(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<OUTPUT_GRID_LANES, 1, 1>,
+                Repeat<1, 1, 1, OUTPUT_STAGES>,
+            >
+        )
+    {
+        forward_batched_stage_grid_lane<
+            COLUMN_COUNT,
+            LDE,
+            OUTPUT_LANES,
+            LDE_WORDS,
+            OUTPUT_GRID_LANES,
+            BabyBear,
+            ProofLdeOutputPlan,
+        >(
+            self.lde_values,
+            self.lde_progress,
+            invocation,
+        )
+    }
+
+    fn finish_lde(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<OUTPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let finish = finish_batched_stage_grid_into<
+            COLUMN_COUNT,
+            LDE,
+            OUTPUT_LANES,
+            LDE_WORDS,
+            OUTPUT_GRID_LANES,
+            COLUMN_COUNT,
+            PROOF_WORDS,
+            ProofLdeOutputPlan,
+        >(
+            self.lde_values,
+            self.lde_progress,
+            self.lde_coset_valid,
+            self.proof,
+            LDE_START,
+            invocation,
+        )
+        if finish.active && finish.lane == 0 {
+            self.proof.store(
+                index: STEP_LDE_VALID + finish.batch,
+                value: if finish.valid { 1 } else { 0 },
+            )
+        }
     }
 
     fn initialize_commitments(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
