@@ -1538,9 +1538,15 @@ done; do not derive a second master checklist from its historical ledger.
   checks direct-DFT values, canonical round trips, stage receipts, progress,
   validity, and trap buffers across three vector families. The emitted prepare,
   forward, and inverse shaders are 4,302, 38,868, and 41,987 bytes and require
-  no workgroup shared memory or barriers. Production `mandelbrot_proof_gpu`
-  NTT/LDE migration, larger domains, fused shared-memory or subgroup placement,
-  and real Chrome hardware parity remain open, so G-NTT stays partial.
+  no workgroup shared memory or barriers. Commit `c8288f5f6` additionally moves
+  the production `mandelbrot_proof_gpu` toy checkpoint onto the reusable
+  batched stage grid. Four 4-to-16 coset LDEs execute an exact `1, 2, 1, 4, 1`
+  prepare/inverse/lift/forward/finish schedule with private cursors. Focused and
+  full-graph llvmpipe gates check all LDE values against a direct DFT, every
+  progress and coset-validity receipt, trap freedom, independent Plonky3
+  commitments, and clean/tampered behavior. Larger production domains, fused
+  shared-memory or subgroup placement, and real Chrome hardware parity for the
+  staged path remain open, so G-NTT stays partial.
 
 This ledger records achieved evidence, not a relaxation of the phases or the
 Definition of done below.

@@ -82,9 +82,17 @@ existing Definition of done, not a second campaign checklist:
   families. The emitted prepare, forward, and inverse shaders are 4,302,
   38,868, and 41,987 bytes and require no workgroup shared memory or barriers.
   Structural and stage receipts are analysis evidence only; the direct DFT is
-  the independent correctness oracle. Production `mandelbrot_proof_gpu`
-  NTT/LDE call-path migration, larger domains, fused shared-memory or subgroup
-  placements, and real Chrome hardware parity remain open, so G-NTT stays
+  the independent correctness oracle. Commit `c8288f5f6` migrated the
+  production `mandelbrot_proof_gpu` toy checkpoint from a whole-transform
+  scalar LDE call to the same typed stage-grid vocabulary. Four contiguous
+  trace columns now execute prepare, two inverse stages, coset lift, four
+  forward stages, and finish as Fe-authored WebGPU passes over private progress
+  cursors. A focused llvmpipe gate checks the exact `1, 2, 1, 4, 1` repetition
+  schedule, all 40 progress words, four coset predicates, trap freedom, and all
+  64 LDE values against the independent direct DFT. The complete graph retains
+  its independent Plonky3 Poseidon gate and clean/tampered mutation behavior.
+  Larger production domains, fused shared-memory or subgroup placements, and
+  real Chrome hardware parity for this staged path remain open, so G-NTT stays
   partial.
 - [ ] **G-LAYOUT:** compiler/FCO-derived typed regions replace application
   proof-tape offsets, and an independent decoder checks every region and width.
@@ -1824,11 +1832,13 @@ existing Definition of done, not a second campaign checklist:
   definitionally `std::conal::RBin<Pair, k>`, and scalar plus portable WebGPU
   interpreters consume the same `Par`, `Pair`, and `Comp` constructors.
   Compiler-derived N=16 forward and inverse transforms execute on llvmpipe and
-  match an independent direct DFT. The production arithmetic plan is not yet
-  migrated to those interpreters, and no fused workgroup/shared-memory proof
-  transform has executed. The remaining work is production NTT/LDE placement
-  and device-tuned interpreters over the shared plan, not a fresh NTT
-  implementation.
+  match an independent direct DFT. The production toy checkpoint now consumes
+  the portable batched stage-grid interpreter for all four 4-to-16 coset LDEs,
+  and its full commitment graph remains exact against the direct-DFT and
+  Plonky3 oracles in clean and tampered modes. No larger-domain or fused
+  workgroup/shared-memory proof transform has executed. The remaining work is
+  production-sized placement and device-tuned interpreters over the shared
+  plan, not a fresh NTT implementation.
 - [ ] Build and run the complete recursive proof experience in the canonical
   gallery after the BabyBear prover exists. The Fe-authored component lets a
   user select a high-precision Mandelbrot point and iteration bound, schedules
@@ -1902,9 +1912,9 @@ fallback. The semantic receipts are:
    the required Sonatina revision. Preserve the four-query receipt as a
    regression fixture, then execute a separate security-sized receipt rather
    than silently changing the checkpoint's meaning.
-3. Close G-NTT: migrate production NTT and coset-LDE call paths onto the now
-   gated scalar and portable stage-grid interpretations, preserve the existing
-   direct-DFT and commitment oracles, then run the real Chrome hardware gate.
+3. Close G-NTT: carry the now-gated production toy coset-LDE migration into the
+   production-sized receipt path, preserve the direct-DFT and commitment
+   oracles, then run the staged path through the real Chrome hardware gate.
 4. Close G-LAYOUT and G-RECEIPT: derive typed proof regions, then finish the
    complete ordered nonrecursive receipt without raw tape offsets or a second
    transcript description.
