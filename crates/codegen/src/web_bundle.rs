@@ -4243,7 +4243,12 @@ impl WebBundle {
                     unreachable!("actor construction rejects unpaired raster fragments")
                 }
             };
-            let artifact = artifact.map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let artifact = artifact.map_err(|error| {
+                WebBundleError::Lower(format!(
+                    "GPU actor stage `{}` ({kind}) failed: {error}",
+                    stage.source_entry
+                ))
+            })?;
             let shader =
                 normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
             validate_browser_wgsl(&shader)?;
