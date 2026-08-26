@@ -2174,6 +2174,23 @@ fallback. The semantic receipts are:
    before the explicit timeout. This is not receipt, security, or proof-runtime
    evidence.
 
+   The first exact retry after landing the Fe-owned growing canonical writer
+   reached a definitive backend boundary. In release mode the runtime graph
+   completed with 16,811 Fe specializations and 92 constant regions. Portable
+   lowering completed all 16,811 functions, but Wasm validation rejected the
+   module with `too many locals: locals exceed maximum` at byte offset
+   14,182,530. The run took about 32 minutes to reach validation, peaked near
+   13.9 GiB RSS, and retained at least 3.4 GiB available system memory. The
+   trace exposed aggregate results with 166,444 and 117,196 flattened lanes,
+   per-layer invalid multipaths with up to 47,883 lanes, and thirteen distinct
+   `write_multi_path_and_root_from_leaves` lowerings, one taking 41.41 seconds.
+   This is a representation failure, not a cryptographic or receipt mismatch.
+   Preserve the typed receipt and schedule as semantic authority, but move FRI
+   layers, Merkle multipaths, and canonical transport behind Fe-owned typed
+   memory handles and value-level loops. Gate each compact interpreter against
+   the existing typed implementation and its mutation oracles before retrying
+   the exact 114-query boundary.
+
    A measured canonical stage-grid experiment was then rejected. The provider
    derived declaration-order routing from the same Fe schema, and both the
    cumulative-bound and linear typed-route forms passed the independent
