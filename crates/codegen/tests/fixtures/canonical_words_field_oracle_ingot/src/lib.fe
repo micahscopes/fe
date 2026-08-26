@@ -10,7 +10,6 @@ use canonical_words::{
     WordSink,
     WordSource,
     canonical_prefix_word_count,
-    canonical_word_stream_count,
     decode_canonical_prefix,
     encode_canonical_prefix,
     encode_canonical_word_array,
@@ -254,8 +253,24 @@ pub fn canonical_stream_envelope(_ count: u32) -> BrowserBytes {
     }
     encode_canonical_word_stream(
         ref value,
-        BrowserWordWriter::allocate(canonical_word_stream_count(ref value)),
-    ).finish()
+        BrowserWordWriter::growing(),
+    ).finish_prefix()
+}
+
+pub fn canonical_growing_words(_ count: u32) -> BrowserBytes {
+    if count > 257 { return BrowserBytes { ptr: 0, len: 0 } }
+    let mut writer = BrowserWordWriter::growing()
+    let mut index: u32 = 0
+    while index < count {
+        writer = writer.write(index + 17)
+        index = index + 1
+    }
+    writer.finish_prefix()
+}
+
+pub fn canonical_oversized_writer_rejects() -> u32 {
+    let encoded = BrowserWordWriter::allocate(1073741824).finish_prefix()
+    if encoded.len == 0 { 1 } else { 0 }
 }
 
 pub fn canonical_stream_envelope_roundtrip(_ count: u32) -> u32 {

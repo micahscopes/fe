@@ -1957,6 +1957,29 @@ existing Definition of done, not a second campaign checklist:
   emitting the same prover module and was stopped. The isolated rerun kept the
   artifact and proof semantics identical and passed 1/1 in 1,891.64 seconds.
 
+  The staged canonical boundary no longer traverses the complete receipt once
+  to count words before traversing it again to encode them. A rejected
+  `CanonicalWordStream::MAX_WORDS` experiment preserved the nominal schema but
+  moved the same recursive cost into associated-const analysis; it was not
+  retained. `BrowserWordWriter::growing` instead starts with a small
+  performance-only region, doubles through Fe-authored allocation and copy
+  operations, fails closed at the checked browser-memory ceiling, and exposes
+  only the exact emitted prefix. Rust and JavaScript know neither the receipt
+  schema nor its capacity. The ordinary reflection-derived stream remains the
+  sole field-order authority.
+
+  The release production-codec gate completes diagnostics in 23.71 seconds,
+  emits a 915,084-byte zero-import Wasm module in 195.92 seconds, and passes
+  clean roundtrip plus invalid-boolean, truncation, and trailing-data rejection
+  in 221.22 seconds overall. A separate canonical-words oracle forces 257
+  writes through three growth boundaries, checks every copied word, rejects an
+  out-of-policy request, and rejects an oversized allocation; it passes in
+  58.19 seconds. The same investigation hardened CTFE failures to retain a
+  compact body-diagnostic class and the full instantiated callee chain rather
+  than an opaque salsa identifier. The 114-query encoder now uses the same
+  growing Fe writer, but its full receipt execution remains the next security
+  gate.
+
   The assembled regression receipt still carries four queries. The compact
   114-query range must subsequently drive real sampling, openings,
   authentication paths, and FRI folds before a separate security-sized

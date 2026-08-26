@@ -193,7 +193,8 @@ pub fn decode_canonical_prefix<
 }
 
 /// Browser-linear-memory interpreter for canonical word emission. The writer
-/// owns an exact word budget and fails closed on overflow or incomplete output.
+/// owns a checked word budget and fails closed on overflow. Exact codecs use
+/// `finish`; bounded streams use `finish_prefix` to expose only emitted words.
 pub struct BrowserWordWriter {
     buffer: BrowserBytes,
     cursor: u32,
@@ -203,6 +204,11 @@ pub struct BrowserWordWriter {
 impl core::marker::Copy for BrowserWordWriter {}
 
 impl BrowserWordWriter {
+    /// Start an exact-prefix stream without walking its schema or value to
+    /// precompute a size. Growth and copying remain ordinary Fe code; the
+    /// browser allocator only supplies opaque linear-memory regions.
+    pub fn growing() -> Self { Self::allocate(64) }
+
     pub fn allocate(_ words: u32) -> Self {
         if words > 1073741823 {
             return Self {
@@ -227,11 +233,18 @@ impl BrowserWordWriter {
         }
         self.buffer
     }
-}
 
-impl WordSink for BrowserWordWriter {
-    fn write(self, _ value: u32) -> Self {
-        if !self.valid || self.cursor >= self.words {
+    /// Finish a bounded stream. Unused capacity remains private to the arena;
+    /// only the canonical prefix crosses the browser boundary.
+    pub fn finish_prefix(self) -> BrowserBytes {
+        if !self.valid {
+            return BrowserBytes { ptr: self.buffer.ptr, len: 0 }
+        }
+        BrowserBytes { ptr: self.buffer.ptr, len: self.cursor * 4 }
+    }
+
+    fn grow(self) -> Self {
+        if !self.valid || self.words >= 1073741823 {
             return Self {
                 buffer: self.buffer,
                 cursor: self.cursor,
@@ -239,13 +252,66 @@ impl WordSink for BrowserWordWriter {
                 valid: false,
             }
         }
+        let next_words = if self.words == 0 {
+            64
+        } else if self.words > 536870911 {
+            1073741823
+        } else {
+            self.words * 2
+        }
+        if next_words <= self.words {
+            return Self {
+                buffer: self.buffer,
+                cursor: self.cursor,
+                words: self.words,
+                valid: false,
+            }
+        }
+        let next = Self::allocate(next_words)
+        if !next.valid {
+            return Self {
+                buffer: self.buffer,
+                cursor: self.cursor,
+                words: self.words,
+                valid: false,
+            }
+        }
+        let mut index: u32 = 0
+        while index < self.cursor {
+            let source: BrowserPtr<u32> =
+                BrowserPtr::from_u32(self.buffer.ptr + index * 4)
+            let destination: BrowserPtr<u32> =
+                BrowserPtr::from_u32(next.buffer.ptr + index * 4)
+            destination.write(source.read())
+            index = index + 1
+        }
+        Self {
+            buffer: next.buffer,
+            cursor: self.cursor,
+            words: next.words,
+            valid: true,
+        }
+    }
+}
+
+impl WordSink for BrowserWordWriter {
+    fn write(self, _ value: u32) -> Self {
+        let writer = if self.cursor >= self.words { self.grow() } else { self }
+        if !writer.valid || writer.cursor >= writer.words {
+            return Self {
+                buffer: writer.buffer,
+                cursor: writer.cursor,
+                words: writer.words,
+                valid: false,
+            }
+        }
         let destination: BrowserPtr<u32> =
-            BrowserPtr::from_u32(self.buffer.ptr + self.cursor * 4)
+            BrowserPtr::from_u32(writer.buffer.ptr + writer.cursor * 4)
         destination.write(value)
         Self {
-            buffer: self.buffer,
-            cursor: self.cursor + 1,
-            words: self.words,
+            buffer: writer.buffer,
+            cursor: writer.cursor + 1,
+            words: writer.words,
             valid: true,
         }
     }

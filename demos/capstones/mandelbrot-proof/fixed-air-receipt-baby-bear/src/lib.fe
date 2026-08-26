@@ -11,7 +11,6 @@ use canonical_words::{
     CanonicalWordStreamProvider,
     CanonicalWords,
     CanonicalWordsProvider,
-    canonical_word_stream_count,
     decode_canonical_words,
     encode_canonical_words,
 }
@@ -634,12 +633,10 @@ fn encode_production_sparse_receipt_fri(
 pub fn encode_production_sparse_baby_bear_receipt(
     _ receipt: ref ProductionSparseBabyBearReceipt,
 ) -> BrowserBytes {
-    let words = canonical_word_stream_count(receipt)
-    if words == 0 { return BrowserBytes { ptr: 0, len: 0 } }
-    let writer = BrowserWordWriter::allocate(words)
+    let writer = BrowserWordWriter::growing()
     let writer = encode_production_sparse_receipt_header(receipt, writer)
     let writer = encode_production_sparse_receipt_air(receipt, writer)
-    encode_production_sparse_receipt_fri(receipt, writer).finish()
+    encode_production_sparse_receipt_fri(receipt, writer).finish_prefix()
 }
 
 fn decode_production_sparse_receipt_header(
@@ -723,12 +720,10 @@ fn encode_production_security_sparse_receipt_fri(
 pub fn encode_production_security_sparse_baby_bear_receipt(
     _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
 ) -> BrowserBytes {
-    let words = canonical_word_stream_count(receipt)
-    if words == 0 { return BrowserBytes { ptr: 0, len: 0 } }
-    let writer = BrowserWordWriter::allocate(words)
+    let writer = BrowserWordWriter::growing()
     let writer = encode_production_security_sparse_receipt_header(receipt, writer)
     let writer = encode_production_security_sparse_receipt_air(receipt, writer)
-    encode_production_security_sparse_receipt_fri(receipt, writer).finish()
+    encode_production_security_sparse_receipt_fri(receipt, writer).finish_prefix()
 }
 
 fn decode_production_security_sparse_receipt_header(

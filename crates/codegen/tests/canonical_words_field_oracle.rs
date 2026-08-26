@@ -252,4 +252,28 @@ fn const_generic_field_codec_runs_on_wasm() {
         .expect("over-capacity stream encoding fails closed");
     assert_eq!(invalid_length, 0);
     assert_eq!(stream_roundtrip.call(&mut store, 5).unwrap(), 0);
+
+    let growing = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "canonical_growing_words")
+        .expect("growing canonical writer export");
+    let (pointer, length) = growing
+        .call(&mut store, 257)
+        .expect("growing canonical writer runs");
+    assert_eq!(length, 257 * 4);
+    let mut bytes = vec![0u8; length as usize];
+    memory.read(&store, pointer as usize, &mut bytes).unwrap();
+    let words = bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(words, (17..274).collect::<Vec<_>>());
+    let (_, invalid_length) = growing
+        .call(&mut store, 258)
+        .expect("out-of-policy growing writer request runs");
+    assert_eq!(invalid_length, 0);
+
+    let oversized = instance
+        .get_typed_func::<(), i32>(&mut store, "canonical_oversized_writer_rejects")
+        .expect("oversized canonical writer export");
+    assert_eq!(oversized.call(&mut store, ()).unwrap(), 1);
 }

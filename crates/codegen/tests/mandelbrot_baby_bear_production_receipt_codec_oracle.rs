@@ -5,24 +5,27 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use std::path::Path;
+use std::time::Instant;
 use url::Url;
 
 fn compile_gate() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "tests/fixtures/mandelbrot_baby_bear_production_receipt_codec_oracle_ingot",
-    );
+    let started = Instant::now();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mandelbrot_baby_bear_production_receipt_codec_oracle_ingot");
     let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     let mut db = DriverDataBase::default();
     assert!(
         !driver::init_ingot(&mut db, &url),
         "production receipt codec fixture initialization diagnostics",
     );
+    trace_gate_phase("initialized", started);
     let ingot = db
         .workspace()
         .containing_ingot(&db, url)
         .expect("production receipt codec fixture ingot");
     let top_mod = ingot.root_mod(&db);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    trace_gate_phase("diagnostics", started);
     assert!(
         diagnostics.is_empty(),
         "unexpected production receipt codec diagnostics:\n{diagnostics}",
@@ -33,8 +36,18 @@ fn compile_gate() -> Vec<u8> {
         .expect("production receipt codec should compile to Wasm")
         .into_bytecode()
         .expect("Wasm backend should emit bytes");
+    trace_gate_phase("compiled", started);
     wasmparser::validate(&bytes).expect("production receipt codec Wasm should validate");
     bytes
+}
+
+fn trace_gate_phase(phase: &str, started: Instant) {
+    if std::env::var_os("FE_PROOF_GATE_TRACE").is_some() {
+        eprintln!(
+            "[production receipt codec gate] {phase}, elapsed_ms={}",
+            started.elapsed().as_millis(),
+        );
+    }
 }
 
 #[test]
@@ -53,11 +66,16 @@ fn staged_production_receipt_codec_roundtrips_and_rejects_malformed_inputs() {
         )
         .expect("production receipt codec status export");
 
-    let clean = status.call(&mut store, 0).expect("clean codec roundtrip runs");
+    let clean = status
+        .call(&mut store, 0)
+        .expect("clean codec roundtrip runs");
     assert_eq!(clean.0, 1, "canonical empty receipt must decode");
     assert_eq!(clean.1, 1, "canonical empty receipt must roundtrip exactly");
     assert!(clean.2 > 0, "canonical receipt must emit a bounded stream");
-    assert_eq!(clean.2, clean.3, "derived count must match encoded bytes");
+    assert_eq!(
+        clean.2, clean.3,
+        "a decoded receipt must re-encode to the same bounded prefix length",
+    );
 
     for mode in 1..=3 {
         let malformed = status
