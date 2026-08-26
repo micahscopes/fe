@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{WasmCompileOptions, compile_runtime_package_wasm_with_options};
+use fe_codegen::{compile_runtime_package_wasm_with_options, WasmCompileOptions};
 use hir::hir_def::HirIngot;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -94,6 +94,27 @@ fn second_receipt_path(first: &Path) -> PathBuf {
     first.with_file_name("receipt-right.bin")
 }
 
+fn prover_wasm_path(receipt: &Path) -> PathBuf {
+    receipt.with_file_name("prover.wasm")
+}
+
+fn verifier_wasm_path(receipt: &Path) -> PathBuf {
+    receipt.with_file_name("verifier.wasm")
+}
+
+fn compile_gate_to_path(entry: &str, path: &Path) {
+    let bytes = compile_gate(entry);
+    std::fs::write(path, bytes).expect("compiled gate Wasm should persist between processes");
+}
+
+fn read_compiled_gate(path: &Path, role: &str) -> Vec<u8> {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("{role} compiler child must persist Wasm: {error}"));
+    wasmparser::validate(&bytes)
+        .unwrap_or_else(|error| panic!("persisted {role} Wasm should validate: {error}"));
+    bytes
+}
+
 fn read_canonical_receipt(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -118,7 +139,7 @@ fn read_canonical_receipt(
 
 fn produce_canonical_receipt(path: &Path) {
     let engine = wasmtime::Engine::default();
-    let prover_wasm = compile_gate("production_zero_interval_receipt");
+    let prover_wasm = read_compiled_gate(&prover_wasm_path(path), "prover");
     eprintln!("production prover gate: instantiate zero-import Wasm");
     let prover_module =
         wasmtime::Module::new(&engine, prover_wasm).expect("prover Wasm module should load");
@@ -146,7 +167,7 @@ fn produce_canonical_receipt(path: &Path) {
 
 fn produce_adjacent_canonical_receipts(first_path: &Path) {
     let engine = wasmtime::Engine::default();
-    let prover_wasm = compile_gate("production_zero_adjacent_interval_receipt");
+    let prover_wasm = read_compiled_gate(&prover_wasm_path(first_path), "adjacent prover");
     eprintln!("production prover gate: instantiate adjacent zero-import Wasm");
     let prover_module =
         wasmtime::Module::new(&engine, prover_wasm).expect("adjacent prover Wasm should load");
@@ -186,7 +207,7 @@ fn verify_canonical_receipt_entry(path: &Path, entry: &str, zero_means_valid: bo
     let receipt = std::fs::read(path).expect("prover child must persist its canonical receipt");
     let length = i32::try_from(receipt.len()).expect("canonical receipt length should fit i32");
     let engine = wasmtime::Engine::default();
-    let verifier_wasm = compile_gate(entry);
+    let verifier_wasm = read_compiled_gate(&verifier_wasm_path(path), "verifier");
     let verifier_module =
         wasmtime::Module::new(&engine, verifier_wasm).expect("verifier Wasm module should load");
     assert!(verifier_module.imports().next().is_none());
@@ -252,11 +273,7 @@ fn verify_canonical_receipt_entry(path: &Path, entry: &str, zero_means_valid: bo
 }
 
 fn verify_canonical_receipt(path: &Path) {
-    verify_canonical_receipt_entry(
-        path,
-        "audit_production_zero_interval_receipt_matrix",
-        true,
-    );
+    verify_canonical_receipt_entry(path, "audit_production_zero_interval_receipt_matrix", true);
 }
 
 fn verify_direct_canonical_receipt(path: &Path) {
@@ -289,7 +306,7 @@ fn verify_adjacent_canonical_receipts(first_path: &Path) {
         .expect("adjacent prover child must persist its right receipt");
     let engine = wasmtime::Engine::default();
     let entry = "audit_production_zero_adjacent_recursive_merge";
-    let verifier_wasm = compile_gate(entry);
+    let verifier_wasm = read_compiled_gate(&verifier_wasm_path(first_path), "adjacent verifier");
     let verifier_module = wasmtime::Module::new(&engine, verifier_wasm)
         .expect("adjacent recursive verifier Wasm module should load");
     assert!(verifier_module.imports().next().is_none());
@@ -374,10 +391,29 @@ fn run_requested_child() -> bool {
     };
     let path = child_receipt_path();
     match mode.as_str() {
+        "compile-prover" => {
+            compile_gate_to_path("production_zero_interval_receipt", &prover_wasm_path(&path))
+        }
         "prove" => produce_canonical_receipt(&path),
+        "compile-verifier" => compile_gate_to_path(
+            "audit_production_zero_interval_receipt_matrix",
+            &verifier_wasm_path(&path),
+        ),
         "verify" => verify_canonical_receipt(&path),
+        "compile-verifier-direct" => compile_gate_to_path(
+            "verify_production_zero_interval_receipt",
+            &verifier_wasm_path(&path),
+        ),
         "verify-direct" => verify_direct_canonical_receipt(&path),
+        "compile-adjacent-prover" => compile_gate_to_path(
+            "production_zero_adjacent_interval_receipt",
+            &prover_wasm_path(&path),
+        ),
         "prove-adjacent" => produce_adjacent_canonical_receipts(&path),
+        "compile-adjacent-verifier" => compile_gate_to_path(
+            "audit_production_zero_adjacent_recursive_merge",
+            &verifier_wasm_path(&path),
+        ),
         "verify-adjacent" => verify_adjacent_canonical_receipts(&path),
         _ => panic!("unknown production gate child mode {mode}"),
     }
@@ -402,9 +438,11 @@ fn production_prover_executes_and_its_canonical_receipt_verifies() {
         return;
     }
 
-    // Compiler databases retain large allocation arenas for their process
-    // lifetime. Run proving and verification as separate test processes so the
-    // operating system reclaims the prover arena before verifier lowering.
+    // Compiler databases and Wasmtime retain large allocation arenas for their
+    // process lifetimes. Compile and execute each exact artifact in separate
+    // processes so compiler residency never overlaps the prover workspace or
+    // verifier JIT. The persisted file is the exact zero-import Wasm under
+    // test, not a host-side proof or receipt representation.
     let scratch_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fe-test-scratch");
     std::fs::create_dir_all(&scratch_root).expect("workspace test scratch directory");
     let scratch = tempfile::Builder::new()
@@ -413,21 +451,15 @@ fn production_prover_executes_and_its_canonical_receipt_verifies() {
         .expect("workspace-backed production gate scratch directory");
     let receipt_path = scratch.path().join("receipt.bin");
 
-    let prove_status = run_gate_child(SINGLE_RECEIPT_GATE, "prove", &receipt_path);
-    if !prove_status.success() {
-        let retained = scratch.keep();
-        panic!(
-            "production gate prove child failed; retained evidence at {}",
-            retained.display(),
-        );
-    }
-    let verify_status = run_gate_child(SINGLE_RECEIPT_GATE, "verify", &receipt_path);
-    if !verify_status.success() {
-        let retained = scratch.keep();
-        panic!(
-            "production gate verify child failed; retained evidence at {}",
-            retained.display(),
-        );
+    for mode in ["compile-prover", "prove", "compile-verifier", "verify"] {
+        let status = run_gate_child(SINGLE_RECEIPT_GATE, mode, &receipt_path);
+        if !status.success() {
+            let retained = scratch.keep();
+            panic!(
+                "production gate {mode} child failed; retained evidence at {}",
+                retained.display(),
+            );
+        }
     }
 }
 
@@ -445,20 +477,19 @@ fn production_adjacent_receipts_merge_through_recursive_authority() {
         .expect("workspace-backed adjacent proof gate scratch directory");
     let receipt_path = scratch.path().join("receipt-left.bin");
 
-    let prove_status = run_gate_child(ADJACENT_RECEIPT_GATE, "prove-adjacent", &receipt_path);
-    if !prove_status.success() {
-        let retained = scratch.keep();
-        panic!(
-            "adjacent production gate prove child failed; retained evidence at {}",
-            retained.display(),
-        );
-    }
-    let verify_status = run_gate_child(ADJACENT_RECEIPT_GATE, "verify-adjacent", &receipt_path);
-    if !verify_status.success() {
-        let retained = scratch.keep();
-        panic!(
-            "adjacent production gate verify child failed; retained evidence at {}",
-            retained.display(),
-        );
+    for mode in [
+        "compile-adjacent-prover",
+        "prove-adjacent",
+        "compile-adjacent-verifier",
+        "verify-adjacent",
+    ] {
+        let status = run_gate_child(ADJACENT_RECEIPT_GATE, mode, &receipt_path);
+        if !status.success() {
+            let retained = scratch.keep();
+            panic!(
+                "adjacent production gate {mode} child failed; retained evidence at {}",
+                retained.display(),
+            );
+        }
     }
 }

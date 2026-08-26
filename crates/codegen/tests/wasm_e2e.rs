@@ -6898,6 +6898,56 @@ pub fn probe() -> u32 {
     );
 }
 
+/// Embedding a large aggregate snapshot in another nominal value must retain
+/// the snapshot's bytes after the original storage is mutated again.
+#[test]
+fn embedded_large_snapshot_does_not_reload_mutated_source_on_wasm() {
+    let source = r#"
+struct Large { valid: bool, values: [u32; 1001] }
+
+impl core::marker::Copy for Large {}
+
+struct Wrapper { snapshot: Large }
+
+impl core::marker::Copy for Wrapper {}
+
+const EMPTY: Large = Large { valid: false, values: [0; 1001] }
+
+fn write_first(_ output: mut Large, _ valid: bool, _ value: u32) {
+    output.valid = valid
+    output.values[0] = value
+}
+
+fn read_large(_ value: ref Large) -> u32 {
+    (if value.valid { 1000 } else { 0 }) + value.values[0]
+}
+
+fn read_first(_ wrapper: ref Wrapper) -> u32 {
+    read_large(ref wrapper.snapshot)
+}
+
+pub fn probe() -> u32 {
+    let mut output = EMPTY
+    write_first(mut output, true, 7)
+    let snapshot = output
+    write_first(mut output, false, 11)
+    let wrapper = Wrapper { snapshot: snapshot }
+    read_first(ref wrapper)
+}
+"#;
+    let wasm = compile_to_wasm_at("wasm_embedded_large_snapshot.fe", source, OptLevel::O2);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(), i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+    assert_eq!(
+        probe
+            .call(&mut store, ())
+            .expect("embedded large snapshot should execute"),
+        1007,
+    );
+}
+
 #[test]
 fn ref_borrow_of_scalar_call_result_reads_on_wasm() {
     let source = r#"

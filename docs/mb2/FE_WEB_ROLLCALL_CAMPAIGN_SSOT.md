@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -109,18 +109,22 @@ existing Definition of done, not a second campaign checklist:
   receipt-wide independent decoder remain before this gate can close.
 - [~] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
-  The current process-isolated exact gate executes a 20,413,169-byte
-  zero-import Fe prover, copies only its canonical receipt bytes into a fresh
-  8,703,961-byte zero-import Fe verifier, and accepts the clean receipt. A
+  The current four-leg process-isolated exact gate compiles a 23,636,877-byte
+  zero-import Fe prover, executes that exact persisted Wasm in a fresh process,
+  and emits a 47,552-byte canonical receipt. It then compiles a fresh
+  10,129,225-byte zero-import Fe verifier and executes that artifact in a fourth
+  process over only the copied receipt bytes. The clean receipt accepts. A
   test-only Fe structural interpreter then mutates the typed decoded carrier,
   without host-owned offsets: the base root and transcript chain, an
   authenticated AIR value, its Merkle sibling, a composition opening, and the
   recursively located terminal FRI evaluation all reject. A raw canonical
-  validity-word mutation also rejects. The gate passes 1/1 in 5,401.40 seconds;
-  its verifier child finishes in 708.27 seconds. Claim, domain, sampled-query,
-  and malformed-encoding coverage still relies on focused layer gates, so the
-  assembled boundary remains partial until those mutations and the
-  security-sized receipt execute there.
+  validity-word mutation also rejects. The complete gate passes 1/1 in
+  1,891.64 seconds; prover execution takes 258.37 seconds after its compiler
+  arena exits, and verifier execution takes 10.74 seconds after its compiler
+  arena exits. Claim, domain, sampled-query, and malformed-encoding coverage
+  still relies on focused layer gates, so the assembled boundary remains
+  partial until those mutations and the separate 114-query security-sized
+  receipt execute there.
 - [~] **G-RECURSE:** the field-neutral multi-limb carrier already merges only
   ordered adjacent iteration intervals with identical statements and shared
   boundary commitments. `VerifiedRecursiveInterval<L>` now makes the
@@ -1877,12 +1881,38 @@ existing Definition of done, not a second campaign checklist:
   gate now consumes the one receipt that already carries all sixteen
   numerators.
 
+  The four-query production regression now binds every interpreted security
+  parameter into the transcript before composition. `SparseDirectFriTranscriptProfile`
+  contains the derived direct-FRI policy, the exact 691-constraint AIR shape,
+  its degree families and composition bound, plus the query count actually
+  executed by the receipt. Its reflection-derived 44 canonical words are
+  injectively packed into 47 BabyBear fields and committed under `SP01`; the
+  canonical statement-and-root AIR transcript is extended under `SP02`.
+  Prover and verifier consume a private-field
+  `SparseCompositionTranscriptDigest`, so an extended challenge digest cannot
+  masquerade as the canonical base AIR transcript. The composition writer
+  rederives both codeword roots and requires exact retained-transcript equality
+  before evaluating internal or fixed-position public constraints. Independent
+  Plonky3 packing/Poseidon tests, policy arithmetic, exact AIR-shape checks,
+  and six malformed-profile mutations pass 6/6. The first complete run exposed
+  a real stale-challenge bug because composition had been generated before the
+  profile extension; the nominal two-level transcript repair closes it. The
+  fresh exact production gate emits and accepts the 47,552-byte receipt and
+  retains the typed mutation matrix.
+
+  To keep this evidence viable on the 19 GiB machine, the exact gate now uses
+  four process legs: compile prover, execute the persisted validated Wasm,
+  compile verifier, execute the persisted validated verifier. Compiler arenas
+  therefore never overlap Wasmtime JIT or Fe proof state. The first combined
+  attempt crossed below the mandated 3 GiB available-memory floor after
+  emitting the same prover module and was stopped. The isolated rerun kept the
+  artifact and proof semantics identical and passed 1/1 in 1,891.64 seconds.
+
   The assembled regression receipt still carries four queries. The compact
   114-query range must subsequently drive real sampling, openings,
   authentication paths, and FRI folds before a separate security-sized
-  receipt is claimed. Production `TRACE = 4096`, `LDE = 8192` revalidation also
-  remains open. The direct-domain policy remains explicitly conjectured rather
-  than a DEEP-ALI soundness claim. The Sonatina companions also need a
+  receipt is claimed. The direct-domain policy remains explicitly conjectured
+  rather than a DEEP-ALI soundness claim. The Sonatina companions also need a
   published revision and normal Fe dependency pin before this gate is
   reproducible without the local path patch.
 - [~] Interpret the BabyBear proof dependency plan through the Conal/CTFE
@@ -2022,17 +2052,15 @@ fallback. The semantic receipts are:
    `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
    Radeon 780M through RADV after the private-heap fix. The four standalone
    hardware test binaries in the runbook remain to be executed without skips.
-2. Finish revalidating the newly fitting `[2, 2, 1, 1]` AIR through
-   commitments, openings, authentication paths, FRI folds, and assembled
-   canonical mutations. The widened 6,595-word base-LDE carrier and every
-   codeword passed its independent direct-DFT gate at `6a4b9eaec`; the focused
-   toy production composition and LD01/LD02 authentication gates are also
-   green. Those executions do not stand in for the remaining production-sized
-   downstream gates. Bind every policy parameter into the production
-   transcript and make the compact 114-query range drive real sampling. Pin
-   the required Sonatina revision. Preserve the four-query receipt as a
-   regression fixture, then execute a separate security-sized receipt rather
-   than silently changing the checkpoint's meaning.
+2. Advance the newly fitting `[2, 2, 1, 1]` AIR from the green four-query
+   production regression to a separate security-sized receipt. The widened
+   6,595-word base-LDE carrier, every codeword, commitments, openings,
+   authentication paths, FRI folds, assembled canonical mutation matrix, and
+   exact profile-bound transcript now execute at `TRACE = 4096`, `LDE = 8192`.
+   Keep that four-query artifact as the protocol-shape regression. Next make
+   the compact 114-query range drive real sampling, openings, authentication,
+   and folds without silently changing the checkpoint's meaning. Pin the
+   required Sonatina revision.
 3. Close G-NTT: carry the now-gated production toy coset-LDE migration into the
    production-sized receipt path, preserve the direct-DFT and commitment
    oracles, then run the staged path through the real Chrome hardware gate.

@@ -9,6 +9,8 @@ use canonical_words::{
     BrowserWordWriter,
     CanonicalWordStream,
     CanonicalWordStreamProvider,
+    CanonicalWords,
+    CanonicalWordsProvider,
     canonical_word_stream_count,
     decode_canonical_words,
     encode_canonical_words,
@@ -39,6 +41,7 @@ use mandelbrot_proof_baby_bear::{
     verify_composition_multi_opening,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
+    SparseAirConstraintShape,
     SparseBaseLdeDigest,
     SparseBaseAirLdeCodeword,
     SparseBaseLdeMultiOpening,
@@ -47,12 +50,16 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseInteractionAirLdeCodeword,
     SparseInteractionLdeMultiOpening,
     SparseAirLdeTranscriptDigest,
+    SparseCompositionTranscriptDigest,
     bind_sparse_air_lde_transcript,
+    bind_sparse_composition_extension,
     evaluate_sparse_bound_composition_opened,
     sparse_lde_opened_air_row,
     sparse_base_lde_root_power_of_two,
-    sparse_composition_lde_root_power_of_two,
+    sparse_composition_degree_bound,
+    sparse_bound_composition_lde_root_power_of_two,
     sparse_interaction_lde_root_power_of_two,
+    sparse_constraint_shape,
     empty_sparse_base_lde_multi_opening,
     empty_sparse_interaction_lde_multi_opening,
     verify_sparse_base_lde_multi_opening,
@@ -63,9 +70,38 @@ use mandelbrot_proof_fixed_air_baby_bear::{
 use mandelbrot_proof_recursive::OrbitInterval
 use mandelbrot_proof_recursive_baby_bear::commit_recursive_leaf_statement
 use merkle_core::multi_path_matches_requests
-use poseidon_baby_bear::Poseidon2Digest
-use precision::baby_bear::{BabyBear, BabyBearExt4}
+use poseidon_baby_bear::{
+    Poseidon2Digest,
+    Poseidon2Domain,
+    Poseidon2FieldDomain,
+    PackedCommitment,
+    commit_canonical_packed,
+}
+use precision::baby_bear::{BABY_BEAR_MODULUS, BabyBear, BabyBearExt4}
 use precision::polynomial::{Radix2Field, radix2_log}
+use proof_security::{
+    DirectFriSecurityPolicy,
+    derive_conjectured_direct_fri_policy,
+    direct_fri_security_policy_is_derived,
+}
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+struct MandelbrotSparseSecurityProfileBabyBearV1 {}
+impl Poseidon2Domain for MandelbrotSparseSecurityProfileBabyBearV1 {
+    const TAG: u32 = protocol_tag("SP01")
+}
+
+struct MandelbrotSparseSecurityTranscriptBabyBearV1 {}
+impl Poseidon2FieldDomain for MandelbrotSparseSecurityTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("SP02")
+}
 
 /// One canonical sparse AIR and FRI receipt. The base and interaction roots
 /// retain their limb, trace, and LDE brands. The nested FRI carrier is an
@@ -125,9 +161,210 @@ pub const PRODUCTION_LIMBS: usize = 4
 pub const PRODUCTION_TRACE_LENGTH: usize = 4096
 pub const PRODUCTION_LDE_LENGTH: usize = 8192
 pub const PRODUCTION_LDE_LOG: usize = 13
+pub const PRODUCTION_TRACE_LENGTH_U32: u32 =
+    PRODUCTION_TRACE_LENGTH.downcast_truncate()
+pub const PRODUCTION_LDE_LENGTH_U32: u32 =
+    PRODUCTION_LDE_LENGTH.downcast_truncate()
 /// Protocol-shape checkpoint only. A later audited soundness policy must
 /// derive the security-bearing query count before recursive proving.
 pub const PRODUCTION_QUERY_COUNT: usize = 4
+pub const PRODUCTION_SECURITY_TARGET_BITS: u32 = 100
+pub const PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS: u32 = 1024
+pub const PRODUCTION_SECURITY_EXTENSION_DEGREE: u32 = 4
+pub const PRODUCTION_SECURITY_FOLDING_ARITY: u32 = 2
+pub const PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP: u32 = 8192
+pub const PRODUCTION_SECURITY_HASH_COLLISION_BITS: u32 = 128
+pub const PRODUCTION_SECURITY_QUERY_POW_BITS: u32 = 0
+pub const PRODUCTION_SECURITY_COMMIT_POW_BITS: u32 = 0
+
+/// Security-affecting transcript data, including the exact structural shape
+/// produced by the AIR evaluator and the query count actually executed by the
+/// receipt. A verifier recomputes this value rather than trusting receipt
+/// bytes, so a policy cannot claim more queries than the proof opens.
+pub struct SparseDirectFriTranscriptProfile {
+    pub valid: bool,
+    pub policy: DirectFriSecurityPolicy,
+    pub air_shape: SparseAirConstraintShape,
+    pub executed_queries: u32,
+}
+impl core::marker::Copy for SparseDirectFriTranscriptProfile {}
+derive CanonicalWords for SparseDirectFriTranscriptProfile using CanonicalWordsProvider
+
+pub const SPARSE_SECURITY_PROFILE_WORDS: usize =
+    <SparseDirectFriTranscriptProfile as CanonicalWords>::WORDS as usize
+pub const SPARSE_SECURITY_PROFILE_FIELDS: usize =
+    (SPARSE_SECURITY_PROFILE_WORDS * 32 + 29) / 30
+
+pub struct SparseDirectFriProfileDigest {
+    pub valid: bool,
+    pub value: Poseidon2Digest,
+}
+impl core::marker::Copy for SparseDirectFriProfileDigest {}
+
+fn production_security_policy(
+    _ target_bits: u32,
+    _ max_composed_proofs: u32,
+) -> DirectFriSecurityPolicy {
+    let shape = sparse_constraint_shape<{PRODUCTION_LIMBS}>()
+    derive_conjectured_direct_fri_policy(
+        target_bits,
+        max_composed_proofs,
+        BABY_BEAR_MODULUS,
+        PRODUCTION_SECURITY_EXTENSION_DEGREE,
+        PRODUCTION_TRACE_LENGTH_U32,
+        PRODUCTION_LDE_LENGTH_U32,
+        sparse_composition_degree_bound(
+            shape,
+            PRODUCTION_TRACE_LENGTH_U32,
+        ),
+        PRODUCTION_SECURITY_FOLDING_ARITY,
+        PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP,
+        PRODUCTION_SECURITY_HASH_COLLISION_BITS,
+        PRODUCTION_SECURITY_QUERY_POW_BITS,
+        PRODUCTION_SECURITY_COMMIT_POW_BITS,
+    )
+}
+
+pub fn production_recursive_security_policy() -> DirectFriSecurityPolicy {
+    production_security_policy(
+        PRODUCTION_SECURITY_TARGET_BITS,
+        PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS,
+    )
+}
+
+/// The already executed four-query receipt is retained as an explicitly
+/// low-security protocol-shape checkpoint. It must never carry the recursive
+/// 100-bit profile, whose derived query count is larger.
+pub fn production_checkpoint_security_policy() -> DirectFriSecurityPolicy {
+    production_security_policy(
+        3,
+        1,
+    )
+}
+
+fn maximum_u32(_ left: u32, _ right: u32) -> u32 {
+    if left > right { left } else { right }
+}
+
+fn sparse_air_shape_is_consistent(
+    _ shape: SparseAirConstraintShape,
+    _ policy: DirectFriSecurityPolicy,
+) -> bool {
+    shape.valid
+        && shape.total == shape.all_rows
+            + shape.pair_rows + shape.first_row + shape.last_row
+        && shape.all_rows > 0 && shape.pair_rows > 0
+        && shape.first_row > 0 && shape.last_row > 0
+        && shape.all_rows_degree > 0 && shape.pair_rows_degree > 0
+        && shape.first_row_degree > 0 && shape.last_row_degree > 0
+        && shape.maximum_degree == maximum_u32(
+            maximum_u32(shape.all_rows_degree, shape.pair_rows_degree),
+            maximum_u32(shape.first_row_degree, shape.last_row_degree),
+        )
+        && shape.total <= policy.max_air_constraints
+        && sparse_composition_degree_bound(
+            shape,
+            policy.trace_length,
+        ) == policy.composition_degree_bound
+}
+
+fn sparse_direct_fri_transcript_profile(
+    _ policy: DirectFriSecurityPolicy,
+    _ air_shape: SparseAirConstraintShape,
+    _ executed_queries: u32,
+) -> SparseDirectFriTranscriptProfile {
+    let shape_consistent = sparse_air_shape_is_consistent(air_shape, policy)
+    let policy_consistent = policy.valid
+        && policy.base_modulus == BABY_BEAR_MODULUS
+        && policy.extension_degree == PRODUCTION_SECURITY_EXTENSION_DEGREE
+        && policy.trace_length == PRODUCTION_TRACE_LENGTH_U32
+        && policy.lde_length == PRODUCTION_LDE_LENGTH_U32
+        && policy.folding_arity == PRODUCTION_SECURITY_FOLDING_ARITY
+        && policy.max_air_constraints == PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP
+        && policy.hash_collision_bits
+            == PRODUCTION_SECURITY_HASH_COLLISION_BITS
+        && policy.query_pow_bits == PRODUCTION_SECURITY_QUERY_POW_BITS
+        && policy.commit_pow_bits == PRODUCTION_SECURITY_COMMIT_POW_BITS
+        && policy.query_count == executed_queries
+    SparseDirectFriTranscriptProfile {
+        valid: shape_consistent && policy_consistent,
+        policy: policy,
+        air_shape: air_shape,
+        executed_queries: executed_queries,
+    }
+}
+
+fn sparse_direct_fri_transcript_profile_is_consistent(
+    _ profile: ref SparseDirectFriTranscriptProfile,
+) -> bool {
+    direct_fri_security_policy_is_derived(profile.policy)
+        && profile.executed_queries == profile.policy.query_count
+        && sparse_air_shape_is_consistent(profile.air_shape, profile.policy)
+}
+
+pub fn production_checkpoint_security_profile()
+    -> SparseDirectFriTranscriptProfile {
+    sparse_direct_fri_transcript_profile(
+        production_checkpoint_security_policy(),
+        sparse_constraint_shape<{PRODUCTION_LIMBS}>(),
+        PRODUCTION_QUERY_COUNT.downcast_truncate(),
+    )
+}
+
+pub fn production_recursive_security_profile()
+    -> SparseDirectFriTranscriptProfile {
+    let policy = production_recursive_security_policy()
+    sparse_direct_fri_transcript_profile(
+        policy,
+        sparse_constraint_shape<{PRODUCTION_LIMBS}>(),
+        policy.query_count,
+    )
+}
+
+pub fn commit_sparse_direct_fri_transcript_profile(
+    _ profile: ref SparseDirectFriTranscriptProfile,
+) -> SparseDirectFriProfileDigest {
+    let commitment = sparse_direct_fri_profile_commitment(profile)
+    SparseDirectFriProfileDigest {
+        valid: commitment.is_valid(),
+        value: commitment.digest(),
+    }
+}
+
+fn sparse_direct_fri_profile_commitment(
+    _ profile: ref SparseDirectFriTranscriptProfile,
+) -> PackedCommitment {
+    let commitment = commit_canonical_packed<
+        MandelbrotSparseSecurityProfileBabyBearV1,
+        SparseDirectFriTranscriptProfile,
+        {SPARSE_SECURITY_PROFILE_WORDS},
+        {SPARSE_SECURITY_PROFILE_FIELDS},
+    >(profile)
+    commitment.require(
+        profile.valid
+            && sparse_direct_fri_transcript_profile_is_consistent(profile),
+    )
+}
+
+/// Extend an already authenticated AIR transcript with the exact security
+/// profile interpreted by this receipt. The profile commitment is nominally
+/// separated from all statement, AIR-root, composition, and FRI domains.
+pub fn bind_sparse_air_security_profile<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ profile: SparseDirectFriTranscriptProfile,
+) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
+    bind_sparse_composition_extension<
+        MandelbrotSparseSecurityTranscriptBabyBearV1,
+        L,
+        TRACE,
+        LDE,
+    >(air, sparse_direct_fri_profile_commitment(ref profile))
+}
+
 pub const PRODUCTION_AIR_MAX_LEAVES: usize = PRODUCTION_QUERY_COUNT * 4
 pub const PRODUCTION_AIR_MAX_SIBLINGS: usize =
     PRODUCTION_AIR_MAX_LEAVES * PRODUCTION_LDE_LOG
@@ -358,16 +595,20 @@ pub fn write_production_sparse_baby_bear_receipt(
         base_root,
         interaction_root,
     )
-    let composition_root = sparse_composition_lde_root_power_of_two<
+    let composition = bind_sparse_air_security_profile(
+        air,
+        production_checkpoint_security_profile(),
+    )
+    let composition_root = sparse_bound_composition_lde_root_power_of_two<
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
         {PRODUCTION_LDE_LENGTH},
-    >(air, composition_codeword)
+    >(composition, composition_codeword)
     let composition_transcript = bind_composition(
-        air.transcript,
+        composition.transcript(),
         composition_root.value,
     )
-    if !base_root.valid || !interaction_root.valid || !air.valid
+    if !base_root.valid || !interaction_root.valid || !composition.is_valid()
         || !composition_root.valid || !composition_transcript.valid {
         return false
     }
@@ -455,14 +696,14 @@ pub fn write_production_sparse_baby_bear_receipt(
 }
 
 fn authenticate_production_sparse_fri(
-    _ air: SparseAirLdeTranscriptDigest<
+    _ composition: SparseCompositionTranscriptDigest<
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
         {PRODUCTION_LDE_LENGTH},
     >,
     _ proof: ref ProductionSparseFriQuery,
 ) -> ProductionSparseFriAuthentication {
-    let composition_authenticated = air.valid && air.transcript.valid
+    let composition_authenticated = composition.is_valid()
         && proof.valid && proof.composition_root.valid
         && verify_composition_multi_opening<
             {PRODUCTION_LDE_LENGTH},
@@ -470,7 +711,7 @@ fn authenticate_production_sparse_fri(
             {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
         >(proof.composition, proof.composition_root)
     let composition_transcript = bind_composition(
-        air.transcript,
+        composition.transcript(),
         proof.composition_root,
     )
     let authenticated = <ProductionSparseFriSchedule
@@ -518,7 +759,7 @@ fn authenticate_production_sparse_fri(
 fn verify_production_sparse_composition_query(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ shift: BabyBear,
-    _ air: SparseAirLdeTranscriptDigest<
+    _ composition: SparseCompositionTranscriptDigest<
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
         {PRODUCTION_LDE_LENGTH},
@@ -576,12 +817,12 @@ fn verify_production_sparse_composition_query(
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
         {PRODUCTION_LDE_LENGTH},
-    >(air, interval, point, ref current.1, ref next.1)
+    >(composition, interval, point, ref current.1, ref next.1)
     let expected_negative = evaluate_sparse_bound_composition_opened<
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
         {PRODUCTION_LDE_LENGTH},
-    >(air, interval, negative_point, ref negative.1, ref negative_next.1)
+    >(composition, interval, negative_point, ref negative.1, ref negative_next.1)
     let opened = receipt.fri.composition.sparse_value(geometry.evaluation)
     let opened_negative = receipt.fri.composition.sparse_value(
         geometry.negative_evaluation,
@@ -628,8 +869,15 @@ pub fn verify_production_sparse_baby_bear_receipt(
         receipt.base_root,
         receipt.interaction_root,
     )
-    let authenticated = authenticate_production_sparse_fri(air, ref receipt.fri)
-    if !air.valid || !authenticated.valid { return false }
+    let composition = bind_sparse_air_security_profile(
+        air,
+        production_checkpoint_security_profile(),
+    )
+    let authenticated = authenticate_production_sparse_fri(
+        composition,
+        ref receipt.fri,
+    )
+    if !composition.is_valid() || !authenticated.valid { return false }
 
     let air_requests = <ProductionSparseFriQueryPlan
         as BabyBearAirLdeRequests<
@@ -663,7 +911,7 @@ pub fn verify_production_sparse_baby_bear_receipt(
         if !verify_production_sparse_composition_query(
             interval,
             shift,
-            air,
+            composition,
             query,
             receipt,
         ) || !<ProductionSparseFriSchedule as BabyBearFriMultiFoldCheck<

@@ -6,12 +6,12 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use p3_baby_bear::{
-    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL,
-    BABYBEAR_POSEIDON2_RC_16_INTERNAL, BabyBear, default_babybear_poseidon2_16,
+    default_babybear_poseidon2_16, BabyBear, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL,
+    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, BABYBEAR_POSEIDON2_RC_16_INTERNAL,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
@@ -354,6 +354,27 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
             );
             offset += width as usize;
         }
+    }
+
+    for words in [
+        [1, BABY_BEAR_MODULUS, u32::MAX, 0x1357_9bdf, 0x2468_ace0],
+        [0, 7, 0x8000_0000, 0, u32::MAX],
+    ] {
+        let packed = reference_pack(&words, &[32; 5], 6)
+            .expect("canonical 32-bit words must fit six BabyBear payloads");
+        let mut expected = vec![1];
+        expected.extend(reference_packed_commitment(protocol_tag(b"BC01"), &packed));
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "canonical_packed5_commitment",
+                &words,
+                9,
+            ),
+            expected,
+            "canonical schema packing differs from the independent Plonky3 model",
+        );
     }
 
     let mut state = 0x6d2b_79f5u32;

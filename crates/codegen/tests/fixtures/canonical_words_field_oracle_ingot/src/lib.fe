@@ -55,6 +55,28 @@ struct DerivedQuartet { rows: [DerivedRow; 4] }
 impl core::marker::Copy for DerivedQuartet {}
 derive CanonicalWords for DerivedQuartet using CanonicalWordsProvider
 
+struct LargeSnapshot { valid: bool, values: [u32; 1001] }
+impl core::marker::Copy for LargeSnapshot {}
+derive CanonicalWords for LargeSnapshot using CanonicalWordsProvider
+
+struct SnapshotEnvelope { snapshot: LargeSnapshot }
+impl core::marker::Copy for SnapshotEnvelope {}
+derive CanonicalWords for SnapshotEnvelope using CanonicalWordsProvider
+
+const EMPTY_LARGE_SNAPSHOT: LargeSnapshot = LargeSnapshot {
+    valid: false,
+    values: [0; 1001],
+}
+
+fn write_snapshot_first(
+    _ output: mut LargeSnapshot,
+    _ valid: bool,
+    _ value: u32,
+) {
+    output.valid = valid
+    output.values[0] = value
+}
+
 struct CountedWords4 { count: u32, values: [u32; 4] }
 impl core::marker::Copy for CountedWords4 {}
 impl CanonicalWordStream for CountedWords4 {
@@ -209,6 +231,18 @@ pub fn canonical_derived_quartet() -> BrowserBytes {
         BrowserWordWriter::allocate(
             <DerivedQuartet as CanonicalWords>::WORDS,
         ),
+    ).finish()
+}
+
+pub fn canonical_embedded_snapshot() -> BrowserBytes {
+    let mut output = EMPTY_LARGE_SNAPSHOT
+    write_snapshot_first(mut output, true, 7)
+    let snapshot = output
+    write_snapshot_first(mut output, false, 11)
+    let value = SnapshotEnvelope { snapshot: snapshot }
+    encode_canonical_words(
+        ref value,
+        BrowserWordWriter::allocate(<SnapshotEnvelope as CanonicalWords>::WORDS),
     ).finish()
 }
 

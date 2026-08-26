@@ -6,10 +6,16 @@
 //! diagonal. No generated constant table is part of the authored source.
 
 use core::num::{IntDowncast, mul_mod_u256}
-use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_words}
+use canonical_words::{
+    CanonicalWords,
+    WordSink,
+    WordSource,
+    encode_canonical_word_array,
+    encode_canonical_words,
+}
 use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
 use precision::word_field::montgomery_word_u32
-use precision::word_field_encoding::PackedFieldBits
+use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 use poseidon_grain::{
     Grain80Word, field_element, warm, warm_word,
 }
@@ -99,6 +105,19 @@ impl core::marker::Copy for PackedCommitment {}
 impl PackedCommitment {
     pub fn is_valid(self) -> bool {
         self.valid == VALID_WORD
+    }
+    /// Preserve one packed commitment only when an enclosing protocol
+    /// predicate also holds. This keeps callers from reconstructing the
+    /// private fail-closed representation merely to authenticate a schema
+    /// whose canonical words were well formed but semantically inconsistent.
+    pub fn require(self, _ condition: bool) -> Self {
+        if self.valid != VALID_WORD || !condition {
+            return PackedCommitment {
+                valid: INVALID_WORD,
+                value: Poseidon2Digest::zero(),
+            }
+        }
+        self
     }
     pub fn digest(self) -> Poseidon2Digest {
         if self.valid != VALID_WORD {
@@ -1377,6 +1396,30 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
         index = index + 1
     }
     PackedCommitment { valid: VALID_WORD, value: Poseidon2Digest { values: values } }
+}
+
+/// Commit any fixed canonical Fe schema as an injective bit string. Canonical
+/// words are interpreted as complete 32-bit lanes, then packed into 30-bit
+/// BabyBear payloads before entering the nominal packed-message domain. This
+/// accepts values such as a modulus or bit mask that are valid `u32` data but
+/// not canonical BabyBear field elements.
+pub fn commit_canonical_packed<
+    D: Poseidon2Domain,
+    T: CanonicalWords,
+    const WORDS: usize,
+    const FIELDS: usize,
+>(
+    _ value: ref T,
+) -> PackedCommitment {
+    let encoded = encode_canonical_word_array<T, WORDS>(value)
+    let packed = pack_bounded_words<
+        precision::baby_bear::BabyBearModulus,
+        WORDS,
+        FIELDS,
+    >(encoded.words, [32; WORDS]).require(
+        encoded.valid && T::WORDS == WORDS.downcast_truncate(),
+    )
+    commit_packed<D, FIELDS>(packed)
 }
 
 /// Commit one fixed-length vector of canonical base-field values. The nominal

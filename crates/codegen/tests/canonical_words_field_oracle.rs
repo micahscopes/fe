@@ -1,6 +1,6 @@
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
@@ -23,7 +23,7 @@ fn compile_gate() -> Vec<u8> {
     );
     BackendKind::Wasm
         .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O2)
         .expect("canonical field words should compile")
         .into_bytecode()
         .expect("Wasm output should be bytecode")
@@ -99,10 +99,7 @@ fn const_generic_field_codec_runs_on_wasm() {
     assert_eq!(array_words, words);
 
     let envelope_array_widths = instance
-        .get_typed_func::<(), (i32, i32, i32)>(
-            &mut store,
-            "canonical_envelope_word_array_widths",
-        )
+        .get_typed_func::<(), (i32, i32, i32)>(&mut store, "canonical_envelope_word_array_widths")
         .expect("envelope array width audit export");
     assert_eq!(
         envelope_array_widths
@@ -206,6 +203,26 @@ fn const_generic_field_codec_runs_on_wasm() {
         assert_eq!(field[0], 7);
         assert!(field[1..].iter().all(|word| *word == 0));
     }
+
+    let embedded_snapshot = instance
+        .get_typed_func::<(), (i32, i32)>(&mut store, "canonical_embedded_snapshot")
+        .expect("embedded snapshot encoding export");
+    let (pointer, length) = embedded_snapshot
+        .call(&mut store, ())
+        .expect("embedded snapshot encoding runs");
+    assert_eq!(length, 1002 * 4);
+    let mut bytes = vec![0u8; length as usize];
+    memory.read(&store, pointer as usize, &mut bytes).unwrap();
+    let words = bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words[0], 1,
+        "derived encoding must retain snapshot validity"
+    );
+    assert_eq!(words[1], 7, "derived encoding must retain snapshot data");
+    assert!(words[2..].iter().all(|word| *word == 0));
 
     let stream = instance
         .get_typed_func::<i32, (i32, i32)>(&mut store, "canonical_stream_envelope")

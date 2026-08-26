@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -192,6 +192,82 @@ fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
                 .expect("policy should execute"),
             0,
             "malformed policy case {case} must fail closed",
+        );
+    }
+}
+
+#[test]
+fn production_profiles_bind_executed_queries_and_air_shape() {
+    let (mut store, instance) = instance();
+    let checkpoint = call_words(
+        &mut store,
+        &instance,
+        "production_checkpoint_profile_words",
+        22,
+    );
+    let recursive = call_words(
+        &mut store,
+        &instance,
+        "production_recursive_profile_words",
+        22,
+    );
+
+    for (words, target, proofs, queries) in [(&checkpoint, 3, 1, 4), (&recursive, 100, 1_024, 114)]
+    {
+        assert_eq!(
+            &words[..8],
+            &[1, 1, target, proofs, 4_096, 8_192, 4_095, queries]
+        );
+        assert_eq!(words[8], 1, "the AIR shape interpreter must be valid");
+        assert!(words[9..13].iter().all(|count| *count > 0));
+        assert_eq!(words[13], words[9..13].iter().sum::<u32>());
+        assert_eq!(words[13], 691);
+        assert_eq!(&words[14..19], &[2, 2, 1, 1, 2]);
+        assert_eq!(
+            words[19], queries,
+            "the committed profile must bind executed queries"
+        );
+        assert_eq!(
+            &words[20..],
+            &[44, 47],
+            "canonical profile capacity changed"
+        );
+    }
+
+    let clean = instance
+        .get_typed_func::<i32, (i32, i32, i32, i32, i32, i32, i32, i32, i32)>(
+            &mut store,
+            "production_checkpoint_profile_commitment",
+        )
+        .expect("production profile commitment export")
+        .call(&mut store, 0)
+        .expect("clean production profile commitment should execute");
+    let clean = [
+        clean.0, clean.1, clean.2, clean.3, clean.4, clean.5, clean.6, clean.7, clean.8,
+    ]
+    .map(|word| word as u32);
+    assert_eq!(clean[0], 1);
+    assert!(clean[1..].iter().any(|word| *word != 0));
+
+    for mutation in 1..=6 {
+        let function = instance
+            .get_func(&mut store, "production_checkpoint_profile_commitment")
+            .expect("production profile commitment export");
+        let mut results = vec![Val::I32(0); 9];
+        function
+            .call(&mut store, &[Val::I32(mutation)], &mut results)
+            .expect("mutated production profile commitment should execute");
+        let words = results
+            .into_iter()
+            .map(|value| match value {
+                Val::I32(word) => word as u32,
+                other => panic!("profile mutation returned non-u32 lane {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            words,
+            vec![0; 9],
+            "profile mutation {mutation} must fail closed"
         );
     }
 }

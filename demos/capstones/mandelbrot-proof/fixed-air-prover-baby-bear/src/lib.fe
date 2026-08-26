@@ -22,13 +22,15 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseInteractionAirEvaluationTrace,
     SparseInteractionAirLdeCodeword,
     SparseLdeInteractionChallenges,
+    bind_sparse_air_lde_transcript,
     sparse_base_air_fields,
     sparse_base_air_row_from_witness,
     sparse_base_lde_root_power_of_two,
     sparse_interaction_air_fields,
+    sparse_interaction_lde_root_power_of_two,
     sparse_lde_interaction_challenges,
     write_sparse_base_air_lde,
-    write_sparse_composition_air_codeword,
+    write_sparse_bound_composition_air_codeword,
     write_sparse_interaction_air_lde,
     write_sparse_lde_interaction_air_rows,
     zero_sparse_interaction_accumulators,
@@ -40,10 +42,13 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     PRODUCTION_LIMBS,
     PRODUCTION_TRACE_LENGTH,
     ProductionSparseBabyBearReceipt,
+    bind_sparse_air_security_profile,
     encode_production_sparse_baby_bear_receipt,
+    production_checkpoint_security_profile,
     write_production_sparse_baby_bear_receipt,
 }
 use mandelbrot_proof_recursive::{OrbitInterval, certify_leaf, complex_equals}
+use mandelbrot_proof_recursive_baby_bear::commit_recursive_leaf_statement
 use precision::baby_bear::BabyBear
 
 pub enum ProductionSparseProverStage {
@@ -383,18 +388,42 @@ fn write_production_sparse_composition(
         composition: mut ProductionCompositionCodeword,
     )
 {
-    let air = write_sparse_composition_air_codeword<
+    let base_root = sparse_base_lde_root_power_of_two<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(ref base)
+    let interaction_root = sparse_interaction_lde_root_power_of_two<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(base_root, ref interaction)
+    let air = bind_sparse_air_lde_transcript<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(
+        commit_recursive_leaf_statement(interval),
+        base_root,
+        interaction_root,
+    )
+    let transcript = bind_sparse_air_security_profile(
+        air,
+        production_checkpoint_security_profile(),
+    )
+    let transcript = write_sparse_bound_composition_air_codeword<
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
         {PRODUCTION_LDE_LENGTH},
     >(
         interval,
+        transcript,
         ref base,
         ref interaction,
         shift,
         mut composition,
     )
-    air.valid && composition.valid
+    transcript.is_valid() && composition.valid
 }
 
 fn write_production_sparse_composition_stage() -> bool
