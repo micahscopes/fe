@@ -79,7 +79,7 @@ use super::{
     realize::{
         RuntimeArgSource, RuntimeValueUseEmitter, SelectedRuntimeArg, emit_runtime_value_use_plan,
     },
-    returns::runtime_return_class,
+    returns::{StaticRuntimeReturnDecision, runtime_return_class, static_runtime_return_decision},
     source::{
         RuntimeSourceMode, RuntimeSourceQuery, SemanticPlaceValueSource,
         alias_source_place_for_local as source_alias_source_place_for_local,
@@ -290,13 +290,20 @@ pub(crate) fn check_runtime_trait_calls_resolvable<'db>(
 /// zero-sized-struct-returning helper) hits the panic in `classify.rs`
 /// before the callee's own instance is ever popped and lowered.
 ///
-/// This walk resolves the same calls the pre-pass and return-class inference
-/// would, transitively through every reachable callee body, so any
-/// unresolvable trait-method call surfaces as the ordinary
-/// `LowerError::UnresolvedTraitSelection` compile error here, before any of
-/// those panicking paths run. `checked` memoizes validated bodies across the
-/// package, while `scheduled` deduplicates pending keys so a shared computation
-/// DAG cannot inflate the worklist exponentially.
+/// This walk resolves every call in the current body. It only descends into a
+/// callee when that callee has a dynamic runtime return. Those are precisely
+/// the bodies that return-class inference may inspect before their own runtime
+/// instance is popped and receives the ordinary current-body guard. A callee
+/// with a statically known runtime return never needs its body inspected by
+/// return-class inference, so eagerly traversing it would only elaborate the
+/// complete semantic call graph, including CTFE and type-derived helpers that
+/// never become runtime-package nodes.
+///
+/// Any unresolvable trait-method call that can be reached early therefore still
+/// surfaces as the ordinary `LowerError::UnresolvedTraitSelection` compile
+/// error. `checked` memoizes validated bodies across the package, while
+/// `scheduled` deduplicates pending keys so a shared computation DAG cannot
+/// inflate the worklist exponentially.
 ///
 /// Only recurses into callees that are actual bodied Fe functions
 /// (`BodyOwner::Func` with `func.body(db).is_some()`); externs and
@@ -386,7 +393,13 @@ pub(crate) fn check_reachable_runtime_trait_calls_resolvable<'db>(
                     let callee_key =
                         resolve_runtime_call_key(db, key, typed_body, &body, *callee, args)?;
                     wasm_trait_preflight_slow(db, key, "resolve_runtime_call", phase_started);
-                    if matches!(callee_key.owner(db), BodyOwner::Func(func) if func.body(db).is_some())
+                    let callee_semantic = get_or_build_semantic_instance(db, callee_key);
+                    let return_is_dynamic = matches!(
+                        static_runtime_return_decision(db, callee_semantic),
+                        StaticRuntimeReturnDecision::Dynamic,
+                    );
+                    if return_is_dynamic
+                        && matches!(callee_key.owner(db), BodyOwner::Func(func) if func.body(db).is_some())
                         && !checked.contains(&callee_key)
                         && scheduled.insert(callee_key)
                     {
