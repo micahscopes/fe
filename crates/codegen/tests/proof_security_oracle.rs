@@ -4,6 +4,9 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{layout_for, BackendKind, OptLevel};
 use hir::hir_def::HirIngot;
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_symmetric::Permutation;
 use std::path::Path;
 use std::sync::OnceLock;
 use url::Url;
@@ -11,6 +14,7 @@ use wasmtime::Val;
 
 const MODULUS: u32 = 2_013_265_921;
 const ONE_Q16: f64 = 65_536.0;
+const POSEIDON_WIDTH: usize = 16;
 
 fn fixture_url() -> Url {
     let path =
@@ -80,6 +84,28 @@ fn call_words(
             other => panic!("`{name}` returned non-u32 lane {other:?}"),
         })
         .collect()
+}
+
+fn reference_permutation(input: [u32; POSEIDON_WIDTH]) -> [u32; POSEIDON_WIDTH] {
+    let mut state = input.map(BabyBear::from_u32);
+    default_babybear_poseidon2_16().permute_mut(&mut state);
+    state.map(|value| value.as_canonical_u32())
+}
+
+fn reference_sponge(message: &[u32]) -> [u32; 8] {
+    let mut state = [0u32; POSEIDON_WIDTH];
+    for block in message.chunks(8) {
+        state[..block.len()].copy_from_slice(block);
+        state = reference_permutation(state);
+    }
+    state[..8].try_into().unwrap()
+}
+
+fn reference_query_index(seed: u32, query: u32) -> u32 {
+    let mut message = vec![u32::from_be_bytes(*b"FQ02"), 9];
+    message.extend((0..8).map(|offset| seed + offset));
+    message.push(query);
+    reference_sponge(&message)[0] & 4095
 }
 
 fn random_words_bits_per_query() -> f64 {
@@ -193,6 +219,46 @@ fn recursive_union_budget_changes_the_derived_query_plan_and_fails_closed() {
             0,
             "malformed policy case {case} must fail closed",
         );
+    }
+}
+
+#[test]
+fn compact_query_range_matches_typed_plan_and_independent_poseidon() {
+    let (mut store, instance) = instance();
+    let typed_equivalence = instance
+        .get_typed_func::<i32, i32>(&mut store, "compact_checkpoint_query_plan_matches")
+        .expect("compact checkpoint equivalence export");
+    let security_samples = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "recursive_security_query_samples")
+        .expect("security query sample export");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("proof security fixture memory");
+
+    for seed in [0_u32, 1, 47, 1_000_003] {
+        assert_eq!(
+            typed_equivalence
+                .call(&mut store, seed as i32)
+                .expect("compact checkpoint equivalence should execute"),
+            1,
+            "compact query interpretation diverged at seed {seed}",
+        );
+        let (pointer, length) = security_samples
+            .call(&mut store, seed as i32)
+            .expect("security query sampling should execute");
+        assert_eq!(length, 114 * 4);
+        let mut bytes = vec![0u8; length as usize];
+        memory
+            .read(&store, pointer as usize, &mut bytes)
+            .expect("security query sample bytes must be readable");
+        let actual = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let expected = (1..=114)
+            .map(|query| reference_query_index(seed, query))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "indexed Poseidon samples at seed {seed}");
     }
 }
 

@@ -52,12 +52,14 @@ use mandelbrot_proof_air_core::{
     CompositionValue,
     FriQueryPlan,
     FriQueryPlanDone,
+    FriQueryRangePlan,
     FriQueryPlanSample,
     FriSchedule,
     FriScheduleDone,
     FriScheduleFold,
     composition_value,
     constraint_numerators,
+    fri_query_range_identity,
     radix2_query_geometry,
     signed_air_value,
 }
@@ -257,6 +259,16 @@ pub struct AirLdeLeafRequests<const MAX_REQUESTS: usize> {
 impl<const MAX_REQUESTS: usize> core::marker::Copy
     for AirLdeLeafRequests<MAX_REQUESTS> {}
 
+/// Runtime sample carrier for a compact consecutive query range. This is the
+/// value-level interpretation of `FriQueryRangePlan`, not a host-provided
+/// query list.
+pub struct FriQueryRangeSamples<const COUNT: usize> {
+    pub valid: bool,
+    pub count: u32,
+    pub indices: [u32; COUNT],
+}
+impl<const COUNT: usize> core::marker::Copy for FriQueryRangeSamples<COUNT> {}
+
 /// Derive the value carrier for a field-neutral query plan.
 pub trait BabyBearFriQueryPlanShape {
     type Samples
@@ -273,6 +285,13 @@ impl<const QUERY: u32, Tail: BabyBearFriQueryPlanShape> BabyBearFriQueryPlanShap
         QUERY,
         <Tail as BabyBearFriQueryPlanShape>::Samples,
     >
+}
+
+impl<
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> BabyBearFriQueryPlanShape for FriQueryRangePlan<FIRST_QUERY, COUNT> {
+    type Samples = FriQueryRangeSamples<COUNT>
 }
 
 /// Interpret the field-neutral query plan into independently domain-separated
@@ -309,6 +328,63 @@ where
         _ transcript: FriLayerTranscriptDigest<ROUND>,
     ) -> (bool, FriQueryIndicesDone<NEXT_QUERY>) {
         (transcript.valid, FriQueryIndicesDone<NEXT_QUERY> {})
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const HALF: usize,
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> BabyBearFriQueryPlan<ROUND, HALF, FriQueryRangeSamples<COUNT>>
+    for FriQueryRangePlan<FIRST_QUERY, COUNT>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { FIRST_QUERY > 0 },
+    { FIRST_QUERY < BABY_BEAR_MODULUS },
+    { COUNT > 0 },
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+    { HALF <= 134217728 },
+{
+    fn invalid_fri_query_samples() -> FriQueryRangeSamples<COUNT> {
+        FriQueryRangeSamples { valid: false, count: 0, indices: [0; COUNT] }
+    }
+
+    fn sample_fri_queries(
+        _ transcript: FriLayerTranscriptDigest<ROUND>,
+    ) -> (bool, FriQueryRangeSamples<COUNT>) {
+        let next_query = FIRST_QUERY + COUNT.downcast_truncate()
+        if !transcript.valid || next_query <= FIRST_QUERY
+            || next_query > BABY_BEAR_MODULUS {
+            return (
+                false,
+                <Self as BabyBearFriQueryPlan<
+                    ROUND,
+                    HALF,
+                    FriQueryRangeSamples<COUNT>,
+                >>::invalid_fri_query_samples(),
+            )
+        }
+        let half: u32 = HALF.downcast_truncate()
+        let mut indices = [0; COUNT]
+        let mut cursor: usize = 0
+        while cursor < COUNT {
+            let query = fri_query_range_identity(FIRST_QUERY, COUNT, cursor)
+            indices[cursor] = squeeze_ext4_indexed<
+                MandelbrotFriQueryBabyBearV2,
+            >(transcript.value, query).coefficient(0).to_u32() & (half - 1)
+            cursor = cursor + 1
+        }
+        (
+            true,
+            FriQueryRangeSamples {
+                valid: true,
+                count: COUNT.downcast_truncate(),
+                indices: indices,
+            },
+        )
     }
 }
 
@@ -487,6 +563,49 @@ where
     }
 }
 
+impl<
+    const HALF: usize,
+    const MAX_REQUESTS: usize,
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> BabyBearFriPairRequests<
+    HALF,
+    MAX_REQUESTS,
+    FriQueryRangeSamples<COUNT>,
+> for FriQueryRangePlan<FIRST_QUERY, COUNT>
+where
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+{
+    fn fri_pair_requests(
+        _ samples: FriQueryRangeSamples<COUNT>,
+    ) -> FriQueryLeafRequests<MAX_REQUESTS> {
+        if !samples.valid
+            || samples.count != COUNT.downcast_truncate()
+            || COUNT + COUNT > MAX_REQUESTS {
+            return FriQueryLeafRequests {
+                valid: false,
+                count: 0,
+                indices: [0; MAX_REQUESTS],
+            }
+        }
+        let half: u32 = HALF.downcast_truncate()
+        let mut indices = [0; MAX_REQUESTS]
+        let mut cursor: usize = 0
+        while cursor < COUNT {
+            let local = samples.indices[cursor] & (half - 1)
+            indices[cursor * 2] = local
+            indices[cursor * 2 + 1] = local + half
+            cursor = cursor + 1
+        }
+        FriQueryLeafRequests {
+            valid: true,
+            count: (COUNT + COUNT).downcast_truncate(),
+            indices: indices,
+        }
+    }
+}
+
 /// Interpret each typed Fiat-Shamir sample into the current, next, negative,
 /// and negative-next AIR LDE positions required by the shared constraint body.
 pub trait BabyBearAirLdeRequests<
@@ -521,6 +640,66 @@ where
         _ samples: FriQueryIndicesDone<NEXT_QUERY>,
     ) -> AirLdeLeafRequests<MAX_REQUESTS> {
         AirLdeLeafRequests { valid: true, count: 0, indices: [0; MAX_REQUESTS] }
+    }
+}
+
+impl<
+    const TRACE: usize,
+    const LDE: usize,
+    const MAX_REQUESTS: usize,
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> BabyBearAirLdeRequests<
+    TRACE,
+    LDE,
+    MAX_REQUESTS,
+    FriQueryRangeSamples<COUNT>,
+> for FriQueryRangePlan<FIRST_QUERY, COUNT>
+where
+    TRACE > 1,
+    LDE > 1,
+    LDE > TRACE,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { (LDE & (LDE - 1)) == 0 },
+    { (LDE % TRACE) == 0 },
+{
+    fn air_lde_requests(
+        _ samples: FriQueryRangeSamples<COUNT>,
+    ) -> AirLdeLeafRequests<MAX_REQUESTS> {
+        if !samples.valid
+            || samples.count != COUNT.downcast_truncate()
+            || COUNT * 4 > MAX_REQUESTS {
+            return AirLdeLeafRequests {
+                valid: false,
+                count: 0,
+                indices: [0; MAX_REQUESTS],
+            }
+        }
+        let mut indices = [0; MAX_REQUESTS]
+        let mut cursor: usize = 0
+        while cursor < COUNT {
+            let geometry = radix2_query_geometry<TRACE, LDE>(
+                samples.indices[cursor],
+            )
+            if !geometry.valid {
+                return AirLdeLeafRequests {
+                    valid: false,
+                    count: 0,
+                    indices: [0; MAX_REQUESTS],
+                }
+            }
+            let output = cursor * 4
+            indices[output] = geometry.evaluation
+            indices[output + 1] = geometry.next_evaluation
+            indices[output + 2] = geometry.negative_evaluation
+            indices[output + 3] = geometry.negative_next_evaluation
+            cursor = cursor + 1
+        }
+        AirLdeLeafRequests {
+            valid: true,
+            count: (COUNT * 4).downcast_truncate(),
+            indices: indices,
+        }
     }
 }
 
@@ -4774,6 +4953,38 @@ where Tail: BabyBearFriQueryBuffer<MAX_QUERIES, TailSamples>
         FriQueryBuffer {
             valid: true,
             count: tail.count + 1,
+            indices: indices,
+        }
+    }
+}
+
+impl<
+    const MAX_QUERIES: usize,
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> BabyBearFriQueryBuffer<MAX_QUERIES, FriQueryRangeSamples<COUNT>>
+    for FriQueryRangePlan<FIRST_QUERY, COUNT> {
+    fn fri_query_buffer(
+        _ samples: FriQueryRangeSamples<COUNT>,
+    ) -> FriQueryBuffer<MAX_QUERIES> {
+        if !samples.valid
+            || samples.count != COUNT.downcast_truncate()
+            || COUNT > MAX_QUERIES {
+            return FriQueryBuffer {
+                valid: false,
+                count: 0,
+                indices: [0; MAX_QUERIES],
+            }
+        }
+        let mut indices = [0; MAX_QUERIES]
+        let mut cursor: usize = 0
+        while cursor < COUNT {
+            indices[cursor] = samples.indices[cursor]
+            cursor = cursor + 1
+        }
+        FriQueryBuffer {
+            valid: true,
+            count: COUNT.downcast_truncate(),
             indices: indices,
         }
     }

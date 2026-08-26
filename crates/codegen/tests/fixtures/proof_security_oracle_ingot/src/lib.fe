@@ -7,10 +7,21 @@ use canonical_words::{
     decode_canonical_words,
     encode_canonical_words,
 }
+use core::BrowserBytes
 use mandelbrot_proof_air_core::{
+    FriQueryPlan,
     FriQueryRangePlan,
     FriQueryPlanShape,
     fri_query_range_identity,
+}
+use mandelbrot_proof_baby_bear::{
+    BabyBearAirLdeRequests,
+    BabyBearFriPairRequests,
+    BabyBearFriQueryBuffer,
+    BabyBearFriQueryPlan,
+    BabyBearFriQueryPlanShape,
+    FriLayerTranscriptDigest,
+    FriQueryRangeSamples,
 }
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     SPARSE_SECURITY_PROFILE_FIELDS,
@@ -27,6 +38,7 @@ use proof_security::{
     security_ceil_log2,
     security_floor_log2,
 }
+use poseidon_baby_bear::Poseidon2Digest
 
 const BABY_BEAR_MODULUS: u32 = 2013265921
 const EXTENSION_DEGREE: u32 = 4
@@ -57,6 +69,127 @@ pub type RecursiveSecurityQueryPlan = FriQueryRangePlan<
     1,
     {RECURSIVE_SECURITY_POLICY.query_count as usize},
 >
+const RECURSIVE_SECURITY_QUERY_COUNT: usize =
+    RECURSIVE_SECURITY_POLICY.query_count as usize
+type RecursiveSecurityQuerySamples =
+    FriQueryRangeSamples<{RECURSIVE_SECURITY_QUERY_COUNT}>
+
+type TypedCheckpointPlan = FriQueryPlan<1, 4>
+type TypedCheckpointSamples =
+    <TypedCheckpointPlan as BabyBearFriQueryPlanShape>::Samples
+type CompactCheckpointPlan = FriQueryRangePlan<1, 4>
+type CompactCheckpointSamples = FriQueryRangeSamples<4>
+
+fn query_transcript(_ seed: u32) -> FriLayerTranscriptDigest<1> {
+    FriLayerTranscriptDigest {
+        valid: true,
+        value: Poseidon2Digest::from_u32s([
+            seed, seed + 1, seed + 2, seed + 3,
+            seed + 4, seed + 5, seed + 6, seed + 7,
+        ]),
+    }
+}
+
+/// Exactness gate between the nominal four-node plan and the compact range
+/// interpreter. It compares samples plus both sparse-request interpretations.
+pub fn compact_checkpoint_query_plan_matches(_ seed: u32) -> u32 {
+    let transcript = query_transcript(seed)
+    let typed = <TypedCheckpointPlan as BabyBearFriQueryPlan<
+        1,
+        4096,
+        TypedCheckpointSamples,
+    >>::sample_fri_queries(transcript)
+    let compact = <CompactCheckpointPlan as BabyBearFriQueryPlan<
+        1,
+        4096,
+        CompactCheckpointSamples,
+    >>::sample_fri_queries(transcript)
+    if !typed.0 || !compact.0 { return 0 }
+
+    let typed_buffer = <TypedCheckpointPlan as BabyBearFriQueryBuffer<
+        4,
+        TypedCheckpointSamples,
+    >>::fri_query_buffer(typed.1)
+    let compact_buffer = <CompactCheckpointPlan as BabyBearFriQueryBuffer<
+        4,
+        CompactCheckpointSamples,
+    >>::fri_query_buffer(compact.1)
+    let typed_pairs = <TypedCheckpointPlan as BabyBearFriPairRequests<
+        4096,
+        8,
+        TypedCheckpointSamples,
+    >>::fri_pair_requests(typed.1)
+    let compact_pairs = <CompactCheckpointPlan as BabyBearFriPairRequests<
+        4096,
+        8,
+        CompactCheckpointSamples,
+    >>::fri_pair_requests(compact.1)
+    let typed_air = <TypedCheckpointPlan as BabyBearAirLdeRequests<
+        4096,
+        8192,
+        16,
+        TypedCheckpointSamples,
+    >>::air_lde_requests(typed.1)
+    let compact_air = <CompactCheckpointPlan as BabyBearAirLdeRequests<
+        4096,
+        8192,
+        16,
+        CompactCheckpointSamples,
+    >>::air_lde_requests(compact.1)
+    if !typed_buffer.valid || !compact_buffer.valid
+        || typed_buffer.count != compact_buffer.count
+        || !typed_pairs.valid || !compact_pairs.valid
+        || typed_pairs.count != compact_pairs.count
+        || !typed_air.valid || !compact_air.valid
+        || typed_air.count != compact_air.count {
+        return 0
+    }
+    let mut cursor: usize = 0
+    while cursor < 4 {
+        if typed_buffer.indices[cursor] != compact_buffer.indices[cursor] {
+            return 0
+        }
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < 8 {
+        if typed_pairs.indices[cursor] != compact_pairs.indices[cursor] {
+            return 0
+        }
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < 16 {
+        if typed_air.indices[cursor] != compact_air.indices[cursor] {
+            return 0
+        }
+        cursor = cursor + 1
+    }
+    1
+}
+
+/// Canonical u32 stream of all policy-selected samples. Rust independently
+/// recomputes every indexed Poseidon squeeze from the same transcript digest.
+pub fn recursive_security_query_samples(_ seed: u32) -> BrowserBytes {
+    let sampled = <RecursiveSecurityQueryPlan as BabyBearFriQueryPlan<
+        1,
+        4096,
+        RecursiveSecurityQuerySamples,
+    >>::sample_fri_queries(query_transcript(seed))
+    if !sampled.0 || !sampled.1.valid
+        || sampled.1.count != RECURSIVE_SECURITY_POLICY.query_count {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    let mut writer = BrowserWordWriter::allocate(
+        RECURSIVE_SECURITY_POLICY.query_count,
+    )
+    let mut cursor: usize = 0
+    while cursor < RECURSIVE_SECURITY_QUERY_COUNT {
+        writer = encode_canonical_words(ref sampled.1.indices[cursor], writer)
+        cursor = cursor + 1
+    }
+    writer.finish()
+}
 
 /// Evidence that the policy-selected count is the type-level query plan.
 /// No value-level query list exists between the two interpreters.
