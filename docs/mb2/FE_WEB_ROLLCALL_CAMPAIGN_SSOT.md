@@ -2149,10 +2149,35 @@ fallback. The semantic receipts are:
    Wasm lowering, observed about 4.8 GiB peak RSS with at least 12 GiB system
    memory available, and emitted neither a Wasm artifact nor a new diagnostic
    before the explicit timeout. This is not receipt, security, or proof-runtime
-   evidence. Compact the FCO-derived canonical codec into one typed schema or
-   stage-grid interpreter before another full four-process retry; exact body
-   interning and streamed MIR retention are the next measured compiler
-   follow-ups.
+   evidence.
+
+   A measured canonical stage-grid experiment was then rejected. The provider
+   derived declaration-order routing from the same Fe schema, and both the
+   cumulative-bound and linear typed-route forms passed the independent
+   canonical oracle. The linear form passed in release mode after 257.65
+   seconds. It nevertheless made exact compilation less tractable: a fair warm
+   six-minute trace remained inside root-body lowering for graph instance 1,
+   instead of making measurable progress through the former 3,079 instances.
+   The experiment was reverted rather than landing semantically correct code
+   with pathological compiler behavior. Do not retry that heterogeneous
+   routing shape. Preserve the existing canonical Fe codec and measure exact
+   runtime-body interning or streamed prepared-MIR retention next. Re-run the
+   full four-process 114-query boundary only after a focused gate demonstrates
+   lower graph size, wall time, or peak memory without changing codec values.
+
+   The Sonatina refresh was also audited against the actual
+   `fe-lang/sonatina` `main` at
+   `8e6c99f67cf3f20b9672cab61d8655c2ff33a6a7`, not the stale `micah/main`
+   tracking branch. Relative to merge base
+   `039a9f530856a7c0097ffc9dad904eed3bf33fe3`, the MB2 worktree has 157 local
+   commits and upstream has 40 commits, principally EVM memory placement,
+   stackification, pointer escape analysis, and shared optimizer changes. A
+   final-tree merge simulation found five textual conflict regions across
+   `cfg_edit`, GVN, SCCP simplification, and expression simplification. Refresh
+   Sonatina in an isolated worktree after the codec compaction checkpoint, run
+   focused Wasm, SPIR-V, and EVM gates there, and move the Fe dependency pin
+   only when the exact scalar receipt and browser proof gates remain green. Do
+   not blindly rebase the live 157-commit proof substrate.
 4. Carry the portable schedule to production-sized NTT/LDE, AIR composition,
    Poseidon/Merkle, FRI folding, and opening extraction. Close typed proof
    regions as each buffer enters the graph, preserve direct-DFT, Plonky3, and
@@ -2208,6 +2233,18 @@ browser proof flow merely to complete this list.
 6. Parallelize independent body lowering only after compaction and under an
    explicit RAM budget. Faster duplication is not the objective; smaller exact
    compilation is.
+
+7. Integrate first-class pointers as a staged semantic transplant from Sean's
+   pointer work, not as a mechanical branch rebase and not as a new proof gate.
+   The order is language syntax and types, borrow and provenance rules,
+   pointer-bearing products and storage-escape rejection, complete pointee
+   identity in runtime MIR, Wasm's exact `i32` carrier, then migration of
+   proof-critical and browser carriers. Preserve MB2 runtime-control effects,
+   FCO normalization, arena rewind and suspension checks, and independent
+   receipt gates. The existing typed `BrowserPtr` aggregate fix is a
+   compatibility oracle. Completion means the equivalent first-class pointer
+   cases pass and the forgeable `BrowserPtr` and `MemPtr` wrappers can be
+   deleted, not merely wrapped again.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
