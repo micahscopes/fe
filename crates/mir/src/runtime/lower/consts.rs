@@ -1,6 +1,6 @@
 use hir::analysis::{
     semantic::{
-        SemConstId, SemConstScalar, SemConstValue, SemanticConstRef, SemanticInstance,
+        CtfeError, SemConstId, SemConstScalar, SemConstValue, SemanticConstRef, SemanticInstance,
         VariantIndex, eval_const_ref, normalize_int_to_shape, reify_runtime_const_for_ty,
         sem_const_ty,
     },
@@ -28,7 +28,27 @@ pub(super) fn evaluated_const_ref_value<'db>(
     db: &'db dyn MirDb,
     cref: SemanticConstRef<'db>,
 ) -> SemConstId<'db> {
-    eval_const_ref(db, cref).unwrap_or_else(|err| panic!("CTFE failed for {cref:?}: {err:?}"))
+    eval_const_ref(db, cref).unwrap_or_else(|err| {
+        panic!(
+            "CTFE failed for {cref:?}: {}",
+            format_runtime_ctfe_error(db, &err),
+        )
+    })
+}
+
+fn format_runtime_ctfe_error<'db>(db: &'db dyn MirDb, error: &CtfeError<'db>) -> String {
+    match error {
+        CtfeError::CalleeError {
+            origin,
+            callee,
+            source,
+        } => format!(
+            "callee `{}` at {origin:?}: {}",
+            crate::runtime::stable_key::semantic_instance_symbol_identity(db, *callee),
+            format_runtime_ctfe_error(db, source),
+        ),
+        other => format!("{other:?}"),
+    }
 }
 
 pub(super) fn reified_const_ref_value_for_ty<'db>(

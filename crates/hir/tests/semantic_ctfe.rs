@@ -555,9 +555,12 @@ const fn invalid_const() -> usize {
     let result =
         eval_body_owner_const_with_args(&db, BodyOwner::Func(func), Vec::new(), Vec::new());
 
+    let Err(CtfeError::InvalidBody { diagnostics, .. }) = result else {
+        panic!("expected invalid body CTFE error, got {result:?}")
+    };
     assert!(
-        matches!(result, Err(CtfeError::InvalidBody { .. })),
-        "expected invalid body CTFE error, got {result:?}"
+        !diagnostics.is_empty(),
+        "invalid-body CTFE errors must retain a compact diagnostic class"
     );
 }
 

@@ -29,6 +29,7 @@ use crate::{
                 PrimitiveWrapperCallKind, RuntimeBuiltinFuncKind, core_primitive_wrapper_call_kind,
                 runtime_builtin_func_kind,
             },
+            diagnostics::{FuncBodyDiag, TyDiagCollection},
             normalize::normalize_ty_uncached,
             ty_check::{BodyOwner, check_anon_const_body, check_const_body, check_func_body},
             ty_def::{PrimTy, TyBase, TyData, TyId},
@@ -110,6 +111,7 @@ pub enum CtfeError<'db> {
     },
     InvalidBody {
         origin: SemOrigin<'db>,
+        diagnostics: String,
     },
     DivisionByZero {
         origin: SemOrigin<'db>,
@@ -1398,7 +1400,10 @@ impl<'db> CtfeMachine<'db> {
             BodyOwner::Func(func) => {
                 let (diags, typed_body) = check_func_body(self.db, func);
                 if !diags.is_empty() && typed_body.has_smir_lowering_blocker(self.db) {
-                    Err(CtfeError::InvalidBody { origin })
+                    Err(CtfeError::InvalidBody {
+                        origin,
+                        diagnostics: summarize_body_diagnostics(diags),
+                    })
                 } else {
                     Ok(())
                 }
@@ -1406,7 +1411,10 @@ impl<'db> CtfeMachine<'db> {
             BodyOwner::Const(const_) => {
                 let (diags, typed_body) = check_const_body(self.db, const_);
                 if !diags.is_empty() && typed_body.has_smir_lowering_blocker(self.db) {
-                    Err(CtfeError::InvalidBody { origin })
+                    Err(CtfeError::InvalidBody {
+                        origin,
+                        diagnostics: summarize_body_diagnostics(diags),
+                    })
                 } else {
                     Ok(())
                 }
@@ -1414,7 +1422,10 @@ impl<'db> CtfeMachine<'db> {
             BodyOwner::AnonConstBody { body, expected } => {
                 let (diags, typed_body) = check_anon_const_body(self.db, body, expected);
                 if !diags.is_empty() && typed_body.has_smir_lowering_blocker(self.db) {
-                    Err(CtfeError::InvalidBody { origin })
+                    Err(CtfeError::InvalidBody {
+                        origin,
+                        diagnostics: summarize_body_diagnostics(diags),
+                    })
                 } else {
                     Ok(())
                 }
@@ -4022,6 +4033,30 @@ impl<'db> CtfeMachine<'db> {
             }
         }
     }
+}
+
+fn summarize_body_diagnostics(diagnostics: &[FuncBodyDiag<'_>]) -> String {
+    diagnostics
+        .iter()
+        .map(|diagnostic| match diagnostic {
+            FuncBodyDiag::Ty(TyDiagCollection::Satisfiability(diagnostic)) => {
+                format!("trait-satisfiability-{}", diagnostic.local_code())
+            }
+            FuncBodyDiag::Ty(TyDiagCollection::TraitLower(diagnostic)) => {
+                format!("trait-lowering-{}", diagnostic.local_code())
+            }
+            FuncBodyDiag::Ty(TyDiagCollection::Impl(diagnostic)) => {
+                format!("impl-{}", diagnostic.local_code())
+            }
+            FuncBodyDiag::Ty(TyDiagCollection::PathRes(diagnostic))
+            | FuncBodyDiag::NameRes(diagnostic) => {
+                format!("name-resolution-{}", diagnostic.local_code())
+            }
+            FuncBodyDiag::Ty(TyDiagCollection::Ty(_)) => "type-lowering".into(),
+            FuncBodyDiag::Body(_) => "body".into(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Clone)]

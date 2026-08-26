@@ -2058,7 +2058,7 @@ fn root_ctfe_error<'a, 'db>(
         | CtfeError::InvalidBorrow { origin }
         | CtfeError::InvalidProviderUse { origin }
         | CtfeError::NonConstCall { origin }
-        | CtfeError::InvalidBody { origin }
+        | CtfeError::InvalidBody { origin, .. }
         | CtfeError::DivisionByZero { origin }
         | CtfeError::ArithmeticOverflow { origin }
         | CtfeError::NegativeExponent { origin }
@@ -2257,7 +2257,7 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
 /// recursion is invisible to the evaluation result. The typed body's
 /// registered const refs give the same resolution edges lowering will take;
 /// refs whose resolution depends on unknown params (no impl selected) end
-/// the walk — those are deferred to instantiation sites.
+/// the walk. Those are deferred to instantiation sites.
 pub(crate) fn const_body_resolution_reenters<'db>(
     db: &'db dyn HirAnalysisDb,
     start_body: Body<'db>,
