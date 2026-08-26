@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_baby_bear_fri_writer_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_air_core = "../../../../../demos/capstones/mandelbrot-proof/air-core"
+mandelbrot_proof_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/baby-bear"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
+precision = "../../../../../demos/sketches/precision"

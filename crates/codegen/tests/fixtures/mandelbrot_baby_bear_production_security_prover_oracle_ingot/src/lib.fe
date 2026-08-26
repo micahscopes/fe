@@ -1,0 +1,150 @@
+//! Executable gate for the separately typed 114-query BabyBear receipt.
+//!
+//! Fe derives the witness, policy-sized query plan, commitments, openings, and
+//! canonical receipt. The host only persists exact Wasm and receipt bytes
+//! between memory-isolated prover and verifier processes.
+
+use core::BrowserBytes
+use mandelbrot_proof_baby_bear::{FriMultiQueryEnd, FriMultiQueryFold}
+use mandelbrot_proof_fixed_air_prover_baby_bear::{
+    prove_production_security_sparse_interval,
+}
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    decode_production_security_sparse_baby_bear_receipt,
+    empty_production_security_sparse_baby_bear_receipt,
+    verify_production_security_sparse_baby_bear_receipt,
+}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitInterval,
+    evaluate_chunk,
+    initial_boundary,
+}
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+use precision::fixed::Fixed
+
+/// Test-only structural interpreter for the schedule-derived FRI carrier.
+/// It follows the Fe type to the terminal evaluation without repeating the
+/// production number of rounds or the concrete carrier shape.
+trait MutateFriTerminal {
+    fn mutate_fri_terminal(mut self)
+}
+
+impl<const ROUND: u32> MutateFriTerminal for FriMultiQueryEnd<ROUND> {
+    fn mutate_fri_terminal(mut self) {
+        self.evaluation = self.evaluation + BabyBearExt4::one()
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+    Tail: core::marker::Copy + MutateFriTerminal,
+> MutateFriTerminal for FriMultiQueryFold<
+    ROUND,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+    Tail,
+> {
+    fn mutate_fri_terminal(mut self) {
+        self.tail.mutate_fri_terminal()
+    }
+}
+
+fn mutate_digest(_ digest: Poseidon2Digest) -> Poseidon2Digest {
+    let mut words = [0; DIGEST_FIELDS]
+    let mut index: u32 = 0
+    while index < DIGEST_FIELDS.downcast_truncate() {
+        words[index as usize] = digest.field(index).to_u32()
+        index = index + 1
+    }
+    words[0] = (digest.field(0) + BabyBear::one()).to_u32()
+    Poseidon2Digest::from_u32s(words)
+}
+
+fn production_zero_interval() -> OrbitInterval<4> {
+    let claim = HighPrecisionEscapeClaim {
+        point: ComplexFixed {
+            real: Fixed::zero(),
+            imaginary: Fixed::zero(),
+        },
+        bound: 8,
+    }
+    let evaluated = evaluate_chunk(claim, initial_boundary<4>(), 1)
+    evaluated.interval
+}
+
+/// Prove the exact transition `z_0 = 0` to `z_1 = 0` for `c = 0` under the
+/// CTFE-derived 100-bit, 1024-leaf recursive composition policy.
+pub fn production_security_zero_interval_receipt() -> BrowserBytes {
+    prove_production_security_sparse_interval(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+    )
+}
+
+fn verify_production_security_zero_interval_receipt_mutation(
+    _ bytes: BrowserBytes,
+    _ mutation: u32,
+) -> bool {
+    let mut receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return false
+    }
+    match mutation {
+        0 => {}
+        1 => {
+            receipt.base_root.value = mutate_digest(receipt.base_root.value)
+        }
+        2 => {
+            if receipt.base.path.leaf_count == 0 { return false }
+            receipt.base.values[0][0] = receipt.base.values[0][0] + BabyBear::one()
+        }
+        3 => {
+            if receipt.base.path.sibling_count == 0 { return false }
+            receipt.base.path.siblings[0]
+                = mutate_digest(receipt.base.path.siblings[0])
+        }
+        4 => {
+            if receipt.fri.composition.path.leaf_count == 0 { return false }
+            receipt.fri.composition.values[0]
+                = receipt.fri.composition.values[0] + BabyBearExt4::one()
+        }
+        5 => { receipt.fri.layers.mutate_fri_terminal() }
+        _ => { return false }
+    }
+    verify_production_security_sparse_baby_bear_receipt(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    )
+}
+
+/// Complete typed mutation matrix for the policy-sized assembled receipt.
+/// Zero is the only success result.
+pub fn audit_production_security_zero_interval_receipt_matrix(
+    _ bytes: BrowserBytes,
+) -> u32 {
+    if !verify_production_security_zero_interval_receipt_mutation(bytes, 0) {
+        return 1
+    }
+    if verify_production_security_zero_interval_receipt_mutation(bytes, 1) {
+        return 2
+    }
+    if verify_production_security_zero_interval_receipt_mutation(bytes, 2) {
+        return 3
+    }
+    if verify_production_security_zero_interval_receipt_mutation(bytes, 3) {
+        return 4
+    }
+    if verify_production_security_zero_interval_receipt_mutation(bytes, 4) {
+        return 5
+    }
+    if verify_production_security_zero_interval_receipt_mutation(bytes, 5) {
+        return 6
+    }
+    0
+}

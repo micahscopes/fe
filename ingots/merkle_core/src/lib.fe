@@ -578,7 +578,7 @@ pub fn write_multi_path_and_root_from_leaves<
     const MAX_SIBLINGS: usize,
 >(
     _ leaves: ref [F; N],
-    _ requested: own [u32; REQUESTS],
+    _ requested: ref [u32; REQUESTS],
     _ path: mut MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
     _ root: mut MerkleRoot<F>,
 ) -> bool
@@ -689,7 +689,7 @@ pub fn multi_path_matches_requests<
     const MAX_SIBLINGS: usize,
 >(
     _ path: ref MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
-    _ requested: own [u32; REQUESTS],
+    _ requested: ref [u32; REQUESTS],
 ) -> bool
 where
     N > 0,
@@ -768,7 +768,7 @@ where
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref leaves, requested, mut path, mut root)
+    >(ref leaves, ref requested, mut path, mut root)
     path
 }
 

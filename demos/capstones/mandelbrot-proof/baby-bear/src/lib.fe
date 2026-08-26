@@ -79,6 +79,7 @@ use merkle_core::{
     push_frontier,
     quartet_path_from_leaves,
     quartet_verify,
+    write_multi_path_and_root_from_leaves,
 }
 use poseidon_baby_bear::{
     PackedCommitment,
@@ -481,7 +482,7 @@ pub trait BabyBearFriPairRequests<
     const MAX_REQUESTS: usize,
     Samples,
 >: BabyBearFriQueryPlanShape {
-    fn fri_pair_requests(_ samples: Samples) -> FriQueryLeafRequests<MAX_REQUESTS>
+    fn fri_pair_requests(_ samples: ref Samples) -> FriQueryLeafRequests<MAX_REQUESTS>
 }
 
 impl<
@@ -495,7 +496,7 @@ where
     { (HALF & (HALF - 1)) == 0 },
 {
     fn fri_pair_requests(
-        _ samples: FriQueryIndicesDone<NEXT_QUERY>,
+        _ samples: ref FriQueryIndicesDone<NEXT_QUERY>,
     ) -> FriQueryLeafRequests<MAX_REQUESTS> {
         FriQueryLeafRequests {
             valid: true,
@@ -523,7 +524,7 @@ where
     TailSamples: core::marker::Copy,
 {
     fn fri_pair_requests(
-        _ samples: FriQueryIndicesSample<QUERY, TailSamples>,
+        _ samples: ref FriQueryIndicesSample<QUERY, TailSamples>,
     ) -> FriQueryLeafRequests<MAX_REQUESTS> {
         if !samples.current.valid {
             return FriQueryLeafRequests {
@@ -536,7 +537,7 @@ where
             HALF,
             MAX_REQUESTS,
             TailSamples,
-        >>::fri_pair_requests(samples.tail)
+        >>::fri_pair_requests(ref samples.tail)
         let tail_count: usize = tail.count as usize
         if !tail.valid || tail_count + 2 > MAX_REQUESTS {
             return FriQueryLeafRequests {
@@ -578,7 +579,7 @@ where
     { (HALF & (HALF - 1)) == 0 },
 {
     fn fri_pair_requests(
-        _ samples: FriQueryRangeSamples<COUNT>,
+        _ samples: ref FriQueryRangeSamples<COUNT>,
     ) -> FriQueryLeafRequests<MAX_REQUESTS> {
         if !samples.valid
             || samples.count != COUNT.downcast_truncate()
@@ -614,7 +615,7 @@ pub trait BabyBearAirLdeRequests<
     const MAX_REQUESTS: usize,
     Samples,
 >: BabyBearFriQueryPlanShape {
-    fn air_lde_requests(_ samples: Samples) -> AirLdeLeafRequests<MAX_REQUESTS>
+    fn air_lde_requests(_ samples: ref Samples) -> AirLdeLeafRequests<MAX_REQUESTS>
 }
 
 impl<
@@ -637,7 +638,7 @@ where
     { (LDE % TRACE) == 0 },
 {
     fn air_lde_requests(
-        _ samples: FriQueryIndicesDone<NEXT_QUERY>,
+        _ samples: ref FriQueryIndicesDone<NEXT_QUERY>,
     ) -> AirLdeLeafRequests<MAX_REQUESTS> {
         AirLdeLeafRequests { valid: true, count: 0, indices: [0; MAX_REQUESTS] }
     }
@@ -664,7 +665,7 @@ where
     { (LDE % TRACE) == 0 },
 {
     fn air_lde_requests(
-        _ samples: FriQueryRangeSamples<COUNT>,
+        _ samples: ref FriQueryRangeSamples<COUNT>,
     ) -> AirLdeLeafRequests<MAX_REQUESTS> {
         if !samples.valid
             || samples.count != COUNT.downcast_truncate()
@@ -726,7 +727,7 @@ where
     Tail: BabyBearAirLdeRequests<TRACE, LDE, MAX_REQUESTS, TailSamples>,
 {
     fn air_lde_requests(
-        _ samples: FriQueryIndicesSample<QUERY, TailSamples>,
+        _ samples: ref FriQueryIndicesSample<QUERY, TailSamples>,
     ) -> AirLdeLeafRequests<MAX_REQUESTS> {
         let geometry = radix2_query_geometry<TRACE, LDE>(samples.current.value)
         let tail = <Tail as BabyBearAirLdeRequests<
@@ -734,7 +735,7 @@ where
             LDE,
             MAX_REQUESTS,
             TailSamples,
-        >>::air_lde_requests(samples.tail)
+        >>::air_lde_requests(ref samples.tail)
         let tail_count: usize = tail.count as usize
         if !samples.current.valid || !geometry.valid || !tail.valid
             || tail_count + 4 > MAX_REQUESTS {
@@ -823,6 +824,12 @@ pub trait BabyBearFriTail<const PREVIOUS: u32, const INPUT: usize> {
         _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
         _ shift: BabyBear,
     ) -> (bool, Self::Proof)
+    fn write_fri_tail(
+        _ evaluations: ref [BabyBearExt4; INPUT],
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+        _ proof: mut Self::Proof,
+    ) -> bool
 }
 
 impl<
@@ -847,6 +854,15 @@ where { NEXT_ROUND == PREVIOUS + 1 }, { INPUT == 1 }
             return (false, <Self as BabyBearFriTail<PREVIOUS, INPUT>>::invalid_fri_tail())
         }
         (true, FriProofEnd<NEXT_ROUND> {})
+    }
+
+    fn write_fri_tail(
+        _ evaluations: ref [BabyBearExt4; INPUT],
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+        _ proof: mut FriProofEnd<NEXT_ROUND>,
+    ) -> bool {
+        transcript.valid && !shift.is_zero()
     }
 }
 
@@ -969,6 +985,57 @@ where
             },
         )
     }
+
+    fn write_fri_tail(
+        _ evaluations: ref [BabyBearExt4; INPUT],
+        _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
+        _ shift: BabyBear,
+        _ proof: mut FriProofFold<
+            ROUND,
+            OUTPUT,
+            <Tail as BabyBearFriTail<ROUND, OUTPUT>>::Proof,
+        >,
+    ) -> bool {
+        proof.valid = false
+        proof.layer.valid = false
+        proof.layer.evaluations = [BabyBearExt4::zero(); OUTPUT]
+        proof.layer.root = FriLayerDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+        proof.layer.transcript = FriLayerTranscriptDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+        let challenge = next_fri_fold_challenge<PREVIOUS, ROUND>(transcript)
+        if !challenge.valid || shift.is_zero()
+            || !write_fri_evaluations<INPUT, OUTPUT>(
+                evaluations,
+                challenge.value,
+                shift,
+                mut proof.layer.evaluations,
+            ) {
+            return false
+        }
+        let root = commit_fri_layer_from_ref<ROUND, OUTPUT>(
+            ref proof.layer.evaluations,
+        )
+        let next_transcript = bind_next_fri_layer<PREVIOUS, ROUND>(transcript, root)
+        if !root.valid || !next_transcript.valid
+            || !<Tail as BabyBearFriTail<ROUND, OUTPUT>>::write_fri_tail(
+                ref proof.layer.evaluations,
+                next_transcript,
+                shift.square(),
+                mut proof.tail,
+            ) {
+            return false
+        }
+        proof.layer.root = root
+        proof.layer.transcript = next_transcript
+        proof.layer.valid = true
+        proof.valid = true
+        true
+    }
 }
 
 /// Interpret the first schedule node from the AIR composition transcript. All
@@ -982,6 +1049,12 @@ pub trait BabyBearFriFirst<const INPUT: usize> {
         _ transcript: own CompositionTranscriptDigest,
         _ shift: BabyBear,
     ) -> (bool, Self::Proof)
+    fn write_fri_first(
+        _ evaluations: ref [BabyBearExt4; INPUT],
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+        _ proof: mut Self::Proof,
+    ) -> bool
 }
 
 impl<
@@ -1097,6 +1170,57 @@ where
             },
         )
     }
+
+    fn write_fri_first(
+        _ evaluations: ref [BabyBearExt4; INPUT],
+        _ transcript: own CompositionTranscriptDigest,
+        _ shift: BabyBear,
+        _ proof: mut FriProofFold<
+            1,
+            OUTPUT,
+            <Tail as BabyBearFriTail<1, OUTPUT>>::Proof,
+        >,
+    ) -> bool {
+        proof.valid = false
+        proof.layer.valid = false
+        proof.layer.evaluations = [BabyBearExt4::zero(); OUTPUT]
+        proof.layer.root = FriLayerDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+        proof.layer.transcript = FriLayerTranscriptDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+        let challenge = fri_fold_challenge(transcript)
+        if !challenge.valid || shift.is_zero()
+            || !write_fri_evaluations<INPUT, OUTPUT>(
+                evaluations,
+                challenge.value,
+                shift,
+                mut proof.layer.evaluations,
+            ) {
+            return false
+        }
+        let root = commit_fri_layer_from_ref<1, OUTPUT>(
+            ref proof.layer.evaluations,
+        )
+        let next_transcript = bind_first_fri_layer(transcript, root)
+        if !root.valid || !next_transcript.valid
+            || !<Tail as BabyBearFriTail<1, OUTPUT>>::write_fri_tail(
+                ref proof.layer.evaluations,
+                next_transcript,
+                shift.square(),
+                mut proof.tail,
+            ) {
+            return false
+        }
+        proof.layer.root = root
+        proof.layer.transcript = next_transcript
+        proof.layer.valid = true
+        proof.valid = true
+        true
+    }
 }
 
 pub fn fold_fri_schedule<
@@ -1112,6 +1236,26 @@ pub fn fold_fri_schedule<
         transcript,
         shift,
     ).1
+}
+
+/// Interpret the same typed FRI schedule into caller-owned proof storage.
+/// This placement keeps complete codewords behind Fe references while the
+/// existing value-returning interpreter remains available as an oracle.
+pub fn write_fri_schedule<
+    const INPUT: usize,
+    S: BabyBearFriFirst<INPUT>,
+>(
+    _ evaluations: ref [BabyBearExt4; INPUT],
+    _ transcript: own CompositionTranscriptDigest,
+    _ shift: BabyBear,
+    _ proof: mut <S as BabyBearFriFirst<INPUT>>::Proof,
+) -> bool {
+    <S as BabyBearFriFirst<INPUT>>::write_fri_first(
+        evaluations,
+        transcript,
+        shift,
+        mut proof,
+    )
 }
 
 /// The existing 16-point complete-codeword gate is an explicit protocol
@@ -1675,8 +1819,13 @@ pub trait BabyBearFriMultiQueryLayers<
     fn sample_fri_multi_queries(_ complete: ref Complete) -> (bool, Samples)
     fn open_fri_multi_query_layers(
         _ complete: own Complete,
-        _ samples: Samples,
+        _ samples: ref Samples,
     ) -> (bool, Layers)
+    fn write_fri_multi_query_layers(
+        _ complete: ref Complete,
+        _ samples: ref Samples,
+        _ layers: mut Layers,
+    ) -> bool
 }
 
 impl<
@@ -1752,7 +1901,7 @@ where
 
     fn open_fri_multi_query_layers(
         _ complete: own FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
-        _ samples: Samples,
+        _ samples: ref Samples,
     ) -> (bool, FriMultiQueryEnd<ROUND>) {
         if !complete.valid || !complete.layer.valid || !complete.layer.root.valid {
             return (
@@ -1776,6 +1925,26 @@ where
                 evaluation: complete.layer.evaluations[0],
             },
         )
+    }
+
+    fn write_fri_multi_query_layers(
+        _ complete: ref FriProofFold<ROUND, OUTPUT, FriProofEnd<NEXT_ROUND>>,
+        _ samples: ref Samples,
+        _ layers: mut FriMultiQueryEnd<ROUND>,
+    ) -> bool {
+        layers.valid = false
+        layers.root = FriLayerDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+        layers.evaluation = BabyBearExt4::zero()
+        if !complete.valid || !complete.layer.valid || !complete.layer.root.valid {
+            return false
+        }
+        layers.root = complete.layer.root
+        layers.evaluation = complete.layer.evaluations[0]
+        layers.valid = true
+        true
     }
 }
 
@@ -1923,7 +2092,7 @@ where
 
     fn open_fri_multi_query_layers(
         _ complete: own FriProofFold<ROUND, OUTPUT, TailComplete>,
-        _ samples: Samples,
+        _ samples: ref Samples,
     ) -> (
         bool,
         FriMultiQueryFold<
@@ -2022,6 +2191,63 @@ where
                 tail: tail.1,
             },
         )
+    }
+
+    fn write_fri_multi_query_layers(
+        _ complete: ref FriProofFold<ROUND, OUTPUT, TailComplete>,
+        _ samples: ref Samples,
+        _ layers: mut FriMultiQueryFold<
+            ROUND,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+            TailLayers,
+        >,
+    ) -> bool {
+        layers.valid = false
+        layers.root = FriLayerDigest {
+            valid: false,
+            value: Poseidon2Digest::zero(),
+        }
+        if !complete.valid || !complete.layer.valid || !complete.layer.root.valid {
+            return false
+        }
+        if !write_fri_layer_multi_query_opening_power_of_two<
+            Plan,
+            Samples,
+            ROUND,
+            OUTPUT,
+            PAIR_WIDTH,
+            REQUESTS,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >(ref complete.layer.evaluations, samples, mut layers.opening) {
+            return false
+        }
+        if !<FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiQueryLayers<
+            QUERY_COUNT,
+            QUERY_HALF,
+            REQUESTS,
+            Plan,
+            Samples,
+            TailComplete,
+            TailLayers,
+        >>::write_fri_multi_query_layers(
+            ref complete.tail,
+            samples,
+            mut layers.tail,
+        ) {
+            return false
+        }
+        layers.root = complete.layer.root
+        layers.valid = true
+        true
     }
 }
 
@@ -2222,7 +2448,7 @@ where
             PAIR_WIDTH,
             MAX_LEAVES,
             Samples,
-        >>::fri_pair_requests(tail.1)
+        >>::fri_pair_requests(ref tail.1)
         let exact = requests.valid
             && requests.count == MAX_LEAVES.downcast_truncate()
             && multi_path_matches_requests<
@@ -2231,7 +2457,7 @@ where
                 MAX_LEAVES,
                 MAX_LEAVES,
                 MAX_SIBLINGS,
-            >(ref layers.opening.path, requests.indices)
+            >(ref layers.opening.path, ref requests.indices)
         let valid = layers.valid && challenge.valid && authenticated
             && next_transcript.valid && tail.0 && exact
         (
@@ -2361,7 +2587,7 @@ where
             PAIR_WIDTH,
             MAX_LEAVES,
             Samples,
-        >>::fri_pair_requests(tail.1)
+        >>::fri_pair_requests(ref tail.1)
         let exact = requests.valid
             && requests.count == MAX_LEAVES.downcast_truncate()
             && multi_path_matches_requests<
@@ -2370,7 +2596,7 @@ where
                 MAX_LEAVES,
                 MAX_LEAVES,
                 MAX_SIBLINGS,
-            >(ref layers.opening.path, requests.indices)
+            >(ref layers.opening.path, ref requests.indices)
         let valid = layers.valid && challenge.valid && authenticated
             && next_transcript.valid && tail.0 && exact
         (
@@ -3206,7 +3432,7 @@ pub fn write_main_lde_multi_query_opening_power_of_two<
     const MAX_SIBLINGS: usize,
 >(
     _ rows: ref [[BabyBear; MAIN_LDE_ROW_FIELDS]; LDE],
-    _ samples: Samples,
+    _ samples: ref Samples,
     _ opening: mut MainLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
 ) -> bool
 where
@@ -3250,7 +3476,7 @@ pub fn write_auxiliary_lde_multi_query_opening_power_of_two<
     const MAX_SIBLINGS: usize,
 >(
     _ rows: ref [[BabyBear; AUXILIARY_ROW_BITS]; LDE],
-    _ samples: Samples,
+    _ samples: ref Samples,
     _ opening: mut AuxiliaryLdeMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
 ) -> bool
 where
@@ -3896,6 +4122,66 @@ pub fn empty_composition_multi_opening<
     }
 }
 
+fn reset_composition_multi_opening<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(_ opening: mut CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS>) {
+    opening.valid = false
+    opening.values = [BabyBearExt4::zero(); MAX_LEAVES]
+    opening.path = invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+}
+
+/// Populate a composition multipath in caller-owned storage. The logical
+/// opening remains type-derived while large policy-sized carriers stay behind
+/// Fe references at backend boundaries.
+pub fn write_composition_multi_opening_power_of_two<
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ evaluations: ref [BabyBearExt4; N],
+    _ requested: ref [u32; REQUESTS],
+    _ opening: mut CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+    let mut leaves = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = composition_row_commitment(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    let mut root = MerkleRoot {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    if !write_multi_path_and_root_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref leaves, requested, mut opening.path, mut root) {
+        return false
+    }
+    cursor = 0
+    while cursor < (opening.path.leaf_count as usize) {
+        opening.values[cursor] = evaluations[opening.path.leaf_indices[cursor] as usize]
+        cursor = cursor + 1
+    }
+    opening.valid = root.valid
+    root.valid
+}
+
 pub fn composition_multi_opening_power_of_two<
     const N: usize,
     const REQUESTS: usize,
@@ -3988,7 +4274,7 @@ pub fn composition_multi_query_opening_power_of_two<
     const MAX_SIBLINGS: usize,
 >(
     _ evaluations: own [BabyBearExt4; N],
-    _ samples: Samples,
+    _ samples: ref Samples,
 ) -> CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS>
 where
     Plan: BabyBearFriPairRequests<HALF, REQUESTS, Samples>,
@@ -4015,6 +4301,49 @@ where
         MAX_LEAVES,
         MAX_SIBLINGS,
     >(evaluations, requests.indices)
+}
+
+/// Compose a typed query plan directly into caller-owned composition-opening
+/// storage without materializing the aggregate as a backend return value.
+pub fn write_composition_multi_query_opening_power_of_two<
+    Plan,
+    Samples: core::marker::Copy,
+    const N: usize,
+    const HALF: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ evaluations: ref [BabyBearExt4; N],
+    _ samples: ref Samples,
+    _ opening: mut CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    Plan: BabyBearFriPairRequests<HALF, REQUESTS, Samples>,
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    HALF > 0,
+    { HALF + HALF == N },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    let requests = <Plan as BabyBearFriPairRequests<
+        HALF,
+        REQUESTS,
+        Samples,
+    >>::fri_pair_requests(samples)
+    if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+        reset_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+        return false
+    }
+    write_composition_multi_opening_power_of_two<
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(evaluations, ref requests.indices, mut opening)
 }
 
 pub fn bind_main_lde(
@@ -4208,6 +4537,70 @@ fn invalid_fri_layer_multi_opening<
     }
 }
 
+fn reset_fri_layer_multi_opening<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(_ opening: mut FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>) {
+    opening.valid = false
+    opening.values = [BabyBearExt4::zero(); MAX_LEAVES]
+    opening.path = invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+}
+
+/// Populate one FRI-layer multipath in caller-owned storage. This preserves
+/// the ordered layer topology while allowing scalar, Wasm, and GPU placement
+/// interpreters to choose a non-aggregate physical boundary.
+pub fn write_fri_layer_multi_opening_power_of_two<
+    const ROUND: u32,
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ evaluations: ref [BabyBearExt4; N],
+    _ requested: ref [u32; REQUESTS],
+    _ opening: mut FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    reset_fri_layer_multi_opening<ROUND, MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+    let mut leaves = [Poseidon2Digest::zero(); N]
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves[cursor] = fri_layer_row_commitment<ROUND>(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    let mut root = MerkleRoot {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    if !write_multi_path_and_root_from_leaves<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref leaves, requested, mut opening.path, mut root) {
+        return false
+    }
+    cursor = 0
+    while cursor < (opening.path.leaf_count as usize) {
+        opening.values[cursor] = evaluations[opening.path.leaf_indices[cursor] as usize]
+        cursor = cursor + 1
+    }
+    opening.valid = root.valid
+    root.valid
+}
+
 pub fn fri_layer_multi_opening_power_of_two<
     const ROUND: u32,
     const N: usize,
@@ -4305,7 +4698,7 @@ pub fn fri_layer_multi_query_opening_power_of_two<
     const MAX_SIBLINGS: usize,
 >(
     _ evaluations: own [BabyBearExt4; N],
-    _ samples: Samples,
+    _ samples: ref Samples,
 ) -> FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>
 where
     Plan: BabyBearFriPairRequests<HALF, REQUESTS, Samples>,
@@ -4335,6 +4728,53 @@ where
         MAX_LEAVES,
         MAX_SIBLINGS,
     >(evaluations, requests.indices)
+}
+
+/// Interpret a typed query plan directly into one caller-owned FRI-layer
+/// opening, avoiding a policy-sized aggregate return from generated code.
+pub fn write_fri_layer_multi_query_opening_power_of_two<
+    Plan,
+    Samples: core::marker::Copy,
+    const ROUND: u32,
+    const N: usize,
+    const HALF: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ evaluations: ref [BabyBearExt4; N],
+    _ samples: ref Samples,
+    _ opening: mut FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+where
+    Plan: BabyBearFriPairRequests<HALF, REQUESTS, Samples>,
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    HALF > 0,
+    { HALF + HALF == N },
+    REQUESTS > 0,
+    MAX_LEAVES > 0,
+{
+    let requests = <Plan as BabyBearFriPairRequests<
+        HALF,
+        REQUESTS,
+        Samples,
+    >>::fri_pair_requests(samples)
+    if !requests.valid || requests.count != REQUESTS.downcast_truncate() {
+        reset_fri_layer_multi_opening<ROUND, MAX_LEAVES, MAX_SIBLINGS>(mut opening)
+        return false
+    }
+    write_fri_layer_multi_opening_power_of_two<
+        ROUND,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(evaluations, ref requests.indices, mut opening)
 }
 
 pub fn bind_first_fri_layer(
@@ -4509,6 +4949,37 @@ where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N }
     FriFoldEvaluations<OUT> { valid: true, evaluations: folded }
 }
 
+/// Fold one complete layer directly into caller-owned output storage. This is
+/// the placement interpretation used by large scalar and WebGPU proof plans;
+/// `fold_fri_evaluations` remains the value oracle for compact checkpoints.
+pub fn write_fri_evaluations<const N: usize, const OUT: usize>(
+    _ evaluations: ref [BabyBearExt4; N],
+    _ challenge: BabyBearExt4,
+    _ shift: BabyBear,
+    _ folded: mut [BabyBearExt4; OUT],
+) -> bool
+where N > 0, N > 1, { (N & (N - 1)) == 0 }, OUT > 0, { OUT + OUT == N }
+{
+    folded = [BabyBearExt4::zero(); OUT]
+    if shift.is_zero() { return false }
+    let root = BabyBear::two_adic_root(radix2_log<N>())
+    let mut point = shift
+    let mut index: usize = 0
+    while index < OUT {
+        let pair = fold_fri_pair_at_point(
+            evaluations[index],
+            evaluations[index + OUT],
+            challenge,
+            point,
+        )
+        if !pair.valid { return false }
+        folded[index] = pair.evaluation
+        point = point * root
+        index = index + 1
+    }
+    true
+}
+
 fn invalid_composition_query_pair<const DEPTH: usize>() -> CompositionQueryPair<DEPTH> {
     CompositionQueryPair<DEPTH> {
         positive: BabyBearExt4::zero(),
@@ -4663,6 +5134,28 @@ where
     fri_layer_root_power_of_two<ROUND, N>(leaves)
 }
 
+fn commit_fri_layer_from_ref<const ROUND: u32, const N: usize>(
+    _ evaluations: ref [BabyBearExt4; N],
+) -> FriLayerDigest<ROUND>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 0,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    { (N & (N - 1)) == 0 },
+{
+    let mut leaves = [FriLayerDigest<ROUND> {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }; N]
+    let mut index: usize = 0
+    while index < N {
+        leaves[index] = fri_layer_row_commitment<ROUND>(evaluations[index])
+        index = index + 1
+    }
+    fri_layer_root_power_of_two<ROUND, N>(leaves)
+}
+
 /// Materialize the current authenticated 16-to-1 checkpoint in the
 /// schedule-derived carrier. Every next challenge is squeezed only after the
 /// preceding folded layer has been committed. Both its type and term-level
@@ -4722,7 +5215,7 @@ pub fn open_fri_multi_commitment_query16(
         8,
         {4 + 4},
         {fri_multi_sibling_capacity(fri_composition_query_depth(4), 4)},
-    >(evaluations, sampled.1)
+    >(evaluations, ref sampled.1)
     let layers = <FriSchedule<1, 4> as BabyBearFriMultiQueryLayers<
         4,
         8,
@@ -4731,7 +5224,7 @@ pub fn open_fri_multi_commitment_query16(
         CheckpointFriQuerySamples4,
         CheckpointFriProof16,
         CheckpointFriMultiQueryLayers16,
-    >>::open_fri_multi_query_layers(complete, sampled.1)
+    >>::open_fri_multi_query_layers(complete, ref sampled.1)
     if !composition.valid || !layers.0 {
         return invalid_fri_multi_query16()
     }
@@ -5028,7 +5521,7 @@ pub trait BabyBearFriQueryBuffer<
     const MAX_QUERIES: usize,
     Samples,
 > {
-    fn fri_query_buffer(_ samples: Samples) -> FriQueryBuffer<MAX_QUERIES>
+    fn fri_query_buffer(_ samples: ref Samples) -> FriQueryBuffer<MAX_QUERIES>
 }
 
 impl<
@@ -5037,7 +5530,7 @@ impl<
 > BabyBearFriQueryBuffer<MAX_QUERIES, FriQueryIndicesDone<NEXT_QUERY>>
     for FriQueryPlanDone<NEXT_QUERY> {
     fn fri_query_buffer(
-        _ samples: FriQueryIndicesDone<NEXT_QUERY>,
+        _ samples: ref FriQueryIndicesDone<NEXT_QUERY>,
     ) -> FriQueryBuffer<MAX_QUERIES> {
         FriQueryBuffer { valid: true, count: 0, indices: [0; MAX_QUERIES] }
     }
@@ -5055,12 +5548,12 @@ impl<
 where Tail: BabyBearFriQueryBuffer<MAX_QUERIES, TailSamples>
 {
     fn fri_query_buffer(
-        _ samples: FriQueryIndicesSample<QUERY, TailSamples>,
+        _ samples: ref FriQueryIndicesSample<QUERY, TailSamples>,
     ) -> FriQueryBuffer<MAX_QUERIES> {
         let tail = <Tail as BabyBearFriQueryBuffer<
             MAX_QUERIES,
             TailSamples,
-        >>::fri_query_buffer(samples.tail)
+        >>::fri_query_buffer(ref samples.tail)
         let tail_count: usize = tail.count as usize
         if !samples.current.valid || !tail.valid || tail_count + 1 > MAX_QUERIES {
             return FriQueryBuffer { valid: false, count: 0, indices: [0; MAX_QUERIES] }
@@ -5087,7 +5580,7 @@ impl<
 > BabyBearFriQueryBuffer<MAX_QUERIES, FriQueryRangeSamples<COUNT>>
     for FriQueryRangePlan<FIRST_QUERY, COUNT> {
     fn fri_query_buffer(
-        _ samples: FriQueryRangeSamples<COUNT>,
+        _ samples: ref FriQueryRangeSamples<COUNT>,
     ) -> FriQueryBuffer<MAX_QUERIES> {
         if !samples.valid
             || samples.count != COUNT.downcast_truncate()
@@ -5147,7 +5640,7 @@ pub fn authenticate_fri_multi_commitment_query16(
     let queries = <CheckpointFriQueryPlan4 as BabyBearFriQueryBuffer<
         4,
         CheckpointFriQuerySamples4,
-    >>::fri_query_buffer(authenticated.1)
+    >>::fri_query_buffer(ref authenticated.1)
     CheckpointFriMultiAuthentication16 {
         valid: composition_authenticated && composition_transcript.valid
             && authenticated.0 && queries.valid && queries.count == 4,

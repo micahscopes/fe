@@ -2115,6 +2115,22 @@ fallback. The semantic receipts are:
    execution with checked value-level loops over canonical request buffers.
    Re-run the four-process exact prover/verifier/mutation gate, and pin the
    required Sonatina revision only after it finishes.
+   This slice is now partial. Wasm trait preflight traverses only dynamic-return
+   dependencies, while all policy-sized sample, AIR-request, composition,
+   Merkle, and FRI-opening paths borrow their Fe-owned carriers. A second
+   schedule interpretation writes the complete `16 -> 8 -> 4 -> 2 -> 1` FRI
+   chain and its sparse query layers into caller-owned typed storage. Its
+   focused release gate passes 1/1 in 51.49 seconds against the established
+   value interpreter, whose values already have independent Rust/Plonky3
+   coverage, including invalid-shift rejection. The staged canonical codec
+   gate remains green 1/1 in 233.38 seconds. A bounded exact 114-query prover
+   probe stayed below 2.7 GiB RSS and made steady progress through 3,216
+   runtime instances in 10 minutes 54 seconds, but emitted no Wasm artifact
+   before the cutoff. This is not receipt or security evidence. The remaining
+   compile cost is repeated normalization and lowering of type-specialized FRI,
+   Poseidon, and field bodies. Shared semantic-body lowering or a flat derived
+   stage-grid interpreter is required before rerunning the full four-process
+   gate.
 4. Carry the portable schedule to production-sized NTT/LDE, AIR composition,
    Poseidon/Merkle, FRI folding, and opening extraction. Close typed proof
    regions as each buffer enters the graph, preserve direct-DFT, Plonky3, and

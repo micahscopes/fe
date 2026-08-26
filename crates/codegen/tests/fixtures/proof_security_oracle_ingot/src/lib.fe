@@ -109,33 +109,33 @@ pub fn compact_checkpoint_query_plan_matches(_ seed: u32) -> u32 {
     let typed_buffer = <TypedCheckpointPlan as BabyBearFriQueryBuffer<
         4,
         TypedCheckpointSamples,
-    >>::fri_query_buffer(typed.1)
+    >>::fri_query_buffer(ref typed.1)
     let compact_buffer = <CompactCheckpointPlan as BabyBearFriQueryBuffer<
         4,
         CompactCheckpointSamples,
-    >>::fri_query_buffer(compact.1)
+    >>::fri_query_buffer(ref compact.1)
     let typed_pairs = <TypedCheckpointPlan as BabyBearFriPairRequests<
         4096,
         8,
         TypedCheckpointSamples,
-    >>::fri_pair_requests(typed.1)
+    >>::fri_pair_requests(ref typed.1)
     let compact_pairs = <CompactCheckpointPlan as BabyBearFriPairRequests<
         4096,
         8,
         CompactCheckpointSamples,
-    >>::fri_pair_requests(compact.1)
+    >>::fri_pair_requests(ref compact.1)
     let typed_air = <TypedCheckpointPlan as BabyBearAirLdeRequests<
         4096,
         8192,
         16,
         TypedCheckpointSamples,
-    >>::air_lde_requests(typed.1)
+    >>::air_lde_requests(ref typed.1)
     let compact_air = <CompactCheckpointPlan as BabyBearAirLdeRequests<
         4096,
         8192,
         16,
         CompactCheckpointSamples,
-    >>::air_lde_requests(compact.1)
+    >>::air_lde_requests(ref compact.1)
     if !typed_buffer.valid || !compact_buffer.valid
         || typed_buffer.count != compact_buffer.count
         || !typed_pairs.valid || !compact_pairs.valid

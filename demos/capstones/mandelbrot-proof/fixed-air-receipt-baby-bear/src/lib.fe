@@ -16,7 +16,12 @@ use canonical_words::{
     encode_canonical_words,
 }
 use core::BrowserBytes
-use mandelbrot_proof_air_core::{FriQueryPlan, FriSchedule, radix2_query_geometry}
+use mandelbrot_proof_air_core::{
+    FriQueryPlan,
+    FriQueryRangePlan,
+    FriSchedule,
+    radix2_query_geometry,
+}
 use mandelbrot_proof_baby_bear::{
     BabyBearAirLdeRequests,
     BabyBearFriFirst,
@@ -36,9 +41,10 @@ use mandelbrot_proof_baby_bear::{
     bind_composition,
     composition_multi_query_opening_power_of_two,
     empty_composition_multi_opening,
-    fold_fri_schedule,
     fri_multi_sibling_capacity,
     verify_composition_multi_opening,
+    write_composition_multi_query_opening_power_of_two,
+    write_fri_schedule,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
     SparseAirConstraintShape,
@@ -201,11 +207,11 @@ pub struct SparseDirectFriProfileDigest {
 }
 impl core::marker::Copy for SparseDirectFriProfileDigest {}
 
-fn production_security_policy(
+const fn production_security_policy_for_bound(
     _ target_bits: u32,
     _ max_composed_proofs: u32,
+    _ composition_degree_bound: u32,
 ) -> DirectFriSecurityPolicy {
-    let shape = sparse_constraint_shape<{PRODUCTION_LIMBS}>()
     derive_conjectured_direct_fri_policy(
         target_bits,
         max_composed_proofs,
@@ -213,10 +219,7 @@ fn production_security_policy(
         PRODUCTION_SECURITY_EXTENSION_DEGREE,
         PRODUCTION_TRACE_LENGTH_U32,
         PRODUCTION_LDE_LENGTH_U32,
-        sparse_composition_degree_bound(
-            shape,
-            PRODUCTION_TRACE_LENGTH_U32,
-        ),
+        composition_degree_bound,
         PRODUCTION_SECURITY_FOLDING_ARITY,
         PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP,
         PRODUCTION_SECURITY_HASH_COLLISION_BITS,
@@ -225,11 +228,32 @@ fn production_security_policy(
     )
 }
 
-pub fn production_recursive_security_policy() -> DirectFriSecurityPolicy {
-    production_security_policy(
+fn production_security_policy(
+    _ target_bits: u32,
+    _ max_composed_proofs: u32,
+) -> DirectFriSecurityPolicy {
+    production_security_policy_for_bound(
+        target_bits,
+        max_composed_proofs,
+        sparse_composition_degree_bound(
+            sparse_constraint_shape<{PRODUCTION_LIMBS}>(),
+            PRODUCTION_TRACE_LENGTH_U32,
+        ),
+    )
+}
+
+/// CTFE-selected production security policy. The runtime profile separately
+/// derives the AIR shape from the real evaluator and rejects this policy if
+/// that evaluator no longer has the expected degree bound.
+pub const PRODUCTION_RECURSIVE_SECURITY_POLICY: DirectFriSecurityPolicy =
+    production_security_policy_for_bound(
         PRODUCTION_SECURITY_TARGET_BITS,
         PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS,
+        PRODUCTION_TRACE_LENGTH_U32 - 1,
     )
+
+pub fn production_recursive_security_policy() -> DirectFriSecurityPolicy {
+    PRODUCTION_RECURSIVE_SECURITY_POLICY
 }
 
 /// The already executed four-query receipt is retained as an explicitly
@@ -392,6 +416,18 @@ pub type ProductionSparseFriProof =
     <ProductionSparseFriSchedule as BabyBearFriFirst<
         {PRODUCTION_LDE_LENGTH},
     >>::Proof
+
+fn write_production_sparse_fri(
+    _ evaluations: ref [BabyBearExt4; PRODUCTION_LDE_LENGTH],
+    _ transcript: mandelbrot_proof_baby_bear::CompositionTranscriptDigest,
+    _ shift: BabyBear,
+    _ proof: mut ProductionSparseFriProof,
+) -> bool {
+    write_fri_schedule<
+        {PRODUCTION_LDE_LENGTH},
+        ProductionSparseFriSchedule,
+    >(evaluations, transcript, shift, mut proof)
+}
 pub type ProductionSparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
     {PRODUCTION_LIMBS},
     {PRODUCTION_TRACE_LENGTH},
@@ -401,11 +437,78 @@ pub type ProductionSparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
     ProductionSparseFriQuery,
 >
 
-/// Construct the canonical empty production carrier. Browser and native
-/// decoders start from this value, so storage shape remains derived from Fe
-/// types rather than repeated in host scaffolding.
-pub fn empty_production_sparse_baby_bear_receipt()
-    -> ProductionSparseBabyBearReceipt {
+pub const PRODUCTION_SECURITY_QUERY_COUNT: usize =
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count as usize
+pub const PRODUCTION_SECURITY_AIR_MAX_LEAVES: usize =
+    PRODUCTION_SECURITY_QUERY_COUNT * 4
+pub const PRODUCTION_SECURITY_AIR_MAX_SIBLINGS: usize =
+    PRODUCTION_SECURITY_AIR_MAX_LEAVES * PRODUCTION_LDE_LOG
+pub const PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES: usize =
+    PRODUCTION_SECURITY_QUERY_COUNT * 2
+pub const PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS: usize =
+    fri_multi_sibling_capacity(
+        PRODUCTION_LDE_LOG - 1,
+        PRODUCTION_SECURITY_QUERY_COUNT,
+    )
+
+pub type ProductionSecuritySparseFriLayers =
+    <ProductionSparseFriSchedule as BabyBearFriMultiQueryShape<
+        {PRODUCTION_SECURITY_QUERY_COUNT},
+    >>::Query
+pub type ProductionSecuritySparseFriQuery = FriMultiCommitmentQuery<
+    {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+    {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+    ProductionSecuritySparseFriLayers,
+>
+pub type ProductionSecuritySparseFriQueryPlan = FriQueryRangePlan<
+    1,
+    {PRODUCTION_SECURITY_QUERY_COUNT},
+>
+pub type ProductionSecuritySparseFriQuerySamples =
+    <ProductionSecuritySparseFriQueryPlan as BabyBearFriQueryPlanShape>::Samples
+pub type ProductionSecuritySparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
+    {PRODUCTION_LIMBS},
+    {PRODUCTION_TRACE_LENGTH},
+    {PRODUCTION_LDE_LENGTH},
+    {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+    {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+    ProductionSecuritySparseFriQuery,
+>
+
+fn empty_profiled_sparse_baby_bear_receipt<
+    const QUERY_COUNT: usize,
+    const AIR_MAX_LEAVES: usize,
+    const AIR_MAX_SIBLINGS: usize,
+    const COMPOSITION_MAX_LEAVES: usize,
+    const COMPOSITION_MAX_SIBLINGS: usize,
+    Plan,
+    Samples: core::marker::Copy,
+    Schedule,
+    Proof,
+    Layers,
+>() -> SparseBabyBearAirFriReceipt<
+    {PRODUCTION_LIMBS},
+    {PRODUCTION_TRACE_LENGTH},
+    {PRODUCTION_LDE_LENGTH},
+    AIR_MAX_LEAVES,
+    AIR_MAX_SIBLINGS,
+    FriMultiCommitmentQuery<
+        COMPOSITION_MAX_LEAVES,
+        COMPOSITION_MAX_SIBLINGS,
+        Layers,
+    >,
+>
+where
+    Schedule: BabyBearFriMultiQueryLayers<
+        QUERY_COUNT,
+        {PRODUCTION_LDE_LENGTH / 2},
+        COMPOSITION_MAX_LEAVES,
+        Plan,
+        Samples,
+        Proof,
+        Layers,
+    >,
+{
     let base_root = SparseBaseLdeDigest {
         valid: false,
         value: Poseidon2Digest::zero(),
@@ -422,15 +525,15 @@ pub fn empty_production_sparse_baby_bear_receipt()
             {PRODUCTION_LIMBS},
             {PRODUCTION_TRACE_LENGTH},
             {PRODUCTION_LDE_LENGTH},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            {PRODUCTION_AIR_MAX_SIBLINGS},
+            AIR_MAX_LEAVES,
+            AIR_MAX_SIBLINGS,
         >(),
         interaction: empty_sparse_interaction_lde_multi_opening<
             {PRODUCTION_LIMBS},
             {PRODUCTION_TRACE_LENGTH},
             {PRODUCTION_LDE_LENGTH},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            {PRODUCTION_AIR_MAX_SIBLINGS},
+            AIR_MAX_LEAVES,
+            AIR_MAX_SIBLINGS,
         >(),
         fri: FriMultiCommitmentQuery {
             valid: false,
@@ -439,21 +542,58 @@ pub fn empty_production_sparse_baby_bear_receipt()
                 value: Poseidon2Digest::zero(),
             },
             composition: empty_composition_multi_opening<
-                {PRODUCTION_COMPOSITION_MAX_LEAVES},
-                {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+                COMPOSITION_MAX_LEAVES,
+                COMPOSITION_MAX_SIBLINGS,
             >(),
-            layers: <ProductionSparseFriSchedule
+            layers: <Schedule
                 as BabyBearFriMultiQueryLayers<
-                    {PRODUCTION_QUERY_COUNT},
+                    QUERY_COUNT,
                     {PRODUCTION_LDE_LENGTH / 2},
-                    {PRODUCTION_COMPOSITION_MAX_LEAVES},
-                    ProductionSparseFriQueryPlan,
-                    ProductionSparseFriQuerySamples,
-                    ProductionSparseFriProof,
-                    ProductionSparseFriLayers,
+                    COMPOSITION_MAX_LEAVES,
+                    Plan,
+                    Samples,
+                    Proof,
+                    Layers,
                 >>::invalid_fri_multi_query_layers(),
         },
     }
+}
+
+/// Construct the canonical empty production carrier. Browser and native
+/// decoders start from this value, so storage shape remains derived from Fe
+/// types rather than repeated in host scaffolding.
+pub fn empty_production_sparse_baby_bear_receipt()
+    -> ProductionSparseBabyBearReceipt {
+    empty_profiled_sparse_baby_bear_receipt<
+        {PRODUCTION_QUERY_COUNT},
+        {PRODUCTION_AIR_MAX_LEAVES},
+        {PRODUCTION_AIR_MAX_SIBLINGS},
+        {PRODUCTION_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+        ProductionSparseFriQueryPlan,
+        ProductionSparseFriQuerySamples,
+        ProductionSparseFriSchedule,
+        ProductionSparseFriProof,
+        ProductionSparseFriLayers,
+    >()
+}
+
+/// Construct the independently typed 114-query security carrier selected by
+/// `PRODUCTION_RECURSIVE_SECURITY_POLICY`.
+pub fn empty_production_security_sparse_baby_bear_receipt()
+    -> ProductionSecuritySparseBabyBearReceipt {
+    empty_profiled_sparse_baby_bear_receipt<
+        {PRODUCTION_SECURITY_QUERY_COUNT},
+        {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+        {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+        ProductionSecuritySparseFriQueryPlan,
+        ProductionSecuritySparseFriQuerySamples,
+        ProductionSparseFriSchedule,
+        ProductionSparseFriProof,
+        ProductionSecuritySparseFriLayers,
+    >()
 }
 
 /// Reset caller-owned production storage without exposing its nested receipt
@@ -545,6 +685,95 @@ pub fn decode_production_sparse_baby_bear_receipt(
     true
 }
 
+/// Reset caller-owned production storage without exposing its nested receipt
+/// layout to a browser or native host.
+pub fn clear_production_security_sparse_baby_bear_receipt(
+    _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+) {
+    receipt = empty_production_security_sparse_baby_bear_receipt()
+}
+
+fn encode_production_security_sparse_receipt_header(
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ writer: BrowserWordWriter,
+) -> BrowserWordWriter {
+    let writer = encode_canonical_words(ref receipt.valid, writer)
+    let writer = encode_canonical_words(ref receipt.base_root, writer)
+    encode_canonical_words(ref receipt.interaction_root, writer)
+}
+
+fn encode_production_security_sparse_receipt_air(
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ writer: BrowserWordWriter,
+) -> BrowserWordWriter {
+    let writer = receipt.base.encode_stream(writer)
+    receipt.interaction.encode_stream(writer)
+}
+
+fn encode_production_security_sparse_receipt_fri(
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ writer: BrowserWordWriter,
+) -> BrowserWordWriter {
+    receipt.fri.encode_stream(writer)
+}
+
+/// Encode one production receipt through explicit Fe-owned stages. The byte
+/// order is still the FCO-derived canonical stream; staging prevents a single
+/// generated browser function from absorbing the complete nested decoder.
+pub fn encode_production_security_sparse_baby_bear_receipt(
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+) -> BrowserBytes {
+    let words = canonical_word_stream_count(receipt)
+    if words == 0 { return BrowserBytes { ptr: 0, len: 0 } }
+    let writer = BrowserWordWriter::allocate(words)
+    let writer = encode_production_security_sparse_receipt_header(receipt, writer)
+    let writer = encode_production_security_sparse_receipt_air(receipt, writer)
+    encode_production_security_sparse_receipt_fri(receipt, writer).finish()
+}
+
+fn decode_production_security_sparse_receipt_header(
+    _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+    _ reader: BrowserWordReader,
+) -> BrowserWordReader {
+    let reader = decode_canonical_words(mut receipt.valid, reader)
+    let reader = decode_canonical_words(mut receipt.base_root, reader)
+    decode_canonical_words(mut receipt.interaction_root, reader)
+}
+
+fn decode_production_security_sparse_receipt_air(
+    _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+    _ reader: BrowserWordReader,
+) -> BrowserWordReader {
+    let reader = receipt.base.decode_stream(reader)
+    receipt.interaction.decode_stream(reader)
+}
+
+fn decode_production_security_sparse_receipt_fri(
+    _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+    _ reader: BrowserWordReader,
+) -> BrowserWordReader {
+    receipt.fri.decode_stream(reader)
+}
+
+/// Decode a bounded canonical receipt through explicit Fe stages. Truncation,
+/// trailing words, invalid booleans or fields, excessive sparse counts, and
+/// noncanonical unused capacity fail closed and reset the caller-owned value.
+pub fn decode_production_security_sparse_baby_bear_receipt(
+    _ bytes: BrowserBytes,
+    _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+) -> bool {
+    clear_production_security_sparse_baby_bear_receipt(mut receipt)
+    let reader = BrowserWordReader::new(bytes)
+    let reader = decode_production_security_sparse_receipt_header(mut receipt, reader)
+    let reader = decode_production_security_sparse_receipt_air(mut receipt, reader)
+    let reader = decode_production_security_sparse_receipt_fri(mut receipt, reader)
+    if !reader.complete() {
+        clear_production_security_sparse_baby_bear_receipt(mut receipt)
+        return false
+    }
+    true
+}
+
 pub struct ProductionSparseFriAuthentication {
     pub valid: bool,
     pub samples: ProductionSparseFriQuerySamples,
@@ -553,11 +782,202 @@ pub struct ProductionSparseFriAuthentication {
 }
 impl core::marker::Copy for ProductionSparseFriAuthentication {}
 
+
+fn install_production_checkpoint_receipt(
+        _ base_codeword: ref SparseBaseAirLdeCodeword<
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ interaction_codeword: ref SparseInteractionAirLdeCodeword<
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ composition_codeword: ref SparseCompositionAirCodeword<
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ base_root: SparseBaseLdeDigest<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ interaction_root: SparseInteractionLdeDigest<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ composition_root: CompositionDigest,
+        _ samples: ref ProductionSparseFriQuerySamples,
+        _ receipt: mut ProductionSparseBabyBearReceipt,
+    ) -> bool {
+        receipt.fri.valid = false
+        if !write_composition_multi_query_opening_power_of_two<
+            ProductionSparseFriQueryPlan,
+            ProductionSparseFriQuerySamples,
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_LDE_LENGTH / 2},
+            {PRODUCTION_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+        >(
+            ref composition_codeword.values,
+            samples,
+            mut receipt.fri.composition,
+        ) {
+            return false
+        }
+        let requests = <ProductionSparseFriQueryPlan
+            as BabyBearAirLdeRequests<
+                {PRODUCTION_TRACE_LENGTH},
+                {PRODUCTION_LDE_LENGTH},
+                {PRODUCTION_AIR_MAX_LEAVES},
+                ProductionSparseFriQuerySamples,
+            >>::air_lde_requests(samples)
+        if !requests.valid
+            || requests.count != PRODUCTION_AIR_MAX_LEAVES.downcast_truncate()
+            || !write_sparse_base_lde_multi_opening_power_of_two<
+                {PRODUCTION_LIMBS},
+                {PRODUCTION_TRACE_LENGTH},
+                {PRODUCTION_LDE_LENGTH},
+                {PRODUCTION_AIR_MAX_LEAVES},
+                {PRODUCTION_AIR_MAX_LEAVES},
+                {PRODUCTION_AIR_MAX_SIBLINGS},
+            >(
+                base_codeword,
+                base_root,
+                requests.indices,
+                mut receipt.base,
+            )
+            || !write_sparse_interaction_lde_multi_opening_power_of_two<
+                {PRODUCTION_LIMBS},
+                {PRODUCTION_TRACE_LENGTH},
+                {PRODUCTION_LDE_LENGTH},
+                {PRODUCTION_AIR_MAX_LEAVES},
+                {PRODUCTION_AIR_MAX_LEAVES},
+                {PRODUCTION_AIR_MAX_SIBLINGS},
+            >(
+                interaction_codeword,
+                interaction_root,
+                requests.indices,
+                mut receipt.interaction,
+            ) {
+            return false
+        }
+        receipt.base_root = base_root
+        receipt.interaction_root = interaction_root
+        receipt.fri.composition_root = composition_root
+        receipt.fri.valid = true
+        receipt.valid = true
+        true
+}
+
+fn install_production_security_receipt(
+        _ base_codeword: ref SparseBaseAirLdeCodeword<
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ interaction_codeword: ref SparseInteractionAirLdeCodeword<
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ composition_codeword: ref SparseCompositionAirCodeword<
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ base_root: SparseBaseLdeDigest<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ interaction_root: SparseInteractionLdeDigest<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+        >,
+        _ composition_root: CompositionDigest,
+        _ samples: ref ProductionSecuritySparseFriQuerySamples,
+        _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+    ) -> bool {
+        receipt.fri.valid = false
+        if !write_composition_multi_query_opening_power_of_two<
+            ProductionSecuritySparseFriQueryPlan,
+            ProductionSecuritySparseFriQuerySamples,
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_LDE_LENGTH / 2},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+        >(
+            ref composition_codeword.values,
+            samples,
+            mut receipt.fri.composition,
+        ) {
+            return false
+        }
+        let requests = <ProductionSecuritySparseFriQueryPlan
+            as BabyBearAirLdeRequests<
+                {PRODUCTION_TRACE_LENGTH},
+                {PRODUCTION_LDE_LENGTH},
+                {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+                ProductionSecuritySparseFriQuerySamples,
+            >>::air_lde_requests(samples)
+        if !requests.valid
+            || requests.count
+                != PRODUCTION_SECURITY_AIR_MAX_LEAVES.downcast_truncate()
+            || !write_sparse_base_lde_multi_opening_power_of_two<
+                {PRODUCTION_LIMBS},
+                {PRODUCTION_TRACE_LENGTH},
+                {PRODUCTION_LDE_LENGTH},
+                {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+                {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+                {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+            >(
+                base_codeword,
+                base_root,
+                requests.indices,
+                mut receipt.base,
+            )
+            || !write_sparse_interaction_lde_multi_opening_power_of_two<
+                {PRODUCTION_LIMBS},
+                {PRODUCTION_TRACE_LENGTH},
+                {PRODUCTION_LDE_LENGTH},
+                {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+                {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+                {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+            >(
+                interaction_codeword,
+                interaction_root,
+                requests.indices,
+                mut receipt.interaction,
+            ) {
+            return false
+        }
+        receipt.base_root = base_root
+        receipt.interaction_root = interaction_root
+        receipt.fri.composition_root = composition_root
+        receipt.fri.valid = true
+        receipt.valid = true
+        true
+}
+
+struct ProductionSparseFriCommitmentMaterial {
+    base_root: SparseBaseLdeDigest<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    interaction_root: SparseInteractionLdeDigest<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    composition_root: CompositionDigest,
+}
+
+enum ProductionSparseFriCommitmentBuild {
+    Invalid,
+    Ready(ProductionSparseFriCommitmentMaterial),
+}
+
 /// Materialize one compact production receipt from caller-owned codewords.
 /// Trace construction, LDE, and composition remain separately schedulable;
 /// this stage binds them, folds FRI, samples once from the terminal
 /// transcript, and opens only the derived sparse request sets.
-pub fn write_production_sparse_baby_bear_receipt(
+fn build_production_sparse_fri_commitment_material(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ base_codeword: ref SparseBaseAirLdeCodeword<
         {PRODUCTION_LDE_LENGTH},
@@ -569,12 +989,13 @@ pub fn write_production_sparse_baby_bear_receipt(
         {PRODUCTION_LDE_LENGTH},
     >,
     _ shift: BabyBear,
-    _ receipt: mut ProductionSparseBabyBearReceipt,
-) -> bool {
-    receipt.valid = false
+    _ profile: SparseDirectFriTranscriptProfile,
+    _ complete: mut ProductionSparseFriProof,
+) -> ProductionSparseFriCommitmentBuild
+{
     if !base_codeword.valid || !interaction_codeword.valid
         || !composition_codeword.valid || shift.is_zero() {
-        return false
+        return ProductionSparseFriCommitmentBuild::Invalid
     }
     let base_root = sparse_base_lde_root_power_of_two<
         {PRODUCTION_LIMBS},
@@ -597,7 +1018,7 @@ pub fn write_production_sparse_baby_bear_receipt(
     )
     let composition = bind_sparse_air_security_profile(
         air,
-        production_checkpoint_security_profile(),
+        profile,
     )
     let composition_root = sparse_bound_composition_lde_root_power_of_two<
         {PRODUCTION_LIMBS},
@@ -610,89 +1031,167 @@ pub fn write_production_sparse_baby_bear_receipt(
     )
     if !base_root.valid || !interaction_root.valid || !composition.is_valid()
         || !composition_root.valid || !composition_transcript.valid {
-        return false
+        return ProductionSparseFriCommitmentBuild::Invalid
     }
 
-    let complete: ProductionSparseFriProof = fold_fri_schedule<
-        {PRODUCTION_LDE_LENGTH},
-        ProductionSparseFriSchedule,
-    >(composition_codeword.values, composition_transcript, shift)
-    let sampled = <ProductionSparseFriSchedule as BabyBearFriMultiQueryLayers<
-        {PRODUCTION_QUERY_COUNT},
-        {PRODUCTION_LDE_LENGTH / 2},
-        {PRODUCTION_COMPOSITION_MAX_LEAVES},
-        ProductionSparseFriQueryPlan,
-        ProductionSparseFriQuerySamples,
-        ProductionSparseFriProof,
-        ProductionSparseFriLayers,
-    >>::sample_fri_multi_queries(ref complete)
-    if !complete.valid || !sampled.0 { return false }
+    if !write_production_sparse_fri(
+        ref composition_codeword.values,
+        composition_transcript,
+        shift,
+        mut complete,
+    ) {
+        return ProductionSparseFriCommitmentBuild::Invalid
+    }
+    ProductionSparseFriCommitmentBuild::Ready(
+        ProductionSparseFriCommitmentMaterial {
+            base_root: base_root,
+            interaction_root: interaction_root,
+            composition_root: composition_root.value,
+        },
+    )
+}
 
-    let composition = composition_multi_query_opening_power_of_two<
-        ProductionSparseFriQueryPlan,
-        ProductionSparseFriQuerySamples,
+/// Materialize the four-query protocol checkpoint retained by the existing
+/// exact process-isolated regression gate.
+pub fn write_production_sparse_baby_bear_receipt(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ base_codeword: ref SparseBaseAirLdeCodeword<
         {PRODUCTION_LDE_LENGTH},
-        {PRODUCTION_LDE_LENGTH / 2},
-        {PRODUCTION_COMPOSITION_MAX_LEAVES},
-        {PRODUCTION_COMPOSITION_MAX_LEAVES},
-        {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
-    >(composition_codeword.values, sampled.1)
-    let layers = <ProductionSparseFriSchedule as BabyBearFriMultiQueryLayers<
-        {PRODUCTION_QUERY_COUNT},
-        {PRODUCTION_LDE_LENGTH / 2},
-        {PRODUCTION_COMPOSITION_MAX_LEAVES},
-        ProductionSparseFriQueryPlan,
-        ProductionSparseFriQuerySamples,
-        ProductionSparseFriProof,
-        ProductionSparseFriLayers,
-    >>::open_fri_multi_query_layers(complete, sampled.1)
-    let air_requests = <ProductionSparseFriQueryPlan
-        as BabyBearAirLdeRequests<
-            {PRODUCTION_TRACE_LENGTH},
-            {PRODUCTION_LDE_LENGTH},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            ProductionSparseFriQuerySamples,
-        >>::air_lde_requests(sampled.1)
-    if !composition.valid || !layers.0 || !air_requests.valid
-        || air_requests.count != PRODUCTION_AIR_MAX_LEAVES.downcast_truncate()
-        || !write_sparse_base_lde_multi_opening_power_of_two<
-            {PRODUCTION_LIMBS},
-            {PRODUCTION_TRACE_LENGTH},
-            {PRODUCTION_LDE_LENGTH},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            {PRODUCTION_AIR_MAX_SIBLINGS},
-        >(
-            base_codeword,
-            base_root,
-            air_requests.indices,
-            mut receipt.base,
-        )
-        || !write_sparse_interaction_lde_multi_opening_power_of_two<
-            {PRODUCTION_LIMBS},
-            {PRODUCTION_TRACE_LENGTH},
-            {PRODUCTION_LDE_LENGTH},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            {PRODUCTION_AIR_MAX_LEAVES},
-            {PRODUCTION_AIR_MAX_SIBLINGS},
-        >(
-            interaction_codeword,
-            interaction_root,
-            air_requests.indices,
-            mut receipt.interaction,
-        ) {
-        return false
+    >,
+    _ interaction_codeword: ref SparseInteractionAirLdeCodeword<
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ composition_codeword: ref SparseCompositionAirCodeword<
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ shift: BabyBear,
+    _ complete: mut ProductionSparseFriProof,
+    _ receipt: mut ProductionSparseBabyBearReceipt,
+) -> bool {
+    receipt.valid = false
+    let material = build_production_sparse_fri_commitment_material(
+        interval,
+        base_codeword,
+        interaction_codeword,
+        composition_codeword,
+        shift,
+        production_checkpoint_security_profile(),
+        mut complete,
+    )
+    match material {
+        ProductionSparseFriCommitmentBuild::Invalid => false
+        ProductionSparseFriCommitmentBuild::Ready(ready) => {
+            let sampled = <ProductionSparseFriSchedule
+                as BabyBearFriMultiQueryLayers<
+                    {PRODUCTION_QUERY_COUNT},
+                    {PRODUCTION_LDE_LENGTH / 2},
+                    {PRODUCTION_COMPOSITION_MAX_LEAVES},
+                    ProductionSparseFriQueryPlan,
+                    ProductionSparseFriQuerySamples,
+                    ProductionSparseFriProof,
+                    ProductionSparseFriLayers,
+                >>::sample_fri_multi_queries(ref complete)
+            if !sampled.0 { return false }
+            if !<ProductionSparseFriSchedule
+                as BabyBearFriMultiQueryLayers<
+                    {PRODUCTION_QUERY_COUNT},
+                    {PRODUCTION_LDE_LENGTH / 2},
+                    {PRODUCTION_COMPOSITION_MAX_LEAVES},
+                    ProductionSparseFriQueryPlan,
+                    ProductionSparseFriQuerySamples,
+                    ProductionSparseFriProof,
+                    ProductionSparseFriLayers,
+                >>::write_fri_multi_query_layers(
+                    ref complete,
+                    ref sampled.1,
+                    mut receipt.fri.layers,
+                ) {
+                return false
+            }
+            install_production_checkpoint_receipt(
+                base_codeword,
+                interaction_codeword,
+                composition_codeword,
+                ready.base_root,
+                ready.interaction_root,
+                ready.composition_root,
+                ref sampled.1,
+                mut receipt,
+            )
+        }
     }
-    receipt.base_root = base_root
-    receipt.interaction_root = interaction_root
-    receipt.fri = FriMultiCommitmentQuery {
-        valid: true,
-        composition_root: composition_root.value,
-        composition: composition,
-        layers: layers.1,
+}
+
+/// Materialize the separately typed policy-sized receipt. Its query count,
+/// opening capacities, and transcript profile all descend from the same CTFE
+/// security policy.
+pub fn write_production_security_sparse_baby_bear_receipt(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ base_codeword: ref SparseBaseAirLdeCodeword<
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ interaction_codeword: ref SparseInteractionAirLdeCodeword<
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ composition_codeword: ref SparseCompositionAirCodeword<
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ shift: BabyBear,
+    _ complete: mut ProductionSparseFriProof,
+    _ receipt: mut ProductionSecuritySparseBabyBearReceipt,
+) -> bool {
+    receipt.valid = false
+    let material = build_production_sparse_fri_commitment_material(
+        interval,
+        base_codeword,
+        interaction_codeword,
+        composition_codeword,
+        shift,
+        production_recursive_security_profile(),
+        mut complete,
+    )
+    match material {
+        ProductionSparseFriCommitmentBuild::Invalid => false
+        ProductionSparseFriCommitmentBuild::Ready(ready) => {
+            let sampled = <ProductionSparseFriSchedule
+                as BabyBearFriMultiQueryLayers<
+                    {PRODUCTION_SECURITY_QUERY_COUNT},
+                    {PRODUCTION_LDE_LENGTH / 2},
+                    {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+                    ProductionSecuritySparseFriQueryPlan,
+                    ProductionSecuritySparseFriQuerySamples,
+                    ProductionSparseFriProof,
+                    ProductionSecuritySparseFriLayers,
+                >>::sample_fri_multi_queries(ref complete)
+            if !sampled.0 { return false }
+            if !<ProductionSparseFriSchedule
+                as BabyBearFriMultiQueryLayers<
+                    {PRODUCTION_SECURITY_QUERY_COUNT},
+                    {PRODUCTION_LDE_LENGTH / 2},
+                    {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+                    ProductionSecuritySparseFriQueryPlan,
+                    ProductionSecuritySparseFriQuerySamples,
+                    ProductionSparseFriProof,
+                    ProductionSecuritySparseFriLayers,
+                >>::write_fri_multi_query_layers(
+                    ref complete,
+                    ref sampled.1,
+                    mut receipt.fri.layers,
+                ) {
+                return false
+            }
+            install_production_security_receipt(
+                base_codeword,
+                interaction_codeword,
+                composition_codeword,
+                ready.base_root,
+                ready.interaction_root,
+                ready.composition_root,
+                ref sampled.1,
+                mut receipt,
+            )
+        }
     }
-    receipt.valid = true
-    true
 }
 
 fn authenticate_production_sparse_fri(
@@ -728,13 +1227,13 @@ fn authenticate_production_sparse_fri(
     let queries = <ProductionSparseFriQueryPlan as BabyBearFriQueryBuffer<
         {PRODUCTION_QUERY_COUNT},
         ProductionSparseFriQuerySamples,
-    >>::fri_query_buffer(authenticated.1)
+    >>::fri_query_buffer(ref authenticated.1)
     let composition_requests = <ProductionSparseFriQueryPlan
         as BabyBearFriPairRequests<
             {PRODUCTION_LDE_LENGTH / 2},
             {PRODUCTION_COMPOSITION_MAX_LEAVES},
             ProductionSparseFriQuerySamples,
-        >>::fri_pair_requests(authenticated.1)
+        >>::fri_pair_requests(ref authenticated.1)
     let exact_composition = composition_requests.valid
         && composition_requests.count
             == PRODUCTION_COMPOSITION_MAX_LEAVES.downcast_truncate()
@@ -744,7 +1243,7 @@ fn authenticate_production_sparse_fri(
             {PRODUCTION_COMPOSITION_MAX_LEAVES},
             {PRODUCTION_COMPOSITION_MAX_LEAVES},
             {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
-        >(ref proof.composition.path, composition_requests.indices)
+        >(ref proof.composition.path, ref composition_requests.indices)
     ProductionSparseFriAuthentication {
         valid: composition_authenticated && composition_transcript.valid
             && authenticated.0 && exact_composition
@@ -885,7 +1384,7 @@ pub fn verify_production_sparse_baby_bear_receipt(
             {PRODUCTION_LDE_LENGTH},
             {PRODUCTION_AIR_MAX_LEAVES},
             ProductionSparseFriQuerySamples,
-        >>::air_lde_requests(authenticated.samples)
+        >>::air_lde_requests(ref authenticated.samples)
     if !air_requests.valid
         || air_requests.count != PRODUCTION_AIR_MAX_LEAVES.downcast_truncate()
         || !multi_path_matches_requests<
@@ -894,14 +1393,14 @@ pub fn verify_production_sparse_baby_bear_receipt(
             {PRODUCTION_AIR_MAX_LEAVES},
             {PRODUCTION_AIR_MAX_LEAVES},
             {PRODUCTION_AIR_MAX_SIBLINGS},
-        >(ref receipt.base.path, air_requests.indices)
+        >(ref receipt.base.path, ref air_requests.indices)
         || !multi_path_matches_requests<
             Poseidon2Digest,
             {PRODUCTION_LDE_LENGTH},
             {PRODUCTION_AIR_MAX_LEAVES},
             {PRODUCTION_AIR_MAX_LEAVES},
             {PRODUCTION_AIR_MAX_SIBLINGS},
-        >(ref receipt.interaction.path, air_requests.indices) {
+        >(ref receipt.interaction.path, ref air_requests.indices) {
         return false
     }
 
@@ -921,6 +1420,255 @@ pub fn verify_production_sparse_baby_bear_receipt(
                 {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
             >,
             ProductionSparseFriLayers,
+            ProductionSparseFriChallenges,
+        >>::verify_fri_multi_fold(
+            receipt.fri.composition,
+            receipt.fri.layers,
+            authenticated.challenges,
+            query,
+            shift,
+        ) {
+            return false
+        }
+        cursor = cursor + 1
+    }
+    true
+}
+
+pub struct ProductionSecuritySparseFriAuthentication {
+    pub valid: bool,
+    pub samples: ProductionSecuritySparseFriQuerySamples,
+    pub queries: FriQueryBuffer<{PRODUCTION_SECURITY_QUERY_COUNT}>,
+    pub challenges: ProductionSparseFriChallenges,
+}
+impl core::marker::Copy for ProductionSecuritySparseFriAuthentication {}
+
+fn authenticate_production_security_sparse_fri(
+    _ composition: SparseCompositionTranscriptDigest<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ proof: ref ProductionSecuritySparseFriQuery,
+) -> ProductionSecuritySparseFriAuthentication {
+    let composition_authenticated = composition.is_valid()
+        && proof.valid && proof.composition_root.valid
+        && verify_composition_multi_opening<
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+        >(proof.composition, proof.composition_root)
+    let composition_transcript = bind_composition(
+        composition.transcript(),
+        proof.composition_root,
+    )
+    let authenticated = <ProductionSparseFriSchedule
+        as BabyBearFriMultiAuthenticateFirst<
+            {PRODUCTION_LDE_LENGTH / 2},
+            ProductionSecuritySparseFriQueryPlan,
+            ProductionSecuritySparseFriQuerySamples,
+            ProductionSecuritySparseFriLayers,
+            ProductionSparseFriChallenges,
+        >>::authenticate_fri_multi_first(
+            composition_transcript,
+            proof.layers,
+        )
+    let queries = <ProductionSecuritySparseFriQueryPlan as BabyBearFriQueryBuffer<
+        {PRODUCTION_SECURITY_QUERY_COUNT},
+        ProductionSecuritySparseFriQuerySamples,
+    >>::fri_query_buffer(ref authenticated.1)
+    let composition_requests = <ProductionSecuritySparseFriQueryPlan
+        as BabyBearFriPairRequests<
+            {PRODUCTION_LDE_LENGTH / 2},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+            ProductionSecuritySparseFriQuerySamples,
+        >>::fri_pair_requests(ref authenticated.1)
+    let exact_composition = composition_requests.valid
+        && composition_requests.count
+            == PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES.downcast_truncate()
+        && multi_path_matches_requests<
+            Poseidon2Digest,
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+            {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+        >(ref proof.composition.path, ref composition_requests.indices)
+    ProductionSecuritySparseFriAuthentication {
+        valid: composition_authenticated && composition_transcript.valid
+            && authenticated.0 && exact_composition
+            && queries.valid
+            && queries.count == PRODUCTION_SECURITY_QUERY_COUNT.downcast_truncate(),
+        samples: authenticated.1,
+        queries: queries,
+        challenges: authenticated.2,
+    }
+}
+
+fn verify_production_security_sparse_composition_query(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ composition: SparseCompositionTranscriptDigest<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >,
+    _ query: u32,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+) -> bool {
+    let geometry = radix2_query_geometry<
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(query)
+    if !geometry.valid { return false }
+    let current = sparse_lde_opened_air_row<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+        {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+        {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+    >(ref receipt.base, ref receipt.interaction, geometry.evaluation)
+    let next = sparse_lde_opened_air_row<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+        {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+        {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+    >(ref receipt.base, ref receipt.interaction, geometry.next_evaluation)
+    let negative = sparse_lde_opened_air_row<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+        {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+        {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+    >(ref receipt.base, ref receipt.interaction, geometry.negative_evaluation)
+    let negative_next = sparse_lde_opened_air_row<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+        {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+        {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+    >(ref receipt.base, ref receipt.interaction, geometry.negative_next_evaluation)
+    if !current.0 || !next.0 || !negative.0 || !negative_next.0 {
+        return false
+    }
+
+    let root = BabyBear::two_adic_root(radix2_log<
+        {PRODUCTION_LDE_LENGTH},
+    >())
+    let point = BabyBearExt4::from_base(
+        shift * root.pow_u32(geometry.evaluation),
+    )
+    let negative_point = BabyBearExt4::from_base(
+        shift * root.pow_u32(geometry.negative_evaluation),
+    )
+    let expected = evaluate_sparse_bound_composition_opened<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(composition, interval, point, ref current.1, ref next.1)
+    let expected_negative = evaluate_sparse_bound_composition_opened<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(composition, interval, negative_point, ref negative.1, ref negative_next.1)
+    let opened = receipt.fri.composition.sparse_value(geometry.evaluation)
+    let opened_negative = receipt.fri.composition.sparse_value(
+        geometry.negative_evaluation,
+    )
+    expected.valid && expected_negative.valid
+        && opened.valid && opened_negative.valid
+        && expected.value.equals(opened.value)
+        && expected_negative.value.equals(opened_negative.value)
+}
+
+/// Verify the production 4-limb, 4,096-row, 8,192-point sparse AIR receipt.
+/// Every AIR and composition opening must be exactly transcript-selected;
+/// each authenticated composition pair is then replayed through the shared
+/// sparse AIR and schedule-derived FRI fold interpreters.
+pub fn verify_production_security_sparse_baby_bear_receipt(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+) -> bool {
+    if !receipt.valid || shift.is_zero()
+        || !receipt.base_root.valid || !receipt.interaction_root.valid
+        || !verify_sparse_base_lde_multi_opening<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+        >(ref receipt.base, receipt.base_root)
+        || !verify_sparse_interaction_lde_multi_opening<
+            {PRODUCTION_LIMBS},
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+        >(ref receipt.interaction, receipt.interaction_root) {
+        return false
+    }
+    let air = bind_sparse_air_lde_transcript<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >(
+        commit_recursive_leaf_statement(interval),
+        receipt.base_root,
+        receipt.interaction_root,
+    )
+    let composition = bind_sparse_air_security_profile(
+        air,
+        production_recursive_security_profile(),
+    )
+    let authenticated = authenticate_production_security_sparse_fri(
+        composition,
+        ref receipt.fri,
+    )
+    if !composition.is_valid() || !authenticated.valid { return false }
+
+    let air_requests = <ProductionSecuritySparseFriQueryPlan
+        as BabyBearAirLdeRequests<
+            {PRODUCTION_TRACE_LENGTH},
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            ProductionSecuritySparseFriQuerySamples,
+        >>::air_lde_requests(ref authenticated.samples)
+    if !air_requests.valid
+        || air_requests.count != PRODUCTION_SECURITY_AIR_MAX_LEAVES.downcast_truncate()
+        || !multi_path_matches_requests<
+            Poseidon2Digest,
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+        >(ref receipt.base.path, ref air_requests.indices)
+        || !multi_path_matches_requests<
+            Poseidon2Digest,
+            {PRODUCTION_LDE_LENGTH},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
+            {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
+        >(ref receipt.interaction.path, ref air_requests.indices) {
+        return false
+    }
+
+    let mut cursor: usize = 0
+    while cursor < PRODUCTION_SECURITY_QUERY_COUNT {
+        let query = authenticated.queries.indices[cursor]
+        if !verify_production_security_sparse_composition_query(
+            interval,
+            shift,
+            composition,
+            query,
+            receipt,
+        ) || !<ProductionSparseFriSchedule as BabyBearFriMultiFoldCheck<
+            {PRODUCTION_LDE_LENGTH},
+            CompositionMultiOpening<
+                {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+                {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+            >,
+            ProductionSecuritySparseFriLayers,
             ProductionSparseFriChallenges,
         >>::verify_fri_multi_fold(
             receipt.fri.composition,

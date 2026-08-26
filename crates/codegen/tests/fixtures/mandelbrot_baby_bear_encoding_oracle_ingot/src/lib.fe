@@ -498,6 +498,7 @@ pub fn fri_fold8x4(
     )
 }
 
+
 pub fn fri_chain16_component(
     _ seed: u32,
     _ transcript: u32,
@@ -526,6 +527,7 @@ pub fn fri_chain16_component(
         final_layer.transcript.value.field(component).to_u32(),
     )
 }
+
 
 pub fn fri_query1(_ transcript: u32) -> (u32, u32, u32) {
     let challenge = fri_query_challenge<4, 1>(
@@ -575,7 +577,7 @@ where HALF > 0, { (HALF & (HALF - 1)) == 0 }
             HALF,
             8,
             mandelbrot_proof_baby_bear::CheckpointFriQuerySamples4,
-        >>::fri_pair_requests(sampled.1)
+        >>::fri_pair_requests(ref sampled.1)
     (
         if sampled.0 && requests.valid { 1 } else { 0 },
         requests.count,
@@ -704,7 +706,7 @@ pub fn planned_multipath_status(
         8,
         8,
         24,
-    >(composition_evaluations, sampled.1)
+    >(composition_evaluations, ref sampled.1)
 
     let fri_evaluations = fri_pattern8(seed + 101)
     let mut fri_leaves = [mandelbrot_proof_baby_bear::FriLayerDigest<1> {
@@ -726,7 +728,7 @@ pub fn planned_multipath_status(
         8,
         8,
         16,
-    >(fri_evaluations, sampled.1)
+    >(fri_evaluations, ref sampled.1)
     (
         if sampled.0 { 1 } else { 0 },
         composition.path.leaf_count,

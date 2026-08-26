@@ -238,9 +238,10 @@ pub fn multipath16_matches(
         4,
         8,
     >(leaves, [query0, query1, query2, query3])
+    let requests = [request0, request1, request2, request3]
     if multi_path_matches_requests<u32, 16, 4, 4, 8>(
         ref path,
-        [request0, request1, request2, request3],
+        ref requests,
     ) { 1 } else { 0 }
 }
 

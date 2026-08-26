@@ -221,7 +221,7 @@ pub fn air_lde_multipath16_status(
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref main_rows, sampled.1, mut main)
+    >(ref main_rows, ref sampled.1, mut main)
     let _ = write_auxiliary_lde_multi_query_opening_power_of_two<
         CheckpointFriQueryPlan4,
         CheckpointFriQuerySamples4,
@@ -230,7 +230,7 @@ pub fn air_lde_multipath16_status(
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref auxiliary_rows, sampled.1, mut auxiliary)
+    >(ref auxiliary_rows, ref sampled.1, mut auxiliary)
 
     if mutation == 1 {
         main.values[0][0] = main.values[0][0] + BabyBear::one()
@@ -425,7 +425,7 @@ fn write_air_fri_receipt16(
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref main_rows, authenticated.samples, mut main)
+    >(ref main_rows, ref authenticated.samples, mut main)
     let auxiliary_opened = write_auxiliary_lde_multi_query_opening_power_of_two<
         CheckpointFriQueryPlan4,
         CheckpointFriQuerySamples4,
@@ -434,7 +434,7 @@ fn write_air_fri_receipt16(
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref auxiliary_rows, authenticated.samples, mut auxiliary)
+    >(ref auxiliary_rows, ref authenticated.samples, mut auxiliary)
     if !main_opened || !auxiliary_opened {
         return false
     }

@@ -4548,7 +4548,7 @@ where
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref commitments, requested, mut path, mut root) {
+    >(ref commitments, ref requested, mut path, mut root) {
         return false
     }
     authentication.root = SparseTraceDigest {
@@ -4806,7 +4806,7 @@ where
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref commitments, requested, mut path, mut root)
+    >(ref commitments, ref requested, mut path, mut root)
         || !root.valid
         || !root.value.equals(expected.value)
     {
@@ -4886,7 +4886,7 @@ where
         REQUESTS,
         MAX_LEAVES,
         MAX_SIBLINGS,
-    >(ref commitments, requested, mut path, mut root)
+    >(ref commitments, ref requested, mut path, mut root)
         || !root.valid
         || !root.value.equals(expected.value)
     {

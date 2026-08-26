@@ -1,0 +1,178 @@
+//! Focused parity boundary for value and caller-owned FRI interpreters.
+
+use mandelbrot_proof_air_core::FriSchedule
+use mandelbrot_proof_baby_bear::{
+    BabyBearFriFirst,
+    CompositionTranscriptDigest,
+    fold_checkpoint_fri16,
+    fold_fri_evaluations,
+    write_fri_evaluations,
+    write_fri_schedule,
+}
+use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+
+fn digest8(_ base: u32) -> Poseidon2Digest {
+    Poseidon2Digest::from_u32s([
+        base, base + 1, base + 2, base + 3,
+        base + 4, base + 5, base + 6, base + 7,
+    ])
+}
+
+fn fri_pattern8(_ seed: u32) -> [BabyBearExt4; 8] {
+    let mut values = [BabyBearExt4::zero(); 8]
+    let mut index: usize = 0
+    while index < 8 {
+        let i: u32 = index.downcast_truncate()
+        values[index] = BabyBearExt4::from_u32s([
+            seed + i,
+            seed + 17 + i,
+            seed + 37 + i + i,
+            seed + 71 + i + i + i,
+        ])
+        index = index + 1
+    }
+    values
+}
+
+fn fri_pattern16(_ seed: u32) -> [BabyBearExt4; 16] {
+    let mut values = [BabyBearExt4::zero(); 16]
+    let mut index: usize = 0
+    while index < 16 {
+        let i: u32 = index.downcast_truncate()
+        values[index] = BabyBearExt4::from_u32s([
+            seed + i,
+            seed + 17 + i,
+            seed + 37 + i + i,
+            seed + 71 + i + i + i,
+        ])
+        index = index + 1
+    }
+    values
+}
+
+fn fold_words(
+    _ valid: bool,
+    _ folded: ref [BabyBearExt4; 4],
+) -> (
+    u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+) {
+    let f0 = folded[0].to_u32s()
+    let f1 = folded[1].to_u32s()
+    let f2 = folded[2].to_u32s()
+    let f3 = folded[3].to_u32s()
+    (
+        if valid { 1 } else { 0 },
+        f0[0], f0[1], f0[2], f0[3],
+        f1[0], f1[1], f1[2], f1[3],
+        f2[0], f2[1], f2[2], f2[3],
+        f3[0], f3[1], f3[2], f3[3],
+    )
+}
+
+pub fn fri_fold8x4_value(
+    _ seed: u32,
+    _ beta0: u32, _ beta1: u32, _ beta2: u32, _ beta3: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+) {
+    let folded = fold_fri_evaluations<8, 4>(
+        fri_pattern8(seed),
+        BabyBearExt4::from_u32s([beta0, beta1, beta2, beta3]),
+        BabyBear::from_u32(shift),
+    )
+    fold_words(folded.valid, ref folded.evaluations)
+}
+
+pub fn fri_fold8x4_writer(
+    _ seed: u32,
+    _ beta0: u32, _ beta1: u32, _ beta2: u32, _ beta3: u32,
+    _ shift: u32,
+) -> (
+    u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+) {
+    let evaluations = fri_pattern8(seed)
+    let mut folded = [BabyBearExt4::zero(); 4]
+    let valid = write_fri_evaluations<8, 4>(
+        ref evaluations,
+        BabyBearExt4::from_u32s([beta0, beta1, beta2, beta3]),
+        BabyBear::from_u32(shift),
+        mut folded,
+    )
+    fold_words(valid, ref folded)
+}
+
+pub fn fri_chain16_value(
+    _ seed: u32,
+    _ transcript: u32,
+    _ shift: u32,
+    _ component: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32) {
+    if component >= 8 { return (0, 0, 0, 0, 0, 0, 0) }
+    let proof = fold_checkpoint_fri16(
+        fri_pattern16(seed),
+        CompositionTranscriptDigest { valid: true, value: digest8(transcript) },
+        BabyBear::from_u32(shift),
+    )
+    let c: usize = component as usize
+    let first = proof.layer
+    let second = proof.tail.layer
+    let third = proof.tail.tail.layer
+    let final_layer = proof.tail.tail.tail.layer
+    let final_words = final_layer.evaluations[0].to_u32s()
+    (
+        if proof.valid { 1 } else { 0 },
+        first.root.value.field(component).to_u32(),
+        second.root.value.field(component).to_u32(),
+        third.root.value.field(component).to_u32(),
+        final_layer.root.value.field(component).to_u32(),
+        if component < 4 { final_words[c] } else { 0 },
+        final_layer.transcript.value.field(component).to_u32(),
+    )
+}
+
+pub fn fri_chain16_writer(
+    _ seed: u32,
+    _ transcript: u32,
+    _ shift: u32,
+    _ component: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32) {
+    if component >= 8 { return (0, 0, 0, 0, 0, 0, 0) }
+    let evaluations = fri_pattern16(seed)
+    let mut proof = <FriSchedule<1, 4>
+        as BabyBearFriFirst<16>>::invalid_fri_first()
+    let valid = write_fri_schedule<16, FriSchedule<1, 4>>(
+        ref evaluations,
+        CompositionTranscriptDigest { valid: true, value: digest8(transcript) },
+        BabyBear::from_u32(shift),
+        mut proof,
+    )
+    let c: usize = component as usize
+    let first = proof.layer
+    let second = proof.tail.layer
+    let third = proof.tail.tail.layer
+    let final_layer = proof.tail.tail.tail.layer
+    let final_words = final_layer.evaluations[0].to_u32s()
+    (
+        if valid && proof.valid { 1 } else { 0 },
+        first.root.value.field(component).to_u32(),
+        second.root.value.field(component).to_u32(),
+        third.root.value.field(component).to_u32(),
+        final_layer.root.value.field(component).to_u32(),
+        if component < 4 { final_words[c] } else { 0 },
+        final_layer.transcript.value.field(component).to_u32(),
+    )
+}
