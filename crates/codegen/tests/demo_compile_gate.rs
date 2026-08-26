@@ -1384,7 +1384,7 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             .map(|resource| (resource.name.as_str(), resource.length))
             .collect::<Vec<_>>(),
         [
-            ("proof", 408),
+            ("proof", 491),
             ("lde_inverse_values", 16),
             ("lde_inverse_progress", 8),
             ("lde_values", 64),
@@ -1392,7 +1392,7 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             ("lde_coset_valid", 4),
         ]
     );
-    assert_eq!(bundle.manifest.passes.len(), 10);
+    assert_eq!(bundle.manifest.passes.len(), 12);
     assert_eq!(
         bundle
             .manifest
@@ -1410,6 +1410,8 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             "initialize_commitments",
             "advance_commitment_rounds",
             "finalize_commitments",
+            "fold_fri_pairs",
+            "finalize_fri_fold",
             "display",
         ]
     );
@@ -1461,6 +1463,8 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
         "Poseidon2ParameterStream",
         "poseidon2_workgroup_lane_with_round_constant",
         "Poseidon2FieldSponge",
+        "fold_fri_pair_value_at_power_of_two",
+        "ProofFriPairs",
     ] {
         assert!(
             authored.contains(shared_surface),
@@ -1484,6 +1488,17 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
     assert_eq!(commitment.layout.workgroup_size, [32, 1, 1]);
     assert_eq!(commitment.dispatch, Some([1, 1, 1]));
     assert_eq!(commitment.repeat, 396);
+    let fri = &bundle.manifest.passes[9];
+    assert_eq!(fri.layout.workgroup_size, [16, 1, 1]);
+    assert_eq!(fri.dispatch, Some([1, 1, 1]));
+    assert_eq!(fri.repeat, 1);
+    assert!(
+        fri.layout
+            .bindings
+            .iter()
+            .all(|binding| binding.name != "trap"),
+        "the factor-2 FRI pair placement must remain in typed storage without a private heap",
+    );
     for manual in [
         "fn extend_step",
         "fn extend_magnitude",

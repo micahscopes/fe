@@ -43,11 +43,22 @@ const POSEIDON_WIDTH: usize = 16;
 const DONE_BLOCK: u32 = 9;
 const ROUND_CONSTANT_COUNT: usize = 8 * POSEIDON_WIDTH + 13;
 const PARAMETER_START: usize = 267;
-const PROOF_WORDS: usize = PARAMETER_START + ROUND_CONSTANT_COUNT;
+const PARAMETER_END: usize = PARAMETER_START + ROUND_CONSTANT_COUNT;
+const FRI_CLEAN: usize = PARAMETER_END;
+const FRI_FOLD_WORDS: usize = 32;
+const FRI_OBSERVED: usize = FRI_CLEAN + FRI_FOLD_WORDS;
+const FRI_STATUS: usize = FRI_OBSERVED + FRI_FOLD_WORDS;
+const FRI_CLEAN_VALID: usize = FRI_STATUS;
+const FRI_OBSERVED_VALID: usize = FRI_CLEAN_VALID + LDE_ROWS / 2;
+const FRI_EQUAL: usize = FRI_OBSERVED_VALID + LDE_ROWS / 2;
+const FRI_CORRECT: usize = FRI_EQUAL + 1;
+const PROOF_WORDS: usize = FRI_CORRECT + 2;
 const TAMPER_LDE_FIELD: usize = 17;
 const DOMAIN: [u8; 4] = *b"MGDL";
-const COMPUTE_PASSES: usize = 9;
+const COMPUTE_PASSES: usize = 11;
 const COMMITMENT_PASS: usize = 7;
+const FRI_PASS: usize = 9;
+const EXT_NONRESIDUE: u32 = 11;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -436,6 +447,59 @@ fn pow_mod(mut base: u64, mut exponent: u32) -> u32 {
     result as u32
 }
 
+fn add_mod(left: u32, right: u32) -> u32 {
+    ((u64::from(left) + u64::from(right)) % u64::from(MODULUS)) as u32
+}
+
+fn sub_mod(left: u32, right: u32) -> u32 {
+    ((u64::from(left) + u64::from(MODULUS) - u64::from(right))
+        % u64::from(MODULUS)) as u32
+}
+
+fn mul_mod(left: u32, right: u32) -> u32 {
+    (u64::from(left) * u64::from(right) % u64::from(MODULUS)) as u32
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ext4([u32; 4]);
+
+impl Ext4 {
+    fn add(self, other: Self) -> Self {
+        Self(std::array::from_fn(|index| {
+            add_mod(self.0[index], other.0[index])
+        }))
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self(std::array::from_fn(|index| {
+            sub_mod(self.0[index], other.0[index])
+        }))
+    }
+
+    fn scale(self, scalar: u32) -> Self {
+        Self(self.0.map(|coefficient| mul_mod(coefficient, scalar)))
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let mut coefficients = [0u32; 7];
+        for left in 0..4 {
+            for right in 0..4 {
+                coefficients[left + right] = add_mod(
+                    coefficients[left + right],
+                    mul_mod(self.0[left], other.0[right]),
+                );
+            }
+        }
+        for degree in (4..=6).rev() {
+            coefficients[degree - 4] = add_mod(
+                coefficients[degree - 4],
+                mul_mod(coefficients[degree], EXT_NONRESIDUE),
+            );
+        }
+        Self(coefficients[..4].try_into().expect("four extension coefficients"))
+    }
+}
+
 fn direct_ntt(values: &[u32], inverse: bool) -> Vec<u32> {
     let log_n = values.len().ilog2();
     let maximal_root = pow_mod(31, 15);
@@ -531,6 +595,37 @@ fn reference_commitment(fields: &[u32]) -> [u32; 8] {
     state[..8].try_into().expect("eight digest fields")
 }
 
+fn reference_fri_fold(fields: &[u32], clean_root: &[u32; 8], tampered: bool) -> Vec<u32> {
+    let maximal_root = pow_mod(31, 15);
+    let root = pow_mod(
+        u64::from(maximal_root),
+        1 << (TWO_ADICITY - LDE_ROWS.ilog2()),
+    );
+    let inverse_two = pow_mod(2, MODULUS - 2);
+    let challenge = Ext4(clean_root[..4].try_into().expect("quartic challenge"));
+    let mut output = Vec::with_capacity(FRI_FOLD_WORDS);
+    for pair in 0..LDE_ROWS / 2 {
+        let mut positive = Ext4(std::array::from_fn(|column| {
+            fields[column * LDE_ROWS + pair]
+        }));
+        if tampered && pair == 1 {
+            positive.0[1] = add_mod(positive.0[1], 1);
+        }
+        let negative = Ext4(std::array::from_fn(|column| {
+            fields[column * LDE_ROWS + pair + LDE_ROWS / 2]
+        }));
+        let point = mul_mod(7, pow_mod(u64::from(root), pair as u32));
+        let inverse_point = pow_mod(u64::from(point), MODULUS - 2);
+        let even = positive.add(negative).scale(inverse_two);
+        let odd = positive
+            .sub(negative)
+            .scale(inverse_two)
+            .scale(inverse_point);
+        output.extend(challenge.mul(odd).add(even).0);
+    }
+    output
+}
+
 fn assert_commit_state(words: &[u32], offset: usize) {
     assert_eq!(
         &words[offset + COMMIT_CURSOR..offset + COMMIT_CURSOR + POSEIDON_WIDTH],
@@ -576,10 +671,32 @@ fn assert_receipt(receipt: &ExecutionReceipt, tampered: bool, expected_lde: &[u3
     assert_commit_state(&receipt.proof, CLEAN_COMMIT_STATE);
     assert_commit_state(&receipt.proof, OBSERVED_COMMIT_STATE);
     assert_eq!(
-        &receipt.proof[PARAMETER_START..PROOF_WORDS],
+        &receipt.proof[PARAMETER_START..PARAMETER_END],
         reference_montgomery_parameters(),
         "GPU parameter initialization must match Plonky3 exactly"
     );
+    let expected_clean_fri = reference_fri_fold(expected_lde, &clean, false);
+    let expected_observed_fri = reference_fri_fold(expected_lde, &clean, tampered);
+    assert_eq!(
+        &receipt.proof[FRI_CLEAN..FRI_CLEAN + FRI_FOLD_WORDS],
+        expected_clean_fri,
+        "GPU clean FRI pairs must match the independent quartic-field formula",
+    );
+    assert_eq!(
+        &receipt.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_FOLD_WORDS],
+        expected_observed_fri,
+        "GPU observed FRI pairs must match the independently mutated formula",
+    );
+    assert_eq!(
+        &receipt.proof[FRI_CLEAN_VALID..FRI_CLEAN_VALID + LDE_ROWS / 2],
+        &[1; LDE_ROWS / 2],
+    );
+    assert_eq!(
+        &receipt.proof[FRI_OBSERVED_VALID..FRI_OBSERVED_VALID + LDE_ROWS / 2],
+        &[1; LDE_ROWS / 2],
+    );
+    assert_eq!(receipt.proof[FRI_EQUAL], u32::from(!tampered));
+    assert_eq!(receipt.proof[FRI_CORRECT], 1);
     assert!(
         receipt.traps.iter().all(|word| *word == 0),
         "every physical invocation lane must remain trap-free: {:?}",
@@ -619,6 +736,11 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
             .workgroup_size,
         [32, 1, 1]
     );
+    assert_eq!(bundle.manifest.passes[FRI_PASS].repeat, 1);
+    assert_eq!(
+        bundle.manifest.passes[FRI_PASS].layout.workgroup_size,
+        [16, 1, 1]
+    );
 
     let Some((adapter, device, queue)) = request_browser_profile_device() else {
         return;
@@ -640,6 +762,10 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
     eprintln!(
         "  Mandelbrot proof largest commitment functions: {:?}",
         largest_wgsl_functions(&bundle.pass_wgsl[COMMITMENT_PASS].source, 12)
+    );
+    eprintln!(
+        "  Mandelbrot proof largest FRI functions: {:?}",
+        largest_wgsl_functions(&bundle.pass_wgsl[FRI_PASS].source, 12)
     );
     let pipeline_started = std::time::Instant::now();
     let kernels = compile_kernels(&device, &bundle);
@@ -670,5 +796,10 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
         &clean.proof[OBSERVED_ROOT..OBSERVED_ROOT + 8],
         &tampered.proof[OBSERVED_ROOT..OBSERVED_ROOT + 8],
         "the Fe-authored mutation mode must alter the observed commitment"
+    );
+    assert_ne!(
+        &clean.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_FOLD_WORDS],
+        &tampered.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_FOLD_WORDS],
+        "the Fe-authored mutation mode must alter the observed FRI fold"
     );
 }

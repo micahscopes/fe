@@ -7,84 +7,127 @@
 
 use core::marker::Copy
 use core::ops::{Add, Mul, Neg, Sub}
-use canonical_words::{CanonicalWords, WordSink, WordSource, encode_canonical_words}
+use canonical_words::{CanonicalWords, WordSink, WordSource}
 use super::word_field::{WordField, WordPrime31}
 
 pub trait WordBinomialExtension4: WordPrime31 {
     fn nonresidue() -> u32
 }
 
-pub struct BinomialExtension4<M> { coefficients: [WordField<M>; 4] }
+/// A quartic extension is a fixed product, not an addressable collection.
+///
+/// Keeping the canonical coordinates as named scalar fields lets placement
+/// interpreters carry extension arithmetic in SSA values. Dynamic coefficient
+/// lookup remains available as a derived view, without making every ordinary
+/// multiply allocate a private array in SPIR-V.
+pub struct BinomialExtension4<M> {
+    c0: WordField<M>,
+    c1: WordField<M>,
+    c2: WordField<M>,
+    c3: WordField<M>,
+}
 impl<M> Copy for BinomialExtension4<M> {}
 
 impl<M: WordBinomialExtension4> BinomialExtension4<M> {
     pub const fn zero() -> Self {
-        Self { coefficients: [WordField<M>::zero(); 4] }
+        Self {
+            c0: WordField<M>::zero(),
+            c1: WordField<M>::zero(),
+            c2: WordField<M>::zero(),
+            c3: WordField<M>::zero(),
+        }
     }
 
     pub fn one() -> Self {
         Self {
-            coefficients: [
-                WordField<M>::one(),
-                WordField<M>::zero(),
-                WordField<M>::zero(),
-                WordField<M>::zero(),
-            ],
+            c0: WordField<M>::one(),
+            c1: WordField<M>::zero(),
+            c2: WordField<M>::zero(),
+            c3: WordField<M>::zero(),
         }
     }
 
     pub fn from_base(_ value: WordField<M>) -> Self {
         Self {
-            coefficients: [
-                value,
-                WordField<M>::zero(),
-                WordField<M>::zero(),
-                WordField<M>::zero(),
-            ],
+            c0: value,
+            c1: WordField<M>::zero(),
+            c2: WordField<M>::zero(),
+            c3: WordField<M>::zero(),
         }
     }
 
     /// Construct directly from canonical base-field coefficient values.
     pub fn from_coefficients(_ values: own [WordField<M>; 4]) -> Self {
-        Self { coefficients: values }
+        Self::from_coordinate_fields(values[0], values[1], values[2], values[3])
+    }
+
+    /// Scalar-coordinate constructor for fixed placement interpreters.
+    pub fn from_coordinate_fields(
+        _ c0: WordField<M>,
+        _ c1: WordField<M>,
+        _ c2: WordField<M>,
+        _ c3: WordField<M>,
+    ) -> Self {
+        Self { c0: c0, c1: c1, c2: c2, c3: c3 }
     }
 
     pub fn from_u32s(_ values: [u32; 4]) -> Self {
+        Self::from_coordinate_words(values[0], values[1], values[2], values[3])
+    }
+
+    /// Canonical-word constructor without an intermediate array carrier.
+    pub fn from_coordinate_words(
+        _ c0: u32,
+        _ c1: u32,
+        _ c2: u32,
+        _ c3: u32,
+    ) -> Self {
         Self {
-            coefficients: [
-                WordField<M>::from_u32(values[0]),
-                WordField<M>::from_u32(values[1]),
-                WordField<M>::from_u32(values[2]),
-                WordField<M>::from_u32(values[3]),
-            ],
+            c0: WordField<M>::from_u32(c0),
+            c1: WordField<M>::from_u32(c1),
+            c2: WordField<M>::from_u32(c2),
+            c3: WordField<M>::from_u32(c3),
         }
     }
 
     pub fn to_u32s(self) -> [u32; 4] {
         [
-            self.coefficients[0].to_u32(),
-            self.coefficients[1].to_u32(),
-            self.coefficients[2].to_u32(),
-            self.coefficients[3].to_u32(),
+            self.c0.to_u32(),
+            self.c1.to_u32(),
+            self.c2.to_u32(),
+            self.c3.to_u32(),
         ]
     }
 
     pub fn coefficient(self, _ index: usize) -> WordField<M> {
-        self.coefficients[index]
+        match index {
+            0 => self.c0
+            1 => self.c1
+            2 => self.c2
+            3 => self.c3
+            _ => WordField<M>::zero()
+        }
     }
 
+    /// Fixed-coordinate accessors preserve the extension as a scalar tree for
+    /// compile-time-known placements such as one GPU lane per FRI pair.
+    pub fn coefficient_0(self) -> WordField<M> { self.c0 }
+    pub fn coefficient_1(self) -> WordField<M> { self.c1 }
+    pub fn coefficient_2(self) -> WordField<M> { self.c2 }
+    pub fn coefficient_3(self) -> WordField<M> { self.c3 }
+
     pub fn is_zero(self) -> bool {
-        self.coefficients[0].is_zero()
-            && self.coefficients[1].is_zero()
-            && self.coefficients[2].is_zero()
-            && self.coefficients[3].is_zero()
+        self.c0.is_zero()
+            && self.c1.is_zero()
+            && self.c2.is_zero()
+            && self.c3.is_zero()
     }
 
     pub fn equals(self, _ other: Self) -> bool {
-        self.coefficients[0].equals(other.coefficients[0])
-            && self.coefficients[1].equals(other.coefficients[1])
-            && self.coefficients[2].equals(other.coefficients[2])
-            && self.coefficients[3].equals(other.coefficients[3])
+        self.c0.equals(other.c0)
+            && self.c1.equals(other.c1)
+            && self.c2.equals(other.c2)
+            && self.c3.equals(other.c3)
     }
 
     pub fn square(self) -> Self { self * self }
@@ -106,10 +149,10 @@ impl<M: WordBinomialExtension4> BinomialExtension4<M> {
     /// field's `inverse_or_zero`, so the operation fails closed without a
     /// second representation or sentinel.
     pub fn inverse_or_zero(self) -> Self {
-        let a0 = self.coefficients[0]
-        let a1 = self.coefficients[1]
-        let a2 = self.coefficients[2]
-        let a3 = self.coefficients[3]
+        let a0 = self.c0
+        let a1 = self.c1
+        let a2 = self.c2
+        let a3 = self.c3
         let w = WordField<M>::from_u32(M::nonresidue())
         let two = WordField<M>::one() + WordField<M>::one()
 
@@ -123,31 +166,35 @@ impl<M: WordBinomialExtension4> BinomialExtension4<M> {
         let even1 = a0 * inverse1 + a2 * inverse0
         let odd0 = a1 * inverse0 + w * a3 * inverse1
         let odd1 = a1 * inverse1 + a3 * inverse0
-        Self { coefficients: [even0, -odd0, even1, -odd1] }
+        Self { c0: even0, c1: -odd0, c2: even1, c3: -odd1 }
     }
 }
 
 impl<M: WordBinomialExtension4> CanonicalWords for BinomialExtension4<M> {
-    const WORDS: u32 = <[WordField<M>; 4] as CanonicalWords>::WORDS
+    const WORDS: u32 = 4 * <WordField<M> as CanonicalWords>::WORDS
 
     fn encode<W: WordSink>(ref self, _ writer: W) -> W {
-        encode_canonical_words(ref self.coefficients, writer)
+        let writer = self.c0.encode(writer)
+        let writer = self.c1.encode(writer)
+        let writer = self.c2.encode(writer)
+        self.c3.encode(writer)
     }
 
     fn decode<R: WordSource>(mut self, _ reader: R) -> R {
-        self.coefficients.decode(reader)
+        let reader = self.c0.decode(reader)
+        let reader = self.c1.decode(reader)
+        let reader = self.c2.decode(reader)
+        self.c3.decode(reader)
     }
 }
 
 impl<M: WordBinomialExtension4> Add for BinomialExtension4<M> {
     fn add(own self, _ other: own Self) -> Self {
         Self {
-            coefficients: [
-                self.coefficients[0] + other.coefficients[0],
-                self.coefficients[1] + other.coefficients[1],
-                self.coefficients[2] + other.coefficients[2],
-                self.coefficients[3] + other.coefficients[3],
-            ],
+            c0: self.c0 + other.c0,
+            c1: self.c1 + other.c1,
+            c2: self.c2 + other.c2,
+            c3: self.c3 + other.c3,
         }
     }
 }
@@ -155,12 +202,10 @@ impl<M: WordBinomialExtension4> Add for BinomialExtension4<M> {
 impl<M: WordBinomialExtension4> Sub for BinomialExtension4<M> {
     fn sub(own self, _ other: own Self) -> Self {
         Self {
-            coefficients: [
-                self.coefficients[0] - other.coefficients[0],
-                self.coefficients[1] - other.coefficients[1],
-                self.coefficients[2] - other.coefficients[2],
-                self.coefficients[3] - other.coefficients[3],
-            ],
+            c0: self.c0 - other.c0,
+            c1: self.c1 - other.c1,
+            c2: self.c2 - other.c2,
+            c3: self.c3 - other.c3,
         }
     }
 }
@@ -168,28 +213,28 @@ impl<M: WordBinomialExtension4> Sub for BinomialExtension4<M> {
 impl<M: WordBinomialExtension4> Neg for BinomialExtension4<M> {
     fn neg(own self) -> Self {
         Self {
-            coefficients: [
-                -self.coefficients[0],
-                -self.coefficients[1],
-                -self.coefficients[2],
-                -self.coefficients[3],
-            ],
+            c0: -self.c0,
+            c1: -self.c1,
+            c2: -self.c2,
+            c3: -self.c3,
         }
     }
 }
 
 impl<M: WordBinomialExtension4> Mul for BinomialExtension4<M> {
     fn mul(own self, _ other: own Self) -> Self {
-        let a = self.coefficients
-        let b = other.coefficients
         let w = WordField<M>::from_u32(M::nonresidue())
         Self {
-            coefficients: [
-                a[0] * b[0] + w * (a[1] * b[3] + a[2] * b[2] + a[3] * b[1]),
-                a[0] * b[1] + a[1] * b[0] + w * (a[2] * b[3] + a[3] * b[2]),
-                a[0] * b[2] + a[1] * b[1] + a[2] * b[0] + w * a[3] * b[3],
-                a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0],
-            ],
+            c0: self.c0 * other.c0 + w * (
+                self.c1 * other.c3 + self.c2 * other.c2 + self.c3 * other.c1
+            ),
+            c1: self.c0 * other.c1 + self.c1 * other.c0 + w * (
+                self.c2 * other.c3 + self.c3 * other.c2
+            ),
+            c2: self.c0 * other.c2 + self.c1 * other.c1
+                + self.c2 * other.c0 + w * self.c3 * other.c3,
+            c3: self.c0 * other.c3 + self.c1 * other.c2
+                + self.c2 * other.c1 + self.c3 * other.c0,
         }
     }
 }

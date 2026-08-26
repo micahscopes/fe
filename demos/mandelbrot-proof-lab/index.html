@@ -1,0 +1,87 @@
+<!doctype html>
+<!--
+  Focused browser lab for the Fe-authored Mandelbrot proof pass graph.
+
+  This page deliberately contains one Fe render declaration and no page
+  JavaScript. It is the fast browser iteration lane. The all-demo gallery is
+  an integration gate after this surface passes its exactness and browser
+  checks.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='13' fill='%23101422'/%3E%3Cpath d='M11 39c8-22 21-28 41-14-13-2-19 4-19 15-5-8-12-9-22-1Z' fill='%23ffb0de'/%3E%3Ccircle cx='42' cy='22' r='7' fill='%235775e2'/%3E%3C/svg%3E">
+<title>Fe Mandelbrot proof GPU lab</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0b0d14;
+    color: #dce3f1;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; padding: 28px; }
+  main { width: min(760px, 100%); margin: 0 auto; }
+  h1 { margin: 0 0 8px; font-size: clamp(20px, 4vw, 30px); line-height: 1.15; }
+  p { margin: 0; }
+  .lede { color: #aab4c8; max-width: 68ch; }
+  .lab {
+    margin-top: 22px;
+    padding: 14px;
+    border: 1px solid #252b3a;
+    border-radius: 12px;
+    background: #111522;
+    box-shadow: 0 20px 70px #0008;
+  }
+  fe-surface { width: 100%; max-width: none; }
+  fe-surface::part(canvas) { width: 100%; height: auto; aspect-ratio: 1 / 1; border-radius: 8px; }
+  .legend {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 12px;
+    color: #aab4c8;
+    font-size: 12px;
+    text-align: center;
+  }
+  .legend span { padding: 6px 3px; border-radius: 5px; background: #171c2a; }
+  .notes { margin-top: 18px; display: grid; gap: 8px; color: #9aa6bc; }
+  .notes strong { color: #dce3f1; }
+  .source { margin-top: 18px; }
+  a { color: #ffb0de; }
+  code { color: #becaff; }
+  @media (max-width: 520px) {
+    body { padding: 16px; }
+    .legend { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+</style>
+</head>
+<body>
+  <main data-proof-lab="mandelbrot-baby-bear-v1">
+    <h1>Mandelbrot proof GPU lab</h1>
+    <p class="lede">One Fe actor, one WebGPU device, one deterministic pass graph. This is the isolated checkpoint laboratory, not yet the complete authenticated or recursive receipt.</p>
+
+    <section class="lab" aria-label="Fe Mandelbrot proof checkpoint">
+      <script type="application/fe"
+              data-fe-src="../sketches/mandelbrot_proof_gpu"
+              data-fe-render></script>
+      <div class="legend" aria-label="status band order">
+        <span>trace</span>
+        <span>LDE</span>
+        <span>Poseidon</span>
+        <span>FRI fold</span>
+        <span>overall</span>
+      </div>
+    </section>
+
+    <div class="notes">
+      <p><strong>Clean:</strong> leave <code>tamper</code> at 0. Every status band must accept.</p>
+      <p><strong>Mutation:</strong> set <code>tamper</code> to 1. The Fe-authored mutation must change both the observed commitment and its folded FRI value, while the overall mutation check still accepts.</p>
+      <p><strong>Browser acceptance:</strong> no uncaptured error, validation error, device loss, or failed surface mount is allowed.</p>
+    </div>
+
+    <p class="source"><a href="../sketches/mandelbrot_proof_gpu/src/lib.fe">Read the authored Fe pass graph</a></p>
+  </main>
+</body>
+</html>

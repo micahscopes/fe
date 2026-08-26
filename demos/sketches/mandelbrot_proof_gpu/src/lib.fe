@@ -3,21 +3,24 @@
 //! The compute pass derives a four-row Q12 Mandelbrot witness through the
 //! production proof kernel, interprets one Conal factor vocabulary as four
 //! staged 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values
-//! with the production Poseidon2 sponge. Inverse butterflies, coset lifting,
-//! and forward butterflies are separate typed placements over disjoint lanes.
-//! Two commitments by sixteen field lanes then advance through one bounded
-//! workgroup kernel. Fe dispatch types derive every ordered repetition count,
-//! so browser WebGPU implementations never receive one crash-shaped
-//! megashader. A Fe-authored mutation mode changes one LDE value after the clean
-//! root is fixed and requires the second commitment to differ. The fragment
-//! pass visualizes the retained codeword and status words.
+//! with the production Poseidon2 sponge. It then interprets the production
+//! factor-2 FRI pair denotation as eight independent WebGPU invocations over a
+//! quartic BabyBear codeword assembled from those four columns. Inverse
+//! butterflies, coset lifting, forward butterflies, and the FRI fold are
+//! separate typed placements over disjoint lanes. Two commitments by sixteen
+//! field lanes advance through one bounded workgroup kernel. Fe dispatch types
+//! derive every ordered repetition count, so browser WebGPU implementations
+//! never receive one crash-shaped megashader. A Fe-authored mutation mode
+//! changes one LDE value after the clean root is fixed and requires both the
+//! second commitment and its corresponding FRI pair to differ. The fragment
+//! pass visualizes the retained folded codeword and status words.
 //!
 //! This is a mixed placement checkpoint. The four independent LDE columns use
 //! the portable stage-grid interpretation of canonical Conal factor trees. The
 //! paired commitment states are a second workgroup-map interpretation. Witness
 //! generation and final comparison remain scalar passes. This is not yet a
-//! shared-memory butterfly interpreter, an authenticated FRI receipt, or a
-//! recursive proof.
+//! shared-memory butterfly interpreter, a transcript-derived FRI challenge, an
+//! authenticated FRI receipt, or a recursive proof.
 
 use std::webgpu::{
     ComputeInvocation,
@@ -37,6 +40,7 @@ use std::webgpu::{
 use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
+use mandelbrot_proof_baby_bear::fold_fri_pair_value_at_power_of_two
 use mandelbrot_proof_kernel::{EscapeAirWordStream, EscapesByQ12}
 use canonical_words::CanonicalWords
 use parallel_ntt_webgpu::{
@@ -62,7 +66,7 @@ use poseidon_baby_bear::{
     poseidon2_round_constant_index,
     poseidon2_workgroup_lane_with_round_constant,
 }
-use precision::baby_bear::{BabyBear, BABY_BEAR_MODULUS}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
 use region_layout::{
     Region,
     RegionIndex,
@@ -89,12 +93,18 @@ const OUTPUT_GRID_LANES: usize = COLUMN_COUNT * OUTPUT_LANES
 const DIGEST_FIELDS: usize = 8
 const COMMIT_STATE_WORDS: usize = 80
 const STATUS_WORDS: usize = 11
+const EXTENSION_WORDS: usize = 4
+const FRI_PAIRS: usize = LDE / 2
+const FRI_FOLD_WORDS: usize = FRI_PAIRS * EXTENSION_WORDS
+const FRI_STATUS_WORDS: usize = 2 * FRI_PAIRS + 3
 const PROOF_WORDS: usize = TRACE_WORDS
     + LDE_WORDS
     + 2 * DIGEST_FIELDS
     + STATUS_WORDS
     + 2 * COMMIT_STATE_WORDS
     + ROUND_CONSTANT_COUNT
+    + 2 * FRI_FOLD_WORDS
+    + FRI_STATUS_WORDS
 
 struct ProofTapeRegions {
     trace: Region<ProofTapeRegions, [u32; TRACE_WORDS]>,
@@ -105,6 +115,9 @@ struct ProofTapeRegions {
     clean_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     observed_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     parameters: Region<ProofTapeRegions, [u32; ROUND_CONSTANT_COUNT]>,
+    fri_clean: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+    fri_observed: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+    fri_status: Region<ProofTapeRegions, [u32; FRI_STATUS_WORDS]>,
 }
 impl core::marker::Copy for ProofTapeRegions {}
 derive RegionSchema for ProofTapeRegions using RegionSchemaProvider
@@ -141,6 +154,16 @@ struct CommitmentRegions {
 impl core::marker::Copy for CommitmentRegions {}
 derive RegionSchema for CommitmentRegions using RegionSchemaProvider
 
+struct FriStatusRegions {
+    clean_valid: Region<FriStatusRegions, [u32; FRI_PAIRS]>,
+    observed_valid: Region<FriStatusRegions, [u32; FRI_PAIRS]>,
+    equal: Region<FriStatusRegions, u32>,
+    correct: Region<FriStatusRegions, u32>,
+    color: Region<FriStatusRegions, u32>,
+}
+impl core::marker::Copy for FriStatusRegions {}
+derive RegionSchema for FriStatusRegions using RegionSchemaProvider
+
 const fn proof_tape_regions() -> ProofTapeRegions {
     <ProofTapeRegions as RegionSchema>::regions()
 }
@@ -155,6 +178,10 @@ const fn status_regions() -> StatusRegions {
 
 const fn commitment_regions() -> CommitmentRegions {
     <CommitmentRegions as RegionSchema>::regions()
+}
+
+const fn fri_status_regions() -> FriStatusRegions {
+    <FriStatusRegions as RegionSchema>::regions()
 }
 
 #[inline(always)]
@@ -210,9 +237,16 @@ where
 type ProofLdeColumns = RBin<Pair, 2>
 type ProofLdeInputPlan = RBin<Pair, 2>
 type ProofLdeOutputPlan = RBin<Pair, 4>
+type ProofFriPairs = RBin<Pair, 3>
+type ProofFriVariants = RBin<Pair, 1>
 const LDE_TASKS: usize = <ProofLdeColumns as BalancedBinarySchedule>::LEAVES
 const INPUT_STAGES: usize = <ProofLdeInputPlan as FactorTree>::FACTORS
 const OUTPUT_STAGES: usize = <ProofLdeOutputPlan as FactorTree>::FACTORS
+const FRI_PAIR_LANES: usize =
+    <ProofFriPairs as BalancedBinarySchedule>::LEAVES
+const FRI_VARIANT_LANES: usize =
+    <ProofFriVariants as BalancedBinarySchedule>::LEAVES
+const FRI_WORKGROUP_LANES: usize = FRI_PAIR_LANES * FRI_VARIANT_LANES
 static_assert(LDE_TASKS == COLUMN_COUNT)
 static_assert(<ProofLdeInputPlan as FactorTree>::POINTS == TRACE)
 static_assert(<ProofLdeOutputPlan as FactorTree>::POINTS == LDE)
@@ -220,12 +254,19 @@ static_assert(INPUT_STAGES == 2)
 static_assert(OUTPUT_STAGES == 4)
 static_assert(INPUT_GRID_LANES == 8)
 static_assert(OUTPUT_GRID_LANES == 32)
+static_assert(FRI_PAIR_LANES == FRI_PAIRS)
+static_assert(FRI_VARIANT_LANES == 2)
+static_assert(FRI_WORKGROUP_LANES == 16)
 static_assert(<ProofTapeRegions as RegionSchema>::WORDS == PROOF_WORDS.downcast_truncate())
 static_assert(<TraceRegions as RegionSchema>::WORDS == TRACE_WORDS.downcast_truncate())
 static_assert(<StatusRegions as RegionSchema>::WORDS == STATUS_WORDS.downcast_truncate())
 static_assert(
     <CommitmentRegions as RegionSchema>::WORDS
         == COMMIT_STATE_WORDS.downcast_truncate()
+)
+static_assert(
+    <FriStatusRegions as RegionSchema>::WORDS
+        == FRI_STATUS_WORDS.downcast_truncate()
 )
 
 type CommitmentDependencies = RBin<Pair, 1>
@@ -403,6 +444,20 @@ fn load_digest(
         field = field + 1
     }
     Poseidon2Digest::from_u32s(words)
+}
+
+#[inline(always)]
+fn store_fri_evaluation(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ region: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+    _ pair: u32,
+    _ evaluation: BabyBearExt4,
+) {
+    let base = pair * EXTENSION_WORDS.downcast_truncate()
+    proof_store(tape, region, base, evaluation.coefficient_0().to_u32())
+    proof_store(tape, region, base + 1, evaluation.coefficient_1().to_u32())
+    proof_store(tape, region, base + 2, evaluation.coefficient_2().to_u32())
+    proof_store(tape, region, base + 3, evaluation.coefficient_3().to_u32())
 }
 
 actor MandelbrotProofGpuCheckpoint uses (
@@ -881,30 +936,192 @@ actor MandelbrotProofGpuCheckpoint uses (
         )
     }
 
+    fn fold_fri_pairs(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<FRI_WORKGROUP_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let regions = proof_tape_regions()
+        let fri_layout = fri_status_regions()
+        let pairs: u32 = FRI_PAIRS.downcast_truncate()
+        let lane = invocation.local.x
+        let observed = lane >= pairs
+        let pair = lane % pairs
+        let negative_index = pair + pairs
+        let lde_words: u32 = LDE.downcast_truncate()
+        let positive = BabyBearExt4::from_coordinate_words(
+            proof_load(self.proof, regions.lde, pair),
+            proof_load(self.proof, regions.lde, pair + lde_words),
+            proof_load(self.proof, regions.lde, pair + lde_words + lde_words),
+            proof_load(
+                self.proof,
+                regions.lde,
+                pair + lde_words + lde_words + lde_words,
+            ),
+        )
+        let negative = BabyBearExt4::from_coordinate_words(
+            proof_load(self.proof, regions.lde, negative_index),
+            proof_load(self.proof, regions.lde, negative_index + lde_words),
+            proof_load(
+                self.proof,
+                regions.lde,
+                negative_index + lde_words + lde_words,
+            ),
+            proof_load(
+                self.proof,
+                regions.lde,
+                negative_index + lde_words + lde_words + lde_words,
+            ),
+        )
+        let changed_coefficient = if observed
+            && self.tamper >= 0.5
+            && pair == 1
+        {
+            positive.coefficient_1() + BabyBear::one()
+        } else {
+            positive.coefficient_1()
+        }
+        let observed_positive = BabyBearExt4::from_coordinate_fields(
+            positive.coefficient_0(),
+            changed_coefficient,
+            positive.coefficient_2(),
+            positive.coefficient_3(),
+        )
+        let challenge = BabyBearExt4::from_coordinate_words(
+            proof_load(self.proof, regions.clean_root, 0),
+            proof_load(self.proof, regions.clean_root, 1),
+            proof_load(self.proof, regions.clean_root, 2),
+            proof_load(self.proof, regions.clean_root, 3),
+        )
+        let shift = BabyBear::from_u32(7)
+        let folded = fold_fri_pair_value_at_power_of_two<16>(
+            observed_positive,
+            negative,
+            challenge,
+            shift,
+            pair,
+        )
+        let destination = if observed {
+            regions.fri_observed
+        } else {
+            regions.fri_clean
+        }
+        let validity = if observed {
+            subregion(regions.fri_status, fri_layout.observed_valid)
+        } else {
+            subregion(regions.fri_status, fri_layout.clean_valid)
+        }
+        store_fri_evaluation(
+            self.proof,
+            destination,
+            pair,
+            folded,
+        )
+        proof_store(
+            self.proof,
+            validity,
+            pair,
+            if !shift.is_zero() && pair < pairs { 1 } else { 0 },
+        )
+    }
+
+    fn finalize_fri_fold(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let regions = proof_tape_regions()
+        let status_layout = status_regions()
+        let fri_layout = fri_status_regions()
+        let clean_valid = all_fri_pairs_valid(
+            self.proof,
+            subregion(regions.fri_status, fri_layout.clean_valid),
+        )
+        let observed_valid = all_fri_pairs_valid(
+            self.proof,
+            subregion(regions.fri_status, fri_layout.observed_valid),
+        )
+        let equal = fri_outputs_equal(
+            self.proof,
+            regions.fri_clean,
+            regions.fri_observed,
+        )
+        let tampered = self.tamper >= 0.5
+        let fri_correct = clean_valid && observed_valid && (
+            if tampered { !equal } else { equal }
+        )
+        let previous_correct = stored_flag(
+            self.proof,
+            subregion(regions.status, status_layout.mode_correct),
+        )
+        let overall = previous_correct && fri_correct
+
+        proof_store(
+            self.proof,
+            subregion(regions.fri_status, fri_layout.equal),
+            0,
+            if equal { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_status, fri_layout.correct),
+            0,
+            if fri_correct { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_status, fri_layout.color),
+            0,
+            status_word(fri_correct, tampered),
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.mode_correct),
+            0,
+            if overall { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.status, status_layout.mode_color),
+            0,
+            status_word(overall, tampered),
+        )
+    }
+
     fn display(self, px: i32, py: i32) -> i32 uses (Display) {
         let regions = proof_tape_regions()
         let status_layout = status_regions()
+        let fri_layout = fri_status_regions()
         let u = from_i32(px) / self.res
         let v = from_i32(py) / self.res
         let tampered = self.tamper >= 0.5
 
         if v < 0.18 {
-            let color = if u < 0.25 {
-                status_layout.trace_color
-            } else {
-                if u < 0.5 {
-                    status_layout.lde_color
-                } else {
-                    if u < 0.75 {
-                        status_layout.root_color
-                    } else {
-                        status_layout.mode_color
-                    }
-                }
+            if u < 0.2 {
+                return proof_load(
+                    self.proof,
+                    subregion(regions.status, status_layout.trace_color),
+                    0,
+                ).downcast_truncate()
+            }
+            if u < 0.4 {
+                return proof_load(
+                    self.proof,
+                    subregion(regions.status, status_layout.lde_color),
+                    0,
+                ).downcast_truncate()
+            }
+            if u < 0.6 {
+                return proof_load(
+                    self.proof,
+                    subregion(regions.status, status_layout.root_color),
+                    0,
+                ).downcast_truncate()
+            }
+            if u < 0.8 {
+                return proof_load(
+                    self.proof,
+                    subregion(regions.fri_status, fri_layout.color),
+                    0,
+                ).downcast_truncate()
             }
             return proof_load(
                 self.proof,
-                subregion(regions.status, color),
+                subregion(regions.status, status_layout.mode_color),
                 0,
             ).downcast_truncate()
         }
@@ -916,8 +1133,13 @@ actor MandelbrotProofGpuCheckpoint uses (
             ).downcast_truncate()
         }
 
-        let sample_i = to_i32(u * 64.0).downcast_unchecked()
-        let sample = proof_load(self.proof, regions.lde, sample_i)
+        let sample_i = to_i32(u * 32.0).downcast_unchecked()
+        let folded = if tampered {
+            regions.fri_observed
+        } else {
+            regions.fri_clean
+        }
+        let sample = proof_load(self.proof, folded, sample_i)
         let red = 54 + (sample & 127)
         let green = 42 + ((sample >> 8) & 95)
         let blue = 96 + ((sample >> 16) & 127)
@@ -935,6 +1157,36 @@ fn all_lde_columns_valid(
         && proof_load(tape, region, 1) == 1
         && proof_load(tape, region, 2) == 1
         && proof_load(tape, region, 3) == 1
+}
+
+fn all_fri_pairs_valid(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ region: Region<ProofTapeRegions, [u32; FRI_PAIRS]>,
+) -> bool {
+    let mut pair: usize = 0
+    while pair < FRI_PAIRS {
+        if proof_load(tape, region, pair.downcast_truncate()) != 1 {
+            return false
+        }
+        pair = pair + 1
+    }
+    true
+}
+
+fn fri_outputs_equal(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ left: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+    _ right: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+) -> bool {
+    let mut word: usize = 0
+    while word < FRI_FOLD_WORDS {
+        let index: u32 = word.downcast_truncate()
+        if proof_load(tape, left, index) != proof_load(tape, right, index) {
+            return false
+        }
+        word = word + 1
+    }
+    true
 }
 
 fn stored_flag(

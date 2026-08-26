@@ -7,6 +7,7 @@ canonical_words = { path = "../../../ingots/canonical_words" }
 core = { path = "../../../ingots/core" }
 fmath = { path = "../fmath" }
 mandelbrot_proof_kernel = { path = "../../capstones/mandelbrot-proof/kernel" }
+mandelbrot_proof_baby_bear = { path = "../../capstones/mandelbrot-proof/baby-bear" }
 parallel_ntt_webgpu = { path = "../../../ingots/parallel_ntt_webgpu" }
 parallel_structure = { path = "../../../ingots/parallel_structure" }
 poseidon_baby_bear = { path = "../../../ingots/poseidon_baby_bear" }

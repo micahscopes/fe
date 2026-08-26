@@ -10432,8 +10432,9 @@ where
     }
 
     /// Copy one addressable Fe aggregate into independent canonical-arena
-    /// storage. A compact byte loop preserves the target layout exactly without
-    /// expanding large records/arrays into one pair of instructions per byte.
+    /// storage. Word-aligned layouts use i32 carriers so the same lowered IR is
+    /// legal for the browser SPIR-V private heap. Other layouts retain the
+    /// byte-exact fallback.
     fn lower_deep_object_copy(
         &mut self,
         source: ValueId,
@@ -10451,6 +10452,11 @@ where
         layout: LayoutId<'db>,
     ) -> Result<(), LowerError> {
         let byte_len = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+        let (copy_ty, stride) = if byte_len % 4 == 0 {
+            (Type::I32, 4)
+        } else {
+            (Type::I8, 1)
+        };
         let byte_len = i32::try_from(byte_len).map_err(|_| {
             LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
         })?;
@@ -10474,17 +10480,17 @@ where
             .insert_inst_no_result(Br::new(is, more, copy_body, copy_done));
 
         self.fb.switch_to_block(copy_body);
-        let source_byte = self.fb.insert_inst(Add::new(is, source, index), Type::I32);
-        let destination_byte = self
+        let source_unit = self.fb.insert_inst(Add::new(is, source, index), Type::I32);
+        let destination_unit = self
             .fb
             .insert_inst(Add::new(is, destination, index), Type::I32);
-        let byte = self
+        let unit = self
             .fb
-            .insert_inst(Mload::new(is, source_byte, Type::I8), Type::I8);
+            .insert_inst(Mload::new(is, source_unit, copy_ty), copy_ty);
         self.fb
-            .insert_inst_no_result(Mstore::new(is, destination_byte, byte, Type::I8));
-        let one = self.fb.make_imm_value(Immediate::I32(1));
-        let next = self.fb.insert_inst(Add::new(is, index, one), Type::I32);
+            .insert_inst_no_result(Mstore::new(is, destination_unit, unit, copy_ty));
+        let stride = self.fb.make_imm_value(Immediate::I32(stride));
+        let next = self.fb.insert_inst(Add::new(is, index, stride), Type::I32);
         let copy_back = self
             .fb
             .current_block()

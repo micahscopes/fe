@@ -1728,13 +1728,15 @@ All four are focused ingots and may remain so permanently.
 - **G-LAYOUT, partial.** Commits `5400eff03` and `36f52db3b` make region
   coordinates schema-branded, require nested layouts to fit through const
   predicates, and make reusable cyclic lane indices unforgeable. The
-  production GPU checkpoint derives its 408-word tape from Fe record schemas,
+  production GPU checkpoint derives its 491-word tape from Fe record schemas,
   contains no raw proof offsets or direct storage access, and passes the
   independent layout, lavapipe, direct-DFT, and all-word clean/tampered receipt
-  gates. The largest commitment shader is 156,769 bytes, below the unchanged
+  gates. Its shared factor-2 FRI denotation now places eight clean and eight
+  observed quartic folds in one typed 16-lane workgroup without private heap
+  storage. The largest commitment shader is 156,769 bytes, below the unchanged
   160 KiB browser-risk cap. Closure still requires carrying the same authority
-  through the complete query, transcript, FRI, and recursive receipt layout,
-  with an independent decoder for that complete receipt.
+  through the complete query, transcript, remaining FRI layers, and recursive
+  receipt layout, with an independent decoder for that complete receipt.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
   Fiat-Shamir sampling, and canonical encoding exist. The four-query regression
@@ -1766,10 +1768,16 @@ All four are focused ingots and may remain so permanently.
   recursive proof. Closure still requires the fixed-size recursive
   proof/provider, multi-chunk proof encoding, logarithmic aggregation evidence,
   and the bounded disk claim.
-- **G-BROWSER, partial.** Fe-authored staged WebGPU witness, LDE, and
-  commitment execution runs on llvmpipe with Wasm control. Interactive point
-  and disk selection, full browser proof generation, Wasm verification, and
-  revm-Wasm verification remain.
+- **G-BROWSER, partial.** Fe-authored staged WebGPU witness, LDE, Poseidon
+  commitments, and the first factor-2 FRI layer execute in external Chrome
+  through an isolated one-surface lab with 2,182 bytes of control Wasm and no
+  authored JavaScript or JSON. The real-browser clean, mutation, and recovery
+  sequence returns exact poster hashes `36d2fddb`, `6d542da3`, and `36d2fddb`;
+  mutation and recovery resubmissions took about 51 ms and 79 ms on the test
+  browser, with no console, validation, device-loss, or pipeline errors. These
+  are end-to-end checkpoint timings, not a complete proof or Wasm comparison.
+  Interactive point and disk selection, full browser proof generation, Wasm
+  verification, and revm-Wasm verification remain.
 - **G-INSPECT, partial.** The Fe SourceInspector and generated artifact views
   exist. `SourceAtlas` must still expose authored, semantic, placement, layout,
   artifact, and evidence layers without a runtime JSON manifest.

@@ -10,7 +10,13 @@ published by `fe web dev`:
 cargo run --release -p fe -- web dev demos/gallery.html --port 8000 --host 0.0.0.0
 cargo run --release -p fe -- web dev demos/source-inspector.html --port 8000 --host 0.0.0.0
 cargo run --release -p fe -- web dev demos/todomvc.html --port 8000 --host 0.0.0.0
+cargo run --release -p fe -- web dev demos/mandelbrot-proof-lab/index.html --port 8000 --host 0.0.0.0
 ```
+
+The Mandelbrot proof lab is the isolated iteration lane for its Fe-authored
+BabyBear WebGPU pass graph. It mounts one surface and is tested before the
+gallery integration gate. See `demos/mandelbrot-proof-lab/README.md` for the
+exact oracle and external Chrome loop.
 
 TodoMVC's lifecycle, UTF-8 storage, reducer, filters, edit policy, stable keys,
 and DOM effect projection are in `demos/sketches/todomvc/src/lib.fe`. The
