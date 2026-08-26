@@ -2123,14 +2123,36 @@ fallback. The semantic receipts are:
    focused release gate passes 1/1 in 51.49 seconds against the established
    value interpreter, whose values already have independent Rust/Plonky3
    coverage, including invalid-shift rejection. The staged canonical codec
-   gate remains green 1/1 in 233.38 seconds. A bounded exact 114-query prover
-   probe stayed below 2.7 GiB RSS and made steady progress through 3,216
-   runtime instances in 10 minutes 54 seconds, but emitted no Wasm artifact
-   before the cutoff. This is not receipt or security evidence. The remaining
-   compile cost is repeated normalization and lowering of type-specialized FRI,
-   Poseidon, and field bodies. Shared semantic-body lowering or a flat derived
-   stage-grid interpreter is required before rerunning the full four-process
-   gate.
+   gate remains green 1/1 in 233.38 seconds. A bounded detailed graph trace
+   reached 3,079 runtime instances. Its dominant owners were canonical codec
+   and provider operations: `write` 425 times, `encode` 249, `word_count` 164,
+   `from_u32` 162, and `encode_stream` 160. Poseidon functions appeared about
+   35 times each and FRI-layer functions 12 to 13 times each. Therefore the
+   primary multiplication is reflected receipt encoding, not the proof
+   recurrence itself.
+
+   The first full exact retry reached a concrete Wasm lowering diagnostic after
+   about 34 minutes: an ordinary Fe record containing typed `BrowserPtr`
+   handles could not be materialized into compiler-owned aggregate storage.
+   In aggregate layout, a `BrowserPtr<T>` field is a memory `RawAddr` branded
+   with `T`'s concrete target layout. The backend now preserves that typed word,
+   plus the already-admitted whole memory-provider word, as an exact `i32` lane
+   in compiler-owned aggregate storage. Untyped raw addresses, object and const
+   references, and non-memory transports retain their fail-closed rules. A
+   semantic fixture allocates two typed Fe objects, returns their handles in an
+   ordinary record, stores and reloads that record through typed memory, then
+   uses both preserved handles and checks the resulting values. The complete
+   focused typed-allocation and provenance suite passes 14/14 in release mode,
+   including the forged-provider rejection.
+
+   A subsequent one-hour exact 114-query retry remained CPU-active in Fe-to-
+   Wasm lowering, observed about 4.8 GiB peak RSS with at least 12 GiB system
+   memory available, and emitted neither a Wasm artifact nor a new diagnostic
+   before the explicit timeout. This is not receipt, security, or proof-runtime
+   evidence. Compact the FCO-derived canonical codec into one typed schema or
+   stage-grid interpreter before another full four-process retry; exact body
+   interning and streamed MIR retention are the next measured compiler
+   follow-ups.
 4. Carry the portable schedule to production-sized NTT/LDE, AIR composition,
    Poseidon/Merkle, FRI folding, and opening extraction. Close typed proof
    regions as each buffer enters the graph, preserve direct-DFT, Plonky3, and
@@ -2155,6 +2177,37 @@ fallback. The semantic receipts are:
 8. Close G-INSPECT, delete the runtime manifest, and finish the legacy
    disposition.
 9. Run the exact G5 command once at the final DONE gate.
+
+## Bonus compiler leverage, subordinate to the proof path
+
+These are bounded side-goals, not new campaign gates. Take them when a focused
+increment directly reduces a measured proof or gallery compiler cost. Do not
+delay the exact scalar receipt, production WebGPU placement, recursion, or the
+browser proof flow merely to complete this list.
+
+1. Compact FCO-derived canonical codecs. Derive one typed receipt schema or
+   stage grid, then interpret it with small value-level loops instead of
+   monomorphizing a distinct `write`, `encode`, `encode_stream`, and
+   `word_count` call chain for every reflected field. Preserve the authored Fe
+   schema and every independent decode and mutation oracle.
+2. Intern exact runtime bodies after substitutions and runtime
+   representations are resolved. Sharing requires identical signatures,
+   constants, effects, layouts, and callee bindings. Source bytes or generated
+   bytes are not a correctness criterion.
+3. Stream prepared MIR through dependency-ordered lowering and release bodies
+   after their escape, ABI, and call-graph obligations are discharged. Record
+   peak RSS as well as wall time.
+4. Persist normalized semantic bodies, prepared runtime bodies, and final
+   artifacts across compiler processes under compiler-version and semantic
+   digests. A cache hit must be observationally identical to a clean build and
+   retain the same independent gates.
+5. Keep repeated dimensions such as FRI query count as checked data in one
+   derived schedule where semantics permit it, rather than multiplying nominal
+   programs. Transcript order, domain separation, receipt layout, and typed
+   bounds remain fixed.
+6. Parallelize independent body lowering only after compaction and under an
+   explicit RAM budget. Faster duplication is not the objective; smaller exact
+   compilation is.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,

@@ -7903,10 +7903,12 @@ where
 
     /// Whether an aggregate value's every scalar leaf passes the R1 scalar
     /// envelope (so it can be stored/loaded through typed Mload/Mstore at i32
-    /// addresses). Structs recurse over their fields, arrays over their element;
-    /// enums (tagged union memory layout) and arbitrary nested transports fail
-    /// closed. Nominal canonical browser descriptors admit their one owned
-    /// wasm32 pointer lane as a narrow exception.
+    /// addresses). Structs recurse over their fields, arrays over their element.
+    /// A typed memory address or whole memory-provider reference is already one
+    /// admitted wasm32 word, so an owned product may preserve that exact word in
+    /// compiler-owned aggregate storage. Object/const references, untyped raw or
+    /// non-memory transports, and payload enums continue to fail closed. Nominal
+    /// canonical browser descriptors retain their narrow owned-pointer exception.
     fn aggregate_is_memory_lowerable(&self, class: &RuntimeClass<'db>) -> bool {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar).is_ok(),
@@ -7925,6 +7927,19 @@ where
                 // fail-closed.
                 Layout::Enum(_) => self.fieldless_enum_tag(*layout).is_some(),
             },
+            RuntimeClass::Ref {
+                kind:
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                view: RefView::Whole,
+                ..
+            } => true,
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                target: Some(_),
+            } => true,
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => false,
         }
     }
@@ -9351,14 +9366,23 @@ where
                 }
                 Ok(())
             }
-            RuntimeClass::RawAddr {
+            RuntimeClass::Ref {
+                kind:
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                view: RefView::Whole,
+                ..
+            }
+            | RuntimeClass::RawAddr {
                 space: AddressSpaceKind::Memory,
                 ..
             } => {
                 let value = self.local_value(source)?;
                 if self.fb.type_of(value) != Type::I32 {
                     return Err(LowerError::Internal(
-                        "canonical descriptor pointer escaped its wasm32 carrier".to_owned(),
+                        "aggregate memory handle escaped its wasm32 carrier".to_owned(),
                     ));
                 }
                 self.fb.insert_inst_no_result(Mstore::new(
@@ -10592,18 +10616,27 @@ where
                     Ok(())
                 }
             },
-            RuntimeClass::RawAddr {
+            RuntimeClass::Ref {
+                kind:
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                view: RefView::Whole,
+                ..
+            }
+            | RuntimeClass::RawAddr {
                 space: AddressSpaceKind::Memory,
                 ..
             } => {
                 let value = *leaves.get(*cursor).ok_or_else(|| {
                     LowerError::Internal(
-                        "materialized descriptor is missing its pointer leaf".to_owned(),
+                        "materialized aggregate is missing its memory-handle leaf".to_owned(),
                     )
                 })?;
                 if self.fb.type_of(value) != Type::I32 {
                     return Err(LowerError::Internal(
-                        "materialized descriptor pointer escaped its wasm32 carrier".to_owned(),
+                        "materialized memory handle escaped its wasm32 carrier".to_owned(),
                     ));
                 }
                 self.fb.insert_inst_no_result(Mstore::new(
@@ -10699,7 +10732,16 @@ where
                 Ok(())
             }
             (
-                RuntimeClass::RawAddr {
+                RuntimeClass::Ref {
+                    kind:
+                        RefKind::Provider {
+                            space: AddressSpaceKind::Memory,
+                            ..
+                        },
+                    view: RefView::Whole,
+                    ..
+                }
+                | RuntimeClass::RawAddr {
                     space: AddressSpaceKind::Memory,
                     ..
                 },

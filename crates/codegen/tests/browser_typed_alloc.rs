@@ -52,6 +52,13 @@ struct Workspace {
     payload: BrowserPtr<Payload>,
 }
 
+struct AllocatedPair {
+    valid: bool,
+    left: BrowserPtr<Payload>,
+    right: BrowserPtr<Payload>,
+}
+impl Copy for AllocatedPair {}
+
 fn initialize(_ seed: u32)
     uses (payload: mut Payload)
 {
@@ -95,6 +102,17 @@ fn workspace_payload_address() -> u32
     workspace.payload.address()
 }
 
+fn allocate_pair(_ left_seed: u32, _ right_seed: u32) -> AllocatedPair {
+    let left: BrowserPtr<Payload> = alloc_browser_object<Payload>()
+    let right: BrowserPtr<Payload> = alloc_browser_object<Payload>()
+    if left.address() == 0 || right.address() == 0 {
+        return AllocatedPair { valid: false, left: left, right: right }
+    }
+    with (left) { initialize(left_seed) }
+    with (right) { initialize(right_seed) }
+    AllocatedPair { valid: true, left: left, right: right }
+}
+
 pub fn two_objects(_ left_seed: u32, _ right_seed: u32) -> u32 {
     let left: BrowserPtr<Payload> = alloc_browser_object<Payload>()
     let right: BrowserPtr<Payload> = alloc_browser_object<Payload>()
@@ -119,6 +137,23 @@ pub fn nested_typed_pointer_field() -> u32 {
     let stored = with (workspace) { workspace_payload_address() }
     if stored == payload.address() { 1 } else { 0 }
 }
+
+pub fn materialized_typed_pointer_product(
+    _ left_seed: u32,
+    _ right_seed: u32,
+) -> u32 {
+    let pair = allocate_pair(left_seed, right_seed)
+    let pair_storage: BrowserPtr<AllocatedPair> =
+        alloc_browser_object<AllocatedPair>()
+    pair_storage.write(pair)
+    let materialized = pair_storage.read()
+    if !materialized.valid { return 0 }
+    let left = materialized.left
+    let right = materialized.right
+    let left_sum = with (left) { checksum() }
+    let right_sum = with (right) { checksum() }
+    left_sum * 1000 + right_sum
+}
 "#,
     );
     wasmparser::validate(&wasm).expect("typed allocation emitted invalid Wasm");
@@ -140,11 +175,18 @@ pub fn nested_typed_pointer_field() -> u32 {
     let nested_pointer = instance
         .get_typed_func::<(), i32>(&mut store, "nested_typed_pointer_field")
         .unwrap();
+    let materialized_product = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "materialized_typed_pointer_product")
+        .unwrap();
 
     // checksum(seed) = (seed + 100) + sum(seed .. seed + 7)
     assert_eq!(run.call(&mut store, (10, 30)).unwrap(), 218_398);
     assert_eq!(read_index.call(&mut store, (10, 7)).unwrap(), 17);
     assert_eq!(nested_pointer.call(&mut store, ()).unwrap(), 1);
+    assert_eq!(
+        materialized_product.call(&mut store, (10, 30)).unwrap(),
+        218_398,
+    );
     assert!(
         read_index.call(&mut store, (10, 8)).is_err(),
         "typed dynamic indexes must trap at the derived array bound"
