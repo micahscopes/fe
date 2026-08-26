@@ -1,6 +1,12 @@
 # Bounded Mandelbrot proof specification
 
-Status: v0 BN254 toy protocol in progress, BabyBear retarget required before GPU proving
+Status: bounded claim stable; BabyBear receipt and WebGPU placement partial;
+cryptographic recursion and the complete browser proof remain open
+
+Current gate status and execution order live in
+`FE_WEB_ROLLCALL_CAMPAIGN_SSOT.md`. The implementation narrative below records
+the protocol's construction history, so earlier staging statements are not a
+current burn-down list.
 
 This specification deliberately proves a bounded execution claim, not general
 Mandelbrot membership and not vague convergence.

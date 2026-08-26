@@ -20,6 +20,55 @@ Legend:
 - `[!]` an explicit risk or environmental qualification
 - `[M]` needs Micah's hardware or product decision
 
+## Intent reconciliation, 2026-08-26
+
+This ordering was rechecked against the complete archived session
+`e806786e-dff4-43c1-b25f-849ba82a8a02`, its 1,333 prompt-side history
+entries, the original `GOAL.md`, `VISION.md`, actor and Conal design records,
+the later browser-proof plans, and the current proof and browser evidence. The
+review changes sequencing, not the goal or its gates.
+
+The recovered invariant is one ordinary typed Fe denotation, followed by an
+exact semantic structure, several analysis and placement interpretations, and
+one fixed standards-derived realization. Semantic topology and placement
+topology remain distinct. A placement may change dispatches, workgroups,
+buffers, retention, and recomputation, but it may not change transcript order,
+hash domains, recursive interval order, receipt layout, or the authored
+mathematics. JavaScript, Rust, Chrome, Vulkan, and revm may realize standards,
+compile artifacts, execute artifacts, or serve as independent oracles. They
+may not own application policy or a second implementation of the proof.
+
+The operating method remains `write -> derive -> prove -> place -> run ->
+measure`. Each increment crosses that whole line at deliberately small depth.
+This replaces both subsystem-at-a-time completion and browser-only showcase
+forks. Byte identity and successful compilation are evidence about artifacts,
+not semantic correctness; independent value and mutation gates remain the G2
+authority.
+
+Two older sequencing assumptions are now retired. Browser revm was originally
+placed first because it was the only unknown infrastructure risk; S0 is now a
+real Chrome-tested generic `fe-revm-browser` engine. BabyBear retargeting and a
+first real WebGPU proof placement are also complete. The current unknown is
+compact, scalable interpretation of the same BabyBear proof dependency graph
+across scalar and WebGPU placements.
+
+The attempted policy-sized scalar path supplied useful negative evidence. The
+114-query typed policy, receipt carrier, codec, prover/verifier boundaries, and
+mutation surface source-check cleanly, but lowering the selected exact prover
+entry produced no artifact or diagnostic after more than two hours and was
+stopped. This is a compile-practicality failure of fully static expansion, not
+a cryptographic rejection. Preserve the typed policy and receipt model, but
+make query iteration and opening verification value-level and loop-compact.
+Do not respond by baking generated queries, copying a second prover, or
+weakening the 114-query policy.
+
+Real Chrome WebGPU is the early acceptance rail. The existing
+`chrome-devtools-mcp` configuration targets the external browser at
+`http://10.0.0.1:9222`; use that path whenever the endpoint is live. Native
+`wgpu`/Vulkan and llvmpipe remain fast exactness and portability gates, but do
+not replace Chrome hardware evidence. No second GPU broker is needed unless
+the existing fixed browser harness proves insufficient.
+
 ## Campaign gates
 
 - G1, anti-bake: a new consumer works without compiler/runtime demo names.
@@ -2048,35 +2097,48 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Finish the external real-GPU handoff above. The
-   `mandelbrot_proof_gpu` clean and tampered Chromium modes now pass on AMD
-   Radeon 780M through RADV after the private-heap fix. The four standalone
-   hardware test binaries in the runbook remain to be executed without skips.
-2. Advance the newly fitting `[2, 2, 1, 1]` AIR from the green four-query
-   production regression to a separate security-sized receipt. The widened
-   6,595-word base-LDE carrier, every codeword, commitments, openings,
-   authentication paths, FRI folds, assembled canonical mutation matrix, and
-   exact profile-bound transcript now execute at `TRACE = 4096`, `LDE = 8192`.
-   Keep that four-query artifact as the protocol-shape regression. Next make
-   the compact 114-query range drive real sampling, openings, authentication,
-   and folds without silently changing the checkpoint's meaning. Pin the
-   required Sonatina revision.
-3. Close G-NTT: carry the now-gated production toy coset-LDE migration into the
-   production-sized receipt path, preserve the direct-DFT and commitment
-   oracles, then run the staged path through the real Chrome hardware gate.
-4. Close G-LAYOUT and G-RECEIPT: derive typed proof regions, then finish the
-   complete ordered nonrecursive receipt without raw tape offsets or a second
-   transcript description.
-5. Close G-RECURSE and G-BROWSER: lower BabyBear leaf proofs and adjacent
-   recursive merges through Fe Conal/CTFE WebGPU schedules, then run the
-   complete progressive proof/verify/tamper page through Chrome, Fe-Wasm, and
-   revm-Wasm.
-6. With multiple nominal child namespaces landed, generalize the render-owned
+1. Add the first post-checkpoint WebGPU proof slice at toy scale. Expose one
+   ordinary Fe factor-2 FRI pair denotation from the existing BabyBear proof
+   code, make the scalar fold and a portable one-invocation-per-pair placement
+   consume it, and extend `mandelbrot_proof_gpu` without hand-authored WGSL.
+   Gate the values against the scalar path and an independent field oracle,
+   gate a mutation, then execute the exact card through real Chrome. This is
+   the next `write -> derive -> prove -> place -> run -> measure` slice.
+2. Extend that placement into the complete toy `16 -> 8 -> 4 -> 2 -> 1` FRI
+   chain with ordered layer commitments and transcript-derived challenges.
+   Keep large buffers device-resident and cross the host boundary only for
+   required transcript observations and final typed receipt extraction. Record
+   dispatch, readback, live-memory, shader-size, pipeline-compile, and
+   device-loss evidence.
+3. Compact the policy-sized scalar boundary. Retain the 114-query Fe-derived
+   `FriQueryRangePlan` and typed receipt, but replace recursively expanded query
+   execution with checked value-level loops over canonical request buffers.
+   Re-run the four-process exact prover/verifier/mutation gate, and pin the
+   required Sonatina revision only after it finishes.
+4. Carry the portable schedule to production-sized NTT/LDE, AIR composition,
+   Poseidon/Merkle, FRI folding, and opening extraction. Close typed proof
+   regions as each buffer enters the graph, preserve direct-DFT, Plonky3, and
+   independent bigint gates, and run each widened stage in Chrome before adding
+   another. Add Merkle retention/recomputation and a peak-memory policy before
+   mobile-sized execution.
+5. Close G-RECEIPT, then G-RECURSE and G-BROWSER. The current recursive carrier
+   and verified-adjacent-interval authority are semantic scaffolding, not a
+   recursive cryptographic proof. Derive fixed-size leaf and merge proof
+   circuits, schedule independent leaves and sibling merges as a typed balanced
+   reduction, and run the progressive point/disk picker, cancellation,
+   generation, mutation rejection, Fe-Wasm verification, and revm-Wasm
+   verification in Chrome.
+6. Finish the four standalone hardware tests in the external runbook. The
+   `mandelbrot_proof_gpu` clean and tampered Chromium modes already pass on AMD
+   Radeon 780M through RADV, but the named Rollcall, fixed precision,
+   perturbation, and known-color binaries still require no-skip hardware
+   receipts.
+7. With multiple nominal child namespaces landed, generalize the render-owned
    DEC path to rich canonical port payloads and nested scopes, then execute it
    in real Chromium.
-7. Close G-INSPECT, delete the runtime manifest, and finish the legacy
+8. Close G-INSPECT, delete the runtime manifest, and finish the legacy
    disposition.
-8. Run the exact G5 command once at the final DONE gate.
+9. Run the exact G5 command once at the final DONE gate.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
