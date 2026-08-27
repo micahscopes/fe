@@ -377,6 +377,29 @@ existing Definition of done, not a second campaign checklist:
   `SpirvBuiltinArgument` API while the pinned revision exposes only
   `SpirvBuiltinInput`. Restoring a published, reproducible Sonatina pin is now
   a prerequisite for counting the recursive gate as clean-clone evidence.
+
+  Commit `db7bfbe09` separates Fe runtime-package lowering from Wasm backend
+  emission through one owned `PreparedWasmEmission` checkpoint. The focused
+  release gate drops the compiler database before staged emission, validates
+  and executes both direct and staged artifacts, obtains the same value `22`,
+  and requires byte-identical Wasm. The staged boundary is where the exact
+  adjacent-child compiler can release Salsa state and return allocator pages
+  before constructing the backend graph. Prepared-body consumption inside
+  lowering and the unpublished Sonatina lineage remain separate prerequisites
+  for reproducing the policy-sized compile.
+
+  Commit `16d99d872` adds the first cryptographic internal relation used by
+  both base and interaction opening verification. One ordered Merkle-node plan
+  constrains its direction bit, algebraically selects left and right children
+  without a host branch, executes the existing 564-product production
+  Poseidon2 denotation, and constrains all eight parent fields. The resulting
+  relation has 573 products and nine assertions. Its zero-import Wasm gate
+  agrees with independent Plonky3 compression in both orientations, rejects
+  every wrong parent lane, rejects a non-boolean direction, and rejects a
+  mutation to every product node in both orientations. The complete two-test
+  recursive-verifier target passes 2/2 in 22.90 seconds. This authenticates one
+  ordered hash dependency. Leaf commitments, canonical multipath topology,
+  and complete base or interaction roots remain to be constrained.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
