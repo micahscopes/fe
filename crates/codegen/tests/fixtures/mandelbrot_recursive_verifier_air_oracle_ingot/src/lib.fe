@@ -1,4 +1,5 @@
 use mandelbrot_proof_recursive_verifier_air_baby_bear::{
+    BinaryMerklePathRelationInputs,
     MERKLE_NODE_ASSERTIONS,
     MERKLE_NODE_PRODUCTS,
     MerkleNodeRelationInputs,
@@ -6,6 +7,7 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     RECEIPT_HEADER_PRODUCTS,
     ReceiptHeaderRelationInputs,
     derive_receipt_header_relation_auxiliary,
+    binary_merkle_path_relation_plan,
     evaluate_merkle_node_relation,
     evaluate_receipt_header_relation,
     merkle_node_relation_residuals,
@@ -16,6 +18,15 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
+use quadratic_plan::{
+    QuadraticRelationConstraintInterpreter,
+    QuadraticRelationValueInterpreter,
+    QuadraticRelationWitnessInterpreter,
+}
+
+const PATH_DEPTH: usize = 4
+const PATH_PRODUCTS: usize = PATH_DEPTH * MERKLE_NODE_PRODUCTS
+const PATH_ASSERTIONS: usize = PATH_DEPTH + 9
 
 fn flag(_ value: bool) -> u32 {
     if value { 1 } else { 0 }
@@ -157,5 +168,92 @@ pub fn merkle_node_relation_audit(
         nonzero_assertions,
         MERKLE_NODE_PRODUCTS.downcast_truncate(),
         MERKLE_NODE_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+fn path_inputs(
+    _ path_index: u32,
+    _ direction_source: u32,
+    _ expected_root: Poseidon2Digest,
+) -> BinaryMerklePathRelationInputs<PATH_DEPTH> {
+    BinaryMerklePathRelationInputs {
+        leaf: digest(0, 1, 2, 3, 5, 8, 13, 21),
+        siblings: [
+            digest(34, 55, 89, 144, 233, 377, 610, 987),
+            digest(1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368),
+            digest(7, 11, 19, 31, 47, 71, 107, 163),
+            digest(257, 389, 587, 887, 1327, 1999, 3001, 4513),
+        ],
+        directions: [
+            BabyBear::from_u32(direction_source & 1),
+            BabyBear::from_u32((direction_source >> 1) & 1),
+            BabyBear::from_u32((direction_source >> 2) & 1),
+            BabyBear::from_u32((direction_source >> 3) & 1),
+        ],
+        path_index: BabyBear::from_u32(path_index),
+        expected_root: expected_root,
+    }
+}
+
+/// Exercise a four-level path derived from the same ordered node denotation.
+/// `path_index` is constrained against the separately supplied direction bits.
+pub fn binary_merkle_path_relation_audit(
+    _ path_index: u32,
+    _ direction_source: u32,
+    _ p0: u32,
+    _ p1: u32,
+    _ p2: u32,
+    _ p3: u32,
+    _ p4: u32,
+    _ p5: u32,
+    _ p6: u32,
+    _ p7: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let inputs = path_inputs(
+        path_index,
+        direction_source,
+        digest(p0, p1, p2, p3, p4, p5, p6, p7),
+    )
+    let witnessed = binary_merkle_path_relation_plan(
+        inputs,
+        QuadraticRelationWitnessInterpreter<BabyBear, PATH_PRODUCTS, PATH_ASSERTIONS>::new(),
+    )
+    let mut witness = witnessed.interpreter.finish()
+    if mutation > 0 && mutation <= PATH_PRODUCTS.downcast_truncate() {
+        let index = (mutation - 1) as usize
+        witness.nodes[index] = witness.nodes[index] + BabyBear::one()
+    }
+    let constrained = binary_merkle_path_relation_plan(
+        inputs,
+        QuadraticRelationConstraintInterpreter<BabyBear, PATH_PRODUCTS, PATH_ASSERTIONS>::new(
+            witness,
+        ),
+    )
+    let residuals = constrained.interpreter.finish()
+    let direct = binary_merkle_path_relation_plan(inputs, QuadraticRelationValueInterpreter::new())
+    let mut nonzero_products: u32 = 0
+    let mut product: usize = 0
+    while product < PATH_PRODUCTS {
+        if !residuals.products[product].radix2_is_zero() {
+            nonzero_products = nonzero_products + 1
+        }
+        product = product + 1
+    }
+    let mut nonzero_assertions: u32 = 0
+    let mut assertion: usize = 0
+    while assertion < PATH_ASSERTIONS {
+        if !residuals.assertions[assertion].radix2_is_zero() {
+            nonzero_assertions = nonzero_assertions + 1
+        }
+        assertion = assertion + 1
+    }
+    (
+        flag(direct.interpreter.finish()),
+        flag(residuals.valid),
+        nonzero_products,
+        nonzero_assertions,
+        PATH_PRODUCTS.downcast_truncate(),
+        PATH_ASSERTIONS.downcast_truncate(),
     )
 }

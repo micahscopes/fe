@@ -15,7 +15,18 @@ const PRODUCTS: u32 = 8;
 const ASSERTIONS: u32 = 9;
 const MERKLE_PRODUCTS: u32 = 573;
 const MERKLE_ASSERTIONS: u32 = 9;
+const PATH_DEPTH: u32 = 4;
+const PATH_PRODUCTS: u32 = PATH_DEPTH * MERKLE_PRODUCTS;
+const PATH_ASSERTIONS: u32 = PATH_DEPTH + 9;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
+
+const PATH_LEAF: [u32; 8] = [0, 1, 2, 3, 5, 8, 13, 21];
+const PATH_SIBLINGS: [[u32; 8]; 4] = [
+    [34, 55, 89, 144, 233, 377, 610, 987],
+    [1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368],
+    [7, 11, 19, 31, 47, 71, 107, 163],
+    [257, 389, 587, 887, 1327, 1999, 3001, 4513],
+];
 
 fn compile_wasm() -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -95,6 +106,31 @@ fn merkle_arguments(
     values.extend(sibling);
     values.push(direction);
     values.extend(parent);
+    values.push(mutation);
+    values
+}
+
+fn reference_path(index: u32) -> [u32; 8] {
+    let mut node = PATH_LEAF;
+    for (level, sibling) in PATH_SIBLINGS.into_iter().enumerate() {
+        node = if ((index >> level) & 1) == 0 {
+            reference_compress(node, sibling)
+        } else {
+            reference_compress(sibling, node)
+        };
+    }
+    node
+}
+
+fn path_arguments(
+    path_index: u32,
+    direction_source: u32,
+    root: [u32; 8],
+    mutation: u32,
+) -> Vec<u32> {
+    let mut values = Vec::with_capacity(11);
+    values.extend([path_index, direction_source]);
+    values.extend(root);
     values.push(mutation);
     values
 }
@@ -203,4 +239,73 @@ fn ordered_merkle_node_relation_matches_plonky3_and_rejects_mutations() {
     assert_eq!(invalid_direction[0], 0);
     assert_eq!(invalid_direction[1], 1);
     assert!(invalid_direction[2] > 0 || invalid_direction[3] > 0);
+}
+
+#[test]
+fn binary_merkle_path_relation_binds_index_and_chained_root() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compile_wasm())
+        .expect("recursive verifier AIR module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("recursive verifier AIR module should instantiate");
+
+    for index in 0..(1 << PATH_DEPTH) {
+        let root = reference_path(index);
+        let result = audit(
+            &mut store,
+            &instance,
+            "binary_merkle_path_relation_audit",
+            &path_arguments(index, index, root, 0),
+        );
+        assert_eq!(
+            result,
+            [1, 1, 0, 0, PATH_PRODUCTS, PATH_ASSERTIONS],
+            "path index {index}",
+        );
+    }
+
+    let root = reference_path(11);
+    for lane in 0..8 {
+        let mut wrong_root = root;
+        wrong_root[lane] = (wrong_root[lane] + 1) % BABY_BEAR_MODULUS;
+        let result = audit(
+            &mut store,
+            &instance,
+            "binary_merkle_path_relation_audit",
+            &path_arguments(11, 11, wrong_root, 0),
+        );
+        assert_eq!(result[0], 0, "wrong path root lane {lane} must reject");
+        assert_eq!(result[1], 1);
+        assert!(result[3] > 0);
+    }
+
+    let mismatched_index = audit(
+        &mut store,
+        &instance,
+        "binary_merkle_path_relation_audit",
+        &path_arguments(3, 5, reference_path(5), 0),
+    );
+    assert_eq!(mismatched_index[0], 0);
+    assert_eq!(mismatched_index[1], 1);
+    assert!(mismatched_index[3] > 0);
+
+    for level in 0..PATH_DEPTH {
+        for offset in [1, 2, 10, MERKLE_PRODUCTS] {
+            let mutation = level * MERKLE_PRODUCTS + offset;
+            let result = audit(
+                &mut store,
+                &instance,
+                "binary_merkle_path_relation_audit",
+                &path_arguments(11, 11, root, mutation),
+            );
+            assert_eq!(result[0], 1);
+            assert_eq!(result[1], 1);
+            assert!(
+                result[2] > 0,
+                "path product mutation {mutation} must reject"
+            );
+        }
+    }
 }

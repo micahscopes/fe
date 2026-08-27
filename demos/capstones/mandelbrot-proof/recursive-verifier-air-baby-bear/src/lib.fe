@@ -203,6 +203,13 @@ pub struct MerkleNodeRelationInputs {
 }
 impl core::marker::Copy for MerkleNodeRelationInputs {}
 
+pub struct OrderedMerkleNodeInputs {
+    pub child: Poseidon2Digest,
+    pub sibling: Poseidon2Digest,
+    pub direction: BabyBear,
+}
+impl core::marker::Copy for OrderedMerkleNodeInputs {}
+
 pub type MerkleNodeRelationWitness = QuadraticRelationWitness<
     BabyBear,
     MERKLE_NODE_PRODUCTS,
@@ -221,12 +228,10 @@ pub struct MerkleNodeRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
 }
 impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy for MerkleNodeRelationPlan<I> {}
 
-/// Interpret the ordered node through one shared arithmetic dependency plan.
-/// Eight selection products place the children without branching, then the
-/// production Poseidon2 compression plan contributes its complete 564-product
-/// permutation.
-pub fn merkle_node_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
-    _ inputs: MerkleNodeRelationInputs,
+/// Interpret one ordered compression without asserting its parent. This is
+/// the compositional kernel used by path and multipath relations.
+pub fn ordered_merkle_node_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: OrderedMerkleNodeInputs,
     _ interpreter: I,
 ) -> MerkleNodeRelationPlan<I> {
     let mut interpreter = constrain_boolean(interpreter, inputs.direction)
@@ -247,17 +252,36 @@ pub fn merkle_node_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
         Poseidon2Digest::from_fields(left_fields),
         Poseidon2Digest::from_fields(right_fields),
     )
-    interpreter = compressed.interpreter
-    lane = 0
+    MerkleNodeRelationPlan { interpreter: compressed.interpreter, parent: compressed.value }
+}
+
+/// Interpret the ordered node through one shared arithmetic dependency plan.
+/// Eight selection products place the children without branching, then the
+/// production Poseidon2 compression plan contributes its complete 564-product
+/// permutation.
+pub fn merkle_node_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: MerkleNodeRelationInputs,
+    _ interpreter: I,
+) -> MerkleNodeRelationPlan<I> {
+    let ordered = ordered_merkle_node_plan(
+        OrderedMerkleNodeInputs {
+            child: inputs.child,
+            sibling: inputs.sibling,
+            direction: inputs.direction,
+        },
+        interpreter,
+    )
+    let mut interpreter = ordered.interpreter
+    let mut lane: usize = 0
     while lane < 8 {
         interpreter = constrain_equal(
             interpreter,
-            compressed.value.field(lane.downcast_truncate()),
+            ordered.parent.field(lane.downcast_truncate()),
             inputs.expected_parent.field(lane.downcast_truncate()),
         )
         lane = lane + 1
     }
-    MerkleNodeRelationPlan { interpreter: interpreter, parent: compressed.value }
+    MerkleNodeRelationPlan { interpreter: interpreter, parent: ordered.parent }
 }
 
 pub fn merkle_node_relation_witness(
@@ -293,4 +317,64 @@ pub fn merkle_node_relation_residuals(
 
 pub fn evaluate_merkle_node_relation(_ inputs: MerkleNodeRelationInputs) -> bool {
     merkle_node_relation_plan(inputs, QuadraticRelationValueInterpreter::new()).interpreter.finish()
+}
+
+/// One conventional bottom-up binary path. Direction bits remain explicit
+/// witness values, while a linear reconstruction binds them to the canonical
+/// little-endian path index.
+pub struct BinaryMerklePathRelationInputs<const DEPTH: usize> {
+    pub leaf: Poseidon2Digest,
+    pub siblings: [Poseidon2Digest; DEPTH],
+    pub directions: [BabyBear; DEPTH],
+    pub path_index: BabyBear,
+    pub expected_root: Poseidon2Digest,
+}
+impl<const DEPTH: usize> core::marker::Copy for BinaryMerklePathRelationInputs<DEPTH> {}
+
+pub struct BinaryMerklePathRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub root: Poseidon2Digest,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy for BinaryMerklePathRelationPlan<
+    I,
+> {}
+
+pub fn binary_merkle_path_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const DEPTH: usize,
+>(
+    _ inputs: BinaryMerklePathRelationInputs<DEPTH>,
+    _ interpreter: I,
+) -> BinaryMerklePathRelationPlan<I> {
+    let mut interpreter = interpreter
+    let mut node = inputs.leaf
+    let mut reconstructed = BabyBear::zero()
+    let mut weight = BabyBear::one()
+    let mut level: usize = 0
+    while level < DEPTH {
+        let planned = ordered_merkle_node_plan(
+            OrderedMerkleNodeInputs {
+                child: node,
+                sibling: inputs.siblings[level],
+                direction: inputs.directions[level],
+            },
+            interpreter,
+        )
+        interpreter = planned.interpreter
+        node = planned.parent
+        reconstructed = reconstructed + inputs.directions[level] * weight
+        weight = weight + weight
+        level = level + 1
+    }
+    interpreter = constrain_equal(interpreter, reconstructed, inputs.path_index)
+    let mut lane: usize = 0
+    while lane < 8 {
+        interpreter = constrain_equal(
+            interpreter,
+            node.field(lane.downcast_truncate()),
+            inputs.expected_root.field(lane.downcast_truncate()),
+        )
+        lane = lane + 1
+    }
+    BinaryMerklePathRelationPlan { interpreter: interpreter, root: node }
 }
