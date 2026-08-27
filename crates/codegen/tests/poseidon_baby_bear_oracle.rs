@@ -22,6 +22,7 @@ use wasmtime::Val;
 
 const WIDTH: usize = 16;
 const ROUND_CONSTANT_COUNT: usize = 8 * WIDTH + 13;
+const PERMUTATION_MULTIPLICATIONS: u32 = ((8 * WIDTH + 13) * 4) as u32;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
 fn bb_mul(left: u32, right: u32) -> u32 {
@@ -129,6 +130,12 @@ fn reference_permutation(input: [u32; WIDTH]) -> [u32; WIDTH] {
     let mut state = input.map(BabyBear::from_u32);
     default_babybear_poseidon2_16().permute_mut(&mut state);
     state.map(|value| value.as_canonical_u32())
+}
+
+fn permutation_relation_arguments(input: [u32; WIDTH], mutation: u32, wrong_lane: u32) -> Vec<u32> {
+    let mut arguments = input.to_vec();
+    arguments.extend([mutation, wrong_lane]);
+    arguments
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -301,6 +308,50 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             ),
             expected,
             "Fe workgroup schedule differs from Plonky3 for {input:?}",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "poseidon2_permutation_relation_audit",
+                &permutation_relation_arguments(input, 0, 0),
+                4,
+            ),
+            [1, 1, 0, 0],
+            "complete quadratic relation differs for {input:?}",
+        );
+    }
+
+    for mutation in 1..=PERMUTATION_MULTIPLICATIONS {
+        let result = call(
+            &mut store,
+            &instance,
+            "poseidon2_permutation_relation_audit",
+            &permutation_relation_arguments(sequential, mutation, 0),
+            4,
+        );
+        assert_eq!(result[0], 1, "mutation {mutation} retains exact shape");
+        assert_eq!(result[1], 1, "direct relation remains exact");
+        assert!(
+            result[2] > 0,
+            "committed permutation node {mutation} must violate a product residual",
+        );
+    }
+
+    for wrong_lane in 1..=WIDTH as u32 {
+        let result = call(
+            &mut store,
+            &instance,
+            "poseidon2_permutation_relation_audit",
+            &permutation_relation_arguments(sequential, 0, wrong_lane),
+            4,
+        );
+        assert_eq!(result[0], 1, "wrong output retains exact shape");
+        assert_eq!(result[1], 0, "wrong lane {wrong_lane} must reject");
+        assert_eq!(result[2], 0, "wrong output does not alter products");
+        assert!(
+            result[3] > 0,
+            "wrong lane {wrong_lane} must violate an assertion"
         );
     }
 }

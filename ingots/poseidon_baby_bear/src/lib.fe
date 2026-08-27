@@ -389,6 +389,8 @@ impl Poseidon2ParameterStream {
 }
 
 pub const POSEIDON2_POWER7_MULTIPLICATIONS: usize = 4
+pub const POSEIDON2_PERMUTATION_MULTIPLICATIONS: usize =
+    (FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS) * POSEIDON2_POWER7_MULTIPLICATIONS
 
 /// One authored quadratic schedule for the Poseidon2 power-seven map. Scalar
 /// hashing, recursive constraints, and future GPU trace placement interpret
@@ -564,42 +566,135 @@ impl Poseidon2State {
 
     #[inline(always)]
     fn permute(mut self, _ parameters: ref Poseidon2Parameters) {
-        self.external_linear()
-        let mut constant: usize = 0
-        let mut round: usize = 0
-        while round < HALF_FULL_ROUNDS {
-            let mut lane: usize = 0
-            while lane < WIDTH {
-                let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
-                self.set_field(lane, sbox7(self.field(lane) + rc))
-                constant = constant + 1
-                lane = lane + 1
-            }
-            self.external_linear()
-            round = round + 1
-        }
+        let executed = poseidon2_permutation_execution(
+            QuadraticValueInterpreter::new(),
+            self.lanes,
+            parameters,
+        )
+        self.lanes = executed.lanes
+    }
+}
 
-        round = 0
-        while round < PARTIAL_ROUNDS {
-            let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
-            self.set_field(0, sbox7(self.field(0) + rc))
+struct Poseidon2PermutationExecution<
+    I: QuadraticPlanInterpreter<BabyBear>,
+> {
+    interpreter: I,
+    lanes: [u32; WIDTH],
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2PermutationExecution<I> {}
+
+/// The exact sequential Poseidon2 dependency plan. Scalar hashing and
+/// recursive witness or constraint interpreters differ only in how they
+/// consume each power-seven multiplication node.
+#[inline(always)]
+fn poseidon2_permutation_execution<I: QuadraticPlanInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ lanes: own [u32; WIDTH],
+    _ parameters: ref Poseidon2Parameters,
+) -> Poseidon2PermutationExecution<I> {
+    let mut interpreter = interpreter
+    let mut state = Poseidon2State { lanes: lanes }
+    state.external_linear()
+    let mut constant: usize = 0
+    let mut round: usize = 0
+    while round < HALF_FULL_ROUNDS {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let rc = BabyBear::from_montgomery_word(
+                parameters.round_constants[constant],
+            )
+            let powered = poseidon2_power7_plan(
+                interpreter,
+                state.field(lane) + rc,
+            )
+            interpreter = powered.interpreter
+            state.set_field(lane, powered.value)
             constant = constant + 1
-            self.internal_linear()
-            round = round + 1
+            lane = lane + 1
         }
+        state.external_linear()
+        round = round + 1
+    }
 
-        round = 0
-        while round < HALF_FULL_ROUNDS {
-            let mut lane: usize = 0
-            while lane < WIDTH {
-                let rc = BabyBear::from_montgomery_word(parameters.round_constants[constant])
-                self.set_field(lane, sbox7(self.field(lane) + rc))
-                constant = constant + 1
-                lane = lane + 1
-            }
-            self.external_linear()
-            round = round + 1
+    round = 0
+    while round < PARTIAL_ROUNDS {
+        let rc = BabyBear::from_montgomery_word(
+            parameters.round_constants[constant],
+        )
+        let powered = poseidon2_power7_plan(
+            interpreter,
+            state.field(0) + rc,
+        )
+        interpreter = powered.interpreter
+        state.set_field(0, powered.value)
+        constant = constant + 1
+        state.internal_linear()
+        round = round + 1
+    }
+
+    round = 0
+    while round < HALF_FULL_ROUNDS {
+        let mut lane: usize = 0
+        while lane < WIDTH {
+            let rc = BabyBear::from_montgomery_word(
+                parameters.round_constants[constant],
+            )
+            let powered = poseidon2_power7_plan(
+                interpreter,
+                state.field(lane) + rc,
+            )
+            interpreter = powered.interpreter
+            state.set_field(lane, powered.value)
+            constant = constant + 1
+            lane = lane + 1
         }
+        state.external_linear()
+        round = round + 1
+    }
+
+    Poseidon2PermutationExecution {
+        interpreter: interpreter,
+        lanes: state.lanes,
+    }
+}
+
+pub struct Poseidon2PermutationPlan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    pub output: [BabyBear; WIDTH],
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2PermutationPlan<I> {}
+
+/// Interpret one complete width-16 permutation from the same dependency plan
+/// used by production scalar hashing.
+pub fn poseidon2_permutation_plan<I: QuadraticPlanInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ input: own [BabyBear; WIDTH],
+) -> Poseidon2PermutationPlan<I> {
+    let mut words = [0; WIDTH]
+    let mut lane: usize = 0
+    while lane < WIDTH {
+        words[lane] = input[lane].to_montgomery_word()
+        lane = lane + 1
+    }
+    let parameters = PARAMETERS
+    let executed = poseidon2_permutation_execution(
+        interpreter,
+        words,
+        ref parameters,
+    )
+    let mut output = [BabyBear::zero(); WIDTH]
+    lane = 0
+    while lane < WIDTH {
+        output[lane] = BabyBear::from_montgomery_word(executed.lanes[lane])
+        lane = lane + 1
+    }
+    Poseidon2PermutationPlan {
+        interpreter: executed.interpreter,
+        output: output,
     }
 }
 
