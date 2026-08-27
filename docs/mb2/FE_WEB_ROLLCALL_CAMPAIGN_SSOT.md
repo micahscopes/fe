@@ -261,6 +261,26 @@ existing Definition of done, not a second campaign checklist:
   independently exact placement of the same Poseidon algorithm, not yet a
   placement interpreter derived from this sequential relation plan. Child
   verifier task ordering, transcript wiring, and trace authentication remain.
+
+  Commits `e3dfe054a` and `6079e80cd` carry that relation through the actual
+  two-to-one Merkle operation and its first scalable runtime placement.
+  Production `compress` now consumes `compress_plan`, so concatenating two
+  typed eight-field digests, executing all 564 permutation products, and
+  selecting the parent digest are one authored Fe dependency plan. The new
+  `QuadraticRelationStreamInterpreter` writes uniform
+  `(left, right, output)` product rows and zero-assertion rows directly into a
+  typed browser arena. Only its opaque handle and two cursors remain live in
+  Wasm, and allocation or incomplete shape failures reject without reading
+  uninitialized rows. The zero-import release gate compares all 564 streamed
+  outputs with the existing fixed witness interpretation, agrees with
+  independent Plonky3 compression values, rejects a mutation to every product
+  output, and rejects each of the eight parent-output assertions. The complete
+  five-test Poseidon gate passes 5/5 in 84.25 seconds; the hardened focused
+  rerun passes 1/1 in 25.98 seconds. This closes lossless memory placement of
+  the arithmetic relation only. The rows do not yet authenticate operand
+  provenance or program topology. Named Poseidon task rows and typed copy
+  interactions must bind round, lane, power step, inputs, constants, prior
+  products, and outputs before a recursive proof can trust the stream.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
