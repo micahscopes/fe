@@ -30,4 +30,10 @@ fn public_recursive_carriers_cannot_forge_verified_authority() {
         diagnostics.contains("`committed` is not visible"),
         "verified recursive authority must remain unforgeable:\n{diagnostics}",
     );
+    assert!(
+        diagnostics.contains("type mismatch")
+            && diagnostics.contains("8192, 456, 5928")
+            && diagnostics.contains("8192, 16, 208"),
+        "protocol-shape receipts must not satisfy the security leaf boundary:\n{diagnostics}",
+    );
 }

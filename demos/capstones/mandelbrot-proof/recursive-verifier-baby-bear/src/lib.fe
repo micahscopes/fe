@@ -8,7 +8,9 @@
 
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     PRODUCTION_LIMBS,
+    ProductionSecuritySparseBabyBearReceipt,
     ProductionSparseBabyBearReceipt,
+    verify_production_security_sparse_baby_bear_receipt,
     verify_production_sparse_baby_bear_receipt,
 }
 use mandelbrot_proof_recursive::OrbitInterval
@@ -51,6 +53,29 @@ pub fn verify_production_sparse_recursive_leaf(
     _ receipt: ref ProductionSparseBabyBearReceipt,
 ) -> VerifiedRecursiveInterval<{PRODUCTION_LIMBS}> {
     if !verify_production_sparse_baby_bear_receipt(
+        interval,
+        shift,
+        receipt,
+    ) {
+        return rejected_interval<{PRODUCTION_LIMBS}>()
+    }
+    let committed = commit_recursive_leaf_statement(interval)
+    if !committed.valid {
+        return rejected_interval<{PRODUCTION_LIMBS}>()
+    }
+    VerifiedRecursiveInterval { committed: committed }
+}
+
+/// Verify one security-policy-sized sparse AIR/FRI receipt before minting the
+/// same private recursive authority. Keeping this boundary distinct from the
+/// four-query protocol-shape oracle prevents a smaller receipt from being
+/// mistaken for the production leaf relation.
+pub fn verify_production_security_sparse_recursive_leaf(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+) -> VerifiedRecursiveInterval<{PRODUCTION_LIMBS}> {
+    if !verify_production_security_sparse_baby_bear_receipt(
         interval,
         shift,
         receipt,

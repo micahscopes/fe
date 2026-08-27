@@ -1,5 +1,11 @@
+use mandelbrot_proof_fixed_air_receipt_baby_bear::ProductionSparseBabyBearReceipt
+use mandelbrot_proof_recursive::OrbitInterval
 use mandelbrot_proof_recursive_baby_bear::invalid_recursive_committed_interval
-use mandelbrot_proof_recursive_verifier_baby_bear::VerifiedRecursiveInterval
+use mandelbrot_proof_recursive_verifier_baby_bear::{
+    VerifiedRecursiveInterval,
+    verify_production_security_sparse_recursive_leaf,
+}
+use precision::baby_bear::BabyBear
 
 /// Ordinary Fe code must not turn a public commitment-shaped carrier into
 /// proof-backed recursive authority.
@@ -7,4 +13,18 @@ pub fn forge_verified_interval() -> VerifiedRecursiveInterval<4> {
     VerifiedRecursiveInterval {
         committed: invalid_recursive_committed_interval<4>(),
     }
+}
+
+/// A protocol-shape receipt must not satisfy the security-policy leaf
+/// constructor, even though both receipts describe the same AIR relation.
+pub fn confuse_protocol_shape_with_security_receipt(
+    _ interval: OrbitInterval<4>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSparseBabyBearReceipt,
+) -> bool {
+    verify_production_security_sparse_recursive_leaf(
+        interval,
+        shift,
+        receipt,
+    ).is_valid()
 }

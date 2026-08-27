@@ -21,6 +21,9 @@ use mandelbrot_proof_recursive::{
     evaluate_chunk,
     initial_boundary,
 }
+use mandelbrot_proof_recursive_verifier_baby_bear::{
+    verify_production_security_sparse_recursive_leaf,
+}
 use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
@@ -123,12 +126,37 @@ fn verify_production_security_zero_interval_receipt_mutation(
     )
 }
 
+/// Admit the security-policy-sized receipt through the private recursive leaf
+/// authority and require that it commits exactly the public one-step interval.
+fn verify_production_security_zero_interval_recursive_leaf(
+    _ bytes: BrowserBytes,
+) -> bool {
+    let mut receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return false
+    }
+    let leaf = verify_production_security_sparse_recursive_leaf(
+        production_zero_interval(),
+        BabyBear::from_u32(7),
+        ref receipt,
+    )
+    let committed = leaf.commitment()
+    leaf.is_valid()
+        && committed.valid
+        && committed.leaves == 1
+        && committed.start_iteration == 0
+        && committed.end_iteration == 1
+        && committed.statement.valid
+        && committed.start.valid
+        && committed.end.valid
+}
+
 /// Complete typed mutation matrix for the policy-sized assembled receipt.
 /// Zero is the only success result.
 pub fn audit_production_security_zero_interval_receipt_matrix(
     _ bytes: BrowserBytes,
 ) -> u32 {
-    if !verify_production_security_zero_interval_receipt_mutation(bytes, 0) {
+    if !verify_production_security_zero_interval_recursive_leaf(bytes) {
         return 1
     }
     if verify_production_security_zero_interval_receipt_mutation(bytes, 1) {
