@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-27
+Updated: 2026-08-28
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -414,6 +414,23 @@ existing Definition of done, not a second campaign checklist:
   multipaths, so their canonical fixed-capacity topology and leaf commitments
   remain the next relation layer rather than being approximated by independent
   binary paths.
+
+  Commits `7279e5140` and `ba29192a4` close the canonical production leaf
+  relation. The scalar base and interaction LDE commitments and the recursive
+  relation now consume one generic `Poseidon2CanonicalCommitmentPlan`, rather
+  than separately implementing the sponge. Production shape words derive from
+  the receipt types. The base leaf derives 34 Poseidon2 permutations, 19,176
+  multiplication rows, and eight output assertions; the interaction leaf
+  derives 21 permutations, 11,844 multiplication rows, and eight assertions.
+  The zero-import Wasm gate agrees with independent Plonky3 commitments,
+  rejects every commitment lane and changed leaf indices, and detects first
+  and last product mutations in every sponge block. It passes 1/1 in 63.77
+  seconds. A fixed aggregate witness placement previously trapped in Wasm
+  allocation at this size; interpreting the identical relation into the typed
+  row stream removes that physical local aggregate without changing its
+  semantics. The pre-existing chained Merkle relation still passes 1/1 in
+  57.65 seconds against the enlarged fixture. Canonical production multipath
+  topology is now the next authentication layer.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
