@@ -234,6 +234,19 @@ existing Definition of done, not a second campaign checklist:
   through the final carry. This is the exact merge relation that a parent
   proof must authenticate. It does not yet authenticate either child verifier
   execution or emit a recursive proof receipt.
+
+  Commit `630d6474e` makes the production BabyBear Poseidon2 S-box the first
+  child-verifier arithmetic primitive to consume that shared relation
+  vocabulary. One four-node `poseidon2_power7_plan` now denotes `x^7` for the
+  scalar permutation, multiplication-witness generation, and quadratic
+  residual evaluation. Its zero-import Wasm gate checks every intermediate
+  product against independent `u64` modular arithmetic, rejects mutations to
+  each of the four committed nodes and a wrong expected output, and retains the
+  full Plonky3 parameter and permutation oracle. The generic quadratic-plan
+  gate and the 423-product recursive merge gate remain green after making the
+  relation interpreter an extension of the ordinary multiplication-plan
+  interpreter. This authenticates one reusable nonlinear primitive, not a
+  complete Poseidon round or child-verifier trace.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
@@ -2338,9 +2351,12 @@ fallback. The semantic receipts are:
    private leaf authority, but the current recursive carrier and
    verified-adjacent-interval authority remain semantic scaffolding, not a
    recursive cryptographic proof. The fixed-size merge constraint relation is
-   now derived and independently gated. Next place it in an authenticated trace
-   and extend the same relation vocabulary over both child verifier task DAGs,
-   then emit the leaf and parent proof receipts. Schedule independent leaves
+   now derived and independently gated. The production Poseidon2 `x^7` S-box
+   also shares one four-multiplication plan across scalar evaluation, witness
+   generation, and quadratic constraints. Next extend that denotation through
+   complete Poseidon rounds, place the merge relation and both child verifier
+   task DAGs in authenticated traces, then emit the leaf and parent proof
+   receipts. Schedule independent leaves
    and sibling merges as a typed balanced reduction, and run the progressive
    point/disk picker, cancellation, generation, mutation rejection, Fe-Wasm
    verification, and revm-Wasm verification in Chrome.
