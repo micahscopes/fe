@@ -208,6 +208,16 @@ existing Definition of done, not a second campaign checklist:
   swapped-order, and mutated-right inputs all fail closed. The fixed-size
   recursive proof/provider and encoding, logarithmic aggregation evidence, and
   bounded disk claim remain.
+
+  Fe commit `23a51230d` binds the full 114-query security receipt to that
+  private leaf authority. A fresh 14,640,593-byte verifier compiled in 620.28
+  seconds with SHA-256
+  `6f2942a62f03da72d10f9580710b2ba40ecdc6360d135e8a6610a541939a5f2e`,
+  admitted the retained 948,808-byte production receipt, and rejected the
+  typed mutation matrix in 17.80 seconds. A compile-negative gate separately
+  proves that the four-query protocol-shape receipt cannot satisfy this
+  security-policy leaf boundary. This closes the authority handoff into the
+  recursive layer. It is still not a cryptographic parent proof.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
@@ -2308,10 +2318,10 @@ fallback. The semantic receipts are:
    another. Add Merkle retention/recomputation and a peak-memory policy before
    mobile-sized execution.
 5. G-RECEIPT is closed at the scalar 114-query boundary. Continue through
-   G-RECURSE and G-BROWSER. The current recursive carrier and
-   verified-adjacent-interval authority are semantic scaffolding, not a
-   recursive cryptographic proof. First bind the security-sized verifier to
-   the private leaf authority, then derive fixed-size leaf and merge proof
+   G-RECURSE and G-BROWSER. The security-sized verifier is now bound to the
+   private leaf authority, but the current recursive carrier and
+   verified-adjacent-interval authority remain semantic scaffolding, not a
+   recursive cryptographic proof. Next derive fixed-size leaf and merge proof
    circuits. Schedule independent leaves and sibling merges as a typed balanced
    reduction, and run the progressive point/disk picker, cancellation,
    generation, mutation rejection, Fe-Wasm verification, and revm-Wasm
