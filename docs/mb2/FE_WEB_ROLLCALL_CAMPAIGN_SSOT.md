@@ -2417,13 +2417,25 @@ fallback. The semantic receipts are:
    Poseidon release oracle passes 6/6 in 83.01 seconds with Plonky3 unchanged.
    This closes semantic topology authentication for one streamed compression;
    it does not yet make those rows an authenticated STARK trace or a recursive
-   proof receipt. Next place the merge relation and both child verifier task
-   DAGs in authenticated traces, derive staged workgroup placement from the
-   same dependency vocabulary, and emit the leaf and parent proof receipts.
-   Schedule independent leaves and sibling merges as a typed balanced
-   reduction, and run the progressive point/disc picker, cancellation,
-   generation, mutation rejection, Fe-Wasm verification, and revm-Wasm
-   verification in Chrome.
+   proof receipt. Commit `0a08d0d24` next applies the same stream-and-replay
+   vocabulary to the complete recursive merge relation: 423 products and 583
+   assertions are written incrementally to typed browser memory, then the sole
+   authored merge denotation re-authenticates product operands, range bits,
+   carries, public digests, interval order, leaf-count addition, and assertions.
+   The fixed aggregate oracle and streamed oracle intentionally execute through
+   separate zero-import exports. Keeping both representations live in one call
+   first trapped `fe_cabi_alloc`; separating them preserves the old independent
+   gate while proving the bounded-memory placement on its own terms. The final
+   release gate passes 1/1 in 11.57 seconds, retains the complete integer and
+   modular-wrap mutation matrix, and adds a coherent operand rewire whose local
+   product remains valid but relation replay rejects. This authenticates the
+   merge relation stream, not either child verifier or a recursive receipt.
+   Next place both child verifier task DAGs in authenticated traces, derive
+   staged workgroup placement from the same dependency vocabulary, and emit the
+   leaf and parent proof receipts. Schedule independent leaves and sibling
+   merges as a typed balanced reduction, and run the progressive point/disc
+   picker, cancellation, generation, mutation rejection, Fe-Wasm verification,
+   and revm-Wasm verification in Chrome.
 6. Finish the four standalone hardware tests in the external runbook. The
    `mandelbrot_proof_gpu` clean and tampered Chromium modes already pass on AMD
    Radeon 780M through RADV, but the named Rollcall, fixed precision,
