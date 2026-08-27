@@ -3,6 +3,10 @@ use precision::polynomial::Radix2Field
 use quadratic_plan::{
     QuadraticConstraintInterpreter,
     QuadraticPlanInterpreter,
+    QuadraticRelationConstraintInterpreter,
+    QuadraticRelationInterpreter,
+    QuadraticRelationValueInterpreter,
+    QuadraticRelationWitnessInterpreter,
     QuadraticWitnessInterpreter,
 }
 
@@ -103,6 +107,134 @@ pub fn quadratic_plan_over_capacity(_ a: u32, _ b: u32, _ c: u32) -> u32 {
         a,
         b,
         c,
+    )
+    if constrained.interpreter.finish().valid { 1 } else { 0 }
+}
+
+struct TinyRelation<I: QuadraticRelationInterpreter<BabyBear>> {
+    interpreter: I,
+    output: BabyBear,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
+    for TinyRelation<I> {}
+
+/// The same three-node arithmetic plan now also owns its two semantic
+/// assertions. No interpreter carries a parallel copy of the relation.
+fn tiny_relation<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ a: BabyBear,
+    _ b: BabyBear,
+    _ c: BabyBear,
+    _ expected: BabyBear,
+) -> TinyRelation<I> {
+    let ab = interpreter.multiply(a, b)
+    let bc = ab.interpreter.multiply(b, c)
+    let output = bc.interpreter.multiply(a.radix2_add(ab.value), bc.value)
+    let expected_output = output.interpreter.constrain_zero(
+        output.value.radix2_sub(expected),
+    )
+    let input_relation = expected_output.interpreter.constrain_zero(
+        c.radix2_sub(a.radix2_add(b)),
+    )
+    TinyRelation { interpreter: input_relation.interpreter, output: output.value }
+}
+
+pub fn quadratic_relation_audit(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ expected: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let expected = BabyBear::from_u32(expected)
+    let witnessed = tiny_relation(
+        QuadraticRelationWitnessInterpreter<BabyBear, 3, 2>::new(),
+        a,
+        b,
+        c,
+        expected,
+    )
+    let mut witness = witnessed.interpreter.finish()
+    if mutation > 0 && mutation <= 3 {
+        let index = (mutation - 1) as usize
+        witness.nodes[index] = witness.nodes[index] + BabyBear::one()
+    }
+    let constrained = tiny_relation(
+        QuadraticRelationConstraintInterpreter<BabyBear, 3, 2>::new(witness),
+        a,
+        b,
+        c,
+        expected,
+    )
+    let direct = tiny_relation(
+        QuadraticRelationValueInterpreter::new(),
+        a,
+        b,
+        c,
+        expected,
+    )
+    let residuals = constrained.interpreter.finish()
+    (
+        if residuals.valid { 1 } else { 0 },
+        residuals.products[0].to_u32(),
+        residuals.products[1].to_u32(),
+        residuals.products[2].to_u32(),
+        residuals.assertions[0].to_u32(),
+        residuals.assertions[1].to_u32(),
+        constrained.output.to_u32(),
+        if direct.interpreter.finish() { direct.output.to_u32() } else { 0 },
+    )
+}
+
+pub fn quadratic_relation_wrong_product_shape(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ expected: u32,
+) -> u32 {
+    let witnessed = tiny_relation(
+        QuadraticRelationWitnessInterpreter<BabyBear, 2, 2>::new(),
+        BabyBear::from_u32(a),
+        BabyBear::from_u32(b),
+        BabyBear::from_u32(c),
+        BabyBear::from_u32(expected),
+    )
+    let constrained = tiny_relation(
+        QuadraticRelationConstraintInterpreter<BabyBear, 2, 2>::new(
+            witnessed.interpreter.finish(),
+        ),
+        BabyBear::from_u32(a),
+        BabyBear::from_u32(b),
+        BabyBear::from_u32(c),
+        BabyBear::from_u32(expected),
+    )
+    if constrained.interpreter.finish().valid { 1 } else { 0 }
+}
+
+pub fn quadratic_relation_wrong_assertion_shape(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ expected: u32,
+) -> u32 {
+    let witnessed = tiny_relation(
+        QuadraticRelationWitnessInterpreter<BabyBear, 3, 1>::new(),
+        BabyBear::from_u32(a),
+        BabyBear::from_u32(b),
+        BabyBear::from_u32(c),
+        BabyBear::from_u32(expected),
+    )
+    let constrained = tiny_relation(
+        QuadraticRelationConstraintInterpreter<BabyBear, 3, 1>::new(
+            witnessed.interpreter.finish(),
+        ),
+        BabyBear::from_u32(a),
+        BabyBear::from_u32(b),
+        BabyBear::from_u32(c),
+        BabyBear::from_u32(expected),
     )
     if constrained.interpreter.finish().valid { 1 } else { 0 }
 }

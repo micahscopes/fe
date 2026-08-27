@@ -40,6 +40,47 @@ pub trait QuadraticPlanInterpreter<F: Radix2Field>: core::marker::Copy {
     fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F>
 }
 
+/// A relation interpreter extends the arithmetic plan with ordered zero
+/// assertions. This is the common denotation needed by proof relations: the
+/// value interpreter evaluates it directly, the witness interpreter records
+/// every multiplication node, and the constraint interpreter emits both the
+/// multiplication equations and the authored assertions.
+pub struct QuadraticRelationStep<I: core::marker::Copy> {
+    pub interpreter: I,
+}
+impl<I: core::marker::Copy> core::marker::Copy for QuadraticRelationStep<I> {}
+
+pub trait QuadraticRelationInterpreter<F: Radix2Field>: core::marker::Copy {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F>
+
+    fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self>
+}
+
+pub struct QuadraticRelationWitness<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+> {
+    pub nodes: [F; PRODUCTS],
+    shape_valid: bool,
+}
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    core::marker::Copy
+    for QuadraticRelationWitness<F, PRODUCTS, ASSERTIONS> {}
+
+pub struct QuadraticRelationResiduals<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+> {
+    pub valid: bool,
+    pub products: [F; PRODUCTS],
+    pub assertions: [F; ASSERTIONS],
+}
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    core::marker::Copy
+    for QuadraticRelationResiduals<F, PRODUCTS, ASSERTIONS> {}
+
 /// Direct value interpretation of an authored plan. This lets callers expose
 /// the same typed expression as an ordinary value without maintaining a
 /// second unplanned implementation beside the witness and constraint forms.
@@ -169,6 +210,237 @@ impl<F: Radix2Field, const N: usize> QuadraticPlanInterpreter<F>
                 valid: true,
             },
             value: value,
+        }
+    }
+}
+
+/// Direct interpretation of a complete quadratic relation.
+pub struct QuadraticRelationValueInterpreter {
+    valid: bool,
+}
+impl core::marker::Copy for QuadraticRelationValueInterpreter {}
+
+impl QuadraticRelationValueInterpreter {
+    pub fn new() -> Self { Self { valid: true } }
+
+    pub fn finish(self) -> bool { self.valid }
+}
+
+impl<F: Radix2Field> QuadraticRelationInterpreter<F>
+    for QuadraticRelationValueInterpreter {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        QuadraticPlanStep {
+            interpreter: self,
+            value: left.radix2_mul(right),
+        }
+    }
+
+    fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
+        QuadraticRelationStep {
+            interpreter: Self {
+                valid: self.valid && value.radix2_is_zero(),
+            },
+        }
+    }
+}
+
+pub struct QuadraticRelationWitnessInterpreter<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+> {
+    nodes: [F; PRODUCTS],
+    product_cursor: u32,
+    assertion_cursor: u32,
+    valid: bool,
+}
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    core::marker::Copy
+    for QuadraticRelationWitnessInterpreter<F, PRODUCTS, ASSERTIONS> {}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationWitnessInterpreter<F, PRODUCTS, ASSERTIONS> {
+    pub fn new() -> Self {
+        Self {
+            nodes: [F::radix2_zero(); PRODUCTS],
+            product_cursor: 0,
+            assertion_cursor: 0,
+            valid: true,
+        }
+    }
+
+    pub fn finish(self) -> QuadraticRelationWitness<F, PRODUCTS, ASSERTIONS> {
+        let valid = self.valid
+            && self.product_cursor == PRODUCTS.downcast_truncate()
+            && self.assertion_cursor == ASSERTIONS.downcast_truncate()
+        QuadraticRelationWitness {
+            nodes: if valid { self.nodes } else { [F::radix2_zero(); PRODUCTS] },
+            shape_valid: valid,
+        }
+    }
+}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationInterpreter<F>
+    for QuadraticRelationWitnessInterpreter<F, PRODUCTS, ASSERTIONS> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        let value = left.radix2_mul(right)
+        if !self.valid || self.product_cursor >= PRODUCTS.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self {
+                    nodes: self.nodes,
+                    product_cursor: self.product_cursor,
+                    assertion_cursor: self.assertion_cursor,
+                    valid: false,
+                },
+                value: F::radix2_zero(),
+            }
+        }
+        let mut nodes = self.nodes
+        nodes[self.product_cursor as usize] = value
+        QuadraticPlanStep {
+            interpreter: Self {
+                nodes: nodes,
+                product_cursor: self.product_cursor + 1,
+                assertion_cursor: self.assertion_cursor,
+                valid: true,
+            },
+            value: value,
+        }
+    }
+
+    fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
+        if !self.valid || self.assertion_cursor >= ASSERTIONS.downcast_truncate() {
+            return QuadraticRelationStep {
+                interpreter: Self {
+                    nodes: self.nodes,
+                    product_cursor: self.product_cursor,
+                    assertion_cursor: self.assertion_cursor,
+                    valid: false,
+                },
+            }
+        }
+        QuadraticRelationStep {
+            interpreter: Self {
+                nodes: self.nodes,
+                product_cursor: self.product_cursor,
+                assertion_cursor: self.assertion_cursor + 1,
+                valid: true,
+            },
+        }
+    }
+}
+
+pub struct QuadraticRelationConstraintInterpreter<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+> {
+    witness: QuadraticRelationWitness<F, PRODUCTS, ASSERTIONS>,
+    product_residuals: [F; PRODUCTS],
+    assertion_residuals: [F; ASSERTIONS],
+    product_cursor: u32,
+    assertion_cursor: u32,
+    valid: bool,
+}
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    core::marker::Copy
+    for QuadraticRelationConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
+    pub fn new(_ witness: QuadraticRelationWitness<F, PRODUCTS, ASSERTIONS>) -> Self {
+        Self {
+            witness: witness,
+            product_residuals: [F::radix2_zero(); PRODUCTS],
+            assertion_residuals: [F::radix2_zero(); ASSERTIONS],
+            product_cursor: 0,
+            assertion_cursor: 0,
+            valid: witness.shape_valid,
+        }
+    }
+
+    pub fn finish(
+        self,
+    ) -> QuadraticRelationResiduals<F, PRODUCTS, ASSERTIONS> {
+        let valid = self.valid
+            && self.product_cursor == PRODUCTS.downcast_truncate()
+            && self.assertion_cursor == ASSERTIONS.downcast_truncate()
+        QuadraticRelationResiduals {
+            valid: valid,
+            products: if valid {
+                self.product_residuals
+            } else {
+                [F::radix2_zero(); PRODUCTS]
+            },
+            assertions: if valid {
+                self.assertion_residuals
+            } else {
+                [F::radix2_zero(); ASSERTIONS]
+            },
+        }
+    }
+}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationInterpreter<F>
+    for QuadraticRelationConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        if !self.valid || self.product_cursor >= PRODUCTS.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self {
+                    witness: self.witness,
+                    product_residuals: self.product_residuals,
+                    assertion_residuals: self.assertion_residuals,
+                    product_cursor: self.product_cursor,
+                    assertion_cursor: self.assertion_cursor,
+                    valid: false,
+                },
+                value: F::radix2_zero(),
+            }
+        }
+        let value = self.witness.nodes[self.product_cursor as usize]
+        let mut residuals = self.product_residuals
+        residuals[self.product_cursor as usize] = value.radix2_sub(
+            left.radix2_mul(right),
+        )
+        QuadraticPlanStep {
+            interpreter: Self {
+                witness: self.witness,
+                product_residuals: residuals,
+                assertion_residuals: self.assertion_residuals,
+                product_cursor: self.product_cursor + 1,
+                assertion_cursor: self.assertion_cursor,
+                valid: true,
+            },
+            value: value,
+        }
+    }
+
+    fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
+        if !self.valid || self.assertion_cursor >= ASSERTIONS.downcast_truncate() {
+            return QuadraticRelationStep {
+                interpreter: Self {
+                    witness: self.witness,
+                    product_residuals: self.product_residuals,
+                    assertion_residuals: self.assertion_residuals,
+                    product_cursor: self.product_cursor,
+                    assertion_cursor: self.assertion_cursor,
+                    valid: false,
+                },
+            }
+        }
+        let mut residuals = self.assertion_residuals
+        residuals[self.assertion_cursor as usize] = value
+        QuadraticRelationStep {
+            interpreter: Self {
+                witness: self.witness,
+                product_residuals: self.product_residuals,
+                assertion_residuals: residuals,
+                product_cursor: self.product_cursor,
+                assertion_cursor: self.assertion_cursor + 1,
+                valid: true,
+            },
         }
     }
 }

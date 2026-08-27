@@ -135,4 +135,80 @@ fn shared_plan_matches_independent_field_math_and_rejects_every_node_mutation() 
             );
         }
     }
+
+    for [a, b] in [
+        [3u32, 5],
+        [BABY_BEAR_MODULUS as u32 - 1, 19],
+        [0, 29],
+        [0x1234_5678, 0x3456_789a],
+    ] {
+        let a = (a as u64 % BABY_BEAR_MODULUS) as u32;
+        let b = (b as u64 % BABY_BEAR_MODULUS) as u32;
+        let c = bb_add(a, b);
+        let ab = bb_mul(a, b);
+        let bc = bb_mul(b, c);
+        let output = bb_mul(bb_add(a, ab), bc);
+        let clean = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_audit",
+            &[a, b, c, output, 0],
+            8,
+        );
+        assert_eq!(clean, [1, 0, 0, 0, 0, 0, output, output]);
+
+        for mutation in 1..=3 {
+            let mutated = call_words(
+                &mut store,
+                &instance,
+                "quadratic_relation_audit",
+                &[a, b, c, output, mutation],
+                8,
+            );
+            assert_eq!(mutated[0], 1, "mutation {mutation} executes the relation");
+            assert!(
+                mutated[1..4].iter().any(|residual| *residual != 0),
+                "relation node mutation {mutation} must violate a product residual",
+            );
+        }
+
+        let wrong_output = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_audit",
+            &[a, b, c, bb_add(output, 1), 0],
+            8,
+        );
+        assert_ne!(wrong_output[4], 0, "output assertion must reject mutation");
+
+        let changed_c = bb_add(c, 1);
+        let changed_bc = bb_mul(b, changed_c);
+        let changed_output = bb_mul(bb_add(a, ab), changed_bc);
+        let wrong_input = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_audit",
+            &[a, b, changed_c, changed_output, 0],
+            8,
+        );
+        assert_eq!(&wrong_input[1..5], &[0, 0, 0, 0]);
+        assert_ne!(wrong_input[5], 0, "input assertion must reject mutation");
+
+        for function in [
+            "quadratic_relation_wrong_product_shape",
+            "quadratic_relation_wrong_assertion_shape",
+        ] {
+            assert_eq!(
+                call_words(
+                    &mut store,
+                    &instance,
+                    function,
+                    &[a, b, c, output],
+                    1,
+                ),
+                [0],
+                "{function} must fail closed",
+            );
+        }
+    }
 }
