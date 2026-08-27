@@ -285,7 +285,9 @@ pub fn forged(_ address: u32, _ seed: u32) {
     assert!(
         error.contains(
             "a function that allocates a local array cannot also use a direct host memory region"
-        ),
+        ) && error.contains("allocation at block")
+            && error.contains("conflicts with unproven memory parameter")
+            && error.contains("class `RawAddr"),
         "unexpected fail-closed diagnostic: {error}",
     );
 }
@@ -463,6 +465,93 @@ pub fn run(_ value: u32) -> u32 {
         .get_typed_func::<i32, i32>(&mut store, "run")
         .unwrap();
     assert_eq!(run.call(&mut store, 41).unwrap(), 42);
+}
+
+#[test]
+fn typed_pointer_product_returns_preserve_arena_provenance() {
+    let wasm = compile_to_wasm(
+        r#"
+use core::{BrowserPtr, alloc_browser_object}
+
+struct Input { value: u32 }
+struct Output { value: u32 }
+struct Pair {
+    input: BrowserPtr<Input>,
+    output: BrowserPtr<Output>,
+}
+
+fn allocate_pair(_ reject: bool) -> Pair {
+    let input = alloc_browser_object<Input>()
+    let output = alloc_browser_object<Output>()
+    if reject { return Pair { input: input, output: output } }
+    Pair { input: input, output: output }
+}
+
+fn initialize(_ value: u32) uses (input: mut Input) {
+    input.value = value
+}
+
+fn transform() -> bool uses (input: Input, output: mut Output) {
+    let mut scratch = [0; 8]
+    scratch[7] = input.value + 1
+    output.value = scratch[7]
+    true
+}
+
+fn read() -> u32 uses (output: Output) { output.value }
+
+pub fn run(_ value: u32) -> u32 {
+    let pair = allocate_pair(false)
+    with (pair.input) { initialize(value) }
+    if !with (pair.input, pair.output) { transform() } { return 0 }
+    with (pair.output) { read() }
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("returned typed-pointer product emitted invalid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<i32, i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, 41).unwrap(), 42);
+}
+
+#[test]
+fn typed_pointer_product_returns_require_every_return_path() {
+    let error = compile_to_wasm_err(
+        r#"
+use core::{BrowserPtr, alloc_browser_object}
+
+struct Payload { value: u32 }
+struct Pair { payload: BrowserPtr<Payload> }
+
+fn select_pair(_ forged: bool, _ address: u32) -> Pair {
+    if forged {
+        return Pair { payload: BrowserPtr<Payload>::from_u32(address) }
+    }
+    Pair { payload: alloc_browser_object<Payload>() }
+}
+
+fn transform(_ value: u32) uses (payload: mut Payload) {
+    let mut scratch = [0; 8]
+    scratch[7] = value
+    payload.value = scratch[7]
+}
+
+pub fn run(_ forged: bool, _ address: u32, _ value: u32) {
+    let pair = select_pair(forged, address)
+    with (pair.payload) { transform(value) }
+}
+"#,
+    );
+    assert!(
+        error.contains("conflicts with unproven memory parameter")
+            && error.contains("while lowering Wasm function `transform`"),
+        "unexpected fail-closed diagnostic: {error}",
+    );
 }
 
 #[test]
@@ -652,6 +741,65 @@ pub fn run() -> u32 {
         .get_typed_func::<(), i32>(&mut store, "run")
         .unwrap();
     assert_eq!(run.call(&mut store, ()).unwrap(), 109_942);
+}
+
+#[test]
+fn address_carried_values_copy_into_effect_storage_without_scalar_expansion() {
+    let wasm = compile_to_wasm(
+        r#"
+use core::{BrowserPtr, alloc_browser_object}
+
+struct Payload { values: [u32; 8192] }
+
+fn empty_payload() -> Payload {
+    Payload { values: [0; 8192] }
+}
+
+fn initialize(_ seed: u32) uses (payload: mut Payload) {
+    payload.values[0] = seed
+    payload.values[8191] = seed + 1
+}
+
+fn clear() uses (payload: mut Payload) {
+    payload = empty_payload()
+}
+
+fn boundary_sum() -> u32 uses (payload: Payload) {
+    payload.values[0] + payload.values[8191]
+}
+
+pub fn run(_ seed: u32) -> u32 {
+    let payload: BrowserPtr<Payload> = alloc_browser_object<Payload>()
+    if payload.address() == 0 { return 1 }
+    with (payload) { initialize(seed) }
+    if with (payload) { boundary_sum() } != seed + seed + 1 { return 2 }
+    with (payload) { clear() }
+    with (payload) { boundary_sum() }
+}
+"#,
+    );
+    wasmparser::validate(&wasm).expect("address-carried effect copy emitted invalid Wasm");
+    let largest_body = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(Result::ok)
+        .filter_map(|payload| match payload {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(body.range().len()),
+            _ => None,
+        })
+        .max()
+        .expect("compiled module should contain functions");
+    assert!(
+        largest_body < 100_000,
+        "address-carried effect copy expanded into a {largest_body}-byte scalar body",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let run = instance
+        .get_typed_func::<i32, i32>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, 41).unwrap(), 0);
 }
 
 #[test]

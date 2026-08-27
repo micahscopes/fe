@@ -3088,46 +3088,71 @@ fn check_host_region_arena_disjoint(
     body: &RuntimeBody<'_>,
     arena_owned: &HashSet<RLocalId>,
 ) -> Result<(), LowerError> {
-    let allocates_array = body.blocks.iter().any(|block| {
-        block.stmts.iter().any(|stmt| {
-            matches!(
-                stmt,
-                RStmt::Assign {
-                    expr: RExpr::AllocObject { .. },
+    let allocation = body
+        .blocks
+        .iter()
+        .enumerate()
+        .find_map(|(block_index, block)| {
+            block
+                .stmts
+                .iter()
+                .enumerate()
+                .find_map(|(stmt_index, stmt)| {
+                    matches!(
+                        stmt,
+                        RStmt::Assign {
+                            expr: RExpr::AllocObject { .. },
+                            ..
+                        }
+                    )
+                    .then_some((block_index, stmt_index, stmt))
+                })
+        });
+    let Some((allocation_block, allocation_stmt_index, allocation_stmt)) = allocation else {
+        return Ok(());
+    };
+    let host_region_param = body.signature.params.iter().enumerate().find(|(_, param)| {
+        !arena_owned.contains(&param.local)
+            && matches!(
+                param.class,
+                RuntimeClass::RawAddr {
+                    space: AddressSpaceKind::Memory,
                     ..
                 }
             )
-        })
     });
-    if !allocates_array {
-        return Ok(());
-    }
-    let host_region_param = body.signature.params.iter().any(|param| {
-        if arena_owned.contains(&param.local) {
-            return false;
-        }
-        matches!(
-            param.class,
-            RuntimeClass::RawAddr {
-                space: AddressSpaceKind::Memory,
-                ..
-            }
-        )
-    });
-    let host_region_place = body.blocks.iter().any(|block| {
-        block
-            .stmts
-            .iter()
-            .any(|stmt| stmt_uses_host_memory_pointer(stmt, arena_owned))
-    });
-    if host_region_param || host_region_place {
-        return Err(LowerError::Unsupported(
+    let host_region_place = body
+        .blocks
+        .iter()
+        .enumerate()
+        .find_map(|(block_index, block)| {
+            block
+                .stmts
+                .iter()
+                .enumerate()
+                .find(|(_, stmt)| stmt_uses_host_memory_pointer(stmt, arena_owned))
+                .map(|(stmt_index, stmt)| (block_index, stmt_index, stmt))
+        });
+    if let Some((param_index, param)) = host_region_param {
+        return Err(LowerError::Unsupported(format!(
             "wasm target: a function that allocates a local array cannot also use a direct \
-             host memory region (a `MemPtr`/`RawAddr{Memory}` parameter or raw memory \
-             pointer); the canonical arena and host-chosen fixed addresses have no disjoint \
-             partition in slice A, so this mix fails closed"
-                .to_string(),
-        ));
+                 host memory region; allocation at block {allocation_block}, statement \
+                 {allocation_stmt_index}: `{allocation_stmt:?}` conflicts with unproven memory \
+                 parameter {param_index}, local `{:?}`, class `{:?}`; the canonical arena and \
+                 host-chosen fixed addresses have no disjoint partition in slice A, so this mix \
+                 fails closed",
+            param.local, param.class,
+        )));
+    }
+    if let Some((block_index, stmt_index, stmt)) = host_region_place {
+        return Err(LowerError::Unsupported(format!(
+            "wasm target: a function that allocates a local array cannot also use a direct host \
+             memory region; allocation at block {allocation_block}, statement \
+             {allocation_stmt_index}: `{allocation_stmt:?}` conflicts with unproven memory \
+             access at block {block_index}, statement {stmt_index}: `{stmt:?}`; the canonical \
+             arena and host-chosen fixed addresses have no disjoint partition in slice A, so \
+             this mix fails closed",
+        )));
     }
     Ok(())
 }
@@ -6667,6 +6692,108 @@ where
         }
     }
 
+    fn unique_local_definition<'body>(
+        body: &'body RuntimeBody<'db>,
+        local: RLocalId,
+    ) -> Option<&'body RExpr<'db>> {
+        let mut definition = None;
+        for stmt in body.blocks.iter().flat_map(|block| &block.stmts) {
+            let RStmt::Assign { dst, expr } = stmt else {
+                continue;
+            };
+            if *dst != local {
+                continue;
+            }
+            if definition.is_some() {
+                return None;
+            }
+            definition = Some(expr);
+        }
+        definition
+    }
+
+    fn aggregate_field_source(
+        body: &RuntimeBody<'db>,
+        aggregate: RLocalId,
+        index: u32,
+        visiting: &mut HashSet<RLocalId>,
+    ) -> Option<RLocalId> {
+        if !visiting.insert(aggregate) {
+            return None;
+        }
+        let source = match Self::unique_local_definition(body, aggregate)? {
+            RExpr::AggregateMake { fields, .. } => fields.get(index as usize).copied(),
+            RExpr::Use(source) => Self::aggregate_field_source(body, *source, index, visiting),
+            _ => None,
+        };
+        visiting.remove(&aggregate);
+        source
+    }
+
+    fn aggregate_call_source(
+        body: &RuntimeBody<'db>,
+        aggregate: RLocalId,
+        visiting: &mut HashSet<RLocalId>,
+    ) -> Option<RuntimeInstance<'db>> {
+        if !visiting.insert(aggregate) {
+            return None;
+        }
+        let source = match Self::unique_local_definition(body, aggregate)? {
+            RExpr::Call { callee, .. } => Some(*callee),
+            RExpr::Use(source) => Self::aggregate_call_source(body, *source, visiting),
+            _ => None,
+        };
+        visiting.remove(&aggregate);
+        source
+    }
+
+    fn materialized_aggregate_source(
+        body: &RuntimeBody<'db>,
+        reference: RLocalId,
+        visiting: &mut HashSet<RLocalId>,
+    ) -> Option<RLocalId> {
+        if !visiting.insert(reference) {
+            return None;
+        }
+        let source = match Self::unique_local_definition(body, reference)? {
+            RExpr::MaterializeToObject { src } => Some(*src),
+            RExpr::Use(source) | RExpr::RetagRef { value: source } => {
+                Self::materialized_aggregate_source(body, *source, visiting)
+            }
+            _ => None,
+        };
+        visiting.remove(&reference);
+        source
+    }
+
+    /// Resolve one flattened typed-pointer field of a private aggregate return
+    /// to the scalar local supplied by every returning path. Callers may then
+    /// require each source to be arena-owned before admitting the extracted
+    /// pointer. A missing field, non-address field, opaque producer, or one
+    /// forged return leaves the caller unproven.
+    fn aggregate_return_field_sources(
+        &self,
+        callee: RuntimeInstance<'db>,
+        index: u32,
+    ) -> Option<Vec<RLocalId>> {
+        let body = self.prepared_bodies.get(&callee)?;
+        let mut sources = Vec::new();
+        for block in &body.blocks {
+            let RTerminator::Return(Some(result)) = block.terminator else {
+                continue;
+            };
+            let source = Self::aggregate_field_source(body, result, index, &mut HashSet::new())?;
+            if !body
+                .value_class(source)
+                .is_some_and(Self::arena_address_param)
+            {
+                return None;
+            }
+            sources.push(source);
+        }
+        (!sources.is_empty()).then_some(sources)
+    }
+
     fn arena_owned_place_source(
         body: &RuntimeBody<'db>,
         place: &RuntimePlace<'db>,
@@ -6821,6 +6948,77 @@ where
                         RExpr::Load { place } => {
                             if let Some((field, root)) = self.arena_pointer_field(body, place) {
                                 field_loads.push((field, (*instance, root), destination));
+                            }
+                            if let PlaceRoot::Ref(root) = place.root
+                                && let [PlaceElem::Field(field)] = place.path.as_ref()
+                                && let Some(aggregate) = Self::materialized_aggregate_source(
+                                    body,
+                                    root,
+                                    &mut HashSet::new(),
+                                )
+                            {
+                                let mut requirements = vec![(*instance, root)];
+                                if let Some(source) = Self::aggregate_field_source(
+                                    body,
+                                    aggregate,
+                                    field.0.into(),
+                                    &mut HashSet::new(),
+                                ) {
+                                    requirements.push((*instance, source));
+                                } else if let Some(callee) = Self::aggregate_call_source(
+                                    body,
+                                    aggregate,
+                                    &mut HashSet::new(),
+                                ) && private_instances.contains(&callee)
+                                    && let Some(sources) =
+                                        self.aggregate_return_field_sources(callee, field.0.into())
+                                {
+                                    requirements
+                                        .extend(sources.into_iter().map(|source| (callee, source)));
+                                } else {
+                                    continue;
+                                }
+                                *call_requirements.entry(destination).or_default() +=
+                                    requirements.len();
+                                for requirement in requirements {
+                                    call_dependents
+                                        .entry(requirement)
+                                        .or_default()
+                                        .push(destination);
+                                }
+                            }
+                        }
+                        RExpr::AggregateExtract { value, index }
+                            if body
+                                .value_class(*dst)
+                                .is_some_and(Self::arena_address_param) =>
+                        {
+                            let direct_source = Self::aggregate_field_source(
+                                body,
+                                *value,
+                                *index,
+                                &mut HashSet::new(),
+                            );
+                            let call_source =
+                                Self::aggregate_call_source(body, *value, &mut HashSet::new());
+                            if let Some(source) = direct_source {
+                                local_dependents
+                                    .entry((*instance, source))
+                                    .or_default()
+                                    .push(destination);
+                            } else if let Some(callee) = call_source
+                                && private_instances.contains(&callee)
+                            {
+                                let sources = self.aggregate_return_field_sources(callee, *index);
+                                if let Some(sources) = sources {
+                                    for source in sources {
+                                        *call_requirements.entry(destination).or_default() += 1;
+                                        call_dependents
+                                            .entry((callee, source))
+                                            .or_default()
+                                            .push(destination);
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -10691,6 +10889,20 @@ where
             return Err(LowerError::Unsupported(format!(
                 "wasm target: aggregate copy source {source:?} has non-memory-lowerable leaves"
             )));
+        }
+        if self.is_address_carried_aggregate_value(source) {
+            let RuntimeClass::AggregateValue { layout } = source_class else {
+                return Err(LowerError::Internal(format!(
+                    "address-carried aggregate copy source {source:?} lost its value layout"
+                )));
+            };
+            // Both values already have the exact target-derived memory layout.
+            // Copy that representation with one checked loop instead of
+            // reloading and restoring every scalar leaf through SSA. This is
+            // still a Fe value copy: every address-carried producer owns an
+            // independent arena object before it reaches `CopyInto`.
+            let source_pointer = self.local_value(source)?;
+            return self.lower_copy_object_bytes_into(source_pointer, pointer, layout);
         }
         let shape = self.module.flat_shape(&source_class).ok_or_else(|| {
             LowerError::Unsupported(format!(
