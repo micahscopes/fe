@@ -75,6 +75,9 @@ impl Poseidon2Digest {
     pub fn zero() -> Self {
         Self { values: [BabyBear::zero(); DIGEST_FIELDS] }
     }
+    pub fn from_fields(_ values: own [BabyBear; DIGEST_FIELDS]) -> Self {
+        Self { values: values }
+    }
     pub fn from_u32s(_ values: own [u32; DIGEST_FIELDS]) -> Self {
         let mut digest = Self::zero()
         let mut index: usize = 0

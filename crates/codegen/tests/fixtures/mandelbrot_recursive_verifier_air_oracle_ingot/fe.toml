@@ -4,4 +4,5 @@ version = "0.1.0"
 
 [dependencies]
 mandelbrot_proof_recursive_verifier_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-verifier-air-baby-bear"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
 precision = "../../../../../demos/sketches/precision"

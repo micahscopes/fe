@@ -12,6 +12,7 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
 }
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
+use poseidon_baby_bear::{POSEIDON2_PERMUTATION_MULTIPLICATIONS, Poseidon2Digest, compress_plan}
 use quadratic_plan::{
     QuadraticRelationConstraintInterpreter,
     QuadraticRelationInterpreter,
@@ -23,6 +24,8 @@ use quadratic_plan::{
 
 pub const RECEIPT_HEADER_PRODUCTS: usize = 8
 pub const RECEIPT_HEADER_ASSERTIONS: usize = 9
+pub const MERKLE_NODE_PRODUCTS: usize = POSEIDON2_PERMUTATION_MULTIPLICATIONS + 9
+pub const MERKLE_NODE_ASSERTIONS: usize = 9
 
 /// Field projection of the exact receipt-header verifier task. The trace row
 /// is selected by its semantic position, so no caller-authored task opcode
@@ -187,4 +190,107 @@ pub fn evaluate_receipt_header_relation(_ inputs: ReceiptHeaderRelationInputs) -
     )
         .interpreter
         .finish()
+}
+
+/// One ordered binary Merkle dependency. `direction = 0` places the current
+/// digest on the left; `direction = 1` places its sibling on the left. The
+/// direction is a constrained field value, not a host branch.
+pub struct MerkleNodeRelationInputs {
+    pub child: Poseidon2Digest,
+    pub sibling: Poseidon2Digest,
+    pub direction: BabyBear,
+    pub expected_parent: Poseidon2Digest,
+}
+impl core::marker::Copy for MerkleNodeRelationInputs {}
+
+pub type MerkleNodeRelationWitness = QuadraticRelationWitness<
+    BabyBear,
+    MERKLE_NODE_PRODUCTS,
+    MERKLE_NODE_ASSERTIONS,
+>
+
+pub type MerkleNodeRelationResiduals = QuadraticRelationResiduals<
+    BabyBear,
+    MERKLE_NODE_PRODUCTS,
+    MERKLE_NODE_ASSERTIONS,
+>
+
+pub struct MerkleNodeRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub parent: Poseidon2Digest,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy for MerkleNodeRelationPlan<I> {}
+
+/// Interpret the ordered node through one shared arithmetic dependency plan.
+/// Eight selection products place the children without branching, then the
+/// production Poseidon2 compression plan contributes its complete 564-product
+/// permutation.
+pub fn merkle_node_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: MerkleNodeRelationInputs,
+    _ interpreter: I,
+) -> MerkleNodeRelationPlan<I> {
+    let mut interpreter = constrain_boolean(interpreter, inputs.direction)
+    let mut left_fields = [BabyBear::zero(); 8]
+    let mut right_fields = [BabyBear::zero(); 8]
+    let mut lane: usize = 0
+    while lane < 8 {
+        let child = inputs.child.field(lane.downcast_truncate())
+        let sibling = inputs.sibling.field(lane.downcast_truncate())
+        let selected = interpreter.multiply(inputs.direction, sibling - child)
+        interpreter = selected.interpreter
+        left_fields[lane] = child + selected.value
+        right_fields[lane] = child + sibling - left_fields[lane]
+        lane = lane + 1
+    }
+    let compressed = compress_plan(
+        interpreter,
+        Poseidon2Digest::from_fields(left_fields),
+        Poseidon2Digest::from_fields(right_fields),
+    )
+    interpreter = compressed.interpreter
+    lane = 0
+    while lane < 8 {
+        interpreter = constrain_equal(
+            interpreter,
+            compressed.value.field(lane.downcast_truncate()),
+            inputs.expected_parent.field(lane.downcast_truncate()),
+        )
+        lane = lane + 1
+    }
+    MerkleNodeRelationPlan { interpreter: interpreter, parent: compressed.value }
+}
+
+pub fn merkle_node_relation_witness(
+    _ inputs: MerkleNodeRelationInputs,
+) -> MerkleNodeRelationWitness {
+    merkle_node_relation_plan(
+        inputs,
+        QuadraticRelationWitnessInterpreter<
+            BabyBear,
+            MERKLE_NODE_PRODUCTS,
+            MERKLE_NODE_ASSERTIONS,
+        >::new(),
+    )
+        .interpreter
+        .finish()
+}
+
+pub fn merkle_node_relation_residuals(
+    _ inputs: MerkleNodeRelationInputs,
+    _ witness: MerkleNodeRelationWitness,
+) -> MerkleNodeRelationResiduals {
+    merkle_node_relation_plan(
+        inputs,
+        QuadraticRelationConstraintInterpreter<
+            BabyBear,
+            MERKLE_NODE_PRODUCTS,
+            MERKLE_NODE_ASSERTIONS,
+        >::new(witness),
+    )
+        .interpreter
+        .finish()
+}
+
+pub fn evaluate_merkle_node_relation(_ inputs: MerkleNodeRelationInputs) -> bool {
+    merkle_node_relation_plan(inputs, QuadraticRelationValueInterpreter::new()).interpreter.finish()
 }

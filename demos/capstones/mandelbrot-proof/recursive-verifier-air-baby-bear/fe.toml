@@ -4,5 +4,6 @@ version = "0.1.0"
 
 [dependencies]
 mandelbrot_proof_fixed_air_receipt_baby_bear = "../fixed-air-receipt-baby-bear"
+poseidon_baby_bear = "../../../../ingots/poseidon_baby_bear"
 precision = "../../../sketches/precision"
 quadratic_plan = "../../../../ingots/quadratic_plan"
