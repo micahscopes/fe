@@ -7,8 +7,21 @@
 //! than treating a trace boolean as proof of its computation.
 
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    PRODUCTION_LDE_LENGTH,
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
     ProductionSecuritySparseBabyBearReceipt,
     ProductionSecurityVerifierTrace,
+}
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+    SparseBaseLdeLeaf,
+    SparseInteractionLdeLeaf,
+    sparse_base_lde_leaf_commitment_permutations,
+    sparse_base_lde_leaf_commitment_plan,
+    sparse_interaction_lde_leaf_commitment_permutations,
+    sparse_interaction_lde_leaf_commitment_plan,
 }
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
@@ -26,6 +39,19 @@ pub const RECEIPT_HEADER_PRODUCTS: usize = 8
 pub const RECEIPT_HEADER_ASSERTIONS: usize = 9
 pub const MERKLE_NODE_PRODUCTS: usize = POSEIDON2_PERMUTATION_MULTIPLICATIONS + 9
 pub const MERKLE_NODE_ASSERTIONS: usize = 9
+pub const PRODUCTION_BASE_LEAF_PRODUCTS: usize =
+    sparse_base_lde_leaf_commitment_permutations<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >() * POSEIDON2_PERMUTATION_MULTIPLICATIONS
+pub const PRODUCTION_INTERACTION_LEAF_PRODUCTS: usize =
+    sparse_interaction_lde_leaf_commitment_permutations<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    >() * POSEIDON2_PERMUTATION_MULTIPLICATIONS
+pub const PRODUCTION_LEAF_ASSERTIONS: usize = 8
 
 /// Field projection of the exact receipt-header verifier task. The trace row
 /// is selected by its semantic position, so no caller-authored task opcode
@@ -377,4 +403,110 @@ pub fn binary_merkle_path_relation_plan<
         lane = lane + 1
     }
     BinaryMerklePathRelationPlan { interpreter: interpreter, root: node }
+}
+
+/// Canonical production base-LDE leaf. Shape words are derived from the
+/// production receipt type rather than accepted as witnesses.
+pub struct ProductionBaseLdeLeafRelationInputs {
+    pub index: BabyBear,
+    pub values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
+    pub expected_commitment: Poseidon2Digest,
+}
+impl core::marker::Copy for ProductionBaseLdeLeafRelationInputs {}
+
+/// Canonical production interaction-LDE leaf. The already authenticated base
+/// root is part of the nominal leaf schema and therefore the hash relation.
+pub struct ProductionInteractionLdeLeafRelationInputs {
+    pub index: BabyBear,
+    pub base_lde_root: Poseidon2Digest,
+    pub values: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
+    pub expected_commitment: Poseidon2Digest,
+}
+impl core::marker::Copy for ProductionInteractionLdeLeafRelationInputs {}
+
+pub struct ProductionLdeLeafRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub commitment: Poseidon2Digest,
+    pub codec_valid: bool,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
+    for ProductionLdeLeafRelationPlan<I> {}
+
+fn constrain_digest<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ actual: Poseidon2Digest,
+    _ expected: Poseidon2Digest,
+) -> I {
+    let mut interpreter = interpreter
+    let mut lane: u32 = 0
+    while lane < 8 {
+        interpreter = constrain_equal(
+            interpreter,
+            actual.field(lane),
+            expected.field(lane),
+        )
+        lane = lane + 1
+    }
+    interpreter
+}
+
+pub fn production_base_lde_leaf_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ inputs: ProductionBaseLdeLeafRelationInputs,
+    _ interpreter: I,
+) -> ProductionLdeLeafRelationPlan<I> {
+    let leaf = SparseBaseLdeLeaf<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    > {
+        limb_count: BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
+        trace_length: BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
+        lde_length: BabyBear::from_u32(PRODUCTION_LDE_LENGTH.downcast_truncate()),
+        index: inputs.index,
+        values: inputs.values,
+    }
+    let planned = sparse_base_lde_leaf_commitment_plan(interpreter, leaf)
+    let codec_valid = planned.is_valid()
+    ProductionLdeLeafRelationPlan {
+        interpreter: constrain_digest(
+            planned.interpreter,
+            planned.digest(),
+            inputs.expected_commitment,
+        ),
+        commitment: planned.digest(),
+        codec_valid: codec_valid,
+    }
+}
+
+pub fn production_interaction_lde_leaf_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ inputs: ProductionInteractionLdeLeafRelationInputs,
+    _ interpreter: I,
+) -> ProductionLdeLeafRelationPlan<I> {
+    let leaf = SparseInteractionLdeLeaf<
+        {PRODUCTION_LIMBS},
+        {PRODUCTION_TRACE_LENGTH},
+        {PRODUCTION_LDE_LENGTH},
+    > {
+        limb_count: BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
+        trace_length: BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
+        lde_length: BabyBear::from_u32(PRODUCTION_LDE_LENGTH.downcast_truncate()),
+        index: inputs.index,
+        base_lde_root: inputs.base_lde_root,
+        values: inputs.values,
+    }
+    let planned = sparse_interaction_lde_leaf_commitment_plan(interpreter, leaf)
+    let codec_valid = planned.is_valid()
+    ProductionLdeLeafRelationPlan {
+        interpreter: constrain_digest(
+            planned.interpreter,
+            planned.digest(),
+            inputs.expected_commitment,
+        ),
+        commitment: planned.digest(),
+        codec_valid: codec_valid,
+    }
 }

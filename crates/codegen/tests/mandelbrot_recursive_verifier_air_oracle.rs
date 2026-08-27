@@ -18,6 +18,15 @@ const MERKLE_ASSERTIONS: u32 = 9;
 const PATH_DEPTH: u32 = 4;
 const PATH_PRODUCTS: u32 = PATH_DEPTH * MERKLE_PRODUCTS;
 const PATH_ASSERTIONS: u32 = PATH_DEPTH + 9;
+const BASE_AIR_FIELDS: u32 = 260;
+const INTERACTION_AIR_FIELDS: u32 = 152;
+const PERMUTATION_PRODUCTS: u32 = 564;
+const BASE_LEAF_PERMUTATIONS: u32 = 34;
+const INTERACTION_LEAF_PERMUTATIONS: u32 = 21;
+const BASE_LEAF_PRODUCTS: u32 = BASE_LEAF_PERMUTATIONS * PERMUTATION_PRODUCTS;
+const INTERACTION_LEAF_PRODUCTS: u32 =
+    INTERACTION_LEAF_PERMUTATIONS * PERMUTATION_PRODUCTS;
+const LEAF_ASSERTIONS: u32 = 8;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
 const PATH_LEAF: [u32; 8] = [0, 1, 2, 3, 5, 8, 13, 21];
@@ -94,6 +103,19 @@ fn reference_compress(left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
     std::array::from_fn(|index| state[index].as_canonical_u32())
 }
 
+fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
+    message.extend_from_slice(fields);
+    let mut state = [P3BabyBear::ZERO; 16];
+    for block in message.chunks(8) {
+        for (destination, value) in state.iter_mut().zip(block) {
+            *destination = P3BabyBear::from_u32(*value);
+        }
+        default_babybear_poseidon2_16().permute_mut(&mut state);
+    }
+    std::array::from_fn(|index| state[index].as_canonical_u32())
+}
+
 fn merkle_arguments(
     child: [u32; 8],
     sibling: [u32; 8],
@@ -131,6 +153,35 @@ fn path_arguments(
     let mut values = Vec::with_capacity(11);
     values.extend([path_index, direction_source]);
     values.extend(root);
+    values.push(mutation);
+    values
+}
+
+fn base_leaf_fields(seed: u32, index: u32) -> Vec<u32> {
+    let mut fields = vec![4, 4096, 8192, index];
+    fields.extend((0..BASE_AIR_FIELDS).map(|lane| seed + lane * 17 + 1));
+    fields
+}
+
+fn interaction_leaf_fields(seed: u32, index: u32, base_root: [u32; 8]) -> Vec<u32> {
+    let mut fields = vec![4, 4096, 8192, index];
+    fields.extend(base_root);
+    fields.extend((0..INTERACTION_AIR_FIELDS).map(|lane| seed + lane * 29 + 3));
+    fields
+}
+
+fn leaf_arguments(
+    seed: u32,
+    index: u32,
+    base_root: Option<[u32; 8]>,
+    commitment: [u32; 8],
+    mutation: u32,
+) -> Vec<u32> {
+    let mut values = vec![seed, index];
+    if let Some(root) = base_root {
+        values.extend(root);
+    }
+    values.extend(commitment);
     values.push(mutation);
     values
 }
@@ -306,6 +357,152 @@ fn binary_merkle_path_relation_binds_index_and_chained_root() {
                 result[2] > 0,
                 "path product mutation {mutation} must reject"
             );
+        }
+    }
+}
+
+#[test]
+fn production_lde_leaf_relations_bind_derived_codecs_and_every_sponge_block() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compile_wasm())
+        .expect("recursive verifier AIR module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("recursive verifier AIR module should instantiate");
+
+    let base_seed = 101;
+    let base_index = 37;
+    let base_commitment: [u32; 8] = reference_field_commitment(
+        b"LD01",
+        &base_leaf_fields(base_seed, base_index),
+    );
+    assert_eq!(
+        audit(
+            &mut store,
+            &instance,
+            "production_base_lde_leaf_relation_audit",
+            &leaf_arguments(base_seed, base_index, None, base_commitment, 0),
+        ),
+        [1, 1, 0, 0, BASE_LEAF_PRODUCTS, LEAF_ASSERTIONS],
+    );
+
+    let interaction_seed = 211;
+    let interaction_index = 93;
+    let base_root = reference_compress(PATH_LEAF, PATH_SIBLINGS[0]);
+    let interaction_commitment: [u32; 8] = reference_field_commitment(
+        b"LD02",
+        &interaction_leaf_fields(interaction_seed, interaction_index, base_root),
+    );
+    assert_eq!(
+        audit(
+            &mut store,
+            &instance,
+            "production_interaction_lde_leaf_relation_audit",
+            &leaf_arguments(
+                interaction_seed,
+                interaction_index,
+                Some(base_root),
+                interaction_commitment,
+                0,
+            ),
+        ),
+        [1, 1, 0, 0, INTERACTION_LEAF_PRODUCTS, LEAF_ASSERTIONS],
+    );
+
+    for lane in 0..8 {
+        let mut wrong_base = base_commitment;
+        wrong_base[lane] = (wrong_base[lane] + 1) % BABY_BEAR_MODULUS;
+        let result = audit(
+            &mut store,
+            &instance,
+            "production_base_lde_leaf_relation_audit",
+            &leaf_arguments(base_seed, base_index, None, wrong_base, 0),
+        );
+        assert_eq!(result[0], 0, "wrong base commitment lane {lane}");
+        assert_eq!(result[1], 1);
+        assert!(result[3] > 0);
+
+        let mut wrong_interaction = interaction_commitment;
+        wrong_interaction[lane] =
+            (wrong_interaction[lane] + 1) % BABY_BEAR_MODULUS;
+        let result = audit(
+            &mut store,
+            &instance,
+            "production_interaction_lde_leaf_relation_audit",
+            &leaf_arguments(
+                interaction_seed,
+                interaction_index,
+                Some(base_root),
+                wrong_interaction,
+                0,
+            ),
+        );
+        assert_eq!(result[0], 0, "wrong interaction commitment lane {lane}");
+        assert_eq!(result[1], 1);
+        assert!(result[3] > 0);
+    }
+
+    for (name, values) in [
+        (
+            "base index",
+            leaf_arguments(base_seed, base_index + 1, None, base_commitment, 0),
+        ),
+        (
+            "interaction index",
+            leaf_arguments(
+                interaction_seed,
+                interaction_index + 1,
+                Some(base_root),
+                interaction_commitment,
+                0,
+            ),
+        ),
+    ] {
+        let export = if name == "base index" {
+            "production_base_lde_leaf_relation_audit"
+        } else {
+            "production_interaction_lde_leaf_relation_audit"
+        };
+        let result = audit(&mut store, &instance, export, &values);
+        assert_eq!(result[0], 0, "changed {name} must reject");
+        assert_eq!(result[1], 1);
+        assert!(result[3] > 0);
+    }
+
+    for permutation in 0..BASE_LEAF_PERMUTATIONS {
+        for offset in [1, PERMUTATION_PRODUCTS] {
+            let mutation = permutation * PERMUTATION_PRODUCTS + offset;
+            let result = audit(
+                &mut store,
+                &instance,
+                "production_base_lde_leaf_relation_audit",
+                &leaf_arguments(base_seed, base_index, None, base_commitment, mutation),
+            );
+            assert_eq!(result[0], 1);
+            assert_eq!(result[1], 1);
+            assert!(result[2] > 0, "base product mutation {mutation}");
+        }
+    }
+
+    for permutation in 0..INTERACTION_LEAF_PERMUTATIONS {
+        for offset in [1, PERMUTATION_PRODUCTS] {
+            let mutation = permutation * PERMUTATION_PRODUCTS + offset;
+            let result = audit(
+                &mut store,
+                &instance,
+                "production_interaction_lde_leaf_relation_audit",
+                &leaf_arguments(
+                    interaction_seed,
+                    interaction_index,
+                    Some(base_root),
+                    interaction_commitment,
+                    mutation,
+                ),
+            );
+            assert_eq!(result[0], 1);
+            assert_eq!(result[1], 1);
+            assert!(result[2] > 0, "interaction product mutation {mutation}");
         }
     }
 }

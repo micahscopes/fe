@@ -3,6 +3,11 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     MERKLE_NODE_ASSERTIONS,
     MERKLE_NODE_PRODUCTS,
     MerkleNodeRelationInputs,
+    PRODUCTION_BASE_LEAF_PRODUCTS,
+    PRODUCTION_INTERACTION_LEAF_PRODUCTS,
+    PRODUCTION_LEAF_ASSERTIONS,
+    ProductionBaseLdeLeafRelationInputs,
+    ProductionInteractionLdeLeafRelationInputs,
     RECEIPT_HEADER_ASSERTIONS,
     RECEIPT_HEADER_PRODUCTS,
     ReceiptHeaderRelationInputs,
@@ -12,14 +17,22 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     evaluate_receipt_header_relation,
     merkle_node_relation_residuals,
     merkle_node_relation_witness,
+    production_base_lde_leaf_relation_plan,
+    production_interaction_lde_leaf_relation_plan,
     receipt_header_relation_residuals,
     receipt_header_relation_witness,
+}
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
 }
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
 use quadratic_plan::{
     QuadraticRelationConstraintInterpreter,
+    QuadraticRelationStreamConstraintInterpreter,
+    QuadraticRelationStreamInterpreter,
     QuadraticRelationValueInterpreter,
     QuadraticRelationWitnessInterpreter,
 }
@@ -255,5 +268,158 @@ pub fn binary_merkle_path_relation_audit(
         nonzero_assertions,
         PATH_PRODUCTS.downcast_truncate(),
         PATH_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+fn base_leaf_values(_ seed: u32) -> [BabyBear; SPARSE_BASE_AIR_FIELDS] {
+    let mut values = [BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]
+    let mut index: usize = 0
+    while index < SPARSE_BASE_AIR_FIELDS {
+        let lane: u32 = index.downcast_truncate()
+        values[index] = BabyBear::from_u32(
+            seed + lane * 17 + 1,
+        )
+        index = index + 1
+    }
+    values
+}
+
+fn interaction_leaf_values(
+    _ seed: u32,
+) -> [BabyBear; SPARSE_INTERACTION_AIR_FIELDS] {
+    let mut values = [BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]
+    let mut index: usize = 0
+    while index < SPARSE_INTERACTION_AIR_FIELDS {
+        let lane: u32 = index.downcast_truncate()
+        values[index] = BabyBear::from_u32(
+            seed + lane * 29 + 3,
+        )
+        index = index + 1
+    }
+    values
+}
+
+pub fn production_base_lde_leaf_relation_audit(
+    _ seed: u32,
+    _ index: u32,
+    _ e0: u32,
+    _ e1: u32,
+    _ e2: u32,
+    _ e3: u32,
+    _ e4: u32,
+    _ e5: u32,
+    _ e6: u32,
+    _ e7: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let inputs = ProductionBaseLdeLeafRelationInputs {
+        index: BabyBear::from_u32(index),
+        values: base_leaf_values(seed),
+        expected_commitment: digest(e0, e1, e2, e3, e4, e5, e6, e7),
+    }
+    let streamed = production_base_lde_leaf_relation_plan(
+        inputs,
+        QuadraticRelationStreamInterpreter<
+            BabyBear,
+            PRODUCTION_BASE_LEAF_PRODUCTS,
+            PRODUCTION_LEAF_ASSERTIONS,
+        >::new(),
+    )
+    let stream_codec_valid = streamed.codec_valid
+    let stream = streamed.interpreter.finish()
+    if mutation > 0 && mutation <= PRODUCTION_BASE_LEAF_PRODUCTS.downcast_truncate() {
+        let node = mutation - 1
+        let mut row = stream.product(node)
+        row.output = row.output + BabyBear::one()
+        stream.replace_product(node, row)
+    }
+    let constrained = production_base_lde_leaf_relation_plan(
+        inputs,
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            PRODUCTION_BASE_LEAF_PRODUCTS,
+            PRODUCTION_LEAF_ASSERTIONS,
+        >::new(stream),
+    )
+    let constraint_codec_valid = constrained.codec_valid
+    let relation = constrained.interpreter.finish()
+    let direct = production_base_lde_leaf_relation_plan(
+        inputs,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    (
+        flag(direct.codec_valid && direct.interpreter.finish()),
+        flag(stream_codec_valid && constraint_codec_valid && relation.shape_valid),
+        relation.operand_copy_mismatches + relation.nonzero_products,
+        relation.assertion_copy_mismatches + relation.nonzero_assertions,
+        PRODUCTION_BASE_LEAF_PRODUCTS.downcast_truncate(),
+        PRODUCTION_LEAF_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+pub fn production_interaction_lde_leaf_relation_audit(
+    _ seed: u32,
+    _ index: u32,
+    _ b0: u32,
+    _ b1: u32,
+    _ b2: u32,
+    _ b3: u32,
+    _ b4: u32,
+    _ b5: u32,
+    _ b6: u32,
+    _ b7: u32,
+    _ e0: u32,
+    _ e1: u32,
+    _ e2: u32,
+    _ e3: u32,
+    _ e4: u32,
+    _ e5: u32,
+    _ e6: u32,
+    _ e7: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let inputs = ProductionInteractionLdeLeafRelationInputs {
+        index: BabyBear::from_u32(index),
+        base_lde_root: digest(b0, b1, b2, b3, b4, b5, b6, b7),
+        values: interaction_leaf_values(seed),
+        expected_commitment: digest(e0, e1, e2, e3, e4, e5, e6, e7),
+    }
+    let streamed = production_interaction_lde_leaf_relation_plan(
+        inputs,
+        QuadraticRelationStreamInterpreter<
+            BabyBear,
+            PRODUCTION_INTERACTION_LEAF_PRODUCTS,
+            PRODUCTION_LEAF_ASSERTIONS,
+        >::new(),
+    )
+    let stream_codec_valid = streamed.codec_valid
+    let stream = streamed.interpreter.finish()
+    if mutation > 0 && mutation <= PRODUCTION_INTERACTION_LEAF_PRODUCTS.downcast_truncate() {
+        let node = mutation - 1
+        let mut row = stream.product(node)
+        row.output = row.output + BabyBear::one()
+        stream.replace_product(node, row)
+    }
+    let constrained = production_interaction_lde_leaf_relation_plan(
+        inputs,
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            PRODUCTION_INTERACTION_LEAF_PRODUCTS,
+            PRODUCTION_LEAF_ASSERTIONS,
+        >::new(stream),
+    )
+    let constraint_codec_valid = constrained.codec_valid
+    let relation = constrained.interpreter.finish()
+    let direct = production_interaction_lde_leaf_relation_plan(
+        inputs,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    (
+        flag(direct.codec_valid && direct.interpreter.finish()),
+        flag(stream_codec_valid && constraint_codec_valid && relation.shape_valid),
+        relation.operand_copy_mismatches + relation.nonzero_products,
+        relation.assertion_copy_mismatches + relation.nonzero_assertions,
+        PRODUCTION_INTERACTION_LEAF_PRODUCTS.downcast_truncate(),
+        PRODUCTION_LEAF_ASSERTIONS.downcast_truncate(),
     )
 }

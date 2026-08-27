@@ -130,10 +130,13 @@ use merkle_browser::{
 use merkle_receipt::MerkleMultiOpening
 use poseidon_baby_bear::{
     PackedCommitment,
+    Poseidon2CanonicalCommitmentPlan,
     Poseidon2Digest,
     Poseidon2FieldDomain,
     bind as poseidon_bind,
+    canonical_commitment_permutations,
     commit_canonical,
+    commit_canonical_plan,
     compress as poseidon_compress,
     squeeze_ext4,
 }
@@ -149,6 +152,7 @@ use precision::polynomial::{
     radix2_log,
     write_radix2_coset_lde,
 }
+use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
 use core::ops::Eq
 
 const SPARSE_TRACE_FRONTIER_LEVELS: usize = 23
@@ -1996,10 +2000,36 @@ pub fn sparse_base_lde_leaf_commitment<
 >(
     _ leaf: SparseBaseLdeLeaf<L, TRACE, LDE>,
 ) -> Poseidon2Digest {
-    commit_canonical<
+    sparse_base_lde_leaf_commitment_plan(
+        QuadraticValueInterpreter::new(),
+        leaf,
+    ).digest()
+}
+
+pub const fn sparse_base_lde_leaf_commitment_permutations<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> usize {
+    canonical_commitment_permutations(
+        <SparseBaseLdeLeaf<L, TRACE, LDE> as CanonicalWords>::WORDS,
+    )
+}
+
+pub fn sparse_base_lde_leaf_commitment_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ interpreter: I,
+    _ leaf: SparseBaseLdeLeaf<L, TRACE, LDE>,
+) -> Poseidon2CanonicalCommitmentPlan<I> {
+    commit_canonical_plan<
+        I,
         MandelbrotSparseBaseLdeLeafBabyBearV1,
         SparseBaseLdeLeaf<L, TRACE, LDE>,
-    >(ref leaf).digest()
+    >(interpreter, ref leaf)
 }
 
 fn sparse_base_lde_leaf_at<
@@ -2223,10 +2253,36 @@ pub fn sparse_interaction_lde_leaf_commitment<
 >(
     _ leaf: SparseInteractionLdeLeaf<L, TRACE, LDE>,
 ) -> Poseidon2Digest {
-    commit_canonical<
+    sparse_interaction_lde_leaf_commitment_plan(
+        QuadraticValueInterpreter::new(),
+        leaf,
+    ).digest()
+}
+
+pub const fn sparse_interaction_lde_leaf_commitment_permutations<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> usize {
+    canonical_commitment_permutations(
+        <SparseInteractionLdeLeaf<L, TRACE, LDE> as CanonicalWords>::WORDS,
+    )
+}
+
+pub fn sparse_interaction_lde_leaf_commitment_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ interpreter: I,
+    _ leaf: SparseInteractionLdeLeaf<L, TRACE, LDE>,
+) -> Poseidon2CanonicalCommitmentPlan<I> {
+    commit_canonical_plan<
+        I,
         MandelbrotSparseInteractionLdeLeafBabyBearV1,
         SparseInteractionLdeLeaf<L, TRACE, LDE>,
-    >(ref leaf).digest()
+    >(interpreter, ref leaf)
 }
 
 fn sparse_interaction_lde_leaf_at<
