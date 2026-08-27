@@ -29,7 +29,6 @@ use poseidon_baby_bear::{
     place_partial_rounds,
     permute16,
     poseidon2_permutation_plan,
-    poseidon2_power_copy_mismatches,
     poseidon2_sbox_count,
     poseidon2_power7_plan,
     poseidon2_workgroup_destination,
@@ -42,8 +41,10 @@ use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus, BABY_BEAR_MO
 use precision::polynomial::Radix2Field
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 use quadratic_plan::{
+    QuadraticProductRow,
     QuadraticRelationConstraintInterpreter,
     QuadraticRelationInterpreter,
+    QuadraticRelationStreamConstraintInterpreter,
     QuadraticRelationStreamInterpreter,
     QuadraticRelationValueInterpreter,
     QuadraticRelationWitnessInterpreter,
@@ -514,8 +515,9 @@ pub fn poseidon2_product_task_descriptor(_ index: u32) -> (
 
 /// Place the complete two-to-one hash relation into typed browser memory and
 /// compare every streamed product with the existing fixed witness
-/// interpretation. The local stream audit checks arithmetic only. Future task
-/// rows and copy interactions must still authenticate the dependency graph.
+/// interpretation. The local stream audit checks arithmetic only; a second
+/// interpretation of this same authored function consumes the untrusted rows
+/// and authenticates every operand copy, round transition, and output claim.
 pub fn poseidon2_compression_stream_audit(
     _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
     _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
@@ -525,7 +527,8 @@ pub fn poseidon2_compression_stream_audit(
     _ wrong_lane: u32,
     _ rewire_sbox: u32,
 ) -> (
-    u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     let left = Poseidon2Digest::from_u32s([
@@ -592,18 +595,37 @@ pub fn poseidon2_compression_stream_audit(
         streamed.replace_product(index, row)
     }
     if rewire_sbox > 0 && rewire_sbox <= poseidon2_sbox_count() {
-        let index = (rewire_sbox - 1)
+        let base = (rewire_sbox - 1)
             * POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate()
-            + 1
-        let mut row = streamed.product(index)
-        let rewired = row.left + BabyBear::one()
-        row.left = rewired
-        row.right = rewired
-        row.output = rewired.radix2_mul(rewired)
-        streamed.replace_product(index, row)
+        let rewired = streamed.product(base).left + BabyBear::one()
+        let square = rewired.radix2_mul(rewired)
+        let fourth = square.radix2_mul(square)
+        let cube = rewired.radix2_mul(square)
+        let seventh = cube.radix2_mul(fourth)
+        let _square_written = streamed.replace_product(base, QuadraticProductRow {
+            left: rewired, right: rewired, output: square,
+        })
+        let _fourth_written = streamed.replace_product(base + 1, QuadraticProductRow {
+            left: square, right: square, output: fourth,
+        })
+        let _cube_written = streamed.replace_product(base + 2, QuadraticProductRow {
+            left: rewired, right: square, output: cube,
+        })
+        let _seventh_written = streamed.replace_product(base + 3, QuadraticProductRow {
+            left: cube, right: fourth, output: seventh,
+        })
     }
     let audit = streamed.audit()
-    let copy_mismatches = poseidon2_power_copy_mismatches<8>(streamed)
+    let constrained = poseidon2_compression_relation(
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            POSEIDON2_PERMUTATION_MULTIPLICATIONS,
+            8,
+        >::new(streamed),
+        left,
+        right,
+        expected,
+    ).interpreter.finish()
 
     (
         if audit.shape_valid { 1 } else { 0 },
@@ -611,7 +633,11 @@ pub fn poseidon2_compression_stream_audit(
         placement_mismatches,
         audit.nonzero_products,
         audit.nonzero_assertions,
-        copy_mismatches,
+        if constrained.shape_valid { 1 } else { 0 },
+        constrained.operand_copy_mismatches,
+        constrained.nonzero_products,
+        constrained.assertion_copy_mismatches,
+        constrained.nonzero_assertions,
         output.field(0).to_u32(), output.field(1).to_u32(),
         output.field(2).to_u32(), output.field(3).to_u32(),
         output.field(4).to_u32(), output.field(5).to_u32(),

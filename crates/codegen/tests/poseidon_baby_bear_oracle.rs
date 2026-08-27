@@ -341,15 +341,15 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             &instance,
             "poseidon2_compression_stream_audit",
             &compression_stream_arguments(input, 0, 0, 0),
-            14,
+            18,
         );
         assert_eq!(
-            &streamed[..6],
-            &[1, 1, 0, 0, 0, 0],
+            &streamed[..10],
+            &[1, 1, 0, 0, 0, 1, 0, 0, 0, 0],
             "streamed compression relation differs for {input:?}",
         );
         assert_eq!(
-            &streamed[6..],
+            &streamed[10..],
             &expected[..8],
             "streamed compression output differs for {input:?}",
         );
@@ -406,7 +406,7 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             &instance,
             "poseidon2_compression_stream_audit",
             &compression_stream_arguments(input, mutation, 0, 0),
-            14,
+            18,
         );
         assert_eq!(result[0], 1, "mutation {mutation} retains stream shape");
         assert_eq!(result[1], 1, "direct compression relation remains exact");
@@ -419,6 +419,11 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             "streamed product mutation {mutation} must violate local arithmetic",
         );
         assert_eq!(result[4], 0, "product mutation does not alter assertions");
+        assert_eq!(result[5], 1, "the authored relation retains exact shape");
+        assert!(
+            result[7] > 0,
+            "authored re-interpretation must reject product mutation {mutation}",
+        );
     }
 
     for wrong_lane in 1..=8 {
@@ -427,7 +432,7 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             &instance,
             "poseidon2_compression_stream_audit",
             &compression_stream_arguments(input, 0, wrong_lane, 0),
-            14,
+            18,
         );
         assert_eq!(result[0], 1, "wrong output retains stream shape");
         assert_eq!(result[1], 0, "wrong output lane {wrong_lane} must reject");
@@ -437,7 +442,14 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             result[4] > 0,
             "wrong output lane {wrong_lane} must violate an assertion",
         );
-        assert_eq!(result[5], 0, "wrong output does not alter internal copies");
+        assert_eq!(result[5], 1, "the authored relation retains exact shape");
+        assert_eq!(result[6], 0, "wrong output does not alter operand copies");
+        assert_eq!(result[7], 0, "wrong output does not alter products");
+        assert_eq!(result[8], 0, "stored and live assertions still agree");
+        assert!(
+            result[9] > 0,
+            "live authored assertion must reject wrong lane {wrong_lane}",
+        );
     }
 
     for rewire_sbox in 1..=PERMUTATION_MULTIPLICATIONS / 4 {
@@ -446,7 +458,7 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             &instance,
             "poseidon2_compression_stream_audit",
             &compression_stream_arguments(input, 0, 0, rewire_sbox),
-            14,
+            18,
         );
         assert_eq!(result[0], 1, "rewire {rewire_sbox} retains stream shape");
         assert_eq!(result[1], 1, "direct compression relation remains exact");
@@ -459,10 +471,12 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             "coherently rewired product {rewire_sbox} remains locally quadratic",
         );
         assert_eq!(result[4], 0, "rewire does not alter stored assertions");
+        assert_eq!(result[5], 1, "the authored relation retains exact shape");
         assert!(
-            result[5] > 0,
-            "coherently rewired S-box {rewire_sbox} must violate internal copy topology",
+            result[6] > 0,
+            "coherently rewired S-box {rewire_sbox} must violate authored topology",
         );
+        assert_eq!(result[7], 0, "coherent products remain locally valid");
     }
 }
 

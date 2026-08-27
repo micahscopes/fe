@@ -21,7 +21,6 @@ use poseidon_grain::{
 }
 use quadratic_plan::{
     QuadraticPlanInterpreter,
-    QuadraticRelationStream,
     QuadraticValueInterpreter,
 }
 
@@ -465,51 +464,6 @@ pub fn write_poseidon2_product_task(
         task.round_index = final_sbox / WIDTH.downcast_truncate()
         task.lane = final_sbox % WIDTH.downcast_truncate()
     }
-}
-
-/// Check the seven internal copy edges of every power-seven task. This binds
-/// the four locally quadratic rows into the intended exponentiation chain.
-/// Round-state, constant, linear-layer, and output copies remain separate
-/// topology and must also be authenticated by the enclosing permutation AIR.
-pub fn poseidon2_power_copy_mismatches<const ASSERTIONS: usize>(
-    _ stream: QuadraticRelationStream<
-        BabyBear,
-        {POSEIDON2_PERMUTATION_MULTIPLICATIONS},
-        ASSERTIONS,
-    >,
-) -> u32 {
-    let mut mismatches: u32 = 0
-    let mut sbox: u32 = 0
-    while sbox < poseidon2_sbox_count() {
-        let base = sbox * POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate()
-        let square = stream.product(base)
-        let fourth = stream.product(base + 1)
-        let cube = stream.product(base + 2)
-        let seventh = stream.product(base + 3)
-        if !square.left.equals(square.right) {
-            mismatches = mismatches + 1
-        }
-        if !fourth.left.equals(square.output) {
-            mismatches = mismatches + 1
-        }
-        if !fourth.right.equals(square.output) {
-            mismatches = mismatches + 1
-        }
-        if !cube.left.equals(square.left) {
-            mismatches = mismatches + 1
-        }
-        if !cube.right.equals(square.output) {
-            mismatches = mismatches + 1
-        }
-        if !seventh.left.equals(cube.output) {
-            mismatches = mismatches + 1
-        }
-        if !seventh.right.equals(fourth.output) {
-            mismatches = mismatches + 1
-        }
-        sbox = sbox + 1
-    }
-    mismatches
 }
 
 /// One authored quadratic schedule for the Poseidon2 power-seven map. Scalar
