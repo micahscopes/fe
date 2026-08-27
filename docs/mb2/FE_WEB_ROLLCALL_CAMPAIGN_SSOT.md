@@ -400,6 +400,20 @@ existing Definition of done, not a second campaign checklist:
   recursive-verifier target passes 2/2 in 22.90 seconds. This authenticates one
   ordered hash dependency. Leaf commitments, canonical multipath topology,
   and complete base or interaction roots remain to be constrained.
+
+  Commit `a5fc8b393` composes that same ordered node plan into a const-generic
+  bottom-up binary path relation. Every direction remains a constrained field
+  witness, their little-endian linear reconstruction must equal the public path
+  index, and only the final eight-field root is asserted. The four-level gate
+  therefore derives 2,292 products and 13 assertions without copying Poseidon
+  or introducing a second path evaluator. It agrees with independent Plonky3
+  roots for all 16 path indices, rejects each wrong root lane, rejects a path
+  index that disagrees with the supplied direction bits, and rejects sampled
+  product mutations in every chained node. The complete target passes 3/3 in
+  31.49 seconds. Production base and interaction openings use deduplicated
+  multipaths, so their canonical fixed-capacity topology and leaf commitments
+  remain the next relation layer rather than being approximated by independent
+  binary paths.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
