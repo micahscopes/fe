@@ -67,6 +67,28 @@ fn audit(
     })
 }
 
+fn stream_audit(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    values: [u32; 7],
+) -> [u32; 8] {
+    let function = instance
+        .get_func(&mut *store, "recursive_merge_stream_audit")
+        .expect("recursive merge stream audit export");
+    let params: Vec<Val> = values
+        .into_iter()
+        .map(|value| Val::I32(value as i32))
+        .collect();
+    let mut results = vec![Val::I32(0); 8];
+    function
+        .call(&mut *store, &params, &mut results)
+        .expect("recursive merge stream audit should execute");
+    std::array::from_fn(|index| match results[index] {
+        Val::I32(value) => value as u32,
+        ref other => panic!("unexpected stream result lane {index}: {other:?}"),
+    })
+}
+
 #[test]
 fn recursive_merge_relation_matches_integer_semantics_and_rejects_mutations() {
     let engine = wasmtime::Engine::default();
@@ -97,6 +119,11 @@ fn recursive_merge_relation_matches_integer_semantics_and_rejects_mutations() {
             [1, 1, 1, 0, 0, EXPECTED_PRODUCTS, EXPECTED_ASSERTIONS,],
             "valid ordered merge {values:?}",
         );
+        assert_eq!(
+            stream_audit(&mut store, &instance, values),
+            [1, 0, 0, 1, 0, 0, 0, 0],
+            "valid streamed merge {values:?}",
+        );
 
         for mutation in 1..=12 {
             let mut mutated = values;
@@ -114,6 +141,26 @@ fn recursive_merge_relation_matches_integer_semantics_and_rejects_mutations() {
                 "mutation {mutation} must produce a nonzero residual",
             );
         }
+
+        for mutation in 1..=13 {
+            let mut mutated = values;
+            mutated[6] = mutation;
+            let result = stream_audit(&mut store, &instance, mutated);
+            assert_eq!(result[0], 1, "mutation preserves stream shape");
+            assert_eq!(result[3], 1, "mutation preserves replay shape");
+            assert!(
+                result[1..8].iter().any(|value| *value > 0),
+                "streamed mutation {mutation} must reject",
+            );
+            if mutation == 13 {
+                assert_eq!(&result[1..3], &[0, 0]);
+                assert!(
+                    result[4] > 0,
+                    "coherent products must not conceal changed operand copies",
+                );
+                assert_eq!(result[5], 0, "coherent products remain locally valid");
+            }
+        }
     }
 
     for invalid in [
@@ -128,6 +175,10 @@ fn recursive_merge_relation_matches_integer_semantics_and_rejects_mutations() {
         assert_eq!(result[1], 0, "invalid constrained relation {invalid:?}");
         assert_eq!(result[2], 1, "invalid values retain fixed relation shape");
         assert!(result[3] > 0 || result[4] > 0);
+        let streamed = stream_audit(&mut store, &instance, invalid);
+        assert_eq!(streamed[0], 1, "invalid values retain stream shape");
+        assert_eq!(streamed[3], 1, "invalid values retain replay shape");
+        assert!(streamed[1..8].iter().any(|value| *value > 0));
     }
 
     let modular_wrap_attack = audit(
@@ -153,4 +204,20 @@ fn recursive_merge_relation_matches_integer_semantics_and_rejects_mutations() {
         "attack retains the exact plan shape"
     );
     assert!(modular_wrap_attack[4] > 0, "wrap must violate an assertion");
+    let streamed_wrap = stream_audit(
+        &mut store,
+        &instance,
+        [
+            MAX_RECURSIVE_CLAIM_BOUND - 1,
+            134_217_726,
+            134_217_727,
+            1,
+            1,
+            37,
+            12,
+        ],
+    );
+    assert_eq!(streamed_wrap[0], 1);
+    assert_eq!(streamed_wrap[3], 1);
+    assert!(streamed_wrap[7] > 0, "stream replay rejects field wrap");
 }

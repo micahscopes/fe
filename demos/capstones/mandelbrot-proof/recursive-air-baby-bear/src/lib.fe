@@ -15,6 +15,10 @@ use quadratic_plan::{
     QuadraticRelationConstraintInterpreter,
     QuadraticRelationInterpreter,
     QuadraticRelationResiduals,
+    QuadraticRelationStream,
+    QuadraticRelationStreamConstraintAudit,
+    QuadraticRelationStreamConstraintInterpreter,
+    QuadraticRelationStreamInterpreter,
     QuadraticRelationValueInterpreter,
     QuadraticRelationWitness,
     QuadraticRelationWitnessInterpreter,
@@ -89,6 +93,12 @@ pub type RecursiveMergeArithmeticWitness = QuadraticRelationWitness<
 >
 
 pub type RecursiveMergeResiduals = QuadraticRelationResiduals<
+    BabyBear,
+    RECURSIVE_MERGE_PRODUCTS,
+    RECURSIVE_MERGE_ASSERTIONS,
+>
+
+pub type RecursiveMergeRelationStream = QuadraticRelationStream<
     BabyBear,
     RECURSIVE_MERGE_PRODUCTS,
     RECURSIVE_MERGE_ASSERTIONS,
@@ -504,6 +514,66 @@ pub fn recursive_merge_relation_witness_from_auxiliary<const L: usize>(
         auxiliary: auxiliary,
         arithmetic: plan.interpreter.finish(),
     }
+}
+
+/// Stream the exact merge relation into typed browser memory. The auxiliary
+/// columns remain caller-owned semantic witness, while every product and
+/// assertion row is written incrementally through the shared relation
+/// interpreter rather than materialized as a second aggregate plan.
+pub fn recursive_merge_relation_stream<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+) -> RecursiveMergeRelationStream {
+    let auxiliary = derive_recursive_merge_auxiliary(left, right, parent)
+    recursive_merge_relation_stream_from_auxiliary(
+        left,
+        right,
+        parent,
+        auxiliary,
+    )
+}
+
+pub fn recursive_merge_relation_stream_from_auxiliary<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+    _ auxiliary: RecursiveMergeAuxiliary,
+) -> RecursiveMergeRelationStream {
+    recursive_merge_plan(
+        left,
+        right,
+        parent,
+        auxiliary,
+        QuadraticRelationStreamInterpreter<
+            BabyBear,
+            RECURSIVE_MERGE_PRODUCTS,
+            RECURSIVE_MERGE_ASSERTIONS,
+        >::new(),
+    ).interpreter.finish()
+}
+
+/// Re-run the sole authored merge relation against an untrusted stream. This
+/// binds stored operand copies, local products, stored assertions, live public
+/// claims, range bits, and carry dependencies without a parallel wiring table.
+pub fn recursive_merge_relation_stream_audit<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+    _ auxiliary: RecursiveMergeAuxiliary,
+    _ stream: RecursiveMergeRelationStream,
+) -> QuadraticRelationStreamConstraintAudit {
+    recursive_merge_plan(
+        left,
+        right,
+        parent,
+        auxiliary,
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            RECURSIVE_MERGE_PRODUCTS,
+            RECURSIVE_MERGE_ASSERTIONS,
+        >::new(stream),
+    ).interpreter.finish()
 }
 
 pub fn recursive_merge_relation_residuals<const L: usize>(

@@ -5,6 +5,8 @@ use mandelbrot_proof_recursive_air_baby_bear::{
     derive_recursive_merge_auxiliary,
     evaluate_recursive_merge_relation,
     recursive_merge_relation_residuals,
+    recursive_merge_relation_stream_audit,
+    recursive_merge_relation_stream_from_auxiliary,
     recursive_merge_relation_witness,
     recursive_merge_relation_witness_from_auxiliary,
 }
@@ -167,5 +169,111 @@ pub fn recursive_merge_air_audit(
         assertion_nonzero,
         RECURSIVE_MERGE_PRODUCTS.downcast_truncate(),
         RECURSIVE_MERGE_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+/// Stream and re-interpret the merge relation in a separate call so the old
+/// fixed aggregate witness and the browser-backed trace are never live at the
+/// same time.
+pub fn recursive_merge_stream_audit(
+    _ start: u32,
+    _ middle: u32,
+    _ end: u32,
+    _ left_leaves: u32,
+    _ right_leaves: u32,
+    _ seed: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let mut left = interval(
+        left_leaves,
+        seed,
+        start,
+        middle,
+        seed + 100,
+        seed + 200,
+    )
+    let mut right = interval(
+        right_leaves,
+        seed,
+        middle,
+        end,
+        seed + 200,
+        seed + 300,
+    )
+    let mut parent = interval(
+        left_leaves + right_leaves,
+        seed,
+        start,
+        end,
+        seed + 100,
+        seed + 300,
+    )
+    match mutation {
+        1 => { right.statement = statement(seed + 1) }
+        2 => { right.start = boundary(seed + 201) }
+        3 => { right.start_iteration = middle + 1 }
+        4 => { parent.leaves = parent.leaves + 1 }
+        5 => { parent.statement = statement(seed + 1) }
+        6 => { parent.start = boundary(seed + 101) }
+        7 => { parent.end_iteration = end + 1 }
+        8 => { left.valid = false }
+        _ => {}
+    }
+
+    let mut auxiliary = derive_recursive_merge_auxiliary(left, right, parent)
+    if mutation == 10 {
+        auxiliary.left_start.bits[0] =
+            auxiliary.left_start.bits[0] + BabyBear::one()
+    } else if mutation == 11 {
+        auxiliary.left_span_addition.carries[0] =
+            auxiliary.left_span_addition.carries[0] + BabyBear::one()
+    } else if mutation == 12 {
+        let mut carry: u32 = 0
+        auxiliary.left_span_addition.carries[0] = BabyBear::zero()
+        let mut index: usize = 0
+        while index < RECURSIVE_MERGE_BITS {
+            auxiliary.left_span_minus_one.bits[index] = BabyBear::one()
+            let shift: u32 = index.downcast_truncate()
+            let total = ((left.start_iteration >> shift) & 1) + 1 + carry
+            carry = total >> 1
+            auxiliary.left_span_addition.carries[index + 1] =
+                BabyBear::from_u32(carry)
+            index = index + 1
+        }
+    }
+    let stream = recursive_merge_relation_stream_from_auxiliary(
+        left,
+        right,
+        parent,
+        auxiliary,
+    )
+    if mutation == 9 {
+        let mut row = stream.product(0)
+        row.output = row.output + BabyBear::one()
+        let _replaced = stream.replace_product(0, row)
+    } else if mutation == 13 {
+        let mut row = stream.product(0)
+        row.left = row.left + BabyBear::one()
+        row.right = row.right + BabyBear::one()
+        row.output = row.left.radix2_mul(row.right)
+        let _replaced = stream.replace_product(0, row)
+    }
+    let local = stream.audit()
+    let replay = recursive_merge_relation_stream_audit(
+        left,
+        right,
+        parent,
+        auxiliary,
+        stream,
+    )
+    (
+        if local.shape_valid { 1 } else { 0 },
+        local.nonzero_products,
+        local.nonzero_assertions,
+        if replay.shape_valid { 1 } else { 0 },
+        replay.operand_copy_mismatches,
+        replay.nonzero_products,
+        replay.assertion_copy_mismatches,
+        replay.nonzero_assertions,
     )
 }
