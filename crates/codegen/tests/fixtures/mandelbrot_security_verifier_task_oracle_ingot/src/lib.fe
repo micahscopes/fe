@@ -1,0 +1,107 @@
+//! Structural oracle boundary for the production security verifier task plan.
+
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    PRODUCTION_SECURITY_VERIFIER_TASK_COUNT,
+    ProductionSecurityVerifierInterpreter,
+    ProductionSecurityVerifierTask,
+    ProductionSecurityVerifierTaskKind,
+    ProductionSecurityVerifierTraceInterpreter,
+    ProductionSecurityVerifierTraceReplayInterpreter,
+    ProductionSecurityVerifierTraceRow,
+    ProductionSecurityVerifierTraceTask,
+    production_security_verifier_task_at,
+}
+
+/// Project the nominal task into a test-only tag and payload. Production code
+/// never consumes this numeric representation.
+pub fn production_security_verifier_task_descriptor(
+    _ index: u32,
+) -> (u32, u32) {
+    match production_security_verifier_task_at(index) {
+        ProductionSecurityVerifierTask::ReceiptHeader => (1, 0),
+        ProductionSecurityVerifierTask::BaseOpening => (2, 0),
+        ProductionSecurityVerifierTask::InteractionOpening => (3, 0),
+        ProductionSecurityVerifierTask::SecurityTranscript => (4, 0),
+        ProductionSecurityVerifierTask::FriAuthentication => (5, 0),
+        ProductionSecurityVerifierTask::AirRequestSet => (6, 0),
+        ProductionSecurityVerifierTask::Query(query) => (7, query),
+        ProductionSecurityVerifierTask::Invalid => (0, 0),
+    }
+}
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+/// Exercise the memory-backed task trace without compiling the large receipt
+/// verifier. Mutation one coherently changes a stored task while keeping its
+/// local result true. Mutation two changes only a stored result. Mutation
+/// three changes the final query payload while retaining a valid task variant.
+pub fn production_security_verifier_task_trace_audit(
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32) {
+    let mut writer = ProductionSecurityVerifierTraceInterpreter::new()
+    let mut cursor: u32 = 0
+    while cursor < PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate() {
+        writer = writer.observe(
+            production_security_verifier_task_at(cursor),
+            true,
+        ).interpreter
+        cursor = cursor + 1
+    }
+    let trace = writer.finish()
+
+    if mutation == 1 {
+        let _ = trace.replace_row(
+            0,
+            ProductionSecurityVerifierTraceRow {
+                task: ProductionSecurityVerifierTraceTask {
+                    kind: ProductionSecurityVerifierTaskKind::Query,
+                    query_position: 0,
+                },
+                accepted: true,
+            },
+        )
+    } else if mutation == 2 {
+        let row = trace.row(4)
+        let _ = trace.replace_row(
+            4,
+            ProductionSecurityVerifierTraceRow {
+                task: row.task,
+                accepted: false,
+            },
+        )
+    } else if mutation == 3 {
+        let count: u32 = PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+        let last: u32 = count - 1
+        let _ = trace.replace_row(
+            last,
+            ProductionSecurityVerifierTraceRow {
+                task: ProductionSecurityVerifierTraceTask {
+                    kind: ProductionSecurityVerifierTaskKind::Query,
+                    query_position: last,
+                },
+                accepted: true,
+            },
+        )
+    }
+
+    let local_shape = trace.shape_valid()
+    let mut replay = ProductionSecurityVerifierTraceReplayInterpreter::new(trace)
+    cursor = 0
+    while cursor < PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate() {
+        replay = replay.observe(
+            production_security_verifier_task_at(cursor),
+            true,
+        ).interpreter
+        cursor = cursor + 1
+    }
+    let audit = replay.finish()
+    (
+        flag(local_shape),
+        flag(audit.shape_valid),
+        audit.task_mismatches,
+        audit.result_mismatches,
+        audit.rejected_tasks,
+    )
+}

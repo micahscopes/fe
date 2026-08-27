@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_security_verifier_task_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_fixed_air_receipt_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-receipt-baby-bear"

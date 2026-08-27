@@ -14,7 +14,8 @@ use canonical_words::{
     decode_canonical_words,
     encode_canonical_words,
 }
-use core::BrowserBytes
+use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
+use core::ops::SaturatingAdd
 use mandelbrot_proof_air_core::{
     FriQueryPlan,
     FriQueryRangePlan,
@@ -438,6 +439,8 @@ pub type ProductionSparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
 
 pub const PRODUCTION_SECURITY_QUERY_COUNT: usize =
     PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count as usize
+pub const PRODUCTION_SECURITY_VERIFIER_TASK_COUNT: usize =
+    PRODUCTION_SECURITY_QUERY_COUNT.saturating_add(6)
 pub const PRODUCTION_SECURITY_AIR_MAX_LEAVES: usize =
     PRODUCTION_SECURITY_QUERY_COUNT * 4
 pub const PRODUCTION_SECURITY_AIR_MAX_SIBLINGS: usize =
@@ -473,6 +476,540 @@ pub type ProductionSecuritySparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
     {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
     ProductionSecuritySparseFriQuery,
 >
+
+/// One semantic operation in the security-policy leaf verifier.
+///
+/// The task graph has six shared predecessors followed by one independently
+/// checkable task per transcript-derived query. The query payload is a plan
+/// position, not a receipt index or a host-selected operation code. Its actual
+/// query index is recovered from the authenticated Fiat-Shamir buffer.
+pub enum ProductionSecurityVerifierTask {
+    ReceiptHeader,
+    BaseOpening,
+    InteractionOpening,
+    SecurityTranscript,
+    FriAuthentication,
+    AirRequestSet,
+    Query(u32),
+    Invalid,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTask {}
+
+/// Derive the fixed verifier task graph from the security query policy.
+pub fn production_security_verifier_task_at(
+    _ index: u32,
+) -> ProductionSecurityVerifierTask {
+    match index {
+        0 => ProductionSecurityVerifierTask::ReceiptHeader,
+        1 => ProductionSecurityVerifierTask::BaseOpening,
+        2 => ProductionSecurityVerifierTask::InteractionOpening,
+        3 => ProductionSecurityVerifierTask::SecurityTranscript,
+        4 => ProductionSecurityVerifierTask::FriAuthentication,
+        5 => ProductionSecurityVerifierTask::AirRequestSet,
+        _ => {
+            let query = index - 6
+            if query < PRODUCTION_SECURITY_QUERY_COUNT.downcast_truncate() {
+                ProductionSecurityVerifierTask::Query(query)
+            } else {
+                ProductionSecurityVerifierTask::Invalid
+            }
+        }
+    }
+}
+
+fn production_security_verifier_tasks_equal(
+    _ left: ProductionSecurityVerifierTask,
+    _ right: ProductionSecurityVerifierTask,
+) -> bool {
+    match left {
+        ProductionSecurityVerifierTask::ReceiptHeader => match right {
+            ProductionSecurityVerifierTask::ReceiptHeader => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::BaseOpening => match right {
+            ProductionSecurityVerifierTask::BaseOpening => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::InteractionOpening => match right {
+            ProductionSecurityVerifierTask::InteractionOpening => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::SecurityTranscript => match right {
+            ProductionSecurityVerifierTask::SecurityTranscript => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::FriAuthentication => match right {
+            ProductionSecurityVerifierTask::FriAuthentication => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::AirRequestSet => match right {
+            ProductionSecurityVerifierTask::AirRequestSet => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::Query(left_query) => match right {
+            ProductionSecurityVerifierTask::Query(right_query) => {
+                left_query == right_query
+            },
+            _ => false,
+        },
+        ProductionSecurityVerifierTask::Invalid => match right {
+            ProductionSecurityVerifierTask::Invalid => true,
+            _ => false,
+        },
+    }
+}
+
+/// Memory placement of a semantic verifier task. The authored task remains a
+/// payload-bearing enum; this projection separates its nominal role from its
+/// query position because portable Wasm does not yet load payload enums from
+/// aggregate memory.
+pub enum ProductionSecurityVerifierTaskKind {
+    ReceiptHeader,
+    BaseOpening,
+    InteractionOpening,
+    SecurityTranscript,
+    FriAuthentication,
+    AirRequestSet,
+    Query,
+    Invalid,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTaskKind {}
+
+pub struct ProductionSecurityVerifierTraceTask {
+    pub kind: ProductionSecurityVerifierTaskKind,
+    pub query_position: u32,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTraceTask {}
+
+fn production_security_verifier_trace_task(
+    _ task: ProductionSecurityVerifierTask,
+) -> ProductionSecurityVerifierTraceTask {
+    match task {
+        ProductionSecurityVerifierTask::ReceiptHeader => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::ReceiptHeader,
+                query_position: 0,
+            }
+        },
+        ProductionSecurityVerifierTask::BaseOpening => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::BaseOpening,
+                query_position: 0,
+            }
+        },
+        ProductionSecurityVerifierTask::InteractionOpening => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::InteractionOpening,
+                query_position: 0,
+            }
+        },
+        ProductionSecurityVerifierTask::SecurityTranscript => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::SecurityTranscript,
+                query_position: 0,
+            }
+        },
+        ProductionSecurityVerifierTask::FriAuthentication => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::FriAuthentication,
+                query_position: 0,
+            }
+        },
+        ProductionSecurityVerifierTask::AirRequestSet => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::AirRequestSet,
+                query_position: 0,
+            }
+        },
+        ProductionSecurityVerifierTask::Query(query) => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::Query,
+                query_position: query,
+            }
+        },
+        ProductionSecurityVerifierTask::Invalid => {
+            ProductionSecurityVerifierTraceTask {
+                kind: ProductionSecurityVerifierTaskKind::Invalid,
+                query_position: 0,
+            }
+        },
+    }
+}
+
+fn production_security_verifier_task_kinds_equal(
+    _ left: ProductionSecurityVerifierTaskKind,
+    _ right: ProductionSecurityVerifierTaskKind,
+) -> bool {
+    match left {
+        ProductionSecurityVerifierTaskKind::ReceiptHeader => match right {
+            ProductionSecurityVerifierTaskKind::ReceiptHeader => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::BaseOpening => match right {
+            ProductionSecurityVerifierTaskKind::BaseOpening => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::InteractionOpening => match right {
+            ProductionSecurityVerifierTaskKind::InteractionOpening => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::SecurityTranscript => match right {
+            ProductionSecurityVerifierTaskKind::SecurityTranscript => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::FriAuthentication => match right {
+            ProductionSecurityVerifierTaskKind::FriAuthentication => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::AirRequestSet => match right {
+            ProductionSecurityVerifierTaskKind::AirRequestSet => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::Query => match right {
+            ProductionSecurityVerifierTaskKind::Query => true,
+            _ => false,
+        },
+        ProductionSecurityVerifierTaskKind::Invalid => match right {
+            ProductionSecurityVerifierTaskKind::Invalid => true,
+            _ => false,
+        },
+    }
+}
+
+fn production_security_verifier_trace_tasks_equal(
+    _ stored: ProductionSecurityVerifierTraceTask,
+    _ live: ProductionSecurityVerifierTask,
+) -> bool {
+    let expected = production_security_verifier_trace_task(live)
+    production_security_verifier_task_kinds_equal(stored.kind, expected.kind)
+        && stored.query_position == expected.query_position
+}
+
+pub struct ProductionSecurityVerifierStep<
+    I: ProductionSecurityVerifierInterpreter,
+> {
+    pub interpreter: I,
+}
+impl<I: ProductionSecurityVerifierInterpreter> core::marker::Copy
+    for ProductionSecurityVerifierStep<I> {}
+
+/// An interpretation of the exact ordered verifier task graph.
+///
+/// The value interpretation produces the ordinary boolean verifier result.
+/// The stream interpretation writes the same task and result sequence to
+/// typed browser memory, and the replay interpretation checks an untrusted
+/// stream against a fresh execution of this denotation.
+pub trait ProductionSecurityVerifierInterpreter: core::marker::Copy {
+    fn observe(
+        self,
+        _ task: ProductionSecurityVerifierTask,
+        _ accepted: bool,
+    ) -> ProductionSecurityVerifierStep<Self>
+
+    /// Whether this placement needs the fixed task suffix after a rejection.
+    /// Scalar verification short-circuits, while trace and replay placements
+    /// retain every row needed by the recursive execution relation.
+    fn continues_after_rejection(self) -> bool
+}
+
+struct ProductionSecurityVerifierValueInterpreter {
+    cursor: u32,
+    accepted: bool,
+}
+impl core::marker::Copy for ProductionSecurityVerifierValueInterpreter {}
+
+impl ProductionSecurityVerifierValueInterpreter {
+    fn new() -> Self {
+        Self { cursor: 0, accepted: true }
+    }
+
+    fn finish(self) -> bool {
+        self.accepted
+            && self.cursor
+                == PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+    }
+}
+
+impl ProductionSecurityVerifierInterpreter
+    for ProductionSecurityVerifierValueInterpreter {
+    fn observe(
+        self,
+        _ task: ProductionSecurityVerifierTask,
+        _ accepted: bool,
+    ) -> ProductionSecurityVerifierStep<Self> {
+        ProductionSecurityVerifierStep {
+            interpreter: Self {
+                cursor: self.cursor + 1,
+                accepted: self.accepted && accepted,
+            },
+        }
+    }
+
+    fn continues_after_rejection(self) -> bool { false }
+}
+
+pub struct ProductionSecurityVerifierTraceRow {
+    pub task: ProductionSecurityVerifierTraceTask,
+    pub accepted: bool,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTraceRow {}
+
+struct ProductionSecurityVerifierTraceArena {
+    rows: [ProductionSecurityVerifierTraceRow; PRODUCTION_SECURITY_VERIFIER_TASK_COUNT],
+    count: u32,
+    shape_valid: bool,
+}
+
+fn initialize_production_security_verifier_trace()
+uses (arena: mut ProductionSecurityVerifierTraceArena)
+{
+    arena.count = 0
+    arena.shape_valid = false
+}
+
+fn write_production_security_verifier_trace_row(
+    _ index: u32,
+    _ row: ProductionSecurityVerifierTraceRow,
+) -> bool
+uses (arena: mut ProductionSecurityVerifierTraceArena)
+{
+    if index >= PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+        || index != arena.count
+    {
+        arena.shape_valid = false
+        return false
+    }
+    arena.rows[index as usize] = row
+    arena.count = index + 1
+    true
+}
+
+fn finish_production_security_verifier_trace(_ valid: bool)
+uses (arena: mut ProductionSecurityVerifierTraceArena)
+{
+    arena.shape_valid = valid
+        && arena.count
+            == PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+}
+
+fn production_security_verifier_trace_row(
+    _ index: u32,
+) -> ProductionSecurityVerifierTraceRow
+uses (arena: mut ProductionSecurityVerifierTraceArena)
+{
+    if index >= arena.count {
+        return ProductionSecurityVerifierTraceRow {
+            task: production_security_verifier_trace_task(
+                ProductionSecurityVerifierTask::Invalid,
+            ),
+            accepted: false,
+        }
+    }
+    arena.rows[index as usize]
+}
+
+fn production_security_verifier_trace_shape_valid() -> bool
+uses (arena: mut ProductionSecurityVerifierTraceArena)
+{
+    arena.shape_valid
+        && arena.count
+            == PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+}
+
+fn replace_production_security_verifier_trace_row(
+    _ index: u32,
+    _ row: ProductionSecurityVerifierTraceRow,
+) -> bool
+uses (arena: mut ProductionSecurityVerifierTraceArena)
+{
+    if !arena.shape_valid || index >= arena.count { return false }
+    arena.rows[index as usize] = row
+    true
+}
+
+/// Opaque handle to one fixed-shape execution of the policy-sized verifier.
+/// The stored booleans are not a recursive proof. They are an untrusted
+/// placement witness which must be replayed against the authored verifier and
+/// later constrained by the recursive AIR.
+pub struct ProductionSecurityVerifierTrace {
+    arena: BrowserPtr<ProductionSecurityVerifierTraceArena>,
+    available: bool,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTrace {}
+
+impl ProductionSecurityVerifierTrace {
+    pub fn shape_valid(self) -> bool {
+        self.available && with (self.arena) {
+            production_security_verifier_trace_shape_valid()
+        }
+    }
+
+    pub fn row(self, _ index: u32) -> ProductionSecurityVerifierTraceRow {
+        if !self.available {
+            return ProductionSecurityVerifierTraceRow {
+                task: production_security_verifier_trace_task(
+                    ProductionSecurityVerifierTask::Invalid,
+                ),
+                accepted: false,
+            }
+        }
+        with (self.arena) {
+            production_security_verifier_trace_row(index)
+        }
+    }
+
+    pub fn replace_row(
+        self,
+        _ index: u32,
+        _ row: ProductionSecurityVerifierTraceRow,
+    ) -> bool {
+        if !self.available { return false }
+        with (self.arena) {
+            replace_production_security_verifier_trace_row(index, row)
+        }
+    }
+}
+
+pub struct ProductionSecurityVerifierTraceInterpreter {
+    trace: ProductionSecurityVerifierTrace,
+    cursor: u32,
+    valid: bool,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTraceInterpreter {}
+
+impl ProductionSecurityVerifierTraceInterpreter {
+    pub fn new() -> Self {
+        let arena = alloc_browser_object<ProductionSecurityVerifierTraceArena>()
+        let available = arena.address() != 0
+        let valid = available && with (arena) {
+            initialize_production_security_verifier_trace()
+            true
+        }
+        Self {
+            trace: ProductionSecurityVerifierTrace {
+                arena: arena,
+                available: available,
+            },
+            cursor: 0,
+            valid: valid,
+        }
+    }
+
+    pub fn finish(self) -> ProductionSecurityVerifierTrace {
+        let valid = self.valid
+            && self.cursor
+                == PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+        if self.trace.available {
+            with (self.trace.arena) {
+                finish_production_security_verifier_trace(valid)
+            }
+        }
+        self.trace
+    }
+}
+
+impl ProductionSecurityVerifierInterpreter
+    for ProductionSecurityVerifierTraceInterpreter {
+    fn observe(
+        self,
+        _ task: ProductionSecurityVerifierTask,
+        _ accepted: bool,
+    ) -> ProductionSecurityVerifierStep<Self> {
+        let expected = production_security_verifier_task_at(self.cursor)
+        let task_valid = production_security_verifier_tasks_equal(task, expected)
+        let wrote = self.valid && task_valid && self.trace.available
+            && with (self.trace.arena) {
+                write_production_security_verifier_trace_row(
+                    self.cursor,
+                    ProductionSecurityVerifierTraceRow {
+                        task: production_security_verifier_trace_task(task),
+                        accepted: accepted,
+                    },
+                )
+            }
+        ProductionSecurityVerifierStep {
+            interpreter: Self {
+                trace: self.trace,
+                cursor: if wrote { self.cursor + 1 } else { self.cursor },
+                valid: wrote,
+            },
+        }
+    }
+
+    fn continues_after_rejection(self) -> bool { true }
+}
+
+pub struct ProductionSecurityVerifierTraceAudit {
+    pub shape_valid: bool,
+    pub task_mismatches: u32,
+    pub result_mismatches: u32,
+    pub rejected_tasks: u32,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTraceAudit {}
+
+pub struct ProductionSecurityVerifierTraceReplayInterpreter {
+    trace: ProductionSecurityVerifierTrace,
+    cursor: u32,
+    task_mismatches: u32,
+    result_mismatches: u32,
+    rejected_tasks: u32,
+    valid: bool,
+}
+impl core::marker::Copy for ProductionSecurityVerifierTraceReplayInterpreter {}
+
+impl ProductionSecurityVerifierTraceReplayInterpreter {
+    pub fn new(_ trace: ProductionSecurityVerifierTrace) -> Self {
+        Self {
+            trace: trace,
+            cursor: 0,
+            task_mismatches: 0,
+            result_mismatches: 0,
+            rejected_tasks: 0,
+            valid: trace.shape_valid(),
+        }
+    }
+
+    pub fn finish(self) -> ProductionSecurityVerifierTraceAudit {
+        ProductionSecurityVerifierTraceAudit {
+            shape_valid: self.valid
+                && self.cursor
+                    == PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate(),
+            task_mismatches: self.task_mismatches,
+            result_mismatches: self.result_mismatches,
+            rejected_tasks: self.rejected_tasks,
+        }
+    }
+}
+
+impl ProductionSecurityVerifierInterpreter
+    for ProductionSecurityVerifierTraceReplayInterpreter {
+    fn observe(
+        self,
+        _ task: ProductionSecurityVerifierTask,
+        _ accepted: bool,
+    ) -> ProductionSecurityVerifierStep<Self> {
+        let mut next = self
+        if !next.valid
+            || next.cursor
+                >= PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+        {
+            next.valid = false
+            return ProductionSecurityVerifierStep { interpreter: next }
+        }
+        let stored = next.trace.row(next.cursor)
+        if !production_security_verifier_trace_tasks_equal(stored.task, task) {
+            next.task_mismatches = next.task_mismatches + 1
+        }
+        if stored.accepted != accepted {
+            next.result_mismatches = next.result_mismatches + 1
+        }
+        if !accepted { next.rejected_tasks = next.rejected_tasks + 1 }
+        next.cursor = next.cursor + 1
+        ProductionSecurityVerifierStep { interpreter: next }
+    }
+
+    fn continues_after_rejection(self) -> bool { true }
+}
 
 fn empty_profiled_sparse_baby_bear_receipt<
     const QUERY_COUNT: usize,
@@ -1576,33 +2113,56 @@ fn verify_production_security_sparse_composition_query(
         && expected_negative.value.equals(opened_negative.value)
 }
 
-/// Verify the production 4-limb, 4,096-row, 8,192-point sparse AIR receipt.
-/// Every AIR and composition opening must be exactly transcript-selected;
-/// each authenticated composition pair is then replayed through the shared
-/// sparse AIR and schedule-derived FRI fold interpreters.
-pub fn verify_production_security_sparse_baby_bear_receipt(
+fn execute_production_security_sparse_baby_bear_receipt<
+    I: ProductionSecurityVerifierInterpreter,
+>(
+    _ interpreter: I,
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ shift: BabyBear,
     _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
-) -> bool {
-    if !receipt.valid || shift.is_zero()
-        || !receipt.base_root.valid || !receipt.interaction_root.valid
-        || !verify_sparse_base_lde_multi_opening<
+) -> I {
+    let mut interpreter = interpreter
+    let header_valid = receipt.valid && !shift.is_zero()
+        && receipt.base_root.valid && receipt.interaction_root.valid
+    interpreter = interpreter.observe(
+        ProductionSecurityVerifierTask::ReceiptHeader,
+        header_valid,
+    ).interpreter
+    if !header_valid && !interpreter.continues_after_rejection() {
+        return interpreter
+    }
+
+    let base_valid = header_valid && verify_sparse_base_lde_multi_opening<
             {PRODUCTION_LIMBS},
             {PRODUCTION_TRACE_LENGTH},
             {PRODUCTION_LDE_LENGTH},
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
         >(ref receipt.base, receipt.base_root)
-        || !verify_sparse_interaction_lde_multi_opening<
+    interpreter = interpreter.observe(
+        ProductionSecurityVerifierTask::BaseOpening,
+        base_valid,
+    ).interpreter
+    if !base_valid && !interpreter.continues_after_rejection() {
+        return interpreter
+    }
+
+    let interaction_valid = header_valid
+        && verify_sparse_interaction_lde_multi_opening<
             {PRODUCTION_LIMBS},
             {PRODUCTION_TRACE_LENGTH},
             {PRODUCTION_LDE_LENGTH},
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
-        >(ref receipt.interaction, receipt.interaction_root) {
-        return false
+        >(ref receipt.interaction, receipt.interaction_root)
+    interpreter = interpreter.observe(
+        ProductionSecurityVerifierTask::InteractionOpening,
+        interaction_valid,
+    ).interpreter
+    if !interaction_valid && !interpreter.continues_after_rejection() {
+        return interpreter
     }
+
     let air = bind_sparse_air_lde_transcript<
         {PRODUCTION_LIMBS},
         {PRODUCTION_TRACE_LENGTH},
@@ -1616,11 +2176,28 @@ pub fn verify_production_security_sparse_baby_bear_receipt(
         air,
         production_recursive_security_profile(),
     )
+    let transcript_valid = base_valid && interaction_valid
+        && composition.is_valid()
+    interpreter = interpreter.observe(
+        ProductionSecurityVerifierTask::SecurityTranscript,
+        transcript_valid,
+    ).interpreter
+    if !transcript_valid && !interpreter.continues_after_rejection() {
+        return interpreter
+    }
+
     let authenticated = authenticate_production_security_sparse_fri(
         composition,
         ref receipt.fri,
     )
-    if !composition.is_valid() || !authenticated.valid { return false }
+    let authentication_valid = transcript_valid && authenticated.valid
+    interpreter = interpreter.observe(
+        ProductionSecurityVerifierTask::FriAuthentication,
+        authentication_valid,
+    ).interpreter
+    if !authentication_valid && !interpreter.continues_after_rejection() {
+        return interpreter
+    }
 
     let air_requests = <ProductionSecuritySparseFriQueryPlan
         as BabyBearAirLdeRequests<
@@ -1629,35 +2206,42 @@ pub fn verify_production_security_sparse_baby_bear_receipt(
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             ProductionSecuritySparseFriQuerySamples,
         >>::air_lde_requests(ref authenticated.samples)
-    if !air_requests.valid
-        || air_requests.count != PRODUCTION_SECURITY_AIR_MAX_LEAVES.downcast_truncate()
-        || !multi_path_matches_requests<
+    let requests_valid = authentication_valid && air_requests.valid
+        && air_requests.count
+            == PRODUCTION_SECURITY_AIR_MAX_LEAVES.downcast_truncate()
+        && multi_path_matches_requests<
             Poseidon2Digest,
             {PRODUCTION_LDE_LENGTH},
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
         >(ref receipt.base.path, ref air_requests.indices)
-        || !multi_path_matches_requests<
+        && multi_path_matches_requests<
             Poseidon2Digest,
             {PRODUCTION_LDE_LENGTH},
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             {PRODUCTION_SECURITY_AIR_MAX_LEAVES},
             {PRODUCTION_SECURITY_AIR_MAX_SIBLINGS},
-        >(ref receipt.interaction.path, ref air_requests.indices) {
-        return false
+        >(ref receipt.interaction.path, ref air_requests.indices)
+    interpreter = interpreter.observe(
+        ProductionSecurityVerifierTask::AirRequestSet,
+        requests_valid,
+    ).interpreter
+    if !requests_valid && !interpreter.continues_after_rejection() {
+        return interpreter
     }
 
     let mut cursor: usize = 0
     while cursor < PRODUCTION_SECURITY_QUERY_COUNT {
         let query = authenticated.queries.indices[cursor]
-        if !verify_production_security_sparse_composition_query(
+        let query_valid = requests_valid
+            && verify_production_security_sparse_composition_query(
             interval,
             shift,
             composition,
             query,
             receipt,
-        ) || !<ProductionSparseFriSchedule as BabyBearFriMultiFoldCheck<
+        ) && <ProductionSparseFriSchedule as BabyBearFriMultiFoldCheck<
             {PRODUCTION_LDE_LENGTH},
             CompositionMultiOpening<
                 {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
@@ -1671,10 +2255,61 @@ pub fn verify_production_security_sparse_baby_bear_receipt(
             authenticated.challenges,
             query,
             shift,
-        ) {
-            return false
+        )
+        interpreter = interpreter.observe(
+            ProductionSecurityVerifierTask::Query(cursor.downcast_truncate()),
+            query_valid,
+        ).interpreter
+        if !query_valid && !interpreter.continues_after_rejection() {
+            return interpreter
         }
         cursor = cursor + 1
     }
-    true
+    interpreter
+}
+
+/// Verify the production 4-limb, 4,096-row, 8,192-point sparse AIR receipt.
+/// Every AIR and composition opening must be exactly transcript-selected;
+/// each authenticated composition pair is then replayed through the shared
+/// sparse AIR and schedule-derived FRI fold interpreters.
+pub fn verify_production_security_sparse_baby_bear_receipt(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+) -> bool {
+    execute_production_security_sparse_baby_bear_receipt(
+        ProductionSecurityVerifierValueInterpreter::new(),
+        interval,
+        shift,
+        receipt,
+    ).finish()
+}
+
+/// Record the exact fixed-shape security verifier execution in typed memory.
+pub fn production_security_sparse_verifier_trace(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+) -> ProductionSecurityVerifierTrace {
+    execute_production_security_sparse_baby_bear_receipt(
+        ProductionSecurityVerifierTraceInterpreter::new(),
+        interval,
+        shift,
+        receipt,
+    ).finish()
+}
+
+/// Re-execute the authored verifier against an untrusted stored task trace.
+pub fn audit_production_security_sparse_verifier_trace(
+    _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ trace: ProductionSecurityVerifierTrace,
+) -> ProductionSecurityVerifierTraceAudit {
+    execute_production_security_sparse_baby_bear_receipt(
+        ProductionSecurityVerifierTraceReplayInterpreter::new(trace),
+        interval,
+        shift,
+        receipt,
+    ).finish()
 }
