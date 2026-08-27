@@ -139,7 +139,27 @@ impl PackedCommitment {
 /// the record remains its own schema, while this sink supplies only the hash
 /// interpretation. It rejects non-field words, codec underflow or overflow,
 /// and invalid values reported by the codec.
-struct CanonicalFieldWriter {
+pub struct Poseidon2CanonicalCommitmentPlan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    valid: u32,
+    value: Poseidon2Digest,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2CanonicalCommitmentPlan<I> {}
+
+impl<I: QuadraticPlanInterpreter<BabyBear>> Poseidon2CanonicalCommitmentPlan<I> {
+    pub fn is_valid(self) -> bool { self.valid == VALID_WORD }
+
+    pub fn digest(self) -> Poseidon2Digest {
+        if self.valid != VALID_WORD { return Poseidon2Digest::zero() }
+        self.value
+    }
+}
+
+struct CanonicalFieldWriter<I: QuadraticPlanInterpreter<BabyBear>> {
+    interpreter: I,
     s0: BabyBear,
     s1: BabyBear,
     s2: BabyBear,
@@ -161,9 +181,10 @@ struct CanonicalFieldWriter {
     written: u32,
     valid: u32,
 }
-impl core::marker::Copy for CanonicalFieldWriter {}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for CanonicalFieldWriter<I> {}
 
-impl CanonicalFieldWriter {
+impl<I: QuadraticPlanInterpreter<BabyBear>> CanonicalFieldWriter<I> {
     fn state(self) -> [BabyBear; WIDTH] {
         [
             self.s0,
@@ -187,12 +208,14 @@ impl CanonicalFieldWriter {
 
     fn with_state(
         self,
+        _ interpreter: I,
         _ state: [BabyBear; WIDTH],
         _ rate: u32,
         _ written: u32,
         _ valid: u32,
     ) -> Self {
         Self {
+            interpreter: interpreter,
             s0: state[0],
             s1: state[1],
             s2: state[2],
@@ -216,9 +239,10 @@ impl CanonicalFieldWriter {
         }
     }
 
-    fn new(_ tag: u32, _ expected: u32) -> Self {
+    fn new(_ interpreter: I, _ tag: u32, _ expected: u32) -> Self {
         let zero = BabyBear::zero()
         Self {
+            interpreter: interpreter,
             s0: BabyBear::from_u32(tag),
             s1: BabyBear::from_u32(expected),
             s2: zero,
@@ -243,7 +267,7 @@ impl CanonicalFieldWriter {
     }
 }
 
-impl WordSink for CanonicalFieldWriter {
+impl<I: QuadraticPlanInterpreter<BabyBear>> WordSink for CanonicalFieldWriter<I> {
     fn write(self, _ value: u32) -> Self {
         if self.valid != VALID_WORD
             || self.written >= self.expected
@@ -252,30 +276,45 @@ impl WordSink for CanonicalFieldWriter {
             return self.reject()
         }
         let mut state = self.state()
+        let mut interpreter = self.interpreter
         let mut rate = self.rate
         state[rate as usize] = BabyBear::from_u32(value)
         rate = rate + 1
         if rate == SPONGE_RATE.downcast_truncate() {
-            state = permute16(input: state)
+            let planned = poseidon2_permutation_plan(interpreter, state)
+            interpreter = planned.interpreter
+            state = planned.output
             rate = 0
         }
-        self.with_state(state, rate, self.written + 1, VALID_WORD)
+        self.with_state(interpreter, state, rate, self.written + 1, VALID_WORD)
     }
 
     fn reject(self) -> Self {
-        self.with_state(self.state(), self.rate, self.written, INVALID_WORD)
+        self.with_state(
+            self.interpreter,
+            self.state(),
+            self.rate,
+            self.written,
+            INVALID_WORD,
+        )
     }
 }
 
-impl CanonicalFieldWriter {
-    fn finish(self) -> PackedCommitment {
+impl<I: QuadraticPlanInterpreter<BabyBear>> CanonicalFieldWriter<I> {
+    fn finish(self) -> Poseidon2CanonicalCommitmentPlan<I> {
         if self.valid != VALID_WORD || self.written != self.expected {
-            return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
+            return Poseidon2CanonicalCommitmentPlan {
+                interpreter: self.interpreter,
+                valid: INVALID_WORD,
+                value: Poseidon2Digest::zero(),
+            }
         }
-        let state = if self.rate == 0 {
-            self.state()
-        } else {
-            permute16(input: self.state())
+        let mut interpreter = self.interpreter
+        let mut state = self.state()
+        if self.rate != 0 {
+            let planned = poseidon2_permutation_plan(interpreter, state)
+            interpreter = planned.interpreter
+            state = planned.output
         }
         let mut values = [BabyBear::zero(); DIGEST_FIELDS]
         let mut index: usize = 0
@@ -283,8 +322,41 @@ impl CanonicalFieldWriter {
             values[index] = state[index]
             index = index + 1
         }
-        PackedCommitment { valid: VALID_WORD, value: Poseidon2Digest { values: values } }
+        Poseidon2CanonicalCommitmentPlan {
+            interpreter: interpreter,
+            valid: VALID_WORD,
+            value: Poseidon2Digest { values: values },
+        }
     }
+}
+
+/// The exact number of width-16 permutations required to commit a canonical
+/// schema. The domain tag and schema-derived word count occupy the first two
+/// rate lanes.
+pub const fn canonical_commitment_permutations(_ words: u32) -> usize {
+    ((words + 9) / SPONGE_RATE.downcast_truncate()) as usize
+}
+
+/// Interpret the canonical codec and every sponge permutation through one
+/// arithmetic plan. The codec fixes semantic field order; the interpreter
+/// chooses direct evaluation, witness generation, constraints, or placement.
+pub fn commit_canonical_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    D: Poseidon2FieldDomain,
+    T: CanonicalWords,
+>(
+    _ interpreter: I,
+    _ value: ref T,
+) -> Poseidon2CanonicalCommitmentPlan<I> {
+    if D::TAG >= BABY_BEAR_MODULUS || T::WORDS >= BABY_BEAR_MODULUS {
+        return Poseidon2CanonicalCommitmentPlan {
+            interpreter: interpreter,
+            valid: INVALID_WORD,
+            value: Poseidon2Digest::zero(),
+        }
+    }
+    let writer = CanonicalFieldWriter::new(interpreter, D::TAG, T::WORDS)
+    encode_canonical_words(value, writer).finish()
 }
 
 /// Commit the exact canonical word stream of one Fe value. The nominal domain
@@ -293,11 +365,14 @@ impl CanonicalFieldWriter {
 pub fn commit_canonical<D: Poseidon2FieldDomain, T: CanonicalWords>(
     _ value: ref T,
 ) -> PackedCommitment {
-    if D::TAG >= BABY_BEAR_MODULUS || T::WORDS >= BABY_BEAR_MODULUS {
-        return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
+    let planned = commit_canonical_plan<QuadraticValueInterpreter, D, T>(
+        QuadraticValueInterpreter::new(),
+        value,
+    )
+    PackedCommitment {
+        valid: if planned.is_valid() { VALID_WORD } else { INVALID_WORD },
+        value: planned.digest(),
     }
-    let writer = CanonicalFieldWriter::new(D::TAG, T::WORDS)
-    encode_canonical_words(value, writer).finish()
 }
 
 const fn field_pow(_ base: u256, _ exponent: u256) -> u256 {

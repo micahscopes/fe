@@ -16,7 +16,9 @@ use poseidon_baby_bear::{
     POSEIDON2_PERMUTATION_MULTIPLICATIONS,
     POSEIDON2_POWER7_MULTIPLICATIONS,
     WIDTH,
+    canonical_commitment_permutations,
     commit_canonical,
+    commit_canonical_plan,
     commit_canonical_packed,
     commit_ext4_fields,
     commit_fields,
@@ -176,6 +178,11 @@ struct CanonicalMessage {
 impl core::marker::Copy for CanonicalMessage {}
 derive CanonicalWords for CanonicalMessage using CanonicalWordsProvider
 
+const CANONICAL7_PRODUCTS: usize = canonical_commitment_permutations(
+    <CanonicalMessage as CanonicalWords>::WORDS,
+) * POSEIDON2_PERMUTATION_MULTIPLICATIONS
+const CANONICAL7_ASSERTIONS: usize = 8
+
 struct CanonicalPackedMessage {
     enabled: bool,
     modulus: u32,
@@ -207,6 +214,130 @@ pub fn canonical7_commitment(
         digest.field(2).to_u32(), digest.field(3).to_u32(),
         digest.field(4).to_u32(), digest.field(5).to_u32(),
         digest.field(6).to_u32(), digest.field(7).to_u32(),
+    )
+}
+
+fn constrain_canonical7_digest<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ actual: Poseidon2Digest,
+    _ expected: Poseidon2Digest,
+) -> I {
+    let mut interpreter = interpreter
+    let mut lane: u32 = 0
+    while lane < 8 {
+        interpreter = interpreter.constrain_zero(
+            actual.field(lane).radix2_sub(expected.field(lane)),
+        ).interpreter
+        lane = lane + 1
+    }
+    interpreter
+}
+
+/// Interpret the same canonical codec and sponge as direct evaluation,
+/// multiplication witnesses, and quadratic residuals.
+pub fn canonical7_relation_audit(
+    _ enabled: u32,
+    _ sequence: u32,
+    _ v0: u32,
+    _ v1: u32,
+    _ v2: u32,
+    _ v3: u32,
+    _ v4: u32,
+    _ e0: u32,
+    _ e1: u32,
+    _ e2: u32,
+    _ e3: u32,
+    _ e4: u32,
+    _ e5: u32,
+    _ e6: u32,
+    _ e7: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let message = CanonicalMessage {
+        enabled: enabled == 1,
+        sequence: sequence,
+        values: [v0, v1, v2, v3, v4],
+    }
+    let expected = Poseidon2Digest::from_u32s([
+        e0, e1, e2, e3, e4, e5, e6, e7,
+    ])
+    let witnessed = commit_canonical_plan<
+        QuadraticRelationWitnessInterpreter<
+            BabyBear,
+            CANONICAL7_PRODUCTS,
+            CANONICAL7_ASSERTIONS,
+        >,
+        FieldVectorTestDomain,
+        CanonicalMessage,
+    >(
+        QuadraticRelationWitnessInterpreter::new(),
+        ref message,
+    )
+    let witness_valid = witnessed.is_valid()
+    let witnessed_interpreter = constrain_canonical7_digest(
+        witnessed.interpreter,
+        witnessed.digest(),
+        expected,
+    )
+    let mut witness = witnessed_interpreter.finish()
+    if mutation > 0 && mutation <= CANONICAL7_PRODUCTS.downcast_truncate() {
+        let index = (mutation - 1) as usize
+        witness.nodes[index] = witness.nodes[index] + BabyBear::one()
+    }
+
+    let constrained = commit_canonical_plan<
+        QuadraticRelationConstraintInterpreter<
+            BabyBear,
+            CANONICAL7_PRODUCTS,
+            CANONICAL7_ASSERTIONS,
+        >,
+        FieldVectorTestDomain,
+        CanonicalMessage,
+    >(
+        QuadraticRelationConstraintInterpreter::new(witness),
+        ref message,
+    )
+    let constrained_interpreter = constrain_canonical7_digest(
+        constrained.interpreter,
+        constrained.digest(),
+        expected,
+    )
+    let residuals = constrained_interpreter.finish()
+
+    let direct = commit_canonical_plan<
+        QuadraticRelationValueInterpreter,
+        FieldVectorTestDomain,
+        CanonicalMessage,
+    >(QuadraticRelationValueInterpreter::new(), ref message)
+    let direct_valid = direct.is_valid()
+    let direct_interpreter = constrain_canonical7_digest(
+        direct.interpreter,
+        direct.digest(),
+        expected,
+    )
+    let mut nonzero_products: u32 = 0
+    let mut product: usize = 0
+    while product < CANONICAL7_PRODUCTS {
+        if !residuals.products[product].radix2_is_zero() {
+            nonzero_products = nonzero_products + 1
+        }
+        product = product + 1
+    }
+    let mut nonzero_assertions: u32 = 0
+    let mut assertion: usize = 0
+    while assertion < CANONICAL7_ASSERTIONS {
+        if !residuals.assertions[assertion].radix2_is_zero() {
+            nonzero_assertions = nonzero_assertions + 1
+        }
+        assertion = assertion + 1
+    }
+    (
+        if direct_valid && direct_interpreter.finish() { 1 } else { 0 },
+        if witness_valid && constrained.is_valid() && residuals.valid { 1 } else { 0 },
+        nonzero_products,
+        nonzero_assertions,
+        CANONICAL7_PRODUCTS.downcast_truncate(),
+        CANONICAL7_ASSERTIONS.downcast_truncate(),
     )
 }
 

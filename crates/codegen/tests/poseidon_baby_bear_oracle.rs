@@ -23,6 +23,8 @@ use wasmtime::Val;
 const WIDTH: usize = 16;
 const ROUND_CONSTANT_COUNT: usize = 8 * WIDTH + 13;
 const PERMUTATION_MULTIPLICATIONS: u32 = ((8 * WIDTH + 13) * 4) as u32;
+const CANONICAL7_PRODUCTS: u32 = 2 * PERMUTATION_MULTIPLICATIONS;
+const CANONICAL7_ASSERTIONS: u32 = 8;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
 fn bb_mul(left: u32, right: u32) -> u32 {
@@ -209,6 +211,70 @@ fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
     message.extend_from_slice(fields);
     reference_sponge(&message)
+}
+
+fn canonical_relation_arguments(
+    fields: [u32; 7],
+    expected: [u32; 8],
+    mutation: u32,
+) -> Vec<u32> {
+    fields
+        .into_iter()
+        .chain(expected)
+        .chain([mutation])
+        .collect()
+}
+
+#[test]
+fn canonical_commitment_uses_one_codec_and_quadratic_plan() {
+    let bytes = compiled_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("Poseidon2 module should load");
+    assert!(module.imports().next().is_none(), "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("Poseidon2 module should instantiate");
+
+    let fields = [1, 17, 2, 3, 5, 8, 13];
+    let expected = reference_field_commitment(b"BV01", &fields);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "canonical7_relation_audit",
+            &canonical_relation_arguments(fields, expected, 0),
+            6,
+        ),
+        vec![1, 1, 0, 0, CANONICAL7_PRODUCTS, CANONICAL7_ASSERTIONS],
+    );
+
+    for lane in 0..8 {
+        let mut wrong = expected;
+        wrong[lane] = (wrong[lane] + 1) % BABY_BEAR_MODULUS;
+        let result = call(
+            &mut store,
+            &instance,
+            "canonical7_relation_audit",
+            &canonical_relation_arguments(fields, wrong, 0),
+            6,
+        );
+        assert_eq!(result[0], 0, "wrong digest lane {lane} must reject");
+        assert_eq!(result[1], 1);
+        assert!(result[3] > 0);
+    }
+
+    for mutation in 1..=CANONICAL7_PRODUCTS {
+        let result = call(
+            &mut store,
+            &instance,
+            "canonical7_relation_audit",
+            &canonical_relation_arguments(fields, expected, mutation),
+            6,
+        );
+        assert_eq!(result[0], 1);
+        assert_eq!(result[1], 1);
+        assert!(result[2] > 0, "product mutation {mutation} must reject");
+    }
 }
 
 fn reference_indexed_squeeze(tag: &[u8; 4], digest: &[u32; 8], index: u32) -> [u32; 4] {
