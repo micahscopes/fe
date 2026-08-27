@@ -431,6 +431,35 @@ existing Definition of done, not a second campaign checklist:
   semantics. The pre-existing chained Merkle relation still passes 1/1 in
   57.65 seconds against the enlarged fixture. Canonical production multipath
   topology is now the next authentication layer.
+
+  Commit `381bad931` makes that topology one reusable Fe interpretation rather
+  than another verifier-specific loop. `merkle_core::interpret_multi_root`
+  emits each canonical deduplicated hash as a typed task carrying its level,
+  node index, opened-pair versus authentication-sibling source, sibling
+  position, and direction. The existing scalar `multi_root` now consumes the
+  value interpreter over that same traversal, while the recursive verifier
+  consumes a quadratic Poseidon2 interpreter. A bounded relation stream keeps
+  compile-time capacities but records the exact value-dependent row counts;
+  replay must consume precisely those counts through the same authored plan.
+  Four independent 16-leaf cases cover adjacent leaves, duplicate requests,
+  separated subtrees, and both directions. Their roots, normalized leaf
+  counts, sibling counts, and hash-task counts agree with an independent
+  Plonky3 model. Structural input mutations and first and last product
+  mutations in every emitted hash task reject. The focused zero-import Wasm
+  gate passes 1/1 in 46.38 seconds. The generic Merkle regression remains
+  green 1/1 in 1.93 seconds and the fixed quadratic-plan regression remains
+  green 1/1 in 5.34 seconds.
+
+  The 114-query policy derives a maximum of 456 opened leaves across depth 13,
+  hence 5,928 hash tasks, 3,396,744 quadratic products, and 5,937 assertions;
+  the gate executes those derived capacities from Fe rather than restating
+  them in application code. A first attempt to pass that complete production
+  carrier by value exposed a compiler dependency-cycle panic and was removed.
+  The next slice is a role-branded typed-arena adapter that links the real base
+  and interaction leaf relation outputs to this schedule without copying the
+  456-leaf aggregate through a function boundary. Exact retained-receipt
+  replay and mutation evidence remain required before multipath authentication
+  is complete.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
