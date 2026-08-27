@@ -218,6 +218,22 @@ existing Definition of done, not a second campaign checklist:
   proves that the four-query protocol-shape receipt cannot satisfy this
   security-policy leaf boundary. This closes the authority handoff into the
   recursive layer. It is still not a cryptographic parent proof.
+
+  Commits `0780b801c` and `9db9cb519` establish the first fixed-size parent
+  constraint relation without copying its semantics into witness code.
+  `quadratic_plan` now interprets one authored quadratic relation directly, as
+  multiplication witnesses, or as ordered product and assertion residuals.
+  The BabyBear recursive merge instantiates that machinery with 423 derived
+  multiplication nodes and 583 assertions. Its 30-bit integer width derives
+  from `MAX_RECURSIVE_CLAIM_BOUND`; bit and carry constraints prove strict
+  child ordering and overflow-safe leaf-count addition without trusting
+  native `u32` comparisons inside the constraint interpreter. The zero-import
+  Wasm gate agrees with an independent integer model, rejects statement,
+  boundary, adjacency, parent projection, validity, witness-node, range-bit,
+  and carry mutations, and rejects an explicit BabyBear modular-wrap attack
+  through the final carry. This is the exact merge relation that a parent
+  proof must authenticate. It does not yet authenticate either child verifier
+  execution or emit a recursive proof receipt.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
@@ -2321,11 +2337,13 @@ fallback. The semantic receipts are:
    G-RECURSE and G-BROWSER. The security-sized verifier is now bound to the
    private leaf authority, but the current recursive carrier and
    verified-adjacent-interval authority remain semantic scaffolding, not a
-   recursive cryptographic proof. Next derive fixed-size leaf and merge proof
-   circuits. Schedule independent leaves and sibling merges as a typed balanced
-   reduction, and run the progressive point/disk picker, cancellation,
-   generation, mutation rejection, Fe-Wasm verification, and revm-Wasm
-   verification in Chrome.
+   recursive cryptographic proof. The fixed-size merge constraint relation is
+   now derived and independently gated. Next place it in an authenticated trace
+   and extend the same relation vocabulary over both child verifier task DAGs,
+   then emit the leaf and parent proof receipts. Schedule independent leaves
+   and sibling merges as a typed balanced reduction, and run the progressive
+   point/disk picker, cancellation, generation, mutation rejection, Fe-Wasm
+   verification, and revm-Wasm verification in Chrome.
 6. Finish the four standalone hardware tests in the external runbook. The
    `mandelbrot_proof_gpu` clean and tampered Chromium modes already pass on AMD
    Radeon 780M through RADV, but the named Rollcall, fixed precision,
