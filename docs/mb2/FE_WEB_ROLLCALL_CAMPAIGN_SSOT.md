@@ -326,6 +326,57 @@ existing Definition of done, not a second campaign checklist:
   is the first exact child-verifier execution trace, not yet an authenticated
   parent proof. Producing and tracing the adjacent `1 -> 2` security-policy
   receipt, then binding both traces into the recursive relation, is next.
+
+  The uncommitted 2026-08-27 adjacent-child slice now closes that exact
+  execution boundary. A statically direct `1 -> 2` Fe root compiled the same
+  production prover body into a 16,141,944-byte zero-import Wasm artifact in
+  1,568.49 seconds. Its runtime graph contained 20,306 functions, only one
+  fewer than the earlier value-selected root, disproving the hypothesis that
+  the leaf selector caused the policy-sized graph. Incremental prepared-body
+  consumption released all 20,306 lowered bodies before backend emission; the
+  highest sampled compiler RSS was 15,424,376 KiB with 3,965,256 KiB still
+  available. The artifact digest is
+  `68cc59be1de73300745840f583da53d98ab386fa7d111ba6b38aa244c7ee1eea`.
+  Executing that persisted Fe-Wasm in a fresh process took 216.19 seconds and
+  emitted the 953,560-byte canonical `1 -> 2` receipt with digest
+  `035bdb10e47d2b85ee1b7756b7e633e0fd6b18aee148baef9212bd0843878323`.
+
+  One shared Fe trace writer then compiled in 341.56 seconds to 15,089,907
+  bytes with digest
+  `763b241a59490d08ff5c0a8fb8467db43b217196dcb02a38d38e188c44635807`.
+  It accepted the retained exact `0 -> 1` receipt and the new exact `1 -> 2`
+  receipt in one fresh process, emitting one 972-byte, 120-task trace for each
+  child in 26.25 seconds. Their identical digest,
+  `537df3ee19012a933816b92688f0c648fe2519cee1b1dadcbd442d502865d865`,
+  is expected for the zero fixed-point: task identities and all acceptance
+  booleans agree even though the receipts and public intervals differ. A
+  separately compiled 15,086,539-byte replay artifact with digest
+  `c13303e8cad6856a586310df64af39770915e41973dde752e4e214781c048079`
+  completed the clean, malformed, mutation, out-of-range, right-child, and
+  cross-leaf matrix in 57.67 seconds. In particular, the right receipt and
+  trace cannot replay as the left public interval. This proves exact execution
+  of both child verifiers through one Fe-authored task denotation. It still
+  does not authenticate the verifier stage internals or emit a cryptographic
+  parent receipt; those relations are the next recursive slice.
+
+  Commit `c14fcfc66` begins that authentication slice with the exact
+  receipt-header relation. One Fe-authored eight-product, nine-assertion plan
+  is interpreted as direct evaluation, multiplication-witness generation, or
+  quadratic residual replay. Its production adapter selects the canonical
+  first verifier-trace row and projects the live receipt, both typed root
+  validity flags, acceptance result, trace shape, and nonzero evaluation shift
+  into the relation. The focused zero-import Wasm gate passes 1/1 in 3.19
+  seconds, rejects each of the six false input cases, and rejects a mutation to
+  every committed product node. This proves header consistency only. It does
+  not yet recompute Merkle openings, transcript challenges, FRI folds, or AIR
+  query constraints, and it does not emit a parent receipt.
+
+  That focused gate currently requires the local Sonatina proof worktree. A
+  clean detached probe against the repository-pinned Sonatina revision fails
+  before reaching the test because `mb2` imports the newer
+  `SpirvBuiltinArgument` API while the pinned revision exposes only
+  `SpirvBuiltinInput`. Restoring a published, reproducible Sonatina pin is now
+  a prerequisite for counting the recursive gate as clean-clone evidence.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
