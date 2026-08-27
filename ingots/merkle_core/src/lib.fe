@@ -1,11 +1,12 @@
-//! Field-generic, effect-free Merkle proof shapes.
+//! Field-generic Merkle proof shapes and placement-neutral traversals.
 //!
-//! This is the portable part of zk-kit.fe's `TwoToOneHasher` design. A
-//! nominal hasher supplies zero, equality, and ordered two-to-one hashing;
-//! the tree algorithms contain no field, permutation, EVM, Wasm, or WebGPU
-//! assumptions. The same little-endian path convention is used throughout:
-//! bit zero of the index chooses the leaf side, then successive bits choose
-//! successive levels.
+//! This is the portable part of zk-kit.fe's `TwoToOneHasher` design. A nominal
+//! hasher supplies zero, equality, and ordered two-to-one hashing; the semantic
+//! tree algorithms contain no field, permutation, EVM, Wasm, or WebGPU
+//! assumptions. Large traversals select physical storage through a typed
+//! interpreter while retaining the same topology. The same little-endian path
+//! convention is used throughout: bit zero of the index chooses the leaf side,
+//! then successive bits choose successive levels.
 
 use core::marker::Copy
 use canonical_words::{
@@ -37,44 +38,37 @@ pub struct MerkleMultiPathTask {
 }
 impl core::marker::Copy for MerkleMultiPathTask {}
 
-pub struct MerkleMultiPathStep<I: core::marker::Copy, F: Copy> {
-    pub interpreter: I,
-    pub value: F,
-}
-impl<I: core::marker::Copy, F: Copy> core::marker::Copy
-    for MerkleMultiPathStep<I, F> {}
+pub struct MerkleMultiPathStep<I: core::marker::Copy, F: Copy> { pub interpreter: I, pub value: F }
+impl<I: core::marker::Copy, F: Copy> core::marker::Copy for MerkleMultiPathStep<I, F> {}
 
 /// Stateful interpretation of the fixed semantic multipath topology. Value,
 /// trace, quadratic-relation, and GPU placements can consume these same
 /// ordered tasks without reimplementing request normalization or sibling
 /// consumption.
-pub trait MerkleMultiPathInterpreter<
-    F: Copy,
-    H: TwoToOneHasher<F>,
->: core::marker::Copy {
-    fn compress(
-        self,
-        _ task: MerkleMultiPathTask,
-        _ child: F,
-        _ sibling: F,
-    ) -> MerkleMultiPathStep<Self, F>
+pub trait MerkleMultiPathInterpreter<F: Copy, H: TwoToOneHasher<F>>: core::marker::Copy {
+    fn compress(self, _ task: MerkleMultiPathTask, _ child: F, _ sibling: F) -> MerkleMultiPathStep<
+        Self,
+        F,
+    >
 }
 
 pub struct MerkleMultiPathValueInterpreter { marker: u32 }
 impl core::marker::Copy for MerkleMultiPathValueInterpreter {}
 
 impl MerkleMultiPathValueInterpreter {
-    pub fn new() -> Self { Self { marker: 0 } }
+    pub fn new() -> Self {
+        Self { marker: 0 }
+    }
 }
 
-impl<F: Copy, H: TwoToOneHasher<F>> MerkleMultiPathInterpreter<F, H>
-    for MerkleMultiPathValueInterpreter {
-    fn compress(
-        self,
-        _ task: MerkleMultiPathTask,
-        _ child: F,
-        _ sibling: F,
-    ) -> MerkleMultiPathStep<Self, F> {
+impl<F: Copy, H: TwoToOneHasher<F>> MerkleMultiPathInterpreter<
+    F,
+    H,
+> for MerkleMultiPathValueInterpreter {
+    fn compress(self, _ task: MerkleMultiPathTask, _ child: F, _ sibling: F) -> MerkleMultiPathStep<
+        Self,
+        F,
+    > {
         MerkleMultiPathStep {
             interpreter: self,
             value: if task.direction == 0 {
@@ -86,17 +80,13 @@ impl<F: Copy, H: TwoToOneHasher<F>> MerkleMultiPathInterpreter<F, H>
     }
 }
 
-pub struct MerkleMultiPathInterpretation<
-    I: core::marker::Copy,
-    F: Copy,
-> {
+pub struct MerkleMultiPathInterpretation<I: core::marker::Copy, F: Copy> {
     pub interpreter: I,
     pub root: MerkleRoot<F>,
     pub hashes: u32,
     pub used_siblings: u32,
 }
-impl<I: core::marker::Copy, F: Copy> core::marker::Copy
-    for MerkleMultiPathInterpretation<I, F> {}
+impl<I: core::marker::Copy, F: Copy> core::marker::Copy for MerkleMultiPathInterpretation<I, F> {}
 
 pub struct MerkleRoot<F: Copy> { pub valid: bool, pub value: F }
 impl<F: Copy> Copy for MerkleRoot<F> {}
@@ -133,22 +123,18 @@ impl<F: Copy, const DEPTH: usize> Copy for MerkleQuartetPath<F, DEPTH> {}
 /// left-to-right, but only when the sibling node is not already derivable from
 /// another opened leaf. Fixed capacities keep the carrier backend-portable;
 /// unused slots must remain canonical zeroes.
-pub struct MerkleMultiPath<
-    F: Copy,
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
-> {
+pub struct MerkleMultiPath<F: Copy, const MAX_LEAVES: usize, const MAX_SIBLINGS: usize> {
     pub valid: bool,
     pub leaf_count: u32,
     pub leaf_indices: [u32; MAX_LEAVES],
     pub sibling_count: u32,
     pub siblings: [F; MAX_SIBLINGS],
 }
-impl<
-    F: Copy,
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
-> Copy for MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS> {}
+impl<F: Copy, const MAX_LEAVES: usize, const MAX_SIBLINGS: usize> Copy for MerkleMultiPath<
+    F,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+> {}
 
 /// Variable canonical encoding for sparse authentication frontiers. Capacity
 /// remains a compile-time storage fact; only the sorted leaves and siblings
@@ -160,8 +146,7 @@ impl<
 > CanonicalWordStream for MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS> {
     fn word_count(ref self) -> u32 {
         if self.leaf_count > MAX_LEAVES.downcast_truncate()
-            || self.sibling_count > MAX_SIBLINGS.downcast_truncate()
-        {
+            || self.sibling_count > MAX_SIBLINGS.downcast_truncate() {
             return 0
         }
         self.valid.word_count()
@@ -173,17 +158,12 @@ impl<
 
     fn encode_stream<W: WordSink>(ref self, _ writer: W) -> W {
         if self.leaf_count > MAX_LEAVES.downcast_truncate()
-            || self.sibling_count > MAX_SIBLINGS.downcast_truncate()
-        {
+            || self.sibling_count > MAX_SIBLINGS.downcast_truncate() {
             return writer.reject()
         }
         let writer = self.valid.encode_stream(writer)
         let writer = self.leaf_count.encode_stream(writer)
-        let writer = encode_canonical_prefix(
-            ref self.leaf_indices,
-            self.leaf_count,
-            writer,
-        )
+        let writer = encode_canonical_prefix(ref self.leaf_indices, self.leaf_count, writer)
         let writer = self.sibling_count.encode_stream(writer)
         encode_canonical_prefix(ref self.siblings, self.sibling_count, writer)
     }
@@ -195,11 +175,7 @@ impl<
             self.valid = false
             return reader.reject()
         }
-        let reader = decode_canonical_prefix(
-            mut self.leaf_indices,
-            self.leaf_count,
-            reader,
-        )
+        let reader = decode_canonical_prefix(mut self.leaf_indices, self.leaf_count, reader)
         let reader = self.sibling_count.decode_stream(reader)
         if self.sibling_count > MAX_SIBLINGS.downcast_truncate() {
             self.valid = false
@@ -213,17 +189,17 @@ fn invalid_root<F: Copy, H: TwoToOneHasher<F>>() -> MerkleRoot<F> {
     MerkleRoot { valid: false, value: H::zero() }
 }
 
-fn invalid_frontier<F: Copy, H: TwoToOneHasher<F>, const LEVELS: usize>(
-) -> MerkleFrontier<F, LEVELS> {
-    MerkleFrontier {
-        valid: false,
-        count: 0,
-        nodes: [H::zero(); LEVELS],
-    }
+fn invalid_frontier<F: Copy, H: TwoToOneHasher<F>, const LEVELS: usize>() -> MerkleFrontier<
+    F,
+    LEVELS,
+> {
+    MerkleFrontier { valid: false, count: 0, nodes: [H::zero(); LEVELS] }
 }
 
-fn invalid_pair_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
-) -> MerklePairPath<F, DEPTH> {
+fn invalid_pair_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>() -> MerklePairPath<
+    F,
+    DEPTH,
+> {
     MerklePairPath {
         valid: false,
         index: 0,
@@ -232,8 +208,10 @@ fn invalid_pair_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
     }
 }
 
-fn invalid_quartet_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
-) -> MerkleQuartetPath<F, DEPTH> {
+fn invalid_quartet_path<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>() -> MerkleQuartetPath<
+    F,
+    DEPTH,
+> {
     MerkleQuartetPath {
         valid: false,
         index: 0,
@@ -260,11 +238,7 @@ fn invalid_multi_path<
 }
 
 /// Fold a conventional bottom-up sibling path.
-pub fn binary_root<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const MAX_DEPTH: usize,
->(
+pub fn binary_root<F: Copy, H: TwoToOneHasher<F>, const MAX_DEPTH: usize>(
     _ leaf: F,
     _ depth: usize,
     _ path_index: u32,
@@ -299,11 +273,7 @@ pub fn binary_root<
     MerkleRoot { valid: true, value: node }
 }
 
-pub fn binary_verify<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const MAX_DEPTH: usize,
->(
+pub fn binary_verify<F: Copy, H: TwoToOneHasher<F>, const MAX_DEPTH: usize>(
     _ expected: F,
     _ leaf: F,
     _ depth: usize,
@@ -315,24 +285,15 @@ pub fn binary_verify<
 }
 
 /// Empty streaming state for a tree with at most `2^LEVELS` leaves.
-pub fn empty_frontier<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const LEVELS: usize,
->() -> MerkleFrontier<F, LEVELS> {
-    MerkleFrontier {
-        valid: true,
-        count: 0,
-        nodes: [H::zero(); LEVELS],
-    }
+pub fn empty_frontier<F: Copy, H: TwoToOneHasher<F>, const LEVELS: usize>() -> MerkleFrontier<
+    F,
+    LEVELS,
+> {
+    MerkleFrontier { valid: true, count: 0, nodes: [H::zero(); LEVELS] }
 }
 
 /// Push one leaf while retaining only the binary carry frontier.
-pub fn push_frontier<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const LEVELS: usize,
->(
+pub fn push_frontier<F: Copy, H: TwoToOneHasher<F>, const LEVELS: usize>(
     _ frontier: own MerkleFrontier<F, LEVELS>,
     _ leaf: F,
 ) -> MerkleFrontier<F, LEVELS> {
@@ -361,11 +322,7 @@ pub fn push_frontier<
 }
 
 /// Accept only a nonempty, complete power-of-two tree.
-pub fn complete_frontier_root<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const LEVELS: usize,
->(
+pub fn complete_frontier_root<F: Copy, H: TwoToOneHasher<F>, const LEVELS: usize>(
     _ frontier: own MerkleFrontier<F, LEVELS>,
 ) -> MerkleRoot<F> {
     if !frontier.valid || frontier.count == 0 || (frontier.count & (frontier.count - 1)) != 0 {
@@ -435,11 +392,7 @@ where N > 1, HALF > 0, { HALF + HALF == N }
     }
 }
 
-pub fn pair_root<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const DEPTH: usize,
->(
+pub fn pair_root<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
     _ positive_leaf: F,
     _ negative_leaf: F,
     _ path: own MerklePairPath<F, DEPTH>,
@@ -475,11 +428,7 @@ pub fn pair_root<
     MerkleRoot { valid: true, value: H::hash2(positive, negative) }
 }
 
-pub fn pair_verify<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const DEPTH: usize,
->(
+pub fn pair_verify<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
     _ expected: F,
     _ positive_leaf: F,
     _ negative_leaf: F,
@@ -550,11 +499,7 @@ where N > 3, QUARTER > 0, { QUARTER + QUARTER + QUARTER + QUARTER == N }
     }
 }
 
-pub fn quartet_root<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const DEPTH: usize,
->(
+pub fn quartet_root<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
     _ first_leaf: F,
     _ second_leaf: F,
     _ third_leaf: F,
@@ -600,11 +545,7 @@ pub fn quartet_root<
     MerkleRoot { valid: true, value: H::hash2(left, right) }
 }
 
-pub fn quartet_verify<
-    F: Copy,
-    H: TwoToOneHasher<F>,
-    const DEPTH: usize,
->(
+pub fn quartet_verify<F: Copy, H: TwoToOneHasher<F>, const DEPTH: usize>(
     _ expected: F,
     _ first_leaf: F,
     _ second_leaf: F,
@@ -617,9 +558,7 @@ pub fn quartet_verify<
 }
 
 /// Base case for a two-leaf tree.
-pub fn pair_path_two<F: Copy, H: TwoToOneHasher<F>>(
-    _ index: u32,
-) -> MerklePairPath<F, 0> {
+pub fn pair_path_two<F: Copy, H: TwoToOneHasher<F>>(_ index: u32) -> MerklePairPath<F, 0> {
     MerklePairPath {
         valid: index == 0,
         index: index,
@@ -634,9 +573,7 @@ pub fn pair_verify_two<F: Copy, H: TwoToOneHasher<F>>(
     _ negative_leaf: F,
     _ path: own MerklePairPath<F, 0>,
 ) -> bool {
-    path.valid
-        && path.index == 0
-        && H::equal(H::hash2(positive_leaf, negative_leaf), expected)
+    path.valid && path.index == 0 && H::equal(H::hash2(positive_leaf, negative_leaf), expected)
 }
 
 /// Build a complete root and canonical sparse multipath in one tree
@@ -656,12 +593,7 @@ pub fn write_multi_path_and_root_from_leaves<
     _ path: mut MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
     _ root: mut MerkleRoot<F>,
 ) -> bool
-where
-    N > 1,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    REQUESTS > 0,
-    MAX_LEAVES > 0,
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, REQUESTS > 0, MAX_LEAVES > 0
 {
     path = invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
     root = invalid_root<F, H>()
@@ -739,7 +671,9 @@ where
         active_count = next_count
         width = parent_count
     }
-    if active_count != 1 || indices[0] != 0 { return false }
+    if active_count != 1 || indices[0] != 0 {
+        return false
+    }
 
     path = MerkleMultiPath {
         valid: true,
@@ -765,14 +699,9 @@ pub fn multi_path_matches_requests<
     _ path: ref MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
     _ requested: ref [u32; REQUESTS],
 ) -> bool
-where
-    N > 0,
-    N <= 2147483648,
-    REQUESTS > 0,
-    MAX_LEAVES > 0,
+where N > 0, N <= 2147483648, REQUESTS > 0, MAX_LEAVES > 0
 {
-    if !path.valid || path.leaf_count == 0
-        || path.leaf_count > MAX_LEAVES.downcast_truncate() {
+    if !path.valid || path.leaf_count == 0 || path.leaf_count > MAX_LEAVES.downcast_truncate() {
         return false
     }
     let width: u32 = N.downcast_truncate()
@@ -781,14 +710,18 @@ where
     let mut request: usize = 0
     while request < REQUESTS {
         let index = requested[request]
-        if index >= width { return false }
+        if index >= width {
+            return false
+        }
 
         let mut position: usize = 0
         while position < count && expected[position] < index {
             position = position + 1
         }
         if position == count || expected[position] != index {
-            if count >= MAX_LEAVES { return false }
+            if count >= MAX_LEAVES {
+                return false
+            }
             let mut cursor = count
             while cursor > position {
                 expected[cursor] = expected[cursor - 1]
@@ -800,15 +733,21 @@ where
         request = request + 1
     }
     let count_u32: u32 = count.downcast_truncate()
-    if count_u32 != path.leaf_count { return false }
+    if count_u32 != path.leaf_count {
+        return false
+    }
 
     let mut cursor: usize = 0
     while cursor < count {
-        if path.leaf_indices[cursor] != expected[cursor] { return false }
+        if path.leaf_indices[cursor] != expected[cursor] {
+            return false
+        }
         cursor = cursor + 1
     }
     while cursor < MAX_LEAVES {
-        if path.leaf_indices[cursor] != 0 { return false }
+        if path.leaf_indices[cursor] != 0 {
+            return false
+        }
         cursor = cursor + 1
     }
     true
@@ -822,27 +761,21 @@ pub fn multi_path_from_leaves<
     const REQUESTS: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->(
-    _ leaves: own [F; N],
-    _ requested: own [u32; REQUESTS],
-) -> MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>
-where
-    N > 1,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    REQUESTS > 0,
-    MAX_LEAVES > 0,
+>(_ leaves: own [F; N], _ requested: own [u32; REQUESTS]) -> MerkleMultiPath<
+    F,
+    MAX_LEAVES,
+    MAX_SIBLINGS,
+>
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, REQUESTS > 0, MAX_LEAVES > 0
 {
     let mut path = invalid_multi_path<F, H, MAX_LEAVES, MAX_SIBLINGS>()
     let mut root = invalid_root<F, H>()
-    write_multi_path_and_root_from_leaves<
-        F,
-        H,
-        N,
-        REQUESTS,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(ref leaves, ref requested, mut path, mut root)
+    write_multi_path_and_root_from_leaves<F, H, N, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+        ref leaves,
+        ref requested,
+        mut path,
+        mut root,
+    )
     path
 }
 
@@ -850,9 +783,7 @@ fn invalid_multi_path_interpretation<
     F: Copy,
     H: TwoToOneHasher<F>,
     I: MerkleMultiPathInterpreter<F, H>,
->(
-    _ interpreter: I,
-) -> MerkleMultiPathInterpretation<I, F> {
+>(_ interpreter: I) -> MerkleMultiPathInterpretation<I, F> {
     MerkleMultiPathInterpretation {
         interpreter: interpreter,
         root: invalid_root<F, H>(),
@@ -861,31 +792,176 @@ fn invalid_multi_path_interpretation<
     }
 }
 
+/// Physical storage interpretation for the canonical multipath reduction.
+/// The traversal owns semantic topology; implementations choose only where
+/// its double-buffered indices and nodes live.
+pub trait MerkleMultiPathReductionStorage<F: Copy, const MAX_LEAVES: usize>: Copy {
+    fn initialize(
+        self,
+        _ opened_leaves: ref [F; MAX_LEAVES],
+        _ leaf_indices: ref [u32; MAX_LEAVES],
+        _ zero: F,
+    ) -> Self
+    fn index(self, _ position: usize, _ current_a: bool) -> u32
+    fn node(self, _ position: usize, _ current_a: bool) -> F
+    fn write_next(self, _ position: usize, _ index: u32, _ node: F, _ current_a: bool) -> Self
+}
+
+struct LocalMerkleMultiPathReductionStorage<F: Copy, const MAX_LEAVES: usize> {
+    indices_a: [u32; MAX_LEAVES],
+    indices_b: [u32; MAX_LEAVES],
+    nodes_a: [F; MAX_LEAVES],
+    nodes_b: [F; MAX_LEAVES],
+}
+impl<F: Copy, const MAX_LEAVES: usize> Copy for LocalMerkleMultiPathReductionStorage<
+    F,
+    MAX_LEAVES,
+> {}
+
+impl<F: Copy, const MAX_LEAVES: usize> MerkleMultiPathReductionStorage<
+    F,
+    MAX_LEAVES,
+> for LocalMerkleMultiPathReductionStorage<F, MAX_LEAVES> {
+    fn initialize(
+        self,
+        _ opened_leaves: ref [F; MAX_LEAVES],
+        _ leaf_indices: ref [u32; MAX_LEAVES],
+        _ zero: F,
+    ) -> Self {
+        let mut storage = self
+        let mut cursor: usize = 0
+        while cursor < MAX_LEAVES {
+            storage.indices_a[cursor] = leaf_indices[cursor]
+            storage.indices_b[cursor] = 0
+            storage.nodes_a[cursor] = opened_leaves[cursor]
+            storage.nodes_b[cursor] = zero
+            cursor = cursor + 1
+        }
+        storage
+    }
+
+    fn index(self, _ position: usize, _ current_a: bool) -> u32 {
+        if current_a {
+            self.indices_a[position]
+        } else {
+            self.indices_b[position]
+        }
+    }
+
+    fn node(self, _ position: usize, _ current_a: bool) -> F {
+        if current_a {
+            self.nodes_a[position]
+        } else {
+            self.nodes_b[position]
+        }
+    }
+
+    fn write_next(self, _ position: usize, _ index: u32, _ node: F, _ current_a: bool) -> Self {
+        let mut storage = self
+        if current_a {
+            storage.indices_b[position] = index
+            storage.nodes_b[position] = node
+        } else {
+            storage.indices_a[position] = index
+            storage.nodes_a[position] = node
+        }
+        storage
+    }
+}
+
+/// Opaque browser-memory target used by the browser storage interpretation.
+/// Its fields remain private to this ingot; `merkle_browser` supplies the
+/// effect handle and calls the checked accessors below.
+pub struct MerkleMultiPathReductionWorkspace<F: Copy, const MAX_LEAVES: usize> {
+    indices_a: [u32; MAX_LEAVES],
+    indices_b: [u32; MAX_LEAVES],
+    nodes_a: [F; MAX_LEAVES],
+    nodes_b: [F; MAX_LEAVES],
+}
+
+pub fn initialize_multi_path_reduction_workspace<F: Copy, const MAX_LEAVES: usize>(
+    _ opened_leaves: ref [F; MAX_LEAVES],
+    _ leaf_indices: ref [u32; MAX_LEAVES],
+    _ zero: F,
+)
+uses (workspace: mut MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>)
+{
+    let mut cursor: usize = 0
+    while cursor < MAX_LEAVES {
+        workspace.indices_a[cursor] = leaf_indices[cursor]
+        workspace.indices_b[cursor] = 0
+        workspace.nodes_a[cursor] = opened_leaves[cursor]
+        workspace.nodes_b[cursor] = zero
+        cursor = cursor + 1
+    }
+}
+
+pub fn multi_path_workspace_index<F: Copy, const MAX_LEAVES: usize>(
+    _ position: usize,
+    _ current_a: bool,
+) -> u32
+uses (workspace: mut MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>)
+{
+    if current_a {
+        workspace.indices_a[position]
+    } else {
+        workspace.indices_b[position]
+    }
+}
+
+pub fn multi_path_workspace_node<F: Copy, const MAX_LEAVES: usize>(
+    _ position: usize,
+    _ current_a: bool,
+) -> F
+uses (workspace: mut MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>)
+{
+    if current_a {
+        workspace.nodes_a[position]
+    } else {
+        workspace.nodes_b[position]
+    }
+}
+
+pub fn write_multi_path_workspace_next<F: Copy, const MAX_LEAVES: usize>(
+    _ position: usize,
+    _ index: u32,
+    _ node: F,
+    _ current_a: bool,
+)
+uses (workspace: mut MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>)
+{
+    if current_a {
+        workspace.indices_b[position] = index
+        workspace.nodes_b[position] = node
+    } else {
+        workspace.indices_a[position] = index
+        workspace.nodes_a[position] = node
+    }
+}
+
 /// Interpret the canonical sparse reduction once. The semantic topology is
 /// fixed here; an interpreter owns only the physical meaning of each ordered
 /// hash task.
-pub fn interpret_multi_root<
+pub fn interpret_multi_root_with_storage<
     F: Copy,
     H: TwoToOneHasher<F>,
     I: MerkleMultiPathInterpreter<F, H>,
     const N: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
+    S: MerkleMultiPathReductionStorage<F, MAX_LEAVES>,
 >(
-    _ opened_leaves: own [F; MAX_LEAVES],
-    _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ opened_leaves: ref [F; MAX_LEAVES],
+    _ path: ref MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
     _ interpreter: I,
+    _ storage: S,
 ) -> MerkleMultiPathInterpretation<I, F>
-where
-    N > 1,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    MAX_LEAVES > 0,
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
 {
+    let mut storage = storage
     let leaf_count: usize = path.leaf_count as usize
     let sibling_count: usize = path.sibling_count as usize
-    if !path.valid || leaf_count == 0 || leaf_count > MAX_LEAVES
-        || sibling_count > MAX_SIBLINGS {
+    if !path.valid || leaf_count == 0 || leaf_count > MAX_LEAVES || sibling_count > MAX_SIBLINGS {
         return invalid_multi_path_interpretation<F, H, I>(interpreter)
     }
     let width_u32: u32 = N.downcast_truncate()
@@ -911,28 +987,26 @@ where
         cursor = cursor + 1
     }
 
-    let mut indices = path.leaf_indices
-    let mut nodes = opened_leaves
+    storage = storage.initialize(opened_leaves, ref path.leaf_indices, H::zero())
     let mut active_count = leaf_count
     let mut used_siblings: usize = 0
     let mut width: usize = N
     let mut level: u32 = 0
     let mut hashes: u32 = 0
+    let mut current_a = true
     let mut interpreter = interpreter
     while width > 1 {
-        let mut next_indices = [0; MAX_LEAVES]
-        let mut next_nodes = [H::zero(); MAX_LEAVES]
         let mut next_count: usize = 0
         cursor = 0
         while cursor < active_count {
-            let index = indices[cursor]
+            let index = storage.index(cursor, current_a)
             let paired = (index & 1) == 0
                 && cursor + 1 < active_count
-                && indices[cursor + 1] == index + 1
-            let child = nodes[cursor]
+                && storage.index(cursor + 1, current_a) == index + 1
+            let child = storage.node(cursor, current_a)
             let sibling_position: u32 = used_siblings.downcast_truncate()
             let sibling = if paired {
-                let value = nodes[cursor + 1]
+                let value = storage.node(cursor + 1, current_a)
                 cursor = cursor + 2
                 value
             } else {
@@ -944,39 +1018,73 @@ where
                 cursor = cursor + 1
                 sibling
             }
-            let compressed = interpreter.compress(
-                MerkleMultiPathTask {
-                    level: level,
-                    index: index,
-                    paired: paired,
-                    sibling_position: sibling_position,
-                    direction: index & 1,
-                },
-                child,
-                sibling,
-            )
+            let compressed = interpreter
+                .compress(
+                    MerkleMultiPathTask {
+                        level: level,
+                        index: index,
+                        paired: paired,
+                        sibling_position: sibling_position,
+                        direction: index & 1,
+                    },
+                    child,
+                    sibling,
+                )
             interpreter = compressed.interpreter
             let parent = compressed.value
             hashes = hashes + 1
-            next_indices[next_count] = index / 2
-            next_nodes[next_count] = parent
+            storage = storage.write_next(next_count, index / 2, parent, current_a)
             next_count = next_count + 1
         }
-        indices = next_indices
-        nodes = next_nodes
+        current_a = !current_a
         active_count = next_count
         width = width / 2
         level = level + 1
     }
-    if active_count != 1 || indices[0] != 0 || used_siblings != sibling_count {
+    if active_count != 1 || storage.index(0, current_a) != 0 || used_siblings != sibling_count {
         return invalid_multi_path_interpretation<F, H, I>(interpreter)
     }
     MerkleMultiPathInterpretation {
         interpreter: interpreter,
-        root: MerkleRoot { valid: true, value: nodes[0] },
+        root: MerkleRoot { valid: true, value: storage.node(0, current_a) },
         hashes: hashes,
         used_siblings: used_siblings.downcast_truncate(),
     }
+}
+
+/// Interpret the canonical sparse reduction with ordinary local Fe storage.
+/// Browser and other large-memory placements provide another storage
+/// interpretation to `interpret_multi_root_with_storage` instead of changing
+/// this topology.
+pub fn interpret_multi_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    I: MerkleMultiPathInterpreter<F, H>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opened_leaves: own [F; MAX_LEAVES],
+    _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ interpreter: I,
+) -> MerkleMultiPathInterpretation<I, F>
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
+{
+    let storage = LocalMerkleMultiPathReductionStorage {
+        indices_a: [0; MAX_LEAVES],
+        indices_b: [0; MAX_LEAVES],
+        nodes_a: [H::zero(); MAX_LEAVES],
+        nodes_b: [H::zero(); MAX_LEAVES],
+    }
+    interpret_multi_root_with_storage<
+        F,
+        H,
+        I,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+        LocalMerkleMultiPathReductionStorage<F, MAX_LEAVES>,
+    >(ref opened_leaves, ref path, interpreter, storage)
 }
 
 /// Reconstruct a root from canonical sparse leaves and their deduplicated
@@ -991,24 +1099,14 @@ pub fn multi_root<
     _ opened_leaves: own [F; MAX_LEAVES],
     _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
 ) -> MerkleRoot<F>
-where
-    N > 1,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    MAX_LEAVES > 0,
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
 {
-    interpret_multi_root<
-        F,
-        H,
-        MerkleMultiPathValueInterpreter,
-        N,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(
+    interpret_multi_root<F, H, MerkleMultiPathValueInterpreter, N, MAX_LEAVES, MAX_SIBLINGS>(
         opened_leaves,
         path,
         MerkleMultiPathValueInterpreter::new(),
-    ).root
+    )
+        .root
 }
 
 pub fn multi_verify<
@@ -1022,11 +1120,7 @@ pub fn multi_verify<
     _ opened_leaves: own [F; MAX_LEAVES],
     _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
 ) -> bool
-where
-    N > 1,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    MAX_LEAVES > 0,
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
 {
     let opened = multi_root<F, H, N, MAX_LEAVES, MAX_SIBLINGS>(opened_leaves, path)
     opened.valid && H::equal(opened.value, expected)

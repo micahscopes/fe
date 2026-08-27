@@ -94,7 +94,7 @@ fn full_root(mut leaves: Vec<u32>) -> u32 {
     leaves[0]
 }
 
-fn reference_multipath(leaves: &[u32], requests: &[u32]) -> (Vec<u32>, Vec<u32>) {
+fn reference_multipath(leaves: &[u32], requests: &[u32]) -> (Vec<u32>, Vec<u32>, u32) {
     let mut indices = requests.to_vec();
     indices.sort_unstable();
     indices.dedup();
@@ -103,6 +103,7 @@ fn reference_multipath(leaves: &[u32], requests: &[u32]) -> (Vec<u32>, Vec<u32>)
     let leaf_indices = indices.clone();
     let mut nodes = leaves.to_vec();
     let mut siblings = Vec::new();
+    let mut hashes = 0u32;
     while nodes.len() > 1 {
         let mut next_indices = Vec::new();
         let mut cursor = 0;
@@ -117,6 +118,7 @@ fn reference_multipath(leaves: &[u32], requests: &[u32]) -> (Vec<u32>, Vec<u32>)
                 cursor += 1;
             }
             next_indices.push(index / 2);
+            hashes += 1;
         }
         nodes = nodes
             .chunks_exact(2)
@@ -124,7 +126,7 @@ fn reference_multipath(leaves: &[u32], requests: &[u32]) -> (Vec<u32>, Vec<u32>)
             .collect();
         indices = next_indices;
     }
-    (leaf_indices, siblings)
+    (leaf_indices, siblings, hashes)
 }
 
 #[test]
@@ -239,7 +241,7 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
         [3, 3, 3, 3],
         [15, 0, 15, 0],
     ] {
-        let (indices, siblings) = reference_multipath(&multipath_leaves, &requests);
+        let (indices, siblings, hashes) = reference_multipath(&multipath_leaves, &requests);
         let actual = call(
             &mut store,
             &instance,
@@ -266,6 +268,23 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
         let mut expected_siblings = vec![0; 8];
         expected_siblings[..siblings.len()].copy_from_slice(&siblings);
         assert_eq!(&actual[9..17], expected_siblings);
+        let placements = call(
+            &mut store,
+            &instance,
+            "multipath16_reduction_placements",
+            &[requests[0], requests[1], requests[2], requests[3], 0],
+            8,
+        );
+        assert_eq!(
+            &placements[..4],
+            &[1, multipath_root, hashes, siblings.len() as u32],
+            "local reduction differs from independent topology",
+        );
+        assert_eq!(
+            &placements[4..],
+            &placements[..4],
+            "browser-memory and local reduction placements differ",
+        );
     }
     assert_eq!(
         call(&mut store, &instance, "multipath16", &[0, 4, 8, 16, 0], 17)[0],
@@ -321,6 +340,18 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
             0,
             "arena multipath mutation {mutation} must be rejected",
         );
+        let placements = call(
+            &mut store,
+            &instance,
+            "multipath16_reduction_placements",
+            &[0, 4, 8, 12, mutation],
+            8,
+        );
+        assert_eq!(
+            &placements[4..],
+            &placements[..4],
+            "browser-memory and local reductions differ for mutation {mutation}",
+        );
     }
     for mutation in 5..=8 {
         assert_eq!(
@@ -345,12 +376,24 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
             0,
             "noncanonical arena multipath mutation {mutation} must be rejected",
         );
+        let placements = call(
+            &mut store,
+            &instance,
+            "multipath16_reduction_placements",
+            &[3, 3, 3, 3, mutation],
+            8,
+        );
+        assert_eq!(
+            &placements[4..],
+            &placements[..4],
+            "browser-memory and local reductions differ for mutation {mutation}",
+        );
     }
 
     let encoded = call(&mut store, &instance, "multipath_receipt16_encoded", &[], 2);
     let pointer = encoded[0];
     let length = encoded[1];
-    let (indices, siblings) = reference_multipath(&multipath_leaves, &[12, 0, 4, 8]);
+    let (indices, siblings, _) = reference_multipath(&multipath_leaves, &[12, 0, 4, 8]);
     let mut expected = vec![1, 1, 1, 4, siblings.len() as u32, 1];
     expected.extend(
         indices

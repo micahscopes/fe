@@ -25,20 +25,14 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     merkle_multi_path_max_assertions,
     merkle_multi_path_max_products,
     merkle_multi_path_relation_plan,
+    merkle_multi_path_relation_plan_in_browser,
     production_base_lde_leaf_relation_plan,
     production_interaction_lde_leaf_relation_plan,
     receipt_header_relation_residuals,
     receipt_header_relation_witness,
 }
-use merkle_core::{
-    MerkleMultiPath,
-    MerkleRoot,
-    write_multi_path_and_root_from_leaves,
-}
-use mandelbrot_proof_fixed_air_baby_bear::{
-    SPARSE_BASE_AIR_FIELDS,
-    SPARSE_INTERACTION_AIR_FIELDS,
-}
+use merkle_core::{MerkleMultiPath, MerkleRoot, write_multi_path_and_root_from_leaves}
+use mandelbrot_proof_fixed_air_baby_bear::{SPARSE_BASE_AIR_FIELDS, SPARSE_INTERACTION_AIR_FIELDS}
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
@@ -56,14 +50,8 @@ const PATH_ASSERTIONS: usize = PATH_DEPTH + 9
 const MULTI_WIDTH: usize = 16
 const MULTI_MAX_LEAVES: usize = 4
 const MULTI_MAX_SIBLINGS: usize = 16
-const MULTI_MAX_PRODUCTS: usize = merkle_multi_path_max_products(
-    MULTI_MAX_LEAVES,
-    PATH_DEPTH,
-)
-const MULTI_MAX_ASSERTIONS: usize = merkle_multi_path_max_assertions(
-    MULTI_MAX_LEAVES,
-    PATH_DEPTH,
-)
+const MULTI_MAX_PRODUCTS: usize = merkle_multi_path_max_products(MULTI_MAX_LEAVES, PATH_DEPTH)
+const MULTI_MAX_ASSERTIONS: usize = merkle_multi_path_max_assertions(MULTI_MAX_LEAVES, PATH_DEPTH)
 
 pub fn production_multipath_relation_capacities() -> (u32, u32, u32) {
     (
@@ -305,11 +293,7 @@ pub fn binary_merkle_path_relation_audit(
 
 struct MultipathCase {
     opened_leaves: [Poseidon2Digest; MULTI_MAX_LEAVES],
-    path: MerkleMultiPath<
-        Poseidon2Digest,
-        MULTI_MAX_LEAVES,
-        MULTI_MAX_SIBLINGS,
-    >,
+    path: MerkleMultiPath<Poseidon2Digest, MULTI_MAX_LEAVES, MULTI_MAX_SIBLINGS>,
     root: MerkleRoot<Poseidon2Digest>,
 }
 impl core::marker::Copy for MultipathCase {}
@@ -327,10 +311,7 @@ fn deterministic_multipath_leaf(_ index: u32) -> Poseidon2Digest {
     )
 }
 
-fn write_multipath_requests(
-    _ case: u32,
-    _ requests: mut [u32; MULTI_MAX_LEAVES],
-) {
+fn write_multipath_requests(_ case: u32, _ requests: mut [u32; MULTI_MAX_LEAVES]) {
     if case == 0 {
         requests[0] = 1
         requests[1] = 2
@@ -358,9 +339,7 @@ fn build_multipath_case(_ case: u32) -> MultipathCase {
     let mut leaves = [Poseidon2Digest::zero(); MULTI_WIDTH]
     let mut index: usize = 0
     while index < MULTI_WIDTH {
-        leaves[index] = deterministic_multipath_leaf(
-            index.downcast_truncate(),
-        )
+        leaves[index] = deterministic_multipath_leaf(index.downcast_truncate())
         index = index + 1
     }
     let mut requests = [0; MULTI_MAX_LEAVES]
@@ -372,10 +351,7 @@ fn build_multipath_case(_ case: u32) -> MultipathCase {
         sibling_count: 0,
         siblings: [Poseidon2Digest::zero(); MULTI_MAX_SIBLINGS],
     }
-    let mut root = MerkleRoot {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
+    let mut root = MerkleRoot { valid: false, value: Poseidon2Digest::zero() }
     let valid = write_multi_path_and_root_from_leaves<
         Poseidon2Digest,
         RecursiveVerifierPoseidonHasher,
@@ -397,11 +373,7 @@ fn build_multipath_case(_ case: u32) -> MultipathCase {
         opened_leaves[index] = leaves[path.leaf_indices[index] as usize]
         index = index + 1
     }
-    MultipathCase {
-        opened_leaves: opened_leaves,
-        path: path,
-        root: root,
-    }
+    MultipathCase { opened_leaves: opened_leaves, path: path, root: root }
 }
 
 fn changed_digest(_ value: Poseidon2Digest) -> Poseidon2Digest {
@@ -415,9 +387,19 @@ fn changed_digest(_ value: Poseidon2Digest) -> Poseidon2Digest {
     Poseidon2Digest::from_fields(fields)
 }
 
-pub fn multipath_case_summary(
-    _ case: u32,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+pub fn multipath_case_summary(_ case: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     let built = build_multipath_case(case)
     let direct = merkle_multi_path_relation_plan<
         QuadraticRelationValueInterpreter,
@@ -450,10 +432,14 @@ pub fn multipath_case_summary(
 /// Generate and replay one canonical deduplicated multipath relation through
 /// a bounded stream. Small case IDs exercise adjacent leaves, duplicate
 /// requests, both directions, and separated subtrees.
-pub fn deduplicated_merkle_multipath_relation_audit(
-    _ case: u32,
-    _ mutation: u32,
-) -> (u32, u32, u32, u32, u32, u32) {
+pub fn deduplicated_merkle_multipath_relation_audit(_ case: u32, _ mutation: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     let mut built = build_multipath_case(case)
     if mutation == 1 {
         built.root.value = changed_digest(built.root.value)
@@ -481,17 +467,15 @@ pub fn deduplicated_merkle_multipath_relation_audit(
         MULTI_MAX_LEAVES,
         MULTI_MAX_SIBLINGS,
     >(inputs, QuadraticRelationValueInterpreter::new())
-    let streamed = merkle_multi_path_relation_plan<
-        QuadraticRelationStreamInterpreter<
-            BabyBear,
-            MULTI_MAX_PRODUCTS,
-            MULTI_MAX_ASSERTIONS,
-        >,
+    let streamed = merkle_multi_path_relation_plan_in_browser<
+        QuadraticRelationStreamInterpreter<BabyBear, MULTI_MAX_PRODUCTS, MULTI_MAX_ASSERTIONS>,
         MULTI_WIDTH,
         MULTI_MAX_LEAVES,
         MULTI_MAX_SIBLINGS,
     >(
-        inputs,
+        ref inputs.opened_leaves,
+        ref inputs.path,
+        inputs.expected_root,
         QuadraticRelationStreamInterpreter<
             BabyBear,
             MULTI_MAX_PRODUCTS,
@@ -507,7 +491,7 @@ pub fn deduplicated_merkle_multipath_relation_audit(
             stream.replace_product(product, row)
         }
     }
-    let constrained = merkle_multi_path_relation_plan<
+    let constrained = merkle_multi_path_relation_plan_in_browser<
         QuadraticRelationStreamConstraintInterpreter<
             BabyBear,
             MULTI_MAX_PRODUCTS,
@@ -517,7 +501,9 @@ pub fn deduplicated_merkle_multipath_relation_audit(
         MULTI_MAX_LEAVES,
         MULTI_MAX_SIBLINGS,
     >(
-        inputs,
+        ref inputs.opened_leaves,
+        ref inputs.path,
+        inputs.expected_root,
         QuadraticRelationStreamConstraintInterpreter<
             BabyBear,
             MULTI_MAX_PRODUCTS,
@@ -540,24 +526,18 @@ fn base_leaf_values(_ seed: u32) -> [BabyBear; SPARSE_BASE_AIR_FIELDS] {
     let mut index: usize = 0
     while index < SPARSE_BASE_AIR_FIELDS {
         let lane: u32 = index.downcast_truncate()
-        values[index] = BabyBear::from_u32(
-            seed + lane * 17 + 1,
-        )
+        values[index] = BabyBear::from_u32(seed + lane * 17 + 1)
         index = index + 1
     }
     values
 }
 
-fn interaction_leaf_values(
-    _ seed: u32,
-) -> [BabyBear; SPARSE_INTERACTION_AIR_FIELDS] {
+fn interaction_leaf_values(_ seed: u32) -> [BabyBear; SPARSE_INTERACTION_AIR_FIELDS] {
     let mut values = [BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]
     let mut index: usize = 0
     while index < SPARSE_INTERACTION_AIR_FIELDS {
         let lane: u32 = index.downcast_truncate()
-        values[index] = BabyBear::from_u32(
-            seed + lane * 29 + 3,
-        )
+        values[index] = BabyBear::from_u32(seed + lane * 29 + 3)
         index = index + 1
     }
     values
@@ -613,7 +593,9 @@ pub fn production_base_lde_leaf_relation_audit(
     )
     (
         flag(direct.codec_valid && direct.interpreter.finish()),
-        flag(stream_codec_valid && constraint_codec_valid && relation.shape_valid),
+        flag(
+            stream_codec_valid && constraint_codec_valid && relation.shape_valid,
+        ),
         relation.operand_copy_mismatches + relation.nonzero_products,
         relation.assertion_copy_mismatches + relation.nonzero_assertions,
         PRODUCTION_BASE_LEAF_PRODUCTS.downcast_truncate(),
@@ -680,7 +662,9 @@ pub fn production_interaction_lde_leaf_relation_audit(
     )
     (
         flag(direct.codec_valid && direct.interpreter.finish()),
-        flag(stream_codec_valid && constraint_codec_valid && relation.shape_valid),
+        flag(
+            stream_codec_valid && constraint_codec_valid && relation.shape_valid,
+        ),
         relation.operand_copy_mismatches + relation.nonzero_products,
         relation.assertion_copy_mismatches + relation.nonzero_assertions,
         PRODUCTION_INTERACTION_LEAF_PRODUCTS.downcast_truncate(),

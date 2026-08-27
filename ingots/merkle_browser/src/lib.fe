@@ -4,9 +4,31 @@
 //! ingot places the same ordered tree traversal in Fe-owned browser linear
 //! memory so large proof domains do not become thousands of Wasm locals.
 
-use core::{BrowserPtr, alloc_browser_object}
+use core::{
+    AddressSpace,
+    BrowserPtr,
+    EffectHandle,
+    EffectHandleMut,
+    EffectRef,
+    EffectRefMut,
+    alloc_browser_object,
+}
 use core::marker::Copy
-use merkle_core::{MerkleMultiPath, MerkleRoot, TwoToOneHasher}
+use core::num::IntDowncast
+use merkle_core::{
+    MerkleMultiPath,
+    MerkleMultiPathInterpretation,
+    MerkleMultiPathInterpreter,
+    MerkleMultiPathReductionStorage,
+    MerkleMultiPathReductionWorkspace,
+    MerkleRoot,
+    TwoToOneHasher,
+    initialize_multi_path_reduction_workspace,
+    interpret_multi_root_with_storage,
+    multi_path_workspace_index,
+    multi_path_workspace_node,
+    write_multi_path_workspace_next,
+}
 
 /// Homogeneous leaf storage for callers that derive commitments at runtime.
 /// The nominal wrapper lets the Fe effect system retain the array in browser
@@ -22,6 +44,81 @@ pub struct MerkleLeafArena<F: Copy, const N: usize> {
 struct MerkleMultiPathWorkspace<F: Copy, const N: usize, const MAX_LEAVES: usize> {
     nodes: [F; N],
     indices: [u32; MAX_LEAVES],
+}
+
+struct BrowserMerkleMultiPathReductionStorage<F: Copy, const MAX_LEAVES: usize> { addr: u32 }
+impl<F: Copy, const MAX_LEAVES: usize> Copy for BrowserMerkleMultiPathReductionStorage<
+    F,
+    MAX_LEAVES,
+> {}
+impl<F: Copy, const MAX_LEAVES: usize> EffectHandle for BrowserMerkleMultiPathReductionStorage<
+    F,
+    MAX_LEAVES,
+> {
+    type Target = MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>
+    const SPACE: AddressSpace = AddressSpace::Memory
+
+    fn from_raw(_ raw: u256) -> Self {
+        Self { addr: raw.downcast_truncate() }
+    }
+
+    fn raw(self) -> u256 {
+        self.addr as u256
+    }
+}
+impl<F: Copy, const MAX_LEAVES: usize> EffectHandleMut for BrowserMerkleMultiPathReductionStorage<
+    F,
+    MAX_LEAVES,
+> {}
+impl<F: Copy, const MAX_LEAVES: usize> EffectRef<
+    MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>,
+> for BrowserMerkleMultiPathReductionStorage<F, MAX_LEAVES> {}
+impl<F: Copy, const MAX_LEAVES: usize> EffectRefMut<
+    MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>,
+> for BrowserMerkleMultiPathReductionStorage<F, MAX_LEAVES> {}
+
+impl<F: Copy, const MAX_LEAVES: usize> MerkleMultiPathReductionStorage<
+    F,
+    MAX_LEAVES,
+> for BrowserMerkleMultiPathReductionStorage<F, MAX_LEAVES> {
+    fn initialize(
+        self,
+        _ opened_leaves: ref [F; MAX_LEAVES],
+        _ leaf_indices: ref [u32; MAX_LEAVES],
+        _ zero: F,
+    ) -> Self {
+        let mut handle = self
+        with (MerkleMultiPathReductionWorkspace<F, MAX_LEAVES> = handle) {
+            initialize_multi_path_reduction_workspace<F, MAX_LEAVES>(
+                opened_leaves,
+                leaf_indices,
+                zero,
+            )
+        }
+        self
+    }
+
+    fn index(self, _ position: usize, _ current_a: bool) -> u32 {
+        let mut handle = self
+        with (MerkleMultiPathReductionWorkspace<F, MAX_LEAVES> = handle) {
+            multi_path_workspace_index<F, MAX_LEAVES>(position, current_a)
+        }
+    }
+
+    fn node(self, _ position: usize, _ current_a: bool) -> F {
+        let mut handle = self
+        with (MerkleMultiPathReductionWorkspace<F, MAX_LEAVES> = handle) {
+            multi_path_workspace_node<F, MAX_LEAVES>(position, current_a)
+        }
+    }
+
+    fn write_next(self, _ position: usize, _ index: u32, _ node: F, _ current_a: bool) -> Self {
+        let mut handle = self
+        with (MerkleMultiPathReductionWorkspace<F, MAX_LEAVES> = handle) {
+            write_multi_path_workspace_next<F, MAX_LEAVES>(position, index, node, current_a)
+        }
+        self
+    }
 }
 
 fn write_multi_path_with_workspace<
@@ -181,4 +278,45 @@ where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, REQUESTS > 0, MAX_LEAVES >
             mut root,
         )
     }
+}
+
+/// Interpret one canonical sparse reduction while retaining its double-buffer
+/// scratch in Fe-owned browser memory. This supplies storage to the exact
+/// traversal used by `merkle_core::interpret_multi_root`; it does not own a
+/// second normalization, sibling-consumption, or hash-order policy.
+pub fn interpret_multi_root_in_browser<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    I: MerkleMultiPathInterpreter<F, H>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opened_leaves: ref [F; MAX_LEAVES],
+    _ path: ref MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ interpreter: I,
+) -> MerkleMultiPathInterpretation<I, F>
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
+{
+    let workspace: BrowserPtr<
+        MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>,
+    > = alloc_browser_object<MerkleMultiPathReductionWorkspace<F, MAX_LEAVES>>()
+    if workspace.address() == 0 {
+        return MerkleMultiPathInterpretation {
+            interpreter: interpreter,
+            root: MerkleRoot { valid: false, value: H::zero() },
+            hashes: 0,
+            used_siblings: 0,
+        }
+    }
+    let storage = BrowserMerkleMultiPathReductionStorage { addr: workspace.address() }
+    interpret_multi_root_with_storage<
+        F,
+        H,
+        I,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+        BrowserMerkleMultiPathReductionStorage<F, MAX_LEAVES>,
+    >(opened_leaves, path, interpreter, storage)
 }

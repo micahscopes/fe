@@ -34,6 +34,7 @@ use merkle_core::{
     TwoToOneHasher,
     interpret_multi_root,
 }
+use merkle_browser::interpret_multi_root_in_browser
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
 use poseidon_baby_bear::{
@@ -55,48 +56,49 @@ pub const RECEIPT_HEADER_PRODUCTS: usize = 8
 pub const RECEIPT_HEADER_ASSERTIONS: usize = 9
 pub const MERKLE_NODE_PRODUCTS: usize = POSEIDON2_PERMUTATION_MULTIPLICATIONS + 9
 pub const MERKLE_NODE_ASSERTIONS: usize = 9
-pub const PRODUCTION_BASE_LEAF_PRODUCTS: usize =
-    sparse_base_lde_leaf_commitment_permutations<
-        {PRODUCTION_LIMBS},
-        {PRODUCTION_TRACE_LENGTH},
-        {PRODUCTION_LDE_LENGTH},
-    >() * POSEIDON2_PERMUTATION_MULTIPLICATIONS
-pub const PRODUCTION_INTERACTION_LEAF_PRODUCTS: usize =
-    sparse_interaction_lde_leaf_commitment_permutations<
-        {PRODUCTION_LIMBS},
-        {PRODUCTION_TRACE_LENGTH},
-        {PRODUCTION_LDE_LENGTH},
-    >() * POSEIDON2_PERMUTATION_MULTIPLICATIONS
+pub const PRODUCTION_BASE_LEAF_PRODUCTS: usize = sparse_base_lde_leaf_commitment_permutations<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    >()
+    * POSEIDON2_PERMUTATION_MULTIPLICATIONS
+pub const PRODUCTION_INTERACTION_LEAF_PRODUCTS: usize = sparse_interaction_lde_leaf_commitment_permutations<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    >()
+    * POSEIDON2_PERMUTATION_MULTIPLICATIONS
 pub const PRODUCTION_LEAF_ASSERTIONS: usize = 8
 
-pub const fn merkle_multi_path_max_hashes(
-    _ maximum_leaves: usize,
-    _ depth: usize,
-) -> usize {
+pub const fn merkle_multi_path_max_hashes(_ maximum_leaves: usize, _ depth: usize) -> usize {
     maximum_leaves * depth
 }
 
-pub const fn merkle_multi_path_max_products(
-    _ maximum_leaves: usize,
-    _ depth: usize,
-) -> usize {
-    merkle_multi_path_max_hashes(maximum_leaves, depth)
-        * MERKLE_NODE_PRODUCTS
+pub const fn merkle_multi_path_max_products(_ maximum_leaves: usize, _ depth: usize) -> usize {
+    merkle_multi_path_max_hashes(maximum_leaves, depth) * MERKLE_NODE_PRODUCTS
 }
 
-pub const fn merkle_multi_path_max_assertions(
-    _ maximum_leaves: usize,
-    _ depth: usize,
-) -> usize {
+pub const fn merkle_multi_path_max_assertions(_ maximum_leaves: usize, _ depth: usize) -> usize {
     merkle_multi_path_max_hashes(maximum_leaves, depth) + 9
 }
 
-pub const PRODUCTION_AIR_MULTIPATH_MAX_HASHES: usize =
-    PRODUCTION_SECURITY_AIR_MAX_LEAVES * PRODUCTION_LDE_LOG
-pub const PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS: usize =
-    PRODUCTION_AIR_MULTIPATH_MAX_HASHES * MERKLE_NODE_PRODUCTS
-pub const PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS: usize =
-    PRODUCTION_AIR_MULTIPATH_MAX_HASHES + 9
+pub const PRODUCTION_AIR_MULTIPATH_MAX_HASHES: usize = PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    * PRODUCTION_LDE_LOG
+pub const PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS: usize = PRODUCTION_AIR_MULTIPATH_MAX_HASHES
+    * MERKLE_NODE_PRODUCTS
+pub const PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS: usize = PRODUCTION_AIR_MULTIPATH_MAX_HASHES + 9
 
 /// Field projection of the exact receipt-header verifier task. The trace row
 /// is selected by its semantic position, so no caller-authored task opcode
@@ -454,16 +456,15 @@ pub fn binary_merkle_path_relation_plan<
 /// interpreter below supplies the recursive relation placement.
 pub struct RecursiveVerifierPoseidonHasher {}
 impl TwoToOneHasher<Poseidon2Digest> for RecursiveVerifierPoseidonHasher {
-    fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
+    fn zero() -> Poseidon2Digest {
+        Poseidon2Digest::zero()
+    }
 
     fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool {
         left.equals(right)
     }
 
-    fn hash2(
-        _ left: Poseidon2Digest,
-        _ right: Poseidon2Digest,
-    ) -> Poseidon2Digest {
+    fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
         compress(left, right)
     }
 }
@@ -472,13 +473,12 @@ impl TwoToOneHasher<Poseidon2Digest> for RecursiveVerifierPoseidonHasher {
 /// deduplicated multipath traversal. The traversal owns level, index, pairing,
 /// sibling position, and direction policy; this interpreter owns only the
 /// ordered arithmetic dependency.
-pub struct QuadraticMerkleMultiPathInterpreter<
-    I: QuadraticRelationInterpreter<BabyBear>,
-> {
+pub struct QuadraticMerkleMultiPathInterpreter<I: QuadraticRelationInterpreter<BabyBear>> {
     pub relation: I,
 }
-impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
-    for QuadraticMerkleMultiPathInterpreter<I> {}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> core::marker::Copy for QuadraticMerkleMultiPathInterpreter<I> {}
 
 impl<I: QuadraticRelationInterpreter<BabyBear>> MerkleMultiPathInterpreter<
     Poseidon2Digest,
@@ -505,33 +505,26 @@ impl<I: QuadraticRelationInterpreter<BabyBear>> MerkleMultiPathInterpreter<
     }
 }
 
-pub struct MerkleMultiPathRelationInputs<
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
-> {
+pub struct MerkleMultiPathRelationInputs<const MAX_LEAVES: usize, const MAX_SIBLINGS: usize> {
     pub opened_leaves: [Poseidon2Digest; MAX_LEAVES],
-    pub path: MerkleMultiPath<
-        Poseidon2Digest,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    pub path: MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
     pub expected_root: Poseidon2Digest,
 }
-impl<const MAX_LEAVES: usize, const MAX_SIBLINGS: usize>
-    core::marker::Copy
-    for MerkleMultiPathRelationInputs<MAX_LEAVES, MAX_SIBLINGS> {}
+impl<
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+> core::marker::Copy for MerkleMultiPathRelationInputs<MAX_LEAVES, MAX_SIBLINGS> {}
 
-pub struct MerkleMultiPathRelationPlan<
-    I: QuadraticRelationInterpreter<BabyBear>,
-> {
+pub struct MerkleMultiPathRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
     pub interpreter: I,
     pub root: Poseidon2Digest,
     pub valid: bool,
     pub hashes: u32,
     pub used_siblings: u32,
 }
-impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
-    for MerkleMultiPathRelationPlan<I> {}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy for MerkleMultiPathRelationPlan<
+    I,
+> {}
 
 /// Reconstruct one canonical deduplicated root through the shared topology
 /// interpreter. The product and assertion counts depend on the authenticated
@@ -546,11 +539,7 @@ pub fn merkle_multi_path_relation_plan<
     _ inputs: MerkleMultiPathRelationInputs<MAX_LEAVES, MAX_SIBLINGS>,
     _ interpreter: I,
 ) -> MerkleMultiPathRelationPlan<I>
-where
-    N > 1,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    MAX_LEAVES > 0,
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
 {
     let interpreted: MerkleMultiPathInterpretation<
         QuadraticMerkleMultiPathInterpreter<I>,
@@ -567,15 +556,21 @@ where
         inputs.path,
         QuadraticMerkleMultiPathInterpreter { relation: interpreter },
     )
+    finish_merkle_multi_path_relation_plan(interpreted, inputs.expected_root)
+}
+
+fn finish_merkle_multi_path_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreted: MerkleMultiPathInterpretation<
+        QuadraticMerkleMultiPathInterpreter<I>,
+        Poseidon2Digest,
+    >,
+    _ expected_root: Poseidon2Digest,
+) -> MerkleMultiPathRelationPlan<I> {
     let mut interpreter = constrain_one(
         interpreted.interpreter.relation,
         bool_field(interpreted.root.valid),
     )
-    interpreter = constrain_digest(
-        interpreter,
-        interpreted.root.value,
-        inputs.expected_root,
-    )
+    interpreter = constrain_digest(interpreter, interpreted.root.value, expected_root)
     MerkleMultiPathRelationPlan {
         interpreter: interpreter,
         root: interpreted.root.value,
@@ -583,6 +578,40 @@ where
         hashes: interpreted.hashes,
         used_siblings: interpreted.used_siblings,
     }
+}
+
+/// Place the shared canonical multipath traversal in Fe-owned browser memory.
+/// The opened-leaf and path carriers remain borrowed, so production policy
+/// sizes do not cross this boundary as flattened by-value aggregates.
+pub fn merkle_multi_path_relation_plan_in_browser<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opened_leaves: ref [Poseidon2Digest; MAX_LEAVES],
+    _ path: ref MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+    _ expected_root: Poseidon2Digest,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I>
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
+{
+    let interpreted: MerkleMultiPathInterpretation<
+        QuadraticMerkleMultiPathInterpreter<I>,
+        Poseidon2Digest,
+    > = interpret_multi_root_in_browser<
+        Poseidon2Digest,
+        RecursiveVerifierPoseidonHasher,
+        QuadraticMerkleMultiPathInterpreter<I>,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(
+        opened_leaves,
+        path,
+        QuadraticMerkleMultiPathInterpreter { relation: interpreter },
+    )
+    finish_merkle_multi_path_relation_plan(interpreted, expected_root)
 }
 
 /// Canonical production base-LDE leaf. Shape words are derived from the
@@ -609,8 +638,9 @@ pub struct ProductionLdeLeafRelationPlan<I: QuadraticRelationInterpreter<BabyBea
     pub commitment: Poseidon2Digest,
     pub codec_valid: bool,
 }
-impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
-    for ProductionLdeLeafRelationPlan<I> {}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> core::marker::Copy for ProductionLdeLeafRelationPlan<I> {}
 
 fn constrain_digest<I: QuadraticRelationInterpreter<BabyBear>>(
     _ interpreter: I,
@@ -620,26 +650,26 @@ fn constrain_digest<I: QuadraticRelationInterpreter<BabyBear>>(
     let mut interpreter = interpreter
     let mut lane: u32 = 0
     while lane < 8 {
-        interpreter = constrain_equal(
-            interpreter,
-            actual.field(lane),
-            expected.field(lane),
-        )
+        interpreter = constrain_equal(interpreter, actual.field(lane), expected.field(lane))
         lane = lane + 1
     }
     interpreter
 }
 
-pub fn production_base_lde_leaf_relation_plan<
-    I: QuadraticRelationInterpreter<BabyBear>,
->(
+pub fn production_base_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
     _ inputs: ProductionBaseLdeLeafRelationInputs,
     _ interpreter: I,
 ) -> ProductionLdeLeafRelationPlan<I> {
     let leaf = SparseBaseLdeLeaf<
-        {PRODUCTION_LIMBS},
-        {PRODUCTION_TRACE_LENGTH},
-        {PRODUCTION_LDE_LENGTH},
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
     > {
         limb_count: BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
         trace_length: BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
@@ -660,16 +690,20 @@ pub fn production_base_lde_leaf_relation_plan<
     }
 }
 
-pub fn production_interaction_lde_leaf_relation_plan<
-    I: QuadraticRelationInterpreter<BabyBear>,
->(
+pub fn production_interaction_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
     _ inputs: ProductionInteractionLdeLeafRelationInputs,
     _ interpreter: I,
 ) -> ProductionLdeLeafRelationPlan<I> {
     let leaf = SparseInteractionLdeLeaf<
-        {PRODUCTION_LIMBS},
-        {PRODUCTION_TRACE_LENGTH},
-        {PRODUCTION_LDE_LENGTH},
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
     > {
         limb_count: BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
         trace_length: BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
