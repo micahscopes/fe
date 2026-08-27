@@ -31,9 +31,7 @@ use crate::{
         get_or_build_runtime_instance,
     },
     runtime::code_region::{code_region_symbol, runtime_code_region_for_manual_root},
-    runtime::lower::body::{
-        check_reachable_runtime_trait_calls_resolvable, declared_external_func,
-    },
+    runtime::lower::body::declared_external_func,
     runtime::lower::classify::{
         RuntimeVisibleBindingPlan, runtime_effect_binding_plan, runtime_param_class,
         runtime_visible_binding_class,
@@ -111,11 +109,10 @@ pub enum LowerError {
     /// legal program, surfaced as a clean diagnostic on every reachable
     /// resolution route (never a backend panic); the call must be disambiguated
     /// with a `with (...)` selection. The message names the trait-method and the
-    /// goal only (no internal keys), so it is stable across runs. See the
-    /// pre-flight `check_runtime_trait_calls_resolvable` (checks the body being
-    /// lowered) and `check_reachable_runtime_trait_calls_resolvable` (walks the
-    /// transitive callee graph, so an unresolvable call reached only through
-    /// return-class inference on a callee is caught before that panics too).
+    /// goal only (no internal keys), so it is stable across runs. The
+    /// current-body preflight reports this error before actual body lowering.
+    /// Speculative return-class inference keeps an unresolved nested call
+    /// opaque until that callee reaches the checked lowering path.
     UnresolvedTraitSelection(String),
 }
 
@@ -223,12 +220,6 @@ struct RuntimeGraphBuilder<'db> {
     seen_region_roots: FxHashSet<RuntimeCodeRegion<'db>>,
     materialized_contracts: FxHashSet<Contract<'db>>,
     materialized_object_names: FxHashSet<String>,
-    /// Memoizes bodies already validated by
-    /// `check_reachable_runtime_trait_calls_resolvable`, keyed by
-    /// `SemanticInstanceKey` (trait-call resolvability does not depend on
-    /// runtime specialization), so the transitive pre-flight walk stays
-    /// cheap across the many `RuntimeInstance`s that can share callees.
-    checked_reachable_trait_calls: FxHashSet<SemanticInstanceKey<'db>>,
 }
 
 impl<'db> RuntimeGraphBuilder<'db> {
@@ -256,7 +247,6 @@ impl<'db> RuntimeGraphBuilder<'db> {
             seen_region_roots: FxHashSet::default(),
             materialized_contracts,
             materialized_object_names,
-            checked_reachable_trait_calls: FxHashSet::default(),
         };
         for root in roots {
             builder.enqueue(root);
@@ -292,15 +282,6 @@ impl<'db> RuntimeGraphBuilder<'db> {
 
             if let Some(semantic) = instance.key(self.db).semantic(self.db) {
                 ensure_semantic_instance_is_smir_lowerable(self.db, semantic)?;
-                wasm_runtime_package_detail(|| {
-                    format!("preflight trait calls for runtime graph instance {discovered}")
-                });
-                check_reachable_runtime_trait_calls_resolvable(
-                    self.db,
-                    semantic.key(self.db),
-                    &mut self.checked_reachable_trait_calls,
-                )
-                .map_err(|err| wrap_runtime_lowering_error(self.db, instance, err))?;
             }
             wasm_runtime_package_detail(|| {
                 format!("lower runtime body for graph instance {discovered}")
@@ -3629,6 +3610,63 @@ pub fn run(value: u32) -> Node<Leaf> {
 
         build_wasm_runtime_package(&db, db.top_mod(file))
             .expect("valid nested generic method calls must lower to a Wasm runtime package");
+    }
+
+    #[test]
+    fn wasm_package_defers_nested_trait_error_to_checked_callee_lowering() {
+        let mut db = DriverDataBase::default();
+        let file_url = Url::parse("file:///deferred_nested_trait_error.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            file_url,
+            Some(
+                r#"
+trait Greet {
+    fn greet(self) -> u32
+}
+
+struct Person { id: u32 }
+
+impl Greet for Person as First {
+    fn greet(self) -> u32 { 1 }
+}
+
+impl Greet for Person as Second {
+    fn greet(self) -> u32 { 2 }
+}
+
+struct Empty {}
+
+fn helper(person: Person) -> Empty {
+    let greeting = person.greet()
+    Empty {}
+}
+
+pub fn run() -> bool {
+    let ignored = helper(person: Person { id: 7 })
+    true
+}
+"#
+                .to_string(),
+            ),
+        );
+
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            diagnostics.is_empty(),
+            "coexisting named implementations should remain legal Fe:\n{diagnostics}"
+        );
+
+        let err = build_wasm_runtime_package(&db, top_mod)
+            .expect_err("the unselected trait call must fail during checked callee lowering");
+        let message = err.to_string();
+        assert!(
+            message.contains("unresolved trait selection while lowering `helper`")
+                && message.contains("call to trait method `greet`")
+                && message.contains("disambiguate the call with a `with (...)` selection"),
+            "unexpected fail-closed error: {message}"
+        );
     }
 
     fn recv_wrapper_plan<'db>(

@@ -217,6 +217,11 @@ enum ExprStaticFacts<'db> {
     Borrow {
         provider_fallback: Option<RuntimeClass<'db>>,
     },
+    /// Speculative return-class inference can inspect a callee before that
+    /// callee reaches ordinary body lowering. Keep an unresolved call opaque
+    /// here so the callee's own checked lowering can report the authoritative
+    /// `LowerError` without an eager transitive preflight walk.
+    UnresolvedCall,
     Call(CallStaticFacts<'db>),
 }
 
@@ -590,6 +595,7 @@ impl<'a, 'db> BodyEnv<'a, 'db> {
                     ExprStaticFacts::Const(_)
                     | ExprStaticFacts::AggregateMake(_)
                     | ExprStaticFacts::Borrow { .. }
+                    | ExprStaticFacts::UnresolvedCall
                     | ExprStaticFacts::Call(_),
                 ) => panic!(
                     "unexpected staged runtime class facts for read-place expr: owner={:?}; expr={expr:?}",
@@ -607,6 +613,9 @@ impl<'a, 'db> BodyEnv<'a, 'db> {
             NExpr::Call {
                 args, effect_args, ..
             } => {
+                if matches!(expr_facts, Some(ExprStaticFacts::UnresolvedCall)) {
+                    return None;
+                }
                 let Some(ExprStaticFacts::Call(facts)) = expr_facts else {
                     panic!(
                         "missing staged runtime call facts: owner={:?}; expr={expr:?}",
@@ -1170,15 +1179,11 @@ impl<'db> ExprStaticFactsBuilder<'_, 'db> {
                 ..
             } => {
                 let caller_key = body.owner.key(db);
-                let callee_key = resolve_runtime_call_key(
-                    db, caller_key, typed_body, body, *callee, args,
-                )
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "runtime call resolution failed during return-class inference for {:?}: {err}",
-                        caller_key,
-                    )
-                });
+                let Ok(callee_key) =
+                    resolve_runtime_call_key(db, caller_key, typed_body, body, *callee, args)
+                else {
+                    return Some(ExprStaticFacts::UnresolvedCall);
+                };
                 let semantic = get_or_build_semantic_instance(db, callee_key);
                 let builtin_return_class = extern_builtin_return_class(db, semantic, result_ty);
                 let return_decision = static_runtime_return_decision(db, semantic);

@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    mem::size_of,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, mem::size_of};
 
 use cranelift_entity::EntityRef;
 use hir::analysis::{
@@ -36,7 +32,6 @@ use hir::hir_def::{
     ArithBinOp, BinOp, CompBinOp, Func, UnOp, attr::ArithmeticMode, scope_graph::ScopeId,
 };
 use hir::projection::{IndexSource, Projection};
-use rustc_hash::FxHashSet;
 
 use crate::{
     db::MirDb,
@@ -79,7 +74,7 @@ use super::{
     realize::{
         RuntimeArgSource, RuntimeValueUseEmitter, SelectedRuntimeArg, emit_runtime_value_use_plan,
     },
-    returns::{StaticRuntimeReturnDecision, runtime_return_class, static_runtime_return_decision},
+    returns::runtime_return_class,
     source::{
         RuntimeSourceMode, RuntimeSourceQuery, SemanticPlaceValueSource,
         alias_source_place_for_local as source_alias_source_place_for_local,
@@ -90,47 +85,6 @@ use super::{
         stored_class_for_ty_in_context, top_level_class_for_ty_in_env,
     },
 };
-
-fn wasm_trait_preflight_trace(message: impl FnOnce() -> String) {
-    if std::env::var_os("FE_WASM_LOWER_TRACE").is_some() {
-        eprintln!("[fe wasm trait preflight] {}", message());
-    }
-}
-
-fn wasm_trait_preflight_detail(message: impl FnOnce() -> String) {
-    if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some() {
-        eprintln!("[fe wasm trait preflight] {}", message());
-    }
-}
-
-fn semantic_key_trace_label<'db>(db: &'db dyn MirDb, key: SemanticInstanceKey<'db>) -> String {
-    match key.owner(db) {
-        BodyOwner::Func(func) => func
-            .name(db)
-            .to_opt()
-            .map(|name| name.data(db).to_string())
-            .unwrap_or_else(|| "<anonymous function>".to_owned()),
-        owner => format!("{owner:?}"),
-    }
-}
-
-fn wasm_trait_preflight_slow<'db>(
-    db: &'db dyn MirDb,
-    key: SemanticInstanceKey<'db>,
-    phase: &'static str,
-    started: Instant,
-) {
-    let elapsed = started.elapsed();
-    if elapsed >= Duration::from_secs(1) {
-        wasm_trait_preflight_trace(|| {
-            format!(
-                "slow phase, phase={phase}, elapsed_ms={}, current={}",
-                elapsed.as_millis(),
-                semantic_key_trace_label(db, key),
-            )
-        });
-    }
-}
 
 pub fn lower_to_rmir<'db>(
     db: &'db dyn MirDb,
@@ -267,157 +221,6 @@ pub(crate) fn check_runtime_trait_calls_resolvable<'db>(
                 resolve_runtime_call_key(db, key, typed_body, body, *callee, args)?;
             }
         }
-    }
-    Ok(())
-}
-
-/// Pre-flight guard extension (closes a residual left by B-1): transitively
-/// walk the semantic call graph reachable from `root_key`, applying
-/// `check_runtime_trait_calls_resolvable` to every reachable body BEFORE any
-/// lowering (or the panicking return-class-inference pre-pass) ever touches
-/// it.
-///
-/// B-1's original guard only checks the CURRENT body's own top-level calls,
-/// once, right before that body is lowered. That leaves a gap: a callee
-/// body's static facts (`BodyStaticFacts::new`, via `RuntimeReturnSummary`)
-/// get walked EARLIER than the callee's own guard, whenever the caller needs
-/// the callee's return class for return-class inference (`returns.rs`'s
-/// `runtime_return_class` / `runtime_return_summary`, demanded from
-/// `lower_call` here and transitively via `LocalStateInferer` in `infer.rs`).
-/// `BodyStaticFacts::new` classifies every call in the callee's body,
-/// including ones that never reach the return value, so an unresolvable call
-/// buried in a callee whose return plan is `Dynamic`/`Erased` (e.g. a
-/// zero-sized-struct-returning helper) hits the panic in `classify.rs`
-/// before the callee's own instance is ever popped and lowered.
-///
-/// This walk resolves every call in the current body. It only descends into a
-/// callee when that callee has a dynamic runtime return. Those are precisely
-/// the bodies that return-class inference may inspect before their own runtime
-/// instance is popped and receives the ordinary current-body guard. A callee
-/// with a statically known runtime return never needs its body inspected by
-/// return-class inference, so eagerly traversing it would only elaborate the
-/// complete semantic call graph, including CTFE and type-derived helpers that
-/// never become runtime-package nodes.
-///
-/// Any unresolvable trait-method call that can be reached early therefore still
-/// surfaces as the ordinary `LowerError::UnresolvedTraitSelection` compile
-/// error. `checked` memoizes validated bodies across the package, while
-/// `scheduled` deduplicates pending keys so a shared computation DAG cannot
-/// inflate the worklist exponentially.
-///
-/// Only recurses into callees that are actual bodied Fe functions
-/// (`BodyOwner::Func` with `func.body(db).is_some()`); externs and
-/// declaration-only callees are resolved (and checked) but not walked
-/// further, mirroring how the ordinary lowering path never normalizes a body
-/// that does not exist.
-pub(crate) fn check_reachable_runtime_trait_calls_resolvable<'db>(
-    db: &'db dyn MirDb,
-    root_key: SemanticInstanceKey<'db>,
-    checked: &mut FxHashSet<SemanticInstanceKey<'db>>,
-) -> Result<(), LowerError> {
-    if checked.contains(&root_key) {
-        return Ok(());
-    }
-    wasm_trait_preflight_trace(|| {
-        format!(
-            "begin root={}, already_checked={}",
-            semantic_key_trace_label(db, root_key),
-            checked.len(),
-        )
-    });
-    let mut worklist = vec![root_key];
-    let mut scheduled = FxHashSet::default();
-    scheduled.insert(root_key);
-    let mut visited = 0_usize;
-    while let Some(key) = worklist.pop() {
-        if !checked.insert(key) {
-            continue;
-        }
-        visited += 1;
-        wasm_trait_preflight_detail(|| {
-            format!(
-                "visit {visited}, pending={}, checked={}, label={}",
-                worklist.len(),
-                checked.len(),
-                semantic_key_trace_label(db, key),
-            )
-        });
-        if visited % 500 == 0 {
-            wasm_trait_preflight_trace(|| {
-                format!(
-                    "progress, newly_checked={visited}, pending={}, current={}",
-                    worklist.len(),
-                    semantic_key_trace_label(db, key),
-                )
-            });
-        }
-        let phase_started = Instant::now();
-        let semantic = get_or_build_semantic_instance(db, key);
-        wasm_trait_preflight_slow(db, key, "semantic_instance", phase_started);
-        wasm_trait_preflight_detail(|| format!("normalize semantic body {visited}"));
-        let phase_started = Instant::now();
-        let Ok(body) = normalize_semantic_body(db, semantic) else {
-            // Normalization failures are a separate, unrelated error class
-            // surfaced through the ordinary lowering path if this body is
-            // actually reached; this guard only concerns trait-call
-            // resolvability.
-            continue;
-        };
-        wasm_trait_preflight_slow(db, key, "normalize_body", phase_started);
-        wasm_trait_preflight_detail(|| {
-            let statements = body
-                .blocks
-                .iter()
-                .map(|block| block.stmts.len())
-                .sum::<usize>();
-            format!(
-                "normalized semantic body {visited}, blocks={}, statements={statements}",
-                body.blocks.len(),
-            )
-        });
-        let phase_started = Instant::now();
-        check_runtime_trait_calls_resolvable(db, key, &body)?;
-        wasm_trait_preflight_slow(db, key, "trait_calls", phase_started);
-        let mut discovered_callees = 0_usize;
-        let phase_started = Instant::now();
-        let typed_body = key.typed_body(db);
-        wasm_trait_preflight_slow(db, key, "typed_body", phase_started);
-        for block in &body.blocks {
-            for stmt in &block.stmts {
-                if let NSStmtKind::Assign {
-                    expr: NExpr::Call { callee, args, .. },
-                    ..
-                } = &stmt.kind
-                {
-                    let phase_started = Instant::now();
-                    let callee_key =
-                        resolve_runtime_call_key(db, key, typed_body, &body, *callee, args)?;
-                    wasm_trait_preflight_slow(db, key, "resolve_runtime_call", phase_started);
-                    let callee_semantic = get_or_build_semantic_instance(db, callee_key);
-                    let return_is_dynamic = matches!(
-                        static_runtime_return_decision(db, callee_semantic),
-                        StaticRuntimeReturnDecision::Dynamic,
-                    );
-                    if return_is_dynamic
-                        && matches!(callee_key.owner(db), BodyOwner::Func(func) if func.body(db).is_some())
-                        && !checked.contains(&callee_key)
-                        && scheduled.insert(callee_key)
-                    {
-                        worklist.push(callee_key);
-                        discovered_callees += 1;
-                    }
-                }
-            }
-        }
-        wasm_trait_preflight_detail(|| {
-            format!(
-                "semantic body {visited} checked, callees={discovered_callees}, pending={}",
-                worklist.len(),
-            )
-        });
-    }
-    if visited > 0 {
-        wasm_trait_preflight_trace(|| format!("preflight complete, newly_checked={visited}"));
     }
     Ok(())
 }
