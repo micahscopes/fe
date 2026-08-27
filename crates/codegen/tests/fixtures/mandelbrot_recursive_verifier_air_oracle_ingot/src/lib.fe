@@ -1,0 +1,72 @@
+use mandelbrot_proof_recursive_verifier_air_baby_bear::{
+    RECEIPT_HEADER_ASSERTIONS,
+    RECEIPT_HEADER_PRODUCTS,
+    ReceiptHeaderRelationInputs,
+    derive_receipt_header_relation_auxiliary,
+    evaluate_receipt_header_relation,
+    receipt_header_relation_residuals,
+    receipt_header_relation_witness,
+}
+use precision::baby_bear::BabyBear
+use precision::polynomial::Radix2Field
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+fn as_bool(_ value: u32) -> BabyBear {
+    BabyBear::from_u32(if value == 1 { 1 } else { 0 })
+}
+
+/// Exercise direct evaluation, witness generation, and constraint replay for
+/// the exact receipt-header task. A nonzero mutation changes one committed
+/// product after witness generation.
+pub fn receipt_header_relation_audit(
+    _ receipt_valid: u32,
+    _ base_root_valid: u32,
+    _ interaction_root_valid: u32,
+    _ shift: u32,
+    _ accepted: u32,
+    _ trace_valid: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let inputs = ReceiptHeaderRelationInputs {
+        receipt_valid: as_bool(receipt_valid),
+        base_root_valid: as_bool(base_root_valid),
+        interaction_root_valid: as_bool(interaction_root_valid),
+        shift: BabyBear::from_u32(shift),
+        accepted: as_bool(accepted),
+        trace_valid: as_bool(trace_valid),
+    }
+    let auxiliary = derive_receipt_header_relation_auxiliary(inputs)
+    let mut witness = receipt_header_relation_witness(inputs)
+    if mutation > 0 && mutation <= RECEIPT_HEADER_PRODUCTS.downcast_truncate() {
+        let index = (mutation - 1) as usize
+        witness.nodes[index] = witness.nodes[index] + BabyBear::one()
+    }
+    let residuals = receipt_header_relation_residuals(inputs, auxiliary, witness)
+    let mut nonzero_products: u32 = 0
+    let mut product: usize = 0
+    while product < RECEIPT_HEADER_PRODUCTS {
+        if !residuals.products[product].radix2_is_zero() {
+            nonzero_products = nonzero_products + 1
+        }
+        product = product + 1
+    }
+    let mut nonzero_assertions: u32 = 0
+    let mut assertion: usize = 0
+    while assertion < RECEIPT_HEADER_ASSERTIONS {
+        if !residuals.assertions[assertion].radix2_is_zero() {
+            nonzero_assertions = nonzero_assertions + 1
+        }
+        assertion = assertion + 1
+    }
+    (
+        flag(evaluate_receipt_header_relation(inputs)),
+        flag(residuals.valid),
+        nonzero_products,
+        nonzero_assertions,
+        RECEIPT_HEADER_PRODUCTS.downcast_truncate(),
+        RECEIPT_HEADER_ASSERTIONS.downcast_truncate(),
+    )
+}

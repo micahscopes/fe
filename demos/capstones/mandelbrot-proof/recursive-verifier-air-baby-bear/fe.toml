@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_proof_recursive_verifier_air_baby_bear"
+version = "0.1.0"
+
+[dependencies]
+mandelbrot_proof_fixed_air_receipt_baby_bear = "../fixed-air-receipt-baby-bear"
+precision = "../../../sketches/precision"
+quadratic_plan = "../../../../ingots/quadratic_plan"

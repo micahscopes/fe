@@ -1,0 +1,190 @@
+//! Quadratic relations for the production BabyBear child verifier.
+//!
+//! This begins with the exact receipt-header task. The stored task result is
+//! witness, not authority: one authored plan constrains receipt validity, both
+//! typed roots, trace shape, the nonzero evaluation shift, and the accepted
+//! result. Later verifier stages extend this same relation vocabulary rather
+//! than treating a trace boolean as proof of its computation.
+
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    ProductionSecuritySparseBabyBearReceipt,
+    ProductionSecurityVerifierTrace,
+}
+use precision::baby_bear::BabyBear
+use precision::polynomial::Radix2Field
+use quadratic_plan::{
+    QuadraticRelationConstraintInterpreter,
+    QuadraticRelationInterpreter,
+    QuadraticRelationResiduals,
+    QuadraticRelationValueInterpreter,
+    QuadraticRelationWitness,
+    QuadraticRelationWitnessInterpreter,
+}
+
+pub const RECEIPT_HEADER_PRODUCTS: usize = 8
+pub const RECEIPT_HEADER_ASSERTIONS: usize = 9
+
+/// Field projection of the exact receipt-header verifier task. The trace row
+/// is selected by its semantic position, so no caller-authored task opcode
+/// enters the relation.
+pub struct ReceiptHeaderRelationInputs {
+    pub receipt_valid: BabyBear,
+    pub base_root_valid: BabyBear,
+    pub interaction_root_valid: BabyBear,
+    pub shift: BabyBear,
+    pub accepted: BabyBear,
+    pub trace_valid: BabyBear,
+}
+impl core::marker::Copy for ReceiptHeaderRelationInputs {}
+
+/// Private nonzero witness for the public evaluation shift.
+pub struct ReceiptHeaderRelationAuxiliary { pub shift_inverse: BabyBear }
+impl core::marker::Copy for ReceiptHeaderRelationAuxiliary {}
+
+pub type ReceiptHeaderRelationWitness = QuadraticRelationWitness<
+    BabyBear,
+    RECEIPT_HEADER_PRODUCTS,
+    RECEIPT_HEADER_ASSERTIONS,
+>
+
+pub type ReceiptHeaderRelationResiduals = QuadraticRelationResiduals<
+    BabyBear,
+    RECEIPT_HEADER_PRODUCTS,
+    RECEIPT_HEADER_ASSERTIONS,
+>
+
+fn bool_field(_ value: bool) -> BabyBear {
+    BabyBear::from_u32(if value { 1 } else { 0 })
+}
+
+/// Project the live receipt and the canonical first trace row into the shared
+/// relation input. This is the only production adapter for this stage.
+pub fn production_receipt_header_relation_inputs(
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ trace: ProductionSecurityVerifierTrace,
+) -> ReceiptHeaderRelationInputs {
+    let row = trace.row(0)
+    ReceiptHeaderRelationInputs {
+        receipt_valid: bool_field(receipt.valid),
+        base_root_valid: bool_field(receipt.base_root.valid),
+        interaction_root_valid: bool_field(receipt.interaction_root.valid),
+        shift: shift,
+        accepted: bool_field(row.accepted),
+        trace_valid: bool_field(trace.shape_valid()),
+    }
+}
+
+pub fn derive_receipt_header_relation_auxiliary(
+    _ inputs: ReceiptHeaderRelationInputs,
+) -> ReceiptHeaderRelationAuxiliary {
+    ReceiptHeaderRelationAuxiliary { shift_inverse: inputs.shift.inverse_or_zero() }
+}
+
+fn constrain_zero<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    interpreter.constrain_zero(value).interpreter
+}
+
+fn constrain_equal<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ left: BabyBear,
+    _ right: BabyBear,
+) -> I {
+    constrain_zero(interpreter, left - right)
+}
+
+fn constrain_one<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    constrain_equal(interpreter, value, BabyBear::one())
+}
+
+fn constrain_boolean<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    let product = interpreter.multiply(value, value - BabyBear::one())
+    constrain_zero(product.interpreter, product.value)
+}
+
+struct ReceiptHeaderRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> { interpreter: I }
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy for ReceiptHeaderRelationPlan<
+    I,
+> {}
+
+/// The sole authored receipt-header relation. Every interpretation must
+/// consume exactly eight products and nine assertions.
+fn receipt_header_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: ReceiptHeaderRelationInputs,
+    _ auxiliary: ReceiptHeaderRelationAuxiliary,
+    _ interpreter: I,
+) -> ReceiptHeaderRelationPlan<I> {
+    let mut interpreter = interpreter
+    interpreter = constrain_boolean(interpreter, inputs.receipt_valid)
+    interpreter = constrain_boolean(interpreter, inputs.base_root_valid)
+    interpreter = constrain_boolean(interpreter, inputs.interaction_root_valid)
+    interpreter = constrain_boolean(interpreter, inputs.accepted)
+    interpreter = constrain_boolean(interpreter, inputs.trace_valid)
+
+    let nonzero = interpreter.multiply(inputs.shift, auxiliary.shift_inverse)
+    interpreter = constrain_one(nonzero.interpreter, nonzero.value)
+
+    let receipt_and_base = interpreter.multiply(inputs.receipt_valid, inputs.base_root_valid)
+    let complete = receipt_and_base
+        .interpreter
+        .multiply(receipt_and_base.value, inputs.interaction_root_valid)
+    interpreter = constrain_equal(complete.interpreter, complete.value, inputs.accepted)
+    interpreter = constrain_one(interpreter, inputs.accepted)
+    interpreter = constrain_one(interpreter, inputs.trace_valid)
+    ReceiptHeaderRelationPlan { interpreter: interpreter }
+}
+
+pub fn receipt_header_relation_witness(
+    _ inputs: ReceiptHeaderRelationInputs,
+) -> ReceiptHeaderRelationWitness {
+    let auxiliary = derive_receipt_header_relation_auxiliary(inputs)
+    receipt_header_relation_plan(
+        inputs,
+        auxiliary,
+        QuadraticRelationWitnessInterpreter<
+            BabyBear,
+            RECEIPT_HEADER_PRODUCTS,
+            RECEIPT_HEADER_ASSERTIONS,
+        >::new(),
+    )
+        .interpreter
+        .finish()
+}
+
+pub fn receipt_header_relation_residuals(
+    _ inputs: ReceiptHeaderRelationInputs,
+    _ auxiliary: ReceiptHeaderRelationAuxiliary,
+    _ witness: ReceiptHeaderRelationWitness,
+) -> ReceiptHeaderRelationResiduals {
+    receipt_header_relation_plan(
+        inputs,
+        auxiliary,
+        QuadraticRelationConstraintInterpreter<
+            BabyBear,
+            RECEIPT_HEADER_PRODUCTS,
+            RECEIPT_HEADER_ASSERTIONS,
+        >::new(witness),
+    )
+        .interpreter
+        .finish()
+}
+
+pub fn evaluate_receipt_header_relation(_ inputs: ReceiptHeaderRelationInputs) -> bool {
+    let auxiliary = derive_receipt_header_relation_auxiliary(inputs)
+    receipt_header_relation_plan(
+        inputs,
+        auxiliary,
+        QuadraticRelationValueInterpreter::new(),
+    )
+        .interpreter
+        .finish()
+}
