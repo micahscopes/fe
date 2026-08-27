@@ -24,6 +24,80 @@ pub trait TwoToOneHasher<F: Copy> {
     fn hash2(_ left: F, _ right: F) -> F
 }
 
+/// One exact hash task in a canonical deduplicated multipath reduction.
+/// `paired` selects another opened node at the same level; otherwise the
+/// sibling comes from `sibling_position` in the canonical authentication
+/// frontier. `direction` remains the low bit of `index`.
+pub struct MerkleMultiPathTask {
+    pub level: u32,
+    pub index: u32,
+    pub paired: bool,
+    pub sibling_position: u32,
+    pub direction: u32,
+}
+impl core::marker::Copy for MerkleMultiPathTask {}
+
+pub struct MerkleMultiPathStep<I: core::marker::Copy, F: Copy> {
+    pub interpreter: I,
+    pub value: F,
+}
+impl<I: core::marker::Copy, F: Copy> core::marker::Copy
+    for MerkleMultiPathStep<I, F> {}
+
+/// Stateful interpretation of the fixed semantic multipath topology. Value,
+/// trace, quadratic-relation, and GPU placements can consume these same
+/// ordered tasks without reimplementing request normalization or sibling
+/// consumption.
+pub trait MerkleMultiPathInterpreter<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+>: core::marker::Copy {
+    fn compress(
+        self,
+        _ task: MerkleMultiPathTask,
+        _ child: F,
+        _ sibling: F,
+    ) -> MerkleMultiPathStep<Self, F>
+}
+
+pub struct MerkleMultiPathValueInterpreter { marker: u32 }
+impl core::marker::Copy for MerkleMultiPathValueInterpreter {}
+
+impl MerkleMultiPathValueInterpreter {
+    pub fn new() -> Self { Self { marker: 0 } }
+}
+
+impl<F: Copy, H: TwoToOneHasher<F>> MerkleMultiPathInterpreter<F, H>
+    for MerkleMultiPathValueInterpreter {
+    fn compress(
+        self,
+        _ task: MerkleMultiPathTask,
+        _ child: F,
+        _ sibling: F,
+    ) -> MerkleMultiPathStep<Self, F> {
+        MerkleMultiPathStep {
+            interpreter: self,
+            value: if task.direction == 0 {
+                H::hash2(child, sibling)
+            } else {
+                H::hash2(sibling, child)
+            },
+        }
+    }
+}
+
+pub struct MerkleMultiPathInterpretation<
+    I: core::marker::Copy,
+    F: Copy,
+> {
+    pub interpreter: I,
+    pub root: MerkleRoot<F>,
+    pub hashes: u32,
+    pub used_siblings: u32,
+}
+impl<I: core::marker::Copy, F: Copy> core::marker::Copy
+    for MerkleMultiPathInterpretation<I, F> {}
+
 pub struct MerkleRoot<F: Copy> { pub valid: bool, pub value: F }
 impl<F: Copy> Copy for MerkleRoot<F> {}
 
@@ -772,6 +846,139 @@ where
     path
 }
 
+fn invalid_multi_path_interpretation<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    I: MerkleMultiPathInterpreter<F, H>,
+>(
+    _ interpreter: I,
+) -> MerkleMultiPathInterpretation<I, F> {
+    MerkleMultiPathInterpretation {
+        interpreter: interpreter,
+        root: invalid_root<F, H>(),
+        hashes: 0,
+        used_siblings: 0,
+    }
+}
+
+/// Interpret the canonical sparse reduction once. The semantic topology is
+/// fixed here; an interpreter owns only the physical meaning of each ordered
+/// hash task.
+pub fn interpret_multi_root<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    I: MerkleMultiPathInterpreter<F, H>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opened_leaves: own [F; MAX_LEAVES],
+    _ path: own MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ interpreter: I,
+) -> MerkleMultiPathInterpretation<I, F>
+where
+    N > 1,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    let leaf_count: usize = path.leaf_count as usize
+    let sibling_count: usize = path.sibling_count as usize
+    if !path.valid || leaf_count == 0 || leaf_count > MAX_LEAVES
+        || sibling_count > MAX_SIBLINGS {
+        return invalid_multi_path_interpretation<F, H, I>(interpreter)
+    }
+    let width_u32: u32 = N.downcast_truncate()
+    let mut cursor: usize = 0
+    while cursor < leaf_count {
+        if path.leaf_indices[cursor] >= width_u32
+            || (cursor > 0 && path.leaf_indices[cursor - 1] >= path.leaf_indices[cursor]) {
+            return invalid_multi_path_interpretation<F, H, I>(interpreter)
+        }
+        cursor = cursor + 1
+    }
+    while cursor < MAX_LEAVES {
+        if path.leaf_indices[cursor] != 0 || !H::equal(opened_leaves[cursor], H::zero()) {
+            return invalid_multi_path_interpretation<F, H, I>(interpreter)
+        }
+        cursor = cursor + 1
+    }
+    cursor = sibling_count
+    while cursor < MAX_SIBLINGS {
+        if !H::equal(path.siblings[cursor], H::zero()) {
+            return invalid_multi_path_interpretation<F, H, I>(interpreter)
+        }
+        cursor = cursor + 1
+    }
+
+    let mut indices = path.leaf_indices
+    let mut nodes = opened_leaves
+    let mut active_count = leaf_count
+    let mut used_siblings: usize = 0
+    let mut width: usize = N
+    let mut level: u32 = 0
+    let mut hashes: u32 = 0
+    let mut interpreter = interpreter
+    while width > 1 {
+        let mut next_indices = [0; MAX_LEAVES]
+        let mut next_nodes = [H::zero(); MAX_LEAVES]
+        let mut next_count: usize = 0
+        cursor = 0
+        while cursor < active_count {
+            let index = indices[cursor]
+            let paired = (index & 1) == 0
+                && cursor + 1 < active_count
+                && indices[cursor + 1] == index + 1
+            let child = nodes[cursor]
+            let sibling_position: u32 = used_siblings.downcast_truncate()
+            let sibling = if paired {
+                let value = nodes[cursor + 1]
+                cursor = cursor + 2
+                value
+            } else {
+                if used_siblings >= sibling_count {
+                    return invalid_multi_path_interpretation<F, H, I>(interpreter)
+                }
+                let sibling = path.siblings[used_siblings]
+                used_siblings = used_siblings + 1
+                cursor = cursor + 1
+                sibling
+            }
+            let compressed = interpreter.compress(
+                MerkleMultiPathTask {
+                    level: level,
+                    index: index,
+                    paired: paired,
+                    sibling_position: sibling_position,
+                    direction: index & 1,
+                },
+                child,
+                sibling,
+            )
+            interpreter = compressed.interpreter
+            let parent = compressed.value
+            hashes = hashes + 1
+            next_indices[next_count] = index / 2
+            next_nodes[next_count] = parent
+            next_count = next_count + 1
+        }
+        indices = next_indices
+        nodes = next_nodes
+        active_count = next_count
+        width = width / 2
+        level = level + 1
+    }
+    if active_count != 1 || indices[0] != 0 || used_siblings != sibling_count {
+        return invalid_multi_path_interpretation<F, H, I>(interpreter)
+    }
+    MerkleMultiPathInterpretation {
+        interpreter: interpreter,
+        root: MerkleRoot { valid: true, value: nodes[0] },
+        hashes: hashes,
+        used_siblings: used_siblings.downcast_truncate(),
+    }
+}
+
 /// Reconstruct a root from canonical sparse leaves and their deduplicated
 /// multipath. `opened_leaves` follows `path.leaf_indices` exactly.
 pub fn multi_root<
@@ -790,81 +997,18 @@ where
     { (N & (N - 1)) == 0 },
     MAX_LEAVES > 0,
 {
-    let leaf_count: usize = path.leaf_count as usize
-    let sibling_count: usize = path.sibling_count as usize
-    if !path.valid || leaf_count == 0 || leaf_count > MAX_LEAVES
-        || sibling_count > MAX_SIBLINGS {
-        return invalid_root<F, H>()
-    }
-    let width_u32: u32 = N.downcast_truncate()
-    let mut cursor: usize = 0
-    while cursor < leaf_count {
-        if path.leaf_indices[cursor] >= width_u32
-            || (cursor > 0 && path.leaf_indices[cursor - 1] >= path.leaf_indices[cursor]) {
-            return invalid_root<F, H>()
-        }
-        cursor = cursor + 1
-    }
-    while cursor < MAX_LEAVES {
-        if path.leaf_indices[cursor] != 0 || !H::equal(opened_leaves[cursor], H::zero()) {
-            return invalid_root<F, H>()
-        }
-        cursor = cursor + 1
-    }
-    cursor = sibling_count
-    while cursor < MAX_SIBLINGS {
-        if !H::equal(path.siblings[cursor], H::zero()) {
-            return invalid_root<F, H>()
-        }
-        cursor = cursor + 1
-    }
-
-    let mut indices = path.leaf_indices
-    let mut nodes = opened_leaves
-    let mut active_count = leaf_count
-    let mut used_siblings: usize = 0
-    let mut width: usize = N
-    while width > 1 {
-        let mut next_indices = [0; MAX_LEAVES]
-        let mut next_nodes = [H::zero(); MAX_LEAVES]
-        let mut next_count: usize = 0
-        cursor = 0
-        while cursor < active_count {
-            let index = indices[cursor]
-            let paired = (index & 1) == 0
-                && cursor + 1 < active_count
-                && indices[cursor + 1] == index + 1
-            let parent = if paired {
-                let value = H::hash2(nodes[cursor], nodes[cursor + 1])
-                cursor = cursor + 2
-                value
-            } else {
-                if used_siblings >= sibling_count {
-                    return invalid_root<F, H>()
-                }
-                let sibling = path.siblings[used_siblings]
-                used_siblings = used_siblings + 1
-                let value = if (index & 1) == 0 {
-                    H::hash2(nodes[cursor], sibling)
-                } else {
-                    H::hash2(sibling, nodes[cursor])
-                }
-                cursor = cursor + 1
-                value
-            }
-            next_indices[next_count] = index / 2
-            next_nodes[next_count] = parent
-            next_count = next_count + 1
-        }
-        indices = next_indices
-        nodes = next_nodes
-        active_count = next_count
-        width = width / 2
-    }
-    if active_count != 1 || indices[0] != 0 || used_siblings != sibling_count {
-        return invalid_root<F, H>()
-    }
-    MerkleRoot { valid: true, value: nodes[0] }
+    interpret_multi_root<
+        F,
+        H,
+        MerkleMultiPathValueInterpreter,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(
+        opened_leaves,
+        path,
+        MerkleMultiPathValueInterpreter::new(),
+    ).root
 }
 
 pub fn multi_verify<

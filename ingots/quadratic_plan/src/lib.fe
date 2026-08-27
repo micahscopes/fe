@@ -98,6 +98,7 @@ struct QuadraticRelationStreamArena<
     assertions: [F; ASSERTIONS],
     product_count: u32,
     assertion_count: u32,
+    exact_capacity: bool,
     shape_valid: bool,
 }
 
@@ -110,6 +111,7 @@ uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
 {
     arena.product_count = 0
     arena.assertion_count = 0
+    arena.exact_capacity = true
     arena.shape_valid = false
 }
 
@@ -159,12 +161,15 @@ fn finish_relation_stream<
     const ASSERTIONS: usize,
 >(
     _ valid: bool,
+    _ exact_capacity: bool,
 )
 uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
 {
+    arena.exact_capacity = exact_capacity
     arena.shape_valid = valid
-        && arena.product_count == PRODUCTS.downcast_truncate()
-        && arena.assertion_count == ASSERTIONS.downcast_truncate()
+        && (!exact_capacity
+            || (arena.product_count == PRODUCTS.downcast_truncate()
+                && arena.assertion_count == ASSERTIONS.downcast_truncate()))
 }
 
 fn relation_product_at<
@@ -204,8 +209,29 @@ fn relation_stream_shape_valid<
 uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
 {
     arena.shape_valid
-        && arena.product_count == PRODUCTS.downcast_truncate()
-        && arena.assertion_count == ASSERTIONS.downcast_truncate()
+        && (!arena.exact_capacity
+            || (arena.product_count == PRODUCTS.downcast_truncate()
+                && arena.assertion_count == ASSERTIONS.downcast_truncate()))
+}
+
+fn relation_stream_product_count<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+>() -> u32
+uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
+{
+    arena.product_count
+}
+
+fn relation_stream_assertion_count<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+>() -> u32
+uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
+{
+    arena.assertion_count
 }
 
 fn replace_relation_product<
@@ -246,8 +272,9 @@ fn audit_relation_stream<
 uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
 {
     let shape_valid = arena.shape_valid
-        && arena.product_count == PRODUCTS.downcast_truncate()
-        && arena.assertion_count == ASSERTIONS.downcast_truncate()
+        && (!arena.exact_capacity
+            || (arena.product_count == PRODUCTS.downcast_truncate()
+                && arena.assertion_count == ASSERTIONS.downcast_truncate()))
     if !shape_valid {
         return QuadraticRelationStreamAudit {
             shape_valid: false,
@@ -257,7 +284,7 @@ uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
     }
     let mut nonzero_products: u32 = 0
     let mut product: usize = 0
-    while product < PRODUCTS {
+    while product < arena.product_count as usize {
         let row = arena.products[product]
         let residual = row.output.radix2_sub(
             row.left.radix2_mul(row.right),
@@ -269,7 +296,7 @@ uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
     }
     let mut nonzero_assertions: u32 = 0
     let mut assertion: usize = 0
-    while assertion < ASSERTIONS {
+    while assertion < arena.assertion_count as usize {
         if !arena.assertions[assertion].radix2_is_zero() {
             nonzero_assertions = nonzero_assertions + 1
         }
@@ -320,6 +347,20 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
     pub fn shape_valid(self) -> bool {
         self.available && with (self.arena) {
             relation_stream_shape_valid<F, PRODUCTS, ASSERTIONS>()
+        }
+    }
+
+    pub fn product_count(self) -> u32 {
+        if !self.available { return 0 }
+        with (self.arena) {
+            relation_stream_product_count<F, PRODUCTS, ASSERTIONS>()
+        }
+    }
+
+    pub fn assertion_count(self) -> u32 {
+        if !self.available { return 0 }
+        with (self.arena) {
+            relation_stream_assertion_count<F, PRODUCTS, ASSERTIONS>()
         }
     }
 
@@ -401,7 +442,25 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
             && self.assertion_cursor == ASSERTIONS.downcast_truncate()
         if self.stream.available {
             with (self.stream.arena) {
-                finish_relation_stream<F, PRODUCTS, ASSERTIONS>(valid)
+                finish_relation_stream<F, PRODUCTS, ASSERTIONS>(valid, true)
+            }
+        }
+        self.stream
+    }
+
+    /// Finish a value-dependent relation whose exact row counts are replayed
+    /// from the same authored plan. Capacities remain hard upper bounds, while
+    /// truncation still fails when the constraint interpreter consumes the
+    /// stream again.
+    pub fn finish_bounded(
+        self,
+    ) -> QuadraticRelationStream<F, PRODUCTS, ASSERTIONS> {
+        if self.stream.available {
+            with (self.stream.arena) {
+                finish_relation_stream<F, PRODUCTS, ASSERTIONS>(
+                    self.valid,
+                    false,
+                )
             }
         }
         self.stream
@@ -511,6 +570,21 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
             shape_valid: self.valid
                 && self.product_cursor == PRODUCTS.downcast_truncate()
                 && self.assertion_cursor == ASSERTIONS.downcast_truncate(),
+            operand_copy_mismatches: self.operand_copy_mismatches,
+            nonzero_products: self.nonzero_products,
+            assertion_copy_mismatches: self.assertion_copy_mismatches,
+            nonzero_assertions: self.nonzero_assertions,
+        }
+    }
+
+    /// Complete replay of a bounded stream. The producer's runtime counts are
+    /// authority only for shape, never for values: every stored row has still
+    /// been consumed through the authored relation and checked above.
+    pub fn finish_bounded(self) -> QuadraticRelationStreamConstraintAudit {
+        QuadraticRelationStreamConstraintAudit {
+            shape_valid: self.valid
+                && self.product_cursor == self.stream.product_count()
+                && self.assertion_cursor == self.stream.assertion_count(),
             operand_copy_mismatches: self.operand_copy_mismatches,
             nonzero_products: self.nonzero_products,
             assertion_copy_mismatches: self.assertion_copy_mismatches,

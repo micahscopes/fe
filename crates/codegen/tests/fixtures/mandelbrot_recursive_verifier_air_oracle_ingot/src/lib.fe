@@ -2,7 +2,11 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     BinaryMerklePathRelationInputs,
     MERKLE_NODE_ASSERTIONS,
     MERKLE_NODE_PRODUCTS,
+    MerkleMultiPathRelationInputs,
     MerkleNodeRelationInputs,
+    PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS,
+    PRODUCTION_AIR_MULTIPATH_MAX_HASHES,
+    PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS,
     PRODUCTION_BASE_LEAF_PRODUCTS,
     PRODUCTION_INTERACTION_LEAF_PRODUCTS,
     PRODUCTION_LEAF_ASSERTIONS,
@@ -11,16 +15,25 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     RECEIPT_HEADER_ASSERTIONS,
     RECEIPT_HEADER_PRODUCTS,
     ReceiptHeaderRelationInputs,
+    RecursiveVerifierPoseidonHasher,
     derive_receipt_header_relation_auxiliary,
     binary_merkle_path_relation_plan,
     evaluate_merkle_node_relation,
     evaluate_receipt_header_relation,
     merkle_node_relation_residuals,
     merkle_node_relation_witness,
+    merkle_multi_path_max_assertions,
+    merkle_multi_path_max_products,
+    merkle_multi_path_relation_plan,
     production_base_lde_leaf_relation_plan,
     production_interaction_lde_leaf_relation_plan,
     receipt_header_relation_residuals,
     receipt_header_relation_witness,
+}
+use merkle_core::{
+    MerkleMultiPath,
+    MerkleRoot,
+    write_multi_path_and_root_from_leaves,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
@@ -40,6 +53,25 @@ use quadratic_plan::{
 const PATH_DEPTH: usize = 4
 const PATH_PRODUCTS: usize = PATH_DEPTH * MERKLE_NODE_PRODUCTS
 const PATH_ASSERTIONS: usize = PATH_DEPTH + 9
+const MULTI_WIDTH: usize = 16
+const MULTI_MAX_LEAVES: usize = 4
+const MULTI_MAX_SIBLINGS: usize = 16
+const MULTI_MAX_PRODUCTS: usize = merkle_multi_path_max_products(
+    MULTI_MAX_LEAVES,
+    PATH_DEPTH,
+)
+const MULTI_MAX_ASSERTIONS: usize = merkle_multi_path_max_assertions(
+    MULTI_MAX_LEAVES,
+    PATH_DEPTH,
+)
+
+pub fn production_multipath_relation_capacities() -> (u32, u32, u32) {
+    (
+        PRODUCTION_AIR_MULTIPATH_MAX_HASHES.downcast_truncate(),
+        PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS.downcast_truncate(),
+        PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS.downcast_truncate(),
+    )
+}
 
 fn flag(_ value: bool) -> u32 {
     if value { 1 } else { 0 }
@@ -268,6 +300,238 @@ pub fn binary_merkle_path_relation_audit(
         nonzero_assertions,
         PATH_PRODUCTS.downcast_truncate(),
         PATH_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+struct MultipathCase {
+    opened_leaves: [Poseidon2Digest; MULTI_MAX_LEAVES],
+    path: MerkleMultiPath<
+        Poseidon2Digest,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_SIBLINGS,
+    >,
+    root: MerkleRoot<Poseidon2Digest>,
+}
+impl core::marker::Copy for MultipathCase {}
+
+fn deterministic_multipath_leaf(_ index: u32) -> Poseidon2Digest {
+    digest(
+        101 + index * 17,
+        211 + index * 19,
+        307 + index * 23,
+        401 + index * 29,
+        503 + index * 31,
+        601 + index * 37,
+        701 + index * 41,
+        809 + index * 43,
+    )
+}
+
+fn write_multipath_requests(
+    _ case: u32,
+    _ requests: mut [u32; MULTI_MAX_LEAVES],
+) {
+    if case == 0 {
+        requests[0] = 1
+        requests[1] = 2
+        requests[2] = 7
+        requests[3] = 12
+    } else if case == 1 {
+        requests[0] = 0
+        requests[1] = 1
+        requests[2] = 2
+        requests[3] = 3
+    } else if case == 2 {
+        requests[0] = 3
+        requests[1] = 3
+        requests[2] = 10
+        requests[3] = 10
+    } else {
+        requests[0] = 0
+        requests[1] = 5
+        requests[2] = 6
+        requests[3] = 15
+    }
+}
+
+fn build_multipath_case(_ case: u32) -> MultipathCase {
+    let mut leaves = [Poseidon2Digest::zero(); MULTI_WIDTH]
+    let mut index: usize = 0
+    while index < MULTI_WIDTH {
+        leaves[index] = deterministic_multipath_leaf(
+            index.downcast_truncate(),
+        )
+        index = index + 1
+    }
+    let mut requests = [0; MULTI_MAX_LEAVES]
+    write_multipath_requests(case, mut requests)
+    let mut path = MerkleMultiPath {
+        valid: false,
+        leaf_count: 0,
+        leaf_indices: [0; MULTI_MAX_LEAVES],
+        sibling_count: 0,
+        siblings: [Poseidon2Digest::zero(); MULTI_MAX_SIBLINGS],
+    }
+    let mut root = MerkleRoot {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    let valid = write_multi_path_and_root_from_leaves<
+        Poseidon2Digest,
+        RecursiveVerifierPoseidonHasher,
+        MULTI_WIDTH,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_SIBLINGS,
+    >(ref leaves, ref requests, mut path, mut root)
+    if !valid {
+        return MultipathCase {
+            opened_leaves: [Poseidon2Digest::zero(); MULTI_MAX_LEAVES],
+            path: path,
+            root: root,
+        }
+    }
+    let mut opened_leaves = [Poseidon2Digest::zero(); MULTI_MAX_LEAVES]
+    index = 0
+    while index < path.leaf_count as usize {
+        opened_leaves[index] = leaves[path.leaf_indices[index] as usize]
+        index = index + 1
+    }
+    MultipathCase {
+        opened_leaves: opened_leaves,
+        path: path,
+        root: root,
+    }
+}
+
+fn changed_digest(_ value: Poseidon2Digest) -> Poseidon2Digest {
+    let mut fields = [BabyBear::zero(); 8]
+    let mut lane: u32 = 0
+    while lane < 8 {
+        fields[lane as usize] = value.field(lane)
+        lane = lane + 1
+    }
+    fields[0] = fields[0] + BabyBear::one()
+    Poseidon2Digest::from_fields(fields)
+}
+
+pub fn multipath_case_summary(
+    _ case: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let built = build_multipath_case(case)
+    let direct = merkle_multi_path_relation_plan<
+        QuadraticRelationValueInterpreter,
+        MULTI_WIDTH,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_SIBLINGS,
+    >(
+        MerkleMultiPathRelationInputs {
+            opened_leaves: built.opened_leaves,
+            path: built.path,
+            expected_root: built.root.value,
+        },
+        QuadraticRelationValueInterpreter::new(),
+    )
+    (
+        built.root.value.field(0).to_u32(),
+        built.root.value.field(1).to_u32(),
+        built.root.value.field(2).to_u32(),
+        built.root.value.field(3).to_u32(),
+        built.root.value.field(4).to_u32(),
+        built.root.value.field(5).to_u32(),
+        built.root.value.field(6).to_u32(),
+        built.root.value.field(7).to_u32(),
+        built.path.leaf_count,
+        built.path.sibling_count,
+        direct.hashes,
+    )
+}
+
+/// Generate and replay one canonical deduplicated multipath relation through
+/// a bounded stream. Small case IDs exercise adjacent leaves, duplicate
+/// requests, both directions, and separated subtrees.
+pub fn deduplicated_merkle_multipath_relation_audit(
+    _ case: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32) {
+    let mut built = build_multipath_case(case)
+    if mutation == 1 {
+        built.root.value = changed_digest(built.root.value)
+    } else if mutation == 2 {
+        built.opened_leaves[0] = changed_digest(built.opened_leaves[0])
+    } else if mutation == 3 && built.path.sibling_count > 0 {
+        built.path.siblings[0] = changed_digest(built.path.siblings[0])
+    } else if mutation == 4 {
+        built.path.leaf_indices[0] = built.path.leaf_indices[0] + 1
+    } else if mutation == 5 && built.path.leaf_count > 1 {
+        built.path.leaf_count = built.path.leaf_count - 1
+    } else if mutation == 6 && built.path.sibling_count > 0 {
+        built.path.sibling_count = built.path.sibling_count - 1
+    } else if mutation == 7 {
+        built.path.valid = false
+    }
+    let inputs = MerkleMultiPathRelationInputs {
+        opened_leaves: built.opened_leaves,
+        path: built.path,
+        expected_root: built.root.value,
+    }
+    let direct = merkle_multi_path_relation_plan<
+        QuadraticRelationValueInterpreter,
+        MULTI_WIDTH,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_SIBLINGS,
+    >(inputs, QuadraticRelationValueInterpreter::new())
+    let streamed = merkle_multi_path_relation_plan<
+        QuadraticRelationStreamInterpreter<
+            BabyBear,
+            MULTI_MAX_PRODUCTS,
+            MULTI_MAX_ASSERTIONS,
+        >,
+        MULTI_WIDTH,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_SIBLINGS,
+    >(
+        inputs,
+        QuadraticRelationStreamInterpreter<
+            BabyBear,
+            MULTI_MAX_PRODUCTS,
+            MULTI_MAX_ASSERTIONS,
+        >::new(),
+    )
+    let stream = streamed.interpreter.finish_bounded()
+    if mutation >= 100 {
+        let product = mutation - 100
+        if product < stream.product_count() {
+            let mut row = stream.product(product)
+            row.output = row.output + BabyBear::one()
+            stream.replace_product(product, row)
+        }
+    }
+    let constrained = merkle_multi_path_relation_plan<
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            MULTI_MAX_PRODUCTS,
+            MULTI_MAX_ASSERTIONS,
+        >,
+        MULTI_WIDTH,
+        MULTI_MAX_LEAVES,
+        MULTI_MAX_SIBLINGS,
+    >(
+        inputs,
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            MULTI_MAX_PRODUCTS,
+            MULTI_MAX_ASSERTIONS,
+        >::new(stream),
+    )
+    let relation = constrained.interpreter.finish_bounded()
+    (
+        flag(direct.interpreter.finish()),
+        flag(relation.shape_valid),
+        relation.operand_copy_mismatches + relation.nonzero_products,
+        relation.assertion_copy_mismatches + relation.nonzero_assertions,
+        stream.product_count(),
+        stream.assertion_count(),
     )
 }
 

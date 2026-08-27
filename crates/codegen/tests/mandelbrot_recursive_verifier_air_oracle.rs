@@ -24,9 +24,10 @@ const PERMUTATION_PRODUCTS: u32 = 564;
 const BASE_LEAF_PERMUTATIONS: u32 = 34;
 const INTERACTION_LEAF_PERMUTATIONS: u32 = 21;
 const BASE_LEAF_PRODUCTS: u32 = BASE_LEAF_PERMUTATIONS * PERMUTATION_PRODUCTS;
-const INTERACTION_LEAF_PRODUCTS: u32 =
-    INTERACTION_LEAF_PERMUTATIONS * PERMUTATION_PRODUCTS;
+const INTERACTION_LEAF_PRODUCTS: u32 = INTERACTION_LEAF_PERMUTATIONS * PERMUTATION_PRODUCTS;
 const LEAF_ASSERTIONS: u32 = 8;
+const MULTI_WIDTH: usize = 16;
+const MULTI_MAX_LEAVES: usize = 4;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
 const PATH_LEAF: [u32; 8] = [0, 1, 2, 3, 5, 8, 13, 21];
@@ -83,6 +84,41 @@ fn audit(
     std::array::from_fn(|index| match results[index] {
         Val::I32(value) => value as u32,
         ref other => panic!("unexpected result lane {index}: {other:?}"),
+    })
+}
+
+fn multipath_summary(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    case: u32,
+) -> [u32; 11] {
+    let function = instance
+        .get_func(&mut *store, "multipath_case_summary")
+        .expect("missing `multipath_case_summary` export");
+    let mut results = vec![Val::I32(0); 11];
+    function
+        .call(&mut *store, &[Val::I32(case as i32)], &mut results)
+        .expect("`multipath_case_summary` should execute");
+    std::array::from_fn(|index| match results[index] {
+        Val::I32(value) => value as u32,
+        ref other => panic!("unexpected summary lane {index}: {other:?}"),
+    })
+}
+
+fn production_multipath_capacities(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+) -> [u32; 3] {
+    let function = instance
+        .get_func(&mut *store, "production_multipath_relation_capacities")
+        .expect("missing `production_multipath_relation_capacities` export");
+    let mut results = vec![Val::I32(0); 3];
+    function
+        .call(&mut *store, &[], &mut results)
+        .expect("`production_multipath_relation_capacities` should execute");
+    std::array::from_fn(|index| match results[index] {
+        Val::I32(value) => value as u32,
+        ref other => panic!("unexpected capacity lane {index}: {other:?}"),
     })
 }
 
@@ -184,6 +220,71 @@ fn leaf_arguments(
     values.extend(commitment);
     values.push(mutation);
     values
+}
+
+fn deterministic_multipath_leaf(index: u32) -> [u32; 8] {
+    [
+        101 + index * 17,
+        211 + index * 19,
+        307 + index * 23,
+        401 + index * 29,
+        503 + index * 31,
+        601 + index * 37,
+        701 + index * 41,
+        809 + index * 43,
+    ]
+}
+
+fn multipath_requests(case: u32) -> [u32; MULTI_MAX_LEAVES] {
+    match case {
+        0 => [1, 2, 7, 12],
+        1 => [0, 1, 2, 3],
+        2 => [3, 3, 10, 10],
+        _ => [0, 5, 6, 15],
+    }
+}
+
+fn reference_multipath_root() -> [u32; 8] {
+    let mut nodes: Vec<[u32; 8]> = (0..MULTI_WIDTH as u32)
+        .map(deterministic_multipath_leaf)
+        .collect();
+    while nodes.len() > 1 {
+        nodes = nodes
+            .chunks_exact(2)
+            .map(|pair| reference_compress(pair[0], pair[1]))
+            .collect();
+    }
+    nodes[0]
+}
+
+fn reference_multipath_shape(case: u32) -> (u32, u32, u32) {
+    let mut indices = multipath_requests(case).to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+    let leaf_count = indices.len() as u32;
+    let mut sibling_count = 0u32;
+    let mut hashes = 0u32;
+    let mut width = MULTI_WIDTH;
+    while width > 1 {
+        let mut next = Vec::with_capacity(indices.len());
+        let mut cursor = 0;
+        while cursor < indices.len() {
+            let index = indices[cursor];
+            let paired =
+                index & 1 == 0 && cursor + 1 < indices.len() && indices[cursor + 1] == index + 1;
+            if paired {
+                cursor += 2;
+            } else {
+                sibling_count += 1;
+                cursor += 1;
+            }
+            next.push(index / 2);
+            hashes += 1;
+        }
+        indices = next;
+        width /= 2;
+    }
+    (leaf_count, sibling_count, hashes)
 }
 
 #[test]
@@ -362,6 +463,84 @@ fn binary_merkle_path_relation_binds_index_and_chained_root() {
 }
 
 #[test]
+fn deduplicated_multipath_relation_reuses_canonical_topology_and_bounded_rows() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compile_wasm())
+        .expect("recursive verifier AIR module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("recursive verifier AIR module should instantiate");
+
+    assert_eq!(
+        production_multipath_capacities(&mut store, &instance),
+        [5_928, 3_396_744, 5_937],
+        "production capacities must derive from 456 leaves and depth 13",
+    );
+
+    let expected_root = reference_multipath_root();
+    for case in 0..4 {
+        let (leaf_count, sibling_count, hashes) = reference_multipath_shape(case);
+        let summary = multipath_summary(&mut store, &instance, case);
+        assert_eq!(&summary[..8], &expected_root, "case {case} root");
+        assert_eq!(summary[8], leaf_count, "case {case} leaf count");
+        assert_eq!(summary[9], sibling_count, "case {case} sibling count");
+        assert_eq!(summary[10], hashes, "case {case} hash task count");
+
+        let clean = audit(
+            &mut store,
+            &instance,
+            "deduplicated_merkle_multipath_relation_audit",
+            &[case, 0],
+        );
+        assert_eq!(
+            clean,
+            [
+                1,
+                1,
+                0,
+                0,
+                hashes * MERKLE_PRODUCTS,
+                hashes + MERKLE_ASSERTIONS,
+            ],
+            "case {case} clean relation",
+        );
+
+        for mutation in 1..=7 {
+            let result = audit(
+                &mut store,
+                &instance,
+                "deduplicated_merkle_multipath_relation_audit",
+                &[case, mutation],
+            );
+            assert_eq!(result[0], 0, "case {case} input mutation {mutation}");
+            assert_eq!(result[1], 1, "case {case} bounded replay shape");
+            assert!(
+                result[2] > 0 || result[3] > 0,
+                "case {case} input mutation {mutation} must leave a residual",
+            );
+        }
+
+        for hash in 0..hashes {
+            for product in [hash * MERKLE_PRODUCTS, (hash + 1) * MERKLE_PRODUCTS - 1] {
+                let result = audit(
+                    &mut store,
+                    &instance,
+                    "deduplicated_merkle_multipath_relation_audit",
+                    &[case, 100 + product],
+                );
+                assert_eq!(result[0], 1, "case {case} semantic inputs");
+                assert_eq!(result[1], 1, "case {case} bounded replay shape");
+                assert!(
+                    result[2] > 0,
+                    "case {case} product mutation {product} must reject",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn production_lde_leaf_relations_bind_derived_codecs_and_every_sponge_block() {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, compile_wasm())
@@ -373,10 +552,8 @@ fn production_lde_leaf_relations_bind_derived_codecs_and_every_sponge_block() {
 
     let base_seed = 101;
     let base_index = 37;
-    let base_commitment: [u32; 8] = reference_field_commitment(
-        b"LD01",
-        &base_leaf_fields(base_seed, base_index),
-    );
+    let base_commitment: [u32; 8] =
+        reference_field_commitment(b"LD01", &base_leaf_fields(base_seed, base_index));
     assert_eq!(
         audit(
             &mut store,
@@ -424,8 +601,7 @@ fn production_lde_leaf_relations_bind_derived_codecs_and_every_sponge_block() {
         assert!(result[3] > 0);
 
         let mut wrong_interaction = interaction_commitment;
-        wrong_interaction[lane] =
-            (wrong_interaction[lane] + 1) % BABY_BEAR_MODULUS;
+        wrong_interaction[lane] = (wrong_interaction[lane] + 1) % BABY_BEAR_MODULUS;
         let result = audit(
             &mut store,
             &instance,
