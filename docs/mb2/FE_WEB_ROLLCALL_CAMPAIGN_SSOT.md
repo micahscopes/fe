@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -281,6 +281,25 @@ existing Definition of done, not a second campaign checklist:
   provenance or program topology. Named Poseidon task rows and typed copy
   interactions must bind round, lane, power step, inputs, constants, prior
   products, and outputs before a recursive proof can trust the stream.
+
+  Commit `47bb98142` derives the first complete production child-verifier task
+  plan from the 114-query security policy. One payload-bearing Fe enum names
+  six shared verifier stages followed by `Query(plan_position)`, giving 120
+  tasks without a generated query table or host-selected opcode. One ordinary
+  verifier denotation is interpreted as the scalar boolean result, a fixed-
+  shape typed-memory trace, or replay against untrusted stored rows. Scalar
+  evaluation short-circuits after rejection, while trace and replay retain the
+  fixed suffix needed by a recursive execution relation. The portable storage
+  projection remains nominally typed as task kind plus query position because
+  payload-enum aggregate loads are not yet supported by Wasm lowering; no
+  numeric production opcode table was introduced. The focused zero-import
+  release oracle checks all 120 task identities, invalid indices, clean replay,
+  coherent task rewiring, changed stored results, and changed query payloads.
+  The separately compiled production verifier still accepts the retained
+  canonical 948,808-byte receipt and rejects its complete typed mutation and
+  malformed-byte matrix. This is a verifier execution placement contract, not
+  an authenticated child trace or recursive proof receipt. Exact trace
+  execution over both real security-policy child receipts remains next.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
@@ -2430,7 +2449,25 @@ fallback. The semantic receipts are:
    modular-wrap mutation matrix, and adds a coherent operand rewire whose local
    product remains valid but relation replay rejects. This authenticates the
    merge relation stream, not either child verifier or a recursive receipt.
-   Next place both child verifier task DAGs in authenticated traces, derive
+   Commit `47bb98142` now gives the production security verifier the same
+   interpretation boundary. Its 120-task plan derives six shared stages and
+   114 transcript-query checks from the typed policy. Scalar evaluation, typed
+   memory placement, and replay all consume the same authored denotation. The
+   focused zero-import task gate passes 1/1 in 5.29 seconds. A final
+   15,265,515-byte production verifier with SHA-256
+   `6f23f402a8779f34b20d8cac46f2d0f4f25e8fc268f096d76bd7703eb0a493b4`
+   compiled in about 7 minutes 35 seconds, accepted the retained canonical
+   receipt whose SHA-256 is
+   `c789a067f63b4ab73d8a4c0b36932e4252b6270b0be3e17cc5d5c27980be3ceb`,
+   and rejected the complete typed mutation matrix, validity corruption,
+   truncation, and trailing bytes. A fresh full four-process rerun was stopped
+   during the unchanged prover compilation at 2.4 GiB available system memory,
+   below the campaign's 3 GiB safety floor; it produced no proof diagnostic and
+   is not counted as a failed proof gate. The exact trace interpreter has not
+   yet run over that receipt, so this checkpoint proves scalar semantic
+   preservation plus the independent trace structure, not their conjunction.
+   Next execute both actual security child verifiers into typed traces, bind
+   their stage internals into authenticated relations, derive
    staged workgroup placement from the same dependency vocabulary, and emit the
    leaf and parent proof receipts. Schedule independent leaves and sibling
    merges as a typed balanced reduction, and run the progressive point/disc
