@@ -754,6 +754,27 @@ pub struct ProductionSecurityVerifierTraceRow {
 }
 impl core::marker::Copy for ProductionSecurityVerifierTraceRow {}
 
+/// Canonical header for an untrusted verifier execution trace. The version is
+/// a protocol boundary; the task count remains derived from the active
+/// security policy rather than repeated in a host manifest.
+pub struct ProductionSecurityVerifierCanonicalTraceHeader {
+    pub version: u32,
+    pub valid: bool,
+    pub task_count: u32,
+}
+impl core::marker::Copy for ProductionSecurityVerifierCanonicalTraceHeader {}
+derive CanonicalWords for ProductionSecurityVerifierCanonicalTraceHeader using CanonicalWordsProvider
+
+/// Canonical row coordinates name positions in the semantic task plan. The
+/// task enum itself is recovered by `production_security_verifier_task_at`, so
+/// the byte format contains no parallel operation-code table.
+pub struct ProductionSecurityVerifierCanonicalTraceRow {
+    pub task_position: u32,
+    pub accepted: bool,
+}
+impl core::marker::Copy for ProductionSecurityVerifierCanonicalTraceRow {}
+derive CanonicalWords for ProductionSecurityVerifierCanonicalTraceRow using CanonicalWordsProvider
+
 struct ProductionSecurityVerifierTraceArena {
     rows: [ProductionSecurityVerifierTraceRow; PRODUCTION_SECURITY_VERIFIER_TASK_COUNT],
     count: u32,
@@ -1009,6 +1030,108 @@ impl ProductionSecurityVerifierInterpreter
     }
 
     fn continues_after_rejection(self) -> bool { true }
+}
+
+fn production_security_verifier_trace_task_position(
+    _ stored: ProductionSecurityVerifierTraceTask,
+) -> u32 {
+    let count: u32 = PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+    let mut position: u32 = 0
+    while position < count {
+        if production_security_verifier_trace_tasks_equal(
+            stored,
+            production_security_verifier_task_at(position),
+        ) {
+            return position
+        }
+        position = position + 1
+    }
+    count
+}
+
+/// Serialize a fixed-shape verifier execution through the general canonical
+/// word interpreter. This is a proof-placement boundary, not host-owned task
+/// policy: every semantic task is recovered from its derived plan position.
+pub fn encode_production_security_verifier_trace(
+    _ trace: ProductionSecurityVerifierTrace,
+) -> BrowserBytes {
+    let count: u32 = PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+    let header = ProductionSecurityVerifierCanonicalTraceHeader {
+        version: 1,
+        valid: trace.shape_valid(),
+        task_count: count,
+    }
+    let mut writer = encode_canonical_words(
+        ref header,
+        BrowserWordWriter::growing(),
+    )
+    let mut position: u32 = 0
+    while position < count {
+        let stored = trace.row(position)
+        let row = ProductionSecurityVerifierCanonicalTraceRow {
+            task_position: production_security_verifier_trace_task_position(
+                stored.task,
+            ),
+            accepted: stored.accepted,
+        }
+        writer = encode_canonical_words(ref row, writer)
+        position = position + 1
+    }
+    writer.finish_prefix()
+}
+
+/// Decode an untrusted canonical trace into typed linear-memory placement.
+/// Invalid versions, counts, tags, booleans, lengths, or allocation state all
+/// fail closed while retaining the same opaque trace handle type.
+pub fn decode_production_security_verifier_trace(
+    _ bytes: BrowserBytes,
+) -> ProductionSecurityVerifierTrace {
+    let placement = ProductionSecurityVerifierTraceInterpreter::new()
+    let trace = placement.trace
+    if !trace.available { return trace }
+
+    let count: u32 = PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+    let mut header = ProductionSecurityVerifierCanonicalTraceHeader {
+        version: 0,
+        valid: false,
+        task_count: 0,
+    }
+    let mut reader = decode_canonical_words(
+        mut header,
+        BrowserWordReader::new(bytes),
+    )
+    if header.version != 1 || !header.valid || header.task_count != count {
+        return trace
+    }
+
+    let mut position: u32 = 0
+    let mut valid = true
+    while position < count {
+        let mut row = ProductionSecurityVerifierCanonicalTraceRow {
+            task_position: count,
+            accepted: false,
+        }
+        reader = decode_canonical_words(mut row, reader)
+        if row.task_position > count { valid = false }
+        let wrote = with (trace.arena) {
+            write_production_security_verifier_trace_row(
+                position,
+                ProductionSecurityVerifierTraceRow {
+                    task: production_security_verifier_trace_task(
+                        production_security_verifier_task_at(row.task_position),
+                    ),
+                    accepted: row.accepted,
+                },
+            )
+        }
+        valid = valid && wrote
+        position = position + 1
+    }
+    valid = valid && reader.complete()
+    with (trace.arena) {
+        finish_production_security_verifier_trace(valid)
+    }
+    trace
 }
 
 fn empty_profiled_sparse_baby_bear_receipt<

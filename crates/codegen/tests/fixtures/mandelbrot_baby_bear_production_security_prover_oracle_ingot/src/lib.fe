@@ -10,8 +10,12 @@ use mandelbrot_proof_fixed_air_prover_baby_bear::{
     prove_production_security_sparse_interval,
 }
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    audit_production_security_sparse_verifier_trace,
     decode_production_security_sparse_baby_bear_receipt,
+    decode_production_security_verifier_trace,
     empty_production_security_sparse_baby_bear_receipt,
+    encode_production_security_verifier_trace,
+    production_security_sparse_verifier_trace,
     verify_production_security_sparse_baby_bear_receipt,
 }
 use mandelbrot_proof_recursive::{
@@ -149,6 +153,59 @@ fn verify_production_security_zero_interval_recursive_leaf(
         && committed.statement.valid
         && committed.start.valid
         && committed.end.valid
+}
+
+/// Execute the exact policy-sized verifier into typed memory and emit its
+/// canonical task trace. Replay intentionally lives in a separate artifact so
+/// each placement compiles one interpretation of the verifier denotation.
+pub fn production_security_zero_interval_task_trace(
+    _ bytes: BrowserBytes,
+) -> BrowserBytes {
+    let mut receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(bytes, mut receipt) {
+        return BrowserBytes { ptr: 0, len: 0 }
+    }
+    let interval = production_zero_interval()
+    let shift = BabyBear::from_u32(7)
+    let trace = production_security_sparse_verifier_trace(
+        interval,
+        shift,
+        ref receipt,
+    )
+    encode_production_security_verifier_trace(trace)
+}
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+/// Decode an untrusted canonical task trace and replay the original verifier
+/// denotation against its stored task identities and local results.
+pub fn audit_production_security_zero_interval_task_trace(
+    _ receipt_bytes: BrowserBytes,
+    _ trace_bytes: BrowserBytes,
+) -> (u32, u32, u32, u32) {
+    let mut receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(
+        receipt_bytes,
+        mut receipt,
+    ) {
+        return (0, 0, 0, 0)
+    }
+    let interval = production_zero_interval()
+    let shift = BabyBear::from_u32(7)
+    let audit = audit_production_security_sparse_verifier_trace(
+        interval,
+        shift,
+        ref receipt,
+        decode_production_security_verifier_trace(trace_bytes),
+    )
+    (
+        flag(audit.shape_valid),
+        audit.task_mismatches,
+        audit.result_mismatches,
+        audit.rejected_tasks,
+    )
 }
 
 /// Complete typed mutation matrix for the policy-sized assembled receipt.

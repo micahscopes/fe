@@ -14,6 +14,12 @@ const RECEIPT_PATH: &str = "FE_MANDELBROT_SECURITY_GATE_RECEIPT";
 const GATE: &str = "production_security_prover_executes_and_its_canonical_receipt_verifies";
 const PROVER_ENTRY: &str = "production_security_zero_interval_receipt";
 const VERIFIER_ENTRY: &str = "audit_production_security_zero_interval_receipt_matrix";
+const TRACE_WRITER_ENTRY: &str = "production_security_zero_interval_task_trace";
+const TRACE_REPLAY_ENTRY: &str = "audit_production_security_zero_interval_task_trace";
+const SECURITY_TASK_COUNT: usize = 120;
+const TRACE_HEADER_WORDS: usize = 3;
+const TRACE_ROW_WORDS: usize = 2;
+const TRACE_BYTES: usize = (TRACE_HEADER_WORDS + TRACE_ROW_WORDS * SECURITY_TASK_COUNT) * 4;
 
 fn compile_gate_with_evidence(entry: &str, evidence_path: Option<&Path>) -> Vec<u8> {
     let started = Instant::now();
@@ -79,6 +85,18 @@ fn prover_wasm_path(receipt: &Path) -> PathBuf {
 
 fn verifier_wasm_path(receipt: &Path) -> PathBuf {
     receipt.with_file_name("verifier.wasm")
+}
+
+fn trace_writer_wasm_path(receipt: &Path) -> PathBuf {
+    receipt.with_file_name("trace-writer.wasm")
+}
+
+fn trace_replay_wasm_path(receipt: &Path) -> PathBuf {
+    receipt.with_file_name("trace-replay.wasm")
+}
+
+fn task_trace_path(receipt: &Path) -> PathBuf {
+    receipt.with_file_name("task-trace.bin")
 }
 
 fn compile_gate_to_path(entry: &str, path: &Path) {
@@ -224,6 +242,213 @@ fn verify_canonical_receipt(path: &Path) {
     );
 }
 
+fn produce_canonical_receipt_trace(path: &Path) {
+    let started = Instant::now();
+    let receipt = std::fs::read(path).expect("prover child must persist its receipt");
+    let length = i32::try_from(receipt.len()).expect("receipt length should fit i32");
+    let engine = wasmtime::Engine::default();
+    let wasm = read_compiled_gate(&trace_writer_wasm_path(path), "security trace writer");
+    let module =
+        wasmtime::Module::new(&engine, wasm).expect("security trace writer module should load");
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("security trace writer Wasm should instantiate");
+    instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .expect("security trace writer arena reset export")
+        .call(&mut store, ())
+        .expect("security trace writer arena reset should run");
+    let pointer = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("security trace writer allocator export")
+        .call(&mut store, (length, 4))
+        .expect("security trace writer receipt allocation should succeed");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("security trace writer should export memory");
+    memory
+        .write(&mut store, pointer as usize, &receipt)
+        .expect("security receipt must fit trace writer memory");
+    let write_trace = instance
+        .get_typed_func::<(i32, i32), (i32, i32)>(&mut store, TRACE_WRITER_ENTRY)
+        .expect("security receipt trace writer export");
+    let (trace_pointer, trace_length) = write_trace
+        .call(&mut store, (pointer, length))
+        .expect("security receipt trace writer should execute");
+    assert_eq!(trace_length as usize, TRACE_BYTES);
+    let mut trace = vec![0_u8; TRACE_BYTES];
+    memory
+        .read(&store, trace_pointer as usize, &mut trace)
+        .expect("canonical security task trace should be readable");
+    let word =
+        |index: usize| u32::from_le_bytes(trace[index * 4..index * 4 + 4].try_into().unwrap());
+    assert_eq!(word(0), 1, "task trace version");
+    assert_eq!(word(1), 1, "task trace validity");
+    assert_eq!(word(2), SECURITY_TASK_COUNT as u32, "task trace count");
+    for position in 0..SECURITY_TASK_COUNT {
+        let base = TRACE_HEADER_WORDS + position * TRACE_ROW_WORDS;
+        assert_eq!(word(base), position as u32, "task trace row {position}");
+        assert_eq!(word(base + 1), 1, "task trace result {position}");
+    }
+    std::fs::write(task_trace_path(path), trace)
+        .expect("canonical task trace should persist between processes");
+    eprintln!(
+        "security prover gate: canonical task trace ready ({TRACE_BYTES} bytes, {:.2?})",
+        started.elapsed(),
+    );
+}
+
+fn verify_canonical_receipt_trace(path: &Path) {
+    let started = Instant::now();
+    let receipt = std::fs::read(path).expect("prover child must persist its receipt");
+    let trace = std::fs::read(task_trace_path(path))
+        .expect("trace writer child must persist its canonical trace");
+    assert_eq!(trace.len(), TRACE_BYTES);
+    let receipt_length = i32::try_from(receipt.len()).expect("receipt length should fit i32");
+    let trace_length = i32::try_from(trace.len()).expect("trace length should fit i32");
+    let engine = wasmtime::Engine::default();
+    let wasm = read_compiled_gate(&trace_replay_wasm_path(path), "security trace replay");
+    let module =
+        wasmtime::Module::new(&engine, wasm).expect("security trace replay module should load");
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("security trace replay Wasm should instantiate");
+    instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .expect("security trace replay arena reset export")
+        .call(&mut store, ())
+        .expect("security trace replay arena reset should run");
+    let allocate = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("security trace replay allocator export");
+    let receipt_pointer = allocate
+        .call(&mut store, (receipt_length + 4, 4))
+        .expect("security trace replay receipt allocation should succeed");
+    let trace_pointer = allocate
+        .call(&mut store, (trace_length + 4, 4))
+        .expect("security trace replay trace allocation should succeed");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("security trace replay should export memory");
+    memory
+        .write(&mut store, receipt_pointer as usize, &receipt)
+        .expect("security receipt must fit trace replay memory");
+    memory
+        .write(
+            &mut store,
+            receipt_pointer as usize + receipt.len(),
+            &0_u32.to_le_bytes(),
+        )
+        .expect("receipt trailing canonicality probe must fit replay memory");
+    memory
+        .write(&mut store, trace_pointer as usize, &trace)
+        .expect("security task trace must fit replay memory");
+    memory
+        .write(
+            &mut store,
+            trace_pointer as usize + trace.len(),
+            &0_u32.to_le_bytes(),
+        )
+        .expect("trace trailing canonicality probe must fit replay memory");
+    let audit = instance
+        .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            TRACE_REPLAY_ENTRY,
+        )
+        .expect("security receipt trace replay export");
+    let run = |store: &mut wasmtime::Store<()>, receipt_len: i32, trace_len: i32| {
+        audit
+            .call(
+                store,
+                (receipt_pointer, receipt_len, trace_pointer, trace_len),
+            )
+            .expect("security receipt trace replay should execute")
+    };
+
+    assert_eq!(run(&mut store, receipt_length, trace_length), (1, 0, 0, 0));
+    memory
+        .write(&mut store, trace_pointer as usize, &2_u32.to_le_bytes())
+        .expect("trace version mutation should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (0, 0, 0, 0));
+    memory
+        .write(&mut store, trace_pointer as usize, &1_u32.to_le_bytes())
+        .expect("trace version restoration should fit replay memory");
+    memory
+        .write(&mut store, trace_pointer as usize + 4, &2_u32.to_le_bytes())
+        .expect("invalid header boolean should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (0, 0, 0, 0));
+    memory
+        .write(&mut store, trace_pointer as usize + 4, &1_u32.to_le_bytes())
+        .expect("header boolean restoration should fit replay memory");
+    memory
+        .write(
+            &mut store,
+            trace_pointer as usize + 8,
+            &((SECURITY_TASK_COUNT - 1) as u32).to_le_bytes(),
+        )
+        .expect("trace count mutation should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (0, 0, 0, 0));
+    memory
+        .write(
+            &mut store,
+            trace_pointer as usize + 8,
+            &(SECURITY_TASK_COUNT as u32).to_le_bytes(),
+        )
+        .expect("trace count restoration should fit replay memory");
+    let first_task = trace_pointer as usize + TRACE_HEADER_WORDS * 4;
+    memory
+        .write(&mut store, first_task, &6_u32.to_le_bytes())
+        .expect("coherent task mutation should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (1, 1, 0, 0));
+    memory
+        .write(&mut store, first_task, &0_u32.to_le_bytes())
+        .expect("task restoration should fit replay memory");
+    memory
+        .write(&mut store, first_task + 4, &0_u32.to_le_bytes())
+        .expect("stored result mutation should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (1, 0, 1, 0));
+    memory
+        .write(&mut store, first_task + 4, &2_u32.to_le_bytes())
+        .expect("invalid result boolean should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (0, 0, 0, 0));
+    memory
+        .write(&mut store, first_task + 4, &1_u32.to_le_bytes())
+        .expect("stored result restoration should fit replay memory");
+    memory
+        .write(
+            &mut store,
+            first_task,
+            &((SECURITY_TASK_COUNT + 1) as u32).to_le_bytes(),
+        )
+        .expect("invalid task position should fit replay memory");
+    assert_eq!(run(&mut store, receipt_length, trace_length), (0, 0, 0, 0));
+    memory
+        .write(&mut store, first_task, &0_u32.to_le_bytes())
+        .expect("task position restoration should fit replay memory");
+    assert_eq!(
+        run(&mut store, receipt_length, trace_length - 4),
+        (0, 0, 0, 0),
+    );
+    assert_eq!(
+        run(&mut store, receipt_length, trace_length + 4),
+        (0, 0, 0, 0),
+    );
+    assert_eq!(
+        run(&mut store, receipt_length - 4, trace_length),
+        (0, 0, 0, 0),
+    );
+    assert_eq!(
+        run(&mut store, receipt_length + 4, trace_length),
+        (0, 0, 0, 0),
+    );
+    eprintln!(
+        "security prover gate: canonical task trace replay finished ({:.2?})",
+        started.elapsed(),
+    );
+}
+
 fn child_receipt_path() -> PathBuf {
     std::env::var_os(RECEIPT_PATH)
         .map(PathBuf::from)
@@ -240,6 +465,14 @@ fn run_requested_child() -> bool {
         "prove" => produce_canonical_receipt(&path),
         "compile-verifier" => compile_gate_to_path(VERIFIER_ENTRY, &verifier_wasm_path(&path)),
         "verify" => verify_canonical_receipt(&path),
+        "compile-trace-writer" => {
+            compile_gate_to_path(TRACE_WRITER_ENTRY, &trace_writer_wasm_path(&path))
+        }
+        "write-trace" => produce_canonical_receipt_trace(&path),
+        "compile-trace-replay" => {
+            compile_gate_to_path(TRACE_REPLAY_ENTRY, &trace_replay_wasm_path(&path))
+        }
+        "verify-trace" => verify_canonical_receipt_trace(&path),
         _ => panic!("unknown security gate child mode {mode}"),
     }
     true
@@ -273,7 +506,16 @@ fn production_security_prover_executes_and_its_canonical_receipt_verifies() {
         .expect("workspace-backed security gate scratch directory");
     let receipt_path = scratch.path().join("receipt.bin");
 
-    for mode in ["compile-prover", "prove", "compile-verifier", "verify"] {
+    for mode in [
+        "compile-prover",
+        "prove",
+        "compile-verifier",
+        "verify",
+        "compile-trace-writer",
+        "write-trace",
+        "compile-trace-replay",
+        "verify-trace",
+    ] {
         let status = run_gate_child(mode, &receipt_path);
         if !status.success() {
             let retained = scratch.keep();
