@@ -24,6 +24,19 @@ const WIDTH: usize = 16;
 const ROUND_CONSTANT_COUNT: usize = 8 * WIDTH + 13;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 
+fn bb_mul(left: u32, right: u32) -> u32 {
+    (left as u64 * right as u64 % BABY_BEAR_MODULUS as u64) as u32
+}
+
+fn reference_power7(value: u32) -> ([u32; 4], u32) {
+    let value = (value as u64 % BABY_BEAR_MODULUS as u64) as u32;
+    let square = bb_mul(value, value);
+    let fourth = bb_mul(square, square);
+    let cube = bb_mul(value, square);
+    let seventh = bb_mul(cube, fourth);
+    ([square, fourth, cube, seventh], seventh)
+}
+
 fn fixture_url() -> Url {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/poseidon_baby_bear_oracle_ingot");
@@ -289,6 +302,73 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             expected,
             "Fe workgroup schedule differs from Plonky3 for {input:?}",
         );
+    }
+}
+
+#[test]
+fn poseidon_power7_uses_one_exact_quadratic_relation() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compiled_wasm())
+        .expect("Poseidon2 power relation module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("Poseidon2 power relation module should instantiate");
+
+    for value in [
+        0,
+        1,
+        2,
+        7,
+        123_456_789,
+        BABY_BEAR_MODULUS - 1,
+        BABY_BEAR_MODULUS,
+        BABY_BEAR_MODULUS + 1,
+        u32::MAX,
+    ] {
+        let (nodes, expected) = reference_power7(value);
+        let clean = call(
+            &mut store,
+            &instance,
+            "poseidon2_power7_relation_audit",
+            &[value, expected, 0],
+            13,
+        );
+        assert_eq!(&clean[..7], &[1, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(&clean[7..11], &nodes);
+        assert_eq!(&clean[11..], &[expected, expected]);
+
+        for mutation in 1..=4 {
+            let mutated = call(
+                &mut store,
+                &instance,
+                "poseidon2_power7_relation_audit",
+                &[value, expected, mutation],
+                13,
+            );
+            assert_eq!(mutated[0], 1, "mutation {mutation} retains plan shape");
+            assert_eq!(mutated[1], 1, "direct relation remains exact");
+            assert!(
+                mutated[2..6].iter().any(|residual| *residual != 0),
+                "committed power node mutation {mutation} must violate a product residual",
+            );
+        }
+
+        let wrong_expected = if expected + 1 == BABY_BEAR_MODULUS {
+            0
+        } else {
+            expected + 1
+        };
+        let wrong = call(
+            &mut store,
+            &instance,
+            "poseidon2_power7_relation_audit",
+            &[value, wrong_expected, 0],
+            13,
+        );
+        assert_eq!(&wrong[2..6], &[0, 0, 0, 0]);
+        assert_ne!(wrong[6], 0, "wrong expected output must violate assertion");
+        assert_eq!(wrong[1], 0, "direct relation must reject wrong output");
     }
 }
 

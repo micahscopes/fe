@@ -50,9 +50,8 @@ pub struct QuadraticRelationStep<I: core::marker::Copy> {
 }
 impl<I: core::marker::Copy> core::marker::Copy for QuadraticRelationStep<I> {}
 
-pub trait QuadraticRelationInterpreter<F: Radix2Field>: core::marker::Copy {
-    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F>
-
+pub trait QuadraticRelationInterpreter<F: Radix2Field>:
+    QuadraticPlanInterpreter<F> {
     fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self>
 }
 
@@ -226,7 +225,7 @@ impl QuadraticRelationValueInterpreter {
     pub fn finish(self) -> bool { self.valid }
 }
 
-impl<F: Radix2Field> QuadraticRelationInterpreter<F>
+impl<F: Radix2Field> QuadraticPlanInterpreter<F>
     for QuadraticRelationValueInterpreter {
     fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
         QuadraticPlanStep {
@@ -234,7 +233,10 @@ impl<F: Radix2Field> QuadraticRelationInterpreter<F>
             value: left.radix2_mul(right),
         }
     }
+}
 
+impl<F: Radix2Field> QuadraticRelationInterpreter<F>
+    for QuadraticRelationValueInterpreter {
     fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
         QuadraticRelationStep {
             interpreter: Self {
@@ -281,7 +283,7 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
 }
 
 impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
-    QuadraticRelationInterpreter<F>
+    QuadraticPlanInterpreter<F>
     for QuadraticRelationWitnessInterpreter<F, PRODUCTS, ASSERTIONS> {
     fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
         let value = left.radix2_mul(right)
@@ -308,7 +310,11 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
             value: value,
         }
     }
+}
 
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationInterpreter<F>
+    for QuadraticRelationWitnessInterpreter<F, PRODUCTS, ASSERTIONS> {
     fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
         if !self.valid || self.assertion_cursor >= ASSERTIONS.downcast_truncate() {
             return QuadraticRelationStep {
@@ -383,7 +389,7 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
 }
 
 impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
-    QuadraticRelationInterpreter<F>
+    QuadraticPlanInterpreter<F>
     for QuadraticRelationConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
     fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
         if !self.valid || self.product_cursor >= PRODUCTS.downcast_truncate() {
@@ -416,7 +422,11 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
             value: value,
         }
     }
+}
 
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationInterpreter<F>
+    for QuadraticRelationConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
     fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
         if !self.valid || self.assertion_cursor >= ASSERTIONS.downcast_truncate() {
             return QuadraticRelationStep {

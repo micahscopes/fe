@@ -19,6 +19,7 @@ use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 use poseidon_grain::{
     Grain80Word, field_element, warm, warm_word,
 }
+use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
 
 pub const WIDTH: usize = 16
 pub const FULL_ROUNDS: usize = 8
@@ -387,11 +388,39 @@ impl Poseidon2ParameterStream {
     }
 }
 
+pub const POSEIDON2_POWER7_MULTIPLICATIONS: usize = 4
+
+/// One authored quadratic schedule for the Poseidon2 power-seven map. Scalar
+/// hashing, recursive constraints, and future GPU trace placement interpret
+/// these same four nodes rather than copying the exponentiation chain.
+pub struct Poseidon2Power7Plan<I: QuadraticPlanInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub value: BabyBear,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2Power7Plan<I> {}
+
+#[inline(always)]
+pub fn poseidon2_power7_plan<I: QuadraticPlanInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> Poseidon2Power7Plan<I> {
+    let square = interpreter.multiply(value, value)
+    let fourth = square.interpreter.multiply(square.value, square.value)
+    let cube = fourth.interpreter.multiply(value, square.value)
+    let seventh = cube.interpreter.multiply(cube.value, fourth.value)
+    Poseidon2Power7Plan {
+        interpreter: seventh.interpreter,
+        value: seventh.value,
+    }
+}
+
 #[inline(always)]
 fn sbox7(_ value: BabyBear) -> BabyBear {
-    let square = value * value
-    let fourth = square * square
-    value * square * fourth
+    poseidon2_power7_plan(
+        QuadraticValueInterpreter::new(),
+        value,
+    ).value
 }
 
 /// Width-16 permutation state in canonical Montgomery words.

@@ -7,3 +7,4 @@ canonical_words = "../canonical_words"
 core = { path = "../core" }
 precision = "../../demos/sketches/precision"
 poseidon_grain = "../poseidon_grain"
+quadratic_plan = "../quadratic_plan"

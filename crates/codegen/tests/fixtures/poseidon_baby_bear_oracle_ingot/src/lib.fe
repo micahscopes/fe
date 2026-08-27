@@ -9,6 +9,7 @@ use poseidon_baby_bear::{
     Poseidon2FieldSponge,
     Poseidon2WorkgroupPlan,
     Poseidon2WorkgroupSchedule,
+    POSEIDON2_POWER7_MULTIPLICATIONS,
     commit_canonical,
     commit_canonical_packed,
     commit_ext4_fields,
@@ -19,13 +20,94 @@ use poseidon_baby_bear::{
     place_first_full_rounds,
     place_partial_rounds,
     permute16,
+    poseidon2_power7_plan,
     poseidon2_workgroup_destination,
     poseidon2_workgroup_lane,
     runtime_parameter_plain,
     squeeze_ext4_indexed,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus, BABY_BEAR_MODULUS}
+use precision::polynomial::Radix2Field
 use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
+use quadratic_plan::{
+    QuadraticRelationConstraintInterpreter,
+    QuadraticRelationInterpreter,
+    QuadraticRelationValueInterpreter,
+    QuadraticRelationWitnessInterpreter,
+}
+
+/// Execute one authored Poseidon power-seven plan as a witness, as quadratic
+/// constraints, and as a direct value relation. The mutation selector changes
+/// one committed multiplication node only after witness generation.
+pub fn poseidon2_power7_relation_audit(
+    _ value: u32,
+    _ expected: u32,
+    _ mutation: u32,
+) -> (
+    u32, u32,
+    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32,
+) {
+    let value = BabyBear::from_u32(value)
+    let expected = BabyBear::from_u32(expected)
+
+    let witnessed = poseidon2_power7_plan(
+        QuadraticRelationWitnessInterpreter<
+            BabyBear,
+            POSEIDON2_POWER7_MULTIPLICATIONS,
+            1,
+        >::new(),
+        value,
+    )
+    let witness_assertion = witnessed.interpreter.constrain_zero(
+        witnessed.value.radix2_sub(expected),
+    )
+    let mut witness = witness_assertion.interpreter.finish()
+    if mutation > 0
+        && mutation <= POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate()
+    {
+        let index = (mutation - 1) as usize
+        witness.nodes[index] = witness.nodes[index] + BabyBear::one()
+    }
+
+    let constrained = poseidon2_power7_plan(
+        QuadraticRelationConstraintInterpreter<
+            BabyBear,
+            POSEIDON2_POWER7_MULTIPLICATIONS,
+            1,
+        >::new(witness),
+        value,
+    )
+    let constraint_assertion = constrained.interpreter.constrain_zero(
+        constrained.value.radix2_sub(expected),
+    )
+    let residuals = constraint_assertion.interpreter.finish()
+
+    let direct = poseidon2_power7_plan(
+        QuadraticRelationValueInterpreter::new(),
+        value,
+    )
+    let direct_assertion = direct.interpreter.constrain_zero(
+        direct.value.radix2_sub(expected),
+    )
+
+    (
+        if residuals.valid { 1 } else { 0 },
+        if direct_assertion.interpreter.finish() { 1 } else { 0 },
+        residuals.products[0].to_u32(),
+        residuals.products[1].to_u32(),
+        residuals.products[2].to_u32(),
+        residuals.products[3].to_u32(),
+        residuals.assertions[0].to_u32(),
+        witness.nodes[0].to_u32(),
+        witness.nodes[1].to_u32(),
+        witness.nodes[2].to_u32(),
+        witness.nodes[3].to_u32(),
+        constrained.value.to_u32(),
+        direct.value.to_u32(),
+    )
+}
 
 const fn protocol_tag(_ label: String<4>) -> u32 {
     let bytes = label.as_bytes()
