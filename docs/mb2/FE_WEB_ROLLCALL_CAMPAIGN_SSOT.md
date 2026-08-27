@@ -156,13 +156,13 @@ existing Definition of done, not a second campaign checklist:
   an out-of-region write to reach the next region. The production Mandelbrot
   proof tape still uses application constants, so migration and a full
   receipt-wide independent decoder remain before this gate can close.
-- [~] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
+- [x] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
-  The current four-leg process-isolated exact gate compiles a 23,636,877-byte
-  zero-import Fe prover, executes that exact persisted Wasm in a fresh process,
-  and emits a 47,552-byte canonical receipt. It then compiles a fresh
-  10,129,225-byte zero-import Fe verifier and executes that artifact in a fourth
-  process over only the copied receipt bytes. The clean receipt accepts. A
+  The first four-query process-isolated exact gate compiled a 23,636,877-byte
+  zero-import Fe prover, executed that exact persisted Wasm in a fresh process,
+  and emitted a 47,552-byte canonical receipt. It then compiled a fresh
+  10,129,225-byte zero-import Fe verifier and executed that artifact in a fourth
+  process over only the copied receipt bytes. The clean receipt accepted. A
   test-only Fe structural interpreter then mutates the typed decoded carrier,
   without host-owned offsets: the base root and transcript chain, an
   authenticated AIR value, its Merkle sibling, a composition opening, and the
@@ -171,9 +171,27 @@ existing Definition of done, not a second campaign checklist:
   1,891.64 seconds; prover execution takes 258.37 seconds after its compiler
   arena exits, and verifier execution takes 10.74 seconds after its compiler
   arena exits. Claim, domain, sampled-query, and malformed-encoding coverage
-  still relies on focused layer gates, so the assembled boundary remains
-  partial until those mutations and the separate 114-query security-sized
-  receipt execute there.
+  remains independently exercised by the focused layer gates.
+
+  Fe commit `9c0d8306e` makes policy-sized Merkle opening storage an ordinary
+  typed browser-arena placement of the same ordered dependency graph. The
+  separate CTFE-derived 100-bit policy now crosses the assembled boundary with
+  114 authenticated queries. A fresh 15,397,939-byte zero-import
+  Fe prover compiled in 2,109.22 seconds, executed in a separate process in
+  539.32 seconds, and emitted a canonical 948,808-byte receipt. Its Wasm and
+  receipt SHA-256 digests are respectively
+  `90dc23f002dac6b80ea595dc1247c90c737ba853e1b89baa216504239d71da06`
+  and
+  `c789a067f63b4ab73d8a4c0b36932e4252b6270b0be3e17cc5d5c27980be3ceb`.
+  A separately compiled 14,636,637-byte zero-import Fe verifier with SHA-256
+  `7c3c0842615854dccda6a69d6a6afc2a0028e1a823283d0f6abb80465e821423`
+  accepted only the copied receipt bytes and rejected mutations to the base
+  root, authenticated AIR value, Merkle sibling, composition opening, and
+  terminal FRI evaluation in 21.05 seconds. The prover compiler peaked at
+  13,288,420 KiB RSS and the prover runtime at 1,740,228 KiB. This closes the
+  scalar assembled-receipt gate. It does not constitute recursive
+  cryptography, WebGPU proof generation, or evidence that this one-iteration
+  verifier is cheaper than direct orbit replay.
 - [~] **G-RECURSE:** the field-neutral multi-limb carrier already merges only
   ordered adjacent iteration intervals with identical statements and shared
   boundary commitments. `VerifiedRecursiveInterval<L>` now makes the
@@ -2205,6 +2223,71 @@ fallback. The semantic receipts are:
    full four-process 114-query boundary only after a focused gate demonstrates
    lower graph size, wall time, or peak memory without changing codec values.
 
+   The subsequent value-level and arena-owned receipt repair crossed the real
+   scalar protocol boundary. The exact Fe prover compiled to valid zero-import
+   Wasm, executed in 285.99 seconds, and emitted one canonical 948,808-byte
+   receipt. A separately compiled 15,269,897-byte Fe verifier accepted that
+   receipt and rejected the complete typed mutation matrix, validity-word
+   mutation, truncation, and trailing bytes in 17.73 seconds. Merkle browser
+   storage matches both the pure Fe interpreter and an independent Rust tree
+   oracle. The caller-owned FRI writer matches its independently checked Fe
+   value interpreter. These are receipt and protocol results, but they are not
+   yet a completed fresh four-process rerun.
+
+   The first fresh rerun exposed a compiler scaling regression rather than a
+   proof mismatch. Its prover reached valid Wasm at 16,392,448 bytes after
+   3,869.88 seconds, but late lowering grew to 13.7 GiB RSS. The run was
+   interrupted at the campaign's 3 GiB system-availability floor immediately
+   after validation and before the child persisted the module. Inspection
+   showed that every address-carried Fe value copy had become its own Sonatina
+   control-flow loop. This kept Wasm bodies valid and compact but multiplied
+   the lowering graph.
+
+   Sonatina commit `a6cb7bc6` therefore adds one generic, overlap-safe
+   `Memcopy` IR instruction with precise read/write effects, parser and
+   verifier coverage, and direct Wasm `memory.copy` lowering. Its overlap test
+   passes. Fe's actual Wasm interpreter emits that instruction for aggregate
+   value copies, while the shared shader/SPIR-V interpreter retains the
+   checked portable loop. The 8,192-word address-carried value gate proves
+   execution and the presence of bulk memory, and the complete typed arena and
+   provenance suite passes 17/17 in 20.41 seconds.
+
+   The exact 114-query verifier then compiled and validated at 14,636,637
+   bytes in 675.65 seconds, versus 15,269,897 bytes in 1,123.70 seconds before
+   bulk memory. That is about a 40 percent wall-time reduction. The module
+   contains 783 `memory.copy` operations and accepts the retained real receipt
+   while rejecting the full mutation matrix in 41.00 seconds. This proves the
+   optimization at the production verifier boundary.
+
+   The final compiler-memory slice consumes prepared Fe MIR bodies as they are
+   lowered, retains only their call interfaces, and asks the GNU allocator to
+   release completed body spans at bounded intervals. Local Sonatina commit
+   `172a3489` adds an owned Wasm backend entry that consumes each Sonatina
+   function body after deriving its WAFFLE body, while the borrowed and owned
+   paths share validation and final emission. Borrowed-versus-owned bytes,
+   export names, validation, instantiation, and mutable execution match in a
+   release gate. The overlap-safe `memory.copy` release gate also passes.
+   Fe's complete typed allocation and provenance suite passes 17/17 in 14.80
+   seconds, and the generated resumable actor continuation gate passes 1/1 in
+   9.98 seconds.
+
+   With those changes, the fresh 114-query verifier compiled in 394.80 seconds
+   at 6,566,328 KiB sampled peak RSS and retained its exact 14,636,637-byte
+   artifact and SHA-256
+   `7c3c0842615854dccda6a69d6a6afc2a0028e1a823283d0f6abb80465e821423`.
+   The fresh prover compiled and persisted valid Wasm in 2,109.22 seconds,
+   rather than the earlier interrupted 3,869.88-second attempt. It emitted
+   15,397,939 bytes with SHA-256
+   `90dc23f002dac6b80ea595dc1247c90c737ba853e1b89baa216504239d71da06`
+   at 13,288,420 KiB sampled peak RSS, leaving 3,443,664 KiB available at the
+   lowest sample. Executing that exact artifact produced the canonical
+   948,808-byte receipt in 539.32 seconds. The separately compiled verifier
+   accepted it and rejected the complete typed mutation matrix in 21.05
+   seconds. This closes the scalar four-process 114-query boundary. The two
+   local Sonatina commits still require publication and an exact Fe dependency
+   pin before the coordinated compiler increment is reproducible from a clean
+   checkout.
+
    The Sonatina refresh was also audited against the actual
    `fe-lang/sonatina` `main` at
    `8e6c99f67cf3f20b9672cab61d8655c2ff33a6a7`, not the stale `micah/main`
@@ -2224,10 +2307,12 @@ fallback. The semantic receipts are:
    independent bigint gates, and run each widened stage in Chrome before adding
    another. Add Merkle retention/recomputation and a peak-memory policy before
    mobile-sized execution.
-5. Close G-RECEIPT, then G-RECURSE and G-BROWSER. The current recursive carrier
-   and verified-adjacent-interval authority are semantic scaffolding, not a
-   recursive cryptographic proof. Derive fixed-size leaf and merge proof
-   circuits, schedule independent leaves and sibling merges as a typed balanced
+5. G-RECEIPT is closed at the scalar 114-query boundary. Continue through
+   G-RECURSE and G-BROWSER. The current recursive carrier and
+   verified-adjacent-interval authority are semantic scaffolding, not a
+   recursive cryptographic proof. First bind the security-sized verifier to
+   the private leaf authority, then derive fixed-size leaf and merge proof
+   circuits. Schedule independent leaves and sibling merges as a typed balanced
    reduction, and run the progressive point/disk picker, cancellation,
    generation, mutation rejection, Fe-Wasm verification, and revm-Wasm
    verification in Chrome.
