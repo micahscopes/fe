@@ -1,0 +1,171 @@
+use mandelbrot_proof_recursive_air_baby_bear::{
+    RECURSIVE_MERGE_ASSERTIONS,
+    RECURSIVE_MERGE_BITS,
+    RECURSIVE_MERGE_PRODUCTS,
+    derive_recursive_merge_auxiliary,
+    evaluate_recursive_merge_relation,
+    recursive_merge_relation_residuals,
+    recursive_merge_relation_witness,
+    recursive_merge_relation_witness_from_auxiliary,
+}
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveBoundaryDigest,
+    RecursiveCommittedInterval,
+    RecursiveStatementDigest,
+}
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
+use precision::baby_bear::BabyBear
+
+fn digest(_ seed: u32) -> Poseidon2Digest {
+    let mut values = [0; DIGEST_FIELDS]
+    let mut index: usize = 0
+    while index < DIGEST_FIELDS {
+        let offset: u32 = index.downcast_truncate()
+        values[index] = seed + offset * (17 as u32)
+        index = index + 1
+    }
+    Poseidon2Digest::from_u32s(values)
+}
+
+fn statement(_ seed: u32) -> RecursiveStatementDigest<4> {
+    RecursiveStatementDigest { valid: true, value: digest(seed) }
+}
+
+fn boundary(_ seed: u32) -> RecursiveBoundaryDigest<4> {
+    RecursiveBoundaryDigest { valid: true, value: digest(seed) }
+}
+
+fn interval(
+    _ leaves: u32,
+    _ statement_seed: u32,
+    _ start_iteration: u32,
+    _ end_iteration: u32,
+    _ start_seed: u32,
+    _ end_seed: u32,
+) -> RecursiveCommittedInterval<4> {
+    RecursiveCommittedInterval {
+        valid: true,
+        leaves: leaves,
+        statement: statement(statement_seed),
+        start_iteration: start_iteration,
+        end_iteration: end_iteration,
+        start: boundary(start_seed),
+        end: boundary(end_seed),
+    }
+}
+
+/// Return direct-relation validity, constrained validity, shape validity,
+/// nonzero product and assertion counts, and both derived capacities.
+pub fn recursive_merge_air_audit(
+    _ start: u32,
+    _ middle: u32,
+    _ end: u32,
+    _ left_leaves: u32,
+    _ right_leaves: u32,
+    _ seed: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32) {
+    let mut left = interval(
+        left_leaves,
+        seed,
+        start,
+        middle,
+        seed + 100,
+        seed + 200,
+    )
+    let mut right = interval(
+        right_leaves,
+        seed,
+        middle,
+        end,
+        seed + 200,
+        seed + 300,
+    )
+    let mut parent = interval(
+        left_leaves + right_leaves,
+        seed,
+        start,
+        end,
+        seed + 100,
+        seed + 300,
+    )
+
+    match mutation {
+        1 => { right.statement = statement(seed + 1) }
+        2 => { right.start = boundary(seed + 201) }
+        3 => { right.start_iteration = middle + 1 }
+        4 => { parent.leaves = parent.leaves + 1 }
+        5 => { parent.statement = statement(seed + 1) }
+        6 => { parent.start = boundary(seed + 101) }
+        7 => { parent.end_iteration = end + 1 }
+        8 => { left.valid = false }
+        _ => {}
+    }
+
+    let direct = evaluate_recursive_merge_relation(left, right, parent)
+    let mut witness = recursive_merge_relation_witness(left, right, parent)
+    if mutation == 9 {
+        witness.arithmetic.nodes[0] =
+            witness.arithmetic.nodes[0] + BabyBear::one()
+    } else if mutation == 10 {
+        witness.auxiliary.left_start.bits[0] =
+            witness.auxiliary.left_start.bits[0] + BabyBear::one()
+    } else if mutation == 11 {
+        witness.auxiliary.left_span_addition.carries[0] =
+            witness.auxiliary.left_span_addition.carries[0] + BabyBear::one()
+    } else if mutation == 12 {
+        let mut auxiliary = derive_recursive_merge_auxiliary(left, right, parent)
+        let mut carry: u32 = 0
+        auxiliary.left_span_addition.carries[0] = BabyBear::zero()
+        let mut index: usize = 0
+        while index < RECURSIVE_MERGE_BITS {
+            auxiliary.left_span_minus_one.bits[index] = BabyBear::one()
+            let shift: u32 = index.downcast_truncate()
+            let total = ((left.start_iteration >> shift) & 1) + 1 + carry
+            carry = total >> 1
+            auxiliary.left_span_addition.carries[index + 1] =
+                BabyBear::from_u32(carry)
+            index = index + 1
+        }
+        witness = recursive_merge_relation_witness_from_auxiliary(
+            left,
+            right,
+            parent,
+            auxiliary,
+        )
+    }
+    let residuals = recursive_merge_relation_residuals(
+        left,
+        right,
+        parent,
+        witness,
+    )
+    let mut product_nonzero: u32 = 0
+    let mut product: usize = 0
+    while product < RECURSIVE_MERGE_PRODUCTS {
+        if !residuals.products[product].is_zero() {
+            product_nonzero = product_nonzero + 1
+        }
+        product = product + 1
+    }
+    let mut assertion_nonzero: u32 = 0
+    let mut assertion: usize = 0
+    while assertion < RECURSIVE_MERGE_ASSERTIONS {
+        if !residuals.assertions[assertion].is_zero() {
+            assertion_nonzero = assertion_nonzero + 1
+        }
+        assertion = assertion + 1
+    }
+    let holds = residuals.valid
+        && product_nonzero == 0
+        && assertion_nonzero == 0
+    (
+        if direct { 1 } else { 0 },
+        if holds { 1 } else { 0 },
+        if residuals.valid { 1 } else { 0 },
+        product_nonzero,
+        assertion_nonzero,
+        RECURSIVE_MERGE_PRODUCTS.downcast_truncate(),
+        RECURSIVE_MERGE_ASSERTIONS.downcast_truncate(),
+    )
+}

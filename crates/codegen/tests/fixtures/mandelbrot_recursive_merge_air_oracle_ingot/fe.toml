@@ -1,0 +1,9 @@
+[ingot]
+name = "mandelbrot_recursive_merge_air_oracle"
+version = "0.1.0"
+
+[dependencies]
+mandelbrot_proof_recursive_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-air-baby-bear"
+mandelbrot_proof_recursive_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-baby-bear"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
+precision = "../../../../../demos/sketches/precision"

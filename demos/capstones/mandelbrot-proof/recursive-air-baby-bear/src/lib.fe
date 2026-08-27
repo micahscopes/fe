@@ -1,0 +1,567 @@
+//! A fixed-size BabyBear AIR relation for one ordered recursive merge.
+//!
+//! This is the first cryptographic parent building block, not yet a recursive
+//! proof. One authored relation is interpreted directly, as multiplication
+//! witnesses, and as quadratic plus linear residuals. The relation constrains
+//! the exact public carrier merge, including ordered intervals and bounded
+//! leaf counts, without trusting host comparisons or modular u32 arithmetic.
+
+use mandelbrot_proof_recursive::MAX_RECURSIVE_CLAIM_BOUND
+use mandelbrot_proof_recursive_baby_bear::RecursiveCommittedInterval
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
+use precision::baby_bear::BabyBear
+use precision::polynomial::Radix2Field
+use quadratic_plan::{
+    QuadraticRelationConstraintInterpreter,
+    QuadraticRelationInterpreter,
+    QuadraticRelationResiduals,
+    QuadraticRelationValueInterpreter,
+    QuadraticRelationWitness,
+    QuadraticRelationWitnessInterpreter,
+}
+
+const fn bit_width(_ value: u32) -> usize {
+    let mut value = value
+    let mut bits: usize = 0
+    while value > 0 {
+        bits = bits + 1
+        value = value >> 1
+    }
+    bits
+}
+
+/// Derived from the semantic accumulator bound, not a second protocol knob.
+pub const RECURSIVE_MERGE_BITS: usize =
+    bit_width(MAX_RECURSIVE_CLAIM_BOUND - 1)
+const RECURSIVE_MERGE_RANGE_VALUES: usize = 11
+const RECURSIVE_MERGE_PUBLIC_RANGE_VALUES: usize = 9
+const RECURSIVE_MERGE_ADDITIONS: usize = 3
+const RECURSIVE_MERGE_REQUIRED_TRUE: usize = 12
+const RECURSIVE_MERGE_DIGEST_EQUALITIES: usize = 5 * DIGEST_FIELDS
+const RECURSIVE_MERGE_ITERATION_EQUALITIES: usize = 3
+
+pub const RECURSIVE_MERGE_PRODUCTS: usize =
+    RECURSIVE_MERGE_RANGE_VALUES * RECURSIVE_MERGE_BITS
+        + RECURSIVE_MERGE_ADDITIONS * (RECURSIVE_MERGE_BITS + 1)
+
+pub const RECURSIVE_MERGE_ASSERTIONS: usize =
+    RECURSIVE_MERGE_PRODUCTS
+        + RECURSIVE_MERGE_PUBLIC_RANGE_VALUES
+        + RECURSIVE_MERGE_ADDITIONS * (RECURSIVE_MERGE_BITS + 2)
+        + RECURSIVE_MERGE_REQUIRED_TRUE
+        + RECURSIVE_MERGE_DIGEST_EQUALITIES
+        + RECURSIVE_MERGE_ITERATION_EQUALITIES
+
+pub struct U30Bits {
+    pub bits: [BabyBear; RECURSIVE_MERGE_BITS],
+}
+impl core::marker::Copy for U30Bits {}
+
+pub struct U30AddWitness {
+    pub carries: [BabyBear; RECURSIVE_MERGE_BITS + 1],
+}
+impl core::marker::Copy for U30AddWitness {}
+
+/// Auxiliary columns for the exact integer part of the merge relation.
+/// These values are private proof witness, never host-validated policy.
+pub struct RecursiveMergeAuxiliary {
+    pub left_start: U30Bits,
+    pub left_end_minus_one: U30Bits,
+    pub right_start: U30Bits,
+    pub right_end_minus_one: U30Bits,
+    pub parent_start: U30Bits,
+    pub parent_end_minus_one: U30Bits,
+    pub left_leaves_minus_one: U30Bits,
+    pub right_leaves_minus_one: U30Bits,
+    pub parent_leaves_minus_one: U30Bits,
+    pub left_span_minus_one: U30Bits,
+    pub right_span_minus_one: U30Bits,
+    pub left_span_addition: U30AddWitness,
+    pub right_span_addition: U30AddWitness,
+    pub leaf_count_addition: U30AddWitness,
+}
+impl core::marker::Copy for RecursiveMergeAuxiliary {}
+
+pub type RecursiveMergeArithmeticWitness = QuadraticRelationWitness<
+    BabyBear,
+    RECURSIVE_MERGE_PRODUCTS,
+    RECURSIVE_MERGE_ASSERTIONS,
+>
+
+pub type RecursiveMergeResiduals = QuadraticRelationResiduals<
+    BabyBear,
+    RECURSIVE_MERGE_PRODUCTS,
+    RECURSIVE_MERGE_ASSERTIONS,
+>
+
+pub struct RecursiveMergeRelationWitness {
+    pub auxiliary: RecursiveMergeAuxiliary,
+    pub arithmetic: RecursiveMergeArithmeticWitness,
+}
+impl core::marker::Copy for RecursiveMergeRelationWitness {}
+
+fn bool_field(_ value: bool) -> BabyBear {
+    BabyBear::from_u32(if value { 1 } else { 0 })
+}
+
+fn minus_one_or_zero(_ value: u32) -> u32 {
+    if value == 0 { 0 } else { value - 1 }
+}
+
+fn span_minus_one_or_zero(_ start: u32, _ end: u32) -> u32 {
+    if end <= start { 0 } else { end - start - 1 }
+}
+
+fn u30_bits(_ value: u32) -> U30Bits {
+    let mut bits = [BabyBear::zero(); RECURSIVE_MERGE_BITS]
+    let mut index: usize = 0
+    while index < RECURSIVE_MERGE_BITS {
+        bits[index] = BabyBear::from_u32(
+            (value >> index.downcast_truncate()) & 1,
+        )
+        index = index + 1
+    }
+    U30Bits { bits: bits }
+}
+
+fn u30_add_witness(
+    _ left: u32,
+    _ right: u32,
+    _ initial_carry: u32,
+) -> U30AddWitness {
+    let mut carries = [BabyBear::zero(); RECURSIVE_MERGE_BITS + 1]
+    let mut carry = initial_carry
+    carries[0] = BabyBear::from_u32(carry)
+    let mut index: usize = 0
+    while index < RECURSIVE_MERGE_BITS {
+        let shift: u32 = index.downcast_truncate()
+        let total = ((left >> shift) & 1) + ((right >> shift) & 1) + carry
+        carry = total >> 1
+        carries[index + 1] = BabyBear::from_u32(carry)
+        index = index + 1
+    }
+    U30AddWitness { carries: carries }
+}
+
+pub fn derive_recursive_merge_auxiliary<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+) -> RecursiveMergeAuxiliary {
+    let left_end_minus_one = minus_one_or_zero(left.end_iteration)
+    let right_end_minus_one = minus_one_or_zero(right.end_iteration)
+    let parent_end_minus_one = minus_one_or_zero(parent.end_iteration)
+    let left_leaves_minus_one = minus_one_or_zero(left.leaves)
+    let right_leaves_minus_one = minus_one_or_zero(right.leaves)
+    let parent_leaves_minus_one = minus_one_or_zero(parent.leaves)
+    let left_span_minus_one = span_minus_one_or_zero(
+        left.start_iteration,
+        left.end_iteration,
+    )
+    let right_span_minus_one = span_minus_one_or_zero(
+        right.start_iteration,
+        right.end_iteration,
+    )
+    RecursiveMergeAuxiliary {
+        left_start: u30_bits(left.start_iteration),
+        left_end_minus_one: u30_bits(left_end_minus_one),
+        right_start: u30_bits(right.start_iteration),
+        right_end_minus_one: u30_bits(right_end_minus_one),
+        parent_start: u30_bits(parent.start_iteration),
+        parent_end_minus_one: u30_bits(parent_end_minus_one),
+        left_leaves_minus_one: u30_bits(left_leaves_minus_one),
+        right_leaves_minus_one: u30_bits(right_leaves_minus_one),
+        parent_leaves_minus_one: u30_bits(parent_leaves_minus_one),
+        left_span_minus_one: u30_bits(left_span_minus_one),
+        right_span_minus_one: u30_bits(right_span_minus_one),
+        left_span_addition: u30_add_witness(
+            left.start_iteration,
+            left_span_minus_one,
+            0,
+        ),
+        right_span_addition: u30_add_witness(
+            right.start_iteration,
+            right_span_minus_one,
+            0,
+        ),
+        leaf_count_addition: u30_add_witness(
+            left_leaves_minus_one,
+            right_leaves_minus_one,
+            1,
+        ),
+    }
+}
+
+fn constrain_zero<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    interpreter.constrain_zero(value).interpreter
+}
+
+fn constrain_equal<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ left: BabyBear,
+    _ right: BabyBear,
+) -> I {
+    constrain_zero(interpreter, left - right)
+}
+
+fn constrain_one<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    constrain_equal(interpreter, value, BabyBear::one())
+}
+
+fn constrain_boolean<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    let product = interpreter.multiply(value, value - BabyBear::one())
+    constrain_zero(product.interpreter, product.value)
+}
+
+fn constrain_u30<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ bits: U30Bits,
+    _ value: BabyBear,
+) -> I {
+    let mut interpreter = constrain_u30_bits(interpreter, bits)
+    let mut reconstructed = BabyBear::zero()
+    let mut weight = BabyBear::one()
+    let mut index: usize = 0
+    while index < RECURSIVE_MERGE_BITS {
+        reconstructed = reconstructed + bits.bits[index] * weight
+        weight = weight + weight
+        index = index + 1
+    }
+    constrain_equal(interpreter, reconstructed, value)
+}
+
+fn constrain_u30_bits<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ bits: U30Bits,
+) -> I {
+    let mut interpreter = interpreter
+    let mut index: usize = 0
+    while index < RECURSIVE_MERGE_BITS {
+        interpreter = constrain_boolean(interpreter, bits.bits[index])
+        index = index + 1
+    }
+    interpreter
+}
+
+fn constrain_u30_addition<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ left: U30Bits,
+    _ right: U30Bits,
+    _ output: U30Bits,
+    _ addition: U30AddWitness,
+    _ initial_carry: u32,
+) -> I {
+    let mut interpreter = interpreter
+    let mut carry_index: usize = 0
+    while carry_index < RECURSIVE_MERGE_BITS + 1 {
+        interpreter = constrain_boolean(
+            interpreter,
+            addition.carries[carry_index],
+        )
+        carry_index = carry_index + 1
+    }
+    interpreter = constrain_equal(
+        interpreter,
+        addition.carries[0],
+        BabyBear::from_u32(initial_carry),
+    )
+    let mut index: usize = 0
+    while index < RECURSIVE_MERGE_BITS {
+        let left_sum = left.bits[index]
+            + right.bits[index]
+            + addition.carries[index]
+        let right_sum = output.bits[index]
+            + addition.carries[index + 1]
+            + addition.carries[index + 1]
+        interpreter = constrain_equal(interpreter, left_sum, right_sum)
+        index = index + 1
+    }
+    constrain_zero(
+        interpreter,
+        addition.carries[RECURSIVE_MERGE_BITS],
+    )
+}
+
+fn constrain_digest_equal<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> I {
+    let mut interpreter = interpreter
+    let mut index: u32 = 0
+    while index < DIGEST_FIELDS.downcast_truncate() {
+        interpreter = constrain_equal(
+            interpreter,
+            left.field(index),
+            right.field(index),
+        )
+        index = index + 1
+    }
+    interpreter
+}
+
+struct RecursiveMergePlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    interpreter: I,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
+    for RecursiveMergePlan<I> {}
+
+/// The sole authored recursive merge relation. Its interpreter determines
+/// whether this is direct evaluation, witness generation, or constraint
+/// emission. Reordering or adding a relation invalidates old capacities.
+fn recursive_merge_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const L: usize,
+>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+    _ auxiliary: RecursiveMergeAuxiliary,
+    _ interpreter: I,
+) -> RecursiveMergePlan<I> {
+    let mut interpreter = interpreter
+
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.left_start,
+        BabyBear::from_u32(left.start_iteration),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.left_end_minus_one,
+        BabyBear::from_u32(left.end_iteration) - BabyBear::one(),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.right_start,
+        BabyBear::from_u32(right.start_iteration),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.right_end_minus_one,
+        BabyBear::from_u32(right.end_iteration) - BabyBear::one(),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.parent_start,
+        BabyBear::from_u32(parent.start_iteration),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.parent_end_minus_one,
+        BabyBear::from_u32(parent.end_iteration) - BabyBear::one(),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.left_leaves_minus_one,
+        BabyBear::from_u32(left.leaves) - BabyBear::one(),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.right_leaves_minus_one,
+        BabyBear::from_u32(right.leaves) - BabyBear::one(),
+    )
+    interpreter = constrain_u30(
+        interpreter,
+        auxiliary.parent_leaves_minus_one,
+        BabyBear::from_u32(parent.leaves) - BabyBear::one(),
+    )
+    interpreter = constrain_u30_bits(
+        interpreter,
+        auxiliary.left_span_minus_one,
+    )
+    interpreter = constrain_u30_bits(
+        interpreter,
+        auxiliary.right_span_minus_one,
+    )
+
+    interpreter = constrain_u30_addition(
+        interpreter,
+        auxiliary.left_start,
+        auxiliary.left_span_minus_one,
+        auxiliary.left_end_minus_one,
+        auxiliary.left_span_addition,
+        0,
+    )
+    interpreter = constrain_u30_addition(
+        interpreter,
+        auxiliary.right_start,
+        auxiliary.right_span_minus_one,
+        auxiliary.right_end_minus_one,
+        auxiliary.right_span_addition,
+        0,
+    )
+    interpreter = constrain_u30_addition(
+        interpreter,
+        auxiliary.left_leaves_minus_one,
+        auxiliary.right_leaves_minus_one,
+        auxiliary.parent_leaves_minus_one,
+        auxiliary.leaf_count_addition,
+        1,
+    )
+
+    interpreter = constrain_one(interpreter, bool_field(left.valid))
+    interpreter = constrain_one(interpreter, bool_field(right.valid))
+    interpreter = constrain_one(interpreter, bool_field(parent.valid))
+    interpreter = constrain_one(interpreter, bool_field(left.statement.valid))
+    interpreter = constrain_one(interpreter, bool_field(right.statement.valid))
+    interpreter = constrain_one(interpreter, bool_field(parent.statement.valid))
+    interpreter = constrain_one(interpreter, bool_field(left.start.valid))
+    interpreter = constrain_one(interpreter, bool_field(left.end.valid))
+    interpreter = constrain_one(interpreter, bool_field(right.start.valid))
+    interpreter = constrain_one(interpreter, bool_field(right.end.valid))
+    interpreter = constrain_one(interpreter, bool_field(parent.start.valid))
+    interpreter = constrain_one(interpreter, bool_field(parent.end.valid))
+
+    interpreter = constrain_digest_equal(
+        interpreter,
+        left.statement.value,
+        right.statement.value,
+    )
+    interpreter = constrain_digest_equal(
+        interpreter,
+        parent.statement.value,
+        left.statement.value,
+    )
+    interpreter = constrain_digest_equal(
+        interpreter,
+        left.end.value,
+        right.start.value,
+    )
+    interpreter = constrain_digest_equal(
+        interpreter,
+        parent.start.value,
+        left.start.value,
+    )
+    interpreter = constrain_digest_equal(
+        interpreter,
+        parent.end.value,
+        right.end.value,
+    )
+
+    interpreter = constrain_equal(
+        interpreter,
+        BabyBear::from_u32(left.end_iteration),
+        BabyBear::from_u32(right.start_iteration),
+    )
+    interpreter = constrain_equal(
+        interpreter,
+        BabyBear::from_u32(parent.start_iteration),
+        BabyBear::from_u32(left.start_iteration),
+    )
+    interpreter = constrain_equal(
+        interpreter,
+        BabyBear::from_u32(parent.end_iteration),
+        BabyBear::from_u32(right.end_iteration),
+    )
+    RecursiveMergePlan { interpreter: interpreter }
+}
+
+pub fn recursive_merge_relation_witness<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+) -> RecursiveMergeRelationWitness {
+    let auxiliary = derive_recursive_merge_auxiliary(left, right, parent)
+    recursive_merge_relation_witness_from_auxiliary(
+        left,
+        right,
+        parent,
+        auxiliary,
+    )
+}
+
+/// Materialize multiplication nodes for caller-owned auxiliary columns. This
+/// is a prover placement boundary, not authority: the constraint interpreter
+/// independently checks every supplied bit, carry, and node.
+pub fn recursive_merge_relation_witness_from_auxiliary<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+    _ auxiliary: RecursiveMergeAuxiliary,
+) -> RecursiveMergeRelationWitness {
+    let plan = recursive_merge_plan(
+        left,
+        right,
+        parent,
+        auxiliary,
+        QuadraticRelationWitnessInterpreter<
+            BabyBear,
+            RECURSIVE_MERGE_PRODUCTS,
+            RECURSIVE_MERGE_ASSERTIONS,
+        >::new(),
+    )
+    RecursiveMergeRelationWitness {
+        auxiliary: auxiliary,
+        arithmetic: plan.interpreter.finish(),
+    }
+}
+
+pub fn recursive_merge_relation_residuals<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+    _ witness: RecursiveMergeRelationWitness,
+) -> RecursiveMergeResiduals {
+    recursive_merge_plan(
+        left,
+        right,
+        parent,
+        witness.auxiliary,
+        QuadraticRelationConstraintInterpreter<
+            BabyBear,
+            RECURSIVE_MERGE_PRODUCTS,
+            RECURSIVE_MERGE_ASSERTIONS,
+        >::new(witness.arithmetic),
+    ).interpreter.finish()
+}
+
+pub fn recursive_merge_relation_holds<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+    _ witness: RecursiveMergeRelationWitness,
+) -> bool {
+    let residuals = recursive_merge_relation_residuals(
+        left,
+        right,
+        parent,
+        witness,
+    )
+    if !residuals.valid { return false }
+    let mut product: usize = 0
+    while product < RECURSIVE_MERGE_PRODUCTS {
+        if !residuals.products[product].is_zero() { return false }
+        product = product + 1
+    }
+    let mut assertion: usize = 0
+    while assertion < RECURSIVE_MERGE_ASSERTIONS {
+        if !residuals.assertions[assertion].is_zero() { return false }
+        assertion = assertion + 1
+    }
+    true
+}
+
+pub fn evaluate_recursive_merge_relation<const L: usize>(
+    _ left: RecursiveCommittedInterval<L>,
+    _ right: RecursiveCommittedInterval<L>,
+    _ parent: RecursiveCommittedInterval<L>,
+) -> bool {
+    let auxiliary = derive_recursive_merge_auxiliary(left, right, parent)
+    recursive_merge_plan(
+        left,
+        right,
+        parent,
+        auxiliary,
+        QuadraticRelationValueInterpreter::new(),
+    ).interpreter.finish()
+}
