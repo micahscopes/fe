@@ -1,12 +1,16 @@
 //! Executable boundary for the Fe-derived BabyBear Poseidon2 oracle.
 
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use core::alloc_browser_object
 use poseidon_baby_bear::{
     Poseidon2Domain,
     Poseidon2Digest,
     Poseidon2FieldDomain,
     Poseidon2FieldPermutation,
     Poseidon2FieldSponge,
+    Poseidon2PowerTask,
+    Poseidon2ProductTask,
+    Poseidon2RoundTask,
     Poseidon2WorkgroupPlan,
     Poseidon2WorkgroupSchedule,
     POSEIDON2_PERMUTATION_MULTIPLICATIONS,
@@ -25,11 +29,14 @@ use poseidon_baby_bear::{
     place_partial_rounds,
     permute16,
     poseidon2_permutation_plan,
+    poseidon2_power_copy_mismatches,
+    poseidon2_sbox_count,
     poseidon2_power7_plan,
     poseidon2_workgroup_destination,
     poseidon2_workgroup_lane,
     runtime_parameter_plain,
     squeeze_ext4_indexed,
+    write_poseidon2_product_task,
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4, BabyBearModulus, BABY_BEAR_MODULUS}
 use precision::polynomial::Radix2Field
@@ -447,6 +454,64 @@ fn poseidon2_compression_relation<
     Poseidon2CompressionRelation { interpreter: interpreter }
 }
 
+fn describe_poseidon2_product_task() -> (
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32,
+) uses (task: mut Poseidon2ProductTask)
+{
+    let mut first_full: u32 = 0
+    let mut partial: u32 = 0
+    let mut final_full: u32 = 0
+    match task.round {
+        Poseidon2RoundTask::FirstFull => { first_full = 1 }
+        Poseidon2RoundTask::Partial => { partial = 1 }
+        Poseidon2RoundTask::FinalFull => { final_full = 1 }
+        Poseidon2RoundTask::Invalid => {}
+    }
+    let mut square: u32 = 0
+    let mut fourth: u32 = 0
+    let mut cube: u32 = 0
+    let mut seventh: u32 = 0
+    match task.power {
+        Poseidon2PowerTask::Square => { square = 1 }
+        Poseidon2PowerTask::Fourth => { fourth = 1 }
+        Poseidon2PowerTask::Cube => { cube = 1 }
+        Poseidon2PowerTask::Seventh => { seventh = 1 }
+        Poseidon2PowerTask::Invalid => {}
+    }
+    (
+        if first_full + partial + final_full == 1
+            && square + fourth + cube + seventh == 1 { 1 } else { 0 },
+        first_full, partial, final_full,
+        square, fourth, cube, seventh,
+        task.round_index, task.lane,
+    )
+}
+
+fn write_product_task(_ index: u32)
+    uses (task: mut Poseidon2ProductTask)
+{
+    write_poseidon2_product_task(index, mut task)
+}
+
+/// Export the nominal semantic task for an independent schedule oracle. The
+/// task stays in typed arena storage through the Wasm interpretation.
+pub fn poseidon2_product_task_descriptor(_ index: u32) -> (
+    u32, u32, u32, u32,
+    u32, u32, u32, u32,
+    u32, u32,
+) {
+    let mut task = alloc_browser_object<Poseidon2ProductTask>()
+    if task.address() == 0 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    with (task) {
+        write_product_task(index)
+    }
+    with (task) { describe_poseidon2_product_task() }
+}
+
 /// Place the complete two-to-one hash relation into typed browser memory and
 /// compare every streamed product with the existing fixed witness
 /// interpretation. The local stream audit checks arithmetic only. Future task
@@ -458,8 +523,9 @@ pub fn poseidon2_compression_stream_audit(
     _ a12: u32, _ a13: u32, _ a14: u32, _ a15: u32,
     _ mutation: u32,
     _ wrong_lane: u32,
+    _ rewire_sbox: u32,
 ) -> (
-    u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32,
     u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     let left = Poseidon2Digest::from_u32s([
@@ -525,7 +591,19 @@ pub fn poseidon2_compression_stream_audit(
         row.output = row.output + BabyBear::one()
         streamed.replace_product(index, row)
     }
+    if rewire_sbox > 0 && rewire_sbox <= poseidon2_sbox_count() {
+        let index = (rewire_sbox - 1)
+            * POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate()
+            + 1
+        let mut row = streamed.product(index)
+        let rewired = row.left + BabyBear::one()
+        row.left = rewired
+        row.right = rewired
+        row.output = rewired.radix2_mul(rewired)
+        streamed.replace_product(index, row)
+    }
     let audit = streamed.audit()
+    let copy_mismatches = poseidon2_power_copy_mismatches<8>(streamed)
 
     (
         if audit.shape_valid { 1 } else { 0 },
@@ -533,6 +611,7 @@ pub fn poseidon2_compression_stream_audit(
         placement_mismatches,
         audit.nonzero_products,
         audit.nonzero_assertions,
+        copy_mismatches,
         output.field(0).to_u32(), output.field(1).to_u32(),
         output.field(2).to_u32(), output.field(3).to_u32(),
         output.field(4).to_u32(), output.field(5).to_u32(),

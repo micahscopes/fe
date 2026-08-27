@@ -138,9 +138,14 @@ fn permutation_relation_arguments(input: [u32; WIDTH], mutation: u32, wrong_lane
     arguments
 }
 
-fn compression_stream_arguments(input: [u32; WIDTH], mutation: u32, wrong_lane: u32) -> Vec<u32> {
+fn compression_stream_arguments(
+    input: [u32; WIDTH],
+    mutation: u32,
+    wrong_lane: u32,
+    rewire_sbox: u32,
+) -> Vec<u32> {
     let mut arguments = input.to_vec();
-    arguments.extend([mutation, wrong_lane]);
+    arguments.extend([mutation, wrong_lane, rewire_sbox]);
     arguments
 }
 
@@ -335,16 +340,16 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             &mut store,
             &instance,
             "poseidon2_compression_stream_audit",
-            &compression_stream_arguments(input, 0, 0),
-            13,
+            &compression_stream_arguments(input, 0, 0, 0),
+            14,
         );
         assert_eq!(
-            &streamed[..5],
-            &[1, 1, 0, 0, 0],
+            &streamed[..6],
+            &[1, 1, 0, 0, 0, 0],
             "streamed compression relation differs for {input:?}",
         );
         assert_eq!(
-            &streamed[5..],
+            &streamed[6..],
             &expected[..8],
             "streamed compression output differs for {input:?}",
         );
@@ -400,8 +405,8 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             &mut store,
             &instance,
             "poseidon2_compression_stream_audit",
-            &compression_stream_arguments(input, mutation, 0),
-            13,
+            &compression_stream_arguments(input, mutation, 0, 0),
+            14,
         );
         assert_eq!(result[0], 1, "mutation {mutation} retains stream shape");
         assert_eq!(result[1], 1, "direct compression relation remains exact");
@@ -421,8 +426,8 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
             &mut store,
             &instance,
             "poseidon2_compression_stream_audit",
-            &compression_stream_arguments(input, 0, wrong_lane),
-            13,
+            &compression_stream_arguments(input, 0, wrong_lane, 0),
+            14,
         );
         assert_eq!(result[0], 1, "wrong output retains stream shape");
         assert_eq!(result[1], 0, "wrong output lane {wrong_lane} must reject");
@@ -431,6 +436,89 @@ fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
         assert!(
             result[4] > 0,
             "wrong output lane {wrong_lane} must violate an assertion",
+        );
+        assert_eq!(result[5], 0, "wrong output does not alter internal copies");
+    }
+
+    for rewire_sbox in 1..=PERMUTATION_MULTIPLICATIONS / 4 {
+        let result = call(
+            &mut store,
+            &instance,
+            "poseidon2_compression_stream_audit",
+            &compression_stream_arguments(input, 0, 0, rewire_sbox),
+            14,
+        );
+        assert_eq!(result[0], 1, "rewire {rewire_sbox} retains stream shape");
+        assert_eq!(result[1], 1, "direct compression relation remains exact");
+        assert_eq!(
+            result[2], 0,
+            "clean stream placement must match fixed witness"
+        );
+        assert_eq!(
+            result[3], 0,
+            "coherently rewired product {rewire_sbox} remains locally quadratic",
+        );
+        assert_eq!(result[4], 0, "rewire does not alter stored assertions");
+        assert!(
+            result[5] > 0,
+            "coherently rewired S-box {rewire_sbox} must violate internal copy topology",
+        );
+    }
+}
+
+#[test]
+fn poseidon_product_tasks_derive_the_exact_round_lane_and_power_schedule() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compiled_wasm())
+        .expect("Poseidon2 task schedule module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("Poseidon2 task schedule module should instantiate");
+
+    for product in 0..PERMUTATION_MULTIPLICATIONS {
+        let sbox = product / 4;
+        let power = product % 4;
+        let (region, round, lane) = if sbox < 4 * WIDTH as u32 {
+            ([1, 0, 0], sbox / WIDTH as u32, sbox % WIDTH as u32)
+        } else if sbox < 4 * WIDTH as u32 + 13 {
+            ([0, 1, 0], sbox - 4 * WIDTH as u32, 0)
+        } else {
+            let final_sbox = sbox - (4 * WIDTH as u32 + 13);
+            (
+                [0, 0, 1],
+                final_sbox / WIDTH as u32,
+                final_sbox % WIDTH as u32,
+            )
+        };
+        let mut expected = vec![1];
+        expected.extend(region);
+        expected.extend((0..4).map(|candidate| u32::from(candidate == power)));
+        expected.extend([round, lane]);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "poseidon2_product_task_descriptor",
+                &[product],
+                10,
+            ),
+            expected,
+            "semantic task differs at product {product}",
+        );
+    }
+
+    for invalid in [PERMUTATION_MULTIPLICATIONS, u32::MAX] {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "poseidon2_product_task_descriptor",
+                &[invalid],
+                10,
+            ),
+            [0; 10],
+            "out-of-range product task must fail closed",
         );
     }
 }

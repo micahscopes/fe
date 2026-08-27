@@ -19,7 +19,11 @@ use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 use poseidon_grain::{
     Grain80Word, field_element, warm, warm_word,
 }
-use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
+use quadratic_plan::{
+    QuadraticPlanInterpreter,
+    QuadraticRelationStream,
+    QuadraticValueInterpreter,
+}
 
 pub const WIDTH: usize = 16
 pub const FULL_ROUNDS: usize = 8
@@ -391,6 +395,122 @@ impl Poseidon2ParameterStream {
 pub const POSEIDON2_POWER7_MULTIPLICATIONS: usize = 4
 pub const POSEIDON2_PERMUTATION_MULTIPLICATIONS: usize =
     (FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS) * POSEIDON2_POWER7_MULTIPLICATIONS
+
+/// Nominal location of one S-box in the exact sequential permutation.
+pub enum Poseidon2RoundTask {
+    FirstFull,
+    Partial,
+    FinalFull,
+    Invalid,
+}
+impl core::marker::Copy for Poseidon2RoundTask {}
+
+/// One of the four quadratic nodes in the authored power-seven relation.
+pub enum Poseidon2PowerTask {
+    Square,
+    Fourth,
+    Cube,
+    Seventh,
+    Invalid,
+}
+impl core::marker::Copy for Poseidon2PowerTask {}
+
+pub struct Poseidon2ProductTask {
+    pub round: Poseidon2RoundTask,
+    pub round_index: u32,
+    pub lane: u32,
+    pub power: Poseidon2PowerTask,
+}
+impl core::marker::Copy for Poseidon2ProductTask {}
+
+pub const fn poseidon2_sbox_count() -> u32 {
+    (FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS).downcast_truncate()
+}
+
+/// Write the semantic round, lane, and power role for one streamed product
+/// into caller-selected storage. This is protocol topology, not a physical
+/// row offset table: scalar, Wasm, and later WebGPU placements consume the
+/// same nominal task without materializing a large aggregate return value.
+pub fn write_poseidon2_product_task(
+    _ index: u32,
+    _ task: mut Poseidon2ProductTask,
+) {
+    if index >= POSEIDON2_PERMUTATION_MULTIPLICATIONS.downcast_truncate() {
+        task.round = Poseidon2RoundTask::Invalid
+        task.round_index = 0
+        task.lane = 0
+        task.power = Poseidon2PowerTask::Invalid
+        return
+    }
+    task.power = match index % POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate() {
+        0 => Poseidon2PowerTask::Square,
+        1 => Poseidon2PowerTask::Fourth,
+        2 => Poseidon2PowerTask::Cube,
+        _ => Poseidon2PowerTask::Seventh,
+    }
+    let sbox = index / POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate()
+    let first_full_sboxes: u32 = (HALF_FULL_ROUNDS * WIDTH).downcast_truncate()
+    let partial_end = first_full_sboxes + PARTIAL_ROUNDS.downcast_truncate()
+    if sbox < first_full_sboxes {
+        task.round = Poseidon2RoundTask::FirstFull
+        task.round_index = sbox / WIDTH.downcast_truncate()
+        task.lane = sbox % WIDTH.downcast_truncate()
+    } else if sbox < partial_end {
+        task.round = Poseidon2RoundTask::Partial
+        task.round_index = sbox - first_full_sboxes
+        task.lane = 0
+    } else {
+        let final_sbox = sbox - partial_end
+        task.round = Poseidon2RoundTask::FinalFull
+        task.round_index = final_sbox / WIDTH.downcast_truncate()
+        task.lane = final_sbox % WIDTH.downcast_truncate()
+    }
+}
+
+/// Check the seven internal copy edges of every power-seven task. This binds
+/// the four locally quadratic rows into the intended exponentiation chain.
+/// Round-state, constant, linear-layer, and output copies remain separate
+/// topology and must also be authenticated by the enclosing permutation AIR.
+pub fn poseidon2_power_copy_mismatches<const ASSERTIONS: usize>(
+    _ stream: QuadraticRelationStream<
+        BabyBear,
+        {POSEIDON2_PERMUTATION_MULTIPLICATIONS},
+        ASSERTIONS,
+    >,
+) -> u32 {
+    let mut mismatches: u32 = 0
+    let mut sbox: u32 = 0
+    while sbox < poseidon2_sbox_count() {
+        let base = sbox * POSEIDON2_POWER7_MULTIPLICATIONS.downcast_truncate()
+        let square = stream.product(base)
+        let fourth = stream.product(base + 1)
+        let cube = stream.product(base + 2)
+        let seventh = stream.product(base + 3)
+        if !square.left.equals(square.right) {
+            mismatches = mismatches + 1
+        }
+        if !fourth.left.equals(square.output) {
+            mismatches = mismatches + 1
+        }
+        if !fourth.right.equals(square.output) {
+            mismatches = mismatches + 1
+        }
+        if !cube.left.equals(square.left) {
+            mismatches = mismatches + 1
+        }
+        if !cube.right.equals(square.output) {
+            mismatches = mismatches + 1
+        }
+        if !seventh.left.equals(cube.output) {
+            mismatches = mismatches + 1
+        }
+        if !seventh.right.equals(fourth.output) {
+            mismatches = mismatches + 1
+        }
+        sbox = sbox + 1
+    }
+    mismatches
+}
 
 /// One authored quadratic schedule for the Poseidon2 power-seven map. Scalar
 /// hashing, recursive constraints, and future GPU trace placement interpret
