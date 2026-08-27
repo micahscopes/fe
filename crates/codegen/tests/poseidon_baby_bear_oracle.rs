@@ -138,6 +138,12 @@ fn permutation_relation_arguments(input: [u32; WIDTH], mutation: u32, wrong_lane
     arguments
 }
 
+fn compression_stream_arguments(input: [u32; WIDTH], mutation: u32, wrong_lane: u32) -> Vec<u32> {
+    let mut arguments = input.to_vec();
+    arguments.extend([mutation, wrong_lane]);
+    arguments
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReferencePacking {
     bit_length: u32,
@@ -325,6 +331,23 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             expected[..8],
             "two-to-one compression differs for {input:?}",
         );
+        let streamed = call(
+            &mut store,
+            &instance,
+            "poseidon2_compression_stream_audit",
+            &compression_stream_arguments(input, 0, 0),
+            13,
+        );
+        assert_eq!(
+            &streamed[..5],
+            &[1, 1, 0, 0, 0],
+            "streamed compression relation differs for {input:?}",
+        );
+        assert_eq!(
+            &streamed[5..],
+            &expected[..8],
+            "streamed compression output differs for {input:?}",
+        );
     }
 
     for mutation in 1..=PERMUTATION_MULTIPLICATIONS {
@@ -357,6 +380,57 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
         assert!(
             result[3] > 0,
             "wrong lane {wrong_lane} must violate an assertion"
+        );
+    }
+}
+
+#[test]
+fn poseidon_compression_stream_is_lossless_and_mutation_checked() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compiled_wasm())
+        .expect("Poseidon2 compression stream module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("Poseidon2 compression stream module should instantiate");
+    let input = std::array::from_fn(|index| (index as u32 + 1) * 17);
+
+    for mutation in 1..=PERMUTATION_MULTIPLICATIONS {
+        let result = call(
+            &mut store,
+            &instance,
+            "poseidon2_compression_stream_audit",
+            &compression_stream_arguments(input, mutation, 0),
+            13,
+        );
+        assert_eq!(result[0], 1, "mutation {mutation} retains stream shape");
+        assert_eq!(result[1], 1, "direct compression relation remains exact");
+        assert_eq!(
+            result[2], 0,
+            "clean stream placement must match fixed witness"
+        );
+        assert!(
+            result[3] > 0,
+            "streamed product mutation {mutation} must violate local arithmetic",
+        );
+        assert_eq!(result[4], 0, "product mutation does not alter assertions");
+    }
+
+    for wrong_lane in 1..=8 {
+        let result = call(
+            &mut store,
+            &instance,
+            "poseidon2_compression_stream_audit",
+            &compression_stream_arguments(input, 0, wrong_lane),
+            13,
+        );
+        assert_eq!(result[0], 1, "wrong output retains stream shape");
+        assert_eq!(result[1], 0, "wrong output lane {wrong_lane} must reject");
+        assert_eq!(result[2], 0, "stream placement remains lossless");
+        assert_eq!(result[3], 0, "wrong output does not alter product rows");
+        assert!(
+            result[4] > 0,
+            "wrong output lane {wrong_lane} must violate an assertion",
         );
     }
 }
