@@ -2399,15 +2399,31 @@ fallback. The semantic receipts are:
    remains locally quadratic and all stored output assertions remain zero; the
    copy topology rejects all 141 rewires. The complete zero-import release
    oracle passes 6/6 in 54.41 seconds, including the independent Plonky3
-   parameters and permutation. This authenticates internal power topology, not
-   yet the round-state, constants, linear layers, initial digest, or final
-   digest copies. Next authenticate those remaining edges, then place the merge
-   relation and both child verifier task DAGs in authenticated traces, derive
-   staged workgroup placement from the same dependency vocabulary, and emit the
-   leaf and parent proof receipts. Schedule independent leaves and sibling
-   merges as a typed balanced reduction, and run the progressive point/disc
-   picker, cancellation, generation, mutation rejection, Fe-Wasm verification,
-   and revm-Wasm verification in Chrome.
+   parameters and permutation. At that checkpoint only the internal power
+   topology was authenticated. Commit `39494ceb6` adds a generic streamed
+   constraint interpreter that re-executes any authored quadratic relation
+   against its untrusted memory-backed rows. It checks stored operand copies,
+   local products, stored assertion copies, live assertions, and exact shape
+   without maintaining a second wiring program. Its independent tiny-relation
+   gate distinguishes clean execution, broken products, coherent rewires,
+   changed stored assertions, changed claims, and incomplete streams; the
+   focused release gate passes 1/1 in 11.09 seconds. Commit `9e9c406dd` applies
+   that interpreter to the original Poseidon compression relation and deletes
+   the manual seven-edge checker. The mutation gate now rewires all four rows
+   of each S-box coherently, retaining valid local products and valid internal
+   power copies. Re-interpreting the original Fe denotation rejects all 141
+   rewires through its round-state, derived-constant, external/internal linear,
+   initial-input, and final-output dependencies. The complete zero-import
+   Poseidon release oracle passes 6/6 in 83.01 seconds with Plonky3 unchanged.
+   This closes semantic topology authentication for one streamed compression;
+   it does not yet make those rows an authenticated STARK trace or a recursive
+   proof receipt. Next place the merge relation and both child verifier task
+   DAGs in authenticated traces, derive staged workgroup placement from the
+   same dependency vocabulary, and emit the leaf and parent proof receipts.
+   Schedule independent leaves and sibling merges as a typed balanced
+   reduction, and run the progressive point/disc picker, cancellation,
+   generation, mutation rejection, Fe-Wasm verification, and revm-Wasm
+   verification in Chrome.
 6. Finish the four standalone hardware tests in the external runbook. The
    `mandelbrot_proof_gpu` clean and tampered Chromium modes already pass on AMD
    Radeon 780M through RADV, but the named Rollcall, fixed precision,
