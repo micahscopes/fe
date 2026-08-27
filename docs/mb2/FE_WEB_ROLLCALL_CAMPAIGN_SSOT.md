@@ -247,6 +247,20 @@ existing Definition of done, not a second campaign checklist:
   relation interpreter an extension of the ordinary multiplication-plan
   interpreter. This authenticates one reusable nonlinear primitive, not a
   complete Poseidon round or child-verifier trace.
+
+  Commit `1798fa6fa` extends that denotation through the complete width-16,
+  21-round permutation. Production scalar hashing now consumes one sequential
+  `poseidon2_permutation_execution`, and the public relation plan interprets
+  the same 564 multiplication nodes as witnesses or quadratic residuals before
+  asserting all 16 output lanes. The release Wasm gate rejects mutations to
+  every one of the 564 committed nodes and every expected output lane while
+  retaining full Plonky3 permutation parity. The actual Mandelbrot proof GPU
+  bundle also remains green: its largest pass is the staged
+  `advance_commitment_rounds` shader at 156,793 bytes, below the existing
+  160-KiB browser-risk ceiling. The staged workgroup schedule remains an
+  independently exact placement of the same Poseidon algorithm, not yet a
+  placement interpreter derived from this sequential relation plan. Child
+  verifier task ordering, transcript wiring, and trace authentication remain.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
@@ -2353,10 +2367,11 @@ fallback. The semantic receipts are:
    recursive cryptographic proof. The fixed-size merge constraint relation is
    now derived and independently gated. The production Poseidon2 `x^7` S-box
    also shares one four-multiplication plan across scalar evaluation, witness
-   generation, and quadratic constraints. Next extend that denotation through
-   complete Poseidon rounds, place the merge relation and both child verifier
-   task DAGs in authenticated traces, then emit the leaf and parent proof
-   receipts. Schedule independent leaves
+   generation, and quadratic constraints. The complete 21-round permutation
+   now consumes that plan as one 564-node sequential relation. Next place the
+   merge relation and both child verifier task DAGs in authenticated traces,
+   derive the staged workgroup placement from the same dependency vocabulary,
+   then emit the leaf and parent proof receipts. Schedule independent leaves
    and sibling merges as a typed balanced reduction, and run the progressive
    point/disk picker, cancellation, generation, mutation rejection, Fe-Wasm
    verification, and revm-Wasm verification in Chrome.
