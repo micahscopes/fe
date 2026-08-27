@@ -20,6 +20,7 @@ use canonical_words::{
     WordSource,
     encode_canonical_word_array,
 }
+use core::{BrowserPtr, alloc_browser_object}
 use mandelbrot_proof_fixed_air::FixedMandelbrotTransitionWitness
 use mandelbrot_proof_baby_bear_transcript::{
     AirLdeTranscriptDigest,
@@ -121,6 +122,10 @@ use merkle_core::{
     multi_verify,
     push_frontier,
     write_multi_path_and_root_from_leaves,
+}
+use merkle_browser::{
+    MerkleLeafArena,
+    write_multi_path_and_root_from_leaves as write_browser_multi_path,
 }
 use merkle_receipt::MerkleMultiOpening
 use poseidon_baby_bear::{
@@ -4257,6 +4262,54 @@ fn invalid_sparse_multi_path<
     }
 }
 
+fn reset_sparse_multi_path<const MAX_LEAVES: usize, const MAX_SIBLINGS: usize>(
+    _ path: mut MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+) {
+    path.valid = false
+    path.leaf_count = 0
+    path.sibling_count = 0
+    let mut cursor: usize = 0
+    while cursor < MAX_LEAVES {
+        path.leaf_indices[cursor] = 0
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < MAX_SIBLINGS {
+        path.siblings[cursor] = Poseidon2Digest::zero()
+        cursor = cursor + 1
+    }
+}
+
+fn write_sparse_multi_path_from_browser_leaves<
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ requested: ref [u32; REQUESTS],
+    _ path: mut MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+uses (leaves: mut MerkleLeafArena<Poseidon2Digest, N>)
+where
+    N > 1,
+    N <= MAX_SPARSE_LDE_LENGTH,
+    N <= 2147483648,
+    {
+        (N & (N - 1)) == 0
+    },
+    REQUESTS > 0,
+    MAX_LEAVES > 0
+{
+    write_browser_multi_path<
+        Poseidon2Digest,
+        SparseDigestHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref leaves.values, requested, mut path, mut leaves.root)
+}
+
 pub fn empty_sparse_trace_multi_opening<
     const L: usize,
     const MAX_LEAVES: usize,
@@ -4712,13 +4765,17 @@ fn reset_sparse_base_lde_multi_opening<
         MAX_SIBLINGS,
     >,
 ) {
-    opening = empty_sparse_base_lde_multi_opening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >()
+    opening.valid = false
+    let mut leaf: usize = 0
+    while leaf < MAX_LEAVES {
+        let mut column: usize = 0
+        while column < SPARSE_BASE_AIR_FIELDS {
+            opening.values[leaf][column] = BabyBear::zero()
+            column = column + 1
+        }
+        leaf = leaf + 1
+    }
+    reset_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>(mut opening.path)
 }
 
 fn reset_sparse_interaction_lde_multi_opening<
@@ -4736,13 +4793,68 @@ fn reset_sparse_interaction_lde_multi_opening<
         MAX_SIBLINGS,
     >,
 ) {
-    opening = empty_sparse_interaction_lde_multi_opening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >()
+    opening.valid = false
+    let mut leaf: usize = 0
+    while leaf < MAX_LEAVES {
+        let mut column: usize = 0
+        while column < SPARSE_INTERACTION_AIR_FIELDS {
+            opening.values[leaf][column] = BabyBear::zero()
+            column = column + 1
+        }
+        leaf = leaf + 1
+    }
+    reset_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>(mut opening.path)
+}
+
+fn write_sparse_base_lde_commitment_leaves<const L: usize, const TRACE: usize, const LDE: usize>(
+    _ codeword: ref SparseBaseAirLdeCodeword<LDE>,
+) -> bool
+uses (leaves: mut MerkleLeafArena<Poseidon2Digest, LDE>)
+where L > 1, TRACE > 1, LDE > TRACE, LDE <= MAX_SPARSE_LDE_LENGTH
+{
+    let mut index: usize = 0
+    while index < LDE {
+        leaves.values[index] = sparse_base_lde_leaf_commitment(
+            sparse_base_lde_leaf_at<L, TRACE, LDE>(
+                index.downcast_truncate(),
+                codeword.values[index],
+            ),
+        )
+        index = index + 1
+    }
+    true
+}
+
+fn write_sparse_interaction_lde_commitment_leaves<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ codeword: ref SparseInteractionAirLdeCodeword<LDE>,
+    _ expected: SparseInteractionLdeDigest<L, TRACE, LDE>,
+) -> bool
+uses (leaves: mut MerkleLeafArena<Poseidon2Digest, LDE>)
+where L > 1, TRACE > 1, LDE > TRACE, LDE <= MAX_SPARSE_LDE_LENGTH
+{
+    let mut index: usize = 0
+    while index < LDE {
+        leaves.values[index] = sparse_interaction_lde_leaf_commitment(
+            sparse_interaction_lde_leaf_at<L, TRACE, LDE>(
+                expected.base,
+                index.downcast_truncate(),
+                codeword.values[index],
+            ),
+        )
+        index = index + 1
+    }
+    true
+}
+
+fn sparse_browser_root_matches<const N: usize>(_ expected: Poseidon2Digest) -> bool
+uses (leaves: MerkleLeafArena<Poseidon2Digest, N>)
+where N > 1, N <= MAX_SPARSE_LDE_LENGTH
+{
+    leaves.root.valid && leaves.root.value.equals(expected)
 }
 
 /// Open requested `LD01` rows and require the reconstructed root to equal the
@@ -4783,39 +4895,29 @@ where
 {
     reset_sparse_base_lde_multi_opening(mut opening)
     if !codeword.valid || !expected.valid { return false }
-    let mut commitments = [Poseidon2Digest::zero(); LDE]
-    let mut index: usize = 0
-    while index < LDE {
-        commitments[index] = sparse_base_lde_leaf_commitment(
-            sparse_base_lde_leaf_at<L, TRACE, LDE>(
-                index.downcast_truncate(),
-                codeword.values[index],
-            ),
-        )
-        index = index + 1
-    }
-    let mut path = invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
-    let mut root = MerkleRoot {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
-    if !write_multi_path_and_root_from_leaves<
-        Poseidon2Digest,
-        SparseDigestHasher,
-        LDE,
-        REQUESTS,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(ref commitments, ref requested, mut path, mut root)
-        || !root.valid
-        || !root.value.equals(expected.value)
+    let commitments: BrowserPtr<MerkleLeafArena<Poseidon2Digest, LDE>> = alloc_browser_object<
+        MerkleLeafArena<Poseidon2Digest, LDE>,
+    >()
+    if commitments.address() == 0
+        || !with (commitments) {
+            write_sparse_base_lde_commitment_leaves<L, TRACE, LDE>(codeword)
+        }
     {
         return false
     }
-    opening.path = path
-    index = 0
-    while index < path.leaf_count as usize {
-        opening.values[index] = codeword.values[path.leaf_indices[index] as usize]
+    if !with (commitments) {
+        write_sparse_multi_path_from_browser_leaves<LDE, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+            ref requested,
+            mut opening.path,
+        )
+    }
+        || !with (commitments) { sparse_browser_root_matches<LDE>(expected.value) }
+    {
+        return false
+    }
+    let mut index: usize = 0
+    while index < opening.path.leaf_count as usize {
+        opening.values[index] = codeword.values[opening.path.leaf_indices[index] as usize]
         index = index + 1
     }
     opening.valid = true
@@ -4862,40 +4964,29 @@ where
     if !codeword.valid || !expected.valid || !expected.base.valid {
         return false
     }
-    let mut commitments = [Poseidon2Digest::zero(); LDE]
-    let mut index: usize = 0
-    while index < LDE {
-        commitments[index] = sparse_interaction_lde_leaf_commitment(
-            sparse_interaction_lde_leaf_at<L, TRACE, LDE>(
-                expected.base,
-                index.downcast_truncate(),
-                codeword.values[index],
-            ),
-        )
-        index = index + 1
-    }
-    let mut path = invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
-    let mut root = MerkleRoot {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
-    if !write_multi_path_and_root_from_leaves<
-        Poseidon2Digest,
-        SparseDigestHasher,
-        LDE,
-        REQUESTS,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(ref commitments, ref requested, mut path, mut root)
-        || !root.valid
-        || !root.value.equals(expected.value)
+    let commitments: BrowserPtr<MerkleLeafArena<Poseidon2Digest, LDE>> = alloc_browser_object<
+        MerkleLeafArena<Poseidon2Digest, LDE>,
+    >()
+    if commitments.address() == 0
+        || !with (commitments) {
+            write_sparse_interaction_lde_commitment_leaves<L, TRACE, LDE>(codeword, expected)
+        }
     {
         return false
     }
-    opening.path = path
-    index = 0
-    while index < path.leaf_count as usize {
-        opening.values[index] = codeword.values[path.leaf_indices[index] as usize]
+    if !with (commitments) {
+        write_sparse_multi_path_from_browser_leaves<LDE, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+            ref requested,
+            mut opening.path,
+        )
+    }
+        || !with (commitments) { sparse_browser_root_matches<LDE>(expected.value) }
+    {
+        return false
+    }
+    let mut index: usize = 0
+    while index < opening.path.leaf_count as usize {
+        opening.values[index] = codeword.values[opening.path.leaf_indices[index] as usize]
         index = index + 1
     }
     opening.valid = true

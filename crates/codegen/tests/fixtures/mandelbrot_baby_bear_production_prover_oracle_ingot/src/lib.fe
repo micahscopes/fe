@@ -3,20 +3,22 @@
 //! The fixture constructs its witness by evaluating the exact Fe recurrence.
 //! No host-authored trace, commitment, challenge, or receipt enters this gate.
 
-use core::BrowserBytes
+use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
 use mandelbrot_proof_baby_bear::{
+    CompositionMultiOpening,
     FriMultiQueryEnd,
     FriMultiQueryFold,
-    composition_multi_opening_power_of_two,
+    empty_composition_multi_opening,
+    write_composition_multi_opening_power_of_two,
 }
 use mandelbrot_proof_fixed_air_prover_baby_bear::{
     production_zero_base_lde_checkpoint,
     prove_production_sparse_interval,
 }
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
-    PRODUCTION_COMPOSITION_MAX_LEAVES,
-    PRODUCTION_COMPOSITION_MAX_SIBLINGS,
     PRODUCTION_LDE_LENGTH,
+    PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES,
+    PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS,
     decode_production_sparse_baby_bear_receipt,
     empty_production_sparse_baby_bear_receipt,
     verify_production_sparse_baby_bear_receipt,
@@ -159,13 +161,99 @@ pub fn production_base_lde_checkpoint() -> bool {
 /// leaf array without pulling the complete prover into a focused regression.
 pub fn production_composition_opening_checkpoint() -> bool {
     let evaluations = [BabyBearExt4::zero(); PRODUCTION_LDE_LENGTH]
-    let requested: [u32; PRODUCTION_COMPOSITION_MAX_LEAVES] = [0, 1, 2, 3, 4, 5, 6, 7]
-    composition_multi_opening_power_of_two<
+    let requested: [u32; PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES] = [0; PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES]
+    let mut opening = empty_composition_multi_opening<
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+    >()
+    write_composition_multi_opening_power_of_two<
         {PRODUCTION_LDE_LENGTH},
-        {PRODUCTION_COMPOSITION_MAX_LEAVES},
-        {PRODUCTION_COMPOSITION_MAX_LEAVES},
-        {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
-    >(evaluations, requested).valid
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+    >(ref evaluations, ref requested, mut opening) && opening.valid
+}
+
+struct ProductionCompositionCheckpointEvaluations {
+    values: [BabyBearExt4; PRODUCTION_LDE_LENGTH],
+}
+
+struct ProductionCompositionCheckpointReceipt {
+    opening: CompositionMultiOpening<
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+    >,
+}
+
+struct ProductionCompositionCheckpointArtifacts {
+    evaluations: BrowserPtr<ProductionCompositionCheckpointEvaluations>,
+    receipt: BrowserPtr<ProductionCompositionCheckpointReceipt>,
+}
+
+fn allocate_production_composition_checkpoint_artifacts(_ reject: bool)
+    -> ProductionCompositionCheckpointArtifacts
+{
+    let evaluations = alloc_browser_object<
+        ProductionCompositionCheckpointEvaluations,
+    >()
+    let receipt = alloc_browser_object<ProductionCompositionCheckpointReceipt>()
+    if reject {
+        return ProductionCompositionCheckpointArtifacts {
+            evaluations: evaluations,
+            receipt: receipt,
+        }
+    }
+    ProductionCompositionCheckpointArtifacts {
+        evaluations: evaluations,
+        receipt: receipt,
+    }
+}
+
+fn initialize_production_composition_checkpoint_evaluations()
+uses (evaluations: mut ProductionCompositionCheckpointEvaluations)
+{
+    let mut cursor: usize = 0
+    while cursor < PRODUCTION_LDE_LENGTH {
+        evaluations.values[cursor] = BabyBearExt4::zero()
+        cursor = cursor + 1
+    }
+}
+
+fn write_production_composition_checkpoint_opening() -> bool
+uses (
+    evaluations: ProductionCompositionCheckpointEvaluations,
+    receipt: mut ProductionCompositionCheckpointReceipt,
+)
+{
+    let requested: [u32; PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES] = [
+        0;
+        PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+    ]
+    write_composition_multi_opening_power_of_two<
+        {PRODUCTION_LDE_LENGTH},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES},
+        {PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS},
+    >(
+        ref evaluations.values,
+        ref requested,
+        mut receipt.opening,
+    ) && receipt.opening.valid
+}
+
+/// Reproduce the production prover's pointer-bearing artifact return followed
+/// by nested effect-provider reborrows, without compiling unrelated AIR work.
+pub fn production_composition_effect_opening_checkpoint() -> bool {
+    let artifacts = allocate_production_composition_checkpoint_artifacts(false)
+    if artifacts.evaluations.address() == 0 || artifacts.receipt.address() == 0 {
+        return false
+    }
+    with (artifacts.evaluations) {
+        initialize_production_composition_checkpoint_evaluations()
+    }
+    with (artifacts.evaluations, artifacts.receipt) {
+        write_production_composition_checkpoint_opening()
+    }
 }
 
 /// Verify browser-owned canonical bytes without reusing prover residency.

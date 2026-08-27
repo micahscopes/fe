@@ -15,7 +15,7 @@ const GATE: &str = "production_security_prover_executes_and_its_canonical_receip
 const PROVER_ENTRY: &str = "production_security_zero_interval_receipt";
 const VERIFIER_ENTRY: &str = "audit_production_security_zero_interval_receipt_matrix";
 
-fn compile_gate(entry: &str) -> Vec<u8> {
+fn compile_gate_with_evidence(entry: &str, evidence_path: Option<&Path>) -> Vec<u8> {
     let started = Instant::now();
     eprintln!("security prover gate: initialize Fe ingot for {entry}");
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -43,7 +43,28 @@ fn compile_gate(entry: &str) -> Vec<u8> {
         compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
             .unwrap_or_else(|error| panic!("security proof entry {entry} Wasm: {error}"))
             .bytes;
-    wasmparser::validate(&bytes).expect("security prover Wasm should validate");
+    if let Err(error) = wasmparser::validate(&bytes) {
+        if let Some(path) = evidence_path {
+            std::fs::write(path, &bytes)
+                .expect("invalid security gate Wasm should persist for diagnosis");
+        }
+        panic!(
+            "security prover Wasm should validate: {error:?}; invalid module{}",
+            evidence_path
+                .map(|path| format!(" persisted at {}", path.display()))
+                .unwrap_or_default(),
+        );
+    }
+    // Persist the validated artifact while the compiler database is still
+    // alive. Dropping a policy-sized specialization graph can take long enough
+    // that an isolated compiler child may be stopped at its memory guard after
+    // successful emission but before returning this byte vector to its caller.
+    // A `Wasm ready` message therefore means the exact validated module is
+    // already durable, rather than merely resident in that compiler process.
+    if let Some(path) = evidence_path {
+        std::fs::write(path, &bytes)
+            .expect("valid security gate Wasm should persist before compiler teardown");
+    }
     eprintln!(
         "security prover gate: {entry} Wasm ready ({} bytes, {:.2?})",
         bytes.len(),
@@ -61,8 +82,7 @@ fn verifier_wasm_path(receipt: &Path) -> PathBuf {
 }
 
 fn compile_gate_to_path(entry: &str, path: &Path) {
-    std::fs::write(path, compile_gate(entry))
-        .expect("compiled security gate Wasm should persist between processes");
+    drop(compile_gate_with_evidence(entry, Some(path)));
 }
 
 fn read_compiled_gate(path: &Path, role: &str) -> Vec<u8> {

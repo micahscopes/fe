@@ -454,17 +454,6 @@ struct ProductionSparseProverArtifacts {
     composition: BrowserPtr<ProductionCompositionCodeword>,
 }
 
-fn invalid_production_sparse_prover_artifacts()
-    -> ProductionSparseProverArtifacts
-{
-    ProductionSparseProverArtifacts {
-        valid: false,
-        base: BrowserPtr<ProductionBaseCodeword>::from_u32(0),
-        interaction: BrowserPtr<ProductionInteractionCodeword>::from_u32(0),
-        composition: BrowserPtr<ProductionCompositionCodeword>::from_u32(0),
-    }
-}
-
 fn write_production_checkpoint_receipt(
     _ interval: OrbitInterval<{PRODUCTION_LIMBS}>,
     _ shift: BabyBear,
@@ -535,12 +524,6 @@ fn prove_production_sparse_artifacts(
     _ profile: SparseDirectFriTranscriptProfile,
 ) -> ProductionSparseProverArtifacts
 {
-    if shift.is_zero()
-        || sparse_transition_trace_length<{PRODUCTION_LIMBS}>()
-            != PRODUCTION_TRACE_LENGTH.downcast_truncate()
-        || !production_leaf_input_is_valid(interval) {
-        return invalid_production_sparse_prover_artifacts()
-    }
     let workspace: BrowserPtr<ProductionSparseProverWorkspace> =
         alloc_browser_object<ProductionSparseProverWorkspace>()
     let base_evaluations: BrowserPtr<ProductionBaseEvaluations> =
@@ -559,7 +542,23 @@ fn prove_production_sparse_artifacts(
         || interaction_evaluations.address() == 0
         || interaction.address() == 0
         || composition.address() == 0 {
-        return invalid_production_sparse_prover_artifacts()
+        return ProductionSparseProverArtifacts {
+            valid: false,
+            base: base,
+            interaction: interaction,
+            composition: composition,
+        }
+    }
+    if shift.is_zero()
+        || sparse_transition_trace_length<{PRODUCTION_LIMBS}>()
+            != PRODUCTION_TRACE_LENGTH.downcast_truncate()
+        || !production_leaf_input_is_valid(interval) {
+        return ProductionSparseProverArtifacts {
+            valid: false,
+            base: base,
+            interaction: interaction,
+            composition: composition,
+        }
     }
     // Every stage writer marks its destination invalid before work, initializes
     // every readable field before success, and no failed destination is ever
@@ -579,7 +578,12 @@ fn prove_production_sparse_artifacts(
     } || !with (workspace) { write_production_sparse_base_stage() }
         || !with (workspace) { write_production_sparse_interaction_stage() }
         || !with (workspace) { write_production_sparse_composition_stage() } {
-        return invalid_production_sparse_prover_artifacts()
+        return ProductionSparseProverArtifacts {
+            valid: false,
+            base: base,
+            interaction: interaction,
+            composition: composition,
+        }
     }
     ProductionSparseProverArtifacts {
         valid: true,

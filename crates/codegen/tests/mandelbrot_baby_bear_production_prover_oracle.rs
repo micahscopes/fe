@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{compile_runtime_package_wasm_with_options, WasmCompileOptions};
+use fe_codegen::{WasmCompileOptions, compile_runtime_package_wasm_with_options};
 use hir::hir_def::HirIngot;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -86,6 +86,30 @@ fn production_composition_opening_executes_with_compact_local_storage() {
         checkpoint
             .call(&mut store, ())
             .expect("production composition opening should execute"),
+        0,
+    );
+}
+
+#[test]
+fn production_composition_opening_preserves_nested_effect_provenance() {
+    let wasm = compile_gate("production_composition_effect_opening_checkpoint");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm)
+        .expect("effect composition opening Wasm module should load");
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("effect composition opening Wasm should instantiate");
+    let checkpoint = instance
+        .get_typed_func::<(), i32>(
+            &mut store,
+            "production_composition_effect_opening_checkpoint",
+        )
+        .expect("production effect composition opening checkpoint export");
+    assert_ne!(
+        checkpoint
+            .call(&mut store, ())
+            .expect("production effect composition opening should execute"),
         0,
     );
 }

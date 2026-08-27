@@ -1,0 +1,7 @@
+[ingot]
+name = "merkle_browser"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+merkle_core = { path = "../merkle_core" }

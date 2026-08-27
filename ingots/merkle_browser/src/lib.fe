@@ -1,0 +1,184 @@
+//! Browser-arena placement for the field-generic Merkle dependency graph.
+//!
+//! `merkle_core` remains the pure value interpreter and semantic oracle. This
+//! ingot places the same ordered tree traversal in Fe-owned browser linear
+//! memory so large proof domains do not become thousands of Wasm locals.
+
+use core::{BrowserPtr, alloc_browser_object}
+use core::marker::Copy
+use merkle_core::{MerkleMultiPath, MerkleRoot, TwoToOneHasher}
+
+/// Homogeneous leaf storage for callers that derive commitments at runtime.
+/// The nominal wrapper lets the Fe effect system retain the array in browser
+/// memory without exposing its physical address to proof code.
+pub struct MerkleLeafArena<F: Copy, const N: usize> {
+    pub values: [F; N],
+    /// Caller-visible only through an effect-scoped helper. Retaining the root
+    /// beside the leaves prevents a direct-memory writer from materializing a
+    /// second array-backed aggregate in its local Wasm arena.
+    pub root: MerkleRoot<F>,
+}
+
+struct MerkleMultiPathWorkspace<F: Copy, const N: usize, const MAX_LEAVES: usize> {
+    nodes: [F; N],
+    indices: [u32; MAX_LEAVES],
+}
+
+fn write_multi_path_with_workspace<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ leaves: ref [F; N],
+    _ requested: ref [u32; REQUESTS],
+    _ path: mut MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ root: mut MerkleRoot<F>,
+) -> bool
+uses (workspace: mut MerkleMultiPathWorkspace<F, N, MAX_LEAVES>)
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, REQUESTS > 0, MAX_LEAVES > 0
+{
+    path.valid = false
+    path.leaf_count = 0
+    path.sibling_count = 0
+    root.valid = false
+    root.value = H::zero()
+
+    let mut cursor: usize = 0
+    while cursor < MAX_LEAVES {
+        path.leaf_indices[cursor] = 0
+        workspace.indices[cursor] = 0
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < MAX_SIBLINGS {
+        path.siblings[cursor] = H::zero()
+        cursor = cursor + 1
+    }
+
+    let width_u32: u32 = N.downcast_truncate()
+    let mut count: usize = 0
+    let mut request: usize = 0
+    while request < REQUESTS {
+        let index = requested[request]
+        if index >= width_u32 {
+            return false
+        }
+
+        let mut position: usize = 0
+        while position < count && workspace.indices[position] < index {
+            position = position + 1
+        }
+        if position == count || workspace.indices[position] != index {
+            if count >= MAX_LEAVES {
+                return false
+            }
+            cursor = count
+            while cursor > position {
+                workspace.indices[cursor] = workspace.indices[cursor - 1]
+                cursor = cursor - 1
+            }
+            workspace.indices[position] = index
+            count = count + 1
+        }
+        request = request + 1
+    }
+    if count == 0 { return false }
+
+    cursor = 0
+    while cursor < count {
+        path.leaf_indices[cursor] = workspace.indices[cursor]
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < N {
+        workspace.nodes[cursor] = leaves[cursor]
+        cursor = cursor + 1
+    }
+
+    let mut sibling_count: usize = 0
+    let mut active_count = count
+    let mut width: usize = N
+    while width > 1 {
+        let mut next_count: usize = 0
+        cursor = 0
+        while cursor < active_count {
+            let index = workspace.indices[cursor]
+            let paired = (index & 1) == 0
+                && cursor + 1 < active_count
+                && workspace.indices[cursor + 1] == index + 1
+            if paired {
+                cursor = cursor + 2
+            } else {
+                if sibling_count >= MAX_SIBLINGS {
+                    return false
+                }
+                path.siblings[sibling_count] = workspace.nodes[(index ^ 1) as usize]
+                sibling_count = sibling_count + 1
+                cursor = cursor + 1
+            }
+            workspace.indices[next_count] = index / 2
+            next_count = next_count + 1
+        }
+
+        let parent_count = width / 2
+        let mut parent: usize = 0
+        while parent < parent_count {
+            workspace.nodes[parent] = H::hash2(
+                workspace.nodes[parent + parent],
+                workspace.nodes[parent + parent + 1],
+            )
+            parent = parent + 1
+        }
+        active_count = next_count
+        width = parent_count
+    }
+    if active_count != 1 || workspace.indices[0] != 0 {
+        return false
+    }
+
+    path.valid = true
+    path.leaf_count = count.downcast_truncate()
+    path.sibling_count = sibling_count.downcast_truncate()
+    root.valid = true
+    root.value = workspace.nodes[0]
+    true
+}
+
+/// Build one canonical sparse path and root with all policy-sized scratch
+/// arrays retained in Fe-owned browser memory. Request normalization, sibling
+/// order, and root construction are identical to `merkle_core`.
+pub fn write_multi_path_and_root_from_leaves<
+    F: Copy,
+    H: TwoToOneHasher<F>,
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ leaves: ref [F; N],
+    _ requested: ref [u32; REQUESTS],
+    _ path: mut MerkleMultiPath<F, MAX_LEAVES, MAX_SIBLINGS>,
+    _ root: mut MerkleRoot<F>,
+) -> bool
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, REQUESTS > 0, MAX_LEAVES > 0
+{
+    let workspace: BrowserPtr<MerkleMultiPathWorkspace<F, N, MAX_LEAVES>> = alloc_browser_object<
+        MerkleMultiPathWorkspace<F, N, MAX_LEAVES>,
+    >()
+    if workspace.address() == 0 {
+        path.valid = false
+        root.valid = false
+        return false
+    }
+    with (workspace) {
+        write_multi_path_with_workspace<F, H, N, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+            leaves,
+            requested,
+            mut path,
+            mut root,
+        )
+    }
+}

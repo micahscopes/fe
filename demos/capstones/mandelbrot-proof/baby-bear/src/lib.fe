@@ -20,7 +20,7 @@ use canonical_words::{
     encode_canonical_prefix,
     encode_canonical_word_stream,
 }
-use core::BrowserBytes
+use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
 pub use mandelbrot_proof_baby_bear_transcript::{
     AirLdeTranscriptDigest,
     CompositionChallenge,
@@ -80,6 +80,10 @@ use merkle_core::{
     quartet_path_from_leaves,
     quartet_verify,
     write_multi_path_and_root_from_leaves,
+}
+use merkle_browser::{
+    MerkleLeafArena,
+    write_multi_path_and_root_from_leaves as write_browser_multi_path,
 }
 use poseidon_baby_bear::{
     PackedCommitment,
@@ -4109,6 +4113,73 @@ fn invalid_digest_multi_path<
     }
 }
 
+fn reset_digest_multi_path<const MAX_LEAVES: usize, const MAX_SIBLINGS: usize>(
+    _ path: mut MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+) {
+    path.valid = false
+    path.leaf_count = 0
+    path.sibling_count = 0
+    let mut cursor: usize = 0
+    while cursor < MAX_LEAVES {
+        path.leaf_indices[cursor] = 0
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < MAX_SIBLINGS {
+        path.siblings[cursor] = Poseidon2Digest::zero()
+        cursor = cursor + 1
+    }
+}
+
+fn write_digest_multi_path_from_browser_leaves<
+    const N: usize,
+    const REQUESTS: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ requested: ref [u32; REQUESTS],
+    _ path: mut MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
+) -> bool
+uses (leaves: mut MerkleLeafArena<Poseidon2Digest, N>)
+where
+    N > 1,
+    N <= MAX_PADDED_TRACE_LENGTH,
+    N <= 2147483648,
+    {
+        (N & (N - 1)) == 0
+    },
+    REQUESTS > 0,
+    MAX_LEAVES > 0
+{
+    write_browser_multi_path<
+        Poseidon2Digest,
+        DigestNodeHasher,
+        N,
+        REQUESTS,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref leaves.values, requested, mut path, mut leaves.root)
+}
+
+fn write_composition_commitment_leaves<const N: usize>(_ evaluations: ref [BabyBearExt4; N]) -> bool
+uses (leaves: mut MerkleLeafArena<Poseidon2Digest, N>)
+where N > 1, N <= MAX_PADDED_TRACE_LENGTH
+{
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves.values[cursor] = composition_row_commitment(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    true
+}
+
+fn digest_browser_root_is_valid<const N: usize>() -> bool
+uses (leaves: MerkleLeafArena<Poseidon2Digest, N>)
+where N > 1, N <= MAX_PADDED_TRACE_LENGTH
+{
+    leaves.root.valid
+}
+
 /// Construct the canonical empty composition opening required before bounded
 /// decoding or caller-owned proof materialization.
 pub fn empty_composition_multi_opening<
@@ -4127,8 +4198,12 @@ fn reset_composition_multi_opening<
     const MAX_SIBLINGS: usize,
 >(_ opening: mut CompositionMultiOpening<MAX_LEAVES, MAX_SIBLINGS>) {
     opening.valid = false
-    opening.values = [BabyBearExt4::zero(); MAX_LEAVES]
-    opening.path = invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+    let mut cursor: usize = 0
+    while cursor < MAX_LEAVES {
+        opening.values[cursor] = BabyBearExt4::zero()
+        cursor = cursor + 1
+    }
+    reset_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>(mut opening.path)
 }
 
 /// Populate a composition multipath in caller-owned storage. The logical
@@ -4153,33 +4228,31 @@ where
     MAX_LEAVES > 0,
 {
     reset_composition_multi_opening<MAX_LEAVES, MAX_SIBLINGS>(mut opening)
-    let mut leaves = [Poseidon2Digest::zero(); N]
-    let mut cursor: usize = 0
-    while cursor < N {
-        leaves[cursor] = composition_row_commitment(evaluations[cursor]).value
-        cursor = cursor + 1
-    }
-    let mut root = MerkleRoot {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
-    if !write_multi_path_and_root_from_leaves<
-        Poseidon2Digest,
-        DigestNodeHasher,
-        N,
-        REQUESTS,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(ref leaves, requested, mut opening.path, mut root) {
+    let leaves: BrowserPtr<MerkleLeafArena<Poseidon2Digest, N>> = alloc_browser_object<
+        MerkleLeafArena<Poseidon2Digest, N>,
+    >()
+    if leaves.address() == 0
+        || !with (leaves) {
+            write_composition_commitment_leaves<N>(evaluations)
+        } {
         return false
     }
-    cursor = 0
+    if !with (leaves) {
+        write_digest_multi_path_from_browser_leaves<N, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+            requested,
+            mut opening.path,
+        )
+    } {
+        return false
+    }
+    let mut cursor: usize = 0
     while cursor < (opening.path.leaf_count as usize) {
         opening.values[cursor] = evaluations[opening.path.leaf_indices[cursor] as usize]
         cursor = cursor + 1
     }
-    opening.valid = root.valid
-    root.valid
+    let valid = with (leaves) { digest_browser_root_is_valid<N>() }
+    opening.valid = valid
+    valid
 }
 
 pub fn composition_multi_opening_power_of_two<
@@ -4543,8 +4616,26 @@ fn reset_fri_layer_multi_opening<
     const MAX_SIBLINGS: usize,
 >(_ opening: mut FriLayerMultiOpening<ROUND, MAX_LEAVES, MAX_SIBLINGS>) {
     opening.valid = false
-    opening.values = [BabyBearExt4::zero(); MAX_LEAVES]
-    opening.path = invalid_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
+    let mut cursor: usize = 0
+    while cursor < MAX_LEAVES {
+        opening.values[cursor] = BabyBearExt4::zero()
+        cursor = cursor + 1
+    }
+    reset_digest_multi_path<MAX_LEAVES, MAX_SIBLINGS>(mut opening.path)
+}
+
+fn write_fri_layer_commitment_leaves<const ROUND: u32, const N: usize>(
+    _ evaluations: ref [BabyBearExt4; N],
+) -> bool
+uses (leaves: mut MerkleLeafArena<Poseidon2Digest, N>)
+where { ROUND > 0 }, { ROUND < 100 }, N > 1, N <= MAX_PADDED_TRACE_LENGTH
+{
+    let mut cursor: usize = 0
+    while cursor < N {
+        leaves.values[cursor] = fri_layer_row_commitment<ROUND>(evaluations[cursor]).value
+        cursor = cursor + 1
+    }
+    true
 }
 
 /// Populate one FRI-layer multipath in caller-owned storage. This preserves
@@ -4572,33 +4663,31 @@ where
     MAX_LEAVES > 0,
 {
     reset_fri_layer_multi_opening<ROUND, MAX_LEAVES, MAX_SIBLINGS>(mut opening)
-    let mut leaves = [Poseidon2Digest::zero(); N]
-    let mut cursor: usize = 0
-    while cursor < N {
-        leaves[cursor] = fri_layer_row_commitment<ROUND>(evaluations[cursor]).value
-        cursor = cursor + 1
-    }
-    let mut root = MerkleRoot {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
-    if !write_multi_path_and_root_from_leaves<
-        Poseidon2Digest,
-        DigestNodeHasher,
-        N,
-        REQUESTS,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(ref leaves, requested, mut opening.path, mut root) {
+    let leaves: BrowserPtr<MerkleLeafArena<Poseidon2Digest, N>> = alloc_browser_object<
+        MerkleLeafArena<Poseidon2Digest, N>,
+    >()
+    if leaves.address() == 0
+        || !with (leaves) {
+            write_fri_layer_commitment_leaves<ROUND, N>(evaluations)
+        } {
         return false
     }
-    cursor = 0
+    if !with (leaves) {
+        write_digest_multi_path_from_browser_leaves<N, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+            requested,
+            mut opening.path,
+        )
+    } {
+        return false
+    }
+    let mut cursor: usize = 0
     while cursor < (opening.path.leaf_count as usize) {
         opening.values[cursor] = evaluations[opening.path.leaf_indices[cursor] as usize]
         cursor = cursor + 1
     }
-    opening.valid = root.valid
-    root.valid
+    let valid = with (leaves) { digest_browser_root_is_valid<N>() }
+    opening.valid = valid
+    valid
 }
 
 pub fn fri_layer_multi_opening_power_of_two<

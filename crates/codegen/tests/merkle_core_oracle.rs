@@ -247,6 +247,14 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
             &[requests[0], requests[1], requests[2], requests[3], 0],
             17,
         );
+        let arena = call(
+            &mut store,
+            &instance,
+            "multipath16_arena",
+            &[requests[0], requests[1], requests[2], requests[3], 0],
+            17,
+        );
+        assert_eq!(arena, actual, "arena and pure Fe multipaths differ");
         assert_eq!(actual[0], 1, "valid multipath requests must open");
         assert_eq!(actual[1], indices.len() as u32);
         assert_eq!(actual[2], siblings.len() as u32);
@@ -264,6 +272,17 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
         0,
         "out-of-domain multipath requests must fail closed",
     );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "multipath16_arena",
+            &[0, 4, 8, 16, 0],
+            17,
+        )[0],
+        0,
+        "arena path must reject out-of-domain requests",
+    );
     for (opened, requested, expected) in [
         ([12, 0, 4, 8], [8, 4, 0, 12], 1),
         ([3, 3, 3, 3], [3, 3, 3, 3], 1),
@@ -274,13 +293,7 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
         let mut arguments = opened.to_vec();
         arguments.extend(requested);
         assert_eq!(
-            call(
-                &mut store,
-                &instance,
-                "multipath16_matches",
-                &arguments,
-                1,
-            ),
+            call(&mut store, &instance, "multipath16_matches", &arguments, 1,),
             vec![expected],
             "multipath request-set canonicality differs",
         );
@@ -297,6 +310,17 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
             0,
             "multipath mutation {mutation} must be rejected",
         );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "multipath16_arena",
+                &[0, 4, 8, 12, mutation],
+                17,
+            )[4],
+            0,
+            "arena multipath mutation {mutation} must be rejected",
+        );
     }
     for mutation in 5..=8 {
         assert_eq!(
@@ -309,6 +333,17 @@ fn generic_merkle_shapes_execute_and_fail_closed() {
             )[4],
             0,
             "noncanonical multipath mutation {mutation} must be rejected",
+        );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "multipath16_arena",
+                &[3, 3, 3, 3, mutation],
+                17,
+            )[4],
+            0,
+            "noncanonical arena multipath mutation {mutation} must be rejected",
         );
     }
 
