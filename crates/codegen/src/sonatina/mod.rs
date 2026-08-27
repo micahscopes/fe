@@ -450,6 +450,109 @@ pub fn compile_runtime_package_wasm_with_options(
     })
 }
 
+/// An owned Fe-to-Sonatina lowering checkpoint. It deliberately carries no
+/// compiler-database lifetime, so callers compiling unusually large programs
+/// may release Salsa and runtime-package state before backend emission.
+pub struct PreparedWasmEmission {
+    module: Module,
+    import_modules: std::collections::HashMap<String, String>,
+    canonical_arena: bool,
+    canonical_stack_post_returns: Vec<String>,
+    canonical_stack_scoped_host_borrows: bool,
+}
+
+/// Lower one runtime package into an owned backend checkpoint without emitting
+/// Wasm yet. This preserves the ordinary compilation semantics while exposing
+/// the phase boundary needed to avoid retaining the complete compiler graph
+/// during backend translation.
+pub fn prepare_runtime_package_wasm_with_options(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    options: WasmCompileOptions,
+) -> Result<PreparedWasmEmission, LowerError> {
+    let (mut module, import_modules) =
+        wasm_lower::compile_runtime_package_wasm_with_canonical_lanes(
+            db,
+            package,
+            &options.canonical_lanes,
+            &options.export_aliases,
+            options.resident_transition.as_ref(),
+            options.resident_initializer.as_ref(),
+            options.resident_projection.as_ref(),
+            &options.resident_policies,
+        )?;
+    if options.optimize {
+        sonatina_codegen::optim::Pipeline::size().run(&mut module);
+    }
+    let canonical_arena =
+        options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module);
+    Ok(PreparedWasmEmission {
+        module,
+        import_modules,
+        canonical_arena,
+        canonical_stack_post_returns: options.canonical_stack_post_returns,
+        canonical_stack_scoped_host_borrows: options.canonical_stack_scoped_host_borrows,
+    })
+}
+
+/// Emit validated backend bytes from an owned lowering checkpoint. No Fe
+/// database or runtime package is required after the checkpoint is prepared.
+pub fn compile_prepared_runtime_package_wasm(
+    prepared: PreparedWasmEmission,
+) -> Result<sonatina_codegen::isa::wasm::WasmArtifact, LowerError> {
+    use sonatina_codegen::Backend as _;
+    use sonatina_codegen::isa::wasm::WasmBackend;
+
+    reclaim_wasm_lowering_allocator_slack();
+    let backend = WasmBackend::new().with_import_modules(prepared.import_modules);
+    let backend = if !prepared.canonical_stack_post_returns.is_empty() {
+        let manifest = sonatina_codegen::isa::wasm::CanonicalStackMemoryManifest::new(
+            prepared.canonical_stack_post_returns,
+        );
+        let manifest = if prepared.canonical_stack_scoped_host_borrows {
+            manifest.with_scoped_host_borrows()
+        } else {
+            manifest
+        };
+        backend.with_canonical_stack_memory(manifest)
+    } else if prepared.canonical_arena {
+        backend.with_canonical_arena()
+    } else {
+        backend
+    };
+    backend.compile_module(&prepared.module).map_err(|errors| {
+        LowerError::Internal(format!(
+            "wasm backend: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    })
+}
+
+/// Return pages from completed Fe MIR lowering before the owned Sonatina
+/// module is translated into backend IR. Dropping the prepared body graph makes
+/// that memory logically free, but glibc otherwise retains multi-gigabyte spans
+/// in the process heap while the next compiler phase allocates its own graph.
+/// This phase boundary is advisory and has no effect on targets whose allocator
+/// does not expose an explicit trim operation.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn reclaim_wasm_lowering_allocator_slack() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+
+    let released = unsafe { malloc_trim(0) } != 0;
+    if std::env::var_os("FE_WASM_LOWER_TRACE").is_some() {
+        eprintln!("[fe wasm lowering] reclaimed allocator slack, released={released}");
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn reclaim_wasm_lowering_allocator_slack() {}
+
 #[derive(Debug)]
 pub enum LowerError {
     RuntimeLower(mir::LowerError),
