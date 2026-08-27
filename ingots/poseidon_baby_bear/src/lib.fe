@@ -1627,7 +1627,22 @@ pub fn commit_ext4_fields<D: Poseidon2FieldDomain, const N: usize>(
 /// Plonky3-compatible two-to-one digest compression. Concatenating the two
 /// eight-field children fills one width-16 permutation exactly, and the first
 /// eight output lanes form the parent digest.
-pub fn compress(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
+pub struct Poseidon2CompressionPlan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    pub value: Poseidon2Digest,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2CompressionPlan<I> {}
+
+/// Interpret the production two-to-one compression through the same complete
+/// permutation plan used by scalar hashing and recursive constraints.
+pub fn compress_plan<I: QuadraticPlanInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> Poseidon2CompressionPlan<I> {
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
     let mut index: usize = 0
     while index < DIGEST_FIELDS {
@@ -1635,14 +1650,25 @@ pub fn compress(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2D
         state[index + DIGEST_FIELDS] = right.values[index]
         index = index + 1
     }
-    let output = permute16(input: state)
+    let planned = poseidon2_permutation_plan(interpreter, state)
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
     while index < DIGEST_FIELDS {
-        values[index] = output[index]
+        values[index] = planned.output[index]
         index = index + 1
     }
-    Poseidon2Digest { values: values }
+    Poseidon2CompressionPlan {
+        interpreter: planned.interpreter,
+        value: Poseidon2Digest { values: values },
+    }
+}
+
+pub fn compress(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
+    compress_plan(
+        QuadraticValueInterpreter::new(),
+        left,
+        right,
+    ).value
 }
 
 /// Bind two full digests under a nominal transcript domain with the same

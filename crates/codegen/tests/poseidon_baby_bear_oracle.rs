@@ -320,6 +320,11 @@ fn fe_derived_poseidon2_matches_plonky3_parameters_and_permutations() {
             [1, 1, 0, 0],
             "complete quadratic relation differs for {input:?}",
         );
+        assert_eq!(
+            call(&mut store, &instance, "poseidon2_compress16", &input, 8,),
+            expected[..8],
+            "two-to-one compression differs for {input:?}",
+        );
     }
 
     for mutation in 1..=PERMUTATION_MULTIPLICATIONS {
