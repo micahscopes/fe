@@ -300,6 +300,32 @@ existing Definition of done, not a second campaign checklist:
   malformed-byte matrix. This is a verifier execution placement contract, not
   an authenticated child trace or recursive proof receipt. Exact trace
   execution over both real security-policy child receipts remains next.
+
+  Commit `e13fdaf5d` executes that trace contract over the retained exact
+  `0 -> 1` security-policy receipt. A Fe trace-writer placement compiled to a
+  15,082,010-byte zero-import Wasm artifact in 918.63 seconds, then verified
+  the 948,808-byte canonical receipt and emitted a 972-byte canonical trace in
+  15.08 seconds. The trace contains a versioned header followed by exactly 120
+  derived task positions and results. Its SHA-256 digest is
+  `537df3ee19012a933816b92688f0c648fe2519cee1b1dadcbd442d502865d865`;
+  the writer artifact digest is
+  `d7b46e6167c3442e69f0df562b9fbb9fb1197f8839a5884ce4f369cc97e7fdd2`.
+  A separately compiled 15,078,618-byte zero-import replay artifact with digest
+  `ec5b4f362d4080205fb671e52d12db4df0498fda4084afbd6f316cb032f3bd8b`
+  compiled in 550.62 seconds. It accepted the exact receipt and trace with
+  `(shape_valid, task_mismatches, result_mismatches, rejected_tasks) =
+  (1, 0, 0, 0)` and rejected changed versions, invalid header and row boolean
+  tags, changed task count, invalid task positions, and truncated or trailing
+  receipt and trace bytes. Coherent task rewiring reports exactly one task
+  mismatch, and a changed stored result reports exactly one result mismatch.
+  The expanded replay matrix completed in 80.15 seconds. The independent Rust
+  decoder also checked every emitted task position and result. Combined
+  writer-plus-replay artifacts had previously approached the sandbox memory
+  ceiling; the canonical trace boundary now lets each interpretation compile
+  and execute independently without changing the Fe verifier denotation. This
+  is the first exact child-verifier execution trace, not yet an authenticated
+  parent proof. Producing and tracing the adjacent `1 -> 2` security-policy
+  receipt, then binding both traces into the recursive relation, is next.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
