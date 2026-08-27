@@ -2388,13 +2388,26 @@ fallback. The semantic receipts are:
    now derived and independently gated. The production Poseidon2 `x^7` S-box
    also shares one four-multiplication plan across scalar evaluation, witness
    generation, and quadratic constraints. The complete 21-round permutation
-   now consumes that plan as one 564-node sequential relation. Next place the
-   merge relation and both child verifier task DAGs in authenticated traces,
-   derive the staged workgroup placement from the same dependency vocabulary,
-   then emit the leaf and parent proof receipts. Schedule independent leaves
-   and sibling merges as a typed balanced reduction, and run the progressive
-   point/disk picker, cancellation, generation, mutation rejection, Fe-Wasm
-   verification, and revm-Wasm verification in Chrome.
+   now consumes that plan as one 564-node sequential relation. Commit
+   `6079e80cd` streams those quadratic rows through typed browser memory while
+   retaining the fixed witness and Plonky3 value oracles. Commit `491c47dc2`
+   derives a nominal round, lane, and power task for every product, using
+   fieldless Fe enums rather than a parallel integer phase table, and binds the
+   four rows of every S-box with all seven internal copy edges. The independent
+   schedule gate checks all 564 tasks plus invalid indices. A stronger mutation
+   gate coherently rewires each of the 141 S-boxes so that every changed row
+   remains locally quadratic and all stored output assertions remain zero; the
+   copy topology rejects all 141 rewires. The complete zero-import release
+   oracle passes 6/6 in 54.41 seconds, including the independent Plonky3
+   parameters and permutation. This authenticates internal power topology, not
+   yet the round-state, constants, linear layers, initial digest, or final
+   digest copies. Next authenticate those remaining edges, then place the merge
+   relation and both child verifier task DAGs in authenticated traces, derive
+   staged workgroup placement from the same dependency vocabulary, and emit the
+   leaf and parent proof receipts. Schedule independent leaves and sibling
+   merges as a typed balanced reduction, and run the progressive point/disc
+   picker, cancellation, generation, mutation rejection, Fe-Wasm verification,
+   and revm-Wasm verification in Chrome.
 6. Finish the four standalone hardware tests in the external runbook. The
    `mandelbrot_proof_gpu` clean and tampered Chromium modes already pass on AMD
    Radeon 780M through RADV, but the named Rollcall, fixed precision,
