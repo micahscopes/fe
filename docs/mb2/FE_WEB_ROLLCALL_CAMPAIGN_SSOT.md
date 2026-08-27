@@ -460,6 +460,27 @@ existing Definition of done, not a second campaign checklist:
   456-leaf aggregate through a function boundary. Exact retained-receipt
   replay and mutation evidence remain required before multipath authentication
   is complete.
+
+  Commit `be4959fb8` separates that canonical traversal from its physical
+  scratch placement without introducing another topology program.
+  `MerkleMultiPathReductionStorage` is the single typed interpretation
+  boundary: the ordinary value path supplies local double buffers, while
+  `merkle_browser` supplies a role-branded Fe memory handle whose address is
+  never exposed to the traversal. Direct quadratic evaluation uses the local
+  placement; bounded witness streaming and constraint replay use the browser
+  placement over borrowed leaf and path carriers. All three therefore consume
+  the same request validation, sibling order, hash tasks, and final-root
+  checks. The generic zero-import Wasm gate compares both placements with an
+  independent Rust root, sibling-count, and exact hash-task model across five
+  request shapes and eight malformed-input mutations; it passes 1/1 in 2.16
+  seconds. The complete recursive-verifier AIR target passes 5/5 in 67.22
+  seconds, retaining the independent Plonky3 value and product-mutation gates.
+  This proves the storage interpretation on bounded 16-leaf cases. It does
+  not yet instantiate the 456-leaf production carrier or authenticate the
+  retained security receipt. The next slice gives the production base and
+  interaction roles their own typed leaf/path arenas, fills those arenas from
+  the already-gated canonical leaf plans, and consumes them through this
+  browser-backed traversal.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
