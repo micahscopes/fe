@@ -157,6 +157,87 @@ fn shared_plan_matches_independent_field_math_and_rejects_every_node_mutation() 
         );
         assert_eq!(clean, [1, 0, 0, 0, 0, 0, output, output]);
 
+        let streamed = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_stream_audit",
+            &[a, b, c, output, 0],
+            8,
+        );
+        assert_eq!(streamed, [1, 0, 0, 1, 0, 0, 0, 0]);
+
+        let broken_product = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_stream_audit",
+            &[a, b, c, output, 1],
+            8,
+        );
+        assert_eq!(broken_product[0], 1);
+        assert!(broken_product[1] > 0, "local product mutation must reject");
+        assert_eq!(broken_product[3], 1);
+        assert!(
+            broken_product[5] > 0,
+            "re-interpretation must reject the changed product",
+        );
+
+        let rewired = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_stream_audit",
+            &[a, b, c, output, 2],
+            8,
+        );
+        assert_eq!(&rewired[..4], &[1, 0, 0, 1]);
+        assert!(
+            rewired[4] > 0,
+            "coherent local products must not conceal changed operand copies",
+        );
+        assert_eq!(rewired[5], 0, "coherent products remain locally valid");
+
+        let changed_stored_assertion = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_stream_audit",
+            &[a, b, c, output, 3],
+            8,
+        );
+        assert_eq!(changed_stored_assertion[2], 1);
+        assert!(
+            changed_stored_assertion[6] > 0,
+            "stored assertions must copy the live authored relation",
+        );
+        assert_eq!(changed_stored_assertion[7], 0);
+
+        let changed_claim = call_words(
+            &mut store,
+            &instance,
+            "quadratic_relation_stream_audit",
+            &[a, b, c, output, 4],
+            8,
+        );
+        assert_eq!(&changed_claim[..3], &[1, 0, 0]);
+        assert!(
+            changed_claim[6] > 0,
+            "changed claim must break its stored copy"
+        );
+        assert!(
+            changed_claim[7] > 0,
+            "changed claim must violate the relation"
+        );
+
+        assert_eq!(
+            call_words(
+                &mut store,
+                &instance,
+                "quadratic_relation_stream_wrong_shape",
+                &[a, b, c, output],
+                1,
+            ),
+            [0],
+            "an incomplete stream must fail closed",
+        );
+
         for mutation in 1..=3 {
             let mutated = call_words(
                 &mut store,

@@ -5,6 +5,8 @@ use quadratic_plan::{
     QuadraticPlanInterpreter,
     QuadraticRelationConstraintInterpreter,
     QuadraticRelationInterpreter,
+    QuadraticRelationStreamConstraintInterpreter,
+    QuadraticRelationStreamInterpreter,
     QuadraticRelationValueInterpreter,
     QuadraticRelationWitnessInterpreter,
     QuadraticWitnessInterpreter,
@@ -187,6 +189,98 @@ pub fn quadratic_relation_audit(
         constrained.output.to_u32(),
         if direct.interpreter.finish() { direct.output.to_u32() } else { 0 },
     )
+}
+
+/// Generate one memory-backed witness, optionally mutate one independent
+/// layer, and re-interpret the same authored relation against that untrusted
+/// stream. No second wiring description participates in the verification.
+pub fn quadratic_relation_stream_audit(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ expected: u32,
+    _ mutation: u32,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let expected = BabyBear::from_u32(expected)
+    let generated = tiny_relation(
+        QuadraticRelationStreamInterpreter<BabyBear, 3, 2>::new(),
+        a,
+        b,
+        c,
+        expected,
+    )
+    let stream = generated.interpreter.finish()
+    if mutation == 1 {
+        let mut row = stream.product(0)
+        row.output = row.output.radix2_add(BabyBear::one())
+        let _replaced = stream.replace_product(0, row)
+    } else if mutation == 2 {
+        let mut row = stream.product(1)
+        row.left = row.left.radix2_add(BabyBear::one())
+        row.output = row.left.radix2_mul(row.right)
+        let _replaced = stream.replace_product(1, row)
+    } else if mutation == 3 {
+        let _replaced = stream.replace_assertion(0, BabyBear::one())
+    }
+    let verified_expected = if mutation == 4 {
+        expected.radix2_add(BabyBear::one())
+    } else {
+        expected
+    }
+    let verified = tiny_relation(
+        QuadraticRelationStreamConstraintInterpreter<BabyBear, 3, 2>::new(
+            stream,
+        ),
+        a,
+        b,
+        c,
+        verified_expected,
+    )
+    let local = stream.audit()
+    let constrained = verified.interpreter.finish()
+    (
+        if local.shape_valid { 1 } else { 0 },
+        local.nonzero_products,
+        local.nonzero_assertions,
+        if constrained.shape_valid { 1 } else { 0 },
+        constrained.operand_copy_mismatches,
+        constrained.nonzero_products,
+        constrained.assertion_copy_mismatches,
+        constrained.nonzero_assertions,
+    )
+}
+
+pub fn quadratic_relation_stream_wrong_shape(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ expected: u32,
+) -> u32 {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let expected = BabyBear::from_u32(expected)
+    let generated = tiny_relation(
+        QuadraticRelationStreamInterpreter<BabyBear, 4, 2>::new(),
+        a,
+        b,
+        c,
+        expected,
+    )
+    let stream = generated.interpreter.finish()
+    let verified = tiny_relation(
+        QuadraticRelationStreamConstraintInterpreter<BabyBear, 4, 2>::new(
+            stream,
+        ),
+        a,
+        b,
+        c,
+        expected,
+    )
+    if verified.interpreter.finish().shape_valid { 1 } else { 0 }
 }
 
 pub fn quadratic_relation_wrong_product_shape(

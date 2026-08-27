@@ -76,6 +76,19 @@ pub struct QuadraticRelationStreamAudit {
 }
 impl core::marker::Copy for QuadraticRelationStreamAudit {}
 
+/// Result of re-interpreting an authored relation against an untrusted stream.
+/// Operand copies bind each stored product row to the exact dependency DAG;
+/// local products bind its output; assertion copies bind the stored assertion
+/// row; and live assertions bind the resulting claim.
+pub struct QuadraticRelationStreamConstraintAudit {
+    pub shape_valid: bool,
+    pub operand_copy_mismatches: u32,
+    pub nonzero_products: u32,
+    pub assertion_copy_mismatches: u32,
+    pub nonzero_assertions: u32,
+}
+impl core::marker::Copy for QuadraticRelationStreamConstraintAudit {}
+
 struct QuadraticRelationStreamArena<
     F: Radix2Field,
     const PRODUCTS: usize,
@@ -168,6 +181,31 @@ uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
         return QuadraticProductRow { left: zero, right: zero, output: zero }
     }
     arena.products[index as usize]
+}
+
+fn relation_assertion_at<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+>(
+    _ index: u32,
+) -> F
+uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
+{
+    if index >= arena.assertion_count { return F::radix2_zero() }
+    arena.assertions[index as usize]
+}
+
+fn relation_stream_shape_valid<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+>() -> bool
+uses (arena: mut QuadraticRelationStreamArena<F, PRODUCTS, ASSERTIONS>)
+{
+    arena.shape_valid
+        && arena.product_count == PRODUCTS.downcast_truncate()
+        && arena.assertion_count == ASSERTIONS.downcast_truncate()
 }
 
 fn replace_relation_product<
@@ -269,6 +307,19 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
         }
         with (self.arena) {
             relation_product_at<F, PRODUCTS, ASSERTIONS>(index)
+        }
+    }
+
+    pub fn assertion(self, _ index: u32) -> F {
+        if !self.available { return F::radix2_zero() }
+        with (self.arena) {
+            relation_assertion_at<F, PRODUCTS, ASSERTIONS>(index)
+        }
+    }
+
+    pub fn shape_valid(self) -> bool {
+        self.available && with (self.arena) {
+            relation_stream_shape_valid<F, PRODUCTS, ASSERTIONS>()
         }
     }
 
@@ -412,6 +463,109 @@ impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
                 valid: wrote,
             },
         }
+    }
+}
+
+/// Constraint interpretation of a memory-backed relation witness. The same
+/// authored function that generated the stream is executed again, but every
+/// multiplication consumes the untrusted row output and checks its stored
+/// operands against the authored dependencies. This authenticates arbitrary
+/// fixed DAG topology without a second hand-written wiring program.
+pub struct QuadraticRelationStreamConstraintInterpreter<
+    F: Radix2Field,
+    const PRODUCTS: usize,
+    const ASSERTIONS: usize,
+> {
+    stream: QuadraticRelationStream<F, PRODUCTS, ASSERTIONS>,
+    product_cursor: u32,
+    assertion_cursor: u32,
+    operand_copy_mismatches: u32,
+    nonzero_products: u32,
+    assertion_copy_mismatches: u32,
+    nonzero_assertions: u32,
+    valid: bool,
+}
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    core::marker::Copy
+    for QuadraticRelationStreamConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationStreamConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
+    pub fn new(
+        _ stream: QuadraticRelationStream<F, PRODUCTS, ASSERTIONS>,
+    ) -> Self {
+        Self {
+            stream: stream,
+            product_cursor: 0,
+            assertion_cursor: 0,
+            operand_copy_mismatches: 0,
+            nonzero_products: 0,
+            assertion_copy_mismatches: 0,
+            nonzero_assertions: 0,
+            valid: stream.shape_valid(),
+        }
+    }
+
+    pub fn finish(self) -> QuadraticRelationStreamConstraintAudit {
+        QuadraticRelationStreamConstraintAudit {
+            shape_valid: self.valid
+                && self.product_cursor == PRODUCTS.downcast_truncate()
+                && self.assertion_cursor == ASSERTIONS.downcast_truncate(),
+            operand_copy_mismatches: self.operand_copy_mismatches,
+            nonzero_products: self.nonzero_products,
+            assertion_copy_mismatches: self.assertion_copy_mismatches,
+            nonzero_assertions: self.nonzero_assertions,
+        }
+    }
+}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticPlanInterpreter<F>
+    for QuadraticRelationStreamConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        let mut next = self
+        if !next.valid || next.product_cursor >= PRODUCTS.downcast_truncate() {
+            next.valid = false
+            return QuadraticPlanStep {
+                interpreter: next,
+                value: F::radix2_zero(),
+            }
+        }
+        let row = next.stream.product(next.product_cursor)
+        if !row.left.radix2_sub(left).radix2_is_zero() {
+            next.operand_copy_mismatches = next.operand_copy_mismatches + 1
+        }
+        if !row.right.radix2_sub(right).radix2_is_zero() {
+            next.operand_copy_mismatches = next.operand_copy_mismatches + 1
+        }
+        if !row.output.radix2_sub(
+            row.left.radix2_mul(row.right),
+        ).radix2_is_zero() {
+            next.nonzero_products = next.nonzero_products + 1
+        }
+        next.product_cursor = next.product_cursor + 1
+        QuadraticPlanStep { interpreter: next, value: row.output }
+    }
+}
+
+impl<F: Radix2Field, const PRODUCTS: usize, const ASSERTIONS: usize>
+    QuadraticRelationInterpreter<F>
+    for QuadraticRelationStreamConstraintInterpreter<F, PRODUCTS, ASSERTIONS> {
+    fn constrain_zero(self, _ value: F) -> QuadraticRelationStep<Self> {
+        let mut next = self
+        if !next.valid || next.assertion_cursor >= ASSERTIONS.downcast_truncate() {
+            next.valid = false
+            return QuadraticRelationStep { interpreter: next }
+        }
+        let stored = next.stream.assertion(next.assertion_cursor)
+        if !stored.radix2_sub(value).radix2_is_zero() {
+            next.assertion_copy_mismatches = next.assertion_copy_mismatches + 1
+        }
+        if !value.radix2_is_zero() {
+            next.nonzero_assertions = next.nonzero_assertions + 1
+        }
+        next.assertion_cursor = next.assertion_cursor + 1
+        QuadraticRelationStep { interpreter: next }
     }
 }
 
