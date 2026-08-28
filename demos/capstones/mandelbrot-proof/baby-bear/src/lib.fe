@@ -22,7 +22,13 @@ use canonical_words::{
 }
 use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
 pub use fri_baby_bear::{
+    FriFoldDomain,
     FriFoldPairEvaluation,
+    FriLayerRowDomain,
+    FriLayerTranscriptDomain,
+    bind_fri_layer_transcript,
+    commit_fri_layer_row,
+    derive_fri_fold_challenge,
     fold_fri_pair_at_point,
     fold_fri_pair_at_power_of_two,
     fold_fri_pair_value_at_point,
@@ -98,11 +104,9 @@ use poseidon_baby_bear::{
     Poseidon2Domain,
     Poseidon2FieldDomain,
     bind as poseidon_bind,
-    commit_ext4_fields,
     commit_fields,
     commit_packed,
     compress as poseidon_compress,
-    squeeze_ext4,
     squeeze_ext4_indexed,
 }
 use precision::baby_bear::{
@@ -128,16 +132,6 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
         | (bytes[3] as u32)
 }
 
-const fn protocol_round_tag(_ prefix: String<2>, _ round: u32) -> u32 {
-    let bytes = prefix.as_bytes()
-    let tens = round / 10
-    let ones = round - tens * 10
-    ((bytes[0] as u32) << 24)
-        | ((bytes[1] as u32) << 16)
-        | ((48 + tens) << 8)
-        | (48 + ones)
-}
-
 struct MandelbrotRowBabyBearV1 {}
 struct MandelbrotPublicBabyBearV1 {}
 struct MandelbrotAuxiliaryBabyBearV1 {}
@@ -147,9 +141,6 @@ struct MandelbrotMainLdeRowBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
 struct MandelbrotMainLdeTranscriptBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
-struct MandelbrotFriFoldBabyBear<const ROUND: u32> {}
-struct MandelbrotFriLayerRowBabyBear<const ROUND: u32> {}
-struct MandelbrotFriLayerTranscriptBabyBear<const ROUND: u32> {}
 struct MandelbrotFriQueryBabyBearV2 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
@@ -186,18 +177,6 @@ impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
 
 impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BY02")
-}
-
-impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriFoldBabyBear<ROUND> {
-    const TAG: u32 = protocol_round_tag("FC", ROUND)
-}
-
-impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriLayerRowBabyBear<ROUND> {
-    const TAG: u32 = protocol_round_tag("FR", ROUND)
-}
-
-impl<const ROUND: u32> Poseidon2FieldDomain for MandelbrotFriLayerTranscriptBabyBear<ROUND> {
-    const TAG: u32 = protocol_round_tag("FT", ROUND)
 }
 
 impl Poseidon2FieldDomain for MandelbrotFriQueryBabyBearV2 {
@@ -4457,7 +4436,7 @@ pub fn fri_fold_challenge(
     }
     FriFoldChallenge<1> {
         valid: true,
-        value: squeeze_ext4<MandelbrotFriFoldBabyBear<1>>(transcript.value),
+        value: derive_fri_fold_challenge<1>(transcript.value),
     }
 }
 
@@ -4471,7 +4450,7 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
     }
     FriFoldChallenge<ROUND> {
         valid: true,
-        value: squeeze_ext4<MandelbrotFriFoldBabyBear<ROUND>>(transcript.value),
+        value: derive_fri_fold_challenge<ROUND>(transcript.value),
     }
 }
 
@@ -4514,7 +4493,7 @@ where { ROUND > 0 }, { ROUND < 100 }
 {
     FriLayerDigest<ROUND> {
         valid: true,
-        value: commit_ext4_fields<MandelbrotFriLayerRowBabyBear<ROUND>, 1>([value]),
+        value: commit_fri_layer_row<ROUND>(value),
     }
 }
 
@@ -4873,7 +4852,7 @@ pub fn bind_first_fri_layer(
     }
     FriLayerTranscriptDigest<1> {
         valid: true,
-        value: poseidon_bind<MandelbrotFriLayerTranscriptBabyBear<1>>(
+        value: bind_fri_layer_transcript<1>(
             transcript.value,
             layer.value,
         ),
@@ -4891,7 +4870,7 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
     }
     FriLayerTranscriptDigest<ROUND> {
         valid: true,
-        value: poseidon_bind<MandelbrotFriLayerTranscriptBabyBear<ROUND>>(
+        value: bind_fri_layer_transcript<ROUND>(
             transcript.value,
             layer.value,
         ),

@@ -1,11 +1,15 @@
 //! Executable boundary for the shared BabyBear FRI pair denotation.
 
 use fri_baby_bear::{
+    FriFoldDomain,
+    FriLayerRowDomain,
+    FriLayerTranscriptDomain,
     fold_fri_pair_at_point,
     fold_fri_pair_at_power_of_two,
     fold_fri_pair_value_at_power_of_two,
 }
 use fri_structure::{FriSchedule, FriSchedulePlacement, FriScheduleShape}
+use poseidon_baby_bear::Poseidon2FieldDomain
 type CheckpointFriSchedule16 = FriSchedule<1, 4>
 
 fn schedule_words<S: FriScheduleShape>() -> (
@@ -50,6 +54,24 @@ pub fn fri_schedule16_round(_ index: u32) -> (
     u32, u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     round_words<CheckpointFriSchedule16>(index)
+}
+
+fn domain_words<const ROUND: u32>() -> (u32, u32, u32) {
+    (
+        <FriFoldDomain<ROUND> as Poseidon2FieldDomain>::TAG,
+        <FriLayerRowDomain<ROUND> as Poseidon2FieldDomain>::TAG,
+        <FriLayerTranscriptDomain<ROUND> as Poseidon2FieldDomain>::TAG,
+    )
+}
+
+pub fn fri_round_domains(_ index: u32) -> (u32, u32, u32) {
+    match index {
+        0 => domain_words<1>()
+        1 => domain_words<2>()
+        2 => domain_words<3>()
+        3 => domain_words<4>()
+        _ => (0, 0, 0)
+    }
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 

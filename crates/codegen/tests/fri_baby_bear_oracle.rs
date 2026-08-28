@@ -199,6 +199,25 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
             placement,
             "wrong placement for FRI round {index}",
         );
+        let round = index as u32 + 1;
+        let decimal = [
+            b'0' + (round / 10) as u8,
+            b'0' + (round % 10) as u8,
+        ];
+        let tag = |prefix: [u8; 2]| {
+            u32::from_be_bytes([prefix[0], prefix[1], decimal[0], decimal[1]])
+        };
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_round_domains",
+                &[index as u32],
+                3,
+            ),
+            vec![tag(*b"FC"), tag(*b"FR"), tag(*b"FT")],
+            "wrong transcript domains for FRI round {round}",
+        );
     }
     assert_eq!(
         call(
@@ -209,6 +228,16 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
             9,
         ),
         vec![0; 9],
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_round_domains",
+            &[4],
+            3,
+        ),
+        vec![0; 3],
     );
 }
 

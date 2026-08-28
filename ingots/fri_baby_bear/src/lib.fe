@@ -6,6 +6,13 @@
 
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::polynomial::radix2_log
+use poseidon_baby_bear::{
+    Poseidon2Digest,
+    Poseidon2FieldDomain,
+    bind,
+    commit_ext4_fields,
+    squeeze_ext4,
+}
 pub use fri_structure::{
     FriRoundPlacement,
     FriSchedule,
@@ -14,6 +21,64 @@ pub use fri_structure::{
     FriScheduleMetadata,
     FriSchedulePlacement,
     FriScheduleShape,
+}
+
+const fn protocol_round_tag(_ prefix: String<2>, _ round: u32) -> u32 {
+    let bytes = prefix.as_bytes()
+    let tens = round / 10
+    let ones = round - tens * 10
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((48 + tens) << 8)
+        | (48 + ones)
+}
+
+/// Typed transcript domains shared by scalar proof construction and GPU
+/// placement. The round is the semantic authority for each domain tag.
+pub struct FriFoldDomain<const ROUND: u32> {}
+pub struct FriLayerRowDomain<const ROUND: u32> {}
+pub struct FriLayerTranscriptDomain<const ROUND: u32> {}
+
+impl<const ROUND: u32> Poseidon2FieldDomain for FriFoldDomain<ROUND> {
+    const TAG: u32 = protocol_round_tag("FC", ROUND)
+}
+
+impl<const ROUND: u32> Poseidon2FieldDomain for FriLayerRowDomain<ROUND> {
+    const TAG: u32 = protocol_round_tag("FR", ROUND)
+}
+
+impl<const ROUND: u32> Poseidon2FieldDomain
+    for FriLayerTranscriptDomain<ROUND>
+{
+    const TAG: u32 = protocol_round_tag("FT", ROUND)
+}
+
+/// Squeeze one round challenge from the preceding transcript digest.
+pub fn derive_fri_fold_challenge<const ROUND: u32>(
+    _ transcript: Poseidon2Digest,
+) -> BabyBearExt4
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    squeeze_ext4<FriFoldDomain<ROUND>>(transcript)
+}
+
+/// Commit one quartic evaluation as an ordered FRI-layer leaf.
+pub fn commit_fri_layer_row<const ROUND: u32>(
+    _ evaluation: BabyBearExt4,
+) -> Poseidon2Digest
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    commit_ext4_fields<FriLayerRowDomain<ROUND>, 1>([evaluation])
+}
+
+/// Bind an ordered FRI-layer root into the transcript for one round.
+pub fn bind_fri_layer_transcript<const ROUND: u32>(
+    _ transcript: Poseidon2Digest,
+    _ layer: Poseidon2Digest,
+) -> Poseidon2Digest
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    bind<FriLayerTranscriptDomain<ROUND>>(transcript, layer)
 }
 
 /// The semantic result of folding one `(x, -x)` pair.
