@@ -1,0 +1,247 @@
+//! Field-neutral FRI schedule structure.
+//!
+//! Protocol code, scalar evaluators, authenticated query builders, and GPU
+//! placements interpret these same constructors. The semantic tree fixes
+//! round order and widths. A placement may map its independent pairs onto
+//! lanes, but it does not own another round table.
+
+use core::marker::Copy
+
+/// Terminal of a binary FRI fold schedule. `NEXT_ROUND` is the first round
+/// number after the schedule.
+pub struct FriScheduleDone<const NEXT_ROUND: u32> {}
+impl<const NEXT_ROUND: u32> Copy for FriScheduleDone<NEXT_ROUND> {}
+
+/// One binary fold in a FRI schedule. `INPUT_LOG` describes the codeword before
+/// this fold. `Tail` is derived recursively rather than selected by a consumer.
+pub struct FriScheduleFold<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    Tail,
+> {}
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    Tail,
+> Copy for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    Tail,
+> {}
+
+const fn fri_schedule_next_round(
+    _ first_round: u32,
+    _ total_log: usize,
+) -> u32 {
+    first_round + total_log.downcast_truncate()
+}
+
+const fn fri_schedule_round(
+    _ first_round: u32,
+    _ total_log: usize,
+    _ remaining_log: usize,
+) -> u32 {
+    first_round + (total_log - remaining_log).downcast_truncate()
+}
+
+const fn fri_schedule_output_width(_ input_log: usize) -> usize {
+    if input_log == 0 { 0 } else { 1 << (input_log - 1) }
+}
+
+const fn fri_schedule_pair_depth(_ input_log: usize) -> usize {
+    if input_log > 1 { input_log - 2 } else { 0 }
+}
+
+const fn fri_schedule_pair_width(_ input_log: usize) -> usize {
+    if input_log > 1 { 1 << (input_log - 2) } else { 0 }
+}
+
+/// Derive the complete fold tree from one initial round and input-domain log.
+pub recursive type fn FriScheduleSteps<
+    const FIRST_ROUND: u32,
+    const TOTAL_LOG: usize,
+    const REMAINING_LOG: usize,
+>() -> (*) {
+    match REMAINING_LOG {
+        0 => FriScheduleDone<{
+            fri_schedule_next_round(FIRST_ROUND, TOTAL_LOG)
+        }>
+        _ => FriScheduleFold<
+            {fri_schedule_round(FIRST_ROUND, TOTAL_LOG, REMAINING_LOG)},
+            REMAINING_LOG,
+            {fri_schedule_output_width(REMAINING_LOG)},
+            {fri_schedule_pair_width(REMAINING_LOG)},
+            {fri_schedule_pair_depth(REMAINING_LOG)},
+            FriScheduleSteps<FIRST_ROUND, TOTAL_LOG, {REMAINING_LOG - 1}>,
+        >
+    }
+}
+
+pub type FriSchedule<const FIRST_ROUND: u32, const INPUT_LOG: usize> =
+    FriScheduleSteps<FIRST_ROUND, INPUT_LOG, INPUT_LOG>
+
+/// Aggregate structural evidence derived from one FRI schedule.
+pub struct FriScheduleMetadata {
+    pub rounds: u32,
+    pub first_round: u32,
+    pub next_round: u32,
+    pub input_log: u32,
+    pub folded_evaluations: u32,
+    pub layer_pair_openings: u32,
+    pub layer_path_siblings_per_side: u32,
+}
+impl Copy for FriScheduleMetadata {}
+
+pub trait FriScheduleShape {
+    const fn fri_schedule_metadata() -> FriScheduleMetadata
+}
+
+impl<const NEXT_ROUND: u32> FriScheduleShape for FriScheduleDone<NEXT_ROUND> {
+    const fn fri_schedule_metadata() -> FriScheduleMetadata {
+        FriScheduleMetadata {
+            rounds: 0,
+            first_round: NEXT_ROUND,
+            next_round: NEXT_ROUND,
+            input_log: 0,
+            folded_evaluations: 0,
+            layer_pair_openings: 0,
+            layer_path_siblings_per_side: 0,
+        }
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    Tail: FriScheduleShape,
+> FriScheduleShape for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    Tail,
+> {
+    const fn fri_schedule_metadata() -> FriScheduleMetadata {
+        let tail = <Tail as FriScheduleShape>::fri_schedule_metadata()
+        let has_pair: u32 = if INPUT_LOG > 1 { 1 } else { 0 }
+        FriScheduleMetadata {
+            rounds: tail.rounds + 1,
+            first_round: ROUND,
+            next_round: tail.next_round,
+            input_log: INPUT_LOG.downcast_truncate(),
+            folded_evaluations: tail.folded_evaluations
+                + OUTPUT.downcast_truncate(),
+            layer_pair_openings: tail.layer_pair_openings + has_pair,
+            layer_path_siblings_per_side: tail.layer_path_siblings_per_side
+                + PAIR_DEPTH.downcast_truncate(),
+        }
+    }
+}
+
+/// One indexable placement view of a semantic fold node. `output_offset`
+/// packs every folded codeword in schedule order without an authored offset
+/// table. Round zero reads the external input. Later rounds read the preceding
+/// placement's output.
+pub struct FriRoundPlacement {
+    pub valid: bool,
+    pub index: u32,
+    pub round: u32,
+    pub input_log: u32,
+    pub input_width: u32,
+    pub output_width: u32,
+    pub output_offset: u32,
+    pub pair_width: u32,
+    pub pair_depth: u32,
+}
+impl Copy for FriRoundPlacement {}
+
+fn invalid_round_placement() -> FriRoundPlacement {
+    FriRoundPlacement {
+        valid: false,
+        index: 0,
+        round: 0,
+        input_log: 0,
+        input_width: 0,
+        output_width: 0,
+        output_offset: 0,
+        pair_width: 0,
+        pair_depth: 0,
+    }
+}
+
+pub trait FriSchedulePlacement {
+    fn fri_round_placement(_ index: u32) -> FriRoundPlacement
+}
+
+impl<const NEXT_ROUND: u32> FriSchedulePlacement
+    for FriScheduleDone<NEXT_ROUND>
+{
+    fn fri_round_placement(_ index: u32) -> FriRoundPlacement {
+        invalid_round_placement()
+    }
+}
+
+impl<
+    const ROUND: u32,
+    const INPUT_LOG: usize,
+    const OUTPUT: usize,
+    const PAIR_WIDTH: usize,
+    const PAIR_DEPTH: usize,
+    Tail: FriSchedulePlacement,
+> FriSchedulePlacement for FriScheduleFold<
+    ROUND,
+    INPUT_LOG,
+    OUTPUT,
+    PAIR_WIDTH,
+    PAIR_DEPTH,
+    Tail,
+> {
+    fn fri_round_placement(_ index: u32) -> FriRoundPlacement {
+        if index == 0 {
+            FriRoundPlacement {
+                valid: true,
+                index: 0,
+                round: ROUND,
+                input_log: INPUT_LOG.downcast_truncate(),
+                input_width: (1 << INPUT_LOG).downcast_truncate(),
+                output_width: OUTPUT.downcast_truncate(),
+                output_offset: 0,
+                pair_width: PAIR_WIDTH.downcast_truncate(),
+                pair_depth: PAIR_DEPTH.downcast_truncate(),
+            }
+        } else {
+            let tail = <Tail as FriSchedulePlacement>::fri_round_placement(
+                index - 1,
+            )
+            if !tail.valid {
+                invalid_round_placement()
+            } else {
+                FriRoundPlacement {
+                    valid: true,
+                    index: tail.index + 1,
+                    round: tail.round,
+                    input_log: tail.input_log,
+                    input_width: tail.input_width,
+                    output_width: tail.output_width,
+                    output_offset: tail.output_offset
+                        + OUTPUT.downcast_truncate(),
+                    pair_width: tail.pair_width,
+                    pair_depth: tail.pair_depth,
+                }
+            }
+        }
+    }
+}

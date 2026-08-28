@@ -5,4 +5,5 @@ version = "0.1.0"
 [dependencies]
 core = "../../../../../ingots/core"
 fri_baby_bear = "../../../../../ingots/fri_baby_bear"
+fri_structure = "../../../../../ingots/fri_structure"
 precision = "../../../../../demos/sketches/precision"

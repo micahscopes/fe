@@ -6,6 +6,15 @@
 
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::polynomial::radix2_log
+pub use fri_structure::{
+    FriRoundPlacement,
+    FriSchedule,
+    FriScheduleDone,
+    FriScheduleFold,
+    FriScheduleMetadata,
+    FriSchedulePlacement,
+    FriScheduleShape,
+}
 
 /// The semantic result of folding one `(x, -x)` pair.
 pub struct FriFoldPairEvaluation {

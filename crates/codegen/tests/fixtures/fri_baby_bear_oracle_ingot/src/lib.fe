@@ -5,6 +5,52 @@ use fri_baby_bear::{
     fold_fri_pair_at_power_of_two,
     fold_fri_pair_value_at_power_of_two,
 }
+use fri_structure::{FriSchedule, FriSchedulePlacement, FriScheduleShape}
+type CheckpointFriSchedule16 = FriSchedule<1, 4>
+
+fn schedule_words<S: FriScheduleShape>() -> (
+    u32, u32, u32, u32, u32, u32, u32,
+) {
+    let metadata = <S as FriScheduleShape>::fri_schedule_metadata()
+    (
+        metadata.rounds,
+        metadata.first_round,
+        metadata.next_round,
+        metadata.input_log,
+        metadata.folded_evaluations,
+        metadata.layer_pair_openings,
+        metadata.layer_path_siblings_per_side,
+    )
+}
+
+pub fn fri_schedule16_metadata() -> (
+    u32, u32, u32, u32, u32, u32, u32,
+) {
+    schedule_words<CheckpointFriSchedule16>()
+}
+
+fn round_words<S: FriSchedulePlacement>(_ index: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let placement = <S as FriSchedulePlacement>::fri_round_placement(index)
+    (
+        if placement.valid { 1 } else { 0 },
+        placement.index,
+        placement.round,
+        placement.input_log,
+        placement.input_width,
+        placement.output_width,
+        placement.output_offset,
+        placement.pair_width,
+        placement.pair_depth,
+    )
+}
+
+pub fn fri_schedule16_round(_ index: u32) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    round_words<CheckpointFriSchedule16>(index)
+}
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 
 fn ext(_ a: u32, _ b: u32, _ c: u32, _ d: u32) -> BabyBearExt4 {

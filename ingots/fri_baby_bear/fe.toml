@@ -4,4 +4,5 @@ version = "0.1.0"
 
 [dependencies]
 core = { path = "../core" }
+fri_structure = { path = "../fri_structure" }
 precision = "../../demos/sketches/precision"

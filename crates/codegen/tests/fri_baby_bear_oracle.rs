@@ -159,6 +159,60 @@ fn arguments(positive: Ext4, negative: Ext4, challenge: Ext4, tail: [u32; 2]) ->
 }
 
 #[test]
+fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
+    let bytes = compile_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("FRI schedule module should load");
+    assert!(
+        module.imports().next().is_none(),
+        "FRI schedule gate must remain zero-import",
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("FRI schedule module should instantiate");
+
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_schedule16_metadata",
+            &[],
+            7,
+        ),
+        vec![4, 1, 5, 4, 15, 3, 3],
+    );
+    let expected = [
+        [1, 0, 1, 4, 16, 8, 0, 4, 2],
+        [1, 1, 2, 3, 8, 4, 8, 2, 1],
+        [1, 2, 3, 2, 4, 2, 12, 1, 0],
+        [1, 3, 4, 1, 2, 1, 14, 0, 0],
+    ];
+    for (index, placement) in expected.into_iter().enumerate() {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_schedule16_round",
+                &[index as u32],
+                9,
+            ),
+            placement,
+            "wrong placement for FRI round {index}",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_schedule16_round",
+            &[4],
+            9,
+        ),
+        vec![0; 9],
+    );
+}
+
+#[test]
 fn reusable_fri_pair_matches_independent_extension_field_arithmetic() {
     let bytes = compile_wasm();
     let engine = wasmtime::Engine::default();
