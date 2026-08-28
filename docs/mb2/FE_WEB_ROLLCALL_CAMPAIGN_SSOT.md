@@ -534,8 +534,39 @@ existing Definition of done, not a second campaign checklist:
   rejection, completed in 14.41 seconds. All mutations reject. This closes
   production base and interaction opening semantics over the retained exact
   receipt. It does not materialize the corresponding 12-million-row maximum
-  quadratic stream, authenticate transcript, AIR, or FRI internals, or emit a
-  cryptographic parent proof.
+  quadratic stream, authenticate AIR or FRI internals, or emit a cryptographic
+  parent proof. The security transcript relation is recorded below.
+
+  Commit `7b062287d` authenticates the complete production
+  `SecurityTranscript` task through one interpreter-parametric Fe plan. The
+  same authored denotation now drives direct values, multiplication witnesses,
+  streamed relation rows, and replay constraints for the canonical interval
+  commitment under `AS01`, ordered roots under `AT01`, AIR transcript under
+  `AT02`, injectively packed 44-word security profile under `SP01`, and final
+  profile extension under `SP02`. Scalar Poseidon entry points are wrappers
+  over that plan rather than a parallel hashing implementation. Invalid
+  statements, roots, opening results, or task traces still execute the exact
+  fixed relation shape and reject through residuals instead of truncating the
+  witness. The derived shape is 21 Poseidon2 permutations, 11,844
+  multiplication rows, and 24 assertions. Its production AIR family counts
+  are independently pinned as `[312, 352, 16, 11]`.
+
+  The zero-import Fe-Wasm gate separately derives the exact Q16 proof-security
+  arithmetic, canonical 44-word profile, 32-to-30-bit injective packing, and
+  all five Plonky3 Poseidon2 domain transitions in Rust. Three seed families
+  match every final digest lane. A changed public statement remains a valid
+  different claim and changes the transcript. Twelve semantic mutations cover
+  interval shape and boundary order, root validity and embedded-base binding,
+  both opening results, the transcript task result, and trace shape. First,
+  middle, and final product mutations plus a stored assertion mutation all
+  survive local storage but fail relation replay. The focused gate passes 1/1
+  in 100.89 seconds; the affected Poseidon, proof-security, and complete
+  recursive-verifier suites pass 7/7 in 60.80 seconds, 4/4 in 45.82 seconds,
+  and 6/6 in 360.98 seconds. The adapter can project the production receipt
+  roots and compiler-derived verifier rows into this relation, but the exact
+  retained receipt has not yet executed through that combined adapter. AIR,
+  composition, FRI internals, the adjacent child trace, and the cryptographic
+  parent receipt remain open.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
