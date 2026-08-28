@@ -1435,8 +1435,17 @@ impl core::marker::Copy for Poseidon2FieldSponge {}
 impl Poseidon2FieldSponge {
     #[inline(always)]
     pub fn begin<D: Poseidon2FieldDomain>(_ expected: u32) -> Self {
+        Self::begin_tag(D::TAG, expected)
+    }
+
+    /// Begin a fixed-length sponge from a compiler-derived domain word.
+    /// Generic domain wrappers and value-level schedule interpreters share
+    /// this constructor, so a dynamic placement does not reconstruct the
+    /// protocol prefix.
+    #[inline(always)]
+    pub fn begin_tag(_ tag: u32, _ expected: u32) -> Self {
         let mut lanes = [0; WIDTH]
-        if D::TAG >= BABY_BEAR_MODULUS {
+        if tag >= BABY_BEAR_MODULUS {
             return Self {
                 lanes: lanes, rate: 2, expected: expected, written: 0,
                 valid: INVALID_WORD,
@@ -1448,7 +1457,7 @@ impl Poseidon2FieldSponge {
                 valid: INVALID_WORD,
             }
         }
-        lanes[0] = BabyBear::from_u32(D::TAG).to_montgomery_word()
+        lanes[0] = BabyBear::from_u32(tag).to_montgomery_word()
         lanes[1] = BabyBear::from_u32(expected).to_montgomery_word()
         Self {
             lanes: lanes,
@@ -1565,6 +1574,53 @@ impl Poseidon2FieldSponge {
             written: self.written,
             phase: 0,
             valid: valid,
+        }
+    }
+
+    /// Fill a complete message's final partial rate block and begin its last
+    /// permutation without evaluating that permutation in the caller. This is
+    /// the staged counterpart of the last partial block in `absorb` plus
+    /// `finish`.
+    #[inline(always)]
+    pub fn begin_final_permutation<const N: usize>(
+        self,
+        _ fields: ref [BabyBear; N],
+    ) -> Poseidon2FieldPermutation
+        where N <= 8
+    {
+        let field_count = fields.len()
+        let count: u32 = field_count.downcast_truncate()
+        let mut valid = self.valid
+        if self.written > self.expected { valid = INVALID_WORD }
+        if count > self.expected - self.written { valid = INVALID_WORD }
+        if self.written + count != self.expected { valid = INVALID_WORD }
+        if self.rate >= SPONGE_RATE.downcast_truncate() { valid = INVALID_WORD }
+        if self.rate + count >= SPONGE_RATE.downcast_truncate() {
+            valid = INVALID_WORD
+        }
+        if valid != VALID_WORD {
+            return Poseidon2FieldPermutation {
+                lanes: self.lanes,
+                expected: self.expected,
+                written: self.written,
+                phase: 0,
+                valid: INVALID_WORD,
+            }
+        }
+        let mut state = Poseidon2State { lanes: self.lanes }
+        let mut rate: usize = self.rate as usize
+        let mut index: usize = 0
+        while index < field_count {
+            state.set_field(rate, fields[index])
+            rate = rate + 1
+            index = index + 1
+        }
+        Poseidon2FieldPermutation {
+            lanes: state.lanes,
+            expected: self.expected,
+            written: self.written + count,
+            phase: 0,
+            valid: VALID_WORD,
         }
     }
 
@@ -1844,6 +1900,29 @@ pub fn commit_ext4_fields<D: Poseidon2FieldDomain, const N: usize>(
     Poseidon2Digest { values: values }
 }
 
+/// First staged permutation for a one-element quartic commitment. The four
+/// coefficients complete the message but leave a partial rate block, so this
+/// constructor pairs directly with the workgroup permutation interpreter.
+pub fn begin_ext4_commitment_placement_tag(
+    _ tag: u32,
+    _ value: BabyBearExt4,
+) -> Poseidon2FieldPermutation {
+    let fields = [
+        value.coefficient(0),
+        value.coefficient(1),
+        value.coefficient(2),
+        value.coefficient(3),
+    ]
+    Poseidon2FieldSponge::begin_tag(tag, 4)
+        .begin_final_permutation<4>(ref fields)
+}
+
+pub fn begin_ext4_commitment_placement<D: Poseidon2FieldDomain>(
+    _ value: BabyBearExt4,
+) -> Poseidon2FieldPermutation {
+    begin_ext4_commitment_placement_tag(D::TAG, value)
+}
+
 /// Plonky3-compatible two-to-one digest compression. Concatenating the two
 /// eight-field children fills one width-16 permutation exactly, and the first
 /// eight output lanes form the parent digest.
@@ -1889,6 +1968,27 @@ pub fn compress(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2D
         left,
         right,
     ).value
+}
+
+/// Staged interpretation of the exact two-to-one Merkle compression. The two
+/// children fill the permutation state without a sponge prefix.
+pub fn begin_compression_placement(
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> Poseidon2FieldPermutation {
+    let mut lanes = [0; WIDTH]
+    let mut index: usize = 0
+    while index < DIGEST_FIELDS {
+        lanes[index] = left.values[index].to_montgomery_word()
+        lanes[index + DIGEST_FIELDS] = right.values[index].to_montgomery_word()
+        index = index + 1
+    }
+    Poseidon2FieldPermutation::restore(
+        lanes,
+        WIDTH.downcast_truncate(),
+        WIDTH.downcast_truncate(),
+        0,
+    )
 }
 
 /// Bind two full digests under a nominal transcript domain with the same
@@ -1974,6 +2074,57 @@ pub fn bind<D: Poseidon2FieldDomain>(
     ).value
 }
 
+/// First staged permutation for binding two digests. The first six fields of
+/// the left digest fill the prefixed block. `remaining` preserves the exact
+/// order of the next full block and final partial block.
+pub struct Poseidon2BindingPlacement {
+    pub permutation: Poseidon2FieldPermutation,
+    pub remaining: [BabyBear; 10],
+}
+impl core::marker::Copy for Poseidon2BindingPlacement {}
+
+pub fn begin_binding_placement_tag(
+    _ tag: u32,
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> Poseidon2BindingPlacement {
+    let first = [
+        left.values[0],
+        left.values[1],
+        left.values[2],
+        left.values[3],
+        left.values[4],
+        left.values[5],
+    ]
+    let remaining = [
+        left.values[6],
+        left.values[7],
+        right.values[0],
+        right.values[1],
+        right.values[2],
+        right.values[3],
+        right.values[4],
+        right.values[5],
+        right.values[6],
+        right.values[7],
+    ]
+    let sponge = Poseidon2FieldSponge::begin_tag(
+        tag,
+        (DIGEST_FIELDS + DIGEST_FIELDS).downcast_truncate(),
+    )
+    Poseidon2BindingPlacement {
+        permutation: sponge.begin_permutation<6>(ref first),
+        remaining: remaining,
+    }
+}
+
+pub fn begin_binding_placement<D: Poseidon2FieldDomain>(
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> Poseidon2BindingPlacement {
+    begin_binding_placement_tag(D::TAG, left, right)
+}
+
 /// First workgroup checkpoint for the exact digest-squeeze message. The first
 /// six digest fields fill the prefixed rate block; `remaining` contains the
 /// final two fields absorbed before the second and final permutation.
@@ -1986,6 +2137,13 @@ impl core::marker::Copy for Poseidon2DigestSqueezePlacement {}
 pub fn begin_digest_squeeze_placement<D: Poseidon2FieldDomain>(
     _ digest: Poseidon2Digest,
 ) -> Poseidon2DigestSqueezePlacement {
+    begin_digest_squeeze_placement_tag(D::TAG, digest)
+}
+
+pub fn begin_digest_squeeze_placement_tag(
+    _ tag: u32,
+    _ digest: Poseidon2Digest,
+) -> Poseidon2DigestSqueezePlacement {
     let first = [
         digest.values[0],
         digest.values[1],
@@ -1994,7 +2152,8 @@ pub fn begin_digest_squeeze_placement<D: Poseidon2FieldDomain>(
         digest.values[4],
         digest.values[5],
     ]
-    let sponge = Poseidon2FieldSponge::begin<D>(
+    let sponge = Poseidon2FieldSponge::begin_tag(
+        tag,
         DIGEST_FIELDS.downcast_truncate(),
     )
     Poseidon2DigestSqueezePlacement {

@@ -984,6 +984,108 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
         );
     }
 
+    let extension = [1, 2, 3, 4];
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "extension1_round_stepped",
+            &extension,
+            9,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(reference_field_commitment(b"BV01", &extension));
+            expected
+        },
+        "staged extension commitment differs from the independent Plonky3 model",
+    );
+    let tagged_extension = [protocol_tag(b"BV01")]
+        .into_iter()
+        .chain(extension)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "extension1_tag_round_stepped",
+            &tagged_extension,
+            9,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(reference_field_commitment(b"BV01", &extension));
+            expected
+        },
+        "value-level domain placement differs from its typed interpretation",
+    );
+    let invalid_extension = [BABY_BEAR_MODULUS]
+        .into_iter()
+        .chain(extension)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "extension1_tag_round_stepped",
+            &invalid_extension,
+            9,
+        ),
+        vec![0; 9],
+        "a noncanonical value-level domain must fail closed",
+    );
+
+    let left = [3, 5, 8, 13, 21, 34, 55, 89];
+    let right = [144, 233, 377, 610, 987, 1597, 2584, 4181];
+    let digest_pair = left.into_iter().chain(right).collect::<Vec<_>>();
+    let mut compression_input = [0; WIDTH];
+    compression_input.copy_from_slice(&digest_pair);
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "compression_round_stepped",
+            &digest_pair,
+            9,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(&reference_permutation(compression_input)[..8]);
+            expected
+        },
+        "staged Merkle compression differs from the independent Plonky3 model",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "binding_round_stepped",
+            &digest_pair,
+            9,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(reference_field_commitment(b"BV01", &digest_pair));
+            expected
+        },
+        "staged transcript binding differs from the independent Plonky3 model",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "squeeze_round_stepped",
+            &left,
+            5,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(&reference_field_commitment(b"BV01", &left)[..4]);
+            expected
+        },
+        "staged challenge squeeze differs from the independent Plonky3 model",
+    );
+
     for arguments in [
         [0, 0, 0, 0, 0, 0, 0],
         [1, 7, 11, 13, 17, 19, 23],
