@@ -359,6 +359,16 @@ impl ModuleAnalysisPass for AdtDefAnalysisPass {
         let mut cycle_participants = FxHashSet::<AdtDef<'db>>::default();
 
         for adt_ref in adts {
+            #[cfg(not(target_arch = "wasm32"))]
+            tracing::debug!(
+                kind = adt_ref.kind_name(),
+                name = adt_ref
+                    .name(db)
+                    .map(|name| name.data(db).as_str())
+                    .unwrap_or("<anonymous>"),
+                phase = "start",
+                "checking Fe ADT definition",
+            );
             diags.extend(adt_ref.diags(db).into_iter().map(|d| d.to_voucher()));
             let adt = lower_adt(db, adt_ref);
             if !cycle_participants.contains(&adt)

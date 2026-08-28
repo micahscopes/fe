@@ -46,6 +46,8 @@ impl AnalysisPassManager {
         for (name, pass) in self.module_passes.iter_mut() {
             #[cfg(not(target_arch = "wasm32"))]
             let t0 = std::time::Instant::now();
+            #[cfg(not(target_arch = "wasm32"))]
+            tracing::debug!(pass = name, phase = "start", "starting Fe analysis pass");
             diags.extend(pass.run_on_module(db, top_mod));
             #[cfg(not(target_arch = "wasm32"))]
             let elapsed = t0.elapsed();
@@ -69,6 +71,8 @@ impl AnalysisPassManager {
             for (name, pass) in self.module_passes.iter_mut() {
                 #[cfg(not(target_arch = "wasm32"))]
                 let t0 = std::time::Instant::now();
+                #[cfg(not(target_arch = "wasm32"))]
+                tracing::debug!(pass = name, phase = "start", "starting Fe analysis pass");
                 diags.extend(pass.run_on_module(db, module));
                 #[cfg(not(target_arch = "wasm32"))]
                 let elapsed = t0.elapsed();
