@@ -36,6 +36,8 @@ pub const fn fixed_length_sponge_permutations(_ payload_fields: usize) -> usize 
 }
 pub const BINDING_PERMUTATIONS: usize =
     fixed_length_sponge_permutations(DIGEST_FIELDS * 2)
+pub const DIGEST_SQUEEZE_PERMUTATIONS: usize =
+    fixed_length_sponge_permutations(DIGEST_FIELDS)
 pub const PERMUTATION_PHASES: u32 =
     (FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()
 
@@ -1972,11 +1974,40 @@ pub fn bind<D: Poseidon2FieldDomain>(
     ).value
 }
 
-/// Squeeze one quartic challenge from a full transcript digest.
-pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
-    if D::TAG >= BABY_BEAR_MODULUS {
-        return BabyBearExt4::zero()
+/// First workgroup checkpoint for the exact digest-squeeze message. The first
+/// six digest fields fill the prefixed rate block; `remaining` contains the
+/// final two fields absorbed before the second and final permutation.
+pub struct Poseidon2DigestSqueezePlacement {
+    pub permutation: Poseidon2FieldPermutation,
+    pub remaining: [BabyBear; 2],
+}
+impl core::marker::Copy for Poseidon2DigestSqueezePlacement {}
+
+pub fn begin_digest_squeeze_placement<D: Poseidon2FieldDomain>(
+    _ digest: Poseidon2Digest,
+) -> Poseidon2DigestSqueezePlacement {
+    let first = [
+        digest.values[0],
+        digest.values[1],
+        digest.values[2],
+        digest.values[3],
+        digest.values[4],
+        digest.values[5],
+    ]
+    let sponge = Poseidon2FieldSponge::begin<D>(
+        DIGEST_FIELDS.downcast_truncate(),
+    )
+    Poseidon2DigestSqueezePlacement {
+        permutation: sponge.begin_permutation<6>(ref first),
+        remaining: [digest.values[6], digest.values[7]],
     }
+}
+
+pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
+    // Keep the ordinary value interpretation loop-compact. The staged
+    // workgroup placement above is independently gated against this evaluator,
+    // rather than a placement cost paid by every scalar caller.
+    if D::TAG >= BABY_BEAR_MODULUS { return BabyBearExt4::zero() }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
     state[0] = BabyBear::from_u32(D::TAG)
     state[1] = BabyBear::from_u32(DIGEST_FIELDS.downcast_truncate())
@@ -1991,10 +2022,10 @@ pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyB
         }
         index = index + 1
     }
-    if rate != 0 {
-        state = permute16(input: state)
-    }
-    BabyBearExt4::from_coefficients([state[0], state[1], state[2], state[3]])
+    if rate != 0 { state = permute16(input: state) }
+    BabyBearExt4::from_coefficients(
+        [state[0], state[1], state[2], state[3]],
+    )
 }
 
 /// Squeeze one quartic challenge while binding an ordinary field index.

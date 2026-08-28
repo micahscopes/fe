@@ -48,3 +48,26 @@ mutation was detected and the rejection check accepted. Red means failure.
 The gallery is a later integration gate. Do not use it for routine proof-pass
 iteration because unrelated surfaces increase compile latency and WebGPU device
 pressure.
+
+The same acceptance flow is executable against either a local Chromium or the
+externally hosted hardware browser:
+
+```sh
+node demos/mandelbrot-proof-lab/mandelbrot_proof_lab.browser.mjs \
+  /workspace/scratch/mb2-mandelbrot-proof-lab-site
+```
+
+For the external browser, preserve its real origin while serving the immutable
+precompiled artifacts through request interception:
+
+```sh
+FE_BROWSER_URL=http://10.0.0.1:9222 \
+FE_BROWSER_ORIGIN=http://fe-proof.test \
+node demos/mandelbrot-proof-lab/mandelbrot_proof_lab.browser.mjs \
+  /workspace/scratch/mb2-mandelbrot-proof-lab-site
+```
+
+The harness contains no proof implementation. It checks the compiler-derived
+pass order and repetitions, drives the public `fe-surface` parameter interface,
+captures the rendered poster, and requires exact clean, mutation, and recovery
+status colors with no browser or device-loss errors.

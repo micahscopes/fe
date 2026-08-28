@@ -3,23 +3,26 @@
 //! The compute pass derives a four-row Q12 Mandelbrot witness through the
 //! production proof kernel, interprets one Conal factor vocabulary as four
 //! staged 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values
-//! with the production Poseidon2 sponge. It then interprets the production
+//! with the production Poseidon2 sponge. A staged two-permutation digest
+//! squeeze derives the FRI challenge under its own typed domain before the
+//! card interprets the production
 //! factor-2 FRI pair denotation as eight independent WebGPU invocations over a
 //! quartic BabyBear codeword assembled from those four columns. Inverse
 //! butterflies, coset lifting, forward butterflies, and the FRI fold are
 //! separate typed placements over disjoint lanes. Two commitments by sixteen
-//! field lanes advance through one bounded workgroup kernel. Fe dispatch types
-//! derive every ordered repetition count, so browser WebGPU implementations
-//! never receive one crash-shaped megashader. A Fe-authored mutation mode
+//! field lanes and the clean-root challenge squeeze advance through bounded
+//! workgroup kernels. Fe dispatch types derive every ordered repetition count,
+//! so browser WebGPU implementations never receive one crash-shaped
+//! megashader. A Fe-authored mutation mode
 //! changes one LDE value after the clean root is fixed and requires both the
 //! second commitment and its corresponding FRI pair to differ. The fragment
 //! pass visualizes the retained folded codeword and status words.
 //!
 //! This is a mixed placement checkpoint. The four independent LDE columns use
 //! the portable stage-grid interpretation of canonical Conal factor trees. The
-//! paired commitment states are a second workgroup-map interpretation. Witness
-//! generation and final comparison remain scalar passes. This is not yet a
-//! shared-memory butterfly interpreter, a transcript-derived FRI challenge, an
+//! paired commitment and challenge states are a second workgroup-map
+//! interpretation. Witness generation and final comparison remain scalar
+//! passes. This is not yet a shared-memory butterfly interpreter, an
 //! authenticated FRI receipt, or a recursive proof.
 
 use std::webgpu::{
@@ -40,8 +43,8 @@ use std::webgpu::{
 use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
-use mandelbrot_proof_baby_bear::fold_fri_pair_value_at_power_of_two
-use mandelbrot_proof_kernel::{EscapeAirWordStream, EscapesByQ12}
+use fri_baby_bear::fold_fri_pair_value_at_power_of_two
+use mandelbrot_q12_words::Q12EscapeAirWordStream as EscapeAirWordStream
 use canonical_words::CanonicalWords
 use parallel_ntt_webgpu::{
     finish_batched_stage_grid_into,
@@ -52,6 +55,7 @@ use parallel_ntt_webgpu::{
 }
 use parallel_structure::FactorTree
 use poseidon_baby_bear::{
+    DIGEST_SQUEEZE_PERMUTATIONS,
     ROUND_CONSTANT_COUNT,
     SPONGE_RATE,
     WIDTH as POSEIDON_LANES,
@@ -62,6 +66,7 @@ use poseidon_baby_bear::{
     Poseidon2ParameterStream,
     Poseidon2WorkgroupPlan,
     Poseidon2WorkgroupSchedule,
+    begin_digest_squeeze_placement,
     poseidon2_workgroup_destination,
     poseidon2_round_constant_index,
     poseidon2_workgroup_lane_with_round_constant,
@@ -97,12 +102,19 @@ const EXTENSION_WORDS: usize = 4
 const FRI_PAIRS: usize = LDE / 2
 const FRI_FOLD_WORDS: usize = FRI_PAIRS * EXTENSION_WORDS
 const FRI_STATUS_WORDS: usize = 2 * FRI_PAIRS + 3
+const FRI_CHALLENGE_WORDS: usize = 4
+const FRI_CHALLENGE_TAIL_WORDS: usize = 2
+const FRI_CHALLENGE_STORAGE_WORDS: usize = COMMIT_STATE_WORDS
+    + FRI_CHALLENGE_TAIL_WORDS
+    + FRI_CHALLENGE_WORDS
+    + 1
 const PROOF_WORDS: usize = TRACE_WORDS
     + LDE_WORDS
     + 2 * DIGEST_FIELDS
     + STATUS_WORDS
     + 2 * COMMIT_STATE_WORDS
     + ROUND_CONSTANT_COUNT
+    + FRI_CHALLENGE_STORAGE_WORDS
     + 2 * FRI_FOLD_WORDS
     + FRI_STATUS_WORDS
 
@@ -115,12 +127,22 @@ struct ProofTapeRegions {
     clean_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     observed_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     parameters: Region<ProofTapeRegions, [u32; ROUND_CONSTANT_COUNT]>,
+    fri_challenge: Region<ProofTapeRegions, [u32; FRI_CHALLENGE_STORAGE_WORDS]>,
     fri_clean: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
     fri_observed: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
     fri_status: Region<ProofTapeRegions, [u32; FRI_STATUS_WORDS]>,
 }
 impl core::marker::Copy for ProofTapeRegions {}
 derive RegionSchema for ProofTapeRegions using RegionSchemaProvider
+
+struct FriChallengeRegions {
+    state: Region<FriChallengeRegions, [u32; COMMIT_STATE_WORDS]>,
+    tail: Region<FriChallengeRegions, [u32; FRI_CHALLENGE_TAIL_WORDS]>,
+    value: Region<FriChallengeRegions, [u32; FRI_CHALLENGE_WORDS]>,
+    valid: Region<FriChallengeRegions, u32>,
+}
+impl core::marker::Copy for FriChallengeRegions {}
+derive RegionSchema for FriChallengeRegions using RegionSchemaProvider
 
 struct TraceRegions {
     step: Region<TraceRegions, [u32; TRACE]>,
@@ -166,6 +188,10 @@ derive RegionSchema for FriStatusRegions using RegionSchemaProvider
 
 const fn proof_tape_regions() -> ProofTapeRegions {
     <ProofTapeRegions as RegionSchema>::regions()
+}
+
+const fn fri_challenge_regions() -> FriChallengeRegions {
+    <FriChallengeRegions as RegionSchema>::regions()
 }
 
 const fn trace_regions() -> TraceRegions {
@@ -258,6 +284,10 @@ static_assert(FRI_PAIR_LANES == FRI_PAIRS)
 static_assert(FRI_VARIANT_LANES == 2)
 static_assert(FRI_WORKGROUP_LANES == 16)
 static_assert(<ProofTapeRegions as RegionSchema>::WORDS == PROOF_WORDS.downcast_truncate())
+static_assert(
+    <FriChallengeRegions as RegionSchema>::WORDS
+        == FRI_CHALLENGE_STORAGE_WORDS.downcast_truncate()
+)
 static_assert(<TraceRegions as RegionSchema>::WORDS == TRACE_WORDS.downcast_truncate())
 static_assert(<StatusRegions as RegionSchema>::WORDS == STATUS_WORDS.downcast_truncate())
 static_assert(
@@ -304,9 +334,31 @@ static_assert(SPONGE_RATE == 8)
 static_assert(TAMPER_PRECEDING_BLOCK == 1)
 static_assert(TAMPER_NEXT_BLOCK_FIELD == 3)
 
+const FRI_CHALLENGE_STEPS: usize = DIGEST_SQUEEZE_PERMUTATIONS
+    * <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::STEPS
+const FRI_CHALLENGE_WORKGROUP_LANES: usize =
+    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::LANES
+const FRI_CHALLENGE_DONE_BLOCK: usize = DIGEST_SQUEEZE_PERMUTATIONS
+static_assert(DIGEST_SQUEEZE_PERMUTATIONS == 2)
+static_assert(FRI_CHALLENGE_STEPS == 88)
+static_assert(FRI_CHALLENGE_WORKGROUP_LANES == 16)
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
 struct MandelbrotGpuLdeV1 {}
 impl Poseidon2FieldDomain for MandelbrotGpuLdeV1 {
-    const TAG: u32 = 1296516172
+    const TAG: u32 = protocol_tag("MGDL")
+}
+
+struct MandelbrotGpuFriChallengeV1 {}
+impl Poseidon2FieldDomain for MandelbrotGpuFriChallengeV1 {
+    const TAG: u32 = protocol_tag("MGFC")
 }
 
 struct ProofParams { tamper: Param, res: Param }
@@ -411,25 +463,26 @@ fn commitment_state_valid(
     let cursor = subregion(state, layout.cursor)
     let block = subregion(state, layout.block)
     let valid = subregion(state, layout.valid)
+    let mut result: u32 = 1
     let mut lane: usize = 0
     while lane < POSEIDON_LANES {
         let lane_word: u32 = lane.downcast_truncate()
         let index: RegionIndex<[u32; POSEIDON_LANES]> =
             cyclic_region_index(lane_word)
         if proof_load_indexed(tape, cursor, index) != 0 {
-            return false
+            result = 0
         }
         if proof_load_indexed(tape, block, index)
             != DONE_BLOCK.downcast_truncate()
         {
-            return false
+            result = 0
         }
         if proof_load_indexed(tape, valid, index) != 1 {
-            return false
+            result = 0
         }
         lane = lane + 1
     }
-    true
+    result == 1
 }
 
 #[inline(always)]
@@ -497,35 +550,34 @@ actor MandelbrotProofGpuCheckpoint uses (
         // the four stream positions so the call-free SPIR-V legality pass can
         // inline the production recurrence. No witness row enters from the
         // host and no recurrence is duplicated here.
-        let claim = EscapesByQ12::new(3072, 0, 4)
-        let mut stream = EscapeAirWordStream::new(claim)
+        let mut stream = EscapeAirWordStream::new(3072, 0, 4)
 
-        let row0 = stream.current_proof_row()
-        proof_store(self.proof, trace_step, 0, row0.air.step)
-        proof_store(self.proof, trace_magnitude, 0, row0.air.magnitude)
-        proof_store(self.proof, trace_active, 0, row0.active)
-        proof_store(self.proof, trace_terminal, 0, row0.terminal)
-
-        stream.advance()
-        let row1 = stream.current_proof_row()
-        proof_store(self.proof, trace_step, 1, row1.air.step)
-        proof_store(self.proof, trace_magnitude, 1, row1.air.magnitude)
-        proof_store(self.proof, trace_active, 1, row1.active)
-        proof_store(self.proof, trace_terminal, 1, row1.terminal)
+        let row0 = stream.current_proof_words()
+        proof_store(self.proof, trace_step, 0, row0.0)
+        proof_store(self.proof, trace_magnitude, 0, row0.1)
+        proof_store(self.proof, trace_active, 0, row0.2)
+        proof_store(self.proof, trace_terminal, 0, row0.3)
 
         stream.advance()
-        let row2 = stream.current_proof_row()
-        proof_store(self.proof, trace_step, 2, row2.air.step)
-        proof_store(self.proof, trace_magnitude, 2, row2.air.magnitude)
-        proof_store(self.proof, trace_active, 2, row2.active)
-        proof_store(self.proof, trace_terminal, 2, row2.terminal)
+        let row1 = stream.current_proof_words()
+        proof_store(self.proof, trace_step, 1, row1.0)
+        proof_store(self.proof, trace_magnitude, 1, row1.1)
+        proof_store(self.proof, trace_active, 1, row1.2)
+        proof_store(self.proof, trace_terminal, 1, row1.3)
 
         stream.advance()
-        let row3 = stream.current_proof_row()
-        proof_store(self.proof, trace_step, 3, row3.air.step)
-        proof_store(self.proof, trace_magnitude, 3, row3.air.magnitude)
-        proof_store(self.proof, trace_active, 3, row3.active)
-        proof_store(self.proof, trace_terminal, 3, row3.terminal)
+        let row2 = stream.current_proof_words()
+        proof_store(self.proof, trace_step, 2, row2.0)
+        proof_store(self.proof, trace_magnitude, 2, row2.1)
+        proof_store(self.proof, trace_active, 2, row2.2)
+        proof_store(self.proof, trace_terminal, 2, row2.3)
+
+        stream.advance()
+        let row3 = stream.current_proof_words()
+        proof_store(self.proof, trace_step, 3, row3.0)
+        proof_store(self.proof, trace_magnitude, 3, row3.1)
+        proof_store(self.proof, trace_active, 3, row3.2)
+        proof_store(self.proof, trace_terminal, 3, row3.3)
 
         let trace_valid = stream.is_valid()
             && stream.is_terminal()
@@ -936,10 +988,228 @@ actor MandelbrotProofGpuCheckpoint uses (
         )
     }
 
+    fn initialize_fri_challenge(self)
+        uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        let regions = proof_tape_regions()
+        let challenge_layout = fri_challenge_regions()
+        let challenge_state = subregion(
+            regions.fri_challenge,
+            challenge_layout.state,
+        )
+        let challenge_tail = subregion(
+            regions.fri_challenge,
+            challenge_layout.tail,
+        )
+        let challenge_valid = subregion(
+            regions.fri_challenge,
+            challenge_layout.valid,
+        )
+        let root = load_digest(tape: self.proof, region: regions.clean_root)
+        let placement = begin_digest_squeeze_placement<
+            MandelbrotGpuFriChallengeV1,
+        >(root)
+        store_initial_commitment(
+            tape: self.proof,
+            state: challenge_state,
+            permutation: ref placement.permutation,
+        )
+        proof_store(
+            self.proof,
+            challenge_tail,
+            0,
+            placement.remaining[0].to_u32(),
+        )
+        proof_store(
+            self.proof,
+            challenge_tail,
+            1,
+            placement.remaining[1].to_u32(),
+        )
+        let mut input_valid: u32 = if placement.permutation.is_valid() {
+            1
+        } else {
+            0
+        }
+        if !commitment_state_valid(
+            tape: self.proof,
+            state: regions.clean_commitment,
+        ) {
+            input_valid = 0
+        }
+        proof_store(
+            self.proof,
+            challenge_valid,
+            0,
+            input_valid,
+        )
+    }
+
+    fn advance_fri_challenge(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<FRI_CHALLENGE_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, FRI_CHALLENGE_STEPS>,
+            >
+        )
+    {
+        let regions = proof_tape_regions()
+        let challenge_layout = fri_challenge_regions()
+        let challenge_state = subregion(
+            regions.fri_challenge,
+            challenge_layout.state,
+        )
+        let challenge_tail = subregion(
+            regions.fri_challenge,
+            challenge_layout.tail,
+        )
+        let challenge_value = subregion(
+            regions.fri_challenge,
+            challenge_layout.value,
+        )
+        let challenge_valid = subregion(
+            regions.fri_challenge,
+            challenge_layout.valid,
+        )
+        let state_layout = commitment_regions()
+        let field_lane = invocation.local.x
+        let field_index: RegionIndex<[u32; POSEIDON_LANES]> =
+            cyclic_region_index(field_lane)
+        let state = challenge_state
+        let primary_region = subregion(state, state_layout.primary)
+        let secondary_region = subregion(state, state_layout.secondary)
+        let cursor_region = subregion(state, state_layout.cursor)
+        let block_region = subregion(state, state_layout.block)
+        let valid_region = subregion(state, state_layout.valid)
+        let cursor = proof_load_indexed(self.proof, cursor_region, field_index)
+        let block = proof_load_indexed(self.proof, block_region, field_index)
+        let mut valid = proof_load_indexed(self.proof, valid_region, field_index)
+        let primary = load_commitment_buffer(
+            tape: self.proof,
+            state: state,
+            buffer: state_layout.primary,
+        )
+        let secondary = load_commitment_buffer(
+            tape: self.proof,
+            state: state,
+            buffer: state_layout.secondary,
+        )
+        let mut checked: usize = 0
+        while checked < POSEIDON_LANES {
+            if primary[checked] >= BABY_BEAR_MODULUS { valid = 0 }
+            if secondary[checked] >= BABY_BEAR_MODULUS { valid = 0 }
+            checked = checked + 1
+        }
+
+        let transition =
+            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+        if cursor < transition {
+            let destination = poseidon2_workgroup_destination(cursor)
+            let output = if destination == 0 {
+                primary_region
+            } else {
+                secondary_region
+            }
+            let mut round_constant: u32 = 0
+            if cursor != 0 && ((cursor - 1) & 1) == 0 {
+                let phase = (cursor - 1) / 2
+                let index = poseidon2_round_constant_index(phase, field_lane)
+                round_constant = proof_load(self.proof, regions.parameters, index)
+            }
+            let value = if valid == 1 {
+                poseidon2_workgroup_lane_with_round_constant(
+                    ref primary,
+                    ref secondary,
+                    cursor,
+                    field_lane,
+                    round_constant,
+                )
+            } else {
+                0
+            }
+            proof_store_indexed(self.proof, output, field_index, value)
+            proof_store_indexed(self.proof, cursor_region, field_index, cursor + 1)
+            proof_store_indexed(self.proof, block_region, field_index, block)
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
+        } else if cursor == transition && block == 0 {
+            let mut value = secondary[field_lane as usize]
+            if field_lane < FRI_CHALLENGE_TAIL_WORDS.downcast_truncate() {
+                value = BabyBear::from_u32(proof_load(
+                    self.proof,
+                    challenge_tail,
+                    field_lane,
+                )).to_montgomery_word()
+            }
+            proof_store_indexed(
+                self.proof,
+                primary_region,
+                field_index,
+                if valid == 1 { value } else { 0 },
+            )
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(self.proof, block_region, field_index, 1)
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
+        } else if cursor == transition && block == 1 {
+            if field_lane < FRI_CHALLENGE_WORDS.downcast_truncate() {
+                proof_store(
+                    self.proof,
+                    challenge_value,
+                    field_lane,
+                    BabyBear::from_montgomery_word(
+                        secondary[field_lane as usize],
+                    ).to_u32(),
+                )
+            }
+            proof_store_indexed(
+                self.proof,
+                primary_region,
+                field_index,
+                secondary[field_lane as usize],
+            )
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(
+                self.proof,
+                block_region,
+                field_index,
+                FRI_CHALLENGE_DONE_BLOCK.downcast_truncate(),
+            )
+            proof_store_indexed(self.proof, valid_region, field_index, valid)
+            if field_lane == 0 {
+                let input_valid = proof_load(
+                    self.proof,
+                    challenge_valid,
+                    0,
+                )
+                proof_store(
+                    self.proof,
+                    challenge_valid,
+                    0,
+                    if input_valid == 1 && valid == 1 { 1 } else { 0 },
+                )
+            }
+        } else {
+            proof_store_indexed(self.proof, cursor_region, field_index, 0)
+            proof_store_indexed(self.proof, block_region, field_index, 0)
+            proof_store_indexed(self.proof, valid_region, field_index, 0)
+            if field_lane == 0 {
+                proof_store(self.proof, challenge_valid, 0, 0)
+            }
+        }
+    }
+
     fn fold_fri_pairs(self, invocation: ComputeInvocation)
         uses (Prove<Threads<FRI_WORKGROUP_LANES, 1, 1>, Once<1, 1, 1>>)
     {
         let regions = proof_tape_regions()
+        let challenge_layout = fri_challenge_regions()
+        let challenge_value = subregion(
+            regions.fri_challenge,
+            challenge_layout.value,
+        )
+        let challenge_valid_region = subregion(
+            regions.fri_challenge,
+            challenge_layout.valid,
+        )
         let fri_layout = fri_status_regions()
         let pairs: u32 = FRI_PAIRS.downcast_truncate()
         let lane = invocation.local.x
@@ -986,11 +1256,16 @@ actor MandelbrotProofGpuCheckpoint uses (
             positive.coefficient_3(),
         )
         let challenge = BabyBearExt4::from_coordinate_words(
-            proof_load(self.proof, regions.clean_root, 0),
-            proof_load(self.proof, regions.clean_root, 1),
-            proof_load(self.proof, regions.clean_root, 2),
-            proof_load(self.proof, regions.clean_root, 3),
+            proof_load(self.proof, challenge_value, 0),
+            proof_load(self.proof, challenge_value, 1),
+            proof_load(self.proof, challenge_value, 2),
+            proof_load(self.proof, challenge_value, 3),
         )
+        let challenge_valid = proof_load(
+            self.proof,
+            challenge_valid_region,
+            0,
+        ) == 1
         let shift = BabyBear::from_u32(7)
         let folded = fold_fri_pair_value_at_power_of_two<16>(
             observed_positive,
@@ -1019,7 +1294,11 @@ actor MandelbrotProofGpuCheckpoint uses (
             self.proof,
             validity,
             pair,
-            if !shift.is_zero() && pair < pairs { 1 } else { 0 },
+            if challenge_valid && !shift.is_zero() && pair < pairs {
+                1
+            } else {
+                0
+            },
         )
     }
 

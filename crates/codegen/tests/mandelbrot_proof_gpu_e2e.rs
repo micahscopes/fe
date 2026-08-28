@@ -44,7 +44,11 @@ const DONE_BLOCK: u32 = 9;
 const ROUND_CONSTANT_COUNT: usize = 8 * POSEIDON_WIDTH + 13;
 const PARAMETER_START: usize = 267;
 const PARAMETER_END: usize = PARAMETER_START + ROUND_CONSTANT_COUNT;
-const FRI_CLEAN: usize = PARAMETER_END;
+const FRI_CHALLENGE_STATE: usize = PARAMETER_END;
+const FRI_CHALLENGE_TAIL: usize = FRI_CHALLENGE_STATE + 80;
+const FRI_CHALLENGE: usize = FRI_CHALLENGE_TAIL + 2;
+const FRI_CHALLENGE_VALID: usize = FRI_CHALLENGE + 4;
+const FRI_CLEAN: usize = FRI_CHALLENGE_VALID + 1;
 const FRI_FOLD_WORDS: usize = 32;
 const FRI_OBSERVED: usize = FRI_CLEAN + FRI_FOLD_WORDS;
 const FRI_STATUS: usize = FRI_OBSERVED + FRI_FOLD_WORDS;
@@ -55,9 +59,10 @@ const FRI_CORRECT: usize = FRI_EQUAL + 1;
 const PROOF_WORDS: usize = FRI_CORRECT + 2;
 const TAMPER_LDE_FIELD: usize = 17;
 const DOMAIN: [u8; 4] = *b"MGDL";
-const COMPUTE_PASSES: usize = 11;
+const COMPUTE_PASSES: usize = 13;
 const COMMITMENT_PASS: usize = 7;
-const FRI_PASS: usize = 9;
+const FRI_CHALLENGE_PASS: usize = 10;
+const FRI_PASS: usize = 11;
 const EXT_NONRESIDUE: u32 = 11;
 
 fn repo_root() -> PathBuf {
@@ -584,8 +589,8 @@ fn reference_montgomery_parameters() -> Vec<u32> {
         .collect()
 }
 
-fn reference_commitment(fields: &[u32]) -> [u32; 8] {
-    let mut message = vec![u32::from_be_bytes(DOMAIN), fields.len() as u32];
+fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
+    let mut message = vec![u32::from_be_bytes(*tag), fields.len() as u32];
     message.extend_from_slice(fields);
     let mut state = [0u32; POSEIDON_WIDTH];
     for block in message.chunks(8) {
@@ -595,6 +600,10 @@ fn reference_commitment(fields: &[u32]) -> [u32; 8] {
     state[..8].try_into().expect("eight digest fields")
 }
 
+fn reference_commitment(fields: &[u32]) -> [u32; 8] {
+    reference_field_commitment(&DOMAIN, fields)
+}
+
 fn reference_fri_fold(fields: &[u32], clean_root: &[u32; 8], tampered: bool) -> Vec<u32> {
     let maximal_root = pow_mod(31, 15);
     let root = pow_mod(
@@ -602,7 +611,8 @@ fn reference_fri_fold(fields: &[u32], clean_root: &[u32; 8], tampered: bool) -> 
         1 << (TWO_ADICITY - LDE_ROWS.ilog2()),
     );
     let inverse_two = pow_mod(2, MODULUS - 2);
-    let challenge = Ext4(clean_root[..4].try_into().expect("quartic challenge"));
+    let challenge_digest = reference_field_commitment(b"MGFC", clean_root);
+    let challenge = Ext4(challenge_digest[..4].try_into().expect("quartic challenge"));
     let mut output = Vec::with_capacity(FRI_FOLD_WORDS);
     for pair in 0..LDE_ROWS / 2 {
         let mut positive = Ext4(std::array::from_fn(|column| {
@@ -675,6 +685,32 @@ fn assert_receipt(receipt: &ExecutionReceipt, tampered: bool, expected_lde: &[u3
         reference_montgomery_parameters(),
         "GPU parameter initialization must match Plonky3 exactly"
     );
+    let expected_challenge = reference_field_commitment(b"MGFC", &clean);
+    assert_eq!(
+        &receipt.proof[FRI_CHALLENGE_TAIL..FRI_CHALLENGE_TAIL + 2],
+        &clean[6..8],
+    );
+    assert_eq!(
+        &receipt.proof[FRI_CHALLENGE..FRI_CHALLENGE + 4],
+        &expected_challenge[..4],
+        "GPU FRI challenge must match the independent typed digest squeeze",
+    );
+    assert_eq!(receipt.proof[FRI_CHALLENGE_VALID], 1);
+    assert_eq!(
+        &receipt.proof[FRI_CHALLENGE_STATE + COMMIT_CURSOR
+            ..FRI_CHALLENGE_STATE + COMMIT_CURSOR + POSEIDON_WIDTH],
+        &[0; POSEIDON_WIDTH],
+    );
+    assert_eq!(
+        &receipt.proof[FRI_CHALLENGE_STATE + COMMIT_BLOCK
+            ..FRI_CHALLENGE_STATE + COMMIT_BLOCK + POSEIDON_WIDTH],
+        &[2; POSEIDON_WIDTH],
+    );
+    assert_eq!(
+        &receipt.proof[FRI_CHALLENGE_STATE + COMMIT_VALID
+            ..FRI_CHALLENGE_STATE + COMMIT_VALID + POSEIDON_WIDTH],
+        &[1; POSEIDON_WIDTH],
+    );
     let expected_clean_fri = reference_fri_fold(expected_lde, &clean, false);
     let expected_observed_fri = reference_fri_fold(expected_lde, &clean, tampered);
     assert_eq!(
@@ -741,7 +777,13 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
         bundle.manifest.passes[FRI_PASS].layout.workgroup_size,
         [16, 1, 1]
     );
-
+    assert_eq!(bundle.manifest.passes[FRI_CHALLENGE_PASS].repeat, 88);
+    assert_eq!(
+        bundle.manifest.passes[FRI_CHALLENGE_PASS]
+            .layout
+            .workgroup_size,
+        [16, 1, 1]
+    );
     let Some((adapter, device, queue)) = request_browser_profile_device() else {
         return;
     };

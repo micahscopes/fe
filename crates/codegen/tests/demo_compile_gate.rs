@@ -1384,7 +1384,7 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             .map(|resource| (resource.name.as_str(), resource.length))
             .collect::<Vec<_>>(),
         [
-            ("proof", 491),
+            ("proof", 578),
             ("lde_inverse_values", 16),
             ("lde_inverse_progress", 8),
             ("lde_values", 64),
@@ -1392,7 +1392,7 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             ("lde_coset_valid", 4),
         ]
     );
-    assert_eq!(bundle.manifest.passes.len(), 12);
+    assert_eq!(bundle.manifest.passes.len(), 14);
     assert_eq!(
         bundle
             .manifest
@@ -1410,6 +1410,8 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
             "initialize_commitments",
             "advance_commitment_rounds",
             "finalize_commitments",
+            "initialize_fri_challenge",
+            "advance_fri_challenge",
             "fold_fri_pairs",
             "finalize_fri_fold",
             "display",
@@ -1461,6 +1463,7 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
         "RepeatedDispatch as Repeat",
         "Poseidon2WorkgroupSchedule",
         "Poseidon2ParameterStream",
+        "begin_digest_squeeze_placement",
         "poseidon2_workgroup_lane_with_round_constant",
         "Poseidon2FieldSponge",
         "fold_fri_pair_value_at_power_of_two",
@@ -1488,7 +1491,11 @@ fn mandelbrot_proof_gpu_checkpoint_compiles_from_shared_fe_math() {
     assert_eq!(commitment.layout.workgroup_size, [32, 1, 1]);
     assert_eq!(commitment.dispatch, Some([1, 1, 1]));
     assert_eq!(commitment.repeat, 396);
-    let fri = &bundle.manifest.passes[9];
+    let challenge = &bundle.manifest.passes[10];
+    assert_eq!(challenge.layout.workgroup_size, [16, 1, 1]);
+    assert_eq!(challenge.dispatch, Some([1, 1, 1]));
+    assert_eq!(challenge.repeat, 88);
+    let fri = &bundle.manifest.passes[11];
     assert_eq!(fri.layout.workgroup_size, [16, 1, 1]);
     assert_eq!(fri.dispatch, Some([1, 1, 1]));
     assert_eq!(fri.repeat, 1);
