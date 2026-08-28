@@ -453,7 +453,17 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
 
     pub(super) fn lower_expr(&mut self, expr: ExprId) -> SValueId {
         let Partial::Present(expr_data) = expr.data(self.db, self.body) else {
-            panic!("cannot lower absent expression")
+            let owner_name = match self.template_owner {
+                BodyOwner::Func(func) => match func.name(self.db) {
+                    Partial::Present(name) => name.data(self.db).as_str(),
+                    Partial::Absent => "<fn>",
+                },
+                _ => "<non-function>",
+            };
+            panic!(
+                "cannot lower absent expression {expr:?} in {owner_name} ({owner:?})",
+                owner = self.template_owner,
+            )
         };
         let origin = SemOrigin::Expr(expr);
         let ty = self.expr_ty(expr);

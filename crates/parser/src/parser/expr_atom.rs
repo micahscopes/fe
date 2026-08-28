@@ -6,7 +6,9 @@ use unwrap_infallible::UnwrapInfallible;
 use super::token_stream::LexicalToken;
 use super::{
     ErrProof, Parser, Recovery, define_scope,
-    expr::{parse_condition_expr, parse_expr, parse_expr_no_struct},
+    expr::{
+        parse_condition_expr, parse_continuation_expr, parse_expr, parse_expr_no_struct,
+    },
     func::{FuncDefScope, FuncScope},
     item::ItemScope,
     parse_list, parse_pat,
@@ -593,6 +595,7 @@ impl super::Parse for RecordFieldScope {
         ) {
             parser.bump_if(SyntaxKind::Ident);
             parser.bump_expected(SyntaxKind::Colon);
+            return parse_continuation_expr(parser);
         }
 
         parse_expr(parser)
