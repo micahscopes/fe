@@ -140,6 +140,19 @@ existing Definition of done, not a second campaign checklist:
   schedule, all 40 progress words, four coset predicates, trap freedom, and all
   64 LDE values against the independent direct DFT. The complete graph retains
   its independent Plonky3 Poseidon gate and clean/tampered mutation behavior.
+  Commit `53aa061ea` carries the first FRI layer through the same exactness
+  discipline. The clean LDE commitment is absorbed under the typed `MGFC`
+  domain by a two-permutation, 16-lane repeated-dispatch placement. The
+  resulting quartic challenge drives eight independent factor-2 folds through
+  the reusable `fri_baby_bear` denotation. One 14-pass actor compiles to 836,285
+  total WGSL bytes in 61.76 seconds. On llvmpipe, pipeline creation took 830.72
+  ms, the clean graph took 976.98 ms, and a warm tampered graph took 17.41 ms.
+  An independent Plonky3 model checks every challenge and fold field. A focused
+  Chromium harness then executed the same immutable bundle on SwiftShader,
+  observed all-clean blue bands, exact pink FRI and overall bands after the
+  Fe-authored mutation, and clean recovery without reload, console error, or
+  device loss. The external Radeon Chrome endpoint was unavailable during this
+  run, so hardware parity for this new slice remains open.
   Larger production domains, fused shared-memory or subgroup placements, and
   real Chrome hardware parity for this staged path remain open, so G-NTT stays
   partial.
@@ -153,9 +166,11 @@ existing Definition of done, not a second campaign checklist:
   layout against an independent Wasm decoder, reject direct field and private-
   constructor forging plus cross-payload confusion, validate emitted
   browser-profile WGSL, and execute typed stores on llvmpipe without allowing
-  an out-of-region write to reach the next region. The production Mandelbrot
-  proof tape still uses application constants, so migration and a full
-  receipt-wide independent decoder remain before this gate can close.
+  an out-of-region write to reach the next region. The production WebGPU toy
+  tape now uses one derived `ProofTapeRegions` schema, including a nested
+  `FriChallengeRegions` schema, and proves its total width at compile time.
+  The full security receipt still needs migration plus an independent
+  receipt-wide decoder before this gate can close.
 - [x] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
   The first four-query process-isolated exact gate compiled a 23,636,877-byte
@@ -2432,6 +2447,13 @@ existing Definition of done, not a second campaign checklist:
   workgroup/shared-memory proof transform has executed. The remaining work is
   production-sized placement and device-tuned interpreters over the shared
   plan, not a fresh NTT implementation.
+  Commit `53aa061ea` adds the transcript-derived `MGFC` challenge and first
+  factor-2 FRI layer without adding a second prover. The scalar and workgroup
+  placements consume the same digest-squeeze and FRI-pair denotations. The
+  exact 14-pass graph now executes on llvmpipe and in local Chromium
+  SwiftShader, including clean, tampered, and recovered visual receipts. The
+  next bounded slice is the complete 16-to-1 fold chain with an authenticated
+  terminal value, followed by compact production-query placement.
 - [ ] Build and run the complete recursive proof experience in the canonical
   gallery after the BabyBear prover exists. The Fe-authored component lets a
   user click a private high-precision Mandelbrot parameter, optionally drag to
