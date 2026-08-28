@@ -5,6 +5,8 @@ version = "0.1.0"
 [dependencies]
 mandelbrot_proof_recursive_verifier_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-verifier-air-baby-bear"
 mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"
+mandelbrot_proof_fixed_air_receipt_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-receipt-baby-bear"
+core = "../../../../../ingots/core"
 merkle_core = "../../../../../ingots/merkle_core"
 poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
 precision = "../../../../../demos/sketches/precision"

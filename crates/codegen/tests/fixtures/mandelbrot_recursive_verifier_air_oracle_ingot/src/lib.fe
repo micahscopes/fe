@@ -7,9 +7,12 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS,
     PRODUCTION_AIR_MULTIPATH_MAX_HASHES,
     PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS,
+    PRODUCTION_BASE_OPENING_MAX_PRODUCTS,
     PRODUCTION_BASE_LEAF_PRODUCTS,
+    PRODUCTION_INTERACTION_OPENING_MAX_PRODUCTS,
     PRODUCTION_INTERACTION_LEAF_PRODUCTS,
     PRODUCTION_LEAF_ASSERTIONS,
+    PRODUCTION_OPENING_MAX_ASSERTIONS,
     ProductionBaseLdeLeafRelationInputs,
     ProductionInteractionLdeLeafRelationInputs,
     RECEIPT_HEADER_ASSERTIONS,
@@ -27,13 +30,32 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     merkle_multi_path_relation_plan,
     merkle_multi_path_relation_plan_in_browser,
     production_base_lde_leaf_relation_plan,
+    production_base_lde_leaf_commitment_relation_plan,
+    production_base_lde_multi_opening_relation_plan,
     production_interaction_lde_leaf_relation_plan,
+    production_interaction_lde_leaf_commitment_relation_plan,
+    production_interaction_lde_multi_opening_relation_plan,
     receipt_header_relation_residuals,
     receipt_header_relation_witness,
 }
+use core::{BrowserPtr, alloc_browser_object}
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+    SparseBaseLdeDigest,
+    SparseBaseLdeMultiOpening,
+    SparseInteractionLdeDigest,
+    SparseInteractionLdeMultiOpening,
+}
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    PRODUCTION_LDE_LENGTH,
+    PRODUCTION_LIMBS,
+    PRODUCTION_SECURITY_AIR_MAX_LEAVES,
+    PRODUCTION_SECURITY_AIR_MAX_SIBLINGS,
+    PRODUCTION_TRACE_LENGTH,
+}
 use merkle_core::{MerkleMultiPath, MerkleRoot, write_multi_path_and_root_from_leaves}
-use mandelbrot_proof_fixed_air_baby_bear::{SPARSE_BASE_AIR_FIELDS, SPARSE_INTERACTION_AIR_FIELDS}
-use poseidon_baby_bear::Poseidon2Digest
+use poseidon_baby_bear::{Poseidon2Digest, compress}
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
 use quadratic_plan::{
@@ -53,11 +75,411 @@ const MULTI_MAX_SIBLINGS: usize = 16
 const MULTI_MAX_PRODUCTS: usize = merkle_multi_path_max_products(MULTI_MAX_LEAVES, PATH_DEPTH)
 const MULTI_MAX_ASSERTIONS: usize = merkle_multi_path_max_assertions(MULTI_MAX_LEAVES, PATH_DEPTH)
 
+type ProductionBaseOpening = SparseBaseLdeMultiOpening<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+    },
+>
+
+type ProductionInteractionOpening = SparseInteractionLdeMultiOpening<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+    },
+>
+
+type ProductionBaseRoot = SparseBaseLdeDigest<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+>
+
+type ProductionInteractionRoot = SparseInteractionLdeDigest<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+>
+
+struct ProductionBaseOpeningCase { opening: ProductionBaseOpening, root: ProductionBaseRoot }
+
+struct ProductionInteractionOpeningCase {
+    opening: ProductionInteractionOpening,
+    root: ProductionInteractionRoot,
+}
+
+fn production_sibling(_ seed: u32, _ level: u32) -> Poseidon2Digest {
+    let stride = level * 97
+    digest(
+        seed + stride + 1,
+        seed + stride + 3,
+        seed + stride + 5,
+        seed + stride + 7,
+        seed + stride + 11,
+        seed + stride + 13,
+        seed + stride + 17,
+        seed + stride + 19,
+    )
+}
+
+fn production_base_root_for_case(_ seed: u32) -> Poseidon2Digest {
+    let leaf = production_base_lde_leaf_commitment_relation_plan(
+        BabyBear::zero(),
+        base_leaf_values(seed),
+        QuadraticRelationValueInterpreter::new(),
+    )
+    let mut node = leaf.commitment
+    let mut level: u32 = 0
+    while level < 13 {
+        node = compress(node, production_sibling(seed + 1000, level))
+        level = level + 1
+    }
+    node
+}
+
+fn production_interaction_base_root(_ seed: u32) -> Poseidon2Digest {
+    production_sibling(seed + 2000, 13)
+}
+
+fn production_interaction_root_for_case(_ seed: u32) -> Poseidon2Digest {
+    let leaf = production_interaction_lde_leaf_commitment_relation_plan(
+        BabyBear::zero(),
+        production_interaction_base_root(seed),
+        interaction_leaf_values(seed),
+        QuadraticRelationValueInterpreter::new(),
+    )
+    let mut node = leaf.commitment
+    let mut level: u32 = 0
+    while level < 13 {
+        node = compress(node, production_sibling(seed + 3000, level))
+        level = level + 1
+    }
+    node
+}
+
+fn initialize_production_base_opening_case(_ seed: u32, _ mutation: u32)
+uses (case: mut ProductionBaseOpeningCase)
+{
+    case.opening.valid = true
+    let mut leaf: usize = 0
+    while leaf < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        let mut field: usize = 0
+        while field < SPARSE_BASE_AIR_FIELDS {
+            case.opening.values[leaf][field] = BabyBear::zero()
+            field = field + 1
+        }
+        case.opening.path.leaf_indices[leaf] = 0
+        leaf = leaf + 1
+    }
+    let values = base_leaf_values(seed)
+    let mut field: usize = 0
+    while field < SPARSE_BASE_AIR_FIELDS {
+        case.opening.values[0][field] = values[field]
+        field = field + 1
+    }
+    case.opening.path.valid = true
+    case.opening.path.leaf_count = 1
+    case.opening.path.sibling_count = 13
+    let mut sibling: usize = 0
+    while sibling < PRODUCTION_SECURITY_AIR_MAX_SIBLINGS {
+        case.opening.path.siblings[sibling] = Poseidon2Digest::zero()
+        sibling = sibling + 1
+    }
+    sibling = 0
+    while sibling < 13 {
+        case.opening.path.siblings[sibling] = production_sibling(
+            seed + 1000,
+            sibling.downcast_truncate(),
+        )
+        sibling = sibling + 1
+    }
+    case.root.valid = true
+    case.root.value = production_base_root_for_case(seed)
+
+    if mutation == 1 {
+        case.root.value = changed_digest(case.root.value)
+    } else if mutation == 2 {
+        case.opening.values[0][0] = case.opening.values[0][0] + BabyBear::one()
+    } else if mutation == 3 {
+        case.opening.path.siblings[0] = changed_digest(case.opening.path.siblings[0])
+    } else if mutation == 4 {
+        case.opening.values[1][0] = BabyBear::one()
+    } else if mutation == 5 {
+        case.opening.valid = false
+    } else if mutation == 6 {
+        case.opening.path.valid = false
+    } else if mutation == 7 {
+        case.opening.path.leaf_indices[0] = 1
+    } else if mutation == 8 {
+        case.root.valid = false
+    } else if mutation == 9 {
+        case.opening.path.sibling_count = 12
+    } else if mutation == 10 {
+        case.opening.path.leaf_count = 0
+    } else if mutation == 11 {
+        case.opening.path.leaf_indices[1] = 1
+    } else if mutation == 12 {
+        case.opening.path.siblings[13] = production_sibling(seed, 31)
+    }
+}
+
+fn initialize_production_interaction_opening_case(_ seed: u32, _ mutation: u32)
+uses (case: mut ProductionInteractionOpeningCase)
+{
+    case.opening.valid = true
+    let mut leaf: usize = 0
+    while leaf < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        let mut field: usize = 0
+        while field < SPARSE_INTERACTION_AIR_FIELDS {
+            case.opening.values[leaf][field] = BabyBear::zero()
+            field = field + 1
+        }
+        case.opening.path.leaf_indices[leaf] = 0
+        leaf = leaf + 1
+    }
+    let values = interaction_leaf_values(seed)
+    let mut field: usize = 0
+    while field < SPARSE_INTERACTION_AIR_FIELDS {
+        case.opening.values[0][field] = values[field]
+        field = field + 1
+    }
+    case.opening.path.valid = true
+    case.opening.path.leaf_count = 1
+    case.opening.path.sibling_count = 13
+    let mut sibling: usize = 0
+    while sibling < PRODUCTION_SECURITY_AIR_MAX_SIBLINGS {
+        case.opening.path.siblings[sibling] = Poseidon2Digest::zero()
+        sibling = sibling + 1
+    }
+    sibling = 0
+    while sibling < 13 {
+        case.opening.path.siblings[sibling] = production_sibling(
+            seed + 3000,
+            sibling.downcast_truncate(),
+        )
+        sibling = sibling + 1
+    }
+    let base = ProductionBaseRoot { valid: true, value: production_interaction_base_root(seed) }
+    case.root.valid = true
+    case.root.base = base
+    case.root.value = production_interaction_root_for_case(seed)
+
+    if mutation == 1 {
+        case.root.value = changed_digest(case.root.value)
+    } else if mutation == 2 {
+        case.opening.values[0][0] = case.opening.values[0][0] + BabyBear::one()
+    } else if mutation == 3 {
+        case.opening.path.siblings[0] = changed_digest(case.opening.path.siblings[0])
+    } else if mutation == 4 {
+        case.opening.values[1][0] = BabyBear::one()
+    } else if mutation == 5 {
+        case.opening.valid = false
+    } else if mutation == 6 {
+        case.opening.path.valid = false
+    } else if mutation == 7 {
+        case.opening.path.leaf_indices[0] = 1
+    } else if mutation == 8 {
+        case.root.valid = false
+    } else if mutation == 9 {
+        case.opening.path.sibling_count = 12
+    } else if mutation == 10 {
+        case.opening.path.leaf_count = 0
+    } else if mutation == 11 {
+        case.opening.path.leaf_indices[1] = 1
+    } else if mutation == 12 {
+        case.opening.path.siblings[13] = production_sibling(seed, 31)
+    } else if mutation == 13 {
+        case.root.base.valid = false
+    } else if mutation == 14 {
+        case.root.base.value = changed_digest(case.root.base.value)
+    }
+}
+
+fn production_base_opening_case_summary() -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+)
+uses (case: mut ProductionBaseOpeningCase)
+{
+    let planned = production_base_lde_multi_opening_relation_plan(
+        ref case.opening,
+        case.root,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    (
+        flag(planned.interpreter.finish()),
+        flag(planned.valid),
+        planned.hashes,
+        planned.used_siblings,
+        case.opening.path.leaf_count,
+        case.opening.path.sibling_count,
+        planned.root.field(0).to_u32(),
+        planned.root.field(1).to_u32(),
+        planned.root.field(2).to_u32(),
+        planned.root.field(3).to_u32(),
+        planned.root.field(4).to_u32(),
+        planned.root.field(5).to_u32(),
+        planned.root.field(6).to_u32(),
+        planned.root.field(7).to_u32(),
+    )
+}
+
+fn production_interaction_opening_case_summary() -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+)
+uses (case: mut ProductionInteractionOpeningCase)
+{
+    let planned = production_interaction_lde_multi_opening_relation_plan(
+        ref case.opening,
+        case.root,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    (
+        flag(planned.interpreter.finish()),
+        flag(planned.valid),
+        planned.hashes,
+        planned.used_siblings,
+        case.opening.path.leaf_count,
+        case.opening.path.sibling_count,
+        planned.root.field(0).to_u32(),
+        planned.root.field(1).to_u32(),
+        planned.root.field(2).to_u32(),
+        planned.root.field(3).to_u32(),
+        planned.root.field(4).to_u32(),
+        planned.root.field(5).to_u32(),
+        planned.root.field(6).to_u32(),
+        planned.root.field(7).to_u32(),
+    )
+}
+
+pub fn production_base_opening_arena_summary(_ seed: u32, _ mutation: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
+    let case: BrowserPtr<ProductionBaseOpeningCase> = alloc_browser_object<
+        ProductionBaseOpeningCase,
+    >()
+    if case.address() == 0 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    with (case) {
+        initialize_production_base_opening_case(seed, mutation)
+        production_base_opening_case_summary()
+    }
+}
+
+pub fn production_interaction_opening_arena_summary(_ seed: u32, _ mutation: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
+    let case: BrowserPtr<ProductionInteractionOpeningCase> = alloc_browser_object<
+        ProductionInteractionOpeningCase,
+    >()
+    if case.address() == 0 {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    with (case) {
+        initialize_production_interaction_opening_case(seed, mutation)
+        production_interaction_opening_case_summary()
+    }
+}
+
 pub fn production_multipath_relation_capacities() -> (u32, u32, u32) {
     (
         PRODUCTION_AIR_MULTIPATH_MAX_HASHES.downcast_truncate(),
         PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS.downcast_truncate(),
         PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+pub fn production_opening_relation_capacities() -> (u32, u32, u32) {
+    (
+        PRODUCTION_BASE_OPENING_MAX_PRODUCTS.downcast_truncate(),
+        PRODUCTION_INTERACTION_OPENING_MAX_PRODUCTS.downcast_truncate(),
+        PRODUCTION_OPENING_MAX_ASSERTIONS.downcast_truncate(),
     )
 }
 

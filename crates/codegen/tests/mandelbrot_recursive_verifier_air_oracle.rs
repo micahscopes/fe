@@ -2,9 +2,9 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear as P3BabyBear};
+use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::path::Path;
@@ -122,6 +122,47 @@ fn production_multipath_capacities(
     })
 }
 
+fn production_opening_capacities(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+) -> [u32; 3] {
+    let function = instance
+        .get_func(&mut *store, "production_opening_relation_capacities")
+        .expect("missing `production_opening_relation_capacities` export");
+    let mut results = vec![Val::I32(0); 3];
+    function
+        .call(&mut *store, &[], &mut results)
+        .expect("`production_opening_relation_capacities` should execute");
+    std::array::from_fn(|index| match results[index] {
+        Val::I32(value) => value as u32,
+        ref other => panic!("unexpected opening capacity lane {index}: {other:?}"),
+    })
+}
+
+fn production_opening_arena_summary(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    name: &str,
+    seed: u32,
+    mutation: u32,
+) -> [u32; 14] {
+    let function = instance
+        .get_func(&mut *store, name)
+        .unwrap_or_else(|| panic!("missing `{name}` export"));
+    let mut results = vec![Val::I32(0); 14];
+    function
+        .call(
+            &mut *store,
+            &[Val::I32(seed as i32), Val::I32(mutation as i32)],
+            &mut results,
+        )
+        .unwrap_or_else(|error| panic!("`{name}` should execute: {error:?}"));
+    std::array::from_fn(|index| match results[index] {
+        Val::I32(value) => value as u32,
+        ref other => panic!("unexpected production opening lane {index}: {other:?}"),
+    })
+}
+
 fn header_audit(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -137,6 +178,29 @@ fn reference_compress(left: [u32; 8], right: [u32; 8]) -> [u32; 8] {
     }
     default_babybear_poseidon2_16().permute_mut(&mut state);
     std::array::from_fn(|index| state[index].as_canonical_u32())
+}
+
+fn production_sibling(seed: u32, level: u32) -> [u32; 8] {
+    let stride = level * 97;
+    [1, 3, 5, 7, 11, 13, 17, 19].map(|offset| seed + stride + offset)
+}
+
+fn reference_production_base_opening_root(seed: u32) -> [u32; 8] {
+    let mut node = reference_field_commitment(b"LD01", &base_leaf_fields(seed, 0));
+    for level in 0..13 {
+        node = reference_compress(node, production_sibling(seed + 1000, level));
+    }
+    node
+}
+
+fn reference_production_interaction_opening_root(seed: u32) -> [u32; 8] {
+    let base_root = production_sibling(seed + 2000, 13);
+    let fields = interaction_leaf_fields(seed, 0, base_root);
+    let mut node = reference_field_commitment(b"LD02", &fields);
+    for level in 0..13 {
+        node = reference_compress(node, production_sibling(seed + 3000, level));
+    }
+    node
 }
 
 fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
@@ -537,6 +601,77 @@ fn deduplicated_multipath_relation_reuses_canonical_topology_and_bounded_rows() 
                 );
             }
         }
+    }
+}
+
+#[test]
+fn production_opening_arenas_preserve_roles_shape_and_canonical_roots() {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compile_wasm())
+        .expect("recursive verifier AIR module should load");
+    assert_eq!(module.imports().len(), 0, "fixture must remain zero-import");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("recursive verifier AIR module should instantiate");
+
+    assert_eq!(
+        production_opening_capacities(&mut store, &instance),
+        [12_141_000, 8_797_608, 5_938],
+        "leaf plans and depth-13 multipaths must derive production capacities",
+    );
+
+    let base_seed = 401;
+    let base_root = reference_production_base_opening_root(base_seed);
+    let base = production_opening_arena_summary(
+        &mut store,
+        &instance,
+        "production_base_opening_arena_summary",
+        base_seed,
+        0,
+    );
+    assert_eq!(&base[..6], &[1, 1, 13, 13, 1, 13]);
+    assert_eq!(&base[6..], &base_root, "production base root");
+    for mutation in 1..=12 {
+        let result = production_opening_arena_summary(
+            &mut store,
+            &instance,
+            "production_base_opening_arena_summary",
+            base_seed,
+            mutation,
+        );
+        assert_eq!(
+            result[0], 0,
+            "production base mutation {mutation} must reject",
+        );
+    }
+
+    let interaction_seed = 607;
+    let interaction_root = reference_production_interaction_opening_root(interaction_seed);
+    let interaction = production_opening_arena_summary(
+        &mut store,
+        &instance,
+        "production_interaction_opening_arena_summary",
+        interaction_seed,
+        0,
+    );
+    assert_eq!(&interaction[..6], &[1, 1, 13, 13, 1, 13]);
+    assert_eq!(
+        &interaction[6..],
+        &interaction_root,
+        "production interaction root",
+    );
+    for mutation in 1..=14 {
+        let result = production_opening_arena_summary(
+            &mut store,
+            &instance,
+            "production_interaction_opening_arena_summary",
+            interaction_seed,
+            mutation,
+        );
+        assert_eq!(
+            result[0], 0,
+            "production interaction mutation {mutation} must reject",
+        );
     }
 }
 

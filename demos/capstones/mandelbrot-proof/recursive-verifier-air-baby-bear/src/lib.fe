@@ -11,6 +11,7 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     PRODUCTION_LDE_LENGTH,
     PRODUCTION_LIMBS,
     PRODUCTION_SECURITY_AIR_MAX_LEAVES,
+    PRODUCTION_SECURITY_AIR_MAX_SIBLINGS,
     PRODUCTION_TRACE_LENGTH,
     ProductionSecuritySparseBabyBearReceipt,
     ProductionSecurityVerifierTrace,
@@ -18,13 +19,18 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
+    SparseBaseLdeMultiOpening,
     SparseBaseLdeLeaf,
+    SparseBaseLdeDigest,
+    SparseInteractionLdeMultiOpening,
     SparseInteractionLdeLeaf,
+    SparseInteractionLdeDigest,
     sparse_base_lde_leaf_commitment_permutations,
     sparse_base_lde_leaf_commitment_plan,
     sparse_interaction_lde_leaf_commitment_permutations,
     sparse_interaction_lde_leaf_commitment_plan,
 }
+use core::{BrowserPtr, alloc_browser_object}
 use merkle_core::{
     MerkleMultiPath,
     MerkleMultiPathInterpretation,
@@ -99,6 +105,94 @@ pub const PRODUCTION_AIR_MULTIPATH_MAX_HASHES: usize = PRODUCTION_SECURITY_AIR_M
 pub const PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS: usize = PRODUCTION_AIR_MULTIPATH_MAX_HASHES
     * MERKLE_NODE_PRODUCTS
 pub const PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS: usize = PRODUCTION_AIR_MULTIPATH_MAX_HASHES + 9
+pub const PRODUCTION_BASE_OPENING_MAX_PRODUCTS: usize = PRODUCTION_SECURITY_AIR_MAX_LEAVES
+        * PRODUCTION_BASE_LEAF_PRODUCTS
+    + PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS
+pub const PRODUCTION_INTERACTION_OPENING_MAX_PRODUCTS: usize = PRODUCTION_SECURITY_AIR_MAX_LEAVES
+        * PRODUCTION_INTERACTION_LEAF_PRODUCTS
+    + PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS
+pub const PRODUCTION_OPENING_MAX_ASSERTIONS: usize = PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS + 1
+
+/// Base and interaction commitments intentionally occupy different nominal
+/// arenas. Their physical payloads are identical, but crossing the roles
+/// would change the leaf schema and therefore the authenticated statement.
+struct ProductionBaseLdeCommitmentArena {
+    commitments: [Poseidon2Digest; PRODUCTION_SECURITY_AIR_MAX_LEAVES],
+}
+
+struct ProductionInteractionLdeCommitmentArena {
+    commitments: [Poseidon2Digest; PRODUCTION_SECURITY_AIR_MAX_LEAVES],
+}
+
+type ProductionBaseOpening = SparseBaseLdeMultiOpening<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+    },
+>
+
+type ProductionInteractionOpening = SparseInteractionLdeMultiOpening<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+    },
+>
+
+type ProductionBaseRoot = SparseBaseLdeDigest<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+>
+
+type ProductionInteractionRoot = SparseInteractionLdeDigest<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+>
+
+type ProductionAirMultiPath = MerkleMultiPath<
+    Poseidon2Digest,
+    {
+        PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+    },
+>
 
 /// Field projection of the exact receipt-header verifier task. The trace row
 /// is selected by its semantic position, so no caller-authored task opcode
@@ -656,8 +750,11 @@ fn constrain_digest<I: QuadraticRelationInterpreter<BabyBear>>(
     interpreter
 }
 
-pub fn production_base_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
-    _ inputs: ProductionBaseLdeLeafRelationInputs,
+/// Commit one production base opening through the exact plan shared by the
+/// scalar leaf verifier and the policy-sized arena placement.
+pub fn production_base_lde_leaf_commitment_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ index: BabyBear,
+    _ values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
     _ interpreter: I,
 ) -> ProductionLdeLeafRelationPlan<I> {
     let leaf = SparseBaseLdeLeaf<
@@ -674,24 +771,46 @@ pub fn production_base_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<Ba
         limb_count: BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
         trace_length: BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
         lde_length: BabyBear::from_u32(PRODUCTION_LDE_LENGTH.downcast_truncate()),
-        index: inputs.index,
-        values: inputs.values,
+        index: index,
+        values: values,
     }
     let planned = sparse_base_lde_leaf_commitment_plan(interpreter, leaf)
     let codec_valid = planned.is_valid()
     ProductionLdeLeafRelationPlan {
-        interpreter: constrain_digest(
-            planned.interpreter,
-            planned.digest(),
-            inputs.expected_commitment,
-        ),
+        interpreter: planned.interpreter,
         commitment: planned.digest(),
         codec_valid: codec_valid,
     }
 }
 
-pub fn production_interaction_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
-    _ inputs: ProductionInteractionLdeLeafRelationInputs,
+pub fn production_base_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: ProductionBaseLdeLeafRelationInputs,
+    _ interpreter: I,
+) -> ProductionLdeLeafRelationPlan<I> {
+    let planned = production_base_lde_leaf_commitment_relation_plan(
+        inputs.index,
+        inputs.values,
+        interpreter,
+    )
+    ProductionLdeLeafRelationPlan {
+        interpreter: constrain_digest(
+            planned.interpreter,
+            planned.commitment,
+            inputs.expected_commitment,
+        ),
+        commitment: planned.commitment,
+        codec_valid: planned.codec_valid,
+    }
+}
+
+/// Commit one production interaction opening through the exact plan shared by
+/// the scalar leaf verifier and the policy-sized arena placement.
+pub fn production_interaction_lde_leaf_commitment_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ index: BabyBear,
+    _ base_lde_root: Poseidon2Digest,
+    _ values: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
     _ interpreter: I,
 ) -> ProductionLdeLeafRelationPlan<I> {
     let leaf = SparseInteractionLdeLeaf<
@@ -708,19 +827,250 @@ pub fn production_interaction_lde_leaf_relation_plan<I: QuadraticRelationInterpr
         limb_count: BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
         trace_length: BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
         lde_length: BabyBear::from_u32(PRODUCTION_LDE_LENGTH.downcast_truncate()),
-        index: inputs.index,
-        base_lde_root: inputs.base_lde_root,
-        values: inputs.values,
+        index: index,
+        base_lde_root: base_lde_root,
+        values: values,
     }
     let planned = sparse_interaction_lde_leaf_commitment_plan(interpreter, leaf)
     let codec_valid = planned.is_valid()
     ProductionLdeLeafRelationPlan {
-        interpreter: constrain_digest(
-            planned.interpreter,
-            planned.digest(),
-            inputs.expected_commitment,
-        ),
+        interpreter: planned.interpreter,
         commitment: planned.digest(),
         codec_valid: codec_valid,
+    }
+}
+
+pub fn production_interaction_lde_leaf_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: ProductionInteractionLdeLeafRelationInputs,
+    _ interpreter: I,
+) -> ProductionLdeLeafRelationPlan<I> {
+    let planned = production_interaction_lde_leaf_commitment_relation_plan(
+        inputs.index,
+        inputs.base_lde_root,
+        inputs.values,
+        interpreter,
+    )
+    ProductionLdeLeafRelationPlan {
+        interpreter: constrain_digest(
+            planned.interpreter,
+            planned.commitment,
+            inputs.expected_commitment,
+        ),
+        commitment: planned.commitment,
+        codec_valid: planned.codec_valid,
+    }
+}
+
+fn unavailable_production_opening_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I> {
+    MerkleMultiPathRelationPlan {
+        interpreter: constrain_one(interpreter, BabyBear::zero()),
+        root: Poseidon2Digest::zero(),
+        valid: false,
+        hashes: 0,
+        used_siblings: 0,
+    }
+}
+
+fn initialize_production_base_commitment_arena()
+uses (arena: mut ProductionBaseLdeCommitmentArena)
+{
+    let mut index: usize = 0
+    while index < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        arena.commitments[index] = Poseidon2Digest::zero()
+        index = index + 1
+    }
+}
+
+fn write_production_base_commitment(_ index: usize, _ value: Poseidon2Digest)
+uses (arena: mut ProductionBaseLdeCommitmentArena)
+{
+    if index < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        arena.commitments[index] = value
+    }
+}
+
+fn initialize_production_interaction_commitment_arena()
+uses (arena: mut ProductionInteractionLdeCommitmentArena)
+{
+    let mut index: usize = 0
+    while index < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        arena.commitments[index] = Poseidon2Digest::zero()
+        index = index + 1
+    }
+}
+
+fn write_production_interaction_commitment(_ index: usize, _ value: Poseidon2Digest)
+uses (arena: mut ProductionInteractionLdeCommitmentArena)
+{
+    if index < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        arena.commitments[index] = value
+    }
+}
+
+fn production_base_commitment_arena_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ path: ref ProductionAirMultiPath,
+    _ expected_root: Poseidon2Digest,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I>
+uses (arena: mut ProductionBaseLdeCommitmentArena)
+{
+    merkle_multi_path_relation_plan_in_browser<
+        I,
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+        {
+            PRODUCTION_SECURITY_AIR_MAX_LEAVES
+        },
+        {
+            PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+        },
+    >(ref arena.commitments, path, expected_root, interpreter)
+}
+
+fn production_interaction_commitment_arena_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ path: ref ProductionAirMultiPath,
+    _ expected_root: Poseidon2Digest,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I>
+uses (arena: mut ProductionInteractionLdeCommitmentArena)
+{
+    merkle_multi_path_relation_plan_in_browser<
+        I,
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+        {
+            PRODUCTION_SECURITY_AIR_MAX_LEAVES
+        },
+        {
+            PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+        },
+    >(ref arena.commitments, path, expected_root, interpreter)
+}
+
+fn production_base_opening_tail_is_zero(
+    _ opening: ref ProductionBaseOpening,
+    _ start: usize,
+) -> bool {
+    let mut leaf = start
+    while leaf < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        let mut field: usize = 0
+        while field < SPARSE_BASE_AIR_FIELDS {
+            if !opening.values[leaf][field].is_zero() {
+                return false
+            }
+            field = field + 1
+        }
+        leaf = leaf + 1
+    }
+    true
+}
+
+fn production_interaction_opening_tail_is_zero(
+    _ opening: ref ProductionInteractionOpening,
+    _ start: usize,
+) -> bool {
+    let mut leaf = start
+    while leaf < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+        let mut field: usize = 0
+        while field < SPARSE_INTERACTION_AIR_FIELDS {
+            if !opening.values[leaf][field].is_zero() {
+                return false
+            }
+            field = field + 1
+        }
+        leaf = leaf + 1
+    }
+    true
+}
+
+/// Authenticate the complete production base opening without materializing
+/// its 456 commitments as a compiler-owned aggregate. One runtime loop derives
+/// each leaf through the canonical commitment plan, stores it in the base-only
+/// arena, and hands a borrow to the shared multipath traversal.
+pub fn production_base_lde_multi_opening_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ opening: ref ProductionBaseOpening,
+    _ root: ProductionBaseRoot,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I> {
+    let commitments: BrowserPtr<ProductionBaseLdeCommitmentArena> = alloc_browser_object<
+        ProductionBaseLdeCommitmentArena,
+    >()
+    if commitments.address() == 0 {
+        return unavailable_production_opening_relation_plan(interpreter)
+    }
+    let count: usize = opening.path.leaf_count as usize
+    let bounded = count > 0 && count <= PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    let mut shape_valid = opening.valid && root.valid && bounded
+    if bounded {
+        shape_valid = shape_valid && production_base_opening_tail_is_zero(opening, count)
+    }
+    let mut interpreter = interpreter
+    with (commitments) {
+        initialize_production_base_commitment_arena()
+        let mut leaf: usize = 0
+        while leaf < count && leaf < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+            let planned = production_base_lde_leaf_commitment_relation_plan(
+                BabyBear::from_u32(opening.path.leaf_indices[leaf]),
+                opening.values[leaf],
+                interpreter,
+            )
+            interpreter = planned.interpreter
+            shape_valid = shape_valid && planned.codec_valid
+            write_production_base_commitment(leaf, planned.commitment)
+            leaf = leaf + 1
+        }
+        interpreter = constrain_one(interpreter, bool_field(shape_valid))
+        production_base_commitment_arena_relation_plan(ref opening.path, root.value, interpreter)
+    }
+}
+
+/// Interaction commitments use a distinct arena and absorb the exact base
+/// root into every canonical leaf. This makes an accidental base/interaction
+/// arena swap ill typed before either relation reaches the Merkle topology.
+pub fn production_interaction_lde_multi_opening_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ opening: ref ProductionInteractionOpening,
+    _ root: ProductionInteractionRoot,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I> {
+    let commitments: BrowserPtr<ProductionInteractionLdeCommitmentArena> = alloc_browser_object<
+        ProductionInteractionLdeCommitmentArena,
+    >()
+    if commitments.address() == 0 {
+        return unavailable_production_opening_relation_plan(interpreter)
+    }
+    let count: usize = opening.path.leaf_count as usize
+    let bounded = count > 0 && count <= PRODUCTION_SECURITY_AIR_MAX_LEAVES
+    let mut shape_valid = opening.valid && root.valid && root.base.valid && bounded
+    if bounded {
+        shape_valid = shape_valid && production_interaction_opening_tail_is_zero(opening, count)
+    }
+    let mut interpreter = interpreter
+    with (commitments) {
+        initialize_production_interaction_commitment_arena()
+        let mut leaf: usize = 0
+        while leaf < count && leaf < PRODUCTION_SECURITY_AIR_MAX_LEAVES {
+            let planned = production_interaction_lde_leaf_commitment_relation_plan(
+                BabyBear::from_u32(opening.path.leaf_indices[leaf]),
+                root.base.value,
+                opening.values[leaf],
+                interpreter,
+            )
+            interpreter = planned.interpreter
+            shape_valid = shape_valid && planned.codec_valid
+            write_production_interaction_commitment(leaf, planned.commitment)
+            leaf = leaf + 1
+        }
+        interpreter = constrain_one(interpreter, bool_field(shape_valid))
+        production_interaction_commitment_arena_relation_plan(
+            ref opening.path,
+            root.value,
+            interpreter,
+        )
     }
 }
