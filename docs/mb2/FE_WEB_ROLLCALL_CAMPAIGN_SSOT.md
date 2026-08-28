@@ -477,10 +477,37 @@ existing Definition of done, not a second campaign checklist:
   seconds, retaining the independent Plonky3 value and product-mutation gates.
   This proves the storage interpretation on bounded 16-leaf cases. It does
   not yet instantiate the 456-leaf production carrier or authenticate the
-  retained security receipt. The next slice gives the production base and
-  interaction roles their own typed leaf/path arenas, fills those arenas from
-  the already-gated canonical leaf plans, and consumes them through this
-  browser-backed traversal.
+  retained security receipt. The production arena slice below gives the base
+  and interaction roles their own typed commitment arenas, fills those arenas
+  from the already-gated canonical leaf plans, and consumes them with borrowed
+  paths through this browser-backed traversal.
+
+  Commit `982e5e6b6` crosses that production representation boundary. Base and
+  interaction commitments occupy distinct nominal Fe arena targets even
+  though both physically contain 456 Poseidon2 digests. One runtime loop per
+  role consumes the existing canonical leaf commitment plan, retains only the
+  current leaf and relation interpreter in Wasm locals, writes the resulting
+  digest into Fe-owned linear memory, and lends that role-specific storage to
+  the shared browser-backed multipath traversal. The opening and path remain
+  borrowed throughout. No 456-digest value, 5,928-sibling path, or complete
+  opening crosses a function boundary by value.
+
+  A zero-import production-shape gate instantiates the real 456-leaf and
+  5,928-sibling receipt carriers for both roles, while executing a one-leaf
+  canonical path through the actual depth-13 tree. Independent Plonky3 code
+  derives the complete base and interaction leaf commitments and all thirteen
+  parent hashes. Both roots agree exactly. Twelve base mutations and fourteen
+  interaction mutations cover changed roots, opened values, siblings, unused
+  values, opening and path validity, leaf indices and counts, sibling counts
+  and unused siblings, plus the interaction base-root validity and value. All
+  reject. The derived worst-case capacities are 12,141,000 base products,
+  8,797,608 interaction products, and 5,938 assertions. The complete
+  recursive-verifier AIR target passes 6/6 serially in 299.05 seconds,
+  retaining the header, ordered-node, binary-path, canonical multipath, and
+  leaf mutation gates. This proves the production storage shape and its
+  role-preserving composition. It does not yet replay the retained 948,808-byte
+  security receipt, execute a maximum-count relation stream, or emit a
+  cryptographic parent proof. Exact retained-receipt replay is the next gate.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
