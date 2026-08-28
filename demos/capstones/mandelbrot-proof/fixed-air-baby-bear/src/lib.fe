@@ -129,11 +129,13 @@ use merkle_browser::{
 }
 use merkle_receipt::MerkleMultiOpening
 use poseidon_baby_bear::{
+    BINDING_PERMUTATIONS,
     PackedCommitment,
     Poseidon2CanonicalCommitmentPlan,
     Poseidon2Digest,
     Poseidon2FieldDomain,
     bind as poseidon_bind,
+    bind_plan as poseidon_bind_plan,
     canonical_commitment_permutations,
     commit_canonical,
     commit_canonical_plan,
@@ -2395,7 +2397,30 @@ fn invalid_sparse_air_lde_transcript<
 /// Bind the exact one-step recursive statement and both production LDE roots
 /// into the shared BabyBear AIR transcript. The interaction root must retain
 /// this exact base root; matching only its shape is insufficient.
-pub fn bind_sparse_air_lde_transcript<
+pub struct SparseAirLdeTranscriptPlan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    pub interpreter: I,
+    pub value: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+}
+impl<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseAirLdeTranscriptPlan<I, L, TRACE, LDE> {}
+
+pub const fn sparse_air_lde_transcript_permutations<const L: usize>() -> usize {
+    canonical_commitment_permutations(
+        <RecursiveCommittedInterval<L> as CanonicalWords>::WORDS,
+    ) + BINDING_PERMUTATIONS + BINDING_PERMUTATIONS
+}
+
+pub fn bind_sparse_air_lde_transcript_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
@@ -2403,7 +2428,8 @@ pub fn bind_sparse_air_lde_transcript<
     _ statement: RecursiveCommittedInterval<L>,
     _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
     _ interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
-) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE> {
+    _ interpreter: I,
+) -> SparseAirLdeTranscriptPlan<I, L, TRACE, LDE> {
     let statement_valid = statement.valid
         && statement.leaves == 1
         && statement.statement.valid
@@ -2415,34 +2441,63 @@ pub fn bind_sparse_air_lde_transcript<
         && interaction.valid
         && interaction.base.valid
         && interaction.base.value.equals(base.value)
-    if !statement_valid || !roots_valid {
-        return invalid_sparse_air_lde_transcript(statement, base, interaction)
-    }
-    let statement_commitment = commit_canonical<
+    let statement_commitment = commit_canonical_plan<
+        I,
         MandelbrotSparseLeafStatementBabyBearV1,
         RecursiveCommittedInterval<L>,
-    >(ref statement)
-    if !statement_commitment.is_valid() {
-        return invalid_sparse_air_lde_transcript(statement, base, interaction)
-    }
-    let roots = poseidon_bind<MandelbrotSparseAirRootsBabyBearV1>(
+    >(interpreter, ref statement)
+    let roots = poseidon_bind_plan<
+        I,
+        MandelbrotSparseAirRootsBabyBearV1,
+    >(
+        statement_commitment.interpreter,
         base.value,
         interaction.value,
     )
-    let transcript = AirLdeTranscriptDigest {
-        valid: true,
-        value: poseidon_bind<MandelbrotSparseAirTranscriptBabyBearV1>(
-            statement_commitment.digest(),
-            roots,
-        ),
+    let transcript = poseidon_bind_plan<
+        I,
+        MandelbrotSparseAirTranscriptBabyBearV1,
+    >(
+        roots.interpreter,
+        statement_commitment.digest(),
+        roots.value,
+    )
+    if !statement_valid || !roots_valid || !statement_commitment.is_valid() {
+        return SparseAirLdeTranscriptPlan {
+            interpreter: transcript.interpreter,
+            value: invalid_sparse_air_lde_transcript(statement, base, interaction),
+        }
     }
-    SparseAirLdeTranscriptDigest {
-        valid: true,
-        statement: statement,
-        base: base,
-        interaction: interaction,
-        transcript: transcript,
+    SparseAirLdeTranscriptPlan {
+        interpreter: transcript.interpreter,
+        value: SparseAirLdeTranscriptDigest {
+            valid: true,
+            statement: statement,
+            base: base,
+            interaction: interaction,
+            transcript: AirLdeTranscriptDigest {
+                valid: true,
+                value: transcript.value,
+            },
+        },
     }
+}
+
+pub fn bind_sparse_air_lde_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ statement: RecursiveCommittedInterval<L>,
+    _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    _ interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
+) -> SparseAirLdeTranscriptDigest<L, TRACE, LDE> {
+    bind_sparse_air_lde_transcript_plan<QuadraticValueInterpreter, L, TRACE, LDE>(
+        statement,
+        base,
+        interaction,
+        QuadraticValueInterpreter::new(),
+    ).value
 }
 
 fn recursive_committed_interval_equals<const L: usize>(
@@ -2536,6 +2591,59 @@ pub fn sparse_composition_transcript<
 /// Extend a canonical AIR transcript with one valid typed commitment. The
 /// nominal field domain is selected by the protocol at compile time, and the
 /// base statement and roots remain attached for later composition checks.
+pub struct SparseCompositionTranscriptPlan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> {
+    pub interpreter: I,
+    pub value: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+}
+impl<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseCompositionTranscriptPlan<I, L, TRACE, LDE> {}
+
+pub fn bind_sparse_composition_extension_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    D: Poseidon2FieldDomain,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ extension: PackedCommitment,
+    _ interpreter: I,
+) -> SparseCompositionTranscriptPlan<I, L, TRACE, LDE> {
+    let valid = sparse_air_lde_transcript_is_canonical(air)
+        && extension.is_valid()
+    let transcript = poseidon_bind_plan<I, D>(
+        interpreter,
+        air.transcript.value,
+        extension.digest(),
+    )
+    if !valid {
+        return SparseCompositionTranscriptPlan {
+            interpreter: transcript.interpreter,
+            value: invalid_sparse_composition_transcript(air),
+        }
+    }
+    SparseCompositionTranscriptPlan {
+        interpreter: transcript.interpreter,
+        value: SparseCompositionTranscriptDigest {
+            valid: true,
+            air: air,
+            transcript: AirLdeTranscriptDigest {
+                valid: true,
+                value: transcript.value,
+            },
+        },
+    }
+}
+
 pub fn bind_sparse_composition_extension<
     D: Poseidon2FieldDomain,
     const L: usize,
@@ -2545,21 +2653,13 @@ pub fn bind_sparse_composition_extension<
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ extension: PackedCommitment,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
-    if !sparse_air_lde_transcript_is_canonical(air)
-        || !extension.is_valid() {
-        return invalid_sparse_composition_transcript(air)
-    }
-    SparseCompositionTranscriptDigest {
-        valid: true,
-        air: air,
-        transcript: AirLdeTranscriptDigest {
-            valid: true,
-            value: poseidon_bind<D>(
-                air.transcript.value,
-                extension.digest(),
-            ),
-        },
-    }
+    bind_sparse_composition_extension_plan<
+        QuadraticValueInterpreter,
+        D,
+        L,
+        TRACE,
+        LDE,
+    >(air, extension, QuadraticValueInterpreter::new()).value
 }
 
 fn sparse_public_fixed_at<const L: usize>(

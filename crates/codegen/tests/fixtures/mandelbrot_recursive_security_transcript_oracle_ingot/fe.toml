@@ -1,0 +1,12 @@
+[ingot]
+name = "mandelbrot_recursive_security_transcript_oracle"
+version = "0.1.0"
+
+[dependencies]
+mandelbrot_proof_recursive_verifier_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-verifier-air-baby-bear"
+mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"
+mandelbrot_proof_fixed_air_receipt_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-receipt-baby-bear"
+mandelbrot_proof_recursive_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/recursive-baby-bear"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
+precision = "../../../../../demos/sketches/precision"
+quadratic_plan = "../../../../../ingots/quadratic_plan"

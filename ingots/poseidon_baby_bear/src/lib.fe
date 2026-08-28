@@ -31,6 +31,11 @@ pub const PARTIAL_ROUNDS: usize = 13
 pub const ROUND_CONSTANT_COUNT: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS
 pub const DIGEST_FIELDS: usize = 8
 pub const SPONGE_RATE: usize = 8
+pub const fn fixed_length_sponge_permutations(_ payload_fields: usize) -> usize {
+    (payload_fields + 2 + SPONGE_RATE - 1) / SPONGE_RATE
+}
+pub const BINDING_PERMUTATIONS: usize =
+    fixed_length_sponge_permutations(DIGEST_FIELDS * 2)
 pub const PERMUTATION_PHASES: u32 =
     (FULL_ROUNDS + PARTIAL_ROUNDS).downcast_truncate()
 
@@ -152,9 +157,24 @@ impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
 impl<I: QuadraticPlanInterpreter<BabyBear>> Poseidon2CanonicalCommitmentPlan<I> {
     pub fn is_valid(self) -> bool { self.valid == VALID_WORD }
 
+    pub fn require(self, _ condition: bool) -> Self {
+        if self.valid != VALID_WORD || !condition {
+            return Self {
+                interpreter: self.interpreter,
+                valid: INVALID_WORD,
+                value: Poseidon2Digest::zero(),
+            }
+        }
+        self
+    }
+
     pub fn digest(self) -> Poseidon2Digest {
         if self.valid != VALID_WORD { return Poseidon2Digest::zero() }
         self.value
+    }
+
+    pub fn commitment(self) -> PackedCommitment {
+        PackedCommitment { valid: self.valid, value: self.digest() }
     }
 }
 
@@ -334,7 +354,7 @@ impl<I: QuadraticPlanInterpreter<BabyBear>> CanonicalFieldWriter<I> {
 /// schema. The domain tag and schema-derived word count occupy the first two
 /// rate lanes.
 pub const fn canonical_commitment_permutations(_ words: u32) -> usize {
-    ((words + 9) / SPONGE_RATE.downcast_truncate()) as usize
+    fixed_length_sponge_permutations(words as usize)
 }
 
 /// Interpret the canonical codec and every sponge permutation through one
@@ -1640,13 +1660,23 @@ pub fn permute16(mut input: own [BabyBear; WIDTH]) -> [BabyBear; WIDTH] {
 /// fixed-length Poseidon2 sponge. The message begins with the type-selected
 /// domain and exact bit length, followed by 30-bit canonical payloads. Invalid
 /// encodings and noncanonical domain tags fail closed before absorption.
-pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
+pub fn commit_packed_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    D: Poseidon2Domain,
+    const N: usize,
+>(
+    _ interpreter: I,
     _ packed: own PackedFieldBits<precision::baby_bear::BabyBearModulus, N>,
-) -> PackedCommitment {
+) -> Poseidon2CanonicalCommitmentPlan<I> {
     if !packed.is_valid() || D::TAG >= BABY_BEAR_MODULUS {
-        return PackedCommitment { valid: INVALID_WORD, value: Poseidon2Digest::zero() }
+        return Poseidon2CanonicalCommitmentPlan {
+            interpreter: interpreter,
+            valid: INVALID_WORD,
+            value: Poseidon2Digest::zero(),
+        }
     }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    let mut next = interpreter
     let mut rate: usize = 0
     state[rate] = BabyBear::from_u32(D::TAG)
     rate = rate + 1
@@ -1657,13 +1687,17 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
         state[rate] = packed.field(index.downcast_truncate())
         rate = rate + 1
         if rate == SPONGE_RATE {
-            state = permute16(input: state)
+            let planned = poseidon2_permutation_plan(next, state)
+            next = planned.interpreter
+            state = planned.output
             rate = 0
         }
         index = index + 1
     }
     if rate != 0 {
-        state = permute16(input: state)
+        let planned = poseidon2_permutation_plan(next, state)
+        next = planned.interpreter
+        state = planned.output
     }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
@@ -1671,7 +1705,20 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
         values[index] = state[index]
         index = index + 1
     }
-    PackedCommitment { valid: VALID_WORD, value: Poseidon2Digest { values: values } }
+    Poseidon2CanonicalCommitmentPlan {
+        interpreter: next,
+        valid: VALID_WORD,
+        value: Poseidon2Digest { values: values },
+    }
+}
+
+pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
+    _ packed: own PackedFieldBits<precision::baby_bear::BabyBearModulus, N>,
+) -> PackedCommitment {
+    commit_packed_plan<QuadraticValueInterpreter, D, N>(
+        QuadraticValueInterpreter::new(),
+        packed,
+    ).commitment()
 }
 
 /// Commit any fixed canonical Fe schema as an injective bit string. Canonical
@@ -1679,14 +1726,16 @@ pub fn commit_packed<D: Poseidon2Domain, const N: usize>(
 /// BabyBear payloads before entering the nominal packed-message domain. This
 /// accepts values such as a modulus or bit mask that are valid `u32` data but
 /// not canonical BabyBear field elements.
-pub fn commit_canonical_packed<
+pub fn commit_canonical_packed_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
     D: Poseidon2Domain,
     T: CanonicalWords,
     const WORDS: usize,
     const FIELDS: usize,
 >(
+    _ interpreter: I,
     _ value: ref T,
-) -> PackedCommitment {
+) -> Poseidon2CanonicalCommitmentPlan<I> {
     let encoded = encode_canonical_word_array<T, WORDS>(value)
     let packed = pack_bounded_words<
         precision::baby_bear::BabyBearModulus,
@@ -1695,7 +1744,24 @@ pub fn commit_canonical_packed<
     >(encoded.words, [32; WORDS]).require(
         encoded.valid && T::WORDS == WORDS.downcast_truncate(),
     )
-    commit_packed<D, FIELDS>(packed)
+    commit_packed_plan<I, D, FIELDS>(interpreter, packed)
+}
+
+pub fn commit_canonical_packed<
+    D: Poseidon2Domain,
+    T: CanonicalWords,
+    const WORDS: usize,
+    const FIELDS: usize,
+>(
+    _ value: ref T,
+) -> PackedCommitment {
+    commit_canonical_packed_plan<
+        QuadraticValueInterpreter,
+        D,
+        T,
+        WORDS,
+        FIELDS,
+    >(QuadraticValueInterpreter::new(), value).commitment()
 }
 
 /// Commit one fixed-length vector of canonical base-field values. The nominal
@@ -1825,14 +1891,29 @@ pub fn compress(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2D
 
 /// Bind two full digests under a nominal transcript domain with the same
 /// rate-8 fixed-length sponge used for leaves.
-pub fn bind<D: Poseidon2FieldDomain>(
+pub struct Poseidon2BindingPlan<I: QuadraticPlanInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub value: Poseidon2Digest,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2BindingPlan<I> {}
+
+pub fn bind_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    D: Poseidon2FieldDomain,
+>(
+    _ interpreter: I,
     _ left: Poseidon2Digest,
     _ right: Poseidon2Digest,
-) -> Poseidon2Digest {
+) -> Poseidon2BindingPlan<I> {
     if D::TAG >= BABY_BEAR_MODULUS {
-        return Poseidon2Digest::zero()
+        return Poseidon2BindingPlan {
+            interpreter: interpreter,
+            value: Poseidon2Digest::zero(),
+        }
     }
     let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
+    let mut next = interpreter
     let mut rate: usize = 0
     let digest_fields: u32 = DIGEST_FIELDS.downcast_truncate()
     state[rate] = BabyBear::from_u32(D::TAG)
@@ -1844,7 +1925,9 @@ pub fn bind<D: Poseidon2FieldDomain>(
         state[rate] = left.values[index]
         rate = rate + 1
         if rate == SPONGE_RATE {
-            state = permute16(input: state)
+            let planned = poseidon2_permutation_plan(next, state)
+            next = planned.interpreter
+            state = planned.output
             rate = 0
         }
         index = index + 1
@@ -1854,13 +1937,17 @@ pub fn bind<D: Poseidon2FieldDomain>(
         state[rate] = right.values[index]
         rate = rate + 1
         if rate == SPONGE_RATE {
-            state = permute16(input: state)
+            let planned = poseidon2_permutation_plan(next, state)
+            next = planned.interpreter
+            state = planned.output
             rate = 0
         }
         index = index + 1
     }
     if rate != 0 {
-        state = permute16(input: state)
+        let planned = poseidon2_permutation_plan(next, state)
+        next = planned.interpreter
+        state = planned.output
     }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
@@ -1868,7 +1955,21 @@ pub fn bind<D: Poseidon2FieldDomain>(
         values[index] = state[index]
         index = index + 1
     }
-    Poseidon2Digest { values: values }
+    Poseidon2BindingPlan {
+        interpreter: next,
+        value: Poseidon2Digest { values: values },
+    }
+}
+
+pub fn bind<D: Poseidon2FieldDomain>(
+    _ left: Poseidon2Digest,
+    _ right: Poseidon2Digest,
+) -> Poseidon2Digest {
+    bind_plan<QuadraticValueInterpreter, D>(
+        QuadraticValueInterpreter::new(),
+        left,
+        right,
+    ).value
 }
 
 /// Squeeze one quartic challenge from a full transcript digest.

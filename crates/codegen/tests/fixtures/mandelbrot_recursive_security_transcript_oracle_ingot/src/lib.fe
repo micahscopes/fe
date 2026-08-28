@@ -1,0 +1,237 @@
+use mandelbrot_proof_fixed_air_baby_bear::{SparseBaseLdeDigest, SparseInteractionLdeDigest}
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    PRODUCTION_LDE_LENGTH,
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    production_recursive_security_profile,
+}
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveBoundaryDigest,
+    RecursiveCommittedInterval,
+    RecursiveStatementDigest,
+}
+use mandelbrot_proof_recursive_verifier_air_baby_bear::{
+    PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS,
+    PRODUCTION_SECURITY_TRANSCRIPT_PERMUTATIONS,
+    PRODUCTION_SECURITY_TRANSCRIPT_PRODUCTS,
+    ProductionSecurityTranscriptRelationInputs,
+    production_security_transcript_relation_plan,
+}
+use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::BabyBear
+use quadratic_plan::{
+    QuadraticRelationStreamConstraintInterpreter,
+    QuadraticRelationStreamInterpreter,
+    QuadraticRelationValueInterpreter,
+}
+
+fn digest(_ seed: u32) -> Poseidon2Digest {
+    Poseidon2Digest::from_u32s(
+        [seed + 1, seed + 3, seed + 5, seed + 7, seed + 11, seed + 13, seed + 17, seed + 19],
+    )
+}
+
+fn changed_digest(_ value: Poseidon2Digest) -> Poseidon2Digest {
+    Poseidon2Digest::from_u32s(
+        [
+            value.field(0).to_u32() + 1,
+            value.field(1).to_u32(),
+            value.field(2).to_u32(),
+            value.field(3).to_u32(),
+            value.field(4).to_u32(),
+            value.field(5).to_u32(),
+            value.field(6).to_u32(),
+            value.field(7).to_u32(),
+        ],
+    )
+}
+
+fn transcript_inputs(_ seed: u32, _ mutation: u32) -> ProductionSecurityTranscriptRelationInputs {
+    let base_value = digest(seed + 100)
+    let mut statement = RecursiveCommittedInterval<{ PRODUCTION_LIMBS }> {
+        valid: true,
+        leaves: 1,
+        statement: RecursiveStatementDigest { valid: true, value: digest(seed + 200) },
+        start_iteration: seed & 255,
+        end_iteration: (seed & 255) + 1,
+        start: RecursiveBoundaryDigest { valid: true, value: digest(seed + 300) },
+        end: RecursiveBoundaryDigest { valid: true, value: digest(seed + 400) },
+    }
+    let mut base_root = SparseBaseLdeDigest<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    > { valid: true, value: base_value }
+    let mut interaction_root = SparseInteractionLdeDigest<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    > { valid: true, base: base_root, value: digest(seed + 500) }
+    let mut base_opening_accepted = BabyBear::one()
+    let mut interaction_opening_accepted = BabyBear::one()
+    let mut accepted = BabyBear::one()
+    let mut trace_valid = BabyBear::one()
+    match mutation {
+        1 => {
+            statement.valid = false
+        },
+        2 => {
+            statement.leaves = 2
+        },
+        3 => {
+            statement.statement.value = changed_digest(statement.statement.value)
+        },
+        4 => {
+            statement.start.valid = false
+        },
+        5 => {
+            statement.end_iteration = statement.end_iteration + 1
+        },
+        6 => {
+            base_root.valid = false
+        },
+        7 => {
+            interaction_root.valid = false
+        },
+        8 => {
+            interaction_root.base.valid = false
+        },
+        9 => {
+            interaction_root.base.value = changed_digest(interaction_root.base.value)
+        },
+        10 => {
+            base_opening_accepted = BabyBear::zero()
+        },
+        11 => {
+            interaction_opening_accepted = BabyBear::zero()
+        },
+        12 => {
+            accepted = BabyBear::zero()
+        },
+        13 => {
+            trace_valid = BabyBear::zero()
+        },
+        _ => {},
+    }
+    ProductionSecurityTranscriptRelationInputs {
+        statement: statement,
+        base_root: base_root,
+        interaction_root: interaction_root,
+        base_opening_accepted: base_opening_accepted,
+        interaction_opening_accepted: interaction_opening_accepted,
+        accepted: accepted,
+        trace_valid: trace_valid,
+    }
+}
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+pub fn production_security_transcript_relation_capacities() -> (u32, u32, u32) {
+    (
+        PRODUCTION_SECURITY_TRANSCRIPT_PERMUTATIONS.downcast_truncate(),
+        PRODUCTION_SECURITY_TRANSCRIPT_PRODUCTS.downcast_truncate(),
+        PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS.downcast_truncate(),
+    )
+}
+
+pub fn production_security_transcript_air_counts() -> (u32, u32, u32, u32) {
+    let profile = production_recursive_security_profile()
+    (
+        profile.air_shape.all_rows,
+        profile.air_shape.pair_rows,
+        profile.air_shape.first_row,
+        profile.air_shape.last_row,
+    )
+}
+
+pub fn production_security_transcript_relation_audit(_ seed: u32, _ mutation: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
+    let semantic_mutation = if mutation < 100 { mutation } else { 0 }
+    let inputs = transcript_inputs(seed, semantic_mutation)
+    let direct = production_security_transcript_relation_plan(
+        inputs,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    let direct_valid = direct.interpreter.finish() && direct.composition.is_valid()
+    let digest = direct.composition.transcript().value
+
+    let streamed = production_security_transcript_relation_plan(
+        inputs,
+        QuadraticRelationStreamInterpreter<
+            BabyBear,
+            PRODUCTION_SECURITY_TRANSCRIPT_PRODUCTS,
+            PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS,
+        >::new(),
+    )
+    let stream = streamed.interpreter.finish()
+    if mutation == 100 {
+        let mut row = stream.product(0)
+        row.output = row.output + BabyBear::one()
+        let _replaced: bool = stream.replace_product(0, row)
+    } else if mutation == 101 {
+        let index: u32 = stream.product_count() / 2
+        let mut row = stream.product(index)
+        row.output = row.output + BabyBear::one()
+        let _replaced: bool = stream.replace_product(index, row)
+    } else if mutation == 102 {
+        let index: u32 = stream.product_count() - 1
+        let mut row = stream.product(index)
+        row.output = row.output + BabyBear::one()
+        let _replaced: bool = stream.replace_product(index, row)
+    } else if mutation == 103 {
+        let _replaced: bool = stream.replace_assertion(0, BabyBear::one())
+    }
+    let constrained = production_security_transcript_relation_plan(
+        inputs,
+        QuadraticRelationStreamConstraintInterpreter<
+            BabyBear,
+            PRODUCTION_SECURITY_TRANSCRIPT_PRODUCTS,
+            PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS,
+        >::new(stream),
+    )
+    let relation = constrained.interpreter.finish()
+    (
+        flag(direct_valid),
+        flag(relation.shape_valid),
+        relation.operand_copy_mismatches + relation.nonzero_products,
+        relation.assertion_copy_mismatches + relation.nonzero_assertions,
+        stream.product_count(),
+        stream.assertion_count(),
+        digest.field(0).to_u32(),
+        digest.field(1).to_u32(),
+        digest.field(2).to_u32(),
+        digest.field(3).to_u32(),
+        digest.field(4).to_u32(),
+        digest.field(5).to_u32(),
+        digest.field(6).to_u32(),
+        digest.field(7).to_u32(),
+    )
+}

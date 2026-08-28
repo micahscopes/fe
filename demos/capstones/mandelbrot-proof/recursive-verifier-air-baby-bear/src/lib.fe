@@ -15,6 +15,9 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     PRODUCTION_TRACE_LENGTH,
     ProductionSecuritySparseBabyBearReceipt,
     ProductionSecurityVerifierTrace,
+    bind_sparse_air_security_profile_plan,
+    production_recursive_security_profile,
+    sparse_air_security_profile_permutations,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
@@ -25,11 +28,15 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseInteractionLdeMultiOpening,
     SparseInteractionLdeLeaf,
     SparseInteractionLdeDigest,
+    SparseCompositionTranscriptDigest,
+    bind_sparse_air_lde_transcript_plan,
+    sparse_air_lde_transcript_permutations,
     sparse_base_lde_leaf_commitment_permutations,
     sparse_base_lde_leaf_commitment_plan,
     sparse_interaction_lde_leaf_commitment_permutations,
     sparse_interaction_lde_leaf_commitment_plan,
 }
+use mandelbrot_proof_recursive_baby_bear::RecursiveCommittedInterval
 use core::{BrowserPtr, alloc_browser_object}
 use merkle_core::{
     MerkleMultiPath,
@@ -112,6 +119,15 @@ pub const PRODUCTION_INTERACTION_OPENING_MAX_PRODUCTS: usize = PRODUCTION_SECURI
         * PRODUCTION_INTERACTION_LEAF_PRODUCTS
     + PRODUCTION_AIR_MULTIPATH_MAX_PRODUCTS
 pub const PRODUCTION_OPENING_MAX_ASSERTIONS: usize = PRODUCTION_AIR_MULTIPATH_MAX_ASSERTIONS + 1
+pub const PRODUCTION_SECURITY_TRANSCRIPT_PERMUTATIONS: usize = sparse_air_lde_transcript_permutations<
+        {
+            PRODUCTION_LIMBS
+        },
+    >()
+    + sparse_air_security_profile_permutations()
+pub const PRODUCTION_SECURITY_TRANSCRIPT_PRODUCTS: usize = PRODUCTION_SECURITY_TRANSCRIPT_PERMUTATIONS
+    * POSEIDON2_PERMUTATION_MULTIPLICATIONS
+pub const PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS: usize = 24
 
 /// Base and interaction commitments intentionally occupy different nominal
 /// arenas. Their physical payloads are identical, but crossing the roles
@@ -748,6 +764,151 @@ fn constrain_digest<I: QuadraticRelationInterpreter<BabyBear>>(
         lane = lane + 1
     }
     interpreter
+}
+
+/// Public inputs consumed by the exact `SecurityTranscript` verifier task.
+/// The committed interval is the recursive statement carrier. Its raw orbit
+/// witness remains outside this stage, while the two roots are the outputs of
+/// the preceding authenticated opening relations.
+pub struct ProductionSecurityTranscriptRelationInputs {
+    pub statement: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+    pub base_root: SparseBaseLdeDigest<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    >,
+    pub interaction_root: SparseInteractionLdeDigest<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    >,
+    pub base_opening_accepted: BabyBear,
+    pub interaction_opening_accepted: BabyBear,
+    pub accepted: BabyBear,
+    pub trace_valid: BabyBear,
+}
+impl core::marker::Copy for ProductionSecurityTranscriptRelationInputs {}
+
+pub struct ProductionSecurityTranscriptRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub composition: SparseCompositionTranscriptDigest<
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    >,
+}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> core::marker::Copy for ProductionSecurityTranscriptRelationPlan<I> {}
+
+/// Project the exact scalar verifier rows into the transcript relation. Task
+/// order remains compiler-derived: rows one, two, and three are respectively
+/// the base opening, interaction opening, and security transcript stages.
+pub fn production_security_transcript_relation_inputs(
+    _ statement: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ trace: ProductionSecurityVerifierTrace,
+) -> ProductionSecurityTranscriptRelationInputs {
+    ProductionSecurityTranscriptRelationInputs {
+        statement: statement,
+        base_root: receipt.base_root,
+        interaction_root: receipt.interaction_root,
+        base_opening_accepted: bool_field(trace.row(1).accepted),
+        interaction_opening_accepted: bool_field(trace.row(2).accepted),
+        accepted: bool_field(trace.row(3).accepted),
+        trace_valid: bool_field(trace.shape_valid()),
+    }
+}
+
+/// The sole authored production security-transcript relation. The interval
+/// commitment, ordered roots, packed security profile, and final transcript
+/// extension all consume the same Poseidon2 multiplication plan as the scalar
+/// verifier. Later FRI and AIR relations consume the returned typed digest.
+pub fn production_security_transcript_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ inputs: ProductionSecurityTranscriptRelationInputs,
+    _ interpreter: I,
+) -> ProductionSecurityTranscriptRelationPlan<I> {
+    let mut interpreter = interpreter
+    interpreter = constrain_one(interpreter, bool_field(inputs.statement.valid))
+    interpreter = constrain_equal(
+        interpreter,
+        BabyBear::from_u32(inputs.statement.leaves),
+        BabyBear::one(),
+    )
+    interpreter = constrain_one(interpreter, bool_field(inputs.statement.statement.valid))
+    interpreter = constrain_one(interpreter, bool_field(inputs.statement.start.valid))
+    interpreter = constrain_one(interpreter, bool_field(inputs.statement.end.valid))
+    interpreter = constrain_equal(
+        interpreter,
+        BabyBear::from_u32(inputs.statement.end_iteration),
+        BabyBear::from_u32(inputs.statement.start_iteration) + BabyBear::one(),
+    )
+    interpreter = constrain_one(interpreter, bool_field(inputs.base_root.valid))
+    interpreter = constrain_one(interpreter, bool_field(inputs.interaction_root.valid))
+    interpreter = constrain_one(
+        interpreter,
+        bool_field(inputs.interaction_root.base.valid),
+    )
+    interpreter = constrain_digest(
+        interpreter,
+        inputs.interaction_root.base.value,
+        inputs.base_root.value,
+    )
+    interpreter = constrain_one(interpreter, inputs.base_opening_accepted)
+    interpreter = constrain_one(interpreter, inputs.interaction_opening_accepted)
+    interpreter = constrain_one(interpreter, inputs.accepted)
+    interpreter = constrain_one(interpreter, inputs.trace_valid)
+
+    let air = bind_sparse_air_lde_transcript_plan<
+        I,
+        {
+            PRODUCTION_LIMBS
+        },
+        {
+            PRODUCTION_TRACE_LENGTH
+        },
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+    >(
+        inputs.statement,
+        inputs.base_root,
+        inputs.interaction_root,
+        interpreter,
+    )
+    interpreter = constrain_one(air.interpreter, bool_field(air.value.valid))
+    interpreter = constrain_one(interpreter, bool_field(air.value.transcript.valid))
+    let composition = bind_sparse_air_security_profile_plan(
+        air.value,
+        production_recursive_security_profile(),
+        interpreter,
+    )
+    interpreter = constrain_one(
+        composition.interpreter,
+        bool_field(composition.value.is_valid()),
+    )
+    ProductionSecurityTranscriptRelationPlan {
+        interpreter: interpreter,
+        composition: composition.value,
+    }
 }
 
 /// Commit one production base opening through the exact plan shared by the

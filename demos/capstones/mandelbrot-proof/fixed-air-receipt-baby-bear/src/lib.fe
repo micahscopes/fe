@@ -56,9 +56,10 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseInteractionAirLdeCodeword,
     SparseInteractionLdeMultiOpening,
     SparseAirLdeTranscriptDigest,
+    SparseCompositionTranscriptPlan,
     SparseCompositionTranscriptDigest,
     bind_sparse_air_lde_transcript,
-    bind_sparse_composition_extension,
+    bind_sparse_composition_extension_plan,
     evaluate_sparse_bound_composition_opened,
     sparse_lde_opened_air_row,
     sparse_base_lde_root_power_of_two,
@@ -77,11 +78,14 @@ use mandelbrot_proof_recursive::OrbitInterval
 use mandelbrot_proof_recursive_baby_bear::commit_recursive_leaf_statement
 use merkle_core::multi_path_matches_requests
 use poseidon_baby_bear::{
+    BINDING_PERMUTATIONS,
+    PackedCommitment,
+    Poseidon2CanonicalCommitmentPlan,
     Poseidon2Digest,
     Poseidon2Domain,
     Poseidon2FieldDomain,
-    PackedCommitment,
-    commit_canonical_packed,
+    commit_canonical_packed_plan,
+    fixed_length_sponge_permutations,
 }
 use precision::baby_bear::{BABY_BEAR_MODULUS, BabyBear, BabyBearExt4}
 use precision::polynomial::{Radix2Field, radix2_log}
@@ -90,6 +94,7 @@ use proof_security::{
     derive_conjectured_direct_fri_policy,
     direct_fri_security_policy_is_derived,
 }
+use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
 
 const fn protocol_tag(_ label: String<4>) -> u32 {
     let bytes = label.as_bytes()
@@ -358,13 +363,29 @@ pub fn commit_sparse_direct_fri_transcript_profile(
 fn sparse_direct_fri_profile_commitment(
     _ profile: ref SparseDirectFriTranscriptProfile,
 ) -> PackedCommitment {
-    let commitment = commit_canonical_packed<
+    sparse_direct_fri_profile_commitment_plan(
+        profile,
+        QuadraticValueInterpreter::new(),
+    ).commitment()
+}
+
+pub const fn sparse_direct_fri_profile_commitment_permutations() -> usize {
+    fixed_length_sponge_permutations(SPARSE_SECURITY_PROFILE_FIELDS)
+}
+
+pub fn sparse_direct_fri_profile_commitment_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+>(
+    _ profile: ref SparseDirectFriTranscriptProfile,
+    _ interpreter: I,
+) -> Poseidon2CanonicalCommitmentPlan<I> {
+    commit_canonical_packed_plan<
+        I,
         MandelbrotSparseSecurityProfileBabyBearV1,
         SparseDirectFriTranscriptProfile,
         {SPARSE_SECURITY_PROFILE_WORDS},
         {SPARSE_SECURITY_PROFILE_FIELDS},
-    >(profile)
-    commitment.require(
+    >(interpreter, profile).require(
         profile.valid
             && sparse_direct_fri_transcript_profile_is_consistent(profile),
     )
@@ -373,6 +394,34 @@ fn sparse_direct_fri_profile_commitment(
 /// Extend an already authenticated AIR transcript with the exact security
 /// profile interpreted by this receipt. The profile commitment is nominally
 /// separated from all statement, AIR-root, composition, and FRI domains.
+pub const fn sparse_air_security_profile_permutations() -> usize {
+    sparse_direct_fri_profile_commitment_permutations()
+        + BINDING_PERMUTATIONS
+}
+
+pub fn bind_sparse_air_security_profile_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ profile: SparseDirectFriTranscriptProfile,
+    _ interpreter: I,
+) -> SparseCompositionTranscriptPlan<I, L, TRACE, LDE> {
+    let commitment = sparse_direct_fri_profile_commitment_plan(
+        ref profile,
+        interpreter,
+    )
+    bind_sparse_composition_extension_plan<
+        I,
+        MandelbrotSparseSecurityTranscriptBabyBearV1,
+        L,
+        TRACE,
+        LDE,
+    >(air, commitment.commitment(), commitment.interpreter)
+}
+
 pub fn bind_sparse_air_security_profile<
     const L: usize,
     const TRACE: usize,
@@ -381,12 +430,11 @@ pub fn bind_sparse_air_security_profile<
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ profile: SparseDirectFriTranscriptProfile,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
-    bind_sparse_composition_extension<
-        MandelbrotSparseSecurityTranscriptBabyBearV1,
-        L,
-        TRACE,
-        LDE,
-    >(air, sparse_direct_fri_profile_commitment(ref profile))
+    bind_sparse_air_security_profile_plan(
+        air,
+        profile,
+        QuadraticValueInterpreter::new(),
+    ).value
 }
 
 pub const PRODUCTION_AIR_MAX_LEAVES: usize = PRODUCTION_QUERY_COUNT * 4
