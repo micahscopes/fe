@@ -1,0 +1,114 @@
+//! Exact retained-receipt gate for production opening relations.
+//!
+//! The host supplies only canonical receipt bytes and a mutation selector.
+//! Fe decodes the complete policy-sized carrier, applies typed mutations, and
+//! executes the same base and interaction relation adapters used by recursion.
+
+use core::BrowserBytes
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    decode_production_security_sparse_baby_bear_receipt,
+    empty_production_security_sparse_baby_bear_receipt,
+}
+use mandelbrot_proof_recursive_verifier_air_baby_bear::{
+    production_base_lde_multi_opening_relation_plan,
+    production_interaction_lde_multi_opening_relation_plan,
+}
+use poseidon_baby_bear::Poseidon2Digest
+use precision::baby_bear::BabyBear
+use quadratic_plan::QuadraticRelationValueInterpreter
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+fn changed_digest(_ value: Poseidon2Digest) -> Poseidon2Digest {
+    let mut fields = [BabyBear::zero(); 8]
+    let mut lane: u32 = 0
+    while lane < 8 {
+        fields[lane as usize] = value.field(lane)
+        lane = lane + 1
+    }
+    fields[0] = fields[0] + BabyBear::one()
+    Poseidon2Digest::from_fields(fields)
+}
+
+/// Decode and authenticate both production opening roles. Mutations happen
+/// after canonical decoding, so rejection comes from the typed Fe relations
+/// rather than malformed transport bytes.
+pub fn audit_retained_production_opening_relations(_ mutation: u32, _ ptr: u32, _ len: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
+    let mut receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(
+        BrowserBytes { ptr: ptr, len: len },
+        mut receipt,
+    ) {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    if mutation == 1 {
+        receipt.base_root.value = changed_digest(receipt.base_root.value)
+    } else if mutation == 2 {
+        receipt.base.values[0][0] = receipt.base.values[0][0] + BabyBear::one()
+    } else if mutation == 3 && receipt.base.path.sibling_count > 0 {
+        receipt.base.path.siblings[0] = changed_digest(receipt.base.path.siblings[0])
+    } else if mutation == 4 {
+        receipt.interaction_root.value = changed_digest(receipt.interaction_root.value)
+    } else if mutation == 5 {
+        receipt.interaction.values[0][0] = receipt.interaction.values[0][0] + BabyBear::one()
+    } else if mutation == 6 && receipt.interaction.path.sibling_count > 0 {
+        receipt.interaction.path.siblings[0] = changed_digest(receipt.interaction.path.siblings[0])
+    } else if mutation == 7 {
+        receipt.interaction_root.base.value = changed_digest(receipt.interaction_root.base.value)
+    } else if mutation == 8 {
+        receipt.interaction_root.base.valid = false
+    } else if mutation == 9 {
+        receipt.interaction_root.value = receipt.base_root.value
+    } else if mutation == 10 {
+        receipt.base.valid = false
+    } else if mutation == 11 {
+        receipt.interaction.valid = false
+    } else if mutation == 12 && receipt.base.path.sibling_count > 0 {
+        receipt.base.path.sibling_count = receipt.base.path.sibling_count - 1
+    }
+
+    let base = production_base_lde_multi_opening_relation_plan(
+        ref receipt.base,
+        receipt.base_root,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    let base_accepted = base.interpreter.finish()
+    let interaction = production_interaction_lde_multi_opening_relation_plan(
+        ref receipt.interaction,
+        receipt.interaction_root,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    let interaction_accepted = interaction.interpreter.finish()
+    (
+        1,
+        flag(base_accepted),
+        flag(base.valid),
+        base.hashes,
+        base.used_siblings,
+        flag(interaction_accepted),
+        flag(interaction.valid),
+        interaction.hashes,
+        interaction.used_siblings,
+        receipt.base.path.leaf_count,
+        receipt.interaction.path.leaf_count,
+        receipt.base.path.sibling_count,
+        receipt.interaction.path.sibling_count,
+    )
+}
