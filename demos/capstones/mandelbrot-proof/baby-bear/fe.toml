@@ -5,6 +5,7 @@ version = "0.1.0"
 [dependencies]
 canonical_words = "../../../../ingots/canonical_words"
 core = "../../../../ingots/core"
+fri_baby_bear = "../../../../ingots/fri_baby_bear"
 mandelbrot_proof_air_core = "../air-core"
 mandelbrot_proof_baby_bear_transcript = "../baby-bear-transcript"
 mandelbrot_proof_kernel = "../kernel"

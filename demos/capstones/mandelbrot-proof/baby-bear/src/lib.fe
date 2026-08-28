@@ -21,6 +21,13 @@ use canonical_words::{
     encode_canonical_word_stream,
 }
 use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
+pub use fri_baby_bear::{
+    FriFoldPairEvaluation,
+    fold_fri_pair_at_point,
+    fold_fri_pair_at_power_of_two,
+    fold_fri_pair_value_at_point,
+    fold_fri_pair_value_at_power_of_two,
+}
 pub use mandelbrot_proof_baby_bear_transcript::{
     AirLdeTranscriptDigest,
     CompositionChallenge,
@@ -782,15 +789,6 @@ pub struct FriFoldEvaluations<const N: usize> {
     pub evaluations: [BabyBearExt4; N],
 }
 impl<const N: usize> core::marker::Copy for FriFoldEvaluations<N> {}
-
-/// The semantic result of folding one `(x, -x)` pair. Scalar proof
-/// construction, sparse query verification, and WebGPU placement consume this
-/// same ordinary Fe value instead of maintaining target-specific formulas.
-pub struct FriFoldPairEvaluation {
-    pub valid: bool,
-    pub evaluation: BabyBearExt4,
-}
-impl core::marker::Copy for FriFoldPairEvaluation {}
 
 /// One committed output layer in a schedule-derived FRI proof. Every fold has
 /// the same carrier shape, including the final one-element layer.
@@ -4896,107 +4894,6 @@ where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
         value: poseidon_bind<MandelbrotFriLayerTranscriptBabyBear<ROUND>>(
             transcript.value,
             layer.value,
-        ),
-    }
-}
-
-/// One reusable FRI binary fold over the quartic BabyBear challenge field.
-/// Evaluations at `x` and `-x` become one evaluation at `x^2`.
-#[inline(always)]
-pub fn fold_fri_pair_value_at_point(
-    _ positive: BabyBearExt4,
-    _ negative: BabyBearExt4,
-    _ challenge: BabyBearExt4,
-    _ point: BabyBear,
-) -> BabyBearExt4 {
-    let inverse_two = BabyBearExt4::from_base(
-        BabyBear::from_u32(2).inverse_or_zero(),
-    )
-    let even = (positive + negative) * inverse_two
-    let odd = (positive - negative)
-        * inverse_two
-        * BabyBearExt4::from_base(point.inverse_or_zero())
-    even + challenge * odd
-}
-
-/// Checked scalar view of the shared pair value. Placement interpreters whose
-/// typed schedule already proves a nonzero point may consume the value function
-/// directly and retain their validity channel in typed storage.
-#[inline(always)]
-pub fn fold_fri_pair_at_point(
-    _ positive: BabyBearExt4,
-    _ negative: BabyBearExt4,
-    _ challenge: BabyBearExt4,
-    _ point: BabyBear,
-) -> FriFoldPairEvaluation {
-    if point.is_zero() {
-        return FriFoldPairEvaluation {
-            valid: false,
-            evaluation: BabyBearExt4::zero(),
-        }
-    }
-    FriFoldPairEvaluation {
-        valid: true,
-        evaluation: fold_fri_pair_value_at_point(
-            positive,
-            negative,
-            challenge,
-            point,
-        ),
-    }
-}
-
-#[inline(always)]
-pub fn fold_fri_pair_value_at_power_of_two<const N: usize>(
-    _ positive: BabyBearExt4,
-    _ negative: BabyBearExt4,
-    _ challenge: BabyBearExt4,
-    _ shift: BabyBear,
-    _ index: u32,
-) -> BabyBearExt4
-where N > 0, N > 1, { (N & (N - 1)) == 0 }
-{
-    let half: u32 = (N / 2).downcast_truncate()
-    if shift.is_zero() || index >= half {
-        return BabyBearExt4::zero()
-    }
-    let root = BabyBear::two_adic_root(radix2_log<N>())
-    fold_fri_pair_value_at_point(
-        positive,
-        negative,
-        challenge,
-        shift * root.pow_u32(index),
-    )
-}
-
-/// Place one pair in a power-of-two FRI layer. The index selects the same
-/// canonical root power used by the scalar array fold and by authenticated
-/// sparse query verification.
-#[inline(always)]
-pub fn fold_fri_pair_at_power_of_two<const N: usize>(
-    _ positive: BabyBearExt4,
-    _ negative: BabyBearExt4,
-    _ challenge: BabyBearExt4,
-    _ shift: BabyBear,
-    _ index: u32,
-) -> FriFoldPairEvaluation
-where N > 0, N > 1, { (N & (N - 1)) == 0 }
-{
-    let half: u32 = (N / 2).downcast_truncate()
-    if shift.is_zero() || index >= half {
-        return FriFoldPairEvaluation {
-            valid: false,
-            evaluation: BabyBearExt4::zero(),
-        }
-    }
-    FriFoldPairEvaluation {
-        valid: true,
-        evaluation: fold_fri_pair_value_at_power_of_two<N>(
-            positive,
-            negative,
-            challenge,
-            shift,
-            index,
         ),
     }
 }

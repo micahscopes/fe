@@ -1,0 +1,38 @@
+//! Executable boundary for the shared Q12 Mandelbrot word stream.
+
+use mandelbrot_q12_words::{Q12EscapeAirWordStream, derive_air_words}
+
+pub fn q12_air_words(
+    _ step: u32,
+    _ z_re_q12: i32,
+    _ z_im_q12: i32,
+) -> (u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32) {
+    derive_air_words(step, z_re_q12, z_im_q12)
+}
+
+pub fn q12_stream_words(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+    _ advances: u32,
+) -> (
+    u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32,
+    u32, u32, u32, u32,
+    u32, u32,
+) {
+    let mut stream = Q12EscapeAirWordStream::new(c_re_q12, c_im_q12, bound)
+    let mut cursor: u32 = 0
+    while cursor < advances {
+        stream.advance()
+        cursor = cursor + 1
+    }
+    let air = stream.current_air_words()
+    let proof = stream.current_proof_words()
+    (
+        air.0, air.1, air.2, air.3, air.4, air.5,
+        air.6, air.7, air.8, air.9, air.10,
+        proof.0, proof.1, proof.2, proof.3,
+        if stream.is_terminal() { 1 } else { 0 },
+        if stream.can_advance() { 1 } else { 0 },
+    )
+}

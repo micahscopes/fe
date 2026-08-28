@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_q12_words_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_q12_words = "../../../../../ingots/mandelbrot_q12_words"

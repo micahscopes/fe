@@ -1,0 +1,69 @@
+//! Executable boundary for the shared BabyBear FRI pair denotation.
+
+use fri_baby_bear::{
+    fold_fri_pair_at_point,
+    fold_fri_pair_at_power_of_two,
+    fold_fri_pair_value_at_power_of_two,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+
+fn ext(_ a: u32, _ b: u32, _ c: u32, _ d: u32) -> BabyBearExt4 {
+    BabyBearExt4::from_u32s([a, b, c, d])
+}
+
+fn words(_ valid: bool, _ value: BabyBearExt4) -> (u32, u32, u32, u32, u32) {
+    let coefficients = value.to_u32s()
+    (
+        if valid { 1 } else { 0 },
+        coefficients[0], coefficients[1], coefficients[2], coefficients[3],
+    )
+}
+
+pub fn fri_pair_at_point(
+    _ p0: u32, _ p1: u32, _ p2: u32, _ p3: u32,
+    _ n0: u32, _ n1: u32, _ n2: u32, _ n3: u32,
+    _ b0: u32, _ b1: u32, _ b2: u32, _ b3: u32,
+    _ point: u32,
+) -> (u32, u32, u32, u32, u32) {
+    let folded = fold_fri_pair_at_point(
+        ext(p0, p1, p2, p3),
+        ext(n0, n1, n2, n3),
+        ext(b0, b1, b2, b3),
+        BabyBear::from_u32(point),
+    )
+    words(folded.valid, folded.evaluation)
+}
+
+pub fn fri_pair16_checked(
+    _ p0: u32, _ p1: u32, _ p2: u32, _ p3: u32,
+    _ n0: u32, _ n1: u32, _ n2: u32, _ n3: u32,
+    _ b0: u32, _ b1: u32, _ b2: u32, _ b3: u32,
+    _ shift: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32) {
+    let folded = fold_fri_pair_at_power_of_two<16>(
+        ext(p0, p1, p2, p3),
+        ext(n0, n1, n2, n3),
+        ext(b0, b1, b2, b3),
+        BabyBear::from_u32(shift),
+        index,
+    )
+    words(folded.valid, folded.evaluation)
+}
+
+pub fn fri_pair16_value(
+    _ p0: u32, _ p1: u32, _ p2: u32, _ p3: u32,
+    _ n0: u32, _ n1: u32, _ n2: u32, _ n3: u32,
+    _ b0: u32, _ b1: u32, _ b2: u32, _ b3: u32,
+    _ shift: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32) {
+    let coefficients = fold_fri_pair_value_at_power_of_two<16>(
+        ext(p0, p1, p2, p3),
+        ext(n0, n1, n2, n3),
+        ext(b0, b1, b2, b3),
+        BabyBear::from_u32(shift),
+        index,
+    ).to_u32s()
+    (coefficients[0], coefficients[1], coefficients[2], coefficients[3])
+}

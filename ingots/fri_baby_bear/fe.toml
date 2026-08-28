@@ -1,0 +1,7 @@
+[ingot]
+name = "fri_baby_bear"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+precision = "../../demos/sketches/precision"

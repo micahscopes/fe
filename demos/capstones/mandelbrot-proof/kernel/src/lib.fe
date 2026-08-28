@@ -5,10 +5,19 @@
 //! The public tuple exports are scalar Wasm lanes for oracle work; the authored
 //! model remains nominal and typed.
 
-pub const Q12_SCALE: i32 = 4096
-pub const ESCAPE_RADIUS_SQUARED_Q24: i32 = 67108864
+pub use mandelbrot_q12_words::{
+    ESCAPE_RADIUS_SQUARED_Q24,
+    EscapeAirWords,
+    MAX_CLAIM_BOUND,
+    Q12_SCALE,
+}
+use mandelbrot_q12_words::{
+    Q12EscapeAirWordStream,
+    derive_air_words as derive_q12_air_words,
+    escape_claim_is_valid,
+}
+
 pub const NO_ESCAPE_STEP: u32 = 4294967295
-pub const MAX_CLAIM_BOUND: u32 = 1048576
 pub const MAX_PADDED_TRACE_LENGTH: usize = 2097152
 pub const MAX_TRACE_COORDINATE_MAGNITUDE: u32 = 24576
 
@@ -232,16 +241,14 @@ pub struct EncodedProofTrace<const N: usize> {
 
 impl<const N: usize> core::marker::Copy for EncodedProofTrace<N> {}
 
-/// Scalar oracle boundary for one flattened AIR row. The proof model remains
-/// nominal; this tuple only keeps Wasm gate wrappers concise.
-pub type EscapeAirWords = (u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32)
-
 /// Canonical numeric traversal for proof backends. Boolean trace facts are
 /// retained as their audited `u32` field words, so GPU and field consumers do
 /// not need to round-trip through a target's in-memory `bool` representation.
 /// The ordinary typed stream and this word stream share `derived_air_words`,
 /// which remains the single authored Q12 recurrence.
-pub struct EscapeAirWordStream { claim: EscapesByQ12, current: EscapeAirWords }
+pub struct EscapeAirWordStream {
+    stream: Q12EscapeAirWordStream,
+}
 
 impl core::marker::Copy for EscapeAirWordStream {}
 
@@ -681,28 +688,7 @@ fn padded_air_last_row_holds(_ row: PaddedEscapeAirRow) -> bool {
 }
 
 fn derived_air_words(_ step: u32, _ z: ComplexQ12) -> EscapeAirWords {
-    let rr = square(z.re)
-    let ii = square(z.im)
-    let magnitude_squared_q24 = rr + ii
-    let real_shift = decompose_q12(rr - ii)
-    let imaginary_shift = decompose_q12((z.re * 2) * z.im)
-    (
-        step,
-        z.re,
-        z.im,
-        rr,
-        ii,
-        magnitude_squared_q24,
-        real_shift.quotient,
-        real_shift.remainder,
-        imaginary_shift.quotient,
-        imaginary_shift.remainder,
-        if magnitude_squared_q24 >= ESCAPE_RADIUS_SQUARED_Q24 {
-            1
-        } else {
-            0
-        },
-    )
+    derive_q12_air_words(step, z.re, z.im)
 }
 
 fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
@@ -711,37 +697,37 @@ fn air_row(_ step: u32, _ z: ComplexQ12) -> EscapeAirRow {
 
 impl EscapeAirWordStream {
     pub fn new(_ claim: EscapesByQ12) -> Self {
-        Self { claim: claim, current: derived_air_words(0, ComplexQ12 { re: 0, im: 0 }) }
+        Self {
+            stream: Q12EscapeAirWordStream::new(
+                claim.c.re,
+                claim.c.im,
+                claim.bound,
+            ),
+        }
     }
     pub fn is_valid(self) -> bool {
-        self.claim.is_valid()
+        self.stream.is_valid()
     }
     pub fn current_proof_row(self) -> EncodedProofRow {
-        let terminal = self.current.10
+        let words = self.stream.current_air_words()
+        let terminal = words.10
         let valid: u32 = if self.is_valid() { 1 } else { 0 }
         EncodedProofRow {
             active: valid,
             terminal: valid * terminal,
-            air: encode_air_words(self.current),
+            air: encode_air_words(words),
         }
     }
     pub fn is_terminal(self) -> bool {
-        self.current.10 == 1
+        self.stream.is_terminal()
     }
     pub fn can_advance(self) -> bool {
-        self.is_valid() && self.current.10 == 0 && self.current.0 < self.claim.bound
+        self.stream.can_advance()
     }
 
     #[inline(always)]
     pub fn advance(mut self) {
-        if !self.can_advance() {
-            return
-        }
-        let z = ComplexQ12 {
-            re: self.current.6 + self.claim.c.re,
-            im: self.current.8 + self.claim.c.im,
-        }
-        self.current = derived_air_words(self.current.0 + 1, z)
+        self.stream.advance()
     }
 }
 
@@ -835,11 +821,7 @@ impl EscapesByQ12 {
     /// These bounds, together with the radius check before every transition,
     /// keep every authored i32 product and sum in range.
     pub fn is_valid(self) -> bool {
-        self.c.re >= -8192
-            && self.c.re < 4096
-            && self.c.im >= -6144
-            && self.c.im < 6144
-            && self.bound <= MAX_CLAIM_BOUND
+        escape_claim_is_valid(self.c.re, self.c.im, self.bound)
     }
 
     /// Materialize the least escape row at or before `bound`. A non-escaping

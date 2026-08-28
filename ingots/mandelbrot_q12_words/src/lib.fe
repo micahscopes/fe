@@ -1,0 +1,120 @@
+//! Compact Q12 Mandelbrot recurrence for proof and placement interpreters.
+//!
+//! This ingot owns the numeric word stream. Rich AIR schemas in the production
+//! kernel and WebGPU storage placement both interpret these same words.
+
+pub const Q12_SCALE: i32 = 4096
+pub const ESCAPE_RADIUS_SQUARED_Q24: i32 = 67108864
+pub const MAX_CLAIM_BOUND: u32 = 1048576
+
+/// `(step, zr, zi, rr, ii, magnitude, q_re, r_re, q_im, r_im, terminal)`.
+pub type EscapeAirWords = (u32, i32, i32, i32, i32, i32, i32, i32, i32, i32, u32)
+
+/// GPU-facing projection of one canonical proof row:
+/// `(step, magnitude, active, unique_terminal)`.
+pub type EscapeProofWords = (u32, u32, u32, u32)
+
+pub fn escape_claim_is_valid(
+    _ c_re_q12: i32,
+    _ c_im_q12: i32,
+    _ bound: u32,
+) -> bool {
+    c_re_q12 >= -8192
+        && c_re_q12 < 4096
+        && c_im_q12 >= -6144
+        && c_im_q12 < 6144
+        && bound <= MAX_CLAIM_BOUND
+}
+
+fn square(_ value: i32) -> i32 { value * value }
+
+pub fn derive_air_words(
+    _ step: u32,
+    _ z_re_q12: i32,
+    _ z_im_q12: i32,
+) -> EscapeAirWords {
+    let rr = square(z_re_q12)
+    let ii = square(z_im_q12)
+    let magnitude = rr + ii
+    let real_numerator = rr - ii
+    let q_re = real_numerator >> 12
+    let imaginary_numerator = (z_re_q12 * 2) * z_im_q12
+    let q_im = imaginary_numerator >> 12
+    (
+        step,
+        z_re_q12,
+        z_im_q12,
+        rr,
+        ii,
+        magnitude,
+        q_re,
+        real_numerator - q_re * Q12_SCALE,
+        q_im,
+        imaginary_numerator - q_im * Q12_SCALE,
+        if magnitude >= ESCAPE_RADIUS_SQUARED_Q24 { 1 } else { 0 },
+    )
+}
+
+pub struct Q12EscapeAirWordStream {
+    c_re_q12: i32,
+    c_im_q12: i32,
+    bound: u32,
+    current: EscapeAirWords,
+}
+impl core::marker::Copy for Q12EscapeAirWordStream {}
+
+impl Q12EscapeAirWordStream {
+    pub fn new(
+        _ c_re_q12: i32,
+        _ c_im_q12: i32,
+        _ bound: u32,
+    ) -> Self {
+        Self {
+            c_re_q12: c_re_q12,
+            c_im_q12: c_im_q12,
+            bound: bound,
+            current: derive_air_words(0, 0, 0),
+        }
+    }
+
+    pub fn is_valid(self) -> bool {
+        escape_claim_is_valid(self.c_re_q12, self.c_im_q12, self.bound)
+    }
+
+    pub fn current_air_words(self) -> EscapeAirWords {
+        (
+            self.current.0,
+            self.current.1,
+            self.current.2,
+            self.current.3,
+            self.current.4,
+            self.current.5,
+            self.current.6,
+            self.current.7,
+            self.current.8,
+            self.current.9,
+            self.current.10,
+        )
+    }
+
+    pub fn current_proof_words(self) -> EscapeProofWords {
+        let valid: u32 = if self.is_valid() { 1 } else { 0 }
+        (self.current.0, self.current.5.downcast_unchecked(), valid, valid * self.current.10)
+    }
+
+    pub fn is_terminal(self) -> bool { self.current.10 == 1 }
+
+    pub fn can_advance(self) -> bool {
+        self.is_valid() && self.current.10 == 0 && self.current.0 < self.bound
+    }
+
+    #[inline(always)]
+    pub fn advance(mut self) {
+        if !self.can_advance() { return }
+        self.current = derive_air_words(
+            self.current.0 + 1,
+            self.current.6 + self.c_re_q12,
+            self.current.8 + self.c_im_q12,
+        )
+    }
+}

@@ -1,0 +1,6 @@
+[ingot]
+name = "mandelbrot_q12_words"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }

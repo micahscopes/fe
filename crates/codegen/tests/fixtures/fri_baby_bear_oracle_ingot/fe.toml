@@ -1,0 +1,8 @@
+[ingot]
+name = "fri_baby_bear_oracle_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+fri_baby_bear = "../../../../../ingots/fri_baby_bear"
+precision = "../../../../../demos/sketches/precision"
