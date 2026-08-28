@@ -23,14 +23,32 @@ pub use fri_structure::{
     FriScheduleShape,
 }
 
-const fn protocol_round_tag(_ prefix: String<2>, _ round: u32) -> u32 {
+const fn protocol_prefix(_ prefix: String<2>) -> u32 {
     let bytes = prefix.as_bytes()
+    ((bytes[0] as u32) << 24) | ((bytes[1] as u32) << 16)
+}
+
+const FRI_FOLD_PREFIX: u32 = protocol_prefix("FC")
+const FRI_LAYER_ROW_PREFIX: u32 = protocol_prefix("FR")
+const FRI_LAYER_TRANSCRIPT_PREFIX: u32 = protocol_prefix("FT")
+
+const fn protocol_round_tag(_ prefix: u32, _ round: u32) -> u32 {
     let tens = round / 10
     let ones = round - tens * 10
-    ((bytes[0] as u32) << 24)
-        | ((bytes[1] as u32) << 16)
-        | ((48 + tens) << 8)
+    prefix | ((48 + tens) << 8)
         | (48 + ones)
+}
+
+pub const fn fri_fold_domain_tag(_ round: u32) -> u32 {
+    protocol_round_tag(FRI_FOLD_PREFIX, round)
+}
+
+pub const fn fri_layer_row_domain_tag(_ round: u32) -> u32 {
+    protocol_round_tag(FRI_LAYER_ROW_PREFIX, round)
+}
+
+pub const fn fri_layer_transcript_domain_tag(_ round: u32) -> u32 {
+    protocol_round_tag(FRI_LAYER_TRANSCRIPT_PREFIX, round)
 }
 
 /// Typed transcript domains shared by scalar proof construction and GPU
@@ -40,17 +58,17 @@ pub struct FriLayerRowDomain<const ROUND: u32> {}
 pub struct FriLayerTranscriptDomain<const ROUND: u32> {}
 
 impl<const ROUND: u32> Poseidon2FieldDomain for FriFoldDomain<ROUND> {
-    const TAG: u32 = protocol_round_tag("FC", ROUND)
+    const TAG: u32 = fri_fold_domain_tag(ROUND)
 }
 
 impl<const ROUND: u32> Poseidon2FieldDomain for FriLayerRowDomain<ROUND> {
-    const TAG: u32 = protocol_round_tag("FR", ROUND)
+    const TAG: u32 = fri_layer_row_domain_tag(ROUND)
 }
 
 impl<const ROUND: u32> Poseidon2FieldDomain
     for FriLayerTranscriptDomain<ROUND>
 {
-    const TAG: u32 = protocol_round_tag("FT", ROUND)
+    const TAG: u32 = fri_layer_transcript_domain_tag(ROUND)
 }
 
 /// Squeeze one round challenge from the preceding transcript digest.

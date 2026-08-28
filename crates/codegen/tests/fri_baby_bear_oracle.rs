@@ -218,6 +218,17 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
             vec![tag(*b"FC"), tag(*b"FR"), tag(*b"FT")],
             "wrong transcript domains for FRI round {round}",
         );
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_runtime_round_domains",
+                &[round],
+                3,
+            ),
+            vec![tag(*b"FC"), tag(*b"FR"), tag(*b"FT")],
+            "runtime placement domains diverged for FRI round {round}",
+        );
     }
     assert_eq!(
         call(
