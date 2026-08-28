@@ -505,9 +505,37 @@ existing Definition of done, not a second campaign checklist:
   recursive-verifier AIR target passes 6/6 serially in 299.05 seconds,
   retaining the header, ordered-node, binary-path, canonical multipath, and
   leaf mutation gates. This proves the production storage shape and its
-  role-preserving composition. It does not yet replay the retained 948,808-byte
-  security receipt, execute a maximum-count relation stream, or emit a
-  cryptographic parent proof. Exact retained-receipt replay is the next gate.
+  role-preserving composition. At that checkpoint it did not yet replay the
+  retained 948,808-byte security receipt, execute a maximum-count relation
+  stream, or emit a cryptographic parent proof. The exact retained-receipt
+  replay is recorded below.
+
+  Commit `f2f247333` closes the exact retained-receipt semantic replay without
+  baking the megabyte-scale proof into source. The process-isolated gate
+  requires an explicit `MB2_PRODUCTION_SECURITY_RECEIPT` path, checks the
+  canonical 948,808-byte vector against SHA-256
+  `c789a067f63b4ab73d8a4c0b36932e4252b6270b0be3e17cc5d5c27980be3ceb`,
+  and is ignored by ordinary CI when that external evidence is unavailable.
+  Fe alone decodes the complete policy-sized carrier, applies typed mutations,
+  derives all base and interaction leaf commitments, and runs both canonical
+  multipath relations through their distinct production arenas. An independent
+  Rust prefix decoder reads the canonical receipt widths rather than Fe memory
+  offsets and independently derives the two sorted leaf sets, sibling counts,
+  and hash-task schedules. The real receipt contains 452 base leaves and 452
+  interaction leaves; each depth-13 opening executes exactly 1,585 ordered
+  hashes, and Fe agrees with both independent schedules.
+
+  A fresh zero-import Fe-Wasm artifact compiled to 2,801,164 bytes with
+  SHA-256
+  `8a4b3255783a317e0f11add7e488af8c350ac3ed774240e499030d7c46faba6c`
+  in 52.39 seconds. Clean replay, twelve post-decode typed mutations across
+  roots, opened values, siblings, interaction base-root binding, role-confused
+  root values, validity, and sibling count, plus truncation and trailing-byte
+  rejection, completed in 14.41 seconds. All mutations reject. This closes
+  production base and interaction opening semantics over the retained exact
+  receipt. It does not materialize the corresponding 12-million-row maximum
+  quadratic stream, authenticate transcript, AIR, or FRI internals, or emit a
+  cryptographic parent proof.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
