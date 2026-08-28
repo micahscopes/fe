@@ -4311,7 +4311,11 @@ impl<'db> TyChecker<'db> {
                     ExprProp::invalid(self.db)
                 }
                 PathRes::FuncParam(..) => {
-                    unreachable!("func params should be resolved as bindings")
+                    let Partial::Present(ident) = path.ident(self.db) else {
+                        return ExprProp::invalid(self.db);
+                    };
+                    self.push_diag(BodyDiag::UndefinedVariable(path_expr_span.into(), ident));
+                    ExprProp::invalid(self.db)
                 }
             },
         }

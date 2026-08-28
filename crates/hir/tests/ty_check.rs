@@ -363,6 +363,29 @@ fn trigger() {
 }
 
 #[test]
+fn runtime_parameter_in_const_predicate_is_diagnostic() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "runtime_parameter_in_const_predicate_is_diagnostic.fe".into(),
+        r#"
+fn invalid(
+    _ invocation: u32,
+)
+where
+    { invocation == 0 }
+{}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+
+    assert!(
+        diagnostics_contain(&diags, "undefined variable `invocation`"),
+        "{diags:#?}"
+    );
+}
+
+#[test]
 fn generic_operator_ambiguity_preserves_checked_candidates() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
