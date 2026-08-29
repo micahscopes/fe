@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -69,6 +69,9 @@ const contentTypes = new Map([
 
 async function siteAsset(value) {
   const url = new URL(value, "http://fe-proof.test");
+  if (url.pathname === "/favicon.ico") {
+    return { status: 204, body: Buffer.alloc(0) };
+  }
   const pathname = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
   const candidate = resolve(siteRoot, `.${pathname}`);
   if (candidate !== siteRoot && !candidate.startsWith(`${siteRoot}${sep}`)) {
@@ -216,18 +219,25 @@ try {
       "initialize_commitments",
       "advance_commitment_rounds",
       "finalize_commitments",
-      "initialize_fri_challenge",
-      "advance_fri_challenge",
-      "fold_fri_pairs",
-      "finalize_fri_fold",
+      "initialize_fri_schedule",
+      "advance_fri_round_1",
+      "advance_fri_round_2",
+      "advance_fri_round_3",
+      "advance_fri_round_4",
+      "finalize_fri_schedule",
       "display",
     ],
     "the browser did not receive the expected Fe-derived proof schedule",
   );
   assert.equal(boot.passes[7].repeat, 396);
-  assert.equal(boot.passes[10].repeat, 88);
-  assert.deepEqual(boot.passes[10].workgroup, [16, 1, 1]);
-  assert.deepEqual(boot.passes[11].workgroup, [16, 1, 1]);
+  assert.deepEqual(
+    boot.passes.slice(10, 14).map(pass => pass.repeat),
+    [403, 358, 313, 268],
+  );
+  assert.deepEqual(
+    boot.passes.slice(9, 14).map(pass => pass.workgroup),
+    Array.from({ length: 5 }, () => [256, 1, 1]),
+  );
 
   const BLUE = [87, 117, 226, 255];
   const PINK = [255, 176, 222, 255];
@@ -240,25 +250,74 @@ try {
       });
       surface.params.tamper = requested;
       await frame;
-      await surface.freeze();
-      const canvas = surface._posterCanvas;
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      const y = Math.floor(canvas.height * 0.09);
-      const bands = [0.1, 0.3, 0.5, 0.7, 0.9].map(fraction =>
-        Array.from(context.getImageData(Math.floor(canvas.width * fraction), y, 1, 1).data)
+      const gpu = surface._gpu;
+      const source = gpu?.resourceBuffers?.get("proof");
+      const proofResource = surface.manifest?.resources?.find(resource =>
+        resource.name === "proof"
       );
+      const context = surface._liveContext;
+      if (!gpu?.device || !source || !proofResource || !context) {
+        throw new Error("the live Fe proof graph is unavailable for test-only readback");
+      }
+      if (proofResource.element !== "U32" ||
+          proofResource.stride !== Uint32Array.BYTES_PER_ELEMENT) {
+        throw new Error("the Fe proof resource is not a canonical u32 tape");
+      }
+      const byteLength = proofResource.length * proofResource.stride;
+      const proofStaging = gpu.device.createBuffer({
+        size: byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const canvas = surface._liveCanvas;
+      const width = canvas.width;
+      const height = canvas.height;
+      const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+      const pixelStaging = gpu.device.createBuffer({
+        size: bytesPerRow * height,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const encoder = gpu.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(source, 0, proofStaging, 0, byteLength);
+      encoder.copyTextureToBuffer(
+        { texture: context.getCurrentTexture() },
+        { buffer: pixelStaging, bytesPerRow, rowsPerImage: height },
+        { width, height, depthOrArrayLayers: 1 },
+      );
+      gpu.device.queue.submit([encoder.finish()]);
+      await Promise.all([
+        proofStaging.mapAsync(GPUMapMode.READ),
+        pixelStaging.mapAsync(GPUMapMode.READ),
+      ]);
+      const proof = Array.from(new Uint32Array(proofStaging.getMappedRange()).slice());
+      const pixels = new Uint8Array(pixelStaging.getMappedRange());
+      const bgra = gpu.format.startsWith("bgra");
+      const y = Math.floor(height * 0.09);
+      const bands = [0.1, 0.3, 0.5, 0.7, 0.9].map(fraction => {
+        const offset = y * bytesPerRow + Math.floor(width * fraction) * 4;
+        return [
+          pixels[offset + (bgra ? 2 : 0)],
+          pixels[offset + 1],
+          pixels[offset + (bgra ? 0 : 2)],
+          pixels[offset + 3],
+        ];
+      });
+      proofStaging.unmap();
+      proofStaging.destroy();
+      pixelStaging.unmap();
+      pixelStaging.destroy();
       return {
         bands,
         state: surface.state,
         mode: surface.mode,
         tamper: surface.params.tamper,
+        proof,
       };
     }, tamper);
   }
 
   const clean = await setModeAndSample(0);
   assert.deepEqual(clean.bands, [BLUE, BLUE, BLUE, BLUE, BLUE]);
-  assert.equal(clean.state, "frozen");
+  assert.equal(clean.state, "live");
   assert.equal(clean.mode, "webgpu");
   assert.equal(clean.tamper, 0);
 
@@ -269,6 +328,24 @@ try {
   const recovered = await setModeAndSample(0);
   assert.deepEqual(recovered.bands, [BLUE, BLUE, BLUE, BLUE, BLUE]);
   assert.equal(recovered.tamper, 0);
+  assert.deepEqual(recovered.proof, clean.proof, "clean recovery must reproduce the receipt");
+  const frozenState = await page.evaluate(async () => {
+    const surface = document.querySelector("fe-surface");
+    await surface.freeze();
+    return surface.state;
+  });
+  assert.equal(frozenState, "frozen");
+
+  if (process.env.MB2_BROWSER_PROOF_RECEIPTS) {
+    await writeFile(
+      resolve(process.env.MB2_BROWSER_PROOF_RECEIPTS),
+      `${JSON.stringify({
+        clean: clean.proof,
+        tampered: tampered.proof,
+        recovered: recovered.proof,
+      })}\n`,
+    );
+  }
 
   const evidence = await page.evaluate(() => globalThis.__feProofLab);
   assert.equal(evidence.ready, 1);
@@ -281,8 +358,10 @@ try {
     clean: clean.bands,
     tampered: tampered.bands,
     recovered: recovered.bands,
+    receiptWords: clean.proof.length,
     frames: evidence.frames,
     states: evidence.states,
+    finalState: frozenState,
   }, null, 2));
 } finally {
   if (page) await page.close();

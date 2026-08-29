@@ -41,9 +41,22 @@ pub struct StageGridStep {
 
 impl core::marker::Copy for StageGridStep {}
 
+/// Preparation receipt for one lane of one transform in a contiguous batch.
+/// The caller decides where semantic validity belongs. Keeping that word out
+/// of the arithmetic scratch buffers permits CTFE-derived storage reuse.
+pub struct BatchCosetPreparation {
+    pub active: bool,
+    pub valid: bool,
+    pub batch: u32,
+    pub lane: u32,
+}
+
+impl core::marker::Copy for BatchCosetPreparation {}
+
 /// Completion receipt for one lane of one transform in a contiguous batch.
 /// `batch` and `lane` are derived from the invocation grid, while `valid`
-/// includes the retained coset predicate and exact stage completion count.
+/// records the exact stage completion count. The caller composes it with the
+/// earlier [`BatchCosetPreparation`] predicate at its semantic storage site.
 pub struct BatchStageGridFinish {
     pub active: bool,
     pub valid: bool,
@@ -352,7 +365,6 @@ pub fn prepare_batched_coset_extension<
     const INVERSE_PROGRESS_WORDS: usize,
     const VALUE_WORDS: usize,
     const PROGRESS_WORDS: usize,
-    const VALID_WORDS: usize,
     F: StorageRadix2Field,
     InputPlan: StageGrid,
     OutputPlan: StageGrid,
@@ -361,10 +373,9 @@ pub fn prepare_batched_coset_extension<
     _ inverse_progress: StorageBuffer<u32, INVERSE_PROGRESS_WORDS>,
     _ values: StorageBuffer<u32, VALUE_WORDS>,
     _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
-    _ valid: StorageBuffer<u32, VALID_WORDS>,
     _ shift: F,
     _ invocation: ComputeInvocation,
-) where
+) -> BatchCosetPreparation where
     BATCHES > 0,
     N > 0,
     N > 1,
@@ -379,7 +390,6 @@ pub fn prepare_batched_coset_extension<
     { INVERSE_PROGRESS_WORDS == BATCHES * INPUT_LANES },
     { VALUE_WORDS == BATCHES * OUT },
     { PROGRESS_WORDS == BATCHES * OUTPUT_LANES },
-    { VALID_WORDS == BATCHES },
     { radix2_field_domain_supported<N, F>() },
     { radix2_field_domain_supported<OUT, F>() },
     { InputPlan::POINTS == N },
@@ -387,7 +397,14 @@ pub fn prepare_batched_coset_extension<
 {
     let global_lane = invocation.global.x
     let total_lanes: u32 = (BATCHES * OUTPUT_LANES).downcast_truncate()
-    if global_lane >= total_lanes { return }
+    if global_lane >= total_lanes {
+        return BatchCosetPreparation {
+            active: false,
+            valid: true,
+            batch: 0,
+            lane: 0,
+        }
+    }
 
     let input_lanes: u32 = INPUT_LANES.downcast_truncate()
     let output_lanes: u32 = OUTPUT_LANES.downcast_truncate()
@@ -438,8 +455,11 @@ pub fn prepare_batched_coset_extension<
         value: second_value.to_storage(),
     )
     progress.store(index: global_lane, value: 0)
-    if lane == 0 {
-        valid.store(index: batch, value: if batch_valid { 1 } else { 0 })
+    BatchCosetPreparation {
+        active: true,
+        valid: batch_valid,
+        batch: batch,
+        lane: lane,
     }
 }
 
@@ -452,13 +472,11 @@ pub fn finish_batched_stage_grid_into<
     const LANES: usize,
     const VALUE_WORDS: usize,
     const PROGRESS_WORDS: usize,
-    const VALID_WORDS: usize,
     const DESTINATION_WORDS: usize,
     Plan: StageGrid,
 >(
     _ values: StorageBuffer<u32, VALUE_WORDS>,
     _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
-    _ retained_valid: StorageBuffer<u32, VALID_WORDS>,
     _ destination: StorageBuffer<u32, DESTINATION_WORDS>,
     _ destination_start: u32,
     _ invocation: ComputeInvocation,
@@ -471,7 +489,6 @@ where
     { LANES * 2 == N },
     { VALUE_WORDS == BATCHES * N },
     { PROGRESS_WORDS == BATCHES * LANES },
-    { VALID_WORDS == BATCHES },
     { Plan::POINTS == N },
 {
     let global_lane = invocation.global.x
@@ -501,7 +518,7 @@ where
     )
 
     let progress_base = batch * lanes
-    let mut complete = retained_valid.load(index: batch) == 1
+    let mut complete = true
     let mut checked: u32 = 0
     while checked < lanes {
         if progress.load(index: progress_base + checked)

@@ -10,16 +10,17 @@ use std::path::{Path, PathBuf};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    resolve_web_entry, WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle,
-    WebBundleMode, WebScalarKind,
+    WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
+    WebScalarKind, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use p3_baby_bear::{
-    default_babybear_poseidon2_16, BabyBear, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL,
-    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, BABYBEAR_POSEIDON2_RC_16_INTERNAL,
+    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL,
+    BABYBEAR_POSEIDON2_RC_16_INTERNAL, BabyBear, default_babybear_poseidon2_16,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
+use serde::Deserialize;
 use url::Url;
 
 const MODULUS: u32 = 2_013_265_921;
@@ -44,26 +45,36 @@ const DONE_BLOCK: u32 = 9;
 const ROUND_CONSTANT_COUNT: usize = 8 * POSEIDON_WIDTH + 13;
 const PARAMETER_START: usize = 267;
 const PARAMETER_END: usize = PARAMETER_START + ROUND_CONSTANT_COUNT;
-const FRI_CHALLENGE_STATE: usize = PARAMETER_END;
-const FRI_CHALLENGE_TAIL: usize = FRI_CHALLENGE_STATE + 80;
-const FRI_CHALLENGE: usize = FRI_CHALLENGE_TAIL + 2;
-const FRI_CHALLENGE_VALID: usize = FRI_CHALLENGE + 4;
-const FRI_CLEAN: usize = FRI_CHALLENGE_VALID + 1;
-const FRI_FOLD_WORDS: usize = 32;
-const FRI_OBSERVED: usize = FRI_CLEAN + FRI_FOLD_WORDS;
-const FRI_STATUS: usize = FRI_OBSERVED + FRI_FOLD_WORDS;
-const FRI_CLEAN_VALID: usize = FRI_STATUS;
-const FRI_OBSERVED_VALID: usize = FRI_CLEAN_VALID + LDE_ROWS / 2;
-const FRI_EQUAL: usize = FRI_OBSERVED_VALID + LDE_ROWS / 2;
+const FRI_ROUNDS: usize = 4;
+const FRI_VARIANTS: usize = 2;
+const EXTENSION_WORDS: usize = 4;
+const FRI_EVALUATIONS: usize = 15;
+const FRI_EVALUATION_WORDS: usize = FRI_EVALUATIONS * EXTENSION_WORDS;
+const FRI_CLEAN: usize = PARAMETER_END;
+const FRI_OBSERVED: usize = FRI_CLEAN + FRI_EVALUATION_WORDS;
+const FRI_CHALLENGES: usize = FRI_OBSERVED + FRI_EVALUATION_WORDS;
+const FRI_CHALLENGE_WORDS: usize = FRI_VARIANTS * FRI_ROUNDS * EXTENSION_WORDS;
+const FRI_ROOTS: usize = FRI_CHALLENGES + FRI_CHALLENGE_WORDS;
+const FRI_ROOT_WORDS: usize = FRI_VARIANTS * FRI_ROUNDS * 8;
+const FRI_TRANSCRIPTS: usize = FRI_ROOTS + FRI_ROOT_WORDS;
+const FRI_TRANSCRIPT_WORDS: usize = FRI_VARIANTS * (FRI_ROUNDS + 1) * 8;
+const FRI_STATUS: usize = FRI_TRANSCRIPTS + FRI_TRANSCRIPT_WORDS;
+const FRI_CHALLENGE_VALID: usize = FRI_STATUS;
+const FRI_ROOT_VALID: usize = FRI_CHALLENGE_VALID + FRI_VARIANTS * FRI_ROUNDS;
+const FRI_TRANSCRIPT_VALID: usize = FRI_ROOT_VALID + FRI_VARIANTS * FRI_ROUNDS;
+const FRI_ROUND_VALID: usize = FRI_TRANSCRIPT_VALID + FRI_VARIANTS * (FRI_ROUNDS + 1);
+const FRI_EQUAL: usize = FRI_ROUND_VALID + FRI_VARIANTS * FRI_ROUNDS;
 const FRI_CORRECT: usize = FRI_EQUAL + 1;
-const PROOF_WORDS: usize = FRI_CORRECT + 2;
+const FRI_COLOR: usize = FRI_CORRECT + 1;
+const PROOF_WORDS: usize = FRI_COLOR + 1;
 const TAMPER_LDE_FIELD: usize = 17;
 const DOMAIN: [u8; 4] = *b"MGDL";
-const COMPUTE_PASSES: usize = 13;
+const COMPUTE_PASSES: usize = 15;
 const COMMITMENT_PASS: usize = 7;
-const FRI_CHALLENGE_PASS: usize = 10;
-const FRI_PASS: usize = 11;
+const FRI_FIRST_PASS: usize = 10;
+const FRI_ROUND_REPEATS: [u32; FRI_ROUNDS] = [403, 358, 313, 268];
 const EXT_NONRESIDUE: u32 = 11;
+const BROWSER_RECEIPTS: &str = "MB2_BROWSER_PROOF_RECEIPTS";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -457,8 +468,7 @@ fn add_mod(left: u32, right: u32) -> u32 {
 }
 
 fn sub_mod(left: u32, right: u32) -> u32 {
-    ((u64::from(left) + u64::from(MODULUS) - u64::from(right))
-        % u64::from(MODULUS)) as u32
+    ((u64::from(left) + u64::from(MODULUS) - u64::from(right)) % u64::from(MODULUS)) as u32
 }
 
 fn mul_mod(left: u32, right: u32) -> u32 {
@@ -469,6 +479,10 @@ fn mul_mod(left: u32, right: u32) -> u32 {
 struct Ext4([u32; 4]);
 
 impl Ext4 {
+    fn zero() -> Self {
+        Self([0; 4])
+    }
+
     fn add(self, other: Self) -> Self {
         Self(std::array::from_fn(|index| {
             add_mod(self.0[index], other.0[index])
@@ -501,7 +515,11 @@ impl Ext4 {
                 mul_mod(coefficients[degree], EXT_NONRESIDUE),
             );
         }
-        Self(coefficients[..4].try_into().expect("four extension coefficients"))
+        Self(
+            coefficients[..4]
+                .try_into()
+                .expect("four extension coefficients"),
+        )
     }
 }
 
@@ -604,36 +622,127 @@ fn reference_commitment(fields: &[u32]) -> [u32; 8] {
     reference_field_commitment(&DOMAIN, fields)
 }
 
-fn reference_fri_fold(fields: &[u32], clean_root: &[u32; 8], tampered: bool) -> Vec<u32> {
-    let maximal_root = pow_mod(31, 15);
-    let root = pow_mod(
-        u64::from(maximal_root),
-        1 << (TWO_ADICITY - LDE_ROWS.ilog2()),
-    );
-    let inverse_two = pow_mod(2, MODULUS - 2);
-    let challenge_digest = reference_field_commitment(b"MGFC", clean_root);
-    let challenge = Ext4(challenge_digest[..4].try_into().expect("quartic challenge"));
-    let mut output = Vec::with_capacity(FRI_FOLD_WORDS);
-    for pair in 0..LDE_ROWS / 2 {
-        let mut positive = Ext4(std::array::from_fn(|column| {
-            fields[column * LDE_ROWS + pair]
-        }));
-        if tampered && pair == 1 {
-            positive.0[1] = add_mod(positive.0[1], 1);
-        }
-        let negative = Ext4(std::array::from_fn(|column| {
-            fields[column * LDE_ROWS + pair + LDE_ROWS / 2]
-        }));
-        let point = mul_mod(7, pow_mod(u64::from(root), pair as u32));
-        let inverse_point = pow_mod(u64::from(point), MODULUS - 2);
-        let even = positive.add(negative).scale(inverse_two);
-        let odd = positive
-            .sub(negative)
-            .scale(inverse_two)
-            .scale(inverse_point);
-        output.extend(challenge.mul(odd).add(even).0);
+fn protocol_round_tag(prefix: [u8; 2], round: usize) -> [u8; 4] {
+    assert!((1..100).contains(&round));
+    [
+        prefix[0],
+        prefix[1],
+        b'0' + (round / 10) as u8,
+        b'0' + (round % 10) as u8,
+    ]
+}
+
+fn reference_compress(left: &[u32; 8], right: &[u32; 8]) -> [u32; 8] {
+    let mut state = [0u32; POSEIDON_WIDTH];
+    state[..8].copy_from_slice(left);
+    state[8..].copy_from_slice(right);
+    reference_permutation(state)[..8]
+        .try_into()
+        .expect("eight digest fields")
+}
+
+fn reference_merkle_root(round: usize, evaluations: &[Ext4]) -> [u32; 8] {
+    let tag = protocol_round_tag(*b"FR", round);
+    let mut layer = evaluations
+        .iter()
+        .map(|evaluation| reference_field_commitment(&tag, &evaluation.0))
+        .collect::<Vec<_>>();
+    while layer.len() > 1 {
+        assert_eq!(layer.len() % 2, 0);
+        layer = layer
+            .chunks_exact(2)
+            .map(|children| reference_compress(&children[0], &children[1]))
+            .collect();
     }
-    output
+    layer[0]
+}
+
+fn reference_fri_pair(positive: Ext4, negative: Ext4, challenge: Ext4, point: u32) -> Ext4 {
+    let inverse_two = pow_mod(2, MODULUS - 2);
+    let inverse_point = pow_mod(u64::from(point), MODULUS - 2);
+    let even = positive.add(negative).scale(inverse_two);
+    let odd = positive
+        .sub(negative)
+        .scale(inverse_two)
+        .scale(inverse_point);
+    challenge.mul(odd).add(even)
+}
+
+#[derive(Debug)]
+struct ReferenceFriReceipt {
+    clean_evaluations: Vec<u32>,
+    observed_evaluations: Vec<u32>,
+    challenges: Vec<u32>,
+    roots: Vec<u32>,
+    transcripts: Vec<u32>,
+}
+
+fn reference_fri_receipt(
+    fields: &[u32],
+    clean_root: &[u32; 8],
+    tampered: bool,
+) -> ReferenceFriReceipt {
+    let maximal_root = pow_mod(31, 15);
+    let initial = (0..LDE_ROWS)
+        .map(|row| {
+            Ext4(std::array::from_fn(|column| {
+                fields[column * LDE_ROWS + row]
+            }))
+        })
+        .collect::<Vec<_>>();
+    let mut receipt = ReferenceFriReceipt {
+        clean_evaluations: Vec::with_capacity(FRI_EVALUATION_WORDS),
+        observed_evaluations: Vec::with_capacity(FRI_EVALUATION_WORDS),
+        challenges: Vec::with_capacity(FRI_CHALLENGE_WORDS),
+        roots: Vec::with_capacity(FRI_ROOT_WORDS),
+        transcripts: Vec::with_capacity(FRI_TRANSCRIPT_WORDS),
+    };
+    for variant in 0..FRI_VARIANTS {
+        let mut current = initial.clone();
+        let mut transcript = *clean_root;
+        receipt.transcripts.extend(transcript);
+        let mut shift = 7;
+        for round_index in 0..FRI_ROUNDS {
+            let round = round_index + 1;
+            let challenge_digest =
+                reference_field_commitment(&protocol_round_tag(*b"FC", round), &transcript);
+            let challenge = Ext4(challenge_digest[..4].try_into().expect("quartic challenge"));
+            receipt.challenges.extend(challenge.0);
+            let input_width = current.len();
+            let output_width = input_width / 2;
+            let root = pow_mod(
+                u64::from(maximal_root),
+                1 << (TWO_ADICITY - input_width.ilog2()),
+            );
+            let mut folded = vec![Ext4::zero(); output_width];
+            for pair in 0..output_width {
+                let mut positive = current[pair];
+                if variant == 1 && tampered && round_index == 0 && pair == 1 {
+                    positive.0[1] = add_mod(positive.0[1], 1);
+                }
+                let negative = current[pair + output_width];
+                let point = mul_mod(shift, pow_mod(u64::from(root), pair as u32));
+                folded[pair] = reference_fri_pair(positive, negative, challenge, point);
+            }
+            let destination = if variant == 0 {
+                &mut receipt.clean_evaluations
+            } else {
+                &mut receipt.observed_evaluations
+            };
+            destination.extend(folded.iter().flat_map(|evaluation| evaluation.0));
+            let layer_root = reference_merkle_root(round, &folded);
+            receipt.roots.extend(layer_root);
+            let mut binding_fields = Vec::with_capacity(16);
+            binding_fields.extend(transcript);
+            binding_fields.extend(layer_root);
+            transcript =
+                reference_field_commitment(&protocol_round_tag(*b"FT", round), &binding_fields);
+            receipt.transcripts.extend(transcript);
+            current = folded;
+            shift = mul_mod(shift, shift);
+        }
+    }
+    receipt
 }
 
 fn assert_commit_state(words: &[u32], offset: usize) {
@@ -654,12 +763,12 @@ fn assert_commit_state(words: &[u32], offset: usize) {
     );
 }
 
-fn assert_receipt(receipt: &ExecutionReceipt, tampered: bool, expected_lde: &[u32]) {
-    assert_eq!(receipt.proof.len(), PROOF_WORDS);
+fn assert_proof(proof: &[u32], tampered: bool, expected_lde: &[u32]) {
+    assert_eq!(proof.len(), PROOF_WORDS);
     let expected_trace = trace_columns().into_iter().flatten().collect::<Vec<_>>();
-    assert_eq!(&receipt.proof[..LDE_START], &expected_trace);
+    assert_eq!(&proof[..LDE_START], &expected_trace);
     assert_eq!(
-        &receipt.proof[LDE_START..LDE_START + expected_lde.len()],
+        &proof[LDE_START..LDE_START + expected_lde.len()],
         expected_lde,
         "GPU LDE must match the independent direct DFT"
     );
@@ -669,75 +778,111 @@ fn assert_receipt(receipt: &ExecutionReceipt, tampered: bool, expected_lde: &[u3
         observed_fields[TAMPER_LDE_FIELD] = (observed_fields[TAMPER_LDE_FIELD] + 1) % MODULUS;
     }
     let observed = reference_commitment(&observed_fields);
-    assert_eq!(&receipt.proof[CLEAN_ROOT..CLEAN_ROOT + 8], &clean);
-    assert_eq!(&receipt.proof[OBSERVED_ROOT..OBSERVED_ROOT + 8], &observed);
-    assert_eq!(receipt.proof[TRACE_VALID], 1);
+    assert_eq!(&proof[CLEAN_ROOT..CLEAN_ROOT + 8], &clean);
+    assert_eq!(&proof[OBSERVED_ROOT..OBSERVED_ROOT + 8], &observed);
+    assert_eq!(proof[TRACE_VALID], 1);
     assert_eq!(
-        &receipt.proof[LDE_VALID_START..LDE_VALID_START + COLUMN_COUNT],
+        &proof[LDE_VALID_START..LDE_VALID_START + COLUMN_COUNT],
         &[1; COLUMN_COUNT]
     );
-    assert_eq!(receipt.proof[ROOTS_EQUAL], u32::from(!tampered));
-    assert_eq!(receipt.proof[MODE_CORRECT], 1);
-    assert_commit_state(&receipt.proof, CLEAN_COMMIT_STATE);
-    assert_commit_state(&receipt.proof, OBSERVED_COMMIT_STATE);
+    assert_eq!(proof[ROOTS_EQUAL], u32::from(!tampered));
+    assert_eq!(proof[MODE_CORRECT], 1);
+    assert_commit_state(proof, CLEAN_COMMIT_STATE);
+    assert_commit_state(proof, OBSERVED_COMMIT_STATE);
     assert_eq!(
-        &receipt.proof[PARAMETER_START..PARAMETER_END],
+        &proof[PARAMETER_START..PARAMETER_END],
         reference_montgomery_parameters(),
         "GPU parameter initialization must match Plonky3 exactly"
     );
-    let expected_challenge = reference_field_commitment(b"MGFC", &clean);
+    let fri = reference_fri_receipt(expected_lde, &clean, tampered);
     assert_eq!(
-        &receipt.proof[FRI_CHALLENGE_TAIL..FRI_CHALLENGE_TAIL + 2],
-        &clean[6..8],
+        &proof[FRI_CLEAN..FRI_CLEAN + FRI_EVALUATION_WORDS],
+        fri.clean_evaluations,
+        "GPU clean FRI schedule must match the independent quartic folds",
     );
     assert_eq!(
-        &receipt.proof[FRI_CHALLENGE..FRI_CHALLENGE + 4],
-        &expected_challenge[..4],
-        "GPU FRI challenge must match the independent typed digest squeeze",
-    );
-    assert_eq!(receipt.proof[FRI_CHALLENGE_VALID], 1);
-    assert_eq!(
-        &receipt.proof[FRI_CHALLENGE_STATE + COMMIT_CURSOR
-            ..FRI_CHALLENGE_STATE + COMMIT_CURSOR + POSEIDON_WIDTH],
-        &[0; POSEIDON_WIDTH],
+        &proof[FRI_OBSERVED..FRI_OBSERVED + FRI_EVALUATION_WORDS],
+        fri.observed_evaluations,
+        "GPU observed FRI schedule must match the independently mutated folds",
     );
     assert_eq!(
-        &receipt.proof[FRI_CHALLENGE_STATE + COMMIT_BLOCK
-            ..FRI_CHALLENGE_STATE + COMMIT_BLOCK + POSEIDON_WIDTH],
-        &[2; POSEIDON_WIDTH],
+        &proof[FRI_CHALLENGES..FRI_CHALLENGES + FRI_CHALLENGE_WORDS],
+        fri.challenges,
+        "every GPU FRI challenge must match the independent typed transcript",
     );
     assert_eq!(
-        &receipt.proof[FRI_CHALLENGE_STATE + COMMIT_VALID
-            ..FRI_CHALLENGE_STATE + COMMIT_VALID + POSEIDON_WIDTH],
-        &[1; POSEIDON_WIDTH],
-    );
-    let expected_clean_fri = reference_fri_fold(expected_lde, &clean, false);
-    let expected_observed_fri = reference_fri_fold(expected_lde, &clean, tampered);
-    assert_eq!(
-        &receipt.proof[FRI_CLEAN..FRI_CLEAN + FRI_FOLD_WORDS],
-        expected_clean_fri,
-        "GPU clean FRI pairs must match the independent quartic-field formula",
+        &proof[FRI_ROOTS..FRI_ROOTS + FRI_ROOT_WORDS],
+        fri.roots,
+        "every GPU FRI Merkle root must match independent Plonky3 compression",
     );
     assert_eq!(
-        &receipt.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_FOLD_WORDS],
-        expected_observed_fri,
-        "GPU observed FRI pairs must match the independently mutated formula",
+        &proof[FRI_TRANSCRIPTS..FRI_TRANSCRIPTS + FRI_TRANSCRIPT_WORDS],
+        fri.transcripts,
+        "every GPU FRI transcript must match independent domain-separated binding",
     );
     assert_eq!(
-        &receipt.proof[FRI_CLEAN_VALID..FRI_CLEAN_VALID + LDE_ROWS / 2],
-        &[1; LDE_ROWS / 2],
+        &proof[FRI_CHALLENGE_VALID..FRI_ROOT_VALID],
+        &[1; FRI_VARIANTS * FRI_ROUNDS],
     );
     assert_eq!(
-        &receipt.proof[FRI_OBSERVED_VALID..FRI_OBSERVED_VALID + LDE_ROWS / 2],
-        &[1; LDE_ROWS / 2],
+        &proof[FRI_ROOT_VALID..FRI_TRANSCRIPT_VALID],
+        &[1; FRI_VARIANTS * FRI_ROUNDS],
     );
-    assert_eq!(receipt.proof[FRI_EQUAL], u32::from(!tampered));
-    assert_eq!(receipt.proof[FRI_CORRECT], 1);
+    assert_eq!(
+        &proof[FRI_TRANSCRIPT_VALID..FRI_ROUND_VALID],
+        &[1; FRI_VARIANTS * (FRI_ROUNDS + 1)],
+    );
+    assert_eq!(
+        &proof[FRI_ROUND_VALID..FRI_EQUAL],
+        &[1; FRI_VARIANTS * FRI_ROUNDS],
+    );
+    assert_eq!(proof[FRI_EQUAL], u32::from(!tampered));
+    assert_eq!(proof[FRI_CORRECT], 1);
+    assert_eq!(
+        proof[FRI_COLOR].to_le_bytes(),
+        if tampered {
+            [255, 176, 222, 255]
+        } else {
+            [87, 117, 226, 255]
+        },
+    );
+}
+
+fn assert_receipt(receipt: &ExecutionReceipt, tampered: bool, expected_lde: &[u32]) {
+    assert_proof(&receipt.proof, tampered, expected_lde);
     assert!(
         receipt.traps.iter().all(|word| *word == 0),
         "every physical invocation lane must remain trap-free: {:?}",
         receipt.traps
     );
+}
+
+#[derive(Deserialize)]
+struct BrowserProofReceipts {
+    clean: Vec<u32>,
+    tampered: Vec<u32>,
+    recovered: Vec<u32>,
+}
+
+#[test]
+fn chromium_receipts_match_independent_oracles() {
+    let Some(path) = std::env::var_os(BROWSER_RECEIPTS) else {
+        eprintln!("  Chromium receipt oracle SKIPPED: {BROWSER_RECEIPTS} is unset");
+        return;
+    };
+    let encoded = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("failed to read {}: {error}", PathBuf::from(&path).display())
+    });
+    let receipts: BrowserProofReceipts = serde_json::from_str(&encoded)
+        .unwrap_or_else(|error| panic!("invalid Chromium receipt JSON: {error}"));
+    let expected_lde = trace_columns()
+        .iter()
+        .flat_map(|column| direct_coset_lde(column, LDE_ROWS, 7))
+        .collect::<Vec<_>>();
+    assert_proof(&receipts.clean, false, &expected_lde);
+    assert_proof(&receipts.tampered, true, &expected_lde);
+    assert_proof(&receipts.recovered, false, &expected_lde);
+    assert_eq!(receipts.recovered, receipts.clean);
 }
 
 #[test]
@@ -757,10 +902,18 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
             ("lde_inverse_progress", 8),
             ("lde_values", 64),
             ("lde_progress", 32),
-            ("lde_coset_valid", 4),
+            ("fri_scratch", 1_842),
         ]
     );
     assert_eq!(bundle.manifest.passes.len(), COMPUTE_PASSES + 1);
+    assert!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .all(|pass| pass.layout.bindings.len() <= 8),
+        "every pass must fit WebGPU's portable per-stage storage-buffer minimum"
+    );
     assert_eq!(bundle.manifest.passes[2].repeat, 2);
     assert_eq!(bundle.manifest.passes[2].layout.workgroup_size, [8, 1, 1]);
     assert_eq!(bundle.manifest.passes[4].repeat, 4);
@@ -772,18 +925,11 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
             .workgroup_size,
         [32, 1, 1]
     );
-    assert_eq!(bundle.manifest.passes[FRI_PASS].repeat, 1);
-    assert_eq!(
-        bundle.manifest.passes[FRI_PASS].layout.workgroup_size,
-        [16, 1, 1]
-    );
-    assert_eq!(bundle.manifest.passes[FRI_CHALLENGE_PASS].repeat, 88);
-    assert_eq!(
-        bundle.manifest.passes[FRI_CHALLENGE_PASS]
-            .layout
-            .workgroup_size,
-        [16, 1, 1]
-    );
+    for (round, expected_repeat) in FRI_ROUND_REPEATS.into_iter().enumerate() {
+        let pass = &bundle.manifest.passes[FRI_FIRST_PASS + round];
+        assert_eq!(pass.repeat, expected_repeat);
+        assert_eq!(pass.layout.workgroup_size, [256, 1, 1]);
+    }
     let Some((adapter, device, queue)) = request_browser_profile_device() else {
         return;
     };
@@ -805,10 +951,13 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
         "  Mandelbrot proof largest commitment functions: {:?}",
         largest_wgsl_functions(&bundle.pass_wgsl[COMMITMENT_PASS].source, 12)
     );
-    eprintln!(
-        "  Mandelbrot proof largest FRI functions: {:?}",
-        largest_wgsl_functions(&bundle.pass_wgsl[FRI_PASS].source, 12)
-    );
+    for round in 0..FRI_ROUNDS {
+        eprintln!(
+            "  Mandelbrot proof largest FRI round {} functions: {:?}",
+            round + 1,
+            largest_wgsl_functions(&bundle.pass_wgsl[FRI_FIRST_PASS + round].source, 12)
+        );
+    }
     let pipeline_started = std::time::Instant::now();
     let kernels = compile_kernels(&device, &bundle);
     eprintln!(
@@ -840,8 +989,8 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
         "the Fe-authored mutation mode must alter the observed commitment"
     );
     assert_ne!(
-        &clean.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_FOLD_WORDS],
-        &tampered.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_FOLD_WORDS],
-        "the Fe-authored mutation mode must alter the observed FRI fold"
+        &clean.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_EVALUATION_WORDS],
+        &tampered.proof[FRI_OBSERVED..FRI_OBSERVED + FRI_EVALUATION_WORDS],
+        "the Fe-authored mutation mode must alter the observed FRI schedule"
     );
 }

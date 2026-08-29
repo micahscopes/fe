@@ -1,29 +1,29 @@
-//! First browser-executed BabyBear proof placement checkpoint.
+//! Browser-executed BabyBear proof placement checkpoint.
 //!
 //! The compute pass derives a four-row Q12 Mandelbrot witness through the
 //! production proof kernel, interprets one Conal factor vocabulary as four
 //! staged 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values
-//! with the production Poseidon2 sponge. A staged two-permutation digest
-//! squeeze derives the FRI challenge under its own typed domain before the
-//! card interprets the production
-//! factor-2 FRI pair denotation as eight independent WebGPU invocations over a
-//! quartic BabyBear codeword assembled from those four columns. Inverse
-//! butterflies, coset lifting, forward butterflies, and the FRI fold are
-//! separate typed placements over disjoint lanes. Two commitments by sixteen
-//! field lanes and the clean-root challenge squeeze advance through bounded
-//! workgroup kernels. Fe dispatch types derive every ordered repetition count,
-//! so browser WebGPU implementations never receive one crash-shaped
-//! megashader. A Fe-authored mutation mode
-//! changes one LDE value after the clean root is fixed and requires both the
-//! second commitment and its corresponding FRI pair to differ. The fragment
-//! pass visualizes the retained folded codeword and status words.
+//! with the production Poseidon2 sponge. One Fe-authored round interpreter
+//! then places the complete `16 -> 8 -> 4 -> 2 -> 1` FRI schedule. Each round
+//! derives its own transcript challenge, folds independent pairs, commits the
+//! resulting quartic evaluations, reduces their exact ordered Merkle tree,
+//! and binds the layer root into the next transcript. The semantic schedule,
+//! round domains, pair operation, and Poseidon operations are shared with the
+//! scalar proof. Thin actor passes specialize only physical round capacities.
+//! Per-invocation progress cursors make repeated dispatch race-free without a
+//! host-owned dispatch index. A Fe-authored mutation changes one round-one
+//! evaluation after the clean root is fixed; later challenges must diverge
+//! only through the authenticated transcript chain. The fragment pass
+//! visualizes the retained full fold schedule and status words.
 //!
 //! This is a mixed placement checkpoint. The four independent LDE columns use
 //! the portable stage-grid interpretation of canonical Conal factor trees. The
-//! paired commitment and challenge states are a second workgroup-map
+//! paired commitment and FRI hash states are a second workgroup-map
 //! interpretation. Witness generation and final comparison remain scalar
-//! passes. This is not yet a shared-memory butterfly interpreter, an
-//! authenticated FRI receipt, or a recursive proof.
+//! passes. This is an exact FRI-subsystem checkpoint whose starting transcript
+//! is the clean LDE commitment. It is not yet the full AIR transcript, a
+//! shared-memory butterfly interpreter, an authenticated query receipt, or a
+//! recursive proof.
 
 use std::webgpu::{
     ComputeInvocation,
@@ -43,7 +43,16 @@ use std::webgpu::{
 use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
-use fri_baby_bear::fold_fri_pair_value_at_power_of_two
+use fri_baby_bear::{
+    FriSchedule,
+    FriScheduleMetadata,
+    FriSchedulePlacement,
+    FriScheduleShape,
+    fold_fri_pair_value_at_point,
+    fri_fold_domain_tag,
+    fri_layer_row_domain_tag,
+    fri_layer_transcript_domain_tag,
+}
 use mandelbrot_q12_words::Q12EscapeAirWordStream as EscapeAirWordStream
 use canonical_words::CanonicalWords
 use parallel_ntt_webgpu::{
@@ -55,7 +64,6 @@ use parallel_ntt_webgpu::{
 }
 use parallel_structure::FactorTree
 use poseidon_baby_bear::{
-    DIGEST_SQUEEZE_PERMUTATIONS,
     ROUND_CONSTANT_COUNT,
     SPONGE_RATE,
     WIDTH as POSEIDON_LANES,
@@ -66,7 +74,10 @@ use poseidon_baby_bear::{
     Poseidon2ParameterStream,
     Poseidon2WorkgroupPlan,
     Poseidon2WorkgroupSchedule,
-    begin_digest_squeeze_placement,
+    begin_binding_placement_tag,
+    begin_compression_placement,
+    begin_digest_squeeze_placement_tag,
+    begin_ext4_commitment_placement_tag,
     poseidon2_workgroup_destination,
     poseidon2_round_constant_index,
     poseidon2_workgroup_lane_with_round_constant,
@@ -99,23 +110,33 @@ const DIGEST_FIELDS: usize = 8
 const COMMIT_STATE_WORDS: usize = 80
 const STATUS_WORDS: usize = 11
 const EXTENSION_WORDS: usize = 4
-const FRI_PAIRS: usize = LDE / 2
-const FRI_FOLD_WORDS: usize = FRI_PAIRS * EXTENSION_WORDS
-const FRI_STATUS_WORDS: usize = 2 * FRI_PAIRS + 3
-const FRI_CHALLENGE_WORDS: usize = 4
-const FRI_CHALLENGE_TAIL_WORDS: usize = 2
-const FRI_CHALLENGE_STORAGE_WORDS: usize = COMMIT_STATE_WORDS
-    + FRI_CHALLENGE_TAIL_WORDS
-    + FRI_CHALLENGE_WORDS
-    + 1
+const FRI_ROUNDS: usize = 4
+const FRI_VARIANTS: usize = 2
+const FRI_MAX_OUTPUT: usize = LDE / 2
+const FRI_EVALUATIONS: usize = 15
+const FRI_EVALUATION_WORDS: usize = FRI_EVALUATIONS * EXTENSION_WORDS
+const FRI_CHALLENGE_WORDS: usize =
+    FRI_VARIANTS * FRI_ROUNDS * EXTENSION_WORDS
+const FRI_ROOT_WORDS: usize = FRI_VARIANTS * FRI_ROUNDS * DIGEST_FIELDS
+const FRI_TRANSCRIPTS_PER_VARIANT: usize = FRI_ROUNDS + 1
+const FRI_TRANSCRIPT_WORDS: usize =
+    FRI_VARIANTS * FRI_TRANSCRIPTS_PER_VARIANT * DIGEST_FIELDS
+const FRI_VALID_ROUNDS: usize = FRI_VARIANTS * FRI_ROUNDS
+const FRI_VALID_TRANSCRIPTS: usize =
+    FRI_VARIANTS * FRI_TRANSCRIPTS_PER_VARIANT
+const FRI_STATUS_WORDS: usize =
+    FRI_VALID_ROUNDS + FRI_VALID_ROUNDS + FRI_VALID_TRANSCRIPTS
+        + FRI_VALID_ROUNDS + 3
 const PROOF_WORDS: usize = TRACE_WORDS
     + LDE_WORDS
     + 2 * DIGEST_FIELDS
     + STATUS_WORDS
     + 2 * COMMIT_STATE_WORDS
     + ROUND_CONSTANT_COUNT
-    + FRI_CHALLENGE_STORAGE_WORDS
-    + 2 * FRI_FOLD_WORDS
+    + 2 * FRI_EVALUATION_WORDS
+    + FRI_CHALLENGE_WORDS
+    + FRI_ROOT_WORDS
+    + FRI_TRANSCRIPT_WORDS
     + FRI_STATUS_WORDS
 
 struct ProofTapeRegions {
@@ -127,22 +148,15 @@ struct ProofTapeRegions {
     clean_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     observed_commitment: Region<ProofTapeRegions, [u32; COMMIT_STATE_WORDS]>,
     parameters: Region<ProofTapeRegions, [u32; ROUND_CONSTANT_COUNT]>,
-    fri_challenge: Region<ProofTapeRegions, [u32; FRI_CHALLENGE_STORAGE_WORDS]>,
-    fri_clean: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
-    fri_observed: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+    fri_clean: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
+    fri_observed: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
+    fri_challenges: Region<ProofTapeRegions, [u32; FRI_CHALLENGE_WORDS]>,
+    fri_roots: Region<ProofTapeRegions, [u32; FRI_ROOT_WORDS]>,
+    fri_transcripts: Region<ProofTapeRegions, [u32; FRI_TRANSCRIPT_WORDS]>,
     fri_status: Region<ProofTapeRegions, [u32; FRI_STATUS_WORDS]>,
 }
 impl core::marker::Copy for ProofTapeRegions {}
 derive RegionSchema for ProofTapeRegions using RegionSchemaProvider
-
-struct FriChallengeRegions {
-    state: Region<FriChallengeRegions, [u32; COMMIT_STATE_WORDS]>,
-    tail: Region<FriChallengeRegions, [u32; FRI_CHALLENGE_TAIL_WORDS]>,
-    value: Region<FriChallengeRegions, [u32; FRI_CHALLENGE_WORDS]>,
-    valid: Region<FriChallengeRegions, u32>,
-}
-impl core::marker::Copy for FriChallengeRegions {}
-derive RegionSchema for FriChallengeRegions using RegionSchemaProvider
 
 struct TraceRegions {
     step: Region<TraceRegions, [u32; TRACE]>,
@@ -177,8 +191,10 @@ impl core::marker::Copy for CommitmentRegions {}
 derive RegionSchema for CommitmentRegions using RegionSchemaProvider
 
 struct FriStatusRegions {
-    clean_valid: Region<FriStatusRegions, [u32; FRI_PAIRS]>,
-    observed_valid: Region<FriStatusRegions, [u32; FRI_PAIRS]>,
+    challenge_valid: Region<FriStatusRegions, [u32; FRI_VALID_ROUNDS]>,
+    root_valid: Region<FriStatusRegions, [u32; FRI_VALID_ROUNDS]>,
+    transcript_valid: Region<FriStatusRegions, [u32; FRI_VALID_TRANSCRIPTS]>,
+    round_valid: Region<FriStatusRegions, [u32; FRI_VALID_ROUNDS]>,
     equal: Region<FriStatusRegions, u32>,
     correct: Region<FriStatusRegions, u32>,
     color: Region<FriStatusRegions, u32>,
@@ -188,10 +204,6 @@ derive RegionSchema for FriStatusRegions using RegionSchemaProvider
 
 const fn proof_tape_regions() -> ProofTapeRegions {
     <ProofTapeRegions as RegionSchema>::regions()
-}
-
-const fn fri_challenge_regions() -> FriChallengeRegions {
-    <FriChallengeRegions as RegionSchema>::regions()
 }
 
 const fn trace_regions() -> TraceRegions {
@@ -263,16 +275,117 @@ where
 type ProofLdeColumns = RBin<Pair, 2>
 type ProofLdeInputPlan = RBin<Pair, 2>
 type ProofLdeOutputPlan = RBin<Pair, 4>
-type ProofFriPairs = RBin<Pair, 3>
+type ProofFriSchedule = FriSchedule<1, 4>
+type ProofFriLeafPairs = RBin<Pair, 3>
 type ProofFriVariants = RBin<Pair, 1>
 const LDE_TASKS: usize = <ProofLdeColumns as BalancedBinarySchedule>::LEAVES
 const INPUT_STAGES: usize = <ProofLdeInputPlan as FactorTree>::FACTORS
 const OUTPUT_STAGES: usize = <ProofLdeOutputPlan as FactorTree>::FACTORS
-const FRI_PAIR_LANES: usize =
-    <ProofFriPairs as BalancedBinarySchedule>::LEAVES
+const FRI_MAX_PAIR_LANES: usize =
+    <ProofFriLeafPairs as BalancedBinarySchedule>::LEAVES
 const FRI_VARIANT_LANES: usize =
     <ProofFriVariants as BalancedBinarySchedule>::LEAVES
-const FRI_WORKGROUP_LANES: usize = FRI_PAIR_LANES * FRI_VARIANT_LANES
+const FRI_WORKGROUP_LANES: usize =
+    FRI_MAX_PAIR_LANES * FRI_VARIANT_LANES * POSEIDON_LANES
+const FRI_MAX_HASH_STATES: usize = FRI_MAX_PAIR_LANES * FRI_VARIANT_LANES
+const FRI_HASH_BUFFERS: usize = 2
+const FRI_HASH_STATE_WORDS: usize =
+    FRI_MAX_HASH_STATES * FRI_HASH_BUFFERS * POSEIDON_LANES
+const FRI_HASH_VALID_WORDS: usize = FRI_MAX_HASH_STATES
+const FRI_HASH_TAIL_WORDS: usize = FRI_VARIANTS * 10
+const FRI_TREE_NODES_PER_VARIANT: usize = 2 * FRI_MAX_OUTPUT - 1
+const FRI_TREE_WORDS: usize =
+    FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT * DIGEST_FIELDS
+const FRI_TREE_VALID_WORDS: usize =
+    FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT
+const FRI_PROGRESS_WORDS: usize = FRI_ROUNDS * FRI_WORKGROUP_LANES
+const FRI_SCRATCH_WORDS: usize = FRI_HASH_STATE_WORDS
+    + FRI_HASH_VALID_WORDS
+    + FRI_HASH_TAIL_WORDS
+    + FRI_TREE_WORDS
+    + FRI_TREE_VALID_WORDS
+    + FRI_PROGRESS_WORDS
+
+struct FriScratchRegions {
+    hash_states: Region<FriScratchRegions, [u32; FRI_HASH_STATE_WORDS]>,
+    hash_valid: Region<FriScratchRegions, [u32; FRI_HASH_VALID_WORDS]>,
+    hash_tails: Region<FriScratchRegions, [u32; FRI_HASH_TAIL_WORDS]>,
+    tree: Region<FriScratchRegions, [u32; FRI_TREE_WORDS]>,
+    tree_valid: Region<FriScratchRegions, [u32; FRI_TREE_VALID_WORDS]>,
+    progress: Region<FriScratchRegions, [u32; FRI_PROGRESS_WORDS]>,
+}
+impl core::marker::Copy for FriScratchRegions {}
+derive RegionSchema for FriScratchRegions using RegionSchemaProvider
+
+const fn fri_scratch_regions() -> FriScratchRegions {
+    <FriScratchRegions as RegionSchema>::regions()
+}
+
+const FRI_HASH_STATES_START: u32 =
+    region_bounds(fri_scratch_regions().hash_states).start
+const FRI_HASH_VALID_START: u32 =
+    region_bounds(fri_scratch_regions().hash_valid).start
+const FRI_HASH_TAILS_START: u32 =
+    region_bounds(fri_scratch_regions().hash_tails).start
+const FRI_TREE_START: u32 = region_bounds(fri_scratch_regions().tree).start
+const FRI_TREE_VALID_START: u32 =
+    region_bounds(fri_scratch_regions().tree_valid).start
+const FRI_PROGRESS_START: u32 =
+    region_bounds(fri_scratch_regions().progress).start
+
+#[inline(always)]
+fn fri_scratch_load(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ start: u32,
+    _ index: u32,
+) -> u32 {
+    scratch.load(index: start + index)
+}
+
+#[inline(always)]
+fn fri_scratch_store(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ start: u32,
+    _ index: u32,
+    _ value: u32,
+) -> bool {
+    scratch.store(index: start + index, value: value)
+    true
+}
+
+const fn proof_fri_metadata() -> FriScheduleMetadata {
+    <ProofFriSchedule as FriScheduleShape>::fri_schedule_metadata()
+}
+
+const HASH_STAGE_STEPS: usize =
+    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::STEPS
+const FRI_CHALLENGE_PLACEMENT_STEPS: usize = 1 + 2 * HASH_STAGE_STEPS
+const FRI_LEAF_PLACEMENT_STEPS: usize = 1 + HASH_STAGE_STEPS
+const FRI_BINDING_PLACEMENT_STEPS: usize = 1 + 3 * HASH_STAGE_STEPS
+
+const fn fri_round_schedule_steps(_ tree_depth: usize) -> usize {
+    FRI_CHALLENGE_PLACEMENT_STEPS
+        + 1
+        + FRI_LEAF_PLACEMENT_STEPS
+        + tree_depth * FRI_LEAF_PLACEMENT_STEPS
+        + FRI_BINDING_PLACEMENT_STEPS
+}
+
+const fn runtime_fri_round_schedule_steps(_ tree_depth: u32) -> u32 {
+    let challenge: u32 = FRI_CHALLENGE_PLACEMENT_STEPS.downcast_truncate()
+    let leaf: u32 = FRI_LEAF_PLACEMENT_STEPS.downcast_truncate()
+    let binding: u32 = FRI_BINDING_PLACEMENT_STEPS.downcast_truncate()
+    challenge + 1 + leaf + tree_depth * leaf + binding
+}
+
+const FRI_ROUND_1_STEPS: usize = fri_round_schedule_steps(3)
+const FRI_ROUND_2_STEPS: usize = fri_round_schedule_steps(2)
+const FRI_ROUND_3_STEPS: usize = fri_round_schedule_steps(1)
+const FRI_ROUND_4_STEPS: usize = fri_round_schedule_steps(0)
+static_assert(runtime_fri_round_schedule_steps(3) == FRI_ROUND_1_STEPS.downcast_truncate())
+static_assert(runtime_fri_round_schedule_steps(2) == FRI_ROUND_2_STEPS.downcast_truncate())
+static_assert(runtime_fri_round_schedule_steps(1) == FRI_ROUND_3_STEPS.downcast_truncate())
+static_assert(runtime_fri_round_schedule_steps(0) == FRI_ROUND_4_STEPS.downcast_truncate())
 static_assert(LDE_TASKS == COLUMN_COUNT)
 static_assert(<ProofLdeInputPlan as FactorTree>::POINTS == TRACE)
 static_assert(<ProofLdeOutputPlan as FactorTree>::POINTS == LDE)
@@ -280,14 +393,32 @@ static_assert(INPUT_STAGES == 2)
 static_assert(OUTPUT_STAGES == 4)
 static_assert(INPUT_GRID_LANES == 8)
 static_assert(OUTPUT_GRID_LANES == 32)
-static_assert(FRI_PAIR_LANES == FRI_PAIRS)
-static_assert(FRI_VARIANT_LANES == 2)
-static_assert(FRI_WORKGROUP_LANES == 16)
-static_assert(<ProofTapeRegions as RegionSchema>::WORDS == PROOF_WORDS.downcast_truncate())
+static_assert(proof_fri_metadata().rounds == FRI_ROUNDS.downcast_truncate())
+static_assert(proof_fri_metadata().first_round == 1)
+static_assert(proof_fri_metadata().next_round == 5)
+static_assert(proof_fri_metadata().input_log == 4)
 static_assert(
-    <FriChallengeRegions as RegionSchema>::WORDS
-        == FRI_CHALLENGE_STORAGE_WORDS.downcast_truncate()
+    proof_fri_metadata().folded_evaluations
+        == FRI_EVALUATIONS.downcast_truncate()
 )
+static_assert(FRI_MAX_PAIR_LANES == FRI_MAX_OUTPUT)
+static_assert(FRI_VARIANT_LANES == FRI_VARIANTS)
+static_assert(FRI_WORKGROUP_LANES == 256)
+static_assert(FRI_MAX_HASH_STATES == 16)
+static_assert(FRI_HASH_STATE_WORDS == 512)
+static_assert(FRI_TREE_NODES_PER_VARIANT == 15)
+static_assert(FRI_TREE_WORDS == 240)
+static_assert(FRI_PROGRESS_WORDS == 1024)
+static_assert(
+    <FriScratchRegions as RegionSchema>::WORDS
+        == FRI_SCRATCH_WORDS.downcast_truncate()
+)
+static_assert(HASH_STAGE_STEPS == 44)
+static_assert(FRI_ROUND_1_STEPS == 403)
+static_assert(FRI_ROUND_2_STEPS == 358)
+static_assert(FRI_ROUND_3_STEPS == 313)
+static_assert(FRI_ROUND_4_STEPS == 268)
+static_assert(<ProofTapeRegions as RegionSchema>::WORDS == PROOF_WORDS.downcast_truncate())
 static_assert(<TraceRegions as RegionSchema>::WORDS == TRACE_WORDS.downcast_truncate())
 static_assert(<StatusRegions as RegionSchema>::WORDS == STATUS_WORDS.downcast_truncate())
 static_assert(
@@ -334,15 +465,6 @@ static_assert(SPONGE_RATE == 8)
 static_assert(TAMPER_PRECEDING_BLOCK == 1)
 static_assert(TAMPER_NEXT_BLOCK_FIELD == 3)
 
-const FRI_CHALLENGE_STEPS: usize = DIGEST_SQUEEZE_PERMUTATIONS
-    * <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::STEPS
-const FRI_CHALLENGE_WORKGROUP_LANES: usize =
-    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::LANES
-const FRI_CHALLENGE_DONE_BLOCK: usize = DIGEST_SQUEEZE_PERMUTATIONS
-static_assert(DIGEST_SQUEEZE_PERMUTATIONS == 2)
-static_assert(FRI_CHALLENGE_STEPS == 88)
-static_assert(FRI_CHALLENGE_WORKGROUP_LANES == 16)
-
 const fn protocol_tag(_ label: String<4>) -> u32 {
     let bytes = label.as_bytes()
     ((bytes[0] as u32) << 24)
@@ -354,11 +476,6 @@ const fn protocol_tag(_ label: String<4>) -> u32 {
 struct MandelbrotGpuLdeV1 {}
 impl Poseidon2FieldDomain for MandelbrotGpuLdeV1 {
     const TAG: u32 = protocol_tag("MGDL")
-}
-
-struct MandelbrotGpuFriChallengeV1 {}
-impl Poseidon2FieldDomain for MandelbrotGpuFriChallengeV1 {
-    const TAG: u32 = protocol_tag("MGFC")
 }
 
 struct ProofParams { tamper: Param, res: Param }
@@ -493,24 +610,955 @@ fn load_digest(
     let mut words = [0; DIGEST_FIELDS]
     let mut field: usize = 0
     while field < DIGEST_FIELDS {
-        words[field] = proof_load(tape, region, field.downcast_truncate())
+        words[field] = proof_load(
+            tape,
+            region,
+            field.downcast_truncate(),
+        )
         field = field + 1
     }
     Poseidon2Digest::from_u32s(words)
 }
 
 #[inline(always)]
+fn load_fri_root_digest(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ root_index: u32,
+) -> Poseidon2Digest {
+    let region = proof_tape_regions().fri_roots
+    let base = root_index * DIGEST_FIELDS.downcast_truncate()
+    let mut words = [0; DIGEST_FIELDS]
+    let mut field: usize = 0
+    while field < DIGEST_FIELDS {
+        words[field] = proof_load(
+            tape,
+            region,
+            base + field.downcast_truncate(),
+        )
+        field = field + 1
+    }
+    Poseidon2Digest::from_u32s(words)
+}
+
+#[inline(always)]
+fn store_fri_root_digest(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ root_index: u32,
+    _ digest: Poseidon2Digest,
+) {
+    let region = proof_tape_regions().fri_roots
+    let base = root_index * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        proof_store(
+            tape,
+            region,
+            base + field,
+            digest.field(index: field).to_u32(),
+        )
+        field = field + 1
+    }
+}
+
+#[inline(always)]
+fn load_fri_transcript_digest(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ transcript_index: u32,
+) -> Poseidon2Digest {
+    let region = proof_tape_regions().fri_transcripts
+    let base = transcript_index * DIGEST_FIELDS.downcast_truncate()
+    let mut words = [0; DIGEST_FIELDS]
+    let mut field: usize = 0
+    while field < DIGEST_FIELDS {
+        words[field] = proof_load(
+            tape,
+            region,
+            base + field.downcast_truncate(),
+        )
+        field = field + 1
+    }
+    Poseidon2Digest::from_u32s(words)
+}
+
+#[inline(always)]
+fn store_fri_transcript_digest(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ transcript_index: u32,
+    _ digest: Poseidon2Digest,
+) {
+    let region = proof_tape_regions().fri_transcripts
+    let base = transcript_index * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        proof_store(
+            tape,
+            region,
+            base + field,
+            digest.field(index: field).to_u32(),
+        )
+        field = field + 1
+    }
+}
+
+#[inline(always)]
 fn store_fri_evaluation(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ region: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
-    _ pair: u32,
+    _ region: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
+    _ evaluation_index: u32,
     _ evaluation: BabyBearExt4,
 ) {
-    let base = pair * EXTENSION_WORDS.downcast_truncate()
+    let base = evaluation_index * EXTENSION_WORDS.downcast_truncate()
     proof_store(tape, region, base, evaluation.coefficient_0().to_u32())
     proof_store(tape, region, base + 1, evaluation.coefficient_1().to_u32())
     proof_store(tape, region, base + 2, evaluation.coefficient_2().to_u32())
     proof_store(tape, region, base + 3, evaluation.coefficient_3().to_u32())
+}
+
+#[inline(always)]
+fn load_fri_evaluation(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ region: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
+    _ evaluation_index: u32,
+) -> BabyBearExt4 {
+    let base = evaluation_index * EXTENSION_WORDS.downcast_truncate()
+    BabyBearExt4::from_coordinate_words(
+        proof_load(tape, region, base),
+        proof_load(tape, region, base + 1),
+        proof_load(tape, region, base + 2),
+        proof_load(tape, region, base + 3),
+    )
+}
+
+#[inline(always)]
+fn hash_buffer_start(_ state: u32, _ secondary: bool) -> u32 {
+    let state_words: u32 = (FRI_HASH_BUFFERS * POSEIDON_LANES).downcast_truncate()
+    let buffer_words: u32 = POSEIDON_LANES.downcast_truncate()
+    state * state_words + if secondary { buffer_words } else { 0 }
+}
+
+#[inline(always)]
+fn load_hash_buffer(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ state: u32,
+    _ secondary: bool,
+) -> [u32; POSEIDON_LANES] {
+    let mut words = [0; POSEIDON_LANES]
+    let start = hash_buffer_start(state, secondary)
+    let mut lane: usize = 0
+    while lane < POSEIDON_LANES {
+        words[lane] = fri_scratch_load(
+            scratch,
+            FRI_HASH_STATES_START,
+            start + lane.downcast_truncate(),
+        )
+        lane = lane + 1
+    }
+    words
+}
+
+#[inline(always)]
+fn initialize_hash_lane(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ state: u32,
+    _ field_lane: u32,
+    _ permutation: ref Poseidon2FieldPermutation,
+    _ input_valid: bool,
+) {
+    if state >= FRI_MAX_HASH_STATES.downcast_truncate()
+        || field_lane >= POSEIDON_LANES.downcast_truncate()
+    {
+        return
+    }
+    fri_scratch_store(
+        scratch,
+        FRI_HASH_STATES_START,
+        hash_buffer_start(state, false) + field_lane,
+        permutation.lane_word(lane: field_lane),
+    )
+    fri_scratch_store(
+        scratch,
+        FRI_HASH_STATES_START,
+        hash_buffer_start(state, true) + field_lane,
+        0,
+    )
+    if field_lane == 0 {
+        fri_scratch_store(
+            scratch,
+            FRI_HASH_VALID_START,
+            state,
+            if input_valid && permutation.is_valid() { 1 } else { 0 },
+        )
+    }
+}
+
+#[inline(always)]
+fn advance_hash_lane(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ state: u32,
+    _ field_lane: u32,
+    _ step: u32,
+) {
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    let mut state_valid = fri_scratch_load(
+        scratch,
+        FRI_HASH_VALID_START,
+        state,
+    ) == 1
+    let primary = load_hash_buffer(scratch, state, false)
+    let secondary = load_hash_buffer(scratch, state, true)
+    let mut checked: usize = 0
+    while checked < POSEIDON_LANES {
+        if primary[checked] >= BABY_BEAR_MODULUS { state_valid = false }
+        if secondary[checked] >= BABY_BEAR_MODULUS { state_valid = false }
+        checked = checked + 1
+    }
+    if step >= transition { state_valid = false }
+    let mut round_constant: u32 = 0
+    if step != 0 && ((step - 1) & 1) == 0 {
+        let phase = (step - 1) / 2
+        let index = poseidon2_round_constant_index(phase, field_lane)
+        round_constant = proof_load(
+            proof,
+            proof_tape_regions().parameters,
+            index,
+        )
+    }
+    let value = if state_valid {
+        poseidon2_workgroup_lane_with_round_constant(
+            ref primary,
+            ref secondary,
+            step,
+            field_lane,
+            round_constant,
+        )
+    } else {
+        0
+    }
+    let destination = poseidon2_workgroup_destination(step)
+    fri_scratch_store(
+        scratch,
+        FRI_HASH_STATES_START,
+        hash_buffer_start(state, destination == 1) + field_lane,
+        value,
+    )
+    if field_lane == 0 {
+        fri_scratch_store(
+            scratch,
+            FRI_HASH_VALID_START,
+            state,
+            if state_valid { 1 } else { 0 },
+        )
+    }
+}
+
+#[inline(always)]
+fn hash_digest(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ state: u32,
+) -> Poseidon2Digest {
+    let output = load_hash_buffer(scratch, state, true)
+    let mut words = [0; DIGEST_FIELDS]
+    let mut field: usize = 0
+    while field < DIGEST_FIELDS {
+        words[field] = BabyBear::from_montgomery_word(output[field]).to_u32()
+        field = field + 1
+    }
+    Poseidon2Digest::from_u32s(words)
+}
+
+#[inline(always)]
+fn store_tree_digest(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ node: u32,
+    _ digest: Poseidon2Digest,
+) {
+    let base = node * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        fri_scratch_store(
+            scratch,
+            FRI_TREE_START,
+            base + field,
+            digest.field(index: field).to_u32(),
+        )
+        field = field + 1
+    }
+}
+
+#[inline(always)]
+fn load_tree_digest(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ node: u32,
+) -> Poseidon2Digest {
+    let base = node * DIGEST_FIELDS.downcast_truncate()
+    let mut words = [0; DIGEST_FIELDS]
+    let mut field: usize = 0
+    while field < DIGEST_FIELDS {
+        words[field] = fri_scratch_load(
+            scratch,
+            FRI_TREE_START,
+            base + field.downcast_truncate(),
+        )
+        field = field + 1
+    }
+    Poseidon2Digest::from_u32s(words)
+}
+
+#[inline(always)]
+fn tree_node(_ variant: u32, _ node: u32) -> u32 {
+    variant * FRI_TREE_NODES_PER_VARIANT.downcast_truncate() + node
+}
+
+#[inline(always)]
+fn tree_level_offset(_ output_width: u32, _ level: u32) -> u32 {
+    let mut offset: u32 = 0
+    let mut width = output_width
+    let mut current: u32 = 0
+    while current < level {
+        offset = offset + width
+        width = width / 2
+        current = current + 1
+    }
+    offset
+}
+
+#[inline(always)]
+fn fri_round_value_index(_ variant: u32, _ round: u32) -> u32 {
+    variant * FRI_ROUNDS.downcast_truncate() + round
+}
+
+#[inline(always)]
+fn fri_transcript_value_index(_ variant: u32, _ transcript: u32) -> u32 {
+    variant * FRI_TRANSCRIPTS_PER_VARIANT.downcast_truncate() + transcript
+}
+
+#[inline(always)]
+fn fri_shift(_ round_index: u32) -> BabyBear {
+    let mut shift = BabyBear::from_u32(7)
+    let mut index: u32 = 0
+    while index < round_index {
+        shift = shift * shift
+        index = index + 1
+    }
+    shift
+}
+
+#[inline(always)]
+fn advance_fri_round<
+    const ROUND_INDEX: usize,
+    const INPUT_WIDTH: usize,
+    const OUTPUT_WIDTH: usize,
+    const TREE_DEPTH: usize,
+    const SCHEDULE_STEPS: usize,
+>(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ tamper: f32,
+    _ invocation: ComputeInvocation,
+)
+where
+    { ROUND_INDEX < FRI_ROUNDS },
+    { INPUT_WIDTH > 0 },
+    { INPUT_WIDTH > 1 },
+    { OUTPUT_WIDTH > 0 },
+    { INPUT_WIDTH == 2 * OUTPUT_WIDTH },
+    { (INPUT_WIDTH & (INPUT_WIDTH - 1)) == 0 },
+    { SCHEDULE_STEPS == fri_round_schedule_steps(TREE_DEPTH) }
+{
+    let regions = proof_tape_regions()
+    let status = fri_status_regions()
+    let challenge_valid_region = subregion(
+        regions.fri_status,
+        status.challenge_valid,
+    )
+    let root_valid_region = subregion(regions.fri_status, status.root_valid)
+    let transcript_valid_region = subregion(
+        regions.fri_status,
+        status.transcript_valid,
+    )
+    let round_valid_region = subregion(regions.fri_status, status.round_valid)
+    let lane = invocation.local.x
+    let lane_count: u32 = FRI_WORKGROUP_LANES.downcast_truncate()
+    if lane >= lane_count { return }
+    let round_index: u32 = ROUND_INDEX.downcast_truncate()
+    let progress_index = round_index * lane_count + lane
+    let step = fri_scratch_load(
+        scratch,
+        FRI_PROGRESS_START,
+        progress_index,
+    )
+    if step >= SCHEDULE_STEPS.downcast_truncate() { return }
+
+    let placement =
+        <ProofFriSchedule as FriSchedulePlacement>::fri_round_placement(
+            round_index,
+        )
+    let output_width: u32 = OUTPUT_WIDTH.downcast_truncate()
+    let input_width: u32 = INPUT_WIDTH.downcast_truncate()
+    let tree_depth: u32 = TREE_DEPTH.downcast_truncate()
+    let variant_count: u32 = FRI_VARIANTS.downcast_truncate()
+    let expected_tree_depth: u32 = if output_width > 1 {
+        placement.pair_depth + 1
+    } else {
+        0
+    }
+    let schedule_valid = placement.valid
+        && placement.index == round_index
+        && placement.round == round_index + 1
+        && placement.input_width == input_width
+        && placement.output_width == output_width
+        && placement.output_offset + output_width
+            <= FRI_EVALUATIONS.downcast_truncate()
+        && expected_tree_depth == tree_depth
+
+    let hash_stage_steps: u32 = HASH_STAGE_STEPS.downcast_truncate()
+    let hash_transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    let challenge_end: u32 = FRI_CHALLENGE_PLACEMENT_STEPS.downcast_truncate()
+    let fold_step = challenge_end
+    let leaf_start = fold_step + 1
+    let tree_start = leaf_start + FRI_LEAF_PLACEMENT_STEPS.downcast_truncate()
+    let binding_start = tree_start
+        + tree_depth
+            * FRI_LEAF_PLACEMENT_STEPS.downcast_truncate()
+
+    if step == 0 {
+        if lane < (FRI_VARIANTS * POSEIDON_LANES).downcast_truncate() {
+            let state = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            let transcript_index = fri_transcript_value_index(
+                state,
+                round_index,
+            )
+            let transcript = load_fri_transcript_digest(
+                proof,
+                transcript_index,
+            )
+            let placed = begin_digest_squeeze_placement_tag(
+                fri_fold_domain_tag(placement.round),
+                transcript,
+            )
+            let input_valid = schedule_valid && proof_load(
+                proof,
+                transcript_valid_region,
+                transcript_index,
+            ) == 1
+            initialize_hash_lane(
+                scratch,
+                state,
+                field_lane,
+                ref placed.permutation,
+                input_valid,
+            )
+            if field_lane < 2 {
+                fri_scratch_store(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    state * 10 + field_lane,
+                    placed.remaining[field_lane as usize].to_u32(),
+                )
+            }
+        }
+    } else if step < challenge_end {
+        let relative = step - 1
+        let block = relative / hash_stage_steps
+        let hash_step = relative % hash_stage_steps
+        if lane < (FRI_VARIANTS * POSEIDON_LANES).downcast_truncate() {
+            let state = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            if hash_step < hash_transition {
+                advance_hash_lane(
+                    proof,
+                    scratch,
+                    state,
+                    field_lane,
+                    hash_step,
+                )
+            } else if block == 0 {
+                let output = load_hash_buffer(
+                    scratch,
+                    state,
+                    true,
+                )
+                let tail = [
+                    BabyBear::from_u32(fri_scratch_load(
+                        scratch,
+                        FRI_HASH_TAILS_START,
+                        state * 10,
+                    )),
+                    BabyBear::from_u32(fri_scratch_load(
+                        scratch,
+                        FRI_HASH_TAILS_START,
+                        state * 10 + 1,
+                    )),
+                ]
+                let sponge = Poseidon2FieldSponge::restore(
+                    lanes: output,
+                    rate: 0,
+                    expected: DIGEST_FIELDS.downcast_truncate(),
+                    written: 6,
+                )
+                let permutation = sponge.begin_final_permutation<2>(
+                    fields: ref tail,
+                )
+                initialize_hash_lane(
+                    scratch,
+                    state,
+                    field_lane,
+                    ref permutation,
+                    fri_scratch_load(
+                        scratch,
+                        FRI_HASH_VALID_START,
+                        state,
+                    ) == 1,
+                )
+            } else {
+                if field_lane < EXTENSION_WORDS.downcast_truncate() {
+                    let digest = hash_digest(scratch, state)
+                    let challenge_base = fri_round_value_index(
+                        state,
+                        round_index,
+                    ) * EXTENSION_WORDS.downcast_truncate()
+                    proof_store(
+                        proof,
+                        regions.fri_challenges,
+                        challenge_base + field_lane,
+                        digest.field(index: field_lane).to_u32(),
+                    )
+                }
+                if field_lane == 0 {
+                    proof_store(
+                        proof,
+                        challenge_valid_region,
+                        fri_round_value_index(state, round_index),
+                        fri_scratch_load(
+                            scratch,
+                            FRI_HASH_VALID_START,
+                            state,
+                        ),
+                    )
+                }
+            }
+        }
+    } else if step == fold_step {
+        if lane < (FRI_VARIANTS * OUTPUT_WIDTH).downcast_truncate() {
+            let variant = lane / output_width
+            let pair = lane % output_width
+            let mut positive = BabyBearExt4::zero()
+            let mut negative = BabyBearExt4::zero()
+            let destination = if variant == 0 {
+                regions.fri_clean
+            } else {
+                regions.fri_observed
+            }
+            if ROUND_INDEX == 0 {
+                let lde_words: u32 = LDE.downcast_truncate()
+                positive = BabyBearExt4::from_coordinate_words(
+                    proof_load(proof, regions.lde, pair),
+                    proof_load(proof, regions.lde, pair + lde_words),
+                    proof_load(proof, regions.lde, pair + 2 * lde_words),
+                    proof_load(proof, regions.lde, pair + 3 * lde_words),
+                )
+                negative = BabyBearExt4::from_coordinate_words(
+                    proof_load(proof, regions.lde, pair + output_width),
+                    proof_load(
+                        proof,
+                        regions.lde,
+                        pair + output_width + lde_words,
+                    ),
+                    proof_load(
+                        proof,
+                        regions.lde,
+                        pair + output_width + 2 * lde_words,
+                    ),
+                    proof_load(
+                        proof,
+                        regions.lde,
+                        pair + output_width + 3 * lde_words,
+                    ),
+                )
+                if variant == 1 && tamper >= 0.5 && pair == 1 {
+                    positive = BabyBearExt4::from_coordinate_fields(
+                        positive.coefficient_0(),
+                        positive.coefficient_1() + BabyBear::one(),
+                        positive.coefficient_2(),
+                        positive.coefficient_3(),
+                    )
+                }
+            } else {
+                let previous = placement.output_offset - placement.input_width
+                positive = load_fri_evaluation(
+                    proof,
+                    destination,
+                    previous + pair,
+                )
+                negative = load_fri_evaluation(
+                    proof,
+                    destination,
+                    previous + pair + output_width,
+                )
+            }
+            let challenge_base = fri_round_value_index(
+                variant,
+                round_index,
+            ) * EXTENSION_WORDS.downcast_truncate()
+            let challenge = BabyBearExt4::from_coordinate_words(
+                proof_load(proof, regions.fri_challenges, challenge_base),
+                proof_load(proof, regions.fri_challenges, challenge_base + 1),
+                proof_load(proof, regions.fri_challenges, challenge_base + 2),
+                proof_load(proof, regions.fri_challenges, challenge_base + 3),
+            )
+            let value_valid = schedule_valid && proof_load(
+                proof,
+                challenge_valid_region,
+                fri_round_value_index(variant, round_index),
+            ) == 1
+            let folded = if value_valid {
+                let root = BabyBear::two_adic_root(placement.input_log)
+                fold_fri_pair_value_at_point(
+                    positive,
+                    negative,
+                    challenge,
+                    fri_shift(round_index) * root.pow_u32(pair),
+                )
+            } else {
+                BabyBearExt4::zero()
+            }
+            store_fri_evaluation(
+                proof,
+                destination,
+                placement.output_offset + pair,
+                folded,
+            )
+        }
+    } else if step == leaf_start {
+        if lane < (FRI_VARIANTS * OUTPUT_WIDTH * POSEIDON_LANES)
+            .downcast_truncate()
+        {
+            let state = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            let variant = state / output_width
+            let pair = state % output_width
+            let source = if variant == 0 {
+                regions.fri_clean
+            } else {
+                regions.fri_observed
+            }
+            let evaluation = load_fri_evaluation(
+                proof,
+                source,
+                placement.output_offset + pair,
+            )
+            let permutation = begin_ext4_commitment_placement_tag(
+                fri_layer_row_domain_tag(placement.round),
+                evaluation,
+            )
+            let input_valid = schedule_valid && proof_load(
+                proof,
+                challenge_valid_region,
+                fri_round_value_index(variant, round_index),
+            ) == 1
+            initialize_hash_lane(
+                scratch,
+                state,
+                field_lane,
+                ref permutation,
+                input_valid,
+            )
+        }
+    } else if step < tree_start {
+        let hash_step = step - leaf_start - 1
+        if lane < (FRI_VARIANTS * OUTPUT_WIDTH * POSEIDON_LANES)
+            .downcast_truncate()
+        {
+            let state = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            let variant = state / output_width
+            let pair = state % output_width
+            if hash_step < hash_transition {
+                advance_hash_lane(
+                    proof,
+                    scratch,
+                    state,
+                    field_lane,
+                    hash_step,
+                )
+            } else if field_lane == 0 {
+                let node = tree_node(variant, pair)
+                let digest = hash_digest(scratch, state)
+                store_tree_digest(scratch, node, digest)
+                fri_scratch_store(
+                    scratch,
+                    FRI_TREE_VALID_START,
+                    node,
+                    fri_scratch_load(
+                        scratch,
+                        FRI_HASH_VALID_START,
+                        state,
+                    ),
+                )
+                if TREE_DEPTH == 0 {
+                    store_fri_root_digest(
+                        proof,
+                        fri_round_value_index(variant, round_index),
+                        digest,
+                    )
+                    proof_store(
+                        proof,
+                        root_valid_region,
+                        fri_round_value_index(variant, round_index),
+                        fri_scratch_load(
+                            scratch,
+                            FRI_HASH_VALID_START,
+                            state,
+                        ),
+                    )
+                }
+            }
+        }
+    } else if step < binding_start {
+        let relative = step - tree_start
+        let level = relative / FRI_LEAF_PLACEMENT_STEPS.downcast_truncate()
+        let level_step = relative % FRI_LEAF_PLACEMENT_STEPS.downcast_truncate()
+        let child_width = output_width >> level
+        let parent_width = child_width / 2
+        let child_offset = tree_level_offset(output_width, level)
+        let parent_offset = child_offset + child_width
+        if lane < variant_count
+            * parent_width * POSEIDON_LANES.downcast_truncate()
+        {
+            let state = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            let variant = state / parent_width
+            let parent = state % parent_width
+            let left_node = tree_node(variant, child_offset + 2 * parent)
+            let right_node = left_node + 1
+            if level_step == 0 {
+                let permutation = begin_compression_placement(
+                    load_tree_digest(scratch, left_node),
+                    load_tree_digest(scratch, right_node),
+                )
+                initialize_hash_lane(
+                    scratch,
+                    state,
+                    field_lane,
+                    ref permutation,
+                    fri_scratch_load(
+                        scratch,
+                        FRI_TREE_VALID_START,
+                        left_node,
+                    ) == 1 && fri_scratch_load(
+                        scratch,
+                        FRI_TREE_VALID_START,
+                        right_node,
+                    ) == 1,
+                )
+            } else {
+                let hash_step = level_step - 1
+                if hash_step < hash_transition {
+                    advance_hash_lane(
+                        proof,
+                        scratch,
+                        state,
+                        field_lane,
+                        hash_step,
+                    )
+                } else if field_lane == 0 {
+                    let node = tree_node(variant, parent_offset + parent)
+                    let digest = hash_digest(scratch, state)
+                    store_tree_digest(scratch, node, digest)
+                    fri_scratch_store(
+                        scratch,
+                        FRI_TREE_VALID_START,
+                        node,
+                        fri_scratch_load(
+                            scratch,
+                            FRI_HASH_VALID_START,
+                            state,
+                        ),
+                    )
+                    if level + 1 == tree_depth {
+                        store_fri_root_digest(
+                            proof,
+                            fri_round_value_index(variant, round_index),
+                            digest,
+                        )
+                        proof_store(
+                            proof,
+                            root_valid_region,
+                            fri_round_value_index(variant, round_index),
+                            fri_scratch_load(
+                                scratch,
+                                FRI_HASH_VALID_START,
+                                state,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    } else {
+        let relative = step - binding_start
+        if lane < (FRI_VARIANTS * POSEIDON_LANES).downcast_truncate() {
+            let state = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            if relative == 0 {
+                let transcript_index = fri_transcript_value_index(
+                    state,
+                    round_index,
+                )
+                let transcript = load_fri_transcript_digest(
+                    proof,
+                    transcript_index,
+                )
+                let root = load_fri_root_digest(
+                    proof,
+                    fri_round_value_index(state, round_index),
+                )
+                let placed = begin_binding_placement_tag(
+                    fri_layer_transcript_domain_tag(placement.round),
+                    transcript,
+                    root,
+                )
+                initialize_hash_lane(
+                    scratch,
+                    state,
+                    field_lane,
+                    ref placed.permutation,
+                    schedule_valid
+                        && proof_load(
+                            proof,
+                            transcript_valid_region,
+                            transcript_index,
+                        ) == 1
+                        && proof_load(
+                            proof,
+                            root_valid_region,
+                            fri_round_value_index(state, round_index),
+                        ) == 1,
+                )
+                if field_lane < 10 {
+                    fri_scratch_store(
+                        scratch,
+                        FRI_HASH_TAILS_START,
+                        state * 10 + field_lane,
+                        placed.remaining[field_lane as usize].to_u32(),
+                    )
+                }
+            } else {
+                let block_relative = relative - 1
+                let block = block_relative / hash_stage_steps
+                let hash_step = block_relative % hash_stage_steps
+                if hash_step < hash_transition {
+                    advance_hash_lane(
+                        proof,
+                        scratch,
+                        state,
+                        field_lane,
+                        hash_step,
+                    )
+                } else if block == 0 {
+                    let output = load_hash_buffer(scratch, state, true)
+                    let mut fields = [BabyBear::zero(); 8]
+                    let mut index: usize = 0
+                    while index < 8 {
+                        fields[index] = BabyBear::from_u32(fri_scratch_load(
+                            scratch,
+                            FRI_HASH_TAILS_START,
+                            state * 10 + index.downcast_truncate(),
+                        ))
+                        index = index + 1
+                    }
+                    let sponge = Poseidon2FieldSponge::restore(
+                        output,
+                        0,
+                        (2 * DIGEST_FIELDS).downcast_truncate(),
+                        6,
+                    )
+                    let permutation = sponge.begin_permutation<8>(ref fields)
+                    initialize_hash_lane(
+                        scratch,
+                        state,
+                        field_lane,
+                        ref permutation,
+                        fri_scratch_load(
+                            scratch,
+                            FRI_HASH_VALID_START,
+                            state,
+                        ) == 1,
+                    )
+                } else if block == 1 {
+                    let output = load_hash_buffer(scratch, state, true)
+                    let fields = [
+                        BabyBear::from_u32(fri_scratch_load(
+                            scratch,
+                            FRI_HASH_TAILS_START,
+                            state * 10 + 8,
+                        )),
+                        BabyBear::from_u32(fri_scratch_load(
+                            scratch,
+                            FRI_HASH_TAILS_START,
+                            state * 10 + 9,
+                        )),
+                    ]
+                    let sponge = Poseidon2FieldSponge::restore(
+                        output,
+                        0,
+                        (2 * DIGEST_FIELDS).downcast_truncate(),
+                        14,
+                    )
+                    let permutation = sponge.begin_final_permutation<2>(ref fields)
+                    initialize_hash_lane(
+                        scratch,
+                        state,
+                        field_lane,
+                        ref permutation,
+                        fri_scratch_load(
+                            scratch,
+                            FRI_HASH_VALID_START,
+                            state,
+                        ) == 1,
+                    )
+                } else if field_lane == 0 {
+                    let digest = hash_digest(scratch, state)
+                    let next_transcript = fri_transcript_value_index(
+                        state,
+                        round_index + 1,
+                    )
+                    store_fri_transcript_digest(
+                        proof,
+                        next_transcript,
+                        digest,
+                    )
+                    let valid = fri_scratch_load(
+                        scratch,
+                        FRI_HASH_VALID_START,
+                        state,
+                    )
+                    proof_store(
+                        proof,
+                        transcript_valid_region,
+                        next_transcript,
+                        valid,
+                    )
+                    proof_store(
+                        proof,
+                        round_valid_region,
+                        fri_round_value_index(state, round_index),
+                        valid,
+                    )
+                }
+            }
+        }
+    }
+    fri_scratch_store(
+        scratch,
+        FRI_PROGRESS_START,
+        progress_index,
+        step + 1,
+    )
 }
 
 actor MandelbrotProofGpuCheckpoint uses (
@@ -522,7 +1570,7 @@ actor MandelbrotProofGpuCheckpoint uses (
     lde_inverse_progress: ProofTape<u32, INPUT_GRID_LANES>,
     lde_values: ProofTape<u32, LDE_WORDS>,
     lde_progress: ProofTape<u32, OUTPUT_GRID_LANES>,
-    lde_coset_valid: ProofTape<u32, COLUMN_COUNT>,
+    fri_scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
     tamper: f32,
     res: f32,
 
@@ -650,7 +1698,7 @@ actor MandelbrotProofGpuCheckpoint uses (
     fn prepare_lde_forward(self, invocation: ComputeInvocation)
         uses (Prove<Threads<OUTPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
     {
-        prepare_batched_coset_extension<
+        let prepared = prepare_batched_coset_extension<
             COLUMN_COUNT,
             TRACE,
             LDE,
@@ -660,7 +1708,6 @@ actor MandelbrotProofGpuCheckpoint uses (
             INPUT_GRID_LANES,
             LDE_WORDS,
             OUTPUT_GRID_LANES,
-            COLUMN_COUNT,
             BabyBear,
             ProofLdeInputPlan,
             ProofLdeOutputPlan,
@@ -669,10 +1716,20 @@ actor MandelbrotProofGpuCheckpoint uses (
             self.lde_inverse_progress,
             self.lde_values,
             self.lde_progress,
-            self.lde_coset_valid,
             BabyBear::from_u32(7),
             invocation,
         )
+        if prepared.active && prepared.lane == 0 {
+            proof_store(
+                self.proof,
+                subregion(
+                    proof_tape_regions().status,
+                    status_regions().lde_valid,
+                ),
+                prepared.batch,
+                if prepared.valid { 1 } else { 0 },
+            )
+        }
     }
 
     fn advance_lde_forward(self, invocation: ComputeInvocation)
@@ -710,23 +1767,26 @@ actor MandelbrotProofGpuCheckpoint uses (
             OUTPUT_LANES,
             LDE_WORDS,
             OUTPUT_GRID_LANES,
-            COLUMN_COUNT,
             PROOF_WORDS,
             ProofLdeOutputPlan,
         >(
             self.lde_values,
             self.lde_progress,
-            self.lde_coset_valid,
             self.proof,
             lde_start,
             invocation,
         )
         if finish.active && finish.lane == 0 {
+            let prepared = proof_load(
+                self.proof,
+                lde_valid,
+                finish.batch,
+            ) == 1
             proof_store(
                 self.proof,
                 lde_valid,
                 finish.batch,
-                if finish.valid { 1 } else { 0 },
+                if prepared && finish.valid { 1 } else { 0 },
             )
         }
     }
@@ -988,341 +2048,136 @@ actor MandelbrotProofGpuCheckpoint uses (
         )
     }
 
-    fn initialize_fri_challenge(self)
-        uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>)
-    {
-        let regions = proof_tape_regions()
-        let challenge_layout = fri_challenge_regions()
-        let challenge_state = subregion(
-            regions.fri_challenge,
-            challenge_layout.state,
-        )
-        let challenge_tail = subregion(
-            regions.fri_challenge,
-            challenge_layout.tail,
-        )
-        let challenge_valid = subregion(
-            regions.fri_challenge,
-            challenge_layout.valid,
-        )
-        let root = load_digest(tape: self.proof, region: regions.clean_root)
-        let placement = begin_digest_squeeze_placement<
-            MandelbrotGpuFriChallengeV1,
-        >(root)
-        store_initial_commitment(
-            tape: self.proof,
-            state: challenge_state,
-            permutation: ref placement.permutation,
-        )
-        proof_store(
-            self.proof,
-            challenge_tail,
-            0,
-            placement.remaining[0].to_u32(),
-        )
-        proof_store(
-            self.proof,
-            challenge_tail,
-            1,
-            placement.remaining[1].to_u32(),
-        )
-        let mut input_valid: u32 = if placement.permutation.is_valid() {
-            1
-        } else {
-            0
-        }
-        if !commitment_state_valid(
-            tape: self.proof,
-            state: regions.clean_commitment,
-        ) {
-            input_valid = 0
-        }
-        proof_store(
-            self.proof,
-            challenge_valid,
-            0,
-            input_valid,
-        )
-    }
-
-    fn advance_fri_challenge(self, invocation: ComputeInvocation)
-        uses (
-            Prove<
-                Threads<FRI_CHALLENGE_WORKGROUP_LANES, 1, 1>,
-                Repeat<1, 1, 1, FRI_CHALLENGE_STEPS>,
-            >
-        )
-    {
-        let regions = proof_tape_regions()
-        let challenge_layout = fri_challenge_regions()
-        let challenge_state = subregion(
-            regions.fri_challenge,
-            challenge_layout.state,
-        )
-        let challenge_tail = subregion(
-            regions.fri_challenge,
-            challenge_layout.tail,
-        )
-        let challenge_value = subregion(
-            regions.fri_challenge,
-            challenge_layout.value,
-        )
-        let challenge_valid = subregion(
-            regions.fri_challenge,
-            challenge_layout.valid,
-        )
-        let state_layout = commitment_regions()
-        let field_lane = invocation.local.x
-        let field_index: RegionIndex<[u32; POSEIDON_LANES]> =
-            cyclic_region_index(field_lane)
-        let state = challenge_state
-        let primary_region = subregion(state, state_layout.primary)
-        let secondary_region = subregion(state, state_layout.secondary)
-        let cursor_region = subregion(state, state_layout.cursor)
-        let block_region = subregion(state, state_layout.block)
-        let valid_region = subregion(state, state_layout.valid)
-        let cursor = proof_load_indexed(self.proof, cursor_region, field_index)
-        let block = proof_load_indexed(self.proof, block_region, field_index)
-        let mut valid = proof_load_indexed(self.proof, valid_region, field_index)
-        let primary = load_commitment_buffer(
-            tape: self.proof,
-            state: state,
-            buffer: state_layout.primary,
-        )
-        let secondary = load_commitment_buffer(
-            tape: self.proof,
-            state: state,
-            buffer: state_layout.secondary,
-        )
-        let mut checked: usize = 0
-        while checked < POSEIDON_LANES {
-            if primary[checked] >= BABY_BEAR_MODULUS { valid = 0 }
-            if secondary[checked] >= BABY_BEAR_MODULUS { valid = 0 }
-            checked = checked + 1
-        }
-
-        let transition =
-            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
-        if cursor < transition {
-            let destination = poseidon2_workgroup_destination(cursor)
-            let output = if destination == 0 {
-                primary_region
-            } else {
-                secondary_region
-            }
-            let mut round_constant: u32 = 0
-            if cursor != 0 && ((cursor - 1) & 1) == 0 {
-                let phase = (cursor - 1) / 2
-                let index = poseidon2_round_constant_index(phase, field_lane)
-                round_constant = proof_load(self.proof, regions.parameters, index)
-            }
-            let value = if valid == 1 {
-                poseidon2_workgroup_lane_with_round_constant(
-                    ref primary,
-                    ref secondary,
-                    cursor,
-                    field_lane,
-                    round_constant,
-                )
-            } else {
-                0
-            }
-            proof_store_indexed(self.proof, output, field_index, value)
-            proof_store_indexed(self.proof, cursor_region, field_index, cursor + 1)
-            proof_store_indexed(self.proof, block_region, field_index, block)
-            proof_store_indexed(self.proof, valid_region, field_index, valid)
-        } else if cursor == transition && block == 0 {
-            let mut value = secondary[field_lane as usize]
-            if field_lane < FRI_CHALLENGE_TAIL_WORDS.downcast_truncate() {
-                value = BabyBear::from_u32(proof_load(
-                    self.proof,
-                    challenge_tail,
-                    field_lane,
-                )).to_montgomery_word()
-            }
-            proof_store_indexed(
-                self.proof,
-                primary_region,
-                field_index,
-                if valid == 1 { value } else { 0 },
-            )
-            proof_store_indexed(self.proof, cursor_region, field_index, 0)
-            proof_store_indexed(self.proof, block_region, field_index, 1)
-            proof_store_indexed(self.proof, valid_region, field_index, valid)
-        } else if cursor == transition && block == 1 {
-            if field_lane < FRI_CHALLENGE_WORDS.downcast_truncate() {
-                proof_store(
-                    self.proof,
-                    challenge_value,
-                    field_lane,
-                    BabyBear::from_montgomery_word(
-                        secondary[field_lane as usize],
-                    ).to_u32(),
-                )
-            }
-            proof_store_indexed(
-                self.proof,
-                primary_region,
-                field_index,
-                secondary[field_lane as usize],
-            )
-            proof_store_indexed(self.proof, cursor_region, field_index, 0)
-            proof_store_indexed(
-                self.proof,
-                block_region,
-                field_index,
-                FRI_CHALLENGE_DONE_BLOCK.downcast_truncate(),
-            )
-            proof_store_indexed(self.proof, valid_region, field_index, valid)
-            if field_lane == 0 {
-                let input_valid = proof_load(
-                    self.proof,
-                    challenge_valid,
-                    0,
-                )
-                proof_store(
-                    self.proof,
-                    challenge_valid,
-                    0,
-                    if input_valid == 1 && valid == 1 { 1 } else { 0 },
-                )
-            }
-        } else {
-            proof_store_indexed(self.proof, cursor_region, field_index, 0)
-            proof_store_indexed(self.proof, block_region, field_index, 0)
-            proof_store_indexed(self.proof, valid_region, field_index, 0)
-            if field_lane == 0 {
-                proof_store(self.proof, challenge_valid, 0, 0)
-            }
-        }
-    }
-
-    fn fold_fri_pairs(self, invocation: ComputeInvocation)
+    fn initialize_fri_schedule(self, invocation: ComputeInvocation)
         uses (Prove<Threads<FRI_WORKGROUP_LANES, 1, 1>, Once<1, 1, 1>>)
     {
         let regions = proof_tape_regions()
-        let challenge_layout = fri_challenge_regions()
-        let challenge_value = subregion(
-            regions.fri_challenge,
-            challenge_layout.value,
-        )
-        let challenge_valid_region = subregion(
-            regions.fri_challenge,
-            challenge_layout.valid,
-        )
-        let fri_layout = fri_status_regions()
-        let pairs: u32 = FRI_PAIRS.downcast_truncate()
+        let status = fri_status_regions()
         let lane = invocation.local.x
-        let observed = lane >= pairs
-        let pair = lane % pairs
-        let negative_index = pair + pairs
-        let lde_words: u32 = LDE.downcast_truncate()
-        let positive = BabyBearExt4::from_coordinate_words(
-            proof_load(self.proof, regions.lde, pair),
-            proof_load(self.proof, regions.lde, pair + lde_words),
-            proof_load(self.proof, regions.lde, pair + lde_words + lde_words),
-            proof_load(
-                self.proof,
-                regions.lde,
-                pair + lde_words + lde_words + lde_words,
-            ),
-        )
-        let negative = BabyBearExt4::from_coordinate_words(
-            proof_load(self.proof, regions.lde, negative_index),
-            proof_load(self.proof, regions.lde, negative_index + lde_words),
-            proof_load(
-                self.proof,
-                regions.lde,
-                negative_index + lde_words + lde_words,
-            ),
-            proof_load(
-                self.proof,
-                regions.lde,
-                negative_index + lde_words + lde_words + lde_words,
-            ),
-        )
-        let changed_coefficient = if observed
-            && self.tamper >= 0.5
-            && pair == 1
-        {
-            positive.coefficient_1() + BabyBear::one()
-        } else {
-            positive.coefficient_1()
+        let lane_count: u32 = FRI_WORKGROUP_LANES.downcast_truncate()
+        let mut round: u32 = 0
+        while round < FRI_ROUNDS.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                round * lane_count + lane,
+                0,
+            )
+            round = round + 1
         }
-        let observed_positive = BabyBearExt4::from_coordinate_fields(
-            positive.coefficient_0(),
-            changed_coefficient,
-            positive.coefficient_2(),
-            positive.coefficient_3(),
-        )
-        let challenge = BabyBearExt4::from_coordinate_words(
-            proof_load(self.proof, challenge_value, 0),
-            proof_load(self.proof, challenge_value, 1),
-            proof_load(self.proof, challenge_value, 2),
-            proof_load(self.proof, challenge_value, 3),
-        )
-        let challenge_valid = proof_load(
-            self.proof,
-            challenge_valid_region,
-            0,
-        ) == 1
-        let shift = BabyBear::from_u32(7)
-        let folded = fold_fri_pair_value_at_power_of_two<16>(
-            observed_positive,
-            negative,
-            challenge,
-            shift,
-            pair,
-        )
-        let destination = if observed {
-            regions.fri_observed
-        } else {
-            regions.fri_clean
+        if lane < DIGEST_FIELDS.downcast_truncate() {
+            let value = proof_load(self.proof, regions.clean_root, lane)
+            let mut variant: u32 = 0
+            while variant < FRI_VARIANTS.downcast_truncate() {
+                proof_store(
+                    self.proof,
+                    regions.fri_transcripts,
+                    fri_transcript_value_index(variant, 0)
+                        * DIGEST_FIELDS.downcast_truncate() + lane,
+                    value,
+                )
+                variant = variant + 1
+            }
         }
-        let validity = if observed {
-            subregion(regions.fri_status, fri_layout.observed_valid)
-        } else {
-            subregion(regions.fri_status, fri_layout.clean_valid)
+        if lane < FRI_VARIANTS.downcast_truncate() {
+            let initial_valid = commitment_state_valid(
+                tape: self.proof,
+                state: regions.clean_commitment,
+            ) && proof_fri_metadata().rounds
+                == FRI_ROUNDS.downcast_truncate()
+            proof_store(
+                self.proof,
+                subregion(regions.fri_status, status.transcript_valid),
+                fri_transcript_value_index(lane, 0),
+                if initial_valid { 1 } else { 0 },
+            )
         }
-        store_fri_evaluation(
-            self.proof,
-            destination,
-            pair,
-            folded,
+    }
+
+    fn advance_fri_round_1(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<FRI_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, FRI_ROUND_1_STEPS>,
+            >
         )
-        proof_store(
+    {
+        advance_fri_round<0, 16, 8, 3, FRI_ROUND_1_STEPS>(
             self.proof,
-            validity,
-            pair,
-            if challenge_valid && !shift.is_zero() && pair < pairs {
-                1
-            } else {
-                0
-            },
+            self.fri_scratch,
+            self.tamper,
+            invocation,
         )
     }
 
-    fn finalize_fri_fold(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+    fn advance_fri_round_2(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<FRI_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, FRI_ROUND_2_STEPS>,
+            >
+        )
+    {
+        advance_fri_round<1, 8, 4, 2, FRI_ROUND_2_STEPS>(
+            self.proof,
+            self.fri_scratch,
+            self.tamper,
+            invocation,
+        )
+    }
+
+    fn advance_fri_round_3(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<FRI_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, FRI_ROUND_3_STEPS>,
+            >
+        )
+    {
+        advance_fri_round<2, 4, 2, 1, FRI_ROUND_3_STEPS>(
+            self.proof,
+            self.fri_scratch,
+            self.tamper,
+            invocation,
+        )
+    }
+
+    fn advance_fri_round_4(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<FRI_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, FRI_ROUND_4_STEPS>,
+            >
+        )
+    {
+        advance_fri_round<3, 2, 1, 0, FRI_ROUND_4_STEPS>(
+            self.proof,
+            self.fri_scratch,
+            self.tamper,
+            invocation,
+        )
+    }
+
+    fn finalize_fri_schedule(self)
+        uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
         let regions = proof_tape_regions()
         let status_layout = status_regions()
         let fri_layout = fri_status_regions()
-        let clean_valid = all_fri_pairs_valid(
+        let valid = all_fri_schedule_valid(
             self.proof,
-            subregion(regions.fri_status, fri_layout.clean_valid),
-        )
-        let observed_valid = all_fri_pairs_valid(
-            self.proof,
-            subregion(regions.fri_status, fri_layout.observed_valid),
-        )
+            subregion(regions.fri_status, fri_layout.challenge_valid),
+            subregion(regions.fri_status, fri_layout.root_valid),
+            subregion(regions.fri_status, fri_layout.transcript_valid),
+            subregion(regions.fri_status, fri_layout.round_valid),
+        ) && all_fri_progress_valid(self.fri_scratch)
         let equal = fri_outputs_equal(
             self.proof,
             regions.fri_clean,
             regions.fri_observed,
         )
         let tampered = self.tamper >= 0.5
-        let fri_correct = clean_valid && observed_valid && (
-            if tampered { !equal } else { equal }
-        )
+        let fri_correct = valid && if tampered { !equal } else { equal }
         let previous_correct = stored_flag(
             self.proof,
             subregion(regions.status, status_layout.mode_correct),
@@ -1360,6 +2215,7 @@ actor MandelbrotProofGpuCheckpoint uses (
             status_word(overall, tampered),
         )
     }
+
 
     fn display(self, px: i32, py: i32) -> i32 uses (Display) {
         let regions = proof_tape_regions()
@@ -1412,7 +2268,11 @@ actor MandelbrotProofGpuCheckpoint uses (
             ).downcast_truncate()
         }
 
-        let sample_i = to_i32(u * 32.0).downcast_unchecked()
+        let fri_evaluation_words: i32 =
+            FRI_EVALUATION_WORDS.downcast_truncate()
+        let sample_i = to_i32(
+            u * from_i32(fri_evaluation_words),
+        ).downcast_unchecked()
         let folded = if tampered {
             regions.fri_observed
         } else {
@@ -1438,34 +2298,71 @@ fn all_lde_columns_valid(
         && proof_load(tape, region, 3) == 1
 }
 
-fn all_fri_pairs_valid(
+fn all_fri_schedule_valid(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ region: Region<ProofTapeRegions, [u32; FRI_PAIRS]>,
+    _ challenges: Region<ProofTapeRegions, [u32; FRI_VALID_ROUNDS]>,
+    _ roots: Region<ProofTapeRegions, [u32; FRI_VALID_ROUNDS]>,
+    _ transcripts: Region<ProofTapeRegions, [u32; FRI_VALID_TRANSCRIPTS]>,
+    _ rounds: Region<ProofTapeRegions, [u32; FRI_VALID_ROUNDS]>,
 ) -> bool {
-    let mut pair: usize = 0
-    while pair < FRI_PAIRS {
-        if proof_load(tape, region, pair.downcast_truncate()) != 1 {
-            return false
-        }
-        pair = pair + 1
+    let mut valid = true
+    let mut index: usize = 0
+    while index < FRI_VALID_ROUNDS {
+        let word: u32 = index.downcast_truncate()
+        valid = valid
+            && proof_load(tape, challenges, word) == 1
+            && proof_load(tape, roots, word) == 1
+            && proof_load(tape, rounds, word) == 1
+        index = index + 1
     }
-    true
+    index = 0
+    while index < FRI_VALID_TRANSCRIPTS {
+        valid = valid
+            && proof_load(tape, transcripts, index.downcast_truncate()) == 1
+        index = index + 1
+    }
+    valid
+}
+
+fn all_fri_progress_valid(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+) -> bool {
+    let rounds: u32 = FRI_ROUNDS.downcast_truncate()
+    let lanes: u32 = FRI_WORKGROUP_LANES.downcast_truncate()
+    let mut valid = true
+    let mut round: u32 = 0
+    while round < rounds {
+        let expected = runtime_fri_round_schedule_steps(rounds - round - 1)
+        let base = round * lanes
+        let mut lane: u32 = 0
+        while lane < lanes {
+            valid = valid && fri_scratch_load(
+                scratch,
+                FRI_PROGRESS_START,
+                base + lane,
+            ) == expected
+            lane = lane + 1
+        }
+        round = round + 1
+    }
+    valid
 }
 
 fn fri_outputs_equal(
     _ tape: ProofTape<u32, PROOF_WORDS>,
-    _ left: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
-    _ right: Region<ProofTapeRegions, [u32; FRI_FOLD_WORDS]>,
+    _ left: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
+    _ right: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
 ) -> bool {
+    let mut equal = true
     let mut word: usize = 0
-    while word < FRI_FOLD_WORDS {
+    while word < FRI_EVALUATION_WORDS {
         let index: u32 = word.downcast_truncate()
-        if proof_load(tape, left, index) != proof_load(tape, right, index) {
-            return false
-        }
+        equal = equal
+            && proof_load(tape, left, index)
+                == proof_load(tape, right, index)
         word = word + 1
     }
-    true
+    equal
 }
 
 fn stored_flag(
