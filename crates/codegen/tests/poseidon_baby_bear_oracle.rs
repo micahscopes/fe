@@ -1071,19 +1071,29 @@ fn bounded_bits_are_injective_and_commit_with_length_and_domain() {
         "staged transcript binding differs from the independent Plonky3 model",
     );
     assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "squeeze_round_stepped",
-            &left,
-            5,
-        ),
+        call(&mut store, &instance, "squeeze_round_stepped", &left, 5,),
         {
             let mut expected = vec![1];
             expected.extend(&reference_field_commitment(b"BV01", &left)[..4]);
             expected
         },
         "staged challenge squeeze differs from the independent Plonky3 model",
+    );
+    let indexed = left.into_iter().chain([114]).collect::<Vec<_>>();
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "indexed_squeeze_round_stepped",
+            &indexed,
+            5,
+        ),
+        {
+            let mut expected = vec![1];
+            expected.extend(reference_indexed_squeeze(b"BI01", &left, 114));
+            expected
+        },
+        "staged indexed squeeze differs from the independent Plonky3 model",
     );
 
     for arguments in [
@@ -1144,6 +1154,19 @@ fn indexed_squeeze_binds_full_field_indices_without_decimal_domain_tags() {
         arguments.push(index);
         let actual = call(&mut store, &instance, "indexed_squeeze", &arguments, 4);
         assert_eq!(actual, reference_indexed_squeeze(b"BI01", &digest, index));
+        let mut staged = vec![1];
+        staged.extend(&actual);
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "indexed_squeeze_round_stepped",
+                &arguments,
+                5,
+            ),
+            staged,
+            "staged indexed squeeze differs for index {index}",
+        );
         if let Some(previous) = previous {
             assert_ne!(actual, previous, "index {index} did not alter the squeeze");
         }
@@ -1162,5 +1185,16 @@ fn indexed_squeeze_binds_full_field_indices_without_decimal_domain_tags() {
         ),
         vec![0; 4],
         "a noncanonical index must fail closed",
+    );
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "indexed_squeeze_round_stepped",
+            &invalid_arguments,
+            5,
+        ),
+        vec![0; 5],
+        "a staged noncanonical index must fail closed",
     );
 }

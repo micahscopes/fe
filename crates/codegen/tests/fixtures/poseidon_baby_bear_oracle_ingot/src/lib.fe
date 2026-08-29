@@ -20,6 +20,7 @@ use poseidon_baby_bear::{
     begin_binding_placement,
     begin_compression_placement,
     begin_digest_squeeze_placement,
+    begin_indexed_digest_squeeze_placement,
     begin_ext4_commitment_placement,
     begin_ext4_commitment_placement_tag,
     commit_canonical,
@@ -1264,6 +1265,28 @@ pub fn squeeze_round_stepped(
     let placement = begin_digest_squeeze_placement<FieldVectorTestDomain>(digest)
     let sponge = execute_round_steps(placement.permutation)
     let final_permutation = sponge.begin_final_permutation<2>(
+        ref placement.remaining,
+    )
+    let commitment = execute_round_steps(final_permutation).finish()
+    let output = commitment.digest()
+    (
+        if commitment.is_valid() { 1 } else { 0 },
+        output.field(0).to_u32(), output.field(1).to_u32(),
+        output.field(2).to_u32(), output.field(3).to_u32(),
+    )
+}
+
+pub fn indexed_squeeze_round_stepped(
+    _ a0: u32, _ a1: u32, _ a2: u32, _ a3: u32,
+    _ a4: u32, _ a5: u32, _ a6: u32, _ a7: u32,
+    _ index: u32,
+) -> (u32, u32, u32, u32, u32) {
+    let digest = Poseidon2Digest::from_u32s([a0, a1, a2, a3, a4, a5, a6, a7])
+    let placement = begin_indexed_digest_squeeze_placement<
+        IndexedSqueezeTestDomain,
+    >(digest, index)
+    let sponge = execute_round_steps(placement.permutation)
+    let final_permutation = sponge.begin_final_permutation<3>(
         ref placement.remaining,
     )
     let commitment = execute_round_steps(final_permutation).finish()

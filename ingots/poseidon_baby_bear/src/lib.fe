@@ -2162,6 +2162,61 @@ pub fn begin_digest_squeeze_placement_tag(
     }
 }
 
+/// First workgroup checkpoint for an indexed digest-squeeze message. The
+/// index is an ordinary field element after the eight digest fields, matching
+/// `squeeze_ext4_indexed` exactly. Keeping it in the message lets one query
+/// plan use arbitrarily many domain-separated samples without minting tags.
+pub struct Poseidon2IndexedDigestSqueezePlacement {
+    pub permutation: Poseidon2FieldPermutation,
+    pub remaining: [BabyBear; 3],
+}
+impl core::marker::Copy for Poseidon2IndexedDigestSqueezePlacement {}
+
+pub fn begin_indexed_digest_squeeze_placement<D: Poseidon2FieldDomain>(
+    _ digest: Poseidon2Digest,
+    _ index_value: u32,
+) -> Poseidon2IndexedDigestSqueezePlacement {
+    begin_indexed_digest_squeeze_placement_tag(D::TAG, digest, index_value)
+}
+
+pub fn begin_indexed_digest_squeeze_placement_tag(
+    _ tag: u32,
+    _ digest: Poseidon2Digest,
+    _ index_value: u32,
+) -> Poseidon2IndexedDigestSqueezePlacement {
+    if index_value >= BABY_BEAR_MODULUS {
+        return Poseidon2IndexedDigestSqueezePlacement {
+            permutation: Poseidon2FieldPermutation::restore(
+                [0; WIDTH],
+                BABY_BEAR_MODULUS,
+                0,
+                0,
+            ),
+            remaining: [BabyBear::zero(); 3],
+        }
+    }
+    let first = [
+        digest.values[0],
+        digest.values[1],
+        digest.values[2],
+        digest.values[3],
+        digest.values[4],
+        digest.values[5],
+    ]
+    let sponge = Poseidon2FieldSponge::begin_tag(
+        tag,
+        (DIGEST_FIELDS + 1).downcast_truncate(),
+    )
+    Poseidon2IndexedDigestSqueezePlacement {
+        permutation: sponge.begin_permutation<6>(ref first),
+        remaining: [
+            digest.values[6],
+            digest.values[7],
+            BabyBear::from_u32(index_value),
+        ],
+    }
+}
+
 pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
     // Keep the ordinary value interpretation loop-compact. The staged
     // workgroup placement above is independently gated against this evaluator,
