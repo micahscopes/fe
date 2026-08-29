@@ -172,14 +172,19 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         .expect("FRI schedule module should instantiate");
 
     assert_eq!(
-        call(&mut store, &instance, "fri_schedule16_metadata", &[], 8,),
-        vec![4, 1, 5, 4, 15, 3, 3, 26],
+        call(&mut store, &instance, "fri_query_plan1_metadata", &[], 3,),
+        vec![1, 1, 2],
+    );
+
+    assert_eq!(
+        call(&mut store, &instance, "fri_schedule16_metadata", &[], 10,),
+        vec![4, 1, 5, 4, 15, 3, 3, 26, 7, 6],
     );
     let expected = [
-        [1, 0, 1, 4, 16, 8, 0, 0, 15, 4, 2],
-        [1, 1, 2, 3, 8, 4, 8, 15, 7, 2, 1],
-        [1, 2, 3, 2, 4, 2, 12, 22, 3, 1, 0],
-        [1, 3, 4, 1, 2, 1, 14, 25, 1, 0, 0],
+        [1, 0, 1, 4, 16, 8, 0, 0, 15, 0, 0, 4, 2],
+        [1, 1, 2, 3, 8, 4, 8, 15, 7, 2, 4, 2, 1],
+        [1, 2, 3, 2, 4, 2, 12, 22, 3, 4, 6, 1, 0],
+        [1, 3, 4, 1, 2, 1, 14, 25, 1, 6, 6, 0, 0],
     ];
     for (index, placement) in expected.into_iter().enumerate() {
         assert_eq!(
@@ -188,7 +193,7 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
                 &instance,
                 "fri_schedule16_round",
                 &[index as u32],
-                11,
+                13,
             ),
             placement,
             "wrong placement for FRI round {index}",
@@ -221,8 +226,8 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         );
     }
     assert_eq!(
-        call(&mut store, &instance, "fri_schedule16_round", &[4], 11,),
-        vec![0; 11],
+        call(&mut store, &instance, "fri_schedule16_round", &[4], 13,),
+        vec![0; 13],
     );
     assert_eq!(
         call(&mut store, &instance, "fri_round_domains", &[4], 3,),

@@ -7,12 +7,19 @@
 
 use core::marker::Copy
 pub use fri_structure::{
+    FriQueryPlan,
+    FriQueryPlanDone,
+    FriQueryPlanMetadata,
+    FriQueryPlanSample,
+    FriQueryPlanShape,
+    FriQueryRangePlan,
     FriSchedule,
     FriScheduleDone,
     FriScheduleFold,
     FriScheduleMetadata,
     FriSchedulePlacement,
     FriScheduleShape,
+    fri_query_range_identity,
 }
 use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
 use precision::polynomial::{Radix2Field, radix2_log}
@@ -60,121 +67,6 @@ pub struct Radix2QueryGeometry {
     pub local_index: u32,
 }
 impl Copy for Radix2QueryGeometry {}
-
-/// Terminal of the field-neutral Fiat-Shamir query plan. `NEXT_QUERY` is the
-/// first unused domain identity after the plan.
-pub struct FriQueryPlanDone<const NEXT_QUERY: u32> {}
-impl<const NEXT_QUERY: u32> Copy for FriQueryPlanDone<NEXT_QUERY> {}
-
-/// One independently domain-separated query followed by the remaining plan.
-/// Runtime interpreters may sample indices, derive sparse opening masks, or
-/// schedule verifier work without maintaining a second query-number list.
-pub struct FriQueryPlanSample<const QUERY: u32, Tail> {}
-impl<const QUERY: u32, Tail: Copy> Copy for FriQueryPlanSample<QUERY, Tail> {}
-
-const fn fri_query_plan_query(
-    _ first_query: u32,
-    _ total: usize,
-    _ remaining: usize,
-) -> u32 {
-    first_query + (total - remaining).downcast_truncate()
-}
-
-const fn fri_query_plan_next(_ first_query: u32, _ total: usize) -> u32 {
-    first_query + total.downcast_truncate()
-}
-
-/// Derive a nominal query identity for each sample in a Fiat-Shamir plan.
-pub recursive type fn FriQueryPlanSteps<
-    const FIRST_QUERY: u32,
-    const TOTAL: usize,
-    const REMAINING: usize,
->() -> (*) {
-    match REMAINING {
-        0 => FriQueryPlanDone<{fri_query_plan_next(FIRST_QUERY, TOTAL)}>
-        _ => FriQueryPlanSample<
-            {fri_query_plan_query(FIRST_QUERY, TOTAL, REMAINING)},
-            FriQueryPlanSteps<FIRST_QUERY, TOTAL, {REMAINING - 1}>,
-        >
-    }
-}
-
-pub type FriQueryPlan<const FIRST_QUERY: u32, const COUNT: usize> =
-    FriQueryPlanSteps<FIRST_QUERY, COUNT, COUNT>
-
-/// Compact denotation of a consecutive Fiat-Shamir query range.
-///
-/// Small proofs may use `FriQueryPlan` when a nominal type per sample is
-/// useful. Security-sized plans should interpret this range directly so
-/// compile time does not scale with a deeply nested query type. Both forms
-/// denote the same sequence of query identities.
-pub struct FriQueryRangePlan<
-    const FIRST_QUERY: u32,
-    const COUNT: usize,
-> {}
-impl<
-    const FIRST_QUERY: u32,
-    const COUNT: usize,
-> Copy for FriQueryRangePlan<FIRST_QUERY, COUNT> {}
-
-pub struct FriQueryPlanMetadata {
-    pub samples: u32,
-    pub first_query: u32,
-    pub next_query: u32,
-}
-impl Copy for FriQueryPlanMetadata {}
-
-/// Structural metadata interpreter used by exactness gates and diagnostics.
-pub trait FriQueryPlanShape {
-    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata
-}
-
-impl<const NEXT_QUERY: u32> FriQueryPlanShape for FriQueryPlanDone<NEXT_QUERY> {
-    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata {
-        FriQueryPlanMetadata {
-            samples: 0,
-            first_query: NEXT_QUERY,
-            next_query: NEXT_QUERY,
-        }
-    }
-}
-
-impl<const QUERY: u32, Tail: FriQueryPlanShape> FriQueryPlanShape
-    for FriQueryPlanSample<QUERY, Tail>
-{
-    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata {
-        let tail = <Tail as FriQueryPlanShape>::fri_query_plan_metadata()
-        FriQueryPlanMetadata {
-            samples: tail.samples + 1,
-            first_query: QUERY,
-            next_query: tail.next_query,
-        }
-    }
-}
-
-impl<
-    const FIRST_QUERY: u32,
-    const COUNT: usize,
-> FriQueryPlanShape for FriQueryRangePlan<FIRST_QUERY, COUNT> {
-    const fn fri_query_plan_metadata() -> FriQueryPlanMetadata {
-        FriQueryPlanMetadata {
-            samples: COUNT.downcast_truncate(),
-            first_query: FIRST_QUERY,
-            next_query: fri_query_plan_next(FIRST_QUERY, COUNT),
-        }
-    }
-}
-
-/// Resolve one identity from a compact query range. An out-of-range offset
-/// returns zero, which is not a valid production query identity.
-pub const fn fri_query_range_identity(
-    _ first_query: u32,
-    _ count: usize,
-    _ offset: usize,
-) -> u32 {
-    if offset >= count { return 0 }
-    first_query + offset.downcast_truncate()
-}
 
 struct AirRow<F: Radix2Field> {
     active: F,
