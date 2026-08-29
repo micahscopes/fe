@@ -393,6 +393,9 @@ pub(crate) fn desired_runtime_value_carrier<'db>(
     {
         return RuntimeCarrier::Value(transport_class);
     }
+    if runtime_zero_sized_transport_ty(db, local.ty, scope, assumptions) {
+        return RuntimeCarrier::Erased;
+    }
     if let RuntimeClass::AggregateValue { layout } = &class
         && matches!(local.facts.interface, SemanticLocalKind::DirectValue)
         && local.facts.root_demand.needs_projectable_owned_storage()
@@ -1558,6 +1561,56 @@ mod tests {
         let instance = runtime_instance_for_semantic(db, semantic);
         let params = instance.key(db).params(db);
         LocalStateInferer::new(env, params, &runtime_param_locals(db, semantic, params)).run()
+    }
+
+    #[test]
+    fn unit_local_rejects_nonzero_inferred_payload_class() {
+        let mut db = DriverDataBase::default();
+        let source = r#"
+fn sink(_ flag: bool) {}
+
+pub fn probe(_ flag: bool) -> u32 {
+    sink(flag)
+    1
+}
+"#;
+        let url = Url::parse("file:///unit_local_rejects_nonzero_payload.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db
+            .workspace()
+            .get(&db, &url)
+            .expect("test source should load");
+        let semantic = semantic_instance_for_named_func(&db, db.top_mod(file), "probe");
+        let normalized = normalize_semantic_body(&db, semantic)
+            .unwrap_or_else(|err| panic!("failed to normalize `probe`: {err:?}"));
+        let facts = BodyStaticFacts::new(&db, &normalized);
+        let env = BodyEnv::new(&db, &normalized, &facts);
+        let unit = normalized
+            .locals
+            .iter()
+            .find(|local| local.ty == TyId::unit(&db))
+            .expect("probe should contain a unit-valued semantic local");
+        let boolean = top_level_class_for_ty_in_context(
+            &db,
+            TyId::bool(&db),
+            AddressSpaceKind::Memory,
+            env.scope(),
+            env.assumptions(),
+        )
+        .expect("bool should have a runtime value class");
+
+        assert_eq!(
+            desired_runtime_value_carrier(
+                &db,
+                unit,
+                boolean,
+                env.scope(),
+                env.assumptions(),
+            ),
+            RuntimeCarrier::Erased,
+            "ordinary unit locals must not inherit nonzero runtime payloads",
+        );
     }
 
     fn whole_const_aggregate_ref(class: &RuntimeClass<'_>) -> bool {
