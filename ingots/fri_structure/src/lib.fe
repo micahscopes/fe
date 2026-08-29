@@ -391,3 +391,161 @@ impl<
         }
     }
 }
+
+/// One opened evaluation selected by a query from the packed schedule output.
+pub struct FriQueryEvaluationPlacement {
+    pub valid: bool,
+    pub round_index: u32,
+    pub round: u32,
+    pub evaluation_index: u32,
+}
+impl Copy for FriQueryEvaluationPlacement {}
+
+/// One authentication sibling selected from the retained schedule trees.
+pub struct FriQuerySiblingPlacement {
+    pub valid: bool,
+    pub round_index: u32,
+    pub round: u32,
+    pub tree_node: u32,
+}
+impl Copy for FriQuerySiblingPlacement {}
+
+fn invalid_query_evaluation_placement() -> FriQueryEvaluationPlacement {
+    FriQueryEvaluationPlacement {
+        valid: false,
+        round_index: 0,
+        round: 0,
+        evaluation_index: 0,
+    }
+}
+
+fn invalid_query_sibling_placement() -> FriQuerySiblingPlacement {
+    FriQuerySiblingPlacement {
+        valid: false,
+        round_index: 0,
+        round: 0,
+        tree_node: 0,
+    }
+}
+
+fn fri_tree_level_offset(_ width: u32, _ level: u32) -> u32 {
+    let mut offset: u32 = 0
+    let mut level_width = width
+    let mut current: u32 = 0
+    while current < level {
+        offset = offset + level_width
+        level_width = level_width / 2
+        current = current + 1
+    }
+    offset
+}
+
+/// Interpret one semantic schedule into canonical one-query receipt slots.
+/// The query is reduced at each fold exactly as the verifier carries its pair
+/// index into the next layer. Returned indices address the packed evaluation
+/// and retained-tree arenas derived by `FriSchedulePlacement`.
+pub trait FriScheduleQueryPlacement {
+    fn fri_query_evaluation_placement(
+        _ opening: u32,
+        _ query: u32,
+    ) -> FriQueryEvaluationPlacement
+    fn fri_query_sibling_placement(
+        _ sibling: u32,
+        _ query: u32,
+    ) -> FriQuerySiblingPlacement
+}
+
+impl<Schedule> FriScheduleQueryPlacement for Schedule
+    where Schedule: FriScheduleShape + FriSchedulePlacement
+{
+    fn fri_query_evaluation_placement(
+        _ opening: u32,
+        _ query: u32,
+    ) -> FriQueryEvaluationPlacement {
+        let metadata = <Schedule as FriScheduleShape>::fri_schedule_metadata()
+        let first = <Schedule as FriSchedulePlacement>::fri_round_placement(0)
+        if !first.valid || query >= first.output_width {
+            return invalid_query_evaluation_placement()
+        }
+        let mut remaining = opening
+        let mut current_query = query
+        let mut round_index: u32 = 0
+        while round_index < metadata.rounds {
+            let placement = <Schedule as FriSchedulePlacement>::fri_round_placement(
+                round_index,
+            )
+            if !placement.valid {
+                return invalid_query_evaluation_placement()
+            }
+            let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
+            if remaining < opened {
+                let evaluation = if placement.output_width > 1 {
+                    let pair = current_query & (placement.pair_width - 1)
+                    pair + remaining * placement.pair_width
+                } else {
+                    0
+                }
+                return FriQueryEvaluationPlacement {
+                    valid: true,
+                    round_index: round_index,
+                    round: placement.round,
+                    evaluation_index: placement.output_offset + evaluation,
+                }
+            }
+            remaining = remaining - opened
+            current_query = if placement.output_width > 1 {
+                current_query & (placement.pair_width - 1)
+            } else {
+                0
+            }
+            round_index = round_index + 1
+        }
+        invalid_query_evaluation_placement()
+    }
+
+    fn fri_query_sibling_placement(
+        _ sibling: u32,
+        _ query: u32,
+    ) -> FriQuerySiblingPlacement {
+        let metadata = <Schedule as FriScheduleShape>::fri_schedule_metadata()
+        let first = <Schedule as FriSchedulePlacement>::fri_round_placement(0)
+        if !first.valid || query >= first.output_width {
+            return invalid_query_sibling_placement()
+        }
+        let mut remaining = sibling
+        let mut current_query = query
+        let mut round_index: u32 = 0
+        while round_index < metadata.rounds {
+            let placement = <Schedule as FriSchedulePlacement>::fri_round_placement(
+                round_index,
+            )
+            if !placement.valid {
+                return invalid_query_sibling_placement()
+            }
+            let siblings = 2 * placement.pair_depth
+            if placement.pair_depth > 0 && remaining < siblings {
+                let side = remaining / placement.pair_depth
+                let level = remaining % placement.pair_depth
+                let leaf = (current_query & (placement.pair_width - 1))
+                    + side * placement.pair_width
+                let node = placement.tree_offset
+                    + fri_tree_level_offset(placement.output_width, level)
+                    + ((leaf >> level) ^ 1)
+                return FriQuerySiblingPlacement {
+                    valid: true,
+                    round_index: round_index,
+                    round: placement.round,
+                    tree_node: node,
+                }
+            }
+            remaining = remaining - siblings
+            current_query = if placement.output_width > 1 {
+                current_query & (placement.pair_width - 1)
+            } else {
+                0
+            }
+            round_index = round_index + 1
+        }
+        invalid_query_sibling_placement()
+    }
+}

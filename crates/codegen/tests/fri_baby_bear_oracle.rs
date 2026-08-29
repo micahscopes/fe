@@ -229,6 +229,69 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         call(&mut store, &instance, "fri_schedule16_round", &[4], 13,),
         vec![0; 13],
     );
+    let evaluations = [
+        [1, 0, 1, 1],
+        [1, 0, 1, 5],
+        [1, 1, 2, 9],
+        [1, 1, 2, 11],
+        [1, 2, 3, 12],
+        [1, 2, 3, 13],
+        [1, 3, 4, 14],
+    ];
+    for (opening, expected) in evaluations.into_iter().enumerate() {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_schedule16_query_evaluation",
+                &[opening as u32, 5],
+                4,
+            ),
+            expected,
+            "wrong evaluation placement for opening {opening}",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_schedule16_query_evaluation",
+            &[7, 5],
+            4,
+        ),
+        vec![0; 4],
+    );
+    let siblings = [
+        [1, 0, 1, 0],
+        [1, 0, 1, 9],
+        [1, 0, 1, 4],
+        [1, 0, 1, 11],
+        [1, 1, 2, 15],
+        [1, 1, 2, 17],
+    ];
+    for (sibling, expected) in siblings.into_iter().enumerate() {
+        assert_eq!(
+            call(
+                &mut store,
+                &instance,
+                "fri_schedule16_query_sibling",
+                &[sibling as u32, 5],
+                4,
+            ),
+            expected,
+            "wrong sibling placement for opening {sibling}",
+        );
+    }
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "fri_schedule16_query_sibling",
+            &[6, 5],
+            4,
+        ),
+        vec![0; 4],
+    );
     assert_eq!(
         call(&mut store, &instance, "fri_round_domains", &[4], 3,),
         vec![0; 3],

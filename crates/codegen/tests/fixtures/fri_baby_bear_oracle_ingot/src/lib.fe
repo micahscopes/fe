@@ -16,6 +16,7 @@ use fri_structure::{
     FriQueryPlanShape,
     FriSchedule,
     FriSchedulePlacement,
+    FriScheduleQueryPlacement,
     FriScheduleShape,
 }
 use poseidon_baby_bear::Poseidon2FieldDomain
@@ -79,6 +80,40 @@ pub fn fri_schedule16_round(_ index: u32) -> (
     u32, u32,
 ) {
     round_words<CheckpointFriSchedule16>(index)
+}
+
+pub fn fri_schedule16_query_evaluation(
+    _ opening: u32,
+    _ query: u32,
+) -> (u32, u32, u32, u32) {
+    let placement = <CheckpointFriSchedule16
+        as FriScheduleQueryPlacement>::fri_query_evaluation_placement(
+        opening,
+        query,
+    )
+    (
+        if placement.valid { 1 } else { 0 },
+        placement.round_index,
+        placement.round,
+        placement.evaluation_index,
+    )
+}
+
+pub fn fri_schedule16_query_sibling(
+    _ sibling: u32,
+    _ query: u32,
+) -> (u32, u32, u32, u32) {
+    let placement = <CheckpointFriSchedule16
+        as FriScheduleQueryPlacement>::fri_query_sibling_placement(
+        sibling,
+        query,
+    )
+    (
+        if placement.valid { 1 } else { 0 },
+        placement.round_index,
+        placement.round,
+        placement.tree_node,
+    )
 }
 
 fn domain_words<const ROUND: u32>() -> (u32, u32, u32) {
