@@ -98,6 +98,7 @@ pub struct FriScheduleMetadata {
     pub folded_evaluations: u32,
     pub layer_pair_openings: u32,
     pub layer_path_siblings_per_side: u32,
+    pub layer_tree_nodes: u32,
 }
 impl Copy for FriScheduleMetadata {}
 
@@ -115,6 +116,7 @@ impl<const NEXT_ROUND: u32> FriScheduleShape for FriScheduleDone<NEXT_ROUND> {
             folded_evaluations: 0,
             layer_pair_openings: 0,
             layer_path_siblings_per_side: 0,
+            layer_tree_nodes: 0,
         }
     }
 }
@@ -147,6 +149,8 @@ impl<
             layer_pair_openings: tail.layer_pair_openings + has_pair,
             layer_path_siblings_per_side: tail.layer_path_siblings_per_side
                 + PAIR_DEPTH.downcast_truncate(),
+            layer_tree_nodes: tail.layer_tree_nodes
+                + (2 * OUTPUT - 1).downcast_truncate(),
         }
     }
 }
@@ -163,6 +167,8 @@ pub struct FriRoundPlacement {
     pub input_width: u32,
     pub output_width: u32,
     pub output_offset: u32,
+    pub tree_offset: u32,
+    pub tree_nodes: u32,
     pub pair_width: u32,
     pub pair_depth: u32,
 }
@@ -177,6 +183,8 @@ fn invalid_round_placement() -> FriRoundPlacement {
         input_width: 0,
         output_width: 0,
         output_offset: 0,
+        tree_offset: 0,
+        tree_nodes: 0,
         pair_width: 0,
         pair_depth: 0,
     }
@@ -219,6 +227,8 @@ impl<
                 input_width: (1 << INPUT_LOG).downcast_truncate(),
                 output_width: OUTPUT.downcast_truncate(),
                 output_offset: 0,
+                tree_offset: 0,
+                tree_nodes: (2 * OUTPUT - 1).downcast_truncate(),
                 pair_width: PAIR_WIDTH.downcast_truncate(),
                 pair_depth: PAIR_DEPTH.downcast_truncate(),
             }
@@ -238,6 +248,9 @@ impl<
                     output_width: tail.output_width,
                     output_offset: tail.output_offset
                         + OUTPUT.downcast_truncate(),
+                    tree_offset: tail.tree_offset
+                        + (2 * OUTPUT - 1).downcast_truncate(),
+                    tree_nodes: tail.tree_nodes,
                     pair_width: tail.pair_width,
                     pair_depth: tail.pair_depth,
                 }

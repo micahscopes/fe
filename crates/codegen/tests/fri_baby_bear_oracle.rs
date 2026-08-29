@@ -172,20 +172,14 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         .expect("FRI schedule module should instantiate");
 
     assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "fri_schedule16_metadata",
-            &[],
-            7,
-        ),
-        vec![4, 1, 5, 4, 15, 3, 3],
+        call(&mut store, &instance, "fri_schedule16_metadata", &[], 8,),
+        vec![4, 1, 5, 4, 15, 3, 3, 26],
     );
     let expected = [
-        [1, 0, 1, 4, 16, 8, 0, 4, 2],
-        [1, 1, 2, 3, 8, 4, 8, 2, 1],
-        [1, 2, 3, 2, 4, 2, 12, 1, 0],
-        [1, 3, 4, 1, 2, 1, 14, 0, 0],
+        [1, 0, 1, 4, 16, 8, 0, 0, 15, 4, 2],
+        [1, 1, 2, 3, 8, 4, 8, 15, 7, 2, 1],
+        [1, 2, 3, 2, 4, 2, 12, 22, 3, 1, 0],
+        [1, 3, 4, 1, 2, 1, 14, 25, 1, 0, 0],
     ];
     for (index, placement) in expected.into_iter().enumerate() {
         assert_eq!(
@@ -194,19 +188,15 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
                 &instance,
                 "fri_schedule16_round",
                 &[index as u32],
-                9,
+                11,
             ),
             placement,
             "wrong placement for FRI round {index}",
         );
         let round = index as u32 + 1;
-        let decimal = [
-            b'0' + (round / 10) as u8,
-            b'0' + (round % 10) as u8,
-        ];
-        let tag = |prefix: [u8; 2]| {
-            u32::from_be_bytes([prefix[0], prefix[1], decimal[0], decimal[1]])
-        };
+        let decimal = [b'0' + (round / 10) as u8, b'0' + (round % 10) as u8];
+        let tag =
+            |prefix: [u8; 2]| u32::from_be_bytes([prefix[0], prefix[1], decimal[0], decimal[1]]);
         assert_eq!(
             call(
                 &mut store,
@@ -231,23 +221,11 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         );
     }
     assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "fri_schedule16_round",
-            &[4],
-            9,
-        ),
-        vec![0; 9],
+        call(&mut store, &instance, "fri_schedule16_round", &[4], 11,),
+        vec![0; 11],
     );
     assert_eq!(
-        call(
-            &mut store,
-            &instance,
-            "fri_round_domains",
-            &[4],
-            3,
-        ),
+        call(&mut store, &instance, "fri_round_domains", &[4], 3,),
         vec![0; 3],
     );
 }

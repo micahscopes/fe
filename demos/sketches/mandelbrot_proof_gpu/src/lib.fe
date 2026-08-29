@@ -6,7 +6,7 @@
 //! with the production Poseidon2 sponge. One Fe-authored round interpreter
 //! then places the complete `16 -> 8 -> 4 -> 2 -> 1` FRI schedule. Each round
 //! derives its own transcript challenge, folds independent pairs, commits the
-//! resulting quartic evaluations, reduces their exact ordered Merkle tree,
+//! resulting quartic evaluations, retains their exact ordered Merkle tree,
 //! and binds the layer root into the next transcript. The semantic schedule,
 //! round domains, pair operation, and Poseidon operations are shared with the
 //! scalar proof. Thin actor passes specialize only physical round capacities.
@@ -293,7 +293,10 @@ const FRI_HASH_STATE_WORDS: usize =
     FRI_MAX_HASH_STATES * FRI_HASH_BUFFERS * POSEIDON_LANES
 const FRI_HASH_VALID_WORDS: usize = FRI_MAX_HASH_STATES
 const FRI_HASH_TAIL_WORDS: usize = FRI_VARIANTS * 10
-const FRI_TREE_NODES_PER_VARIANT: usize = 2 * FRI_MAX_OUTPUT - 1
+// Fe proves this concrete storage capacity against the schedule-derived
+// metadata below. Keeping the array length concrete avoids repeatedly
+// normalizing the recursive schedule inside every storage specialization.
+const FRI_TREE_NODES_PER_VARIANT: usize = 26
 const FRI_TREE_WORDS: usize =
     FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT * DIGEST_FIELDS
 const FRI_TREE_VALID_WORDS: usize =
@@ -406,8 +409,11 @@ static_assert(FRI_VARIANT_LANES == FRI_VARIANTS)
 static_assert(FRI_WORKGROUP_LANES == 256)
 static_assert(FRI_MAX_HASH_STATES == 16)
 static_assert(FRI_HASH_STATE_WORDS == 512)
-static_assert(FRI_TREE_NODES_PER_VARIANT == 15)
-static_assert(FRI_TREE_WORDS == 240)
+static_assert(proof_fri_metadata().layer_tree_nodes == 26)
+static_assert(FRI_TREE_NODES_PER_VARIANT == 26)
+static_assert(FRI_TREE_WORDS == 416)
+static_assert(FRI_TREE_VALID_WORDS == 52)
+static_assert(FRI_SCRATCH_WORDS == 2040)
 static_assert(FRI_PROGRESS_WORDS == 1024)
 static_assert(
     <FriScratchRegions as RegionSchema>::WORDS
@@ -907,8 +913,9 @@ fn load_tree_digest(
 }
 
 #[inline(always)]
-fn tree_node(_ variant: u32, _ node: u32) -> u32 {
-    variant * FRI_TREE_NODES_PER_VARIANT.downcast_truncate() + node
+fn tree_node(_ variant: u32, _ tree_offset: u32, _ node: u32) -> u32 {
+    variant * FRI_TREE_NODES_PER_VARIANT.downcast_truncate()
+        + tree_offset + node
 }
 
 #[inline(always)]
@@ -1011,6 +1018,9 @@ where
         && placement.output_width == output_width
         && placement.output_offset + output_width
             <= FRI_EVALUATIONS.downcast_truncate()
+        && placement.tree_nodes == 2 * output_width - 1
+        && placement.tree_offset + placement.tree_nodes
+            <= proof_fri_metadata().layer_tree_nodes
         && expected_tree_depth == tree_depth
 
     let hash_stage_steps: u32 = HASH_STAGE_STEPS.downcast_truncate()
@@ -1286,7 +1296,7 @@ where
                     hash_step,
                 )
             } else if field_lane == 0 {
-                let node = tree_node(variant, pair)
+                let node = tree_node(variant, placement.tree_offset, pair)
                 let digest = hash_digest(scratch, state)
                 store_tree_digest(scratch, node, digest)
                 fri_scratch_store(
@@ -1333,7 +1343,11 @@ where
             let field_lane = lane % POSEIDON_LANES.downcast_truncate()
             let variant = state / parent_width
             let parent = state % parent_width
-            let left_node = tree_node(variant, child_offset + 2 * parent)
+            let left_node = tree_node(
+                variant,
+                placement.tree_offset,
+                child_offset + 2 * parent,
+            )
             let right_node = left_node + 1
             if level_step == 0 {
                 let permutation = begin_compression_placement(
@@ -1366,7 +1380,11 @@ where
                         hash_step,
                     )
                 } else if field_lane == 0 {
-                    let node = tree_node(variant, parent_offset + parent)
+                    let node = tree_node(
+                        variant,
+                        placement.tree_offset,
+                        parent_offset + parent,
+                    )
                     let digest = hash_digest(scratch, state)
                     store_tree_digest(scratch, node, digest)
                     fri_scratch_store(
@@ -2171,6 +2189,7 @@ actor MandelbrotProofGpuCheckpoint uses (
             subregion(regions.fri_status, fri_layout.transcript_valid),
             subregion(regions.fri_status, fri_layout.round_valid),
         ) && all_fri_progress_valid(self.fri_scratch)
+            && all_fri_tree_nodes_valid(self.fri_scratch)
         let equal = fri_outputs_equal(
             self.proof,
             regions.fri_clean,
@@ -2344,6 +2363,24 @@ fn all_fri_progress_valid(
             lane = lane + 1
         }
         round = round + 1
+    }
+    valid
+}
+
+fn all_fri_tree_nodes_valid(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+) -> bool {
+    let nodes: u32 = (FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT)
+        .downcast_truncate()
+    let mut valid = true
+    let mut node: u32 = 0
+    while node < nodes {
+        valid = valid && fri_scratch_load(
+            scratch,
+            FRI_TREE_VALID_START,
+            node,
+        ) == 1
+        node = node + 1
     }
     valid
 }

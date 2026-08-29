@@ -902,7 +902,7 @@ fn complete_proof_graph_matches_independent_oracles_on_webgpu() {
             ("lde_inverse_progress", 8),
             ("lde_values", 64),
             ("lde_progress", 32),
-            ("fri_scratch", 1_842),
+            ("fri_scratch", 2_040),
         ]
     );
     assert_eq!(bundle.manifest.passes.len(), COMPUTE_PASSES + 1);

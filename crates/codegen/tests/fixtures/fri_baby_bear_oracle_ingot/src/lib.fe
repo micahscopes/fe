@@ -16,7 +16,7 @@ use poseidon_baby_bear::Poseidon2FieldDomain
 type CheckpointFriSchedule16 = FriSchedule<1, 4>
 
 fn schedule_words<S: FriScheduleShape>() -> (
-    u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     let metadata = <S as FriScheduleShape>::fri_schedule_metadata()
     (
@@ -27,17 +27,18 @@ fn schedule_words<S: FriScheduleShape>() -> (
         metadata.folded_evaluations,
         metadata.layer_pair_openings,
         metadata.layer_path_siblings_per_side,
+        metadata.layer_tree_nodes,
     )
 }
 
 pub fn fri_schedule16_metadata() -> (
-    u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     schedule_words<CheckpointFriSchedule16>()
 }
 
 fn round_words<S: FriSchedulePlacement>(_ index: u32) -> (
-    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     let placement = <S as FriSchedulePlacement>::fri_round_placement(index)
     (
@@ -48,13 +49,15 @@ fn round_words<S: FriSchedulePlacement>(_ index: u32) -> (
         placement.input_width,
         placement.output_width,
         placement.output_offset,
+        placement.tree_offset,
+        placement.tree_nodes,
         placement.pair_width,
         placement.pair_depth,
     )
 }
 
 pub fn fri_schedule16_round(_ index: u32) -> (
-    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
 ) {
     round_words<CheckpointFriSchedule16>(index)
 }
