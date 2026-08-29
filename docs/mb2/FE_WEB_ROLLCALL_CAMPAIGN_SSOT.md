@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-28
+Updated: 2026-08-29
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -153,6 +153,38 @@ existing Definition of done, not a second campaign checklist:
   Fe-authored mutation, and clean recovery without reload, console error, or
   device loss. The external Radeon Chrome endpoint was unavailable during this
   run, so hardware parity for this new slice remains open.
+  Commit `c468daaa1` extends that checkpoint through the complete exact toy FRI
+  chain `16 -> 8 -> 4 -> 2 -> 1`. One 16-pass graph derives and executes all
+  four quartic challenges, folds, ordered Poseidon2 Merkle roots, and typed
+  transcript bindings with Fe-derived repeats `403, 358, 313, 268`. A derived
+  `FriScratchRegions` schema consolidates six physical scratch arrays into one
+  1,842-word typed tape. Together with the NTT preparation result no longer
+  retaining a redundant validity buffer, the actor now has six graph resources
+  and every pass uses at most eight storage bindings, exactly the portable
+  WebGPU minimum. The first unconsolidated bundle failed honestly in Chromium
+  at 13 or 14 storage buffers per compute stage. No browser limit was raised
+  and no application predicate moved to JavaScript.
+
+  A fresh release web build emitted 16 passes, 9,045,922 WGSL bytes, and 2,182
+  Wasm bytes in 858.19 seconds. Source diagnostics took 700.65 seconds and
+  backend lowering took 118.00 seconds. The equivalent pre-refactor build took
+  1,765.65 seconds, including 1,111.51 seconds for source diagnostics and
+  585.40 seconds for lowering. Chromium 150 then executed one live graph on
+  SwiftShader with five clean blue bands, the exact final two pink rejection
+  bands after the Fe-authored mutation, clean recovery, no console or device
+  errors, and normal final resource release. A test-only standards readback
+  copied the three 741-word Fe-owned proof tapes without decoding them in
+  JavaScript. The independent Rust/Plonky3 oracle matched every trace and LDE
+  value, generated Poseidon2 parameter, commitment root, FRI challenge, folded
+  evaluation, FRI Merkle root, transcript digest, validity flag, and output
+  color for clean, mutated, and recovered receipts. The fresh from-source
+  release structural gate passed in 833.02 seconds; native execution explicitly
+  skipped because this sandbox exposes no `wgpu` adapter. Local Sonatina commits
+  `5b96d731` and `95f558bf` are the required structured-control-flow companions
+  until they are published and pinned. This closes the complete toy FRI
+  placement and browser exactness checkpoint. It is not yet authenticated query
+  opening, canonical proof encoding, a production-sized schedule, or a
+  recursive proof.
   Larger production domains, fused shared-memory or subgroup placements, and
   real Chrome hardware parity for this staged path remain open, so G-NTT stays
   partial.
