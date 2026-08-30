@@ -84,11 +84,35 @@ fn production_zero_interval() -> OrbitInterval<4> {
     evaluated.interval
 }
 
+fn production_one_interval() -> OrbitInterval<4> {
+    let first = production_zero_interval()
+    evaluate_chunk(first.claim, first.end, 1).interval
+}
+
+/// Select one of the first two exact recurrence leaves from one value-level
+/// computation. The public leaf index chooses statement data, not a different
+/// prover or verifier implementation.
+fn production_zero_interval_at(_ leaf: u32) -> OrbitInterval<4> {
+    if leaf == 0 { return production_zero_interval() }
+    production_one_interval()
+}
+
 /// Prove the exact transition `z_0 = 0` to `z_1 = 0` for `c = 0` under the
 /// CTFE-derived 100-bit, 1024-leaf recursive composition policy.
 pub fn production_security_zero_interval_receipt() -> BrowserBytes {
     prove_production_security_sparse_interval(
         production_zero_interval(),
+        BabyBear::from_u32(7),
+    )
+}
+
+/// Prove the exact adjacent transition `z_1 = 0` to `z_2 = 0` through the
+/// same imported production prover body as the zero interval. These thin
+/// roots select statement data; they do not define separate proof programs.
+pub fn production_security_one_interval_receipt() -> BrowserBytes {
+    let first = production_zero_interval()
+    prove_production_security_sparse_interval(
+        evaluate_chunk(first.claim, first.end, 1).interval,
         BabyBear::from_u32(7),
     )
 }
@@ -161,11 +185,21 @@ fn verify_production_security_zero_interval_recursive_leaf(
 pub fn production_security_zero_interval_task_trace(
     _ bytes: BrowserBytes,
 ) -> BrowserBytes {
+    production_security_adjacent_interval_task_trace(0, bytes)
+}
+
+/// Execute either adjacent policy-sized verifier into the same canonical task
+/// trace format. The leaf index changes only the public interval value.
+pub fn production_security_adjacent_interval_task_trace(
+    _ leaf: u32,
+    _ bytes: BrowserBytes,
+) -> BrowserBytes {
+    if leaf > 1 { return BrowserBytes { ptr: 0, len: 0 } }
     let mut receipt = empty_production_security_sparse_baby_bear_receipt()
     if !decode_production_security_sparse_baby_bear_receipt(bytes, mut receipt) {
         return BrowserBytes { ptr: 0, len: 0 }
     }
-    let interval = production_zero_interval()
+    let interval = production_zero_interval_at(leaf)
     let shift = BabyBear::from_u32(7)
     let trace = production_security_sparse_verifier_trace(
         interval,
@@ -185,6 +219,20 @@ pub fn audit_production_security_zero_interval_task_trace(
     _ receipt_bytes: BrowserBytes,
     _ trace_bytes: BrowserBytes,
 ) -> (u32, u32, u32, u32) {
+    audit_production_security_adjacent_interval_task_trace(
+        0,
+        receipt_bytes,
+        trace_bytes,
+    )
+}
+
+/// Replay either adjacent verifier against its canonical stored execution.
+pub fn audit_production_security_adjacent_interval_task_trace(
+    _ leaf: u32,
+    _ receipt_bytes: BrowserBytes,
+    _ trace_bytes: BrowserBytes,
+) -> (u32, u32, u32, u32) {
+    if leaf > 1 { return (0, 0, 0, 0) }
     let mut receipt = empty_production_security_sparse_baby_bear_receipt()
     if !decode_production_security_sparse_baby_bear_receipt(
         receipt_bytes,
@@ -192,7 +240,7 @@ pub fn audit_production_security_zero_interval_task_trace(
     ) {
         return (0, 0, 0, 0)
     }
-    let interval = production_zero_interval()
+    let interval = production_zero_interval_at(leaf)
     let shift = BabyBear::from_u32(7)
     let audit = audit_production_security_sparse_verifier_trace(
         interval,
