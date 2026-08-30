@@ -78,6 +78,23 @@ pub fn specialize_pure_inline_stmts<'db>(
     external: &RuntimeAggregateFacts,
     root: RLocalId,
 ) -> Option<Vec<RStmt<'db>>> {
+    // The projection forwarding and reverse liveness pass below operate on
+    // value identities. Runtime MIR locals are variables rather than SSA
+    // values, so a repeated destination would make both assumptions false:
+    // an earlier aggregate snapshot could be confused with its reassigned
+    // value, and reverse liveness could retain the wrong definition. This is
+    // an optional inline specialization, so fail closed and leave the call in
+    // the program when a body contains mutation.
+    let mut assigned = FxHashSet::default();
+    for stmt in &stmts {
+        let RStmt::Assign { dst, .. } = stmt else {
+            return None;
+        };
+        if !assigned.insert(*dst) {
+            return None;
+        }
+    }
+
     let mut aggregates = external.clone();
     let mut aliases = FxHashMap::default();
     let mut projections = FxHashMap::default();
@@ -358,6 +375,33 @@ mod tests {
         );
         assert!(
             matches!(got[1], RStmt::Assign { dst, expr: RExpr::Use(value) } if dst == id(2) && value == id(1))
+        );
+    }
+
+    #[test]
+    fn repeated_destination_fails_closed_instead_of_reusing_a_stale_value() {
+        let stmts = vec![
+            RStmt::Assign {
+                dst: id(0),
+                expr: RExpr::ConstScalar(ConstScalar::Bool(false)),
+            },
+            RStmt::Assign {
+                dst: id(1),
+                expr: RExpr::Use(id(0)),
+            },
+            RStmt::Assign {
+                dst: id(0),
+                expr: RExpr::ConstScalar(ConstScalar::Bool(true)),
+            },
+            RStmt::Assign {
+                dst: id(2),
+                expr: RExpr::Use(id(1)),
+            },
+        ];
+
+        assert!(
+            specialize_pure_inline_stmts(stmts, &RuntimeAggregateFacts::default(), id(2)).is_none(),
+            "mutation must retain the unspecialized Runtime MIR body",
         );
     }
 
