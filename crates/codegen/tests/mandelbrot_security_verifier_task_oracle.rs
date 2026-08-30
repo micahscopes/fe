@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
@@ -79,29 +79,29 @@ fn production_security_verifier_tasks_are_derived_and_replay_authenticated() {
     );
 
     let audit = instance
-        .get_typed_func::<i32, (i32, i32, i32, i32, i32)>(
+        .get_typed_func::<i32, (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)>(
             &mut store,
             "production_security_verifier_task_trace_audit",
         )
         .expect("security verifier trace audit export");
     assert_eq!(
         audit.call(&mut store, 0).expect("clean trace audit"),
-        (1, 1, 0, 0, 0),
+        (1, 1, 0, 0, 0, 1, 1, 1, 1, 1),
     );
     assert_eq!(
         audit
             .call(&mut store, 1)
             .expect("coherent task mutation audit"),
-        (1, 1, 1, 0, 0),
+        (1, 1, 1, 0, 0, 0, 1, 1, 1, 0),
     );
     assert_eq!(
         audit.call(&mut store, 2).expect("result mutation audit"),
-        (1, 1, 0, 1, 0),
+        (1, 1, 0, 1, 0, 1, 1, 1, 1, 1),
     );
     assert_eq!(
         audit
             .call(&mut store, 3)
             .expect("query payload mutation audit"),
-        (1, 1, 1, 0, 0),
+        (1, 1, 1, 0, 0, 1, 1, 1, 1, 0),
     );
 }

@@ -83,6 +83,9 @@ fn transcript_inputs(_ seed: u32, _ mutation: u32) -> ProductionSecurityTranscri
     let mut interaction_opening_accepted = BabyBear::one()
     let mut accepted = BabyBear::one()
     let mut trace_valid = BabyBear::one()
+    let mut base_task_valid = BabyBear::one()
+    let mut interaction_task_valid = BabyBear::one()
+    let mut transcript_task_valid = BabyBear::one()
     match mutation {
         1 => {
             statement.valid = false
@@ -123,6 +126,15 @@ fn transcript_inputs(_ seed: u32, _ mutation: u32) -> ProductionSecurityTranscri
         13 => {
             trace_valid = BabyBear::zero()
         },
+        14 => {
+            base_task_valid = BabyBear::zero()
+        },
+        15 => {
+            interaction_task_valid = BabyBear::zero()
+        },
+        16 => {
+            transcript_task_valid = BabyBear::zero()
+        },
         _ => {},
     }
     ProductionSecurityTranscriptRelationInputs {
@@ -133,6 +145,9 @@ fn transcript_inputs(_ seed: u32, _ mutation: u32) -> ProductionSecurityTranscri
         interaction_opening_accepted: interaction_opening_accepted,
         accepted: accepted,
         trace_valid: trace_valid,
+        base_task_valid: base_task_valid,
+        interaction_task_valid: interaction_task_valid,
+        transcript_task_valid: transcript_task_valid,
     }
 }
 

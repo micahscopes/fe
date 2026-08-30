@@ -12,7 +12,7 @@ use url::Url;
 use wasmtime::Val;
 
 const PRODUCTS: u32 = 8;
-const ASSERTIONS: u32 = 9;
+const ASSERTIONS: u32 = 10;
 const MERKLE_PRODUCTS: u32 = 573;
 const MERKLE_ASSERTIONS: u32 = 9;
 const PATH_DEPTH: u32 = 4;
@@ -166,7 +166,7 @@ fn production_opening_arena_summary(
 fn header_audit(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
-    values: [u32; 7],
+    values: [u32; 8],
 ) -> [u32; 6] {
     audit(store, instance, "receipt_header_relation_audit", &values)
 }
@@ -361,13 +361,13 @@ fn receipt_header_relation_rejects_false_inputs_and_mutated_products() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("recursive verifier AIR module should instantiate");
 
-    let valid = [1, 1, 1, 7, 1, 1, 0];
+    let valid = [1, 1, 1, 7, 1, 1, 1, 0];
     assert_eq!(
         header_audit(&mut store, &instance, valid),
         [1, 1, 0, 0, PRODUCTS, ASSERTIONS],
     );
 
-    for input in 0..6 {
+    for input in 0..7 {
         let mut invalid = valid;
         invalid[input] = 0;
         let result = header_audit(&mut store, &instance, invalid);
@@ -382,7 +382,7 @@ fn receipt_header_relation_rejects_false_inputs_and_mutated_products() {
 
     for mutation in 1..=PRODUCTS {
         let mut mutated = valid;
-        mutated[6] = mutation;
+        mutated[7] = mutation;
         let result = header_audit(&mut store, &instance, mutated);
         assert_eq!(result[0], 1, "the semantic inputs remain valid");
         assert_eq!(result[1], 1, "product mutation preserves relation shape");

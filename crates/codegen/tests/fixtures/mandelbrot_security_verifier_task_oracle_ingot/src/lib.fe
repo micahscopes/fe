@@ -39,7 +39,7 @@ fn flag(_ value: bool) -> u32 {
 /// three changes the final query payload while retaining a valid task variant.
 pub fn production_security_verifier_task_trace_audit(
     _ mutation: u32,
-) -> (u32, u32, u32, u32, u32) {
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
     let mut writer = ProductionSecurityVerifierTraceInterpreter::new()
     let mut cursor: u32 = 0
     while cursor < PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate() {
@@ -97,11 +97,22 @@ pub fn production_security_verifier_task_trace_audit(
         cursor = cursor + 1
     }
     let audit = replay.finish()
+    let mut all_tasks_match = true
+    cursor = 0
+    while cursor < PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate() {
+        all_tasks_match = all_tasks_match && trace.task_matches(cursor)
+        cursor = cursor + 1
+    }
     (
         flag(local_shape),
         flag(audit.shape_valid),
         audit.task_mismatches,
         audit.result_mismatches,
         audit.rejected_tasks,
+        flag(trace.task_matches(0)),
+        flag(trace.task_matches(1)),
+        flag(trace.task_matches(2)),
+        flag(trace.task_matches(3)),
+        flag(all_tasks_match),
     )
 }

@@ -66,7 +66,7 @@ use quadratic_plan::{
 }
 
 pub const RECEIPT_HEADER_PRODUCTS: usize = 8
-pub const RECEIPT_HEADER_ASSERTIONS: usize = 9
+pub const RECEIPT_HEADER_ASSERTIONS: usize = 10
 pub const MERKLE_NODE_PRODUCTS: usize = POSEIDON2_PERMUTATION_MULTIPLICATIONS + 9
 pub const MERKLE_NODE_ASSERTIONS: usize = 9
 pub const PRODUCTION_BASE_LEAF_PRODUCTS: usize = sparse_base_lde_leaf_commitment_permutations<
@@ -127,7 +127,7 @@ pub const PRODUCTION_SECURITY_TRANSCRIPT_PERMUTATIONS: usize = sparse_air_lde_tr
     + sparse_air_security_profile_permutations()
 pub const PRODUCTION_SECURITY_TRANSCRIPT_PRODUCTS: usize = PRODUCTION_SECURITY_TRANSCRIPT_PERMUTATIONS
     * POSEIDON2_PERMUTATION_MULTIPLICATIONS
-pub const PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS: usize = 24
+pub const PRODUCTION_SECURITY_TRANSCRIPT_ASSERTIONS: usize = 27
 
 /// Base and interaction commitments intentionally occupy different nominal
 /// arenas. Their physical payloads are identical, but crossing the roles
@@ -220,6 +220,7 @@ pub struct ReceiptHeaderRelationInputs {
     pub shift: BabyBear,
     pub accepted: BabyBear,
     pub trace_valid: BabyBear,
+    pub task_valid: BabyBear,
 }
 impl core::marker::Copy for ReceiptHeaderRelationInputs {}
 
@@ -258,6 +259,7 @@ pub fn production_receipt_header_relation_inputs(
         shift: shift,
         accepted: bool_field(row.accepted),
         trace_valid: bool_field(trace.shape_valid()),
+        task_valid: bool_field(trace.task_matches(0)),
     }
 }
 
@@ -326,6 +328,7 @@ fn receipt_header_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
     interpreter = constrain_equal(complete.interpreter, complete.value, inputs.accepted)
     interpreter = constrain_one(interpreter, inputs.accepted)
     interpreter = constrain_one(interpreter, inputs.trace_valid)
+    interpreter = constrain_one(interpreter, inputs.task_valid)
     ReceiptHeaderRelationPlan { interpreter: interpreter }
 }
 
@@ -798,6 +801,9 @@ pub struct ProductionSecurityTranscriptRelationInputs {
     pub interaction_opening_accepted: BabyBear,
     pub accepted: BabyBear,
     pub trace_valid: BabyBear,
+    pub base_task_valid: BabyBear,
+    pub interaction_task_valid: BabyBear,
+    pub transcript_task_valid: BabyBear,
 }
 impl core::marker::Copy for ProductionSecurityTranscriptRelationInputs {}
 
@@ -835,6 +841,9 @@ pub fn production_security_transcript_relation_inputs(
         interaction_opening_accepted: bool_field(trace.row(2).accepted),
         accepted: bool_field(trace.row(3).accepted),
         trace_valid: bool_field(trace.shape_valid()),
+        base_task_valid: bool_field(trace.task_matches(1)),
+        interaction_task_valid: bool_field(trace.task_matches(2)),
+        transcript_task_valid: bool_field(trace.task_matches(3)),
     }
 }
 
@@ -876,6 +885,9 @@ pub fn production_security_transcript_relation_plan<I: QuadraticRelationInterpre
     interpreter = constrain_one(interpreter, inputs.interaction_opening_accepted)
     interpreter = constrain_one(interpreter, inputs.accepted)
     interpreter = constrain_one(interpreter, inputs.trace_valid)
+    interpreter = constrain_one(interpreter, inputs.base_task_valid)
+    interpreter = constrain_one(interpreter, inputs.interaction_task_valid)
+    interpreter = constrain_one(interpreter, inputs.transcript_task_valid)
 
     let air = bind_sparse_air_lde_transcript_plan<
         I,

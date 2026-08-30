@@ -927,6 +927,23 @@ impl ProductionSecurityVerifierTrace {
         }
     }
 
+    /// Prove that a stored row occupies its compiler-derived semantic task
+    /// position. Recursive relations consume this predicate together with the
+    /// row result, so a validly encoded but coherently rewired trace cannot
+    /// substitute one verifier stage for another.
+    pub fn task_matches(self, _ index: u32) -> bool {
+        if !self.shape_valid()
+            || index
+                >= PRODUCTION_SECURITY_VERIFIER_TASK_COUNT.downcast_truncate()
+        {
+            return false
+        }
+        production_security_verifier_trace_tasks_equal(
+            self.row(index).task,
+            production_security_verifier_task_at(index),
+        )
+    }
+
     pub fn replace_row(
         self,
         _ index: u32,

@@ -15,7 +15,7 @@ use wasmtime::Val;
 const MODULUS: u32 = 2_013_265_921;
 const WIDTH: usize = 16;
 const PERMUTATION_PRODUCTS: u32 = 564;
-const ASSERTIONS: u32 = 24;
+const ASSERTIONS: u32 = 27;
 const DIGEST_FIELDS: u32 = 8;
 const SPONGE_RATE: u32 = 8;
 const STATEMENT_WORDS: u32 =
@@ -347,7 +347,7 @@ fn production_security_transcript_is_one_exact_mutation_gated_relation() {
         assert_ne!(&changed_statement[6..], &clean[6..]);
     }
 
-    for mutation in [1u32, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
+    for mutation in [1u32, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
         let rejected = call_u32s(
             &mut store,
             &instance,

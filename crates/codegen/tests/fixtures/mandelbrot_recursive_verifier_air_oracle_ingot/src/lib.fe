@@ -501,6 +501,7 @@ pub fn receipt_header_relation_audit(
     _ shift: u32,
     _ accepted: u32,
     _ trace_valid: u32,
+    _ task_valid: u32,
     _ mutation: u32,
 ) -> (u32, u32, u32, u32, u32, u32) {
     let inputs = ReceiptHeaderRelationInputs {
@@ -510,6 +511,7 @@ pub fn receipt_header_relation_audit(
         shift: BabyBear::from_u32(shift),
         accepted: as_bool(accepted),
         trace_valid: as_bool(trace_valid),
+        task_valid: as_bool(task_valid),
     }
     let auxiliary = derive_receipt_header_relation_auxiliary(inputs)
     let mut witness = receipt_header_relation_witness(inputs)
