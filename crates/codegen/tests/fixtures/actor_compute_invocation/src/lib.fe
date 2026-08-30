@@ -18,8 +18,121 @@ impl InvocationExtent for PairExtent { const X: usize = 2 }
 const TILE_X: usize = <PairExtent as InvocationExtent>::X
 const GRID_X: usize = <PairExtent as InvocationExtent>::X
 
+struct ReceiptPlacement {
+    values: Shared<u32, 16>,
+    base: u32,
+}
+
+impl Copy for ReceiptPlacement {}
+
+struct CheckpointWords {
+    c0: u32,
+    c1: u32,
+    c2: u32,
+    c3: u32,
+}
+
+impl Copy for CheckpointWords {}
+
+struct WideCheckpoint {
+    challenge: CheckpointWords,
+    power: CheckpointWords,
+    value: CheckpointWords,
+}
+
+impl Copy for WideCheckpoint {}
+
+struct CheckpointPlacement {
+    values: Shared<u32, 192>,
+    base: u32,
+}
+
+impl Copy for CheckpointPlacement {}
+
+fn write_receipt(
+    _ placement: ReceiptPlacement,
+    _ slot: u32,
+    _ value: u32,
+) {
+    placement.values.store(index: placement.base + slot, value: value)
+}
+
+#[inline(always)]
+fn add_checkpoint_words(
+    _ left: CheckpointWords,
+    _ right: CheckpointWords,
+) -> CheckpointWords {
+    CheckpointWords {
+        c0: left.c0 + right.c0,
+        c1: left.c1 + right.c1,
+        c2: left.c2 + right.c2,
+        c3: left.c3 + right.c3,
+    }
+}
+
+#[inline(always)]
+fn advance_checkpoint(
+    _ checkpoint: WideCheckpoint,
+    _ delta: u32,
+) -> WideCheckpoint {
+    WideCheckpoint {
+        challenge: checkpoint.challenge,
+        power: add_checkpoint_words(checkpoint.power, checkpoint.challenge),
+        value: add_checkpoint_words(
+            checkpoint.value,
+            CheckpointWords {
+                c0: checkpoint.power.c0 + delta,
+                c1: checkpoint.power.c1 + delta * 2,
+                c2: checkpoint.power.c2 + delta * 3,
+                c3: checkpoint.power.c3 + delta * 4,
+            },
+        ),
+    }
+}
+
+#[inline(always)]
+fn derive_checkpoint(_ seed: u32) -> WideCheckpoint {
+    let mut checkpoint = WideCheckpoint {
+        challenge: CheckpointWords {
+            c0: seed + 11,
+            c1: seed + 17,
+            c2: seed + 23,
+            c3: seed + 29,
+        },
+        power: CheckpointWords { c0: 1, c1: 0, c2: 0, c3: 0 },
+        value: CheckpointWords { c0: 0, c1: 0, c2: 0, c3: 0 },
+    }
+    let mut round: u32 = 0
+    while round < 9 {
+        checkpoint = advance_checkpoint(checkpoint, round + 1)
+        round = round + 1
+    }
+    checkpoint
+}
+
+fn write_checkpoint(
+    _ placement: CheckpointPlacement,
+    _ slot: u32,
+    _ checkpoint: WideCheckpoint,
+) {
+    let base = placement.base + slot * 12
+    placement.values.store(index: base, value: checkpoint.challenge.c0)
+    placement.values.store(index: base + 1, value: checkpoint.challenge.c1)
+    placement.values.store(index: base + 2, value: checkpoint.challenge.c2)
+    placement.values.store(index: base + 3, value: checkpoint.challenge.c3)
+    placement.values.store(index: base + 4, value: checkpoint.power.c0)
+    placement.values.store(index: base + 5, value: checkpoint.power.c1)
+    placement.values.store(index: base + 6, value: checkpoint.power.c2)
+    placement.values.store(index: base + 7, value: checkpoint.power.c3)
+    placement.values.store(index: base + 8, value: checkpoint.value.c0)
+    placement.values.store(index: base + 9, value: checkpoint.value.c1)
+    placement.values.store(index: base + 10, value: checkpoint.value.c2)
+    placement.values.store(index: base + 11, value: checkpoint.value.c3)
+}
+
 actor InvocationReceipt uses (Program<WebGpuBackend>) {
     receipts: Shared<u32, 16>,
+    checkpoints: Shared<u32, 192>,
 
     fn stamp(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<TILE_X, 2, 1>, Grid<GRID_X, 2, 1>>)
@@ -40,7 +153,14 @@ actor InvocationReceipt uses (Program<WebGpuBackend>) {
             + invocation.local_index * 1000000
         let mut staged: [u32; 1] = [0; 1]
         staged[0] = receipt
-        self.receipts.store(index: slot, value: staged[0])
+        let placement = ReceiptPlacement { values: self.receipts, base: 0 }
+        write_receipt(placement, slot, staged[0])
+        let checkpoint = derive_checkpoint(slot + 1)
+        let checkpoint_placement = CheckpointPlacement {
+            values: self.checkpoints,
+            base: 0,
+        }
+        write_checkpoint(checkpoint_placement, slot, checkpoint)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {

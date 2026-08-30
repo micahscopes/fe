@@ -1548,6 +1548,34 @@ fn record_value_fact(
     let RStmt::Assign { dst, expr } = stmt else {
         return;
     };
+    // Runtime MIR locals are variables, not SSA values. Snapshot a propagated
+    // fact before invalidation so `dst = use dst` remains an identity, then
+    // forget both the old destination fact and every aggregate fact whose
+    // structural description depended on that old value. Keeping the first
+    // fact for a reassigned aggregate can specialize a later helper call with
+    // the original fields even though the runtime value has changed.
+    let propagated_aggregate = match expr {
+        RExpr::Use(src) => aggregates.get(src).cloned(),
+        _ => None,
+    };
+    let propagated_constant = match expr {
+        RExpr::Use(src) => constants.get(src).cloned(),
+        _ => None,
+    };
+    let mut invalidated = vec![*dst];
+    while let Some(value) = invalidated.pop() {
+        constants.remove(&value);
+        aggregates.remove(&value);
+        let dependents = aggregates
+            .iter()
+            .filter_map(|(aggregate, fields)| fields.contains(&value).then_some(*aggregate))
+            .collect::<Vec<_>>();
+        for dependent in dependents {
+            if aggregates.remove(&dependent).is_some() {
+                invalidated.push(dependent);
+            }
+        }
+    }
     match expr {
         RExpr::AggregateMake { fields, .. } => {
             aggregates.insert(*dst, fields.clone());
@@ -1555,11 +1583,11 @@ fn record_value_fact(
         RExpr::ConstScalar(value) => {
             constants.insert(*dst, value.clone());
         }
-        RExpr::Use(src) => {
-            if let Some(fields) = aggregates.get(src).cloned() {
+        RExpr::Use(_) => {
+            if let Some(fields) = propagated_aggregate {
                 aggregates.insert(*dst, fields);
             }
-            if let Some(value) = constants.get(src).cloned() {
+            if let Some(value) = propagated_constant {
                 constants.insert(*dst, value);
             }
         }
@@ -12820,6 +12848,62 @@ mod tests {
     use hir::analysis::semantic::FieldIndex;
     use mir::ScalarRole;
     use url::Url;
+
+    fn runtime_local(index: u32) -> RLocalId {
+        RLocalId::from_u32(index)
+    }
+
+    #[test]
+    fn value_facts_follow_reassignment_instead_of_the_first_aggregate_value() {
+        let aggregate = runtime_local(0);
+        let old_field = runtime_local(1);
+        let dependent = runtime_local(2);
+        let unknown = runtime_local(3);
+        let mut aggregates = mir::RuntimeAggregateFacts::default();
+        aggregates.insert(aggregate, vec![old_field].into_boxed_slice());
+        aggregates.insert(dependent, vec![aggregate].into_boxed_slice());
+        let mut constants = mir::RuntimeScalarConstFacts::default();
+        constants.insert(old_field, mir::ConstScalar::Float { bits: 1 });
+
+        record_value_fact(
+            &RStmt::Assign {
+                dst: aggregate,
+                expr: RExpr::Use(unknown),
+            },
+            &mut aggregates,
+            &mut constants,
+        );
+
+        assert!(!aggregates.contains_key(&aggregate));
+        assert!(!aggregates.contains_key(&dependent));
+        assert_eq!(
+            constants.get(&old_field),
+            Some(&mir::ConstScalar::Float { bits: 1 })
+        );
+    }
+
+    #[test]
+    fn value_fact_self_copy_preserves_the_current_snapshot() {
+        let aggregate = runtime_local(0);
+        let field = runtime_local(1);
+        let mut aggregates = mir::RuntimeAggregateFacts::default();
+        aggregates.insert(aggregate, vec![field].into_boxed_slice());
+        let mut constants = mir::RuntimeScalarConstFacts::default();
+
+        record_value_fact(
+            &RStmt::Assign {
+                dst: aggregate,
+                expr: RExpr::Use(aggregate),
+            },
+            &mut aggregates,
+            &mut constants,
+        );
+
+        assert_eq!(
+            aggregates.get(&aggregate).map(Box::as_ref),
+            Some([field].as_slice()),
+        );
+    }
 
     #[test]
     fn aggregate_param_reification_excludes_mutable_object_refs() {

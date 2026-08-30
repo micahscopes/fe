@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    resolve_web_entry, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
+    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -124,6 +124,28 @@ fn expected_receipts() -> [u32; 16] {
     expected
 }
 
+fn expected_checkpoints() -> Vec<u32> {
+    let mut expected = Vec::with_capacity(16 * 12);
+    for slot in 0..16u32 {
+        let seed = slot + 1;
+        let challenge = [seed + 11, seed + 17, seed + 23, seed + 29];
+        let mut power = [1, 0, 0, 0];
+        let mut value = [0, 0, 0, 0];
+        for round in 0..9u32 {
+            let delta = round + 1;
+            let old_power = power;
+            for lane in 0..4 {
+                power[lane] += challenge[lane];
+                value[lane] += old_power[lane] + delta * (lane as u32 + 1);
+            }
+        }
+        expected.extend(challenge);
+        expected.extend(power);
+        expected.extend(value);
+    }
+    expected
+}
+
 #[test]
 fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
     let bundle = compile_invocation_graph();
@@ -136,8 +158,14 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
         .layout
         .bindings
         .iter()
-        .find(|binding| binding.role == WebBindingRole::Resource)
+        .find(|binding| binding.role == WebBindingRole::Resource && binding.name == "receipts")
         .expect("receipt resource binding");
+    let checkpoint_binding = compute
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == WebBindingRole::Resource && binding.name == "checkpoints")
+        .expect("checkpoint resource binding");
     let trap_binding = compute
         .layout
         .bindings
@@ -150,13 +178,25 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
         .iter()
         .find(|resource| resource.name == "receipts")
         .expect("receipt resource declaration");
+    let checkpoint_resource = bundle
+        .manifest
+        .resources
+        .iter()
+        .find(|resource| resource.name == "checkpoints")
+        .expect("checkpoint resource declaration");
     let receipt_bytes = receipt_resource
         .length
         .checked_mul(receipt_resource.stride)
         .expect("receipt resource byte span");
+    let checkpoint_bytes = checkpoint_resource
+        .length
+        .checked_mul(checkpoint_resource.stride)
+        .expect("checkpoint resource byte span");
     assert_eq!(receipt_binding.name, "receipts");
     assert_eq!(receipt_binding.span, receipt_resource.stride);
     assert_eq!(receipt_bytes, 16 * 4);
+    assert_eq!(checkpoint_binding.span, checkpoint_resource.stride);
+    assert_eq!(checkpoint_bytes, 16 * 12 * 4);
     assert_eq!(trap_binding.span, 16 * 4);
 
     let Some((adapter, device, queue)) = request_browser_profile_device() else {
@@ -173,6 +213,12 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    let checkpoints = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Fe wide helper-return checkpoints"),
+        size: u64::from(checkpoint_bytes),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
     let trap = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Fe compute invocation trap lanes"),
         size: u64::from(trap_binding.span),
@@ -181,7 +227,7 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
     });
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("compute invocation test-only readback"),
-        size: u64::from(receipt_bytes + trap_binding.span),
+        size: u64::from(receipt_bytes + checkpoint_bytes + trap_binding.span),
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -233,6 +279,10 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
                 resource: receipts.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
+                binding: checkpoint_binding.binding,
+                resource: checkpoints.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
                 binding: trap_binding.binding,
                 resource: trap.as_entire_binding(),
             },
@@ -254,10 +304,17 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
     }
     encoder.copy_buffer_to_buffer(&receipts, 0, &staging, 0, u64::from(receipt_bytes));
     encoder.copy_buffer_to_buffer(
-        &trap,
+        &checkpoints,
         0,
         &staging,
         u64::from(receipt_bytes),
+        u64::from(checkpoint_bytes),
+    );
+    encoder.copy_buffer_to_buffer(
+        &trap,
+        0,
+        &staging,
+        u64::from(receipt_bytes + checkpoint_bytes),
         u64::from(trap_binding.span),
     );
     queue.submit(Some(encoder.finish()));
@@ -280,8 +337,9 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
     let data = slice.get_mapped_range();
     let result = words(&data);
     assert_eq!(&result[..16], &expected_receipts());
+    assert_eq!(&result[16..16 + 16 * 12], expected_checkpoints());
     assert_eq!(
-        &result[16..],
+        &result[16 + 16 * 12..],
         &[0; 16],
         "one clean trap lane per invocation"
     );
