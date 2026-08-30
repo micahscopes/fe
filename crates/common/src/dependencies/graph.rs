@@ -44,6 +44,28 @@ impl DependencyGraph {
         )
     }
 
+    /// Recreate this resolved dependency graph in another compiler database.
+    ///
+    /// Salsa identities belong to one database, so copying the input handle is
+    /// not a valid way to isolate a compilation. Re-interning the owned graph
+    /// data gives the destination an equivalent set of resolved dependency
+    /// facts without retaining any query or interned runtime state from the
+    /// source database.
+    pub fn replicate_into(self, source: &dyn InputDb, destination: &dyn InputDb) -> Self {
+        Self::new(
+            destination,
+            self.graph(source),
+            self.node_map(source),
+            self.git_locations(source),
+            self.reverse_git_map(source),
+            self.ingots_by_metadata(source),
+            self.workspace_members(source),
+            self.workspace_root_by_member(source),
+            self.expected_member_metadata(source),
+            self.forced_dependency_arithmetic(source),
+        )
+    }
+
     fn allocate_node(
         graph: &mut DiGraph<Url, EdgeWeight>,
         node_map: &mut HashMap<Url, NodeIndex>,

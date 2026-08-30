@@ -15,6 +15,7 @@ use std::{
     },
 };
 
+use common::InputDb;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     semantic::{ViewParam, ViewParamKind, project_view_surface},
@@ -3979,17 +3980,25 @@ fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResour
 fn stage_external_resources(
     db: &DriverDataBase,
     package: &mir::RuntimePackage<'_>,
+    entry: &str,
     resources: &[WebResource],
     access: Access,
     leading_context_leaves: Option<u32>,
 ) -> Result<Vec<SpirvExternalResource>, WebBundleError> {
-    let root = package.primary_object(db).ok_or_else(|| {
-        WebBundleError::Lower("GPU stage runtime package has no primary object".to_owned())
-    })?;
-    let section = root.sections(db).into_iter().next().ok_or_else(|| {
-        WebBundleError::Lower("GPU stage runtime package has no root section".to_owned())
-    })?;
-    let body = section.entry.instance(db).body(db);
+    let functions = package
+        .functions(db)
+        .into_iter()
+        .filter(|function| {
+            function.linkage(db) == mir::RuntimeLinkage::Internal && function.symbol(db) == entry
+        })
+        .collect::<Vec<_>>();
+    let [function] = functions.as_slice() else {
+        return Err(WebBundleError::Lower(format!(
+            "GPU stage `{entry}` must select exactly one public runtime function (found {})",
+            functions.len()
+        )));
+    };
+    let body = function.instance(db).body(db);
     let context_offset = leading_context_leaves
         .map(|leaves| leaves.saturating_sub(1))
         .unwrap_or(0);
@@ -4061,6 +4070,64 @@ impl WebBundleFile {
         &self.bytes
     }
 }
+
+/// Run one bounded compilation unit against an input-equivalent database whose
+/// query lifetime ends with the unit. Salsa interned values intentionally live
+/// for a database's lifetime; a large pass graph must therefore make physical
+/// derivation and emission boundaries explicit instead of retaining every
+/// stage's specialized HIR and MIR until the complete page bundle is finished.
+fn with_isolated_compiler_database<T>(
+    source_db: &DriverDataBase,
+    source_mod: TopLevelMod<'_>,
+    unit: &str,
+    compile: impl for<'db> FnOnce(&'db DriverDataBase, TopLevelMod<'db>) -> Result<T, WebBundleError>,
+) -> Result<T, WebBundleError> {
+    let trace = std::env::var_os("FE_WEB_STAGE_TRACE").is_some()
+        || std::env::var_os("FE_WASM_LOWER_TRACE").is_some();
+    let started = std::time::Instant::now();
+    if trace {
+        eprintln!("[fe web compiler unit] begin unit={unit}");
+    }
+    let source_url = source_mod
+        .source_file(source_db)
+        .url(source_db)
+        .ok_or_else(|| {
+            WebBundleError::Lower("GPU actor source module has no compiler-owned URL".to_owned())
+        })?;
+    let stage_db = source_db.replicate_inputs();
+    let stage_file = stage_db
+        .workspace()
+        .get(&stage_db, &source_url)
+        .ok_or_else(|| {
+            WebBundleError::Lower(format!(
+                "isolated GPU stage database lost source `{source_url}`"
+            ))
+        })?;
+    let stage_mod = stage_db.top_mod(stage_file);
+    let result = compile(&stage_db, stage_mod);
+    drop(stage_db);
+    reclaim_completed_compiler_database();
+    if trace {
+        eprintln!(
+            "[fe web compiler unit] end unit={unit}, elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+    result
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn reclaim_completed_compiler_database() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn reclaim_completed_compiler_database() {}
 
 impl WebBundle {
     fn compile_actor_graph(
@@ -4145,19 +4212,26 @@ impl WebBundle {
                     ));
                 }
                 let vertex_entry = &stage.source_entry;
-                let package = mir::build_wasm_runtime_package_for_entries(
+                let artifact = with_isolated_compiler_database(
                     db,
                     top_mod,
-                    &[vertex_entry.clone(), fragment_entry.clone()],
-                )
-                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-                let artifact = compile_runtime_package_spirv_authored_raster(
-                    db,
-                    &package,
-                    vertex_entry,
                     fragment_entry,
-                )
-                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                    |stage_db, stage_mod| {
+                        let package = mir::build_wasm_runtime_package_for_entries(
+                            stage_db,
+                            stage_mod,
+                            &[vertex_entry.clone(), fragment_entry.clone()],
+                        )
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                        compile_runtime_package_spirv_authored_raster(
+                            stage_db,
+                            &package,
+                            vertex_entry,
+                            fragment_entry,
+                        )
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))
+                    },
+                )?;
                 let shader =
                     normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
                 validate_browser_wgsl(&shader)?;
@@ -4190,9 +4264,6 @@ impl WebBundle {
                 index += 2;
                 continue;
             }
-            let package =
-                mir::build_wasm_runtime_package_for_entry(db, top_mod, &stage.source_entry)
-                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
             let (artifact, dispatch, repeat, kind) = match stage.kind {
                 WebActorStageKind::Compute {
                     workgroup_size,
@@ -4205,38 +4276,65 @@ impl WebBundle {
                         .unwrap_or_default();
                     let context_leaves = (!builtin_arguments.is_empty())
                         .then_some(u32::try_from(builtin_arguments.len()).unwrap());
-                    let external = stage_external_resources(
+                    let artifact = with_isolated_compiler_database(
                         db,
-                        &package,
-                        &resources,
-                        Access::ReadWrite,
-                        context_leaves,
-                    )?;
-                    (
-                        compile_runtime_package_spirv_compute_with_interface(
-                            db,
-                            &package,
-                            workgroup_size,
-                            dispatch,
-                            &external,
-                            &builtin_arguments,
-                        ),
-                        Some(dispatch),
-                        repeat,
-                        "compute",
-                    )
+                        top_mod,
+                        &stage.source_entry,
+                        |stage_db, stage_mod| {
+                            let package = mir::build_wasm_runtime_package_for_entry(
+                                stage_db,
+                                stage_mod,
+                                &stage.source_entry,
+                            )
+                            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                            let external = stage_external_resources(
+                                stage_db,
+                                &package,
+                                &stage.source_entry,
+                                &resources,
+                                Access::ReadWrite,
+                                context_leaves,
+                            )?;
+                            compile_runtime_package_spirv_compute_with_interface(
+                                stage_db,
+                                &package,
+                                workgroup_size,
+                                dispatch,
+                                &external,
+                                &builtin_arguments,
+                            )
+                            .map_err(|error| WebBundleError::Lower(error.to_string()))
+                        },
+                    );
+                    (artifact, Some(dispatch), repeat, "compute")
                 }
                 WebActorStageKind::Fragment => {
-                    let external =
-                        stage_external_resources(db, &package, &resources, Access::Read, None)?;
-                    (
-                        compile_runtime_package_spirv_render_with_resources(
-                            db, &package, &external,
-                        ),
-                        None,
-                        1,
-                        "fragment",
-                    )
+                    let artifact = with_isolated_compiler_database(
+                        db,
+                        top_mod,
+                        &stage.source_entry,
+                        |stage_db, stage_mod| {
+                            let package = mir::build_wasm_runtime_package_for_entry(
+                                stage_db,
+                                stage_mod,
+                                &stage.source_entry,
+                            )
+                            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                            let external = stage_external_resources(
+                                stage_db,
+                                &package,
+                                &stage.source_entry,
+                                &resources,
+                                Access::Read,
+                                None,
+                            )?;
+                            compile_runtime_package_spirv_render_with_resources(
+                                stage_db, &package, &external,
+                            )
+                            .map_err(|error| WebBundleError::Lower(error.to_string()))
+                        },
+                    );
+                    (artifact, None, 1, "fragment")
                 }
                 WebActorStageKind::Vertex { .. } => unreachable!("handled as an adjacent pair"),
                 WebActorStageKind::RasterFragment { .. } => {
@@ -4495,7 +4593,9 @@ impl WebBundle {
         top_mod: TopLevelMod<'_>,
         options: WebBuildOptions,
     ) -> Result<Self, WebBundleError> {
-        if let Some(program) = actor_gpu_program(db, top_mod)?
+        let actor_program =
+            with_isolated_compiler_database(db, top_mod, "<actor-program>", actor_gpu_program)?;
+        if let Some(program) = actor_program
             && (!program.resources.is_empty()
                 || program.stages.iter().any(|stage| {
                     matches!(

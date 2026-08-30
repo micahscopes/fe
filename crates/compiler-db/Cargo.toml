@@ -12,3 +12,5 @@ common.workspace = true
 hir.workspace = true
 salsa.workspace = true
 
+[dev-dependencies]
+url.workspace = true

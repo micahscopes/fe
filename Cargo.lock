@@ -2922,6 +2922,7 @@ dependencies = [
  "fe-common",
  "fe-hir",
  "salsa",
+ "url",
 ]
 
 [[package]]

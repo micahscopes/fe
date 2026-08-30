@@ -5,7 +5,7 @@ use codespan_reporting::term::{
 };
 use common::file::File;
 use common::{
-    define_input_db,
+    InputDb, define_input_db,
     diagnostics::{
         CompleteDiagnostic, Severity, cmp_complete_diagnostics, trim_trailing_line_whitespace,
     },
@@ -25,6 +25,38 @@ use crate::diagnostics::ToCsDiag;
 define_input_db!(DriverDataBase);
 
 impl DriverDataBase {
+    /// Recreate only compiler inputs in a fresh Salsa database.
+    ///
+    /// Large multi-artifact builds can use this boundary to give each emitted
+    /// artifact a bounded query lifetime. Source files, the resolved dependency
+    /// graph, compiler options, and compilation settings are reproduced, while
+    /// parsed HIR, type-system queries, MIR packages, and backend state are not.
+    pub fn replicate_inputs(&self) -> Self {
+        let files = self
+            .workspace()
+            .all_files(self)
+            .iter()
+            .map(|(url, file)| (url, file.text(self).clone()))
+            .collect::<Vec<_>>();
+        let dependency_graph = self.dependency_graph();
+        let recovery_mode = self.compiler_options().recovery_mode(self);
+        let profile = self.compilation_settings().profile(self);
+
+        let mut replica = Self::default();
+        for (url, text) in files {
+            replica.workspace().update(&mut replica, url, text);
+        }
+        replica.graph = Some(dependency_graph.replicate_into(self, &replica));
+        replica.options = Some(common::options::CompilerOptions::new(
+            &replica,
+            recovery_mode,
+        ));
+        replica.settings = Some(common::compilation::CompilationSettings::new(
+            &replica, profile,
+        ));
+        replica
+    }
+
     // TODO: An temporary implementation for ui testing.
     pub fn run_on_top_mod<'db>(&'db self, top_mod: TopLevelMod<'db>) -> DiagnosticsCollection<'db> {
         self.run_on_file_with_pass_manager(top_mod, initialize_analysis_pass())
@@ -216,4 +248,46 @@ fn sort_complete_diagnostics(diags: &mut [CompleteDiagnostic]) {
 fn sort_and_dedup_complete_diagnostics(diags: &mut Vec<CompleteDiagnostic>) {
     sort_complete_diagnostics(diags);
     diags.dedup();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use salsa::Setter;
+
+    #[test]
+    fn replicated_inputs_preserve_configuration_without_sharing_files() {
+        let mut source = DriverDataBase::default();
+        let url: url::Url = "file:///isolated-stage/src/lib.fe".parse().unwrap();
+        source.workspace().update(
+            &mut source,
+            url.clone(),
+            "pub fn shade() -> u32 { 7 }".to_owned(),
+        );
+        source
+            .compiler_options()
+            .set_recovery_mode(&mut source)
+            .to(false);
+        source
+            .compilation_settings()
+            .set_profile(&mut source)
+            .to("release".into());
+
+        let mut replica = source.replicate_inputs();
+        let replicated_file = replica.workspace().get(&replica, &url).unwrap();
+        assert_eq!(
+            replicated_file.text(&replica),
+            "pub fn shade() -> u32 { 7 }"
+        );
+        assert!(!replica.compiler_options().recovery_mode(&replica));
+        assert_eq!(replica.compilation_settings().profile(&replica), "release");
+
+        replica.workspace().update(
+            &mut replica,
+            url.clone(),
+            "pub fn shade() -> u32 { 9 }".to_owned(),
+        );
+        let source_file = source.workspace().get(&source, &url).unwrap();
+        assert_eq!(source_file.text(&source), "pub fn shade() -> u32 { 7 }");
+    }
 }
