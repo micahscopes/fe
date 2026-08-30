@@ -2692,3 +2692,54 @@ fn contract_field_explicit_const_hole_is_flagged() {
     // The explicit hole is not numbered as a slot (only the inline string word).
     assert_eq!(field.slot_count, 1);
 }
+
+#[test]
+fn self_branded_adt_fields_do_not_reenter_layout_planning() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("self_branded_adt_fields_do_not_reenter_layout_planning.fe"),
+        r#"
+struct Region<Space, T> { offset: u32 }
+
+struct ProofTapeRegions {
+    r00: Region<ProofTapeRegions, u32>,
+    r01: Region<ProofTapeRegions, u32>,
+    r02: Region<ProofTapeRegions, u32>,
+    r03: Region<ProofTapeRegions, u32>,
+    r04: Region<ProofTapeRegions, u32>,
+    r05: Region<ProofTapeRegions, u32>,
+    r06: Region<ProofTapeRegions, u32>,
+    r07: Region<ProofTapeRegions, u32>,
+    r08: Region<ProofTapeRegions, u32>,
+    r09: Region<ProofTapeRegions, u32>,
+    r10: Region<ProofTapeRegions, u32>,
+    r11: Region<ProofTapeRegions, u32>,
+    r12: Region<ProofTapeRegions, u32>,
+    r13: Region<ProofTapeRegions, u32>,
+    r14: Region<ProofTapeRegions, u32>,
+    r15: Region<ProofTapeRegions, u32>,
+    r16: Region<ProofTapeRegions, u32>,
+    r17: Region<ProofTapeRegions, u32>,
+}
+
+fn consume(_ regions: ProofTapeRegions) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn self_layout_fast_path_preserves_recursive_type_diagnostic() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("self_layout_fast_path_preserves_recursive_type_diagnostic.fe"),
+        "struct Recursive { next: Recursive }",
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("recursive type definition"),
+        "expected recursive type diagnostic, got:\n{rendered}"
+    );
+}

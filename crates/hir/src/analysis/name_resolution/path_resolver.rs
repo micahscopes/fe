@@ -1933,6 +1933,7 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                         path,
                         adt_ref,
                         &args,
+                        scope,
                         assumptions,
                         minter,
                     )?)
@@ -2239,7 +2240,7 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                 } else {
                     // The variant was imported via `use`.
                     debug_assert!(path.parent(db).is_none());
-                    ty_from_adtref(db, path, var.enum_.into(), &[], assumptions, minter)?
+                    ty_from_adtref(db, path, var.enum_.into(), &[], scope, assumptions, minter)?
                 };
                 // TODO report error if args isn't empty
                 PathRes::EnumVariant(ResolvedVariant {
@@ -2272,6 +2273,7 @@ fn ty_from_adtref<'db>(
     path: PathId<'db>,
     adt_ref: AdtRef<'db>,
     args: &[TyId<'db>],
+    scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
     minter: &HoleMinter<'db>,
 ) -> PathResolutionResult<'db, TyId<'db>> {
@@ -2291,45 +2293,55 @@ fn ty_from_adtref<'db>(
         ConstDefaultCompletion::metadata(Some(path)),
         Some(minter),
     );
-    let layout_plan = if completed_args.len() == explicit_param_len {
-        adt_layout_hole_plan_with_explicit_args(db, adt, &completed_args)
-    } else {
-        adt_layout_hole_plan(db, adt)
-    };
+    let explicit_args_complete = completed_args.len() == explicit_param_len;
     completed_args.extend(layout_provided.iter().copied());
 
-    let provided_layout_len = layout_provided.len();
-    for (layout_idx, entry) in layout_plan
-        .entries()
-        .iter()
-        .copied()
-        .enumerate()
-        .skip(provided_layout_len)
-    {
-        completed_args.push(match entry.source {
-            // The plan occurrence was substituted in from an explicit arg:
-            // reuse that hole's identity so one logical hole stays one TyId
-            // across the arg position and the instantiated field types.
-            Some(placeholder) => placeholder,
-            None => layout_hole_with_fallback_ty(
-                db,
-                entry.hole_ty,
-                HoleId::structural(
+    // A reference to an ADT from its own definition participates in deriving
+    // that ADT's layout plan. Re-entering the plan here would scan the same
+    // fields again before the outer plan can finish. It also cannot discover
+    // an independent layout occurrence: any placeholders belong to the outer
+    // definition and are collected there. Keep explicitly written trailing
+    // args, but derive missing ones only at an application outside the ADT.
+    if scope.item() != adt_ref.as_item() {
+        let layout_plan = if explicit_args_complete {
+            adt_layout_hole_plan_with_explicit_args(db, adt, &completed_args[..explicit_param_len])
+        } else {
+            adt_layout_hole_plan(db, adt)
+        };
+
+        let provided_layout_len = layout_provided.len();
+        for (layout_idx, entry) in layout_plan
+            .entries()
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(provided_layout_len)
+        {
+            completed_args.push(match entry.source {
+                // The plan occurrence was substituted in from an explicit arg:
+                // reuse that hole's identity so one logical hole stays one TyId
+                // across the arg position and the instantiated field types.
+                Some(placeholder) => placeholder,
+                None => layout_hole_with_fallback_ty(
                     db,
                     entry.hole_ty,
-                    // Keep the template hole's origin so the trailing arg
-                    // stays attributable to the generic param that declared
-                    // it; identity comes from the freshly minted anchor.
-                    entry
-                        .template_origin
-                        .unwrap_or(StructuralHoleOrigin::ExplicitWildcard {
-                            site: LayoutHoleArgSite::Path(path),
-                            arg_idx: explicit_param_len + layout_idx,
-                        }),
-                    minter.mint(),
+                    HoleId::structural(
+                        db,
+                        entry.hole_ty,
+                        // Keep the template hole's origin so the trailing arg
+                        // stays attributable to the generic param that declared
+                        // it; identity comes from the freshly minted anchor.
+                        entry
+                            .template_origin
+                            .unwrap_or(StructuralHoleOrigin::ExplicitWildcard {
+                                site: LayoutHoleArgSite::Path(path),
+                                arg_idx: explicit_param_len + layout_idx,
+                            }),
+                        minter.mint(),
+                    ),
                 ),
-            ),
-        });
+            });
+        }
     }
 
     let applied =
