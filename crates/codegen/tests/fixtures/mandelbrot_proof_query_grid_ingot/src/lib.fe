@@ -25,6 +25,17 @@ use fri_structure_webgpu::{
     store_fri_round_placement,
 }
 use fri_baby_bear::fri_query_domain_tag
+use fri_commitment_webgpu::{
+    advance_fri_layer_commitment_lane,
+    advance_fri_tree_lane,
+    fri_commitment_progress_words,
+    fri_commitment_state_words,
+    fri_commitment_valid_words,
+    fri_commitment_workgroups,
+    fri_tree_schedule_steps,
+    initialize_fri_layer_commitment_lane,
+    initialize_fri_tree_lane,
+}
 use fri_opening_webgpu::compact_fri_round_openings
 use mandelbrot_proof_production_profile_baby_bear::{
     PRODUCTION_LDE_LENGTH,
@@ -35,6 +46,7 @@ use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
 use poseidon_baby_bear_webgpu::{
     INDEXED_DIGEST_SQUEEZE_STEPS,
     POSEIDON2_LANES,
+    POSEIDON2_STAGE_STEPS,
     advance_indexed_digest_squeeze_lane,
     indexed_digest_squeeze_progress_words,
     indexed_digest_squeeze_state_words,
@@ -110,8 +122,31 @@ const SIBLING_PROGRESS_START: u32 =
     SIBLING_CURSOR_START + SIBLING_CURSOR_WORDS.downcast_truncate()
 const OPENING_ACTIVITY_START: u32 =
     SIBLING_PROGRESS_START + SIBLING_ITEMS.downcast_truncate()
+const OPENING_ACTIVITY_END: u32 =
+    OPENING_ACTIVITY_START + LAYER_TREE_NODES.downcast_truncate()
+const FRI_COMMITMENT_STATES: usize = FOLDED_EVALUATIONS
+const FRI_COMMITMENT_STATE_WORDS: usize =
+    fri_commitment_state_words(FRI_COMMITMENT_STATES)
+const FRI_COMMITMENT_VALID_WORDS: usize =
+    fri_commitment_valid_words(FRI_COMMITMENT_STATES)
+const FRI_COMMITMENT_PROGRESS_WORDS: usize =
+    fri_commitment_progress_words(FRI_COMMITMENT_STATES)
+const FRI_COMMITMENT_GROUPS: usize =
+    fri_commitment_workgroups(FRI_COMMITMENT_STATES, THREADS)
+const FRI_TREE_STATES: usize = FOLDED_EVALUATIONS / 2
+const FRI_TREE_GROUPS: usize =
+    fri_commitment_workgroups(FRI_TREE_STATES, THREADS)
+const FRI_TREE_LEVELS: usize = PRODUCTION_LDE_LOG - 1
+const FRI_TREE_STEPS: usize = fri_tree_schedule_steps(FRI_TREE_LEVELS)
+const POSEIDON_STATE_START: u32 = OPENING_ACTIVITY_END
+const POSEIDON_VALID_START: u32 =
+    POSEIDON_STATE_START + FRI_COMMITMENT_STATE_WORDS.downcast_truncate()
+const POSEIDON_PROGRESS_START: u32 =
+    POSEIDON_VALID_START + FRI_COMMITMENT_VALID_WORDS.downcast_truncate()
+const FRI_NODE_VALID_START: u32 =
+    POSEIDON_PROGRESS_START + FRI_COMMITMENT_PROGRESS_WORDS.downcast_truncate()
 const PROOF_ARENA_WORDS: usize =
-    OPENING_ACTIVITY_START as usize + LAYER_TREE_NODES
+    FRI_NODE_VALID_START as usize + LAYER_TREE_NODES
 const COMPACT_VALID_START: u32 = 0
 const COMPACT_LEAF_COUNT_START: u32 = FRI_ROUNDS.downcast_truncate()
 const COMPACT_SIBLING_COUNT_START: u32 =
@@ -178,7 +213,20 @@ static_assert(LAYER_TREE_NODES == 16369)
 static_assert(ROUND_PLACEMENT_WORDS == 169)
 static_assert(PROOF_DATA_WORDS == 163716)
 static_assert(OPENING_ACTIVITY_START == 324798)
-static_assert(PROOF_ARENA_WORDS == 341167)
+static_assert(OPENING_ACTIVITY_END == 341167)
+static_assert(FRI_COMMITMENT_STATE_WORDS == 262112)
+static_assert(FRI_COMMITMENT_VALID_WORDS == 8191)
+static_assert(FRI_COMMITMENT_PROGRESS_WORDS == 131056)
+static_assert(FRI_COMMITMENT_GROUPS == 2048)
+static_assert(FRI_TREE_STATES == 4095)
+static_assert(FRI_TREE_GROUPS == 1024)
+static_assert(FRI_TREE_LEVELS == 12)
+static_assert(FRI_TREE_STEPS == 540)
+static_assert(POSEIDON_STATE_START == 341167)
+static_assert(POSEIDON_VALID_START == 603279)
+static_assert(POSEIDON_PROGRESS_START == 611470)
+static_assert(FRI_NODE_VALID_START == 742526)
+static_assert(PROOF_ARENA_WORDS == 758895)
 static_assert(COMPACT_METADATA_WORDS == 2889)
 static_assert(OPENING_METADATA_WORDS == 2975)
 
@@ -200,6 +248,106 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
             self.round_placements,
             lane,
             <FoldSchedule as FriSchedulePlacement>::fri_round_placement(lane),
+        )
+    }
+
+    fn initialize_fri_layer_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<FRI_COMMITMENT_GROUPS, 1, 1>,
+            >
+        )
+    {
+        initialize_fri_layer_commitment_lane<
+            FRI_ROUNDS,
+            FRI_COMMITMENT_STATES,
+            ROUND_PLACEMENT_WORDS,
+            PROOF_ARENA_WORDS,
+        >(
+            self.round_placements,
+            self.proof_arena,
+            0,
+            LAYER_TREE_START,
+            POSEIDON_STATE_START,
+            POSEIDON_VALID_START,
+            FRI_NODE_VALID_START,
+            POSEIDON_PROGRESS_START,
+            invocation,
+        )
+    }
+
+    fn advance_fri_layer_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    FRI_COMMITMENT_GROUPS,
+                    1,
+                    1,
+                    POSEIDON2_STAGE_STEPS,
+                >,
+            >
+        )
+    {
+        advance_fri_layer_commitment_lane<
+            FRI_ROUNDS,
+            FRI_COMMITMENT_STATES,
+            ROUND_PLACEMENT_WORDS,
+            PROOF_ARENA_WORDS,
+        >(
+            self.round_placements,
+            self.proof_arena,
+            LAYER_TREE_START,
+            POSEIDON_STATE_START,
+            POSEIDON_VALID_START,
+            FRI_NODE_VALID_START,
+            POSEIDON_PROGRESS_START,
+            invocation,
+        )
+    }
+
+    fn initialize_fri_layer_trees(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<FRI_TREE_GROUPS, 1, 1>,
+            >
+        )
+    {
+        initialize_fri_tree_lane<
+            FRI_TREE_STATES,
+            PROOF_ARENA_WORDS,
+        >(
+            self.proof_arena,
+            POSEIDON_PROGRESS_START,
+            invocation,
+        )
+    }
+
+    fn advance_fri_layer_trees(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<FRI_TREE_GROUPS, 1, 1, FRI_TREE_STEPS>,
+            >
+        )
+    {
+        advance_fri_tree_lane<
+            FRI_ROUNDS,
+            FRI_TREE_STATES,
+            FRI_TREE_LEVELS,
+            ROUND_PLACEMENT_WORDS,
+            PROOF_ARENA_WORDS,
+        >(
+            self.round_placements,
+            self.proof_arena,
+            LAYER_TREE_START,
+            POSEIDON_STATE_START,
+            POSEIDON_VALID_START,
+            FRI_NODE_VALID_START,
+            POSEIDON_PROGRESS_START,
+            invocation,
         )
     }
 

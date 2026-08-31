@@ -37,6 +37,7 @@ const ROUND_PLACEMENT_WORDS: usize = FRI_ROUNDS * ROUND_PLACEMENT_FIELDS;
 const FOLDED_EVALUATIONS: usize = 8191;
 const LAYER_TREE_NODES: usize = 16369;
 const FOLDED_EVALUATION_WORDS: usize = FOLDED_EVALUATIONS * EVALUATION_WORDS;
+const LAYER_TREE_START: usize = FOLDED_EVALUATION_WORDS;
 const LAYER_TREE_WORDS: usize = LAYER_TREE_NODES * DIGEST_WORDS;
 const PROOF_DATA_WORDS: usize = FOLDED_EVALUATION_WORDS + LAYER_TREE_WORDS;
 const EVALUATION_CURSOR_WORDS: usize = EVALUATION_ITEMS * QUERY_CURSOR_FIELDS;
@@ -46,7 +47,15 @@ const OPENING_ACTIVITY_START: usize = PROOF_DATA_WORDS
     + EVALUATION_ITEMS
     + SIBLING_CURSOR_WORDS
     + SIBLING_ITEMS;
-const PROOF_ARENA_WORDS: usize = OPENING_ACTIVITY_START + LAYER_TREE_NODES;
+const OPENING_ACTIVITY_END: usize = OPENING_ACTIVITY_START + LAYER_TREE_NODES;
+const FRI_COMMITMENT_STATE_WORDS: usize = FOLDED_EVALUATIONS * 2 * POSEIDON_WIDTH;
+const FRI_COMMITMENT_VALID_WORDS: usize = FOLDED_EVALUATIONS;
+const FRI_COMMITMENT_PROGRESS_WORDS: usize = FOLDED_EVALUATIONS * POSEIDON_WIDTH;
+const POSEIDON_STATE_START: usize = OPENING_ACTIVITY_END;
+const POSEIDON_VALID_START: usize = POSEIDON_STATE_START + FRI_COMMITMENT_STATE_WORDS;
+const POSEIDON_PROGRESS_START: usize = POSEIDON_VALID_START + FRI_COMMITMENT_VALID_WORDS;
+const FRI_NODE_VALID_START: usize = POSEIDON_PROGRESS_START + FRI_COMMITMENT_PROGRESS_WORDS;
+const PROOF_ARENA_WORDS: usize = FRI_NODE_VALID_START + LAYER_TREE_NODES;
 const COMPACT_METADATA_WORDS: usize = 3 * FRI_ROUNDS + EVALUATION_ITEMS;
 const OPENING_PADDING_START: usize = COMPACT_METADATA_WORDS;
 const OPENING_METADATA_WORDS: usize = COMPACT_METADATA_WORDS + EVALUATION_PADDING + SIBLING_PADDING;
@@ -61,6 +70,12 @@ const EVALUATION_PADDING: usize = EVALUATION_GROUPS as usize * THREADS as usize 
 const SIBLING_PADDING: usize = SIBLING_GROUPS as usize * THREADS as usize - SIBLING_ITEMS;
 const QUERY_SAMPLE_GROUPS: u32 = 29;
 const QUERY_SAMPLE_STEPS: u32 = 89;
+const POSEIDON_STAGE_STEPS: u32 = 44;
+const FRI_COMMITMENT_GROUPS: u32 = 2048;
+const FRI_TREE_STATES: usize = FOLDED_EVALUATIONS / 2;
+const FRI_TREE_GROUPS: u32 = 1024;
+const FRI_TREE_LEVELS: u32 = 12;
+const FRI_TREE_STEPS: u32 = FRI_TREE_LEVELS * (1 + POSEIDON_STAGE_STEPS);
 const QUERY_SAMPLE_WORK_ITEMS: usize = QUERY_COUNT * POSEIDON_WIDTH;
 const QUERY_SAMPLE_PADDING: usize =
     QUERY_SAMPLE_GROUPS as usize * THREADS as usize - QUERY_SAMPLE_WORK_ITEMS;
@@ -156,6 +171,16 @@ fn read_words(
     source: &wgpu::Buffer,
     words: usize,
 ) -> Vec<u32> {
+    read_words_at(device, queue, source, 0, words)
+}
+
+fn read_words_at(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: &wgpu::Buffer,
+    start_words: usize,
+    words: usize,
+) -> Vec<u32> {
     let size = (words * 4) as u64;
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("production query-grid readback"),
@@ -166,7 +191,7 @@ fn read_words(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("production query-grid readback encoder"),
     });
-    encoder.copy_buffer_to_buffer(source, 0, &staging, 0, size);
+    encoder.copy_buffer_to_buffer(source, (start_words * 4) as u64, &staging, 0, size);
     queue.submit(Some(encoder.finish()));
 
     let slice = staging.slice(..);
@@ -341,14 +366,58 @@ fn proof_word(domain: u32, index: usize, lane: usize) -> u32 {
 }
 
 fn reference_proof_arena() -> Vec<u32> {
-    let evaluations = (0..FOLDED_EVALUATIONS)
+    let arena = (0..FOLDED_EVALUATIONS)
         .flat_map(|index| (0..EVALUATION_WORDS).map(move |lane| proof_word(1, index, lane)));
-    let tree = (0..LAYER_TREE_NODES)
-        .flat_map(|index| (0..DIGEST_WORDS).map(move |lane| proof_word(2, index, lane)));
-    let mut arena = evaluations.chain(tree).collect::<Vec<_>>();
-    assert_eq!(arena.len(), PROOF_DATA_WORDS);
+    let mut arena = arena.collect::<Vec<_>>();
+    assert_eq!(arena.len(), FOLDED_EVALUATION_WORDS);
     arena.resize(PROOF_ARENA_WORDS, 0);
     arena
+}
+
+fn fri_layer_row_tag(round: u32) -> u32 {
+    assert!((1..=99).contains(&round));
+    u32::from_be_bytes([
+        b'F',
+        b'R',
+        b'0' + (round / 10) as u8,
+        b'0' + (round % 10) as u8,
+    ])
+}
+
+fn reference_layer_tree_words(rounds: &[RoundPlacement]) -> Vec<u32> {
+    let mut all_nodes = Vec::<[u32; DIGEST_WORDS]>::with_capacity(LAYER_TREE_NODES);
+    for placement in rounds {
+        assert_eq!(all_nodes.len(), placement.tree_offset as usize);
+        let round_start = all_nodes.len();
+        for leaf in 0..placement.output_width as usize {
+            let evaluation = placement.output_offset as usize + leaf;
+            let mut message = vec![fri_layer_row_tag(placement.round), EVALUATION_WORDS as u32];
+            message.extend((0..EVALUATION_WORDS).map(|lane| proof_word(1, evaluation, lane)));
+            all_nodes.push(reference_sponge(&message));
+        }
+
+        let mut level_start = round_start;
+        let mut width = placement.output_width as usize;
+        while width > 1 {
+            for parent in 0..width / 2 {
+                let left = all_nodes[level_start + 2 * parent];
+                let right = all_nodes[level_start + 2 * parent + 1];
+                let mut input = [0; POSEIDON_WIDTH];
+                input[..DIGEST_WORDS].copy_from_slice(&left);
+                input[DIGEST_WORDS..].copy_from_slice(&right);
+                all_nodes.push(
+                    reference_permutation(input)[..DIGEST_WORDS]
+                        .try_into()
+                        .unwrap(),
+                );
+            }
+            level_start += width;
+            width /= 2;
+        }
+        assert_eq!(all_nodes.len() - round_start, placement.tree_nodes as usize);
+    }
+    assert_eq!(all_nodes.len(), LAYER_TREE_NODES);
+    all_nodes.into_iter().flatten().collect()
 }
 
 fn expected_evaluation_openings(queries: &[u32], rounds: &[RoundPlacement]) -> Vec<u32> {
@@ -363,13 +432,17 @@ fn expected_evaluation_openings(queries: &[u32], rounds: &[RoundPlacement]) -> V
         .collect()
 }
 
-fn expected_sibling_openings(queries: &[u32], rounds: &[RoundPlacement]) -> Vec<u32> {
+fn expected_sibling_openings(
+    queries: &[u32],
+    rounds: &[RoundPlacement],
+    tree_words: &[u32],
+) -> Vec<u32> {
     queries
         .iter()
         .flat_map(|query| {
             (0..SIBLINGS_PER_QUERY).flat_map(move |sibling| {
                 let node = reference_tree_node(rounds, sibling as u32, *query);
-                (0..DIGEST_WORDS).map(move |lane| proof_word(2, node, lane))
+                (0..DIGEST_WORDS).map(move |lane| tree_words[node * DIGEST_WORDS + lane])
             })
         })
         .collect()
@@ -378,6 +451,7 @@ fn expected_sibling_openings(queries: &[u32], rounds: &[RoundPlacement]) -> Vec<
 fn expected_compact_openings(
     queries: &[u32],
     rounds: &[RoundPlacement],
+    tree_words: &[u32],
 ) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
     let mut metadata = vec![0; COMPACT_METADATA_WORDS];
     let mut values = vec![0; EVALUATION_ITEMS * EVALUATION_WORDS];
@@ -428,12 +502,9 @@ fn expected_compact_openings(
             for node in 0..width {
                 if active[level_start + node] && !active[level_start + (node ^ 1)] {
                     for lane in 0..DIGEST_WORDS {
+                        let tree_node = placement.tree_offset as usize + level_start + (node ^ 1);
                         siblings[sibling_word_start + sibling_count * DIGEST_WORDS + lane] =
-                            proof_word(
-                                2,
-                                placement.tree_offset as usize + level_start + (node ^ 1),
-                                lane,
-                            );
+                            tree_words[tree_node * DIGEST_WORDS + lane];
                     }
                     sibling_count += 1;
                 }
@@ -488,19 +559,71 @@ struct ExecutablePass {
 
 #[test]
 fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
+    assert_eq!(OPENING_ACTIVITY_END, 341_167);
+    assert_eq!(POSEIDON_STATE_START, 341_167);
+    assert_eq!(POSEIDON_VALID_START, 603_279);
+    assert_eq!(POSEIDON_PROGRESS_START, 611_470);
+    assert_eq!(FRI_NODE_VALID_START, 742_526);
+    assert_eq!(PROOF_ARENA_WORDS, 758_895);
+    assert_eq!(FRI_TREE_STATES, 4_095);
+    assert_eq!(FRI_TREE_STEPS, 540);
     let compile_started = Instant::now();
     let bundle = compile_query_grid();
     let compile_elapsed = compile_started.elapsed();
-    assert_eq!(bundle.manifest.passes.len(), 6);
+    assert_eq!(bundle.manifest.passes.len(), 10);
     let prepare_pass = &bundle.manifest.passes[0];
-    let sample_pass = &bundle.manifest.passes[1];
-    let evaluation_pass = &bundle.manifest.passes[2];
-    let sibling_pass = &bundle.manifest.passes[3];
-    let compact_pass = &bundle.manifest.passes[4];
+    let initialize_commitments_pass = &bundle.manifest.passes[1];
+    let advance_commitments_pass = &bundle.manifest.passes[2];
+    let initialize_trees_pass = &bundle.manifest.passes[3];
+    let advance_trees_pass = &bundle.manifest.passes[4];
+    let sample_pass = &bundle.manifest.passes[5];
+    let evaluation_pass = &bundle.manifest.passes[6];
+    let sibling_pass = &bundle.manifest.passes[7];
+    let compact_pass = &bundle.manifest.passes[8];
     assert_eq!(prepare_pass.source_entry, "prepare_rounds");
     assert_eq!(prepare_pass.layout.workgroup_size, [THREADS, 1, 1]);
     assert_eq!(prepare_pass.dispatch, Some([1, 1, 1]));
     assert_eq!(prepare_pass.repeat, 1);
+    assert_eq!(
+        initialize_commitments_pass.source_entry,
+        "initialize_fri_layer_commitments",
+    );
+    assert_eq!(
+        initialize_commitments_pass.layout.workgroup_size,
+        [THREADS, 1, 1],
+    );
+    assert_eq!(
+        initialize_commitments_pass.dispatch,
+        Some([FRI_COMMITMENT_GROUPS, 1, 1]),
+    );
+    assert_eq!(initialize_commitments_pass.repeat, 1);
+    assert_eq!(
+        advance_commitments_pass.source_entry,
+        "advance_fri_layer_commitments",
+    );
+    assert_eq!(
+        advance_commitments_pass.layout.workgroup_size,
+        [THREADS, 1, 1],
+    );
+    assert_eq!(
+        advance_commitments_pass.dispatch,
+        Some([FRI_COMMITMENT_GROUPS, 1, 1]),
+    );
+    assert_eq!(advance_commitments_pass.repeat, POSEIDON_STAGE_STEPS);
+    assert_eq!(
+        initialize_trees_pass.source_entry,
+        "initialize_fri_layer_trees",
+    );
+    assert_eq!(initialize_trees_pass.layout.workgroup_size, [THREADS, 1, 1]);
+    assert_eq!(
+        initialize_trees_pass.dispatch,
+        Some([FRI_TREE_GROUPS, 1, 1]),
+    );
+    assert_eq!(initialize_trees_pass.repeat, 1);
+    assert_eq!(advance_trees_pass.source_entry, "advance_fri_layer_trees");
+    assert_eq!(advance_trees_pass.layout.workgroup_size, [THREADS, 1, 1]);
+    assert_eq!(advance_trees_pass.dispatch, Some([FRI_TREE_GROUPS, 1, 1]),);
+    assert_eq!(advance_trees_pass.repeat, FRI_TREE_STEPS);
     assert_eq!(sample_pass.source_entry, "sample_queries");
     assert_eq!(sample_pass.layout.workgroup_size, [THREADS, 1, 1]);
     assert_eq!(sample_pass.dispatch, Some([QUERY_SAMPLE_GROUPS, 1, 1]));
@@ -518,9 +641,9 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     assert_eq!(compact_pass.dispatch, Some([1, 1, 1]));
     assert_eq!(compact_pass.repeat, 1);
 
-    for (pass, shader) in bundle.manifest.passes[..5]
+    for (pass, shader) in bundle.manifest.passes[..9]
         .iter()
-        .zip(&bundle.pass_wgsl[..5])
+        .zip(&bundle.pass_wgsl[..9])
     {
         let module = naga::front::wgsl::parse_str(&shader.source)
             .unwrap_or_else(|error| panic!("{} WGSL parse failed: {error:?}", pass.source_entry));
@@ -613,9 +736,9 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     );
 
     let mut executable = Vec::new();
-    for (pass, shader) in bundle.manifest.passes[..5]
+    for (pass, shader) in bundle.manifest.passes[..9]
         .iter()
-        .zip(&bundle.pass_wgsl[..5])
+        .zip(&bundle.pass_wgsl[..9])
     {
         assert!(
             pass.layout.bindings.iter().all(|binding| {
@@ -738,7 +861,7 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     let mut raw_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("production query-grid raw opening execution"),
     });
-    for pass in &executable[..4] {
+    for pass in &executable[..8] {
         let mut compute = raw_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Fe-derived production raw query grid"),
             timestamp_writes: None,
@@ -773,6 +896,20 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
         &resources["round_placements"],
         ROUND_PLACEMENT_WORDS,
     );
+    let layer_tree_words = read_words_at(
+        &device,
+        &queue,
+        &resources["proof_arena"],
+        LAYER_TREE_START,
+        LAYER_TREE_WORDS,
+    );
+    let layer_tree_validity = read_words_at(
+        &device,
+        &queue,
+        &resources["proof_arena"],
+        FRI_NODE_VALID_START,
+        LAYER_TREE_NODES,
+    );
     let evaluation_openings = read_words(
         &device,
         &queue,
@@ -786,7 +923,7 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
         SIBLING_ITEMS * DIGEST_WORDS,
     );
 
-    let compact_pass = &executable[4];
+    let compact_pass = &executable[8];
     let mut compact_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("production query-grid compact opening execution"),
     });
@@ -878,10 +1015,20 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     );
 
     let expected_rounds = reference_round_placements();
+    let expected_layer_tree_words = reference_layer_tree_words(&expected_rounds);
     assert_eq!(
         round_placements,
         flattened_round_placements(&expected_rounds),
         "the device-resident FRI schedule must match the independent recurrence",
+    );
+    assert_eq!(
+        layer_tree_validity,
+        vec![1; LAYER_TREE_NODES],
+        "every device-produced FRI Merkle node must carry valid ancestry",
+    );
+    assert_eq!(
+        layer_tree_words, expected_layer_tree_words,
+        "every FRI leaf and parent digest must match the independent Plonky3 tree",
     );
     assert_eq!(
         evaluation_openings,
@@ -890,11 +1037,19 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     );
     assert_eq!(
         sibling_openings,
-        expected_sibling_openings(&expected_query_indices, &expected_rounds),
+        expected_sibling_openings(
+            &expected_query_indices,
+            &expected_rounds,
+            &expected_layer_tree_words,
+        ),
         "every production sibling lane must extract its independently derived digest",
     );
     let (expected_metadata, expected_compact_evaluations, expected_compact_siblings) =
-        expected_compact_openings(&expected_query_indices, &expected_rounds);
+        expected_compact_openings(
+            &expected_query_indices,
+            &expected_rounds,
+            &expected_layer_tree_words,
+        );
     assert_eq!(
         compact_metadata,
         expected_metadata.as_slice(),
@@ -921,8 +1076,9 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     eprintln!(
         "  production query grid: adapter={adapter_name:?}, compile={compile_elapsed:?}, \
          execute_and_read={execution_elapsed:?}, query_samples={QUERY_COUNT}, \
-         evaluation_items={EVALUATION_ITEMS}, sibling_items={SIBLING_ITEMS}, wgsl_bytes={}",
-        bundle.pass_wgsl[..5]
+         merkle_nodes={LAYER_TREE_NODES}, evaluation_items={EVALUATION_ITEMS}, \
+         sibling_items={SIBLING_ITEMS}, wgsl_bytes={}",
+        bundle.pass_wgsl[..9]
             .iter()
             .map(|shader| shader.source.len())
             .sum::<usize>(),

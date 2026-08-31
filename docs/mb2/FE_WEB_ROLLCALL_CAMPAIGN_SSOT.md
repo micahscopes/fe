@@ -3095,15 +3095,32 @@ fallback. The semantic receipts are:
    executed raw extraction, in-place compaction, and all software-GPU readbacks
    on llvmpipe in 417.93 milliseconds.
 
-   The proof arena remains deliberately synthetic oracle input at this
-   boundary. These gates prove device-resident selection and canonical
-   compaction wiring, not authentication by the preceding production FRI and
-   Merkle stages. Next connect the arena to those real producers and encode the
-   compact prefixes into the canonical receipt without introducing a host-side
-   query table. Physical Radeon execution remains a separate required gate.
-   The current cold-start cost also makes pipeline caching and
-   semantics-preserving pass fusion a required practicality slice before
-   scaling domains or integrating the gallery.
+   The next producer checkpoint removes synthetic Merkle nodes from that
+   arena. `fri_commitment_webgpu` interprets all 8,191 retained quartic FRI
+   evaluations as domain-tagged Poseidon2 leaves, then builds the thirteen
+   fixed left/right trees level by level. The shared staged Poseidon machine
+   now accepts caller-owned storage regions, so leaf and parent placement reuse
+   one permutation denotation rather than copying its rounds into the query
+   actor. The actor remains at seven resident storage resources plus its
+   fail-closed trap. Its four additional pass roles and their dispatch counts
+   are derived from the FRI schedule sizes: 2,048 leaf workgroups for 44
+   permutation steps and 1,024 parent workgroups for 540 level-ordered steps.
+   The release llvmpipe gate seeds only the evaluations and compares every one
+   of 16,369 emitted node digests and validity bits against an independently
+   constructed Plonky3 tree. All 114 sampled queries, raw openings, compact
+   prefixes, padding receipts, and bounds traps remain exact. Compilation of
+   the nine compute shaders took 281.24 seconds and emitted 1,479,842 WGSL
+   bytes; execution plus all readbacks took 1.935 seconds on llvmpipe.
+
+   The arena still receives synthetic folded evaluations at this boundary.
+   The gate now proves real device-resident Poseidon/Merkle production plus
+   selection and canonical compaction, but it does not yet prove that those
+   evaluations came from the production composition and FRI fold chain. Next
+   connect those producers, then encode the compact prefixes into the canonical
+   receipt without introducing a host-side query table. The shader size and
+   cold compilation time make semantics-preserving pass fusion through the
+   typed factor/workgroup interpreter an immediate practicality slice. Physical
+   Radeon execution remains a separate required gate.
    The first complete 49-pass replay exposed a compiler semantic defect before
    this gate could be claimed: Runtime MIR aggregate facts retained the first
    structural value of a reassigned local, so an inlined quartic constraint

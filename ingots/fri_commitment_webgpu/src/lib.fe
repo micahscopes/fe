@@ -1,0 +1,377 @@
+//! Device-resident Poseidon2 commitments for an Fe-derived FRI schedule.
+//!
+//! FRI round placement fixes the ordered semantic trees. This interpreter
+//! places all independent leaf commitments into one storage grid, then walks
+//! those trees level by level without changing their left/right topology.
+//! The dense portable grid is an exactness baseline for later packed, Bush,
+//! subgroup, and workgroup-shared schedule interpreters.
+
+use fri_baby_bear::fri_layer_row_domain_tag
+use fri_structure_webgpu::load_fri_round_placement
+use poseidon_baby_bear::{
+    DIGEST_FIELDS,
+    Poseidon2Digest,
+    Poseidon2WorkgroupPlan,
+    Poseidon2WorkgroupSchedule,
+    begin_compression_placement,
+    begin_ext4_commitment_placement_tag,
+}
+use poseidon_baby_bear_webgpu::{
+    POSEIDON2_LANES,
+    POSEIDON2_STAGE_STEPS,
+    advance_poseidon2_permutation_lane,
+    initialize_poseidon2_permutation_lane,
+    poseidon2_permutation_digest,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+
+pub const fn fri_commitment_state_words(_ states: usize) -> usize {
+    states * 2 * POSEIDON2_LANES
+}
+
+pub const fn fri_commitment_valid_words(_ states: usize) -> usize { states }
+
+pub const fn fri_commitment_progress_words(_ states: usize) -> usize {
+    states * POSEIDON2_LANES
+}
+
+pub const fn fri_commitment_workgroups(
+    _ states: usize,
+    _ threads: usize,
+) -> usize {
+    if threads == 0 { return 0 }
+    let work_items = states * POSEIDON2_LANES
+    (work_items + threads - 1) / threads
+}
+
+pub const fn fri_tree_schedule_steps(_ levels: usize) -> usize {
+    levels * (1 + POSEIDON2_STAGE_STEPS)
+}
+
+#[inline(always)]
+fn load_ext4<const ARENA_WORDS: usize>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ start: u32,
+    _ index: u32,
+) -> BabyBearExt4 {
+    let base = start + index * 4
+    BabyBearExt4::from_coefficients([
+        BabyBear::from_u32(arena.load(index: base)),
+        BabyBear::from_u32(arena.load(index: base + 1)),
+        BabyBear::from_u32(arena.load(index: base + 2)),
+        BabyBear::from_u32(arena.load(index: base + 3)),
+    ])
+}
+
+#[inline(always)]
+fn store_digest<const ARENA_WORDS: usize>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ tree_start: u32,
+    _ node: u32,
+    _ digest: Poseidon2Digest,
+) {
+    let base = tree_start + node * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        arena.store(
+            index: base + field,
+            value: digest.field(field).to_u32(),
+        )
+        field = field + 1
+    }
+}
+
+#[inline(always)]
+fn load_digest<const ARENA_WORDS: usize>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ tree_start: u32,
+    _ node: u32,
+) -> Poseidon2Digest {
+    let base = tree_start + node * DIGEST_FIELDS.downcast_truncate()
+    Poseidon2Digest::from_u32s([
+        arena.load(index: base),
+        arena.load(index: base + 1),
+        arena.load(index: base + 2),
+        arena.load(index: base + 3),
+        arena.load(index: base + 4),
+        arena.load(index: base + 5),
+        arena.load(index: base + 6),
+        arena.load(index: base + 7),
+    ])
+}
+
+#[inline(always)]
+fn tree_level_offset(_ width: u32, _ level: u32) -> u32 {
+    let mut offset: u32 = 0
+    let mut level_width = width
+    let mut cursor: u32 = 0
+    while cursor < level {
+        offset = offset + level_width
+        level_width = level_width / 2
+        cursor = cursor + 1
+    }
+    offset
+}
+
+/// Initialize every scheduled FRI evaluation as one independent Poseidon2
+/// leaf state. Evaluation and tree offsets are schedule-derived.
+pub fn initialize_fri_layer_commitment_lane<
+    const ROUNDS: usize,
+    const STATES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ evaluation_start: u32,
+    _ tree_start: u32,
+    _ state_start: u32,
+    _ valid_start: u32,
+    _ node_valid_start: u32,
+    _ progress_start: u32,
+    _ invocation: ComputeInvocation,
+) {
+    let global_lane = invocation.global.x
+    if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
+        return
+    }
+    let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
+    let state = global_lane / lanes
+    let field_lane = global_lane % lanes
+    let mut selected: u32 = 0
+    let mut round_tag: u32 = 0
+    let mut tree_node: u32 = 0
+    let mut round: u32 = 0
+    while round < ROUNDS.downcast_truncate() {
+        let placement = load_fri_round_placement<ROUND_WORDS>(rounds, round)
+        let within = placement.valid
+            && state >= placement.output_offset
+            && state < placement.output_offset + placement.output_width
+        if selected == 0 && within {
+            selected = 1
+            round_tag = fri_layer_row_domain_tag(placement.round)
+            tree_node = placement.tree_offset
+                + state - placement.output_offset
+        }
+        round = round + 1
+    }
+    let evaluation = load_ext4(arena, evaluation_start, state)
+    let permutation = begin_ext4_commitment_placement_tag(
+        round_tag,
+        evaluation,
+    )
+    initialize_poseidon2_permutation_lane(
+        arena,
+        state_start,
+        valid_start,
+        state,
+        field_lane,
+        ref permutation,
+        selected == 1,
+    )
+    arena.store(index: progress_start + global_lane, value: 0)
+    if field_lane == 0 && selected == 1 {
+        arena.store(index: node_valid_start + tree_node, value: 0)
+    }
+}
+
+/// Advance every leaf state through the shared Poseidon2 stage schedule and
+/// materialize the completed digest in its exact semantic tree position.
+pub fn advance_fri_layer_commitment_lane<
+    const ROUNDS: usize,
+    const STATES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ tree_start: u32,
+    _ state_start: u32,
+    _ valid_start: u32,
+    _ node_valid_start: u32,
+    _ progress_start: u32,
+    _ invocation: ComputeInvocation,
+) {
+    let global_lane = invocation.global.x
+    if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
+        return
+    }
+    let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
+    let state = global_lane / lanes
+    let field_lane = global_lane % lanes
+    let progress_index = progress_start + global_lane
+    let step = arena.load(index: progress_index)
+    if step >= POSEIDON2_STAGE_STEPS.downcast_truncate() { return }
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if step < transition {
+        let advanced = advance_poseidon2_permutation_lane(
+            arena,
+            state_start,
+            valid_start,
+            state,
+            field_lane,
+            step,
+        )
+        if !advanced && field_lane == 0 {
+            arena.store(index: valid_start + state, value: 0)
+        }
+    } else if field_lane == 0 {
+        let mut selected: u32 = 0
+        let mut tree_node: u32 = 0
+        let mut round: u32 = 0
+        while round < ROUNDS.downcast_truncate() {
+            let placement = load_fri_round_placement<ROUND_WORDS>(rounds, round)
+            let within = placement.valid
+                && state >= placement.output_offset
+                && state < placement.output_offset + placement.output_width
+            if selected == 0 && within {
+                selected = 1
+                tree_node = placement.tree_offset
+                    + state - placement.output_offset
+            }
+            round = round + 1
+        }
+        let valid = selected == 1
+            && arena.load(index: valid_start + state) == 1
+        store_digest(
+            arena,
+            tree_start,
+            tree_node,
+            poseidon2_permutation_digest(arena, state_start, state),
+        )
+        arena.store(
+            index: node_valid_start + tree_node,
+            value: if valid { 1 } else { 0 },
+        )
+    }
+    arena.store(index: progress_index, value: step + 1)
+}
+
+/// Reset the per-lane cursor used by the level-ordered tree interpreter.
+pub fn initialize_fri_tree_lane<
+    const STATES: usize,
+    const ARENA_WORDS: usize,
+>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ progress_start: u32,
+    _ invocation: ComputeInvocation,
+) {
+    let global_lane = invocation.global.x
+    if global_lane < (STATES * POSEIDON2_LANES).downcast_truncate() {
+        arena.store(index: progress_start + global_lane, value: 0)
+    }
+}
+
+/// Advance all FRI trees through one dense, level-ordered schedule step.
+/// Parent tasks at a level are independent and retain exact left/right order.
+pub fn advance_fri_tree_lane<
+    const ROUNDS: usize,
+    const STATES: usize,
+    const LEVELS: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ tree_start: u32,
+    _ state_start: u32,
+    _ valid_start: u32,
+    _ node_valid_start: u32,
+    _ progress_start: u32,
+    _ invocation: ComputeInvocation,
+) {
+    let global_lane = invocation.global.x
+    if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
+        return
+    }
+    let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
+    let state = global_lane / lanes
+    let field_lane = global_lane % lanes
+    let progress_index = progress_start + global_lane
+    let step = arena.load(index: progress_index)
+    if step >= fri_tree_schedule_steps(LEVELS).downcast_truncate() { return }
+    let level_steps: u32 = (1 + POSEIDON2_STAGE_STEPS).downcast_truncate()
+    let level = step / level_steps
+    let relative = step % level_steps
+
+    let mut selected: u32 = 0
+    let mut remaining = state
+    let mut left_node: u32 = 0
+    let mut right_node: u32 = 0
+    let mut parent_node: u32 = 0
+    let mut round: u32 = 0
+    while round < ROUNDS.downcast_truncate() {
+        let placement = load_fri_round_placement<ROUND_WORDS>(rounds, round)
+        let child_width = placement.output_width >> level
+        let parent_width = child_width / 2
+        if selected == 0 && placement.valid && parent_width > 0 {
+            if remaining < parent_width {
+                selected = 1
+                let child_offset = tree_level_offset(
+                    placement.output_width,
+                    level,
+                )
+                let parent_offset = child_offset + child_width
+                left_node = placement.tree_offset + child_offset
+                    + remaining + remaining
+                right_node = left_node + 1
+                parent_node = placement.tree_offset + parent_offset
+                    + remaining
+            } else {
+                remaining = remaining - parent_width
+            }
+        }
+        round = round + 1
+    }
+
+    if selected == 1 {
+        if relative == 0 {
+            let permutation = begin_compression_placement(
+                load_digest(arena, tree_start, left_node),
+                load_digest(arena, tree_start, right_node),
+            )
+            initialize_poseidon2_permutation_lane(
+                arena,
+                state_start,
+                valid_start,
+                state,
+                field_lane,
+                ref permutation,
+                arena.load(index: node_valid_start + left_node) == 1
+                    && arena.load(index: node_valid_start + right_node) == 1,
+            )
+        } else {
+            let hash_step = relative - 1
+            let transition =
+                <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+            if hash_step < transition {
+                let advanced = advance_poseidon2_permutation_lane(
+                    arena,
+                    state_start,
+                    valid_start,
+                    state,
+                    field_lane,
+                    hash_step,
+                )
+                if !advanced && field_lane == 0 {
+                    arena.store(index: valid_start + state, value: 0)
+                }
+            } else if field_lane == 0 {
+                let valid = arena.load(index: valid_start + state) == 1
+                store_digest(
+                    arena,
+                    tree_start,
+                    parent_node,
+                    poseidon2_permutation_digest(arena, state_start, state),
+                )
+                arena.store(
+                    index: node_valid_start + parent_node,
+                    value: if valid { 1 } else { 0 },
+                )
+            }
+        }
+    }
+    arena.store(index: progress_index, value: step + 1)
+}

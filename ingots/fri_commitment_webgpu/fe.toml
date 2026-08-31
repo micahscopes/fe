@@ -1,0 +1,12 @@
+[ingot]
+name = "fri_commitment_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"
+fri_baby_bear = "../fri_baby_bear"
+fri_structure_webgpu = "../fri_structure_webgpu"
+poseidon_baby_bear = "../poseidon_baby_bear"
+poseidon_baby_bear_webgpu = "../poseidon_baby_bear_webgpu"
+precision = "../../demos/sketches/precision"
+std = "../std"

@@ -98,19 +98,73 @@ fn state_buffer_start(_ state: u32, _ secondary: bool) -> u32 {
 }
 
 #[inline(always)]
-fn load_state_buffer<const WORKSPACE_WORDS: usize>(
+fn storage_state_buffer_start(
+    _ state_start: u32,
+    _ state: u32,
+    _ secondary: bool,
+) -> u32 {
+    state_start + state_buffer_start(state, secondary)
+}
+
+#[inline(always)]
+fn load_storage_state_buffer<const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state_start: u32,
     _ state: u32,
     _ secondary: bool,
 ) -> [u32; POSEIDON2_LANES] {
     let mut words = [0; POSEIDON2_LANES]
-    let start = state_buffer_start(state, secondary)
+    let start = storage_state_buffer_start(state_start, state, secondary)
     let mut lane: usize = 0
     while lane < POSEIDON2_LANES {
         words[lane] = workspace.load(index: start + lane.downcast_truncate())
         lane = lane + 1
     }
     words
+}
+
+#[inline(always)]
+fn load_state_buffer<const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state: u32,
+    _ secondary: bool,
+) -> [u32; POSEIDON2_LANES] {
+    load_storage_state_buffer(workspace, 0, state, secondary)
+}
+
+/// Initialize one field lane of a storage-resident Poseidon2 permutation.
+///
+/// `state_start` owns two width-16 buffers per logical state. `valid_start`
+/// owns one validity word per state. Callers derive physical batching and
+/// progress placement independently from this exact permutation machine.
+#[inline(always)]
+pub fn initialize_poseidon2_permutation_lane<
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state_start: u32,
+    _ valid_start: u32,
+    _ state: u32,
+    _ field_lane: u32,
+    _ permutation: ref Poseidon2FieldPermutation,
+    _ input_valid: bool,
+) {
+    workspace.store(
+        index: storage_state_buffer_start(state_start, state, false)
+            + field_lane,
+        value: permutation.lane_word(lane: field_lane),
+    )
+    workspace.store(
+        index: storage_state_buffer_start(state_start, state, true)
+            + field_lane,
+        value: 0,
+    )
+    if field_lane == 0 {
+        workspace.store(
+            index: valid_start + state,
+            value: if input_valid && permutation.is_valid() { 1 } else { 0 },
+        )
+    }
 }
 
 #[inline(always)]
@@ -123,38 +177,43 @@ fn initialize_lane<const STATES: usize, const WORKSPACE_WORDS: usize>(
 ) {
     let valid_start: u32 =
         indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
-    workspace.store(
-        index: state_buffer_start(state, false) + field_lane,
-        value: permutation.lane_word(lane: field_lane),
+    initialize_poseidon2_permutation_lane(
+        workspace,
+        0,
+        valid_start,
+        state,
+        field_lane,
+        permutation,
+        input_valid,
     )
-    workspace.store(
-        index: state_buffer_start(state, true) + field_lane,
-        value: 0,
-    )
-    if field_lane == 0 {
-        workspace.store(
-            index: valid_start + state,
-            value: if input_valid && permutation.is_valid() { 1 } else { 0 },
-        )
-    }
 }
 
+/// Advance one field lane by one exact Poseidon2 workgroup transition.
 #[inline(always)]
-fn advance_permutation_lane<
-    const STATES: usize,
+pub fn advance_poseidon2_permutation_lane<
     const WORKSPACE_WORDS: usize,
 >(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state_start: u32,
+    _ valid_start: u32,
     _ state: u32,
     _ field_lane: u32,
     _ step: u32,
 ) -> bool {
     let transition =
         <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
-    let primary = load_state_buffer(workspace, state, false)
-    let secondary = load_state_buffer(workspace, state, true)
-    let valid_start: u32 =
-        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    let primary = load_storage_state_buffer(
+        workspace,
+        state_start,
+        state,
+        false,
+    )
+    let secondary = load_storage_state_buffer(
+        workspace,
+        state_start,
+        state,
+        true,
+    )
     let valid_index = valid_start + state
     // Keep the wide-loop validity reduction in the same word representation
     // used by storage. Only the final comparison projects it to `bool`.
@@ -183,7 +242,8 @@ fn advance_permutation_lane<
         0
     }
     workspace.store(
-        index: state_buffer_start(
+        index: storage_state_buffer_start(
+            state_start,
             state,
             poseidon2_workgroup_destination(step) == 1,
         ) + field_lane,
@@ -196,6 +256,53 @@ fn advance_permutation_lane<
         )
     }
     state_valid
+}
+
+#[inline(always)]
+fn advance_permutation_lane<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state: u32,
+    _ field_lane: u32,
+    _ step: u32,
+) -> bool {
+    let valid_start: u32 =
+        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    advance_poseidon2_permutation_lane(
+        workspace,
+        0,
+        valid_start,
+        state,
+        field_lane,
+        step,
+    )
+}
+
+/// Read the first eight canonical fields of a completed storage permutation.
+#[inline(always)]
+pub fn poseidon2_permutation_digest<const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state_start: u32,
+    _ state: u32,
+) -> Poseidon2Digest {
+    let output = load_storage_state_buffer(
+        workspace,
+        state_start,
+        state,
+        true,
+    )
+    Poseidon2Digest::from_u32s([
+        BabyBear::from_montgomery_word(output[0]).to_u32(),
+        BabyBear::from_montgomery_word(output[1]).to_u32(),
+        BabyBear::from_montgomery_word(output[2]).to_u32(),
+        BabyBear::from_montgomery_word(output[3]).to_u32(),
+        BabyBear::from_montgomery_word(output[4]).to_u32(),
+        BabyBear::from_montgomery_word(output[5]).to_u32(),
+        BabyBear::from_montgomery_word(output[6]).to_u32(),
+        BabyBear::from_montgomery_word(output[7]).to_u32(),
+    ])
 }
 
 #[inline(always)]
