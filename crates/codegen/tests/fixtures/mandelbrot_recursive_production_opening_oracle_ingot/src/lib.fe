@@ -7,11 +7,22 @@
 use core::BrowserBytes
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     decode_production_security_sparse_baby_bear_receipt,
+    decode_production_security_verifier_trace,
     empty_production_security_sparse_baby_bear_receipt,
 }
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveBoundaryDigest,
+    RecursiveCommittedInterval,
+    RecursiveStatementDigest,
+}
 use mandelbrot_proof_recursive_verifier_air_baby_bear::{
+    derive_receipt_header_relation_auxiliary,
     production_base_lde_multi_opening_relation_plan,
     production_interaction_lde_multi_opening_relation_plan,
+    production_receipt_header_relation_inputs,
+    production_security_transcript_relation_inputs,
+    production_security_transcript_relation_plan,
+    receipt_header_relation_plan,
 }
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::BabyBear
@@ -110,5 +121,134 @@ pub fn audit_retained_production_opening_relations(_ mutation: u32, _ ptr: u32, 
         receipt.interaction.path.leaf_count,
         receipt.base.path.sibling_count,
         receipt.interaction.path.sibling_count,
+    )
+}
+
+/// Thread one quadratic value interpreter through the exact receipt header,
+/// both production opening roles, and the security transcript. The canonical
+/// verifier trace supplies typed row witnesses for these first four shared
+/// stages; their task identities and accepted bits are constrained before the
+/// transcript digest is exposed.
+pub fn audit_retained_production_recursive_transcript_relation(
+    _ mutation: u32,
+    _ receipt_ptr: u32,
+    _ receipt_len: u32,
+    _ trace_ptr: u32,
+    _ trace_len: u32,
+    _ statement_digest: Poseidon2Digest,
+    _ start_digest: Poseidon2Digest,
+    _ end_digest: Poseidon2Digest,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32, u32, u32,
+) {
+    let mut receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(
+        BrowserBytes { ptr: receipt_ptr, len: receipt_len },
+        mut receipt,
+    ) {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    if mutation == 1 {
+        receipt.base_root.value = changed_digest(receipt.base_root.value)
+    } else if mutation == 2 {
+        receipt.base.values[0][0] = receipt.base.values[0][0] + BabyBear::one()
+    } else if mutation == 3 && receipt.base.path.sibling_count > 0 {
+        receipt.base.path.siblings[0] = changed_digest(receipt.base.path.siblings[0])
+    } else if mutation == 4 {
+        receipt.interaction_root.value = changed_digest(receipt.interaction_root.value)
+    } else if mutation == 5 {
+        receipt.interaction.values[0][0] = receipt.interaction.values[0][0] + BabyBear::one()
+    } else if mutation == 6 && receipt.interaction.path.sibling_count > 0 {
+        receipt.interaction.path.siblings[0] = changed_digest(receipt.interaction.path.siblings[0])
+    } else if mutation == 7 {
+        receipt.interaction_root.base.value = changed_digest(receipt.interaction_root.base.value)
+    } else if mutation == 8 {
+        receipt.interaction_root.base.valid = false
+    } else if mutation == 9 {
+        receipt.interaction_root.value = receipt.base_root.value
+    } else if mutation == 10 {
+        receipt.base.valid = false
+    } else if mutation == 11 {
+        receipt.interaction.valid = false
+    } else if mutation == 12 && receipt.base.path.sibling_count > 0 {
+        receipt.base.path.sibling_count = receipt.base.path.sibling_count - 1
+    } else if mutation == 18 {
+        receipt.valid = false
+    }
+    let trace = decode_production_security_verifier_trace(
+        BrowserBytes { ptr: trace_ptr, len: trace_len },
+    )
+    if mutation >= 13 && mutation <= 16 {
+        let target = mutation - 13
+        let source = if target == 0 { 1 } else { 0 }
+        let mut row = trace.row(target)
+        row.task = trace.row(source).task
+        let _replaced = trace.replace_row(target, row)
+    } else if mutation == 17 {
+        let mut row = trace.row(1)
+        row.accepted = false
+        let _replaced = trace.replace_row(1, row)
+    }
+
+    let statement = RecursiveCommittedInterval<4> {
+        valid: true,
+        leaves: 1,
+        statement: RecursiveStatementDigest { valid: true, value: statement_digest },
+        start_iteration: 0,
+        end_iteration: 1,
+        start: RecursiveBoundaryDigest { valid: true, value: start_digest },
+        end: RecursiveBoundaryDigest { valid: true, value: end_digest },
+    }
+    let header_inputs = production_receipt_header_relation_inputs(
+        BabyBear::from_u32(7),
+        ref receipt,
+        trace,
+    )
+    let header = receipt_header_relation_plan(
+        header_inputs,
+        derive_receipt_header_relation_auxiliary(header_inputs),
+        QuadraticRelationValueInterpreter::new(),
+    )
+    let base = production_base_lde_multi_opening_relation_plan(
+        ref receipt.base,
+        receipt.base_root,
+        header.interpreter,
+    )
+    let interaction = production_interaction_lde_multi_opening_relation_plan(
+        ref receipt.interaction,
+        receipt.interaction_root,
+        base.interpreter,
+    )
+    let transcript_inputs = production_security_transcript_relation_inputs(
+        statement,
+        ref receipt,
+        trace,
+    )
+    let transcript = production_security_transcript_relation_plan(
+        transcript_inputs,
+        interaction.interpreter,
+    )
+    let digest = transcript.composition.transcript().value
+    (
+        1,
+        flag(trace.shape_valid()),
+        flag(header.interpreter.finish()),
+        flag(base.interpreter.finish()),
+        flag(interaction.interpreter.finish()),
+        flag(transcript.interpreter.finish()),
+        flag(transcript.composition.is_valid()),
+        flag(trace.task_matches(0)),
+        flag(trace.task_matches(1)),
+        flag(trace.task_matches(2)),
+        flag(trace.task_matches(3)),
+        digest.field(0).to_u32(),
+        digest.field(1).to_u32(),
+        digest.field(2).to_u32(),
+        digest.field(3).to_u32(),
+        digest.field(4).to_u32(),
+        digest.field(5).to_u32(),
+        digest.field(6).to_u32(),
+        digest.field(7).to_u32(),
     )
 }

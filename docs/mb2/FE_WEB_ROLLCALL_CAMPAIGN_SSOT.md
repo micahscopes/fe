@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-29
+Updated: 2026-08-31
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -614,6 +614,38 @@ existing Definition of done, not a second campaign checklist:
   retained receipt has not yet executed through that combined adapter. AIR,
   composition, FRI internals, the adjacent child trace, and the cryptographic
   parent receipt remain open.
+
+  The 2026-08-31 joined adapter now executes that combined boundary over the
+  retained 948,808-byte production receipt and its exact 972-byte verifier
+  trace. Fe decodes both canonical byte streams, independently supplied
+  Plonky3 statement and boundary digests enter as public inputs, and one
+  `QuadraticRelationValueInterpreter` flows through the receipt header, base
+  opening, interaction opening, and security transcript plans. The resulting
+  zero-import Wasm module is 4,297,924 bytes with SHA-256
+  `ca40908acb5ff01ebbda50bca0ce5e7287c0101cbbb68ba7e55e7a24eb37034f`.
+  It compiled in 287.96 seconds, executed the joined relation and mutation
+  matrix in 46.32 seconds, and completed its process-isolated exact gate in
+  334.56 seconds. Twelve receipt mutations, four coherent task rewires across
+  the joined rows, one changed stored result, receipt invalidation, and
+  truncated receipt or trace input all reject. The canonical field-codec gate
+  remains green independently.
+
+  Reaching this gate exposed a compiler semantic defect rather than a proof
+  mismatch. Wasm aggregate reification proved read-only use only for
+  array-containing structs, so a mutable no-array provider reference could be
+  flattened into a rootless value after Runtime MIR had correctly retained
+  the borrow. Commit `808c7fb51` now requires the same exhaustive read-only-use
+  proof for every reified aggregate reference. Its focused regression first
+  establishes that an ordinary no-array provider reference is eligible, adds
+  a write through that reference, and proves reification then rejects it.
+
+  This checkpoint constrains only the first four shared verifier stages:
+  receipt header, base opening, interaction opening, and security transcript.
+  It does not yet authenticate the `FriAuthentication` or `AirRequestSet`
+  stages, any of the 114 query rows, the adjacent child trace, or the merge
+  relation. The accepted row booleans therefore remain witnesses awaiting
+  their internal execution relations. No recursive cryptographic parent
+  receipt is emitted or implied.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private

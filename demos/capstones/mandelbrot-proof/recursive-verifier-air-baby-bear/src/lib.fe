@@ -299,14 +299,16 @@ fn constrain_boolean<I: QuadraticRelationInterpreter<BabyBear>>(
     constrain_zero(product.interpreter, product.value)
 }
 
-struct ReceiptHeaderRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> { interpreter: I }
+pub struct ReceiptHeaderRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    pub interpreter: I,
+}
 impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy for ReceiptHeaderRelationPlan<
     I,
 > {}
 
 /// The sole authored receipt-header relation. Every interpretation must
 /// consume exactly eight products and nine assertions.
-fn receipt_header_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
+pub fn receipt_header_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
     _ inputs: ReceiptHeaderRelationInputs,
     _ auxiliary: ReceiptHeaderRelationAuxiliary,
     _ interpreter: I,
