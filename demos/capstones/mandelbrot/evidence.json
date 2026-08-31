@@ -60,8 +60,8 @@
       "artifact": {
         "kind": "wasm-module",
         "path": "demos/webgpu-mandelbrot/gen/kernel.wasm",
-        "bytes": 255,
-        "sha256": "f8fe356a87c87dd25fe598df8364aec23076f3a52ae771a49071850fb4dad09d"
+        "bytes": 367,
+        "sha256": "338b888205fbd446d8613f18cd90169b4ce304df01acc3ef9383951d0e31c70e"
       },
       "verification": {
         "status": "verified",
