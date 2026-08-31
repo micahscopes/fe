@@ -182,6 +182,7 @@ use region_layout::{
     load_region_indexed_word,
     load_region_word,
     region_bounds,
+    storage_word_capacity,
     store_region_indexed_word,
     store_region_word,
     subregion,
@@ -420,6 +421,7 @@ fn proof_load<T: CanonicalWords, const STORAGE_WORDS: usize>(
 ) -> u32
 where
     STORAGE_WORDS > 0,
+    ProofTapeRegions::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     load_region_word(tape, region, index).value
 }
@@ -433,6 +435,7 @@ fn proof_store<T: CanonicalWords, const STORAGE_WORDS: usize>(
 ) -> bool
 where
     STORAGE_WORDS > 0,
+    ProofTapeRegions::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     store_region_word(tape, region, index, value)
 }
@@ -445,6 +448,7 @@ fn proof_load_indexed<T: CanonicalWords, const STORAGE_WORDS: usize>(
 ) -> u32
 where
     STORAGE_WORDS > 0,
+    ProofTapeRegions::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     load_region_indexed_word(tape, region, index)
 }
@@ -458,6 +462,7 @@ fn proof_store_indexed<T: CanonicalWords, const STORAGE_WORDS: usize>(
 )
 where
     STORAGE_WORDS > 0,
+    ProofTapeRegions::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     store_region_indexed_word(tape, region, index, value)
 }

@@ -3,7 +3,7 @@
 //! This is the end-to-end "platform fact" demo: a backend fact expressed as an
 //! associated const (`B::WORD_BITS`) appears in a `where` predicate, becomes a
 //! first-class obligation at the call site, and is discharged by CTFE under the
-//! call's type substitution — never inside the trait solver. The satisfying
+//! call's type substitution - never inside the trait solver. The satisfying
 //! backend compiles and records evidence; the non-satisfying backend fails with
 //! a named diagnostic; a generic caller that forwards its own type leaves the
 //! predicate as its own assumption (no false discharge, no false error).
@@ -115,7 +115,7 @@ fn platform_fact_fails_for_non_satisfying_backend() {
         "expected the unsatisfied-predicate diagnostic, got: {diags:#?}"
     );
 
-    // The failing call discharges *no* evidence — the program does not proceed
+    // The failing call discharges *no* evidence - the program does not proceed
     // as if the fact held.
     let caller = func_named(&db, top_mod, "caller");
     let typed = &check_func_body(&db, caller).1;
@@ -130,7 +130,7 @@ fn symbolic_forward_discharges_by_matching_assumption() {
     // A generic caller forwards its own type parameter `B`. The predicate
     // `B::WORD_BITS == 256` stays symbolic at this call, but `mid` carries the
     // identical predicate as its own `where`-clause assumption, so it discharges
-    // by the Assumption route (term identity) — not CTFE — and does not error.
+    // by the Assumption route (term identity) - not CTFE - and does not error.
     let mut db = HirAnalysisTestDb::default();
     let src = format!(
         "{PLATFORM}\nfn mid<B: Platform>() where B::WORD_BITS == 256 {{\n    word_op<B>()\n}}\n"
@@ -154,7 +154,7 @@ fn symbolic_forward_discharges_by_matching_assumption() {
         "a symbolic forwarded predicate discharges by assumption, not CTFE"
     );
     // A3: the assumption route records the matched in-scope assumption as its
-    // premise — the logical dependency of the discharge. Matching is by exact
+    // premise - the logical dependency of the discharge. Matching is by exact
     // identity, so the required and assumption terms are the same term, and the
     // premise's origin points at `mid`'s own `where`-clause predicate body (the
     // anchor a receipt resolves to "discharged by assumption at <span>").
@@ -180,7 +180,7 @@ fn symbolic_forward_discharges_by_matching_assumption() {
 #[test]
 fn assumption_route_requires_an_assumption() {
     // A generic caller with *no* matching assumption cannot discharge the
-    // symbolic predicate (CTFE cannot decide it either) — hard failure.
+    // symbolic predicate (CTFE cannot decide it either) - hard failure.
     let mut db = HirAnalysisTestDb::default();
     let src = format!("{PLATFORM}\nfn naked<B: Platform>() {{\n    word_op<B>()\n}}\n");
     let file = db.new_stand_alone("assumption_route_none.fe".into(), &src);
@@ -352,6 +352,45 @@ where { ROUND > 0 }, { ROUND < 100 }
     );
 }
 
+#[test]
+fn associated_const_capacity_function_discharges_by_assumption() {
+    // This is the region-layout forwarding shape used by generic WebGPU tape
+    // helpers. The conversion is a typed const function rather than an
+    // intrinsic method call, so the predicate has a stable symbolic identity.
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+trait Layout {
+    const WORDS: u32
+}
+const fn storage_capacity<const N: usize>() -> u32 {
+    N.downcast_truncate()
+}
+fn load<Space: Layout, const N: usize>()
+where Space::WORDS <= storage_capacity<N>()
+{
+}
+fn forward<Space: Layout, const N: usize>()
+where Space::WORDS <= storage_capacity<N>()
+{
+    load<Space, N>()
+}
+"#;
+    let file = db.new_stand_alone("associated_const_capacity_forward.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    db.assert_no_diags(top_mod);
+
+    let caller = func_named(&db, top_mod, "forward");
+    let call_expr = only_call_expr(&db, caller);
+    let typed = &check_func_body(&db, caller).1;
+    let records: Vec<_> = typed
+        .discharged_const_predicates_for_call(call_expr)
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, DischargeRoute::Assumption);
+    assert_eq!(records[0].premises.len(), 1);
+}
+
 /// Compiles `src` and returns the number of const-predicate discharges recorded
 /// in function `func`.
 fn discharges_in(name: &str, src: &str, func: &str) -> usize {
@@ -404,7 +443,7 @@ fn ok(x: Evm::Word) -> Evm::Word {
     assert_eq!(discharges_in("assoc_type_word_param", src, "ok"), 1);
 }
 
-// Pair 3: a relational predicate discharges correctly at the boundary — `>=` is
+// Pair 3: a relational predicate discharges correctly at the boundary - `>=` is
 // evaluated, not approximated.
 const FIELD: &str = r#"
 trait Field {
@@ -504,7 +543,7 @@ fn multiple_predicates_discharge_and_diagnose_individually() {
 
 // Pair 7: discharge is keyed to the concrete substitution at the use site, not
 // global by callee. The Evm call discharges; the Tiny call is refuted and
-// records no discharge — the Evm success is never reused for Tiny.
+// records no discharge - the Evm success is never reused for Tiny.
 #[test]
 fn per_call_substitution_no_stale_evidence() {
     let mut db = HirAnalysisTestDb::default();
@@ -557,7 +596,7 @@ fn bad() {
             .1
             .discharged_const_predicates()
             .is_empty(),
-        "the refuted Tiny call records no discharge — Evm's success is not reused"
+        "the refuted Tiny call records no discharge - Evm's success is not reused"
     );
 }
 
@@ -588,7 +627,7 @@ fn assoc_const_identity_includes_the_trait() {
     );
     assert_eq!(discharges_in("two_traits_pos", &pos, "ok"), 2);
 
-    // Bound through `T: A` but asserting 64 must fail — A::SIZE is 32, not the
+    // Bound through `T: A` but asserting 64 must fail - A::SIZE is 32, not the
     // sibling B::SIZE = 64.
     let neg = format!(
         "{TWO_TRAITS}\nfn needs_a_wrong<T: A>() where T::SIZE == 64 {{\n}}\nfn bad() {{\n    needs_a_wrong<X>()\n}}\n"
@@ -649,7 +688,7 @@ fn ctfe_fault_is_hard_error_not_sfinae() {
     );
     assert_eq!(discharges_in("divisor_pos", &pos, "ok"), 1);
 
-    // 100 / 0 faults — hard error, not a discharge failure.
+    // 100 / 0 faults - hard error, not a discharge failure.
     let neg = format!(
         "{DIVISOR}\nstruct Zero {{}}\nimpl Divisor for Zero {{\n    const DENOM: u256 = 0\n}}\nfn bad() {{\n    divides_cleanly<Zero>()\n}}\n"
     );
@@ -696,7 +735,7 @@ fn named_const_fn_bound_discharges_by_ctfe() {
 #[test]
 fn named_const_fn_bound_foreign_twin_does_not_match() {
     // The caller proves `twin(LEN, CAP)`; the callee requires `fits(LEN, CAP)`.
-    // Same body, different callee — the `App` terms differ, so the symbolic
+    // Same body, different callee - the `App` terms differ, so the symbolic
     // forward is not discharged by assumption.
     let src = format!(
         "{FITS}\nfn fwd<const LEN: u256, const CAP: u256>() where twin(LEN, CAP) {{\n    store<LEN, CAP>()\n}}\n"
@@ -706,7 +745,7 @@ fn named_const_fn_bound_foreign_twin_does_not_match() {
 
 // Pair 8 (negative): a generic caller forwarding its own type with a
 // *mismatched* assumption (`B::WORD_BITS == 128` calling a callee that requires
-// `== 256`) is rejected by exact term identity — no implication, no fuzzy
+// `== 256`) is rejected by exact term identity - no implication, no fuzzy
 // matching, no direction flipping, no boolean splitting.
 #[test]
 fn assumption_route_mismatch_is_rejected() {
@@ -723,7 +762,7 @@ fn bad_forward<B: Platform>() where B::WORD_BITS == 128 {
     assert_has_code("assumption_mismatch", src, "8-0085");
 }
 
-// A12: the assumption matcher is *exact* — it does not flip relation direction,
+// A12: the assumption matcher is *exact* - it does not flip relation direction,
 // reason by implication, or split conjunctions. A trait carrying a relational
 // and a boolean fact, plus a callee that demands a specific shape.
 const RELATIONAL: &str = r#"
@@ -791,7 +830,7 @@ fn assert_compiles(name: &str, src: &str) {
 
 #[test]
 fn wf_const_predicate_declaration_is_accepted() {
-    // The generic declaration is not refuted — only concrete instantiations are.
+    // The generic declaration is not refuted - only concrete instantiations are.
     assert_compiles("bounded_decl", BOUNDED);
 }
 
@@ -851,7 +890,7 @@ fn wf_const_predicate_signature_return_never_called() {
 #[test]
 fn wf_const_predicate_struct_field_no_body() {
     // A refuted ADT in a struct field is rejected with no function body in
-    // sight — this is the position a body-only check would miss.
+    // sight - this is the position a body-only check would miss.
     assert_has_code(
         "bounded_field_bad",
         &format!("{BOUNDED}\nstruct Holder {{\n    x: Bounded<4, 1>\n}}\n"),
@@ -876,7 +915,7 @@ fn impl_const_predicate_gates_via_trait_bound() {
         "impl_gate_ok",
         &format!("{IMPL_GATED}\nfn ok(w: Wrap<64>) {{\n    needs(w)\n}}\n"),
     );
-    // Violating: Wrap<10> selects the same impl, but 10 >= 50 is refuted — the
+    // Violating: Wrap<10> selects the same impl, but 10 >= 50 is refuted - the
     // selected impl's residual const predicate is gated, not silently accepted.
     assert_has_code(
         "impl_gate_bad",
@@ -1017,7 +1056,7 @@ fn wf_const_predicate_symbolic_generic_not_refuted() {
 // M0: method const-predicate conformance.
 //
 // An impl method's `where`-clause const predicates must match the trait
-// method's *exactly* (by normalized term identity) — not by logical
+// method's *exactly* (by normalized term identity) - not by logical
 // implication. This mirrors the obligation discharge path: a caller's
 // assumption discharges a callee predicate only by identity, so if the impl
 // could publish one predicate to trait-routed callers while its body relied
@@ -1045,7 +1084,7 @@ impl HasOp for X {
 #[test]
 fn method_const_predicate_stronger_is_rejected() {
     // Stronger is unsound for trait-routed callers (they only guarantee the
-    // trait's predicate) — and, regardless, fails the exact-identity rule.
+    // trait's predicate) - and, regardless, fails the exact-identity rule.
     assert_has_code(
         "m0_stronger",
         r#"

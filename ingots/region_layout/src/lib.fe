@@ -36,6 +36,15 @@ pub trait RegionMember<Space> {}
 
 impl<Space, T: CanonicalWords> RegionMember<Space> for Region<Space, T> {}
 
+/// Project a const-sized storage buffer's word capacity into the canonical
+/// `u32` coordinate domain used by browser resources and region schemas.
+/// Keeping this conversion behind one typed const function also gives generic
+/// schema-fit predicates a stable identity when they are forwarded through
+/// helper functions.
+pub const fn storage_word_capacity<const STORAGE_WORDS: usize>() -> u32 {
+    STORAGE_WORDS.downcast_truncate()
+}
+
 /// Exact packed layout of an ordinary record of typed regions.
 pub trait RegionSchema {
     const WORDS: u32
@@ -184,7 +193,7 @@ pub fn load_region_indexed_word<
 ) -> u32
 where
     STORAGE_WORDS > 0,
-    Space::WORDS <= STORAGE_WORDS.downcast_truncate(),
+    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     storage.load(index: region.offset + index.value)
 }
@@ -202,7 +211,7 @@ pub fn store_region_indexed_word<
 )
 where
     STORAGE_WORDS > 0,
-    Space::WORDS <= STORAGE_WORDS.downcast_truncate(),
+    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     storage.store(index: region.offset + index.value, value: value)
 }
@@ -220,7 +229,7 @@ pub fn load_region_word<
 ) -> RegionWordRead
 where
     STORAGE_WORDS > 0,
-    Space::WORDS <= STORAGE_WORDS.downcast_truncate(),
+    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     let address = region_address(region, index)
     if !address.valid {
@@ -246,7 +255,7 @@ pub fn store_region_word<
 ) -> bool
 where
     STORAGE_WORDS > 0,
-    Space::WORDS <= STORAGE_WORDS.downcast_truncate(),
+    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
 {
     let address = region_address(region, index)
     if !address.valid {
