@@ -26,6 +26,7 @@ pub use fri_baby_bear::{
     FriFoldPairEvaluation,
     FriLayerRowDomain,
     FriLayerTranscriptDomain,
+    FriQueryDomainV2,
     bind_fri_layer_transcript,
     commit_fri_layer_row,
     derive_fri_fold_challenge,
@@ -141,7 +142,6 @@ struct MandelbrotMainLdeRowBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
 struct MandelbrotMainLdeTranscriptBabyBearV1 {}
 struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
-struct MandelbrotFriQueryBabyBearV2 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -177,10 +177,6 @@ impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
 
 impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BY02")
-}
-
-impl Poseidon2FieldDomain for MandelbrotFriQueryBabyBearV2 {
-    const TAG: u32 = protocol_tag("FQ02")
 }
 
 pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
@@ -364,7 +360,7 @@ where
         while cursor < COUNT {
             let query = fri_query_range_identity(FIRST_QUERY, COUNT, cursor)
             indices[cursor] = squeeze_ext4_indexed<
-                MandelbrotFriQueryBabyBearV2,
+                FriQueryDomainV2,
             >(transcript.value, query).coefficient(0).to_u32() & (half - 1)
             cursor = cursor + 1
         }
@@ -4464,7 +4460,7 @@ where { ROUND > 0 }, { ROUND < 100 }, { QUERY > 0 }, { QUERY < BABY_BEAR_MODULUS
     }
     FriQueryChallenge<QUERY> {
         valid: true,
-        value: squeeze_ext4_indexed<MandelbrotFriQueryBabyBearV2>(
+        value: squeeze_ext4_indexed<FriQueryDomainV2>(
             transcript.value,
             QUERY,
         ).coefficient(0),

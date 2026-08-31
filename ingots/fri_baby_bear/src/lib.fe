@@ -36,6 +36,27 @@ const FRI_FOLD_PREFIX: u32 = protocol_prefix("FC")
 const FRI_LAYER_ROW_PREFIX: u32 = protocol_prefix("FR")
 const FRI_LAYER_TRANSCRIPT_PREFIX: u32 = protocol_prefix("FT")
 
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+/// Shared domain for transcript-indexed FRI query sampling. The query identity
+/// is absorbed as a field element, so this one nominal domain supports every
+/// sample in a typed query plan without decimal tag variants.
+pub struct FriQueryDomainV2 {}
+
+impl Poseidon2FieldDomain for FriQueryDomainV2 {
+    const TAG: u32 = protocol_tag("FQ02")
+}
+
+pub const fn fri_query_domain_tag() -> u32 {
+    <FriQueryDomainV2 as Poseidon2FieldDomain>::TAG
+}
+
 const fn protocol_round_tag(_ prefix: u32, _ round: u32) -> u32 {
     let tens = round / 10
     let ones = round - tens * 10
