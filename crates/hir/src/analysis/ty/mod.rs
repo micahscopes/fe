@@ -357,8 +357,17 @@ impl ModuleAnalysisPass for AdtDefAnalysisPass {
 
         let mut diags = vec![];
         let mut cycle_participants = FxHashSet::<AdtDef<'db>>::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let explicit_trace = std::env::var_os("FE_ANALYSIS_TRACE").is_some();
 
         for adt_ref in adts {
+            #[cfg(not(target_arch = "wasm32"))]
+            let trace_name = adt_ref
+                .name(db)
+                .map(|name| name.data(db).to_string())
+                .unwrap_or_else(|| "<anonymous>".to_owned());
+            #[cfg(not(target_arch = "wasm32"))]
+            let trace_started = std::time::Instant::now();
             #[cfg(not(target_arch = "wasm32"))]
             tracing::debug!(
                 kind = adt_ref.kind_name(),
@@ -369,13 +378,39 @@ impl ModuleAnalysisPass for AdtDefAnalysisPass {
                 phase = "start",
                 "checking Fe ADT definition",
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!(
+                    "[fe analysis] begin pass=AdtDef item_kind={} item={trace_name}",
+                    adt_ref.kind_name()
+                );
+            }
             diags.extend(adt_ref.diags(db).into_iter().map(|d| d.to_voucher()));
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!("[fe analysis] step pass=AdtDef item={trace_name} step=diagnostics");
+            }
             let adt = lower_adt(db, adt_ref);
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!("[fe analysis] step pass=AdtDef item={trace_name} step=lowered");
+            }
             if !cycle_participants.contains(&adt)
                 && let Some(cycle) = adt.recursive_cycle(db)
             {
                 diags.push(Box::new(TyLowerDiag::RecursiveType(cycle.clone())) as _);
                 cycle_participants.extend(cycle.iter().map(|m| m.adt));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!("[fe analysis] step pass=AdtDef item={trace_name} step=cycle_checked");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!(
+                    "[fe analysis] end pass=AdtDef item={trace_name}, elapsed_ms={}",
+                    trace_started.elapsed().as_millis()
+                );
             }
         }
         diags

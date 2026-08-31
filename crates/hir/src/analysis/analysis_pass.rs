@@ -43,14 +43,28 @@ impl AnalysisPassManager {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         let mut diags = vec![];
+        #[cfg(not(target_arch = "wasm32"))]
+        let explicit_trace = std::env::var_os("FE_ANALYSIS_TRACE").is_some();
         for (name, pass) in self.module_passes.iter_mut() {
             #[cfg(not(target_arch = "wasm32"))]
             let t0 = std::time::Instant::now();
             #[cfg(not(target_arch = "wasm32"))]
             tracing::debug!(pass = name, phase = "start", "starting Fe analysis pass");
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!("[fe analysis] begin pass={name}");
+            }
             diags.extend(pass.run_on_module(db, top_mod));
             #[cfg(not(target_arch = "wasm32"))]
             let elapsed = t0.elapsed();
+            #[cfg(not(target_arch = "wasm32"))]
+            if explicit_trace {
+                eprintln!(
+                    "[fe analysis] end pass={name}, diagnostics_total={}, elapsed_ms={}",
+                    diags.len(),
+                    elapsed.as_millis()
+                );
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if elapsed.as_micros() > 100 {
                 tracing::debug!("[fe:timing]   pass {name}: {elapsed:?}");
@@ -67,15 +81,29 @@ impl AnalysisPassManager {
         tree: &'db ModuleTree<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         let mut diags = vec![];
+        #[cfg(not(target_arch = "wasm32"))]
+        let explicit_trace = std::env::var_os("FE_ANALYSIS_TRACE").is_some();
         for module in tree.all_modules() {
             for (name, pass) in self.module_passes.iter_mut() {
                 #[cfg(not(target_arch = "wasm32"))]
                 let t0 = std::time::Instant::now();
                 #[cfg(not(target_arch = "wasm32"))]
                 tracing::debug!(pass = name, phase = "start", "starting Fe analysis pass");
+                #[cfg(not(target_arch = "wasm32"))]
+                if explicit_trace {
+                    eprintln!("[fe analysis] begin pass={name}");
+                }
                 diags.extend(pass.run_on_module(db, module));
                 #[cfg(not(target_arch = "wasm32"))]
                 let elapsed = t0.elapsed();
+                #[cfg(not(target_arch = "wasm32"))]
+                if explicit_trace {
+                    eprintln!(
+                        "[fe analysis] end pass={name}, diagnostics_total={}, elapsed_ms={}",
+                        diags.len(),
+                        elapsed.as_millis()
+                    );
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 if elapsed.as_micros() > 100 {
                     tracing::debug!("[fe:timing]   pass {name}: {elapsed:?}");
