@@ -343,6 +343,14 @@ pub struct FriQueryGridMetadata {
 }
 impl Copy for FriQueryGridMetadata {}
 
+/// One Fiat-Shamir sample position in the query plan.
+pub struct FriQuerySampleWorkItem {
+    pub valid: bool,
+    pub query_position: u32,
+    pub query_identity: u32,
+}
+impl Copy for FriQuerySampleWorkItem {}
+
 /// One evaluation-opening position in the query-by-opening product space.
 pub struct FriQueryEvaluationWorkItem {
     pub valid: bool,
@@ -367,6 +375,14 @@ fn invalid_query_evaluation_work_item() -> FriQueryEvaluationWorkItem {
         query_position: 0,
         query_identity: 0,
         opening: 0,
+    }
+}
+
+fn invalid_query_sample_work_item() -> FriQuerySampleWorkItem {
+    FriQuerySampleWorkItem {
+        valid: false,
+        query_position: 0,
+        query_identity: 0,
     }
 }
 
@@ -406,6 +422,24 @@ pub const fn fri_query_grid_workgroups(
 ) -> u32 {
     if lanes_per_workgroup == 0 { return 0 }
     (items + lanes_per_workgroup - 1) / lanes_per_workgroup
+}
+
+/// Resolve one query-plan position into its transcript identity.
+pub fn fri_query_sample_work_item<Plan: FriQueryPlanPlacement>(
+    _ query_position: u32,
+) -> FriQuerySampleWorkItem {
+    let metadata = <Plan as FriQueryPlanShape>::fri_query_plan_metadata()
+    if query_position >= metadata.samples {
+        return invalid_query_sample_work_item()
+    }
+    let identity = <Plan as FriQueryPlanPlacement>::fri_query_identity(
+        query_position,
+    )
+    FriQuerySampleWorkItem {
+        valid: identity != 0,
+        query_position: query_position,
+        query_identity: identity,
+    }
 }
 
 /// Resolve one global invocation lane into a query evaluation work item.

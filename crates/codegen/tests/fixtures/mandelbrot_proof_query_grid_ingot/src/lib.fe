@@ -11,11 +11,26 @@ use fri_structure::{
     fri_query_evaluation_work_item,
     fri_query_grid_metadata,
     fri_query_grid_workgroups,
+    fri_query_sample_work_item,
     fri_query_sibling_work_item,
 }
+use fri_baby_bear::fri_query_domain_tag
 use mandelbrot_proof_production_profile_baby_bear::{
+    PRODUCTION_LDE_LENGTH,
     PRODUCTION_LDE_LOG,
     PRODUCTION_SECURITY_QUERY_COUNT,
+}
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
+use poseidon_baby_bear_webgpu::{
+    INDEXED_DIGEST_SQUEEZE_STEPS,
+    POSEIDON2_LANES,
+    advance_indexed_digest_squeeze_lane,
+    indexed_digest_squeeze_progress_words,
+    indexed_digest_squeeze_state_words,
+    indexed_digest_squeeze_tail_words,
+    indexed_digest_squeeze_valid_words,
+    indexed_digest_squeeze_workgroups,
+    indexed_digest_squeeze_workspace_words,
 }
 use std::webgpu::{
     ComputeInvocation,
@@ -23,6 +38,7 @@ use std::webgpu::{
     FixedDispatch as Grid,
     FragmentSurface as Pixel,
     GpuProgram as Program,
+    RepeatedDispatch as Repeat,
     StorageBuffer as Shared,
     Workgroup as Threads,
     WebGpuBackend,
@@ -56,6 +72,32 @@ const SIBLING_PADDING: usize = SIBLING_GROUPS * THREADS - SIBLING_ITEMS
 const PADDING_RECEIPT_WORDS: usize = EVALUATION_PADDING + SIBLING_PADDING
 const EVALUATION_RECEIPT_WORDS: usize = EVALUATION_ITEMS * RECEIPT_WORDS
 const SIBLING_RECEIPT_WORDS: usize = SIBLING_ITEMS * RECEIPT_WORDS
+const QUERY_STATE_WORDS: usize =
+    indexed_digest_squeeze_state_words(QUERY_COUNT)
+const QUERY_TAIL_WORDS: usize =
+    indexed_digest_squeeze_tail_words(QUERY_COUNT)
+const QUERY_VALID_WORDS: usize =
+    indexed_digest_squeeze_valid_words(QUERY_COUNT)
+const QUERY_PROGRESS_WORDS: usize =
+    indexed_digest_squeeze_progress_words(QUERY_COUNT)
+const QUERY_SAMPLE_GROUPS: usize =
+    indexed_digest_squeeze_workgroups(QUERY_COUNT, THREADS)
+const QUERY_SAMPLE_PADDING: usize =
+    QUERY_SAMPLE_GROUPS * THREADS - QUERY_COUNT * POSEIDON2_LANES
+const QUERY_SAMPLE_WORK_ITEMS: u32 =
+    (QUERY_COUNT * POSEIDON2_LANES).downcast_truncate()
+const QUERY_HALF_MASK: u32 = (PRODUCTION_LDE_LENGTH / 2 - 1).downcast_truncate()
+
+const QUERY_TRANSCRIPT_WORDS: usize = DIGEST_FIELDS
+const QUERY_TRANSCRIPT_START: u32 = 0
+const QUERY_TRANSCRIPT_VALID: u32 =
+    QUERY_TRANSCRIPT_START + QUERY_TRANSCRIPT_WORDS.downcast_truncate()
+const QUERY_INDICES_START: u32 = QUERY_TRANSCRIPT_VALID + 1
+const QUERY_PADDING_START: u32 = QUERY_INDICES_START + QUERY_COUNT.downcast_truncate()
+const QUERY_CONTROL_WORDS: usize =
+    QUERY_TRANSCRIPT_WORDS + 1 + QUERY_COUNT + QUERY_SAMPLE_PADDING
+const QUERY_WORKSPACE_WORDS: usize =
+    indexed_digest_squeeze_workspace_words(QUERY_COUNT)
 
 static_assert(QUERY_COUNT == PRODUCTION_SECURITY_QUERY_COUNT)
 static_assert(QUERY_COUNT == 114)
@@ -67,11 +109,83 @@ static_assert(EVALUATION_GROUPS == 45)
 static_assert(SIBLING_GROUPS == 236)
 static_assert(EVALUATION_PADDING == 30)
 static_assert(SIBLING_PADDING == 56)
+static_assert(POSEIDON2_LANES == 16)
+static_assert(INDEXED_DIGEST_SQUEEZE_STEPS == 89)
+static_assert(QUERY_STATE_WORDS == 3648)
+static_assert(QUERY_TAIL_WORDS == 342)
+static_assert(QUERY_VALID_WORDS == 114)
+static_assert(QUERY_PROGRESS_WORDS == 1824)
+static_assert(QUERY_SAMPLE_GROUPS == 29)
+static_assert(QUERY_SAMPLE_PADDING == 32)
+static_assert(QUERY_TRANSCRIPT_WORDS == 8)
+static_assert(QUERY_CONTROL_WORDS == 155)
+static_assert(QUERY_WORKSPACE_WORDS == 5928)
+static_assert(QUERY_PADDING_START == 123)
 
 actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
+    query_control: Shared<u32, QUERY_CONTROL_WORDS>,
+    query_workspace: Shared<u32, QUERY_WORKSPACE_WORDS>,
     evaluation_receipts: Shared<u32, EVALUATION_RECEIPT_WORDS>,
     sibling_receipts: Shared<u32, SIBLING_RECEIPT_WORDS>,
     padding_receipts: Shared<u32, PADDING_RECEIPT_WORDS>,
+
+    fn sample_queries(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    QUERY_SAMPLE_GROUPS,
+                    1,
+                    1,
+                    INDEXED_DIGEST_SQUEEZE_STEPS,
+                >,
+            >
+        )
+    {
+        let query_position = invocation.global.x
+            / POSEIDON2_LANES.downcast_truncate()
+        let item = fri_query_sample_work_item<QueryPlan>(query_position)
+        let input_valid = item.valid
+            && self.query_control.load(index: QUERY_TRANSCRIPT_VALID) == 1
+        let transcript = Poseidon2Digest::from_u32s([
+            self.query_control.load(index: QUERY_TRANSCRIPT_START),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 1),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 2),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 3),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 4),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 5),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 6),
+            self.query_control.load(index: QUERY_TRANSCRIPT_START + 7),
+        ])
+        let step = advance_indexed_digest_squeeze_lane<
+            QUERY_COUNT,
+            QUERY_WORKSPACE_WORDS,
+        >(
+            self.query_workspace,
+            invocation,
+            fri_query_domain_tag(),
+            transcript,
+            item.query_identity,
+            input_valid,
+        )
+        if !step.active {
+            self.query_control.store(
+                index: QUERY_PADDING_START
+                    + invocation.global.x - QUERY_SAMPLE_WORK_ITEMS,
+                value: invocation.global.x + 1,
+            )
+        } else if !step.valid && step.field_lane == 0 {
+            self.query_control.store(
+                index: QUERY_INDICES_START + step.state,
+                value: 0,
+            )
+        } else if step.complete {
+            self.query_control.store(
+                index: QUERY_INDICES_START + step.state,
+                value: step.value.coefficient(0).to_u32() & QUERY_HALF_MASK,
+            )
+        }
+    }
 
     fn place_evaluations(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<THREADS, 1, 1>, Grid<EVALUATION_GROUPS, 1, 1>>)

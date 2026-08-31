@@ -1,0 +1,345 @@
+//! Portable storage-grid placement for BabyBear Poseidon2.
+//!
+//! This ingot interprets the same Fe-derived permutation and sponge protocol
+//! used by scalar code. One invocation owns one field lane, repeated dispatch
+//! boundaries order the permutation steps, and private lane cursors keep the
+//! host unaware of cryptographic phase or round policy.
+
+use poseidon_baby_bear::{
+    Poseidon2Digest,
+    Poseidon2FieldPermutation,
+    Poseidon2FieldSponge,
+    Poseidon2WorkgroupPlan,
+    Poseidon2WorkgroupSchedule,
+    begin_indexed_digest_squeeze_placement_tag,
+    poseidon2_workgroup_destination,
+    poseidon2_workgroup_lane,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+
+pub const POSEIDON2_LANES: usize =
+    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::LANES
+pub const POSEIDON2_STAGE_STEPS: usize =
+    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::STEPS
+pub const INDEXED_DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
+
+pub const fn indexed_digest_squeeze_state_words(_ states: usize) -> usize {
+    states * 2 * POSEIDON2_LANES
+}
+
+pub const fn indexed_digest_squeeze_tail_words(_ states: usize) -> usize {
+    states * 3
+}
+
+pub const fn indexed_digest_squeeze_valid_words(_ states: usize) -> usize {
+    states
+}
+
+pub const fn indexed_digest_squeeze_progress_words(_ states: usize) -> usize {
+    states * POSEIDON2_LANES
+}
+
+pub const fn indexed_digest_squeeze_tail_start(_ states: usize) -> usize {
+    indexed_digest_squeeze_state_words(states)
+}
+
+pub const fn indexed_digest_squeeze_valid_start(_ states: usize) -> usize {
+    indexed_digest_squeeze_tail_start(states)
+        + indexed_digest_squeeze_tail_words(states)
+}
+
+pub const fn indexed_digest_squeeze_progress_start(_ states: usize) -> usize {
+    indexed_digest_squeeze_valid_start(states)
+        + indexed_digest_squeeze_valid_words(states)
+}
+
+pub const fn indexed_digest_squeeze_workspace_words(_ states: usize) -> usize {
+    indexed_digest_squeeze_progress_start(states)
+        + indexed_digest_squeeze_progress_words(states)
+}
+
+pub const fn indexed_digest_squeeze_workgroups(
+    _ states: usize,
+    _ lanes_per_workgroup: usize,
+) -> usize {
+    if lanes_per_workgroup == 0 { return 0 }
+    let work_items = states * POSEIDON2_LANES
+    (work_items + lanes_per_workgroup - 1) / lanes_per_workgroup
+}
+
+/// Observable state of one lane after one repeated dispatch.
+pub struct IndexedDigestSqueezeStep {
+    pub active: bool,
+    pub complete: bool,
+    pub valid: bool,
+    pub state: u32,
+    pub field_lane: u32,
+    pub value: BabyBearExt4,
+}
+impl core::marker::Copy for IndexedDigestSqueezeStep {}
+
+fn inactive_step() -> IndexedDigestSqueezeStep {
+    IndexedDigestSqueezeStep {
+        active: false,
+        complete: false,
+        valid: true,
+        state: 0,
+        field_lane: 0,
+        value: BabyBearExt4::zero(),
+    }
+}
+
+#[inline(always)]
+fn state_buffer_start(_ state: u32, _ secondary: bool) -> u32 {
+    let state_words: u32 = (2 * POSEIDON2_LANES).downcast_truncate()
+    let buffer_words: u32 = POSEIDON2_LANES.downcast_truncate()
+    state * state_words + if secondary { buffer_words } else { 0 }
+}
+
+#[inline(always)]
+fn load_state_buffer<const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state: u32,
+    _ secondary: bool,
+) -> [u32; POSEIDON2_LANES] {
+    let mut words = [0; POSEIDON2_LANES]
+    let start = state_buffer_start(state, secondary)
+    let mut lane: usize = 0
+    while lane < POSEIDON2_LANES {
+        words[lane] = workspace.load(index: start + lane.downcast_truncate())
+        lane = lane + 1
+    }
+    words
+}
+
+#[inline(always)]
+fn initialize_lane<const STATES: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state: u32,
+    _ field_lane: u32,
+    _ permutation: ref Poseidon2FieldPermutation,
+    _ input_valid: bool,
+) {
+    let valid_start: u32 =
+        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    workspace.store(
+        index: state_buffer_start(state, false) + field_lane,
+        value: permutation.lane_word(lane: field_lane),
+    )
+    workspace.store(
+        index: state_buffer_start(state, true) + field_lane,
+        value: 0,
+    )
+    if field_lane == 0 {
+        workspace.store(
+            index: valid_start + state,
+            value: if input_valid && permutation.is_valid() { 1 } else { 0 },
+        )
+    }
+}
+
+#[inline(always)]
+fn advance_permutation_lane<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state: u32,
+    _ field_lane: u32,
+    _ step: u32,
+) -> bool {
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    let primary = load_state_buffer(workspace, state, false)
+    let secondary = load_state_buffer(workspace, state, true)
+    let valid_start: u32 =
+        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    let valid_index = valid_start + state
+    // Keep the wide-loop validity reduction in the same word representation
+    // used by storage. Only the final comparison projects it to `bool`.
+    let mut failure: u32 =
+        if workspace.load(index: valid_index) == 1 { 0 } else { 1 }
+    if step >= transition { failure = 2 }
+    let mut checked: usize = 0
+    while checked < POSEIDON2_LANES {
+        if primary[checked] >= BABY_BEAR_MODULUS {
+            failure = 10 + checked.downcast_truncate()
+        }
+        if secondary[checked] >= BABY_BEAR_MODULUS {
+            failure = 100 + checked.downcast_truncate()
+        }
+        checked = checked + 1
+    }
+    let state_valid = failure == 0
+    let value = if state_valid {
+        poseidon2_workgroup_lane(
+            ref primary,
+            ref secondary,
+            step,
+            field_lane,
+        )
+    } else {
+        0
+    }
+    workspace.store(
+        index: state_buffer_start(
+            state,
+            poseidon2_workgroup_destination(step) == 1,
+        ) + field_lane,
+        value: value,
+    )
+    if field_lane == 0 {
+        workspace.store(
+            index: valid_index,
+            value: if state_valid { 1 } else { 0 },
+        )
+    }
+    state_valid
+}
+
+#[inline(always)]
+fn output_value<const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state: u32,
+) -> BabyBearExt4 {
+    let output = load_state_buffer(workspace, state, true)
+    BabyBearExt4::from_coefficients([
+        BabyBear::from_montgomery_word(output[0]),
+        BabyBear::from_montgomery_word(output[1]),
+        BabyBear::from_montgomery_word(output[2]),
+        BabyBear::from_montgomery_word(output[3]),
+    ])
+}
+
+/// Advance one lane of a batch of indexed digest squeezes.
+///
+/// Callers select only the number of logical states and the physical workgroup
+/// tile. `INDEXED_DIGEST_SQUEEZE_STEPS` repeated queue submissions execute the
+/// two exact Poseidon2 permutations and their typed absorption boundary. The
+/// workspace layout is derived entirely from `STATES`.
+pub fn advance_indexed_digest_squeeze_lane<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ invocation: ComputeInvocation,
+    _ tag: u32,
+    _ digest: Poseidon2Digest,
+    _ index_value: u32,
+    _ input_valid: bool,
+) -> IndexedDigestSqueezeStep
+where
+    STATES > 0,
+    { WORKSPACE_WORDS == indexed_digest_squeeze_workspace_words(STATES) },
+{
+    let global_lane = invocation.global.x
+    if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
+        return inactive_step()
+    }
+    let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
+    let state = global_lane / lanes
+    let field_lane = global_lane % lanes
+    let progress_start: u32 =
+        indexed_digest_squeeze_progress_start(STATES).downcast_truncate()
+    let progress_index = progress_start + global_lane
+    let step = workspace.load(index: progress_index)
+    if step >= INDEXED_DIGEST_SQUEEZE_STEPS.downcast_truncate() {
+        return IndexedDigestSqueezeStep {
+            active: true,
+            complete: false,
+            valid: false,
+            state: state,
+            field_lane: field_lane,
+            value: BabyBearExt4::zero(),
+        }
+    }
+
+    let hash_steps: u32 = POSEIDON2_STAGE_STEPS.downcast_truncate()
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    let valid_start: u32 =
+        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    let valid_index = valid_start + state
+    let mut complete = false
+    let mut state_valid = input_valid
+    let mut value = BabyBearExt4::zero()
+
+    if step == 0 {
+        let placed = begin_indexed_digest_squeeze_placement_tag(
+            tag,
+            digest,
+            index_value,
+        )
+        initialize_lane<STATES, WORKSPACE_WORDS>(
+            workspace,
+            state,
+            field_lane,
+            ref placed.permutation,
+            input_valid,
+        )
+        if field_lane < 3 {
+            let tail_start: u32 =
+                indexed_digest_squeeze_tail_start(STATES).downcast_truncate()
+            workspace.store(
+                index: tail_start + state * 3 + field_lane,
+                value: placed.remaining[field_lane as usize].to_u32(),
+            )
+        }
+        state_valid = input_valid && placed.permutation.is_valid()
+    } else {
+        let relative = step - 1
+        let block = relative / hash_steps
+        let hash_step = relative % hash_steps
+        state_valid = workspace.load(index: valid_index) == 1
+        if hash_step < transition {
+            state_valid = advance_permutation_lane<STATES, WORKSPACE_WORDS>(
+                workspace,
+                state,
+                field_lane,
+                hash_step,
+            )
+        } else if block == 0 {
+            let output = load_state_buffer(workspace, state, true)
+            let tails_start: u32 =
+                indexed_digest_squeeze_tail_start(STATES).downcast_truncate()
+            let tail_start = tails_start + state * 3
+            let tail = [
+                BabyBear::from_u32(workspace.load(index: tail_start)),
+                BabyBear::from_u32(workspace.load(index: tail_start + 1)),
+                BabyBear::from_u32(workspace.load(index: tail_start + 2)),
+            ]
+            let sponge = Poseidon2FieldSponge::restore(
+                lanes: output,
+                rate: 0,
+                expected: 9,
+                written: 6,
+            )
+            let permutation = sponge.begin_final_permutation<3>(
+                fields: ref tail,
+            )
+            initialize_lane<STATES, WORKSPACE_WORDS>(
+                workspace,
+                state,
+                field_lane,
+                ref permutation,
+                state_valid,
+            )
+            state_valid = state_valid && permutation.is_valid()
+        } else if field_lane == 0 {
+            complete = true
+            state_valid = workspace.load(index: valid_index) == 1
+            if state_valid { value = output_value(workspace, state) }
+        }
+    }
+
+    workspace.store(index: progress_index, value: step + 1)
+    IndexedDigestSqueezeStep {
+        active: true,
+        complete: complete,
+        valid: state_valid,
+        state: state,
+        field_lane: field_lane,
+        value: value,
+    }
+}
