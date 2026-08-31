@@ -9,11 +9,12 @@ use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use poseidon_baby_bear::{
     Poseidon2Digest,
     Poseidon2FieldDomain,
-    bind as poseidon_bind,
-    commit_ext4_fields,
-    squeeze_ext4,
+    bind_plan as poseidon_bind_plan,
+    commit_canonical_plan,
+    squeeze_ext4_plan,
 }
-use precision::baby_bear::BabyBearExt4
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
 
 const fn protocol_tag(_ label: String<4>) -> u32 {
     let bytes = label.as_bytes()
@@ -54,24 +55,114 @@ impl core::marker::Copy for CompositionTranscriptDigest {}
 
 /// Derive a quartic challenge from any AIR interpreter that has committed all
 /// of its pre-composition codewords into this transcript type.
+pub struct CompositionChallengePlan<I: QuadraticPlanInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub value: CompositionChallenge,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for CompositionChallengePlan<I> {}
+
+pub fn composition_challenge_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+>(
+    _ interpreter: I,
+    _ transcript: AirLdeTranscriptDigest,
+) -> CompositionChallengePlan<I> {
+    let squeezed = squeeze_ext4_plan<
+        I,
+        MandelbrotCompositionChallengeBabyBearV1,
+    >(interpreter, transcript.value)
+    if !transcript.valid || !squeezed.valid {
+        return CompositionChallengePlan {
+            interpreter: squeezed.interpreter,
+            value: CompositionChallenge {
+                valid: false,
+                value: BabyBearExt4::zero(),
+            },
+        }
+    }
+    CompositionChallengePlan {
+        interpreter: squeezed.interpreter,
+        value: CompositionChallenge { valid: true, value: squeezed.value },
+    }
+}
+
 pub fn composition_challenge(
     _ transcript: own AirLdeTranscriptDigest,
 ) -> CompositionChallenge {
-    if !transcript.valid {
-        return CompositionChallenge { valid: false, value: BabyBearExt4::zero() }
-    }
-    CompositionChallenge {
-        valid: true,
-        value: squeeze_ext4<MandelbrotCompositionChallengeBabyBearV1>(
-            transcript.value,
-        ),
+    composition_challenge_plan(
+        QuadraticValueInterpreter::new(),
+        transcript,
+    ).value
+}
+
+pub struct CompositionDigestPlan<I: QuadraticPlanInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub value: CompositionDigest,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for CompositionDigestPlan<I> {}
+
+pub fn composition_row_commitment_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+>(
+    _ interpreter: I,
+    _ value: BabyBearExt4,
+) -> CompositionDigestPlan<I> {
+    let fields = [value]
+    let committed = commit_canonical_plan<
+        I,
+        MandelbrotCompositionRowBabyBearV1,
+        [BabyBearExt4; 1],
+    >(interpreter, ref fields)
+    CompositionDigestPlan {
+        interpreter: committed.interpreter,
+        value: CompositionDigest {
+            valid: committed.is_valid(),
+            value: committed.digest(),
+        },
     }
 }
 
 pub fn composition_row_commitment(_ value: BabyBearExt4) -> CompositionDigest {
-    CompositionDigest {
-        valid: true,
-        value: commit_ext4_fields<MandelbrotCompositionRowBabyBearV1, 1>([value]),
+    composition_row_commitment_plan(
+        QuadraticValueInterpreter::new(),
+        value,
+    ).value
+}
+
+pub struct CompositionTranscriptPlan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    pub value: CompositionTranscriptDigest,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for CompositionTranscriptPlan<I> {}
+
+pub fn bind_composition_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+>(
+    _ interpreter: I,
+    _ transcript: AirLdeTranscriptDigest,
+    _ composition: CompositionDigest,
+) -> CompositionTranscriptPlan<I> {
+    let bound = poseidon_bind_plan<
+        I,
+        MandelbrotCompositionTranscriptBabyBearV1,
+    >(interpreter, transcript.value, composition.value)
+    if !transcript.valid || !composition.valid {
+        return CompositionTranscriptPlan {
+            interpreter: bound.interpreter,
+            value: CompositionTranscriptDigest {
+                valid: false,
+                value: Poseidon2Digest::zero(),
+            },
+        }
+    }
+    CompositionTranscriptPlan {
+        interpreter: bound.interpreter,
+        value: CompositionTranscriptDigest { valid: true, value: bound.value },
     }
 }
 
@@ -79,17 +170,9 @@ pub fn bind_composition(
     _ transcript: own AirLdeTranscriptDigest,
     _ composition: own CompositionDigest,
 ) -> CompositionTranscriptDigest {
-    if !transcript.valid || !composition.valid {
-        return CompositionTranscriptDigest {
-            valid: false,
-            value: Poseidon2Digest::zero(),
-        }
-    }
-    CompositionTranscriptDigest {
-        valid: true,
-        value: poseidon_bind<MandelbrotCompositionTranscriptBabyBearV1>(
-            transcript.value,
-            composition.value,
-        ),
-    }
+    bind_composition_plan(
+        QuadraticValueInterpreter::new(),
+        transcript,
+        composition,
+    ).value
 }

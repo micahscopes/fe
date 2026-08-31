@@ -8,11 +8,15 @@ use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::polynomial::radix2_log
 use poseidon_baby_bear::{
     Poseidon2Digest,
+    Poseidon2BindingPlan,
+    Poseidon2CanonicalCommitmentPlan,
+    Poseidon2Ext4Plan,
     Poseidon2FieldDomain,
-    bind,
-    commit_ext4_fields,
-    squeeze_ext4,
+    bind_plan,
+    commit_canonical_plan,
+    squeeze_ext4_plan,
 }
+use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
 pub use fri_structure::{
     FriRoundPlacement,
     FriSchedule,
@@ -72,31 +76,87 @@ impl<const ROUND: u32> Poseidon2FieldDomain
 }
 
 /// Squeeze one round challenge from the preceding transcript digest.
+pub fn derive_fri_fold_challenge_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const ROUND: u32,
+>(
+    _ interpreter: I,
+    _ transcript: Poseidon2Digest,
+) -> Poseidon2Ext4Plan<I>
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    squeeze_ext4_plan<I, FriFoldDomain<ROUND>>(interpreter, transcript)
+}
+
 pub fn derive_fri_fold_challenge<const ROUND: u32>(
     _ transcript: Poseidon2Digest,
 ) -> BabyBearExt4
 where { ROUND > 0 }, { ROUND < 100 }
 {
-    squeeze_ext4<FriFoldDomain<ROUND>>(transcript)
+    derive_fri_fold_challenge_plan<QuadraticValueInterpreter, ROUND>(
+        QuadraticValueInterpreter::new(),
+        transcript,
+    ).value
 }
 
 /// Commit one quartic evaluation as an ordered FRI-layer leaf.
+pub fn commit_fri_layer_row_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const ROUND: u32,
+>(
+    _ interpreter: I,
+    _ evaluation: BabyBearExt4,
+) -> Poseidon2CanonicalCommitmentPlan<I>
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    let fields = [evaluation]
+    commit_canonical_plan<
+        I,
+        FriLayerRowDomain<ROUND>,
+        [BabyBearExt4; 1],
+    >(interpreter, ref fields)
+}
+
 pub fn commit_fri_layer_row<const ROUND: u32>(
     _ evaluation: BabyBearExt4,
 ) -> Poseidon2Digest
 where { ROUND > 0 }, { ROUND < 100 }
 {
-    commit_ext4_fields<FriLayerRowDomain<ROUND>, 1>([evaluation])
+    commit_fri_layer_row_plan<QuadraticValueInterpreter, ROUND>(
+        QuadraticValueInterpreter::new(),
+        evaluation,
+    ).digest()
 }
 
 /// Bind an ordered FRI-layer root into the transcript for one round.
+pub fn bind_fri_layer_transcript_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    const ROUND: u32,
+>(
+    _ interpreter: I,
+    _ transcript: Poseidon2Digest,
+    _ layer: Poseidon2Digest,
+) -> Poseidon2BindingPlan<I>
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    bind_plan<I, FriLayerTranscriptDomain<ROUND>>(
+        interpreter,
+        transcript,
+        layer,
+    )
+}
+
 pub fn bind_fri_layer_transcript<const ROUND: u32>(
     _ transcript: Poseidon2Digest,
     _ layer: Poseidon2Digest,
 ) -> Poseidon2Digest
 where { ROUND > 0 }, { ROUND < 100 }
 {
-    bind<FriLayerTranscriptDomain<ROUND>>(transcript, layer)
+    bind_fri_layer_transcript_plan<QuadraticValueInterpreter, ROUND>(
+        QuadraticValueInterpreter::new(),
+        transcript,
+        layer,
+    ).value
 }
 
 /// The semantic result of folding one `(x, -x)` pair.

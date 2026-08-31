@@ -7,3 +7,4 @@ core = { path = "../core" }
 fri_structure = { path = "../fri_structure" }
 poseidon_baby_bear = { path = "../poseidon_baby_bear" }
 precision = "../../demos/sketches/precision"
+quadratic_plan = { path = "../quadratic_plan" }
