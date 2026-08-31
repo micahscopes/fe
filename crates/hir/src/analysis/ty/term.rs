@@ -43,8 +43,8 @@ use salsa::plumbing::AsId;
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{PathRes, resolve_path};
 use crate::hir_def::{
-    ArithBinOp, BinOp, Body, CallableDef, CompBinOp, Const, Expr, ExprId, Func, IdentId, IntegerId,
-    LitKind, LogicalBinOp, Partial, PathId, UnOp,
+    ArithBinOp, BinOp, Body, BodyKind, CallableDef, CompBinOp, Const, Expr, ExprId, Func, IdentId,
+    IntegerId, LitKind, LogicalBinOp, Partial, PathId, Stmt, UnOp,
 };
 
 use super::binder::Binder;
@@ -73,7 +73,7 @@ use super::ty_lower::lower_generic_arg_list;
 /// The `term_lang_version_ledger_matches_shape` test enforces the bump: the
 /// ledger records a fingerprint of the shape descriptors, so a shape or
 /// rule change without a matching version bump fails the test.
-pub const TERM_LANG_VERSION: u32 = 1;
+pub const TERM_LANG_VERSION: u32 = 2;
 
 /// One descriptor string per [`TermNode`] variant.
 ///
@@ -97,7 +97,9 @@ pub const TERM_LANG_SHAPE: &[&str] = &[
 ];
 
 /// Descriptor strings for [`TermArithOp`], in declaration order.
-pub const TERM_ARITH_OP_SHAPE: &[&str] = &["Add", "Sub", "Mul", "Div", "Rem"];
+pub const TERM_ARITH_OP_SHAPE: &[&str] = &[
+    "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor",
+];
 
 /// Descriptor strings for [`TermCmpOp`], in declaration order.
 pub const TERM_CMP_OP_SHAPE: &[&str] = &["Eq", "Ne", "Lt", "Le", "Gt", "Ge"];
@@ -127,7 +129,7 @@ pub const NORMALIZATION_RULES: &[&str] = &[
     "fold-not-literal",
     // Not(Not(x)) => x.
     "elim-double-negation",
-    // Operands of Add/Mul/Eq/Ne are put in interned-id order. Determinism
+    // Operands of Add/Mul/BitAnd/BitOr/BitXor/Eq/Ne are put in interned-id order. Determinism
     // only — NOT semantic canonicalization (see `normalize_term`).
     "order-commutative-operands-by-intern-id",
 ];
@@ -155,6 +157,31 @@ impl<'db> TermId<'db> {
     /// Interns a boolean-literal term.
     pub fn bool(db: &'db dyn HirAnalysisDb, value: bool) -> Self {
         Self::new(db, TermNode::Bool(value))
+    }
+}
+
+/// Returns whether a predicate term still depends on a generic parameter.
+///
+/// Callers use this after substitution to distinguish a genuinely symbolic
+/// predicate from a closed predicate carried by a function that happens to
+/// have other, unrelated generic arguments. This is a structural query only:
+/// it performs no CTFE and does not inspect const function bodies.
+pub fn term_has_param<'db>(db: &'db dyn HirAnalysisDb, term: TermId<'db>) -> bool {
+    match term.data(db) {
+        TermNode::Int(_) | TermNode::Bool(_) | TermNode::ConstRef(_) => false,
+        TermNode::ConstParam(ty) => ty.has_param(db),
+        TermNode::AssocConst { inst, .. } => inst.args(db).iter().any(|ty| ty.has_param(db)),
+        TermNode::Arith { lhs, rhs, .. }
+        | TermNode::Cmp { lhs, rhs, .. }
+        | TermNode::And(lhs, rhs)
+        | TermNode::Or(lhs, rhs) => term_has_param(db, *lhs) || term_has_param(db, *rhs),
+        TermNode::Not(inner) => term_has_param(db, *inner),
+        TermNode::App {
+            generic_args, args, ..
+        } => {
+            generic_args.iter().any(|ty| ty.has_param(db))
+                || args.iter().any(|arg| term_has_param(db, *arg))
+        }
     }
 }
 
@@ -269,11 +296,11 @@ pub enum TermNode<'db> {
     },
 }
 
-/// Arithmetic operators of the term language: exactly `+ - * / %`.
+/// Arithmetic operators of the term language: `+ - * / % & | ^`.
 ///
-/// Deliberately narrower than HIR's [`ArithBinOp`]: `**`, shifts, bitwise
-/// ops, and ranges are not part of the predicate fragment and are rejected
-/// during lowering with [`TermLowerError::UnsupportedArithOp`].
+/// Deliberately narrower than HIR's [`ArithBinOp`]: `**`, shifts, and ranges
+/// are not part of the predicate fragment and are rejected during lowering
+/// with [`TermLowerError::UnsupportedArithOp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum TermArithOp {
     /// `+`
@@ -286,11 +313,26 @@ pub enum TermArithOp {
     Div,
     /// `%`
     Rem,
+    /// `&`
+    BitAnd,
+    /// `|`
+    BitOr,
+    /// `^`
+    BitXor,
 }
 
 impl TermArithOp {
     /// All arithmetic operators, in declaration order.
-    pub const ALL: [Self; 5] = [Self::Add, Self::Sub, Self::Mul, Self::Div, Self::Rem];
+    pub const ALL: [Self; 8] = [
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Rem,
+        Self::BitAnd,
+        Self::BitOr,
+        Self::BitXor,
+    ];
 }
 
 /// Comparison relations of the term language.
@@ -375,7 +417,7 @@ pub enum TermLowerError<'db> {
     /// A syntactic construct outside the predicate fragment, named by
     /// [`UnsupportedExprKind`].
     UnsupportedExpr(ExprId, UnsupportedExprKind),
-    /// An arithmetic operator outside `+ - * / %` (e.g. `**`, `<<`, `&`).
+    /// An arithmetic operator outside `+ - * / % & | ^` (e.g. `**`, `<<`).
     UnsupportedArithOp(ExprId, ArithBinOp),
     /// The indexing operator `[..]`.
     IndexOperator(ExprId),
@@ -473,6 +515,21 @@ pub fn lower_hir_to_term<'db>(
             ))
         }
 
+        Expr::Block(stmts)
+            if body.body_kind(db) == BodyKind::Anonymous
+                && expr == body.expr(db)
+                && stmts.len() == 1 =>
+        {
+            match stmts[0].data(db, body) {
+                Partial::Present(Stmt::Expr(inner)) => {
+                    lower_hir_to_term(db, body, *inner, assumptions)
+                }
+                _ => Err(TermLowerError::UnsupportedExpr(
+                    expr,
+                    UnsupportedExprKind::Block,
+                )),
+            }
+        }
         Expr::Block(_) => Err(TermLowerError::UnsupportedExpr(
             expr,
             UnsupportedExprKind::Block,
@@ -562,13 +619,10 @@ fn lower_bin<'db>(
             ArithBinOp::Mul => LoweredBinOp::Arith(TermArithOp::Mul),
             ArithBinOp::Div => LoweredBinOp::Arith(TermArithOp::Div),
             ArithBinOp::Rem => LoweredBinOp::Arith(TermArithOp::Rem),
-            ArithBinOp::Pow
-            | ArithBinOp::LShift
-            | ArithBinOp::RShift
-            | ArithBinOp::BitAnd
-            | ArithBinOp::BitOr
-            | ArithBinOp::BitXor
-            | ArithBinOp::Range => {
+            ArithBinOp::BitAnd => LoweredBinOp::Arith(TermArithOp::BitAnd),
+            ArithBinOp::BitOr => LoweredBinOp::Arith(TermArithOp::BitOr),
+            ArithBinOp::BitXor => LoweredBinOp::Arith(TermArithOp::BitXor),
+            ArithBinOp::Pow | ArithBinOp::LShift | ArithBinOp::RShift | ArithBinOp::Range => {
                 return Err(TermLowerError::UnsupportedArithOp(expr, arith));
             }
         },
@@ -1022,6 +1076,9 @@ fn normalize_arith<'db>(
             // (effort2's `1 / 0 == 0` fixture relies on this).
             TermArithOp::Div => (!b.is_zero()).then(|| a / b),
             TermArithOp::Rem => (!b.is_zero()).then(|| a % b),
+            TermArithOp::BitAnd => Some(a & b),
+            TermArithOp::BitOr => Some(a | b),
+            TermArithOp::BitXor => Some(a ^ b),
         };
         if let Some(value) = folded {
             return TermId::int(db, value);
@@ -1029,7 +1086,11 @@ fn normalize_arith<'db>(
     }
 
     let (lhs, rhs) = match op {
-        TermArithOp::Add | TermArithOp::Mul => order_commutative(lhs, rhs),
+        TermArithOp::Add
+        | TermArithOp::Mul
+        | TermArithOp::BitAnd
+        | TermArithOp::BitOr
+        | TermArithOp::BitXor => order_commutative(lhs, rhs),
         TermArithOp::Sub | TermArithOp::Div | TermArithOp::Rem => (lhs, rhs),
     };
     TermId::new(db, TermNode::Arith { op, lhs, rhs })
@@ -1243,6 +1304,9 @@ fn arith_op_symbol(op: TermArithOp) -> &'static str {
         TermArithOp::Mul => "*",
         TermArithOp::Div => "/",
         TermArithOp::Rem => "%",
+        TermArithOp::BitAnd => "&",
+        TermArithOp::BitOr => "|",
+        TermArithOp::BitXor => "^",
     }
 }
 
@@ -1317,8 +1381,9 @@ mod tests {
     /// To change the term language: append a NEW entry with the bumped
     /// version and the new fingerprint (the failing test prints it), and
     /// bump `TERM_LANG_VERSION` to match. Never edit an existing entry in
-    /// place — review rejects ledger rewrites.
-    const TERM_LANG_LEDGER: &[(u32, u64)] = &[(1, 0x92de_9054_97e3_98d6)];
+    /// place, because review rejects ledger rewrites.
+    const TERM_LANG_LEDGER: &[(u32, u64)] =
+        &[(1, 0x92de_9054_97e3_98d6), (2, 0x2348_fb15_4da6_44fa)];
 
     fn setup(name: &str, src: &str) -> (HirAnalysisTestDb, common::file::File) {
         let mut db = HirAnalysisTestDb::default();
@@ -1620,9 +1685,6 @@ mod tests {
             ("const P: u256 = 1 ** 2", ArithBinOp::Pow),
             ("const P: u256 = 1 << 2", ArithBinOp::LShift),
             ("const P: u256 = 1 >> 2", ArithBinOp::RShift),
-            ("const P: u256 = 1 & 2", ArithBinOp::BitAnd),
-            ("const P: u256 = 1 | 2", ArithBinOp::BitOr),
-            ("const P: u256 = 1 ^ 2", ArithBinOp::BitXor),
         ];
         for (src, expected_op) in cases {
             let (db, file) = setup(&format!("unsupported_arith_{expected_op:?}"), src);
@@ -1633,6 +1695,15 @@ mod tests {
                 other => panic!("expected UnsupportedArithOp({expected_op:?}), got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn bitwise_arith_ops_lower_and_fold() {
+        let (db, file) = setup("bitwise_arith", "const P: u256 = (6 & 3) | (8 ^ 1)");
+        let (top_mod, _) = db.top_mod(file);
+        let body = const_body(&db, top_mod, "P");
+        let term = normalize_term(&db, lower_root(&db, body).unwrap());
+        assert_eq!(term, TermId::int(&db, BigUint::from(11u32)));
     }
 
     #[test]
@@ -2131,7 +2202,13 @@ mod tests {
         let leaves = enumeration_leaves(&db, top_mod);
         for &lhs in &leaves {
             for &rhs in &leaves {
-                for op in [TermArithOp::Add, TermArithOp::Mul] {
+                for op in [
+                    TermArithOp::Add,
+                    TermArithOp::Mul,
+                    TermArithOp::BitAnd,
+                    TermArithOp::BitOr,
+                    TermArithOp::BitXor,
+                ] {
                     let ab = TermId::new(&db, TermNode::Arith { op, lhs, rhs });
                     let ba = TermId::new(
                         &db,
@@ -2595,6 +2672,9 @@ mod tests {
             TermArithOp::Mul => "Mul",
             TermArithOp::Div => "Div",
             TermArithOp::Rem => "Rem",
+            TermArithOp::BitAnd => "BitAnd",
+            TermArithOp::BitOr => "BitOr",
+            TermArithOp::BitXor => "BitXor",
         }
     }
 

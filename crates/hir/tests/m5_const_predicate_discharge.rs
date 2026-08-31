@@ -192,6 +192,166 @@ fn assumption_route_requires_an_assumption() {
     );
 }
 
+#[test]
+fn unrelated_symbolic_argument_does_not_block_ctfe() {
+    // The caller forwards `T`, but the callee predicate only depends on the
+    // concrete const argument. An unrelated symbolic argument must not force
+    // the whole predicate onto the assumption route.
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+fn concrete_gate<T, const N: u256>() where N > 0 && (N & (N - 1)) == 0 {
+}
+fn forwards_type<T>() {
+    concrete_gate<T, 4>()
+}
+"#;
+    let file = db.new_stand_alone("unrelated_symbolic_argument.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    db.assert_no_diags(top_mod);
+
+    let caller = func_named(&db, top_mod, "forwards_type");
+    let call_expr = only_call_expr(&db, caller);
+    let typed = &check_func_body(&db, caller).1;
+    let records: Vec<_> = typed
+        .discharged_const_predicates_for_call(call_expr)
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, DischargeRoute::Ctfe);
+    assert!(records[0].premises.is_empty());
+}
+
+#[test]
+fn forwarded_const_parameter_discharges_by_assumption() {
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+fn needs_positive<const N: u256>() where N > 0 {
+}
+fn forwards_positive<const N: u256>() where N > 0 {
+    needs_positive<N>()
+}
+"#;
+    let file = db.new_stand_alone("forwarded_const_parameter.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    db.assert_no_diags(top_mod);
+
+    let caller = func_named(&db, top_mod, "forwards_positive");
+    let call_expr = only_call_expr(&db, caller);
+    let typed = &check_func_body(&db, caller).1;
+    let records: Vec<_> = typed
+        .discharged_const_predicates_for_call(call_expr)
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, DischargeRoute::Assumption);
+    assert_eq!(records[0].premises.len(), 1);
+}
+
+#[test]
+fn forwarded_const_after_concrete_type_argument_discharges_by_assumption() {
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+struct ValueInterpreter {}
+fn planned<I, const N: u256>() where N > 0 {
+}
+fn value<const N: u256>() where N > 0 {
+    planned<ValueInterpreter, N>()
+}
+"#;
+    let file = db.new_stand_alone("mixed_generic_const_forward.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    db.assert_no_diags(top_mod);
+
+    let caller = func_named(&db, top_mod, "value");
+    let call_expr = only_call_expr(&db, caller);
+    let typed = &check_func_body(&db, caller).1;
+    let records: Vec<_> = typed
+        .discharged_const_predicates_for_call(call_expr)
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, DischargeRoute::Assumption);
+    assert_eq!(records[0].premises.len(), 1);
+}
+
+#[test]
+fn braced_bitwise_predicates_discharge_by_assumption() {
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+struct ValueInterpreter {}
+fn planned<I, const N: u256>() where { N > 0 }, { (N & (N - 1)) == 0 } {
+}
+fn value<const N: u256>() where { N > 0 }, { (N & (N - 1)) == 0 } {
+    planned<ValueInterpreter, N>()
+}
+"#;
+    let file = db.new_stand_alone("braced_bitwise_const_forward.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    db.assert_no_diags(top_mod);
+
+    let caller = func_named(&db, top_mod, "value");
+    let call_expr = only_call_expr(&db, caller);
+    let typed = &check_func_body(&db, caller).1;
+    let records: Vec<_> = typed
+        .discharged_const_predicates_for_call(call_expr)
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.route == DischargeRoute::Assumption)
+    );
+    assert!(records.iter().all(|record| record.premises.len() == 1));
+}
+
+#[test]
+fn enclosing_impl_predicate_discharges_by_assumption() {
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+trait Run {
+    fn run()
+}
+struct Schedule<const ROUND: u32> {}
+fn needs_round<const ROUND: u32>() where { ROUND > 0 }, { ROUND < 100 } {
+}
+impl<const ROUND: u32> Run for Schedule<ROUND>
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    fn run() {
+        needs_round<ROUND>()
+    }
+}
+"#;
+    let file = db.new_stand_alone("enclosing_impl_const_forward.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    db.assert_no_diags(top_mod);
+
+    let caller = top_mod
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "run")
+                && func.body(&db).is_some()
+        })
+        .expect("implementation run function");
+    let call_expr = only_call_expr(&db, caller);
+    let typed = &check_func_body(&db, caller).1;
+    let records: Vec<_> = typed
+        .discharged_const_predicates_for_call(call_expr)
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.route == DischargeRoute::Assumption)
+    );
+}
+
 /// Compiles `src` and returns the number of const-predicate discharges recorded
 /// in function `func`.
 fn discharges_in(name: &str, src: &str, func: &str) -> usize {

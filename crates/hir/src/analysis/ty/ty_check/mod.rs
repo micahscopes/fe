@@ -67,7 +67,7 @@ use super::{
         TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
-    term::{TermId, lower_hir_to_term, normalize_term, substitute_term},
+    term::{TermId, lower_hir_to_term, normalize_term, substitute_term, term_has_param},
     trait_def::{ImplementorOrigin, TraitInstId},
     trait_resolution::{
         CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitGoalSolution,
@@ -1615,12 +1615,29 @@ impl<'db> TyChecker<'db> {
             return ConstPredicateOutcome::Discharged;
         }
 
-        // Symbolic subject: the substitution still mentions a generic parameter
-        // (the caller forwards its own type). CTFE cannot decide it; the only
-        // sound discharge is an exact matching assumption in the caller's own
-        // `where` clause, matched by normalized term identity.
+        // A call may forward caller generics that the predicate does not
+        // inspect. Classify the substituted predicate itself, not the complete
+        // generic argument list. Closed predicates go to CTFE; predicates that
+        // still contain a parameter require exact assumption evidence.
         if args.iter().any(|ty| ty.has_param(db)) {
-            return self.discharge_const_predicate_by_assumption(obligation, args);
+            let env::ConstPredicateObligationOrigin::CallConstraint { callable_def, .. } =
+                obligation.origin;
+            let callee_assumptions =
+                crate::analysis::ty::trait_resolution::constraint::collect_func_decl_constraints(
+                    db,
+                    callable_def,
+                    true,
+                )
+                .instantiate_identity();
+            let predicate = obligation.predicate;
+            if let Ok(term) =
+                lower_hir_to_term(db, predicate, predicate.expr(db), callee_assumptions)
+            {
+                let term = normalize_term(db, substitute_term(db, term, &args));
+                if term_has_param(db, term) {
+                    return self.discharge_const_predicate_by_assumption(obligation, args);
+                }
+            }
         }
 
         let expected = TyId::bool(db);
