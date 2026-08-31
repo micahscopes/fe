@@ -393,7 +393,8 @@ existing Definition of done, not a second campaign checklist:
   exactness for the current authenticated toy checkpoint. It is not the
   114-query production WebGPU policy or a recursive parent proof.
 
-  The first production-policy WebGPU placement slice is now exact. The compact
+  Commit `b543e5f0d` makes the first production-policy WebGPU placement slice
+  exact. The compact
   `FriQueryRangePlan<1, 114>` and thirteen-round `FriSchedule<1, 13>` jointly
   derive 25 evaluation openings and 132 authentication siblings per query,
   for 2,850 and 15,048 work items. `fri_structure` interprets those two
@@ -411,6 +412,38 @@ existing Definition of done, not a second campaign checklist:
   production query-grid topology and portable placement seam. It does not yet
   sample the 114 runtime query indices, materialize their actual openings, or
   authenticate them inside the production receipt.
+
+  Commit `011593abf` now closes the first of those three omissions. A reusable
+  `poseidon_baby_bear_webgpu` interpreter gives each invocation one field lane
+  and derives an 89-dispatch indexed digest squeeze directly from the shared
+  Poseidon2 workgroup schedule. The production query actor runs 114 independent
+  `FQ02` squeezes across 29 workgroups, masks the resulting extension-field
+  coefficients into the 4,096-position half-domain, and keeps every phase,
+  round, identity, workspace offset, and dispatch count in Fe. A compact
+  state-count-derived workspace reduces the physical actor contract to five
+  storage resources plus the compiler's fail-closed trap channel, within the
+  baseline WebGPU limit of eight storage bindings.
+
+  The focused release gate validates 503,482 bytes across the sampler,
+  evaluation, and sibling WGSL passes. On warmed llvmpipe it compiled the Fe
+  bundle in 19.40 seconds and executed all three passes plus readbacks in 13.73
+  milliseconds. All 114 sampled indices match independent Plonky3 Poseidon2
+  squeezes, all 2,850 evaluation and 15,048 sibling placements match the
+  independent product-space oracle, all 86 placement padding lanes and 32
+  sampler padding lanes are exact, all query states finish 89 steps valid, and
+  all 1,856 compiler trap lanes remain zero. This is query sampling and work
+  placement, not authenticated opening extraction: the sampled indices must
+  next select production codeword values and Merkle siblings, and those words
+  must be bound into the receipt.
+
+  This slice also exposed two compiler-hardening seams. Instantiating a generic
+  foreign `RegionSchema` through the const-sized sampler helper produced a
+  Salsa dependency cycle, so the reusable ingot currently owns its exact
+  state-count-derived packed workspace. A mutable `bool` reduction across the
+  wide lane-validation loop lowered incorrectly on the GPU path; retaining the
+  storage-native word status through the loop and projecting to `bool` only at
+  the boundary is exact. Both deserve focused compiler regressions before the
+  workspace API is generalized further.
 
   The externally hosted Chrome 149 endpoint was live but could not supply a
   hardware adapter for this run. DevTools reported the AMD Radeon 780M and
@@ -3027,9 +3060,12 @@ fallback. The semantic receipts are:
    mobile-sized execution. The complete 428-column, four-row production toy
    AIR LDE, separate main and auxiliary commitments, packed trace commitments,
    and ordered AIR transcript now pass Chromium/SwiftShader, independent
-   direct-DFT, and Plonky3 gates. Next derive and commit the AIR composition
-   codeword and make it the input to the first FRI layer. Physical Radeon
-   execution remains a separate required gate. The current cold-start cost
+   direct-DFT, and Plonky3 gates. The complete composition and toy FRI replay,
+   production 114-query work topology, and all 114 transcript-derived query
+   indices are now exact on software WebGPU. Next use those indices to extract
+   and authenticate production codeword openings and Merkle paths without
+   introducing a host-side query table. Physical Radeon execution remains a
+   separate required gate. The current cold-start cost
    also makes pipeline caching and semantics-preserving pass fusion a required
    practicality slice before scaling domains or integrating the gallery.
    The first complete 49-pass replay exposed a compiler semantic defect before
