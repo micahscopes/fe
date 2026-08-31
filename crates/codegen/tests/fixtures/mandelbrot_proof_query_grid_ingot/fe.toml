@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_proof_query_grid_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+fri_structure = "../../../../../ingots/fri_structure"
+mandelbrot_proof_production_profile_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/production-profile-baby-bear"

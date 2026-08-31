@@ -139,6 +139,39 @@ pub const fn fri_query_range_identity(
     first_query + offset.downcast_truncate()
 }
 
+/// Indexable interpretation of a Fiat-Shamir query plan. Work-grid consumers
+/// ask the plan for its identity instead of reconstructing identities from
+/// aggregate metadata, so a future nonconsecutive plan can preserve its exact
+/// transcript denotation.
+pub trait FriQueryPlanPlacement: FriQueryPlanShape {
+    fn fri_query_identity(_ offset: u32) -> u32
+}
+
+impl<const NEXT_QUERY: u32> FriQueryPlanPlacement
+    for FriQueryPlanDone<NEXT_QUERY>
+{
+    fn fri_query_identity(_ offset: u32) -> u32 { 0 }
+}
+
+impl<
+    const QUERY: u32,
+    Tail: FriQueryPlanPlacement,
+> FriQueryPlanPlacement for FriQueryPlanSample<QUERY, Tail> {
+    fn fri_query_identity(_ offset: u32) -> u32 {
+        if offset == 0 { return QUERY }
+        <Tail as FriQueryPlanPlacement>::fri_query_identity(offset - 1)
+    }
+}
+
+impl<
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+> FriQueryPlanPlacement for FriQueryRangePlan<FIRST_QUERY, COUNT> {
+    fn fri_query_identity(_ offset: u32) -> u32 {
+        fri_query_range_identity(FIRST_QUERY, COUNT, offset as usize)
+    }
+}
+
 /// Terminal of a binary FRI fold schedule. `NEXT_ROUND` is the first round
 /// number after the schedule.
 pub struct FriScheduleDone<const NEXT_ROUND: u32> {}
@@ -292,6 +325,132 @@ impl<
             query_path_siblings: tail.query_path_siblings
                 + (2 * PAIR_DEPTH).downcast_truncate(),
         }
+    }
+}
+
+/// Portable Cartesian work grid derived from one Fiat-Shamir query plan and
+/// one FRI fold schedule. Query identities describe transcript domains. The
+/// sampled codeword index remains runtime data loaded by the prover or
+/// verifier that interprets a work item.
+pub struct FriQueryGridMetadata {
+    pub query_count: u32,
+    pub first_query: u32,
+    pub next_query: u32,
+    pub evaluations_per_query: u32,
+    pub siblings_per_query: u32,
+    pub evaluation_items: u32,
+    pub sibling_items: u32,
+}
+impl Copy for FriQueryGridMetadata {}
+
+/// One evaluation-opening position in the query-by-opening product space.
+pub struct FriQueryEvaluationWorkItem {
+    pub valid: bool,
+    pub query_position: u32,
+    pub query_identity: u32,
+    pub opening: u32,
+}
+impl Copy for FriQueryEvaluationWorkItem {}
+
+/// One authentication-sibling position in the query-by-sibling product space.
+pub struct FriQuerySiblingWorkItem {
+    pub valid: bool,
+    pub query_position: u32,
+    pub query_identity: u32,
+    pub sibling: u32,
+}
+impl Copy for FriQuerySiblingWorkItem {}
+
+fn invalid_query_evaluation_work_item() -> FriQueryEvaluationWorkItem {
+    FriQueryEvaluationWorkItem {
+        valid: false,
+        query_position: 0,
+        query_identity: 0,
+        opening: 0,
+    }
+}
+
+fn invalid_query_sibling_work_item() -> FriQuerySiblingWorkItem {
+    FriQuerySiblingWorkItem {
+        valid: false,
+        query_position: 0,
+        query_identity: 0,
+        sibling: 0,
+    }
+}
+
+/// Derive the full portable query work shape without expanding a nominal type
+/// per security query and without maintaining an authored placement table.
+pub const fn fri_query_grid_metadata<
+    Plan: FriQueryPlanShape,
+    Schedule: FriScheduleShape,
+>() -> FriQueryGridMetadata {
+    let queries = <Plan as FriQueryPlanShape>::fri_query_plan_metadata()
+    let schedule = <Schedule as FriScheduleShape>::fri_schedule_metadata()
+    FriQueryGridMetadata {
+        query_count: queries.samples,
+        first_query: queries.first_query,
+        next_query: queries.next_query,
+        evaluations_per_query: schedule.query_evaluations,
+        siblings_per_query: schedule.query_path_siblings,
+        evaluation_items: queries.samples * schedule.query_evaluations,
+        sibling_items: queries.samples * schedule.query_path_siblings,
+    }
+}
+
+/// Number of fixed dispatch workgroups needed to cover a portable work grid.
+/// Extra invocations are rejected by the work-item interpreters below.
+pub const fn fri_query_grid_workgroups(
+    _ items: u32,
+    _ lanes_per_workgroup: u32,
+) -> u32 {
+    if lanes_per_workgroup == 0 { return 0 }
+    (items + lanes_per_workgroup - 1) / lanes_per_workgroup
+}
+
+/// Resolve one global invocation lane into a query evaluation work item.
+pub fn fri_query_evaluation_work_item<
+    Plan: FriQueryPlanPlacement,
+    Schedule: FriScheduleShape,
+>(
+    _ global_lane: u32,
+) -> FriQueryEvaluationWorkItem {
+    let grid = fri_query_grid_metadata<Plan, Schedule>()
+    if grid.evaluations_per_query == 0
+        || global_lane >= grid.evaluation_items
+    {
+        return invalid_query_evaluation_work_item()
+    }
+    let query_position = global_lane / grid.evaluations_per_query
+    FriQueryEvaluationWorkItem {
+        valid: true,
+        query_position: query_position,
+        query_identity: <Plan as FriQueryPlanPlacement>::fri_query_identity(
+            query_position,
+        ),
+        opening: global_lane % grid.evaluations_per_query,
+    }
+}
+
+/// Resolve one global invocation lane into a query sibling work item.
+pub fn fri_query_sibling_work_item<
+    Plan: FriQueryPlanPlacement,
+    Schedule: FriScheduleShape,
+>(
+    _ global_lane: u32,
+) -> FriQuerySiblingWorkItem {
+    let grid = fri_query_grid_metadata<Plan, Schedule>()
+    if grid.siblings_per_query == 0 || global_lane >= grid.sibling_items {
+        return invalid_query_sibling_work_item()
+    }
+    let query_position = global_lane / grid.siblings_per_query
+    FriQuerySiblingWorkItem {
+        valid: true,
+        query_position: query_position,
+        query_identity: <Plan as FriQueryPlanPlacement>::fri_query_identity(
+            query_position,
+        ),
+        sibling: global_lane % grid.siblings_per_query,
     }
 }
 

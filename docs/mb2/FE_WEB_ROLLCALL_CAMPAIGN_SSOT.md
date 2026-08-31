@@ -393,6 +393,25 @@ existing Definition of done, not a second campaign checklist:
   exactness for the current authenticated toy checkpoint. It is not the
   114-query production WebGPU policy or a recursive parent proof.
 
+  The first production-policy WebGPU placement slice is now exact. The compact
+  `FriQueryRangePlan<1, 114>` and thirteen-round `FriSchedule<1, 13>` jointly
+  derive 25 evaluation openings and 132 authentication siblings per query,
+  for 2,850 and 15,048 work items. `fri_structure` interprets those two
+  denotations into indexable Cartesian work items and derives fixed dispatch
+  counts from a caller-selected portable tile. Query identities are read
+  through the plan interpreter, not reconstructed from aggregate metadata, so
+  a future nonconsecutive plan can retain its transcript meaning. A focused Fe
+  actor uses 64 lanes across 45 evaluation workgroups and 236 sibling
+  workgroups. Its 86 padded invocations all resolve to invalid work items. The
+  release gate validates 5,848 bytes of browser-profile WGSL, executes both
+  passes on llvmpipe, and matches every one of the 17,898 semantic receipts plus
+  every padded lane against an independently expanded Rust product space. On a
+  warmed filesystem, focused Fe bundle compilation took 12.42 seconds and both
+  dispatches plus three readbacks took 126.42 milliseconds. This closes the
+  production query-grid topology and portable placement seam. It does not yet
+  sample the 114 runtime query indices, materialize their actual openings, or
+  authenticate them inside the production receipt.
+
   The externally hosted Chrome 149 endpoint was live but could not supply a
   hardware adapter for this run. DevTools reported the AMD Radeon 780M and
   WebGPU feature as configured, while `chrome://gpu` reported hardware
