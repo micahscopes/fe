@@ -638,6 +638,141 @@ fn invalid_query_sibling_placement() -> FriQuerySiblingPlacement {
     }
 }
 
+/// Stateful interpretation of one evaluation-opening coordinate. The cursor
+/// fixes semantic order while allowing array, storage, and future fused
+/// schedule readers to supply one round placement at a time.
+pub struct FriQueryEvaluationCursor {
+    valid: bool,
+    found: bool,
+    remaining: u32,
+    current_query: u32,
+    result: FriQueryEvaluationPlacement,
+}
+impl Copy for FriQueryEvaluationCursor {}
+
+pub fn begin_fri_query_evaluation_cursor(
+    _ opening: u32,
+    _ query: u32,
+) -> FriQueryEvaluationCursor {
+    FriQueryEvaluationCursor {
+        valid: true,
+        found: false,
+        remaining: opening,
+        current_query: query,
+        result: invalid_query_evaluation_placement(),
+    }
+}
+
+pub fn advance_fri_query_evaluation_cursor(
+    _ cursor: FriQueryEvaluationCursor,
+    _ placement: FriRoundPlacement,
+) -> FriQueryEvaluationCursor {
+    let mut next = cursor
+    if !next.valid || next.found { return next }
+    if !placement.valid || next.current_query >= placement.output_width {
+        next.valid = false
+        return next
+    }
+    let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
+    if next.remaining < opened {
+        let evaluation = if placement.output_width > 1 {
+            let pair = next.current_query & (placement.pair_width - 1)
+            pair + next.remaining * placement.pair_width
+        } else {
+            0
+        }
+        next.result = FriQueryEvaluationPlacement {
+            valid: true,
+            round_index: placement.index,
+            round: placement.round,
+            evaluation_index: placement.output_offset + evaluation,
+        }
+        next.found = true
+        return next
+    }
+    next.remaining = next.remaining - opened
+    next.current_query = if placement.output_width > 1 {
+        next.current_query & (placement.pair_width - 1)
+    } else {
+        0
+    }
+    next
+}
+
+pub fn finish_fri_query_evaluation_cursor(
+    _ cursor: FriQueryEvaluationCursor,
+) -> FriQueryEvaluationPlacement {
+    if cursor.valid && cursor.found { cursor.result }
+    else { invalid_query_evaluation_placement() }
+}
+
+/// Stateful interpretation of one authentication-sibling coordinate.
+pub struct FriQuerySiblingCursor {
+    valid: bool,
+    found: bool,
+    remaining: u32,
+    current_query: u32,
+    result: FriQuerySiblingPlacement,
+}
+impl Copy for FriQuerySiblingCursor {}
+
+pub fn begin_fri_query_sibling_cursor(
+    _ sibling: u32,
+    _ query: u32,
+) -> FriQuerySiblingCursor {
+    FriQuerySiblingCursor {
+        valid: true,
+        found: false,
+        remaining: sibling,
+        current_query: query,
+        result: invalid_query_sibling_placement(),
+    }
+}
+
+pub fn advance_fri_query_sibling_cursor(
+    _ cursor: FriQuerySiblingCursor,
+    _ placement: FriRoundPlacement,
+) -> FriQuerySiblingCursor {
+    let mut next = cursor
+    if !next.valid || next.found { return next }
+    if !placement.valid || next.current_query >= placement.output_width {
+        next.valid = false
+        return next
+    }
+    let siblings = 2 * placement.pair_depth
+    if placement.pair_depth > 0 && next.remaining < siblings {
+        let side = next.remaining / placement.pair_depth
+        let level = next.remaining % placement.pair_depth
+        let leaf = (next.current_query & (placement.pair_width - 1))
+            + side * placement.pair_width
+        let node = placement.tree_offset
+            + fri_tree_level_offset(placement.output_width, level)
+            + ((leaf >> level) ^ 1)
+        next.result = FriQuerySiblingPlacement {
+            valid: true,
+            round_index: placement.index,
+            round: placement.round,
+            tree_node: node,
+        }
+        next.found = true
+        return next
+    }
+    next.remaining = next.remaining - siblings
+    next.current_query = if placement.output_width > 1 {
+        next.current_query & (placement.pair_width - 1)
+    } else {
+        0
+    }
+    next
+}
+
+pub fn finish_fri_query_sibling_cursor(
+    _ cursor: FriQuerySiblingCursor,
+) -> FriQuerySiblingPlacement {
+    if cursor.valid && cursor.found { cursor.result }
+    else { invalid_query_sibling_placement() }
+}
+
 fn fri_tree_level_offset(_ width: u32, _ level: u32) -> u32 {
     let mut offset: u32 = 0
     let mut level_width = width
@@ -673,44 +808,16 @@ impl<Schedule> FriScheduleQueryPlacement for Schedule
         _ query: u32,
     ) -> FriQueryEvaluationPlacement {
         let metadata = <Schedule as FriScheduleShape>::fri_schedule_metadata()
-        let first = <Schedule as FriSchedulePlacement>::fri_round_placement(0)
-        if !first.valid || query >= first.output_width {
-            return invalid_query_evaluation_placement()
-        }
-        let mut remaining = opening
-        let mut current_query = query
+        let mut cursor = begin_fri_query_evaluation_cursor(opening, query)
         let mut round_index: u32 = 0
         while round_index < metadata.rounds {
             let placement = <Schedule as FriSchedulePlacement>::fri_round_placement(
                 round_index,
             )
-            if !placement.valid {
-                return invalid_query_evaluation_placement()
-            }
-            let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
-            if remaining < opened {
-                let evaluation = if placement.output_width > 1 {
-                    let pair = current_query & (placement.pair_width - 1)
-                    pair + remaining * placement.pair_width
-                } else {
-                    0
-                }
-                return FriQueryEvaluationPlacement {
-                    valid: true,
-                    round_index: round_index,
-                    round: placement.round,
-                    evaluation_index: placement.output_offset + evaluation,
-                }
-            }
-            remaining = remaining - opened
-            current_query = if placement.output_width > 1 {
-                current_query & (placement.pair_width - 1)
-            } else {
-                0
-            }
+            cursor = advance_fri_query_evaluation_cursor(cursor, placement)
             round_index = round_index + 1
         }
-        invalid_query_evaluation_placement()
+        finish_fri_query_evaluation_cursor(cursor)
     }
 
     fn fri_query_sibling_placement(
@@ -718,45 +825,16 @@ impl<Schedule> FriScheduleQueryPlacement for Schedule
         _ query: u32,
     ) -> FriQuerySiblingPlacement {
         let metadata = <Schedule as FriScheduleShape>::fri_schedule_metadata()
-        let first = <Schedule as FriSchedulePlacement>::fri_round_placement(0)
-        if !first.valid || query >= first.output_width {
-            return invalid_query_sibling_placement()
-        }
-        let mut remaining = sibling
-        let mut current_query = query
+        let mut cursor = begin_fri_query_sibling_cursor(sibling, query)
         let mut round_index: u32 = 0
         while round_index < metadata.rounds {
             let placement = <Schedule as FriSchedulePlacement>::fri_round_placement(
                 round_index,
             )
-            if !placement.valid {
-                return invalid_query_sibling_placement()
-            }
-            let siblings = 2 * placement.pair_depth
-            if placement.pair_depth > 0 && remaining < siblings {
-                let side = remaining / placement.pair_depth
-                let level = remaining % placement.pair_depth
-                let leaf = (current_query & (placement.pair_width - 1))
-                    + side * placement.pair_width
-                let node = placement.tree_offset
-                    + fri_tree_level_offset(placement.output_width, level)
-                    + ((leaf >> level) ^ 1)
-                return FriQuerySiblingPlacement {
-                    valid: true,
-                    round_index: round_index,
-                    round: placement.round,
-                    tree_node: node,
-                }
-            }
-            remaining = remaining - siblings
-            current_query = if placement.output_width > 1 {
-                current_query & (placement.pair_width - 1)
-            } else {
-                0
-            }
+            cursor = advance_fri_query_sibling_cursor(cursor, placement)
             round_index = round_index + 1
         }
-        invalid_query_sibling_placement()
+        finish_fri_query_sibling_cursor(cursor)
     }
 }
 
@@ -768,41 +846,13 @@ pub fn fri_query_evaluation_from_rounds<const ROUNDS: usize>(
     _ opening: u32,
     _ query: u32,
 ) -> FriQueryEvaluationPlacement {
-    if ROUNDS == 0 || !rounds[0].valid || query >= rounds[0].output_width {
-        return invalid_query_evaluation_placement()
-    }
-    let mut remaining = opening
-    let mut current_query = query
+    let mut cursor = begin_fri_query_evaluation_cursor(opening, query)
     let mut round_index: usize = 0
     while round_index < ROUNDS {
-        let placement = rounds[round_index]
-        if !placement.valid {
-            return invalid_query_evaluation_placement()
-        }
-        let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
-        if remaining < opened {
-            let evaluation = if placement.output_width > 1 {
-                let pair = current_query & (placement.pair_width - 1)
-                pair + remaining * placement.pair_width
-            } else {
-                0
-            }
-            return FriQueryEvaluationPlacement {
-                valid: true,
-                round_index: round_index.downcast_truncate(),
-                round: placement.round,
-                evaluation_index: placement.output_offset + evaluation,
-            }
-        }
-        remaining = remaining - opened
-        current_query = if placement.output_width > 1 {
-            current_query & (placement.pair_width - 1)
-        } else {
-            0
-        }
+        cursor = advance_fri_query_evaluation_cursor(cursor, rounds[round_index])
         round_index = round_index + 1
     }
-    invalid_query_evaluation_placement()
+    finish_fri_query_evaluation_cursor(cursor)
 }
 
 pub fn fri_query_sibling_from_rounds<const ROUNDS: usize>(
@@ -810,42 +860,13 @@ pub fn fri_query_sibling_from_rounds<const ROUNDS: usize>(
     _ sibling: u32,
     _ query: u32,
 ) -> FriQuerySiblingPlacement {
-    if ROUNDS == 0 || !rounds[0].valid || query >= rounds[0].output_width {
-        return invalid_query_sibling_placement()
-    }
-    let mut remaining = sibling
-    let mut current_query = query
+    let mut cursor = begin_fri_query_sibling_cursor(sibling, query)
     let mut round_index: usize = 0
     while round_index < ROUNDS {
-        let placement = rounds[round_index]
-        if !placement.valid {
-            return invalid_query_sibling_placement()
-        }
-        let siblings = 2 * placement.pair_depth
-        if placement.pair_depth > 0 && remaining < siblings {
-            let side = remaining / placement.pair_depth
-            let level = remaining % placement.pair_depth
-            let leaf = (current_query & (placement.pair_width - 1))
-                + side * placement.pair_width
-            let node = placement.tree_offset
-                + fri_tree_level_offset(placement.output_width, level)
-                + ((leaf >> level) ^ 1)
-            return FriQuerySiblingPlacement {
-                valid: true,
-                round_index: round_index.downcast_truncate(),
-                round: placement.round,
-                tree_node: node,
-            }
-        }
-        remaining = remaining - siblings
-        current_query = if placement.output_width > 1 {
-            current_query & (placement.pair_width - 1)
-        } else {
-            0
-        }
+        cursor = advance_fri_query_sibling_cursor(cursor, rounds[round_index])
         round_index = round_index + 1
     }
-    invalid_query_sibling_placement()
+    finish_fri_query_sibling_cursor(cursor)
 }
 
 /// Four-round physical specialization used by the first complete browser FRI
@@ -856,41 +877,13 @@ pub fn fri_query_evaluation_from_four_rounds(
     _ opening: u32,
     _ query: u32,
 ) -> FriQueryEvaluationPlacement {
-    if !rounds[0].valid || query >= rounds[0].output_width {
-        return invalid_query_evaluation_placement()
-    }
-    let mut remaining = opening
-    let mut current_query = query
+    let mut cursor = begin_fri_query_evaluation_cursor(opening, query)
     let mut round_index: usize = 0
     while round_index < 4 {
-        let placement = rounds[round_index]
-        if !placement.valid {
-            return invalid_query_evaluation_placement()
-        }
-        let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
-        if remaining < opened {
-            let evaluation = if placement.output_width > 1 {
-                let pair = current_query & (placement.pair_width - 1)
-                pair + remaining * placement.pair_width
-            } else {
-                0
-            }
-            return FriQueryEvaluationPlacement {
-                valid: true,
-                round_index: round_index.downcast_truncate(),
-                round: placement.round,
-                evaluation_index: placement.output_offset + evaluation,
-            }
-        }
-        remaining = remaining - opened
-        current_query = if placement.output_width > 1 {
-            current_query & (placement.pair_width - 1)
-        } else {
-            0
-        }
+        cursor = advance_fri_query_evaluation_cursor(cursor, rounds[round_index])
         round_index = round_index + 1
     }
-    invalid_query_evaluation_placement()
+    finish_fri_query_evaluation_cursor(cursor)
 }
 
 pub fn fri_query_sibling_from_four_rounds(
@@ -898,40 +891,11 @@ pub fn fri_query_sibling_from_four_rounds(
     _ sibling: u32,
     _ query: u32,
 ) -> FriQuerySiblingPlacement {
-    if !rounds[0].valid || query >= rounds[0].output_width {
-        return invalid_query_sibling_placement()
-    }
-    let mut remaining = sibling
-    let mut current_query = query
+    let mut cursor = begin_fri_query_sibling_cursor(sibling, query)
     let mut round_index: usize = 0
     while round_index < 4 {
-        let placement = rounds[round_index]
-        if !placement.valid {
-            return invalid_query_sibling_placement()
-        }
-        let siblings = 2 * placement.pair_depth
-        if placement.pair_depth > 0 && remaining < siblings {
-            let side = remaining / placement.pair_depth
-            let level = remaining % placement.pair_depth
-            let leaf = (current_query & (placement.pair_width - 1))
-                + side * placement.pair_width
-            let node = placement.tree_offset
-                + fri_tree_level_offset(placement.output_width, level)
-                + ((leaf >> level) ^ 1)
-            return FriQuerySiblingPlacement {
-                valid: true,
-                round_index: round_index.downcast_truncate(),
-                round: placement.round,
-                tree_node: node,
-            }
-        }
-        remaining = remaining - siblings
-        current_query = if placement.output_width > 1 {
-            current_query & (placement.pair_width - 1)
-        } else {
-            0
-        }
+        cursor = advance_fri_query_sibling_cursor(cursor, rounds[round_index])
         round_index = round_index + 1
     }
-    invalid_query_sibling_placement()
+    finish_fri_query_sibling_cursor(cursor)
 }
