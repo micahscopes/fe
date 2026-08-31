@@ -1827,36 +1827,11 @@ pub fn commit_canonical_packed<
 pub fn commit_fields<D: Poseidon2FieldDomain, const N: usize>(
     _ fields: own [BabyBear; N],
 ) -> Poseidon2Digest {
-    if D::TAG >= BABY_BEAR_MODULUS {
-        return Poseidon2Digest::zero()
-    }
-    let parameters = PARAMETERS
-    let mut state = Poseidon2State::zero()
-    let mut rate: usize = 0
-    state.set_field(rate, BabyBear::from_u32(D::TAG))
-    rate = rate + 1
-    state.set_field(rate, BabyBear::from_u32(N.downcast_truncate()))
-    rate = rate + 1
-    let mut index: usize = 0
-    while index < N {
-        state.set_field(rate, fields[index])
-        rate = rate + 1
-        if rate == SPONGE_RATE {
-            state.permute(ref parameters)
-            rate = 0
-        }
-        index = index + 1
-    }
-    if rate != 0 {
-        state.permute(ref parameters)
-    }
-    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
-    index = 0
-    while index < DIGEST_FIELDS {
-        values[index] = state.field(index)
-        index = index + 1
-    }
-    Poseidon2Digest { values: values }
+    commit_canonical_plan<
+        QuadraticValueInterpreter,
+        D,
+        [BabyBear; N],
+    >(QuadraticValueInterpreter::new(), ref fields).digest()
 }
 
 /// Commit a fixed-length vector of quartic extension values by flattening
@@ -1864,40 +1839,11 @@ pub fn commit_fields<D: Poseidon2FieldDomain, const N: usize>(
 pub fn commit_ext4_fields<D: Poseidon2FieldDomain, const N: usize>(
     _ fields: own [BabyBearExt4; N],
 ) -> Poseidon2Digest {
-    if D::TAG >= BABY_BEAR_MODULUS {
-        return Poseidon2Digest::zero()
-    }
-    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
-    let mut rate: usize = 0
-    let value_count: u32 = N.downcast_truncate()
-    state[rate] = BabyBear::from_u32(D::TAG)
-    rate = rate + 1
-    state[rate] = BabyBear::from_u32(value_count * 4)
-    rate = rate + 1
-    let mut value: usize = 0
-    while value < N {
-        let mut coefficient: usize = 0
-        while coefficient < 4 {
-            state[rate] = fields[value].coefficient(coefficient)
-            rate = rate + 1
-            if rate == SPONGE_RATE {
-                state = permute16(input: state)
-                rate = 0
-            }
-            coefficient = coefficient + 1
-        }
-        value = value + 1
-    }
-    if rate != 0 {
-        state = permute16(input: state)
-    }
-    let mut values = [BabyBear::zero(); DIGEST_FIELDS]
-    let mut index: usize = 0
-    while index < DIGEST_FIELDS {
-        values[index] = state[index]
-        index = index + 1
-    }
-    Poseidon2Digest { values: values }
+    commit_canonical_plan<
+        QuadraticValueInterpreter,
+        D,
+        [BabyBearExt4; N],
+    >(QuadraticValueInterpreter::new(), ref fields).digest()
 }
 
 /// First staged permutation for a one-element quartic commitment. The four
@@ -2217,29 +2163,47 @@ pub fn begin_indexed_digest_squeeze_placement_tag(
     }
 }
 
-pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
-    // Keep the ordinary value interpretation loop-compact. The staged
-    // workgroup placement above is independently gated against this evaluator,
-    // rather than a placement cost paid by every scalar caller.
-    if D::TAG >= BABY_BEAR_MODULUS { return BabyBearExt4::zero() }
-    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
-    state[0] = BabyBear::from_u32(D::TAG)
-    state[1] = BabyBear::from_u32(DIGEST_FIELDS.downcast_truncate())
-    let mut index: usize = 0
-    let mut rate: usize = 2
-    while index < DIGEST_FIELDS {
-        state[rate] = digest.values[index]
-        rate = rate + 1
-        if rate == SPONGE_RATE {
-            state = permute16(input: state)
-            rate = 0
-        }
-        index = index + 1
-    }
-    if rate != 0 { state = permute16(input: state) }
-    BabyBearExt4::from_coefficients(
-        [state[0], state[1], state[2], state[3]],
+/// One interpreter-threaded quartic challenge derived from a typed transcript
+/// message. The canonical codec fixes the absorbed field order and the
+/// interpreter chooses direct evaluation, witness generation, constraints, or
+/// placement.
+pub struct Poseidon2Ext4Plan<I: QuadraticPlanInterpreter<BabyBear>> {
+    pub interpreter: I,
+    pub valid: bool,
+    pub value: BabyBearExt4,
+}
+impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
+    for Poseidon2Ext4Plan<I> {}
+
+pub fn squeeze_ext4_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    D: Poseidon2FieldDomain,
+>(
+    _ interpreter: I,
+    _ digest: Poseidon2Digest,
+) -> Poseidon2Ext4Plan<I> {
+    let planned = commit_canonical_plan<I, D, Poseidon2Digest>(
+        interpreter,
+        ref digest,
     )
+    let output = planned.digest()
+    Poseidon2Ext4Plan {
+        interpreter: planned.interpreter,
+        valid: planned.is_valid(),
+        value: BabyBearExt4::from_coefficients([
+            output.field(0),
+            output.field(1),
+            output.field(2),
+            output.field(3),
+        ]),
+    }
+}
+
+pub fn squeeze_ext4<D: Poseidon2FieldDomain>(_ digest: Poseidon2Digest) -> BabyBearExt4 {
+    squeeze_ext4_plan<QuadraticValueInterpreter, D>(
+        QuadraticValueInterpreter::new(),
+        digest,
+    ).value
 }
 
 /// Squeeze one quartic challenge while binding an ordinary field index.
@@ -2252,29 +2216,51 @@ pub fn squeeze_ext4_indexed<D: Poseidon2FieldDomain>(
     _ digest: Poseidon2Digest,
     _ index_value: u32,
 ) -> BabyBearExt4 {
-    if D::TAG >= BABY_BEAR_MODULUS || index_value >= BABY_BEAR_MODULUS {
-        return BabyBearExt4::zero()
-    }
-    let mut state: [BabyBear; WIDTH] = [BabyBear::zero(); WIDTH]
-    state[0] = BabyBear::from_u32(D::TAG)
-    state[1] = BabyBear::from_u32((DIGEST_FIELDS + 1).downcast_truncate())
-    let mut index: usize = 0
-    let mut rate: usize = 2
-    while index < DIGEST_FIELDS {
-        state[rate] = digest.values[index]
-        rate = rate + 1
-        if rate == SPONGE_RATE {
-            state = permute16(input: state)
-            rate = 0
+    squeeze_ext4_indexed_plan<QuadraticValueInterpreter, D>(
+        QuadraticValueInterpreter::new(),
+        digest,
+        index_value,
+    ).value
+}
+
+pub fn squeeze_ext4_indexed_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+    D: Poseidon2FieldDomain,
+>(
+    _ interpreter: I,
+    _ digest: Poseidon2Digest,
+    _ index_value: u32,
+) -> Poseidon2Ext4Plan<I> {
+    if index_value >= BABY_BEAR_MODULUS {
+        return Poseidon2Ext4Plan {
+            interpreter: interpreter,
+            valid: false,
+            value: BabyBearExt4::zero(),
         }
+    }
+    let mut fields = [BabyBear::zero(); DIGEST_FIELDS + 1]
+    let mut index: usize = 0
+    while index < DIGEST_FIELDS {
+        fields[index] = digest.field(index.downcast_truncate())
         index = index + 1
     }
-    state[rate] = BabyBear::from_u32(index_value)
-    rate = rate + 1
-    if rate != 0 {
-        state = permute16(input: state)
+    fields[DIGEST_FIELDS] = BabyBear::from_u32(index_value)
+    let planned = commit_canonical_plan<
+        I,
+        D,
+        [BabyBear; DIGEST_FIELDS + 1],
+    >(interpreter, ref fields)
+    let output = planned.digest()
+    Poseidon2Ext4Plan {
+        interpreter: planned.interpreter,
+        valid: planned.is_valid(),
+        value: BabyBearExt4::from_coefficients([
+            output.field(0),
+            output.field(1),
+            output.field(2),
+            output.field(3),
+        ]),
     }
-    BabyBearExt4::from_coefficients([state[0], state[1], state[2], state[3]])
 }
 
 /// Expose the Fe-derived constants in canonical form for the independent
