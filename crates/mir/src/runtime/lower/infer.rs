@@ -1601,13 +1601,7 @@ pub fn probe(_ flag: bool) -> u32 {
         .expect("bool should have a runtime value class");
 
         assert_eq!(
-            desired_runtime_value_carrier(
-                &db,
-                unit,
-                boolean,
-                env.scope(),
-                env.assumptions(),
-            ),
+            desired_runtime_value_carrier(&db, unit, boolean, env.scope(), env.assumptions(),),
             RuntimeCarrier::Erased,
             "ordinary unit locals must not inherit nonzero runtime payloads",
         );

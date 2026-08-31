@@ -148,11 +148,11 @@ fn reject_wrong_brand(_ input: own Input) -> Pending<WasmBackend, Output> {
     let (top_mod, _) = db.top_mod(file);
     let rendered = format_diagnostics(&db, &db.run_on_top_mod(top_mod));
     assert!(
-        rendered.contains(
-            "requires `BrowserActorCompute<ScalarSquare, DifferentKernel>` to implement",
-        ) && rendered.contains(
-            "does not implement `Compute<WasmBackend, DifferentKernel, Input, Output>`",
-        ),
+        rendered
+            .contains("requires `BrowserActorCompute<ScalarSquare, DifferentKernel>` to implement",)
+            && rendered.contains(
+                "does not implement `Compute<WasmBackend, DifferentKernel, Input, Output>`",
+            ),
         "expected the wrong computation brand to be rejected:\n{rendered}"
     );
 }

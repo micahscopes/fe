@@ -1072,12 +1072,18 @@ mod tests {
     #[test]
     #[wasm_bindgen_test]
     fn record_init_field_value_can_continue_after_newline() {
-        let (record_init_expr, errors): (RecordInitExpr, _) = parse_expr_with_errors(
-            "Foo {\n    a:\n        1 + 2,\n    b: 3,\n}",
-        );
+        let (record_init_expr, errors): (RecordInitExpr, _) =
+            parse_expr_with_errors("Foo {\n    a:\n        1 + 2,\n    b: 3,\n}");
 
-        assert!(errors.is_empty(), "unexpected parser diagnostics: {errors:?}");
-        let fields = record_init_expr.fields().unwrap().into_iter().collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "unexpected parser diagnostics: {errors:?}"
+        );
+        let fields = record_init_expr
+            .fields()
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].label().unwrap().text(), "a");
         assert!(matches!(fields[0].expr().unwrap().kind(), ExprKind::Bin(_)));

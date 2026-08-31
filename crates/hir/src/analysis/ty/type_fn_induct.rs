@@ -2368,18 +2368,10 @@ impl<T: Shape> Shape for Step<T> { type Out = Node<T::Out> }
         let done = adt_ty(&db, top_mod, "Done");
         let node = adt_ty(&db, top_mod, "Node");
         let end = adt_ty(&db, top_mod, "End");
-        let chain2 = TyId::foldl(
-            &db,
-            TyId::type_fn(&db, chain),
-            &[usize_subject(&db, 2)],
-        );
+        let chain2 = TyId::foldl(&db, TyId::type_fn(&db, chain), &[usize_subject(&db, 2)]);
         let inst = TraitInstId::new_simple(&db, shape, vec![chain2]);
         let projection = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Out".to_string()));
-        let expected = TyId::foldl(
-            &db,
-            node,
-            &[TyId::foldl(&db, node, &[end])],
-        );
+        let expected = TyId::foldl(&db, node, &[TyId::foldl(&db, node, &[end])]);
         let normal = normalize_ty(
             &db,
             projection,

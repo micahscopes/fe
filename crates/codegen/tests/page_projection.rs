@@ -22,8 +22,8 @@ fn repository_has_one_canonical_gallery_source() {
         "the retired Trunk gallery directory must not return"
     );
 
-    let legacy_index = std::fs::read_to_string(demos.join("index.html"))
-        .expect("legacy showcase landing page");
+    let legacy_index =
+        std::fs::read_to_string(demos.join("index.html")).expect("legacy showcase landing page");
     assert!(
         !legacy_index.contains("copy-dir\" href=\"gallery")
             && !legacy_index.contains("href=\"gallery/\""),
