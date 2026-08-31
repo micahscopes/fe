@@ -356,12 +356,51 @@ existing Definition of done, not a second campaign checklist:
   exposes no adapter. Browser value parity, mutation/recovery, and a physical
   hardware receipt for this composition graph remain open.
 
+  The 2026-08-31 standalone acceptance run closes the software-browser part
+  of that composition checkpoint. Tightened const-predicate discharge first
+  exposed four generic proof-tape wrappers that forwarded only the nonzero
+  storage premise and omitted the schema-fit premise required by
+  `region_layout`. The reusable ingot now exposes one typed
+  `storage_word_capacity<N>() -> u32` const function, and both the underlying
+  accessors and wrappers state the identical
+  `Space::WORDS <= storage_word_capacity<N>()` obligation. A focused HIR gate
+  proves the real associated-const plus const-generic forwarding shape
+  discharges by exact assumption evidence. No runtime check, raw capacity, or
+  demo-specific compiler rule was added.
+
+  A fresh immutable publication then emitted 48 compute passes plus one
+  display pass, 19,687,731 WGSL bytes, 2,182 Wasm bytes, six typed resources,
+  a 3,295-word proof tape, and 52 assets. Source and dependency diagnostics
+  completed in 34.98 seconds, lowering in 782.00 seconds, and atomic site
+  publication in 818.12 seconds. Per-unit measurements identify the current
+  compiler hotspots precisely: pair rows took 153.56 seconds, local-step
+  constraints 65.94 seconds, orbit coordinates 50.48 seconds, first-row
+  constraints 42.88 seconds, the two quotient families 38.26 and 37.43
+  seconds, and last-row constraints 33.41 seconds. These measurements now
+  replace the undifferentiated full-graph timing as the optimization baseline.
+
+  Chromium 150 on SwiftShader mounted that exact immutable graph in 202.37
+  seconds. Clean, Fe-authored mutation, and recovered executions took 16.84,
+  8.94, and 7.41 seconds. Clean and recovery produced five exact blue bands;
+  mutation changed only FRI and overall to exact pink. Recovery reproduced all
+  3,295 proof words byte-for-byte, with no console, mount, validation, or
+  device-loss error. The captured browser evidence file has SHA-256
+  `df4805fa560d6dcdc1bb88cc7b9cd54cd6e691d9866dcb45788271a75404b5e0`.
+  The independent Rust, direct-DFT, and Plonky3 oracle then matched all 6,848
+  AIR LDE words, production commitments and transcript, every composition
+  value and scratch checkpoint, authenticated FRI query evaluation and sibling,
+  mutation behavior, and clean recovery. This closes software-browser semantic
+  exactness for the current authenticated toy checkpoint. It is not the
+  114-query production WebGPU policy or a recursive parent proof.
+
   The externally hosted Chrome 149 endpoint was live but could not supply a
   hardware adapter for this run. DevTools reported the AMD Radeon 780M and
   WebGPU feature as configured, while `chrome://gpu` reported hardware
   acceleration disabled after two GPU-process crashes. Both the allowlisted
   `http://10.0.0.2:8000` origin and a secure intercepted localhost origin
   returned `requestAdapter() == null` before any proof shader was requested.
+  The 2026-08-31 rerun returned the same adapter-null result before loading the
+  newly authenticated graph.
   Therefore this checkpoint is browser-runtime and independent-value evidence
   on SwiftShader, not the required physical-GPU receipt. Restart the external
   browser GPU process, confirm hardware acceleration, and rerun the same

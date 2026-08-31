@@ -81,26 +81,28 @@ status colors with no browser or device-loss errors.
 
 ## Current measured checkpoint
 
-The latest 2026-08-30 release checkpoint emits 30 passes, 14,155,138 WGSL
-bytes, 2,182 Wasm bytes, six typed resources, and a 3,184-word proof tape.
-Fresh site publication took 789.82 seconds. Chromium 150 on SwiftShader mounted
-the graph in 344.01 seconds, ran the first clean case in 386.93 seconds, and ran
-warm tampered and recovered cases in 38.54 and 23.82 seconds.
+The latest 2026-08-31 release checkpoint emits 48 compute passes plus one
+display pass, 19,687,731 WGSL bytes, 2,182 Wasm bytes, six typed resources, and
+a 3,295-word proof tape. Fresh site publication took 818.12 seconds, including
+782.00 seconds of graph lowering. Chromium 150 on SwiftShader mounted the graph
+in 202.37 seconds and ran clean, tampered, and recovered cases in 16.84, 8.94,
+and 7.41 seconds.
 
-The Fe-authored placement commits 16 production main AIR rows and 16 production
-auxiliary AIR rows, reduces both ordered 16-leaf trees, commits packed main and
-auxiliary trace rows plus public inputs, and binds those roots and both LDE
-roots into the ordered production AIR transcript. The shared Fe encoding ingot
-owns both the aggregate scalar encoding and the direct GPU field projection.
-The independent Rust and Plonky3 oracle matched all 1,712 trace words, 428
-completion flags, 6,848 LDE values, packed fields, production roots, final AIR
-transcript, and authenticated FRI checkpoint receipt. The captured receipt
-SHA-256 is
-`c0e886d136dc5e944faca70505455cfc3ec46d31e61d91afc4aae374e5a14ccc`.
+The Fe-authored placement commits the complete production toy AIR trace and
+LDE, binds the production roots and public inputs into the AIR transcript,
+evaluates all 708 constraints over the coset, commits the resulting quartic
+composition codeword, and feeds that codeword into the complete four-round FRI
+schedule. Its typed query plan samples and extracts the authenticated toy query
+evaluations and siblings. The independent Rust, direct-DFT, and Plonky3 oracle
+matched all 6,848 LDE words, roots, transcript words, composition values,
+scratch checkpoints, FRI queries, mutation behavior, and clean recovery. The
+captured browser evidence SHA-256 is
+`df4805fa560d6dcdc1bb88cc7b9cd54cd6e691d9866dcb45788271a75404b5e0`.
 
-This is software-browser exactness evidence, not yet a complete STARK proof.
-The current FRI checkpoint still starts from four selected main columns rather
-than the full AIR composition codeword. Physical-GPU parity also remains
-required. The large cold-start time is now an explicit pressure to improve
-pipeline caching and semantics-preserving pass fusion before gallery
+This is software-browser exactness for the authenticated toy checkpoint, not
+yet the 114-query production WebGPU policy or a recursive parent proof.
+Physical-GPU parity also remains required. The external Chrome endpoint still
+returns no adapter because its GPU process is disabled. The large compile and
+cold-start costs are explicit pressure to improve product interpretation,
+pipeline caching, and semantics-preserving pass fusion before gallery
 integration or larger domains.
