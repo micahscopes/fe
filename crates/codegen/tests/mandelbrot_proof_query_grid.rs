@@ -2,8 +2,9 @@
 //!
 //! Fe derives the 114-query Cartesian schedule from the security policy and
 //! the thirteen-round FRI tree. This test checks the emitted browser contract,
-//! executes every work item, and compares the full receipts with an
-//! independently expanded Rust product space.
+//! executes every staged work item, and compares the materialized round plan,
+//! sampled indices, evaluation fields, and Merkle siblings with independent
+//! Rust and Plonky3 recurrences.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,10 +13,10 @@ use std::time::Instant;
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry,
+    resolve_web_entry, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
 };
 use hir::hir_def::HirIngot;
-use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use url::Url;
@@ -27,7 +28,24 @@ const EVALUATIONS_PER_QUERY: usize = 25;
 const SIBLINGS_PER_QUERY: usize = 132;
 const EVALUATION_ITEMS: usize = QUERY_COUNT * EVALUATIONS_PER_QUERY;
 const SIBLING_ITEMS: usize = QUERY_COUNT * SIBLINGS_PER_QUERY;
-const RECEIPT_WORDS: usize = 4;
+const EVALUATION_WORDS: usize = 4;
+const DIGEST_WORDS: usize = 8;
+const FRI_ROUNDS: usize = 13;
+const ROUND_PLACEMENT_FIELDS: usize = 13;
+const QUERY_CURSOR_FIELDS: usize = 8;
+const ROUND_PLACEMENT_WORDS: usize = FRI_ROUNDS * ROUND_PLACEMENT_FIELDS;
+const FOLDED_EVALUATIONS: usize = 8191;
+const LAYER_TREE_NODES: usize = 16369;
+const FOLDED_EVALUATION_WORDS: usize = FOLDED_EVALUATIONS * EVALUATION_WORDS;
+const LAYER_TREE_WORDS: usize = LAYER_TREE_NODES * DIGEST_WORDS;
+const PROOF_DATA_WORDS: usize = FOLDED_EVALUATION_WORDS + LAYER_TREE_WORDS;
+const EVALUATION_CURSOR_WORDS: usize = EVALUATION_ITEMS * QUERY_CURSOR_FIELDS;
+const SIBLING_CURSOR_WORDS: usize = SIBLING_ITEMS * QUERY_CURSOR_FIELDS;
+const PROOF_ARENA_WORDS: usize = PROOF_DATA_WORDS
+    + EVALUATION_CURSOR_WORDS
+    + EVALUATION_ITEMS
+    + SIBLING_CURSOR_WORDS
+    + SIBLING_ITEMS;
 const THREADS: u32 = 64;
 const EVALUATION_GROUPS: u32 = 45;
 const SIBLING_GROUPS: u32 = 236;
@@ -168,18 +186,185 @@ fn read_words(
     result
 }
 
-fn expected_receipts(queries: usize, openings: usize) -> Vec<u32> {
-    let mut expected = Vec::with_capacity(queries * openings * RECEIPT_WORDS);
-    for query in 0..queries {
-        for opening in 0..openings {
-            expected.extend_from_slice(&[1, query as u32, query as u32 + 1, opening as u32]);
-        }
-    }
-    expected
-}
-
 fn bytes(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RoundPlacement {
+    index: u32,
+    round: u32,
+    input_log: u32,
+    input_width: u32,
+    output_width: u32,
+    output_offset: u32,
+    tree_offset: u32,
+    tree_nodes: u32,
+    query_value_offset: u32,
+    query_sibling_offset: u32,
+    pair_width: u32,
+    pair_depth: u32,
+}
+
+fn reference_round_placements() -> Vec<RoundPlacement> {
+    let mut output_offset = 0;
+    let mut tree_offset = 0;
+    let mut query_value_offset = 0;
+    let mut query_sibling_offset = 0;
+    (0..FRI_ROUNDS)
+        .map(|index| {
+            let input_log = (FRI_ROUNDS - index) as u32;
+            let input_width = 1u32 << input_log;
+            let output_width = input_width / 2;
+            let pair_width = if input_log > 1 {
+                1u32 << (input_log - 2)
+            } else {
+                0
+            };
+            let pair_depth = input_log.saturating_sub(2);
+            let placement = RoundPlacement {
+                index: index as u32,
+                round: index as u32 + 1,
+                input_log,
+                input_width,
+                output_width,
+                output_offset,
+                tree_offset,
+                tree_nodes: 2 * output_width - 1,
+                query_value_offset,
+                query_sibling_offset,
+                pair_width,
+                pair_depth,
+            };
+            output_offset += output_width;
+            tree_offset += placement.tree_nodes;
+            query_value_offset += if input_log > 1 { 2 } else { 1 };
+            query_sibling_offset += 2 * pair_depth;
+            placement
+        })
+        .collect()
+}
+
+fn flattened_round_placements(rounds: &[RoundPlacement]) -> Vec<u32> {
+    rounds
+        .iter()
+        .flat_map(|round| {
+            [
+                1,
+                round.index,
+                round.round,
+                round.input_log,
+                round.input_width,
+                round.output_width,
+                round.output_offset,
+                round.tree_offset,
+                round.tree_nodes,
+                round.query_value_offset,
+                round.query_sibling_offset,
+                round.pair_width,
+                round.pair_depth,
+            ]
+        })
+        .collect()
+}
+
+fn reference_evaluation_index(rounds: &[RoundPlacement], opening: u32, query: u32) -> usize {
+    let mut remaining = opening;
+    let mut current_query = query;
+    for placement in rounds {
+        assert!(current_query < placement.output_width);
+        let opened = if placement.output_width > 1 { 2 } else { 1 };
+        if remaining < opened {
+            let evaluation = if placement.output_width > 1 {
+                let pair = current_query & (placement.pair_width - 1);
+                pair + remaining * placement.pair_width
+            } else {
+                0
+            };
+            return (placement.output_offset + evaluation) as usize;
+        }
+        remaining -= opened;
+        current_query = if placement.output_width > 1 {
+            current_query & (placement.pair_width - 1)
+        } else {
+            0
+        };
+    }
+    panic!("evaluation opening {opening} is outside the derived FRI schedule")
+}
+
+fn tree_level_offset(width: u32, level: u32) -> u32 {
+    let mut offset = 0;
+    let mut level_width = width;
+    for _ in 0..level {
+        offset += level_width;
+        level_width /= 2;
+    }
+    offset
+}
+
+fn reference_tree_node(rounds: &[RoundPlacement], sibling: u32, query: u32) -> usize {
+    let mut remaining = sibling;
+    let mut current_query = query;
+    for placement in rounds {
+        assert!(current_query < placement.output_width);
+        let siblings = 2 * placement.pair_depth;
+        if placement.pair_depth > 0 && remaining < siblings {
+            let side = remaining / placement.pair_depth;
+            let level = remaining % placement.pair_depth;
+            let leaf = (current_query & (placement.pair_width - 1)) + side * placement.pair_width;
+            return (placement.tree_offset
+                + tree_level_offset(placement.output_width, level)
+                + ((leaf >> level) ^ 1)) as usize;
+        }
+        remaining -= siblings;
+        current_query = if placement.output_width > 1 {
+            current_query & (placement.pair_width - 1)
+        } else {
+            0
+        };
+    }
+    panic!("sibling opening {sibling} is outside the derived FRI schedule")
+}
+
+fn proof_word(domain: u32, index: usize, lane: usize) -> u32 {
+    let mixed = u64::from(domain) * 1_000_003 + index as u64 * 65_537 + lane as u64 * 257 + 17;
+    (mixed % u64::from(BABY_BEAR_MODULUS - 1)) as u32 + 1
+}
+
+fn reference_proof_arena() -> Vec<u32> {
+    let evaluations = (0..FOLDED_EVALUATIONS)
+        .flat_map(|index| (0..EVALUATION_WORDS).map(move |lane| proof_word(1, index, lane)));
+    let tree = (0..LAYER_TREE_NODES)
+        .flat_map(|index| (0..DIGEST_WORDS).map(move |lane| proof_word(2, index, lane)));
+    let mut arena = evaluations.chain(tree).collect::<Vec<_>>();
+    assert_eq!(arena.len(), PROOF_DATA_WORDS);
+    arena.resize(PROOF_ARENA_WORDS, 0);
+    arena
+}
+
+fn expected_evaluation_openings(queries: &[u32], rounds: &[RoundPlacement]) -> Vec<u32> {
+    queries
+        .iter()
+        .flat_map(|query| {
+            (0..EVALUATIONS_PER_QUERY).flat_map(move |opening| {
+                let index = reference_evaluation_index(rounds, opening as u32, *query);
+                (0..EVALUATION_WORDS).map(move |lane| proof_word(1, index, lane))
+            })
+        })
+        .collect()
+}
+
+fn expected_sibling_openings(queries: &[u32], rounds: &[RoundPlacement]) -> Vec<u32> {
+    queries
+        .iter()
+        .flat_map(|query| {
+            (0..SIBLINGS_PER_QUERY).flat_map(move |sibling| {
+                let node = reference_tree_node(rounds, sibling as u32, *query);
+                (0..DIGEST_WORDS).map(move |lane| proof_word(2, node, lane))
+            })
+        })
+        .collect()
 }
 
 fn reference_permutation(input: [u32; POSEIDON_WIDTH]) -> [u32; POSEIDON_WIDTH] {
@@ -219,26 +404,31 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     let compile_started = Instant::now();
     let bundle = compile_query_grid();
     let compile_elapsed = compile_started.elapsed();
-    assert_eq!(bundle.manifest.passes.len(), 4);
-    let sample_pass = &bundle.manifest.passes[0];
-    let evaluation_pass = &bundle.manifest.passes[1];
-    let sibling_pass = &bundle.manifest.passes[2];
+    assert_eq!(bundle.manifest.passes.len(), 5);
+    let prepare_pass = &bundle.manifest.passes[0];
+    let sample_pass = &bundle.manifest.passes[1];
+    let evaluation_pass = &bundle.manifest.passes[2];
+    let sibling_pass = &bundle.manifest.passes[3];
+    assert_eq!(prepare_pass.source_entry, "prepare_rounds");
+    assert_eq!(prepare_pass.layout.workgroup_size, [THREADS, 1, 1]);
+    assert_eq!(prepare_pass.dispatch, Some([1, 1, 1]));
+    assert_eq!(prepare_pass.repeat, 1);
     assert_eq!(sample_pass.source_entry, "sample_queries");
     assert_eq!(sample_pass.layout.workgroup_size, [THREADS, 1, 1]);
     assert_eq!(sample_pass.dispatch, Some([QUERY_SAMPLE_GROUPS, 1, 1]));
     assert_eq!(sample_pass.repeat, QUERY_SAMPLE_STEPS);
-    assert_eq!(evaluation_pass.source_entry, "place_evaluations");
+    assert_eq!(evaluation_pass.source_entry, "open_evaluations");
     assert_eq!(evaluation_pass.layout.workgroup_size, [THREADS, 1, 1]);
     assert_eq!(evaluation_pass.dispatch, Some([EVALUATION_GROUPS, 1, 1]));
-    assert_eq!(evaluation_pass.repeat, 1);
-    assert_eq!(sibling_pass.source_entry, "place_siblings");
+    assert_eq!(evaluation_pass.repeat, FRI_ROUNDS as u32);
+    assert_eq!(sibling_pass.source_entry, "open_siblings");
     assert_eq!(sibling_pass.layout.workgroup_size, [THREADS, 1, 1]);
     assert_eq!(sibling_pass.dispatch, Some([SIBLING_GROUPS, 1, 1]));
-    assert_eq!(sibling_pass.repeat, 1);
+    assert_eq!(sibling_pass.repeat, FRI_ROUNDS as u32);
 
-    for (pass, shader) in bundle.manifest.passes[..3]
+    for (pass, shader) in bundle.manifest.passes[..4]
         .iter()
-        .zip(&bundle.pass_wgsl[..3])
+        .zip(&bundle.pass_wgsl[..4])
     {
         let module = naga::front::wgsl::parse_str(&shader.source)
             .unwrap_or_else(|error| panic!("{} WGSL parse failed: {error:?}", pass.source_entry));
@@ -282,18 +472,18 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
             .manifest
             .resources
             .iter()
-            .find(|resource| resource.name == "evaluation_receipts")
+            .find(|resource| resource.name == "evaluation_openings")
             .map(|resource| resource.length),
-        Some((EVALUATION_ITEMS * RECEIPT_WORDS) as u32),
+        Some((EVALUATION_ITEMS * EVALUATION_WORDS) as u32),
     );
     assert_eq!(
         bundle
             .manifest
             .resources
             .iter()
-            .find(|resource| resource.name == "sibling_receipts")
+            .find(|resource| resource.name == "sibling_openings")
             .map(|resource| resource.length),
-        Some((SIBLING_ITEMS * RECEIPT_WORDS) as u32),
+        Some((SIBLING_ITEMS * DIGEST_WORDS) as u32),
     );
     assert_eq!(
         bundle
@@ -320,11 +510,19 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
         resource_length("query_control"),
         Some(QUERY_CONTROL_WORDS as u32),
     );
+    assert_eq!(
+        resource_length("round_placements"),
+        Some(ROUND_PLACEMENT_WORDS as u32),
+    );
+    assert_eq!(
+        resource_length("proof_arena"),
+        Some(PROOF_ARENA_WORDS as u32),
+    );
 
     let mut executable = Vec::new();
-    for (pass, shader) in bundle.manifest.passes[..3]
+    for (pass, shader) in bundle.manifest.passes[..4]
         .iter()
-        .zip(&bundle.pass_wgsl[..3])
+        .zip(&bundle.pass_wgsl[..4])
     {
         assert!(
             pass.layout.bindings.iter().all(|binding| {
@@ -439,6 +637,9 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
         (QUERY_TRANSCRIPT_VALID_START * 4) as u64,
         &bytes(&[1]),
     );
+    let proof_arena = reference_proof_arena();
+    assert_eq!(proof_arena.len(), PROOF_ARENA_WORDS);
+    queue.write_buffer(&resources["proof_arena"], 0, &bytes(&proof_arena));
 
     let execution_started = Instant::now();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -473,29 +674,39 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
     let query_validity = &query_workspace[QUERY_VALIDITY_START..QUERY_PROGRESS_START];
     let query_progress = &query_workspace[QUERY_PROGRESS_START..QUERY_WORKSPACE_WORDS];
     let query_sample_padding = &query_control[QUERY_PADDING_START..QUERY_CONTROL_WORDS];
-    let sample_trap = executable[0]
-        .auxiliary
+    let trap_receipts = executable
         .iter()
-        .find(|(_, name, role, _)| name == "trap" && *role == WebBindingRole::Output)
-        .map(|(_, _, _, buffer)| {
-            read_words(
-                &device,
-                &queue,
-                buffer,
-                QUERY_SAMPLE_GROUPS as usize * THREADS as usize,
-            )
-        });
-    let evaluation_receipts = read_words(
+        .map(|pass| {
+            pass.auxiliary
+                .iter()
+                .find(|(_, name, role, _)| name == "trap" && *role == WebBindingRole::Output)
+                .map(|(_, _, _, buffer)| {
+                    read_words(
+                        &device,
+                        &queue,
+                        buffer,
+                        pass.dispatch[0] as usize * THREADS as usize,
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    let round_placements = read_words(
         &device,
         &queue,
-        &resources["evaluation_receipts"],
-        EVALUATION_ITEMS * RECEIPT_WORDS,
+        &resources["round_placements"],
+        ROUND_PLACEMENT_WORDS,
     );
-    let sibling_receipts = read_words(
+    let evaluation_openings = read_words(
         &device,
         &queue,
-        &resources["sibling_receipts"],
-        SIBLING_ITEMS * RECEIPT_WORDS,
+        &resources["evaluation_openings"],
+        EVALUATION_ITEMS * EVALUATION_WORDS,
+    );
+    let sibling_openings = read_words(
+        &device,
+        &queue,
+        &resources["sibling_openings"],
+        SIBLING_ITEMS * DIGEST_WORDS,
     );
     let padding_receipts = read_words(
         &device,
@@ -521,26 +732,37 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
             .collect::<Vec<_>>(),
         "all padded sampler lanes must remain outside the cryptographic schedule",
     );
-    assert_eq!(
-        sample_trap,
-        Some(vec![0; QUERY_SAMPLE_GROUPS as usize * THREADS as usize]),
-        "all dynamic Fe accesses in the production sampler must remain in bounds",
-    );
+    for (pass, trap) in executable.iter().zip(&trap_receipts) {
+        if let Some(trap) = trap {
+            assert_eq!(
+                trap,
+                &vec![0; pass.dispatch[0] as usize * THREADS as usize],
+                "all dynamic Fe accesses must remain in bounds for dispatch {:?}",
+                pass.dispatch,
+            );
+        }
+    }
     assert_eq!(query_validity, vec![1; QUERY_COUNT]);
     assert_eq!(
         query_indices, expected_query_indices,
         "all production Fiat-Shamir indices must match independent Plonky3 squeezes",
     );
 
+    let expected_rounds = reference_round_placements();
     assert_eq!(
-        evaluation_receipts,
-        expected_receipts(QUERY_COUNT, EVALUATIONS_PER_QUERY),
-        "every production evaluation work item must match the independent product space",
+        round_placements,
+        flattened_round_placements(&expected_rounds),
+        "the device-resident FRI schedule must match the independent recurrence",
     );
     assert_eq!(
-        sibling_receipts,
-        expected_receipts(QUERY_COUNT, SIBLINGS_PER_QUERY),
-        "every production sibling work item must match the independent product space",
+        evaluation_openings,
+        expected_evaluation_openings(&expected_query_indices, &expected_rounds),
+        "every production evaluation lane must extract its independently derived field value",
+    );
+    assert_eq!(
+        sibling_openings,
+        expected_sibling_openings(&expected_query_indices, &expected_rounds),
+        "every production sibling lane must extract its independently derived digest",
     );
     let expected_padding = (EVALUATION_ITEMS..EVALUATION_GROUPS as usize * THREADS as usize)
         .chain(SIBLING_ITEMS..SIBLING_GROUPS as usize * THREADS as usize)
@@ -555,7 +777,7 @@ fn production_policy_query_grid_is_derived_and_exact_on_webgpu() {
         "  production query grid: adapter={adapter_name:?}, compile={compile_elapsed:?}, \
          execute_and_read={execution_elapsed:?}, query_samples={QUERY_COUNT}, \
          evaluation_items={EVALUATION_ITEMS}, sibling_items={SIBLING_ITEMS}, wgsl_bytes={}",
-        bundle.pass_wgsl[..3]
+        bundle.pass_wgsl[..4]
             .iter()
             .map(|shader| shader.source.len())
             .sum::<usize>(),

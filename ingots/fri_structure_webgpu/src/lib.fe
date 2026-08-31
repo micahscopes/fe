@@ -1,0 +1,197 @@
+//! Portable storage interpretation of an Fe-derived FRI schedule.
+//!
+//! The semantic schedule remains in `fri_structure`. This ingot only gives
+//! its ordered round placements a device-resident representation, then feeds
+//! those placements through the same query cursors used by scalar code.
+
+use fri_structure::{
+    FriQueryEvaluationPlacement,
+    FriQueryEvaluationCursor,
+    FriQuerySiblingPlacement,
+    FriQuerySiblingCursor,
+    FriRoundPlacement,
+    advance_fri_query_evaluation_cursor,
+    advance_fri_query_sibling_cursor,
+    begin_fri_query_evaluation_cursor,
+    begin_fri_query_sibling_cursor,
+    finish_fri_query_evaluation_cursor,
+    finish_fri_query_sibling_cursor,
+}
+use std::webgpu::StorageBuffer
+
+pub const FRI_ROUND_PLACEMENT_FIELDS: usize = 13
+pub const FRI_QUERY_CURSOR_FIELDS: usize = 8
+
+pub const fn fri_round_placement_storage_words(_ rounds: usize) -> usize {
+    rounds * FRI_ROUND_PLACEMENT_FIELDS
+}
+
+#[inline(always)]
+pub fn store_fri_round_placement<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ index: u32,
+    _ placement: FriRoundPlacement,
+) {
+    let base = index * FRI_ROUND_PLACEMENT_FIELDS.downcast_truncate()
+    storage.store(index: base, value: if placement.valid { 1 } else { 0 })
+    storage.store(index: base + 1, value: placement.index)
+    storage.store(index: base + 2, value: placement.round)
+    storage.store(index: base + 3, value: placement.input_log)
+    storage.store(index: base + 4, value: placement.input_width)
+    storage.store(index: base + 5, value: placement.output_width)
+    storage.store(index: base + 6, value: placement.output_offset)
+    storage.store(index: base + 7, value: placement.tree_offset)
+    storage.store(index: base + 8, value: placement.tree_nodes)
+    storage.store(index: base + 9, value: placement.query_value_offset)
+    storage.store(index: base + 10, value: placement.query_sibling_offset)
+    storage.store(index: base + 11, value: placement.pair_width)
+    storage.store(index: base + 12, value: placement.pair_depth)
+}
+
+#[inline(always)]
+pub fn load_fri_round_placement<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ index: u32,
+) -> FriRoundPlacement {
+    let base = index * FRI_ROUND_PLACEMENT_FIELDS.downcast_truncate()
+    FriRoundPlacement {
+        valid: storage.load(index: base) == 1,
+        index: storage.load(index: base + 1),
+        round: storage.load(index: base + 2),
+        input_log: storage.load(index: base + 3),
+        input_width: storage.load(index: base + 4),
+        output_width: storage.load(index: base + 5),
+        output_offset: storage.load(index: base + 6),
+        tree_offset: storage.load(index: base + 7),
+        tree_nodes: storage.load(index: base + 8),
+        query_value_offset: storage.load(index: base + 9),
+        query_sibling_offset: storage.load(index: base + 10),
+        pair_width: storage.load(index: base + 11),
+        pair_depth: storage.load(index: base + 12),
+    }
+}
+
+#[inline(always)]
+fn store_fri_query_evaluation_cursor<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ base: u32,
+    _ cursor: FriQueryEvaluationCursor,
+) {
+    storage.store(index: base, value: if cursor.valid { 1 } else { 0 })
+    storage.store(index: base + 1, value: if cursor.found { 1 } else { 0 })
+    storage.store(index: base + 2, value: cursor.remaining)
+    storage.store(index: base + 3, value: cursor.current_query)
+    storage.store(index: base + 4, value: if cursor.result.valid { 1 } else { 0 })
+    storage.store(index: base + 5, value: cursor.result.round_index)
+    storage.store(index: base + 6, value: cursor.result.round)
+    storage.store(index: base + 7, value: cursor.result.evaluation_index)
+}
+
+#[inline(always)]
+fn load_fri_query_evaluation_cursor<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ base: u32,
+) -> FriQueryEvaluationCursor {
+    FriQueryEvaluationCursor {
+        valid: storage.load(index: base) == 1,
+        found: storage.load(index: base + 1) == 1,
+        remaining: storage.load(index: base + 2),
+        current_query: storage.load(index: base + 3),
+        result: FriQueryEvaluationPlacement {
+            valid: storage.load(index: base + 4) == 1,
+            round_index: storage.load(index: base + 5),
+            round: storage.load(index: base + 6),
+            evaluation_index: storage.load(index: base + 7),
+        },
+    }
+}
+
+#[inline(always)]
+fn store_fri_query_sibling_cursor<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ base: u32,
+    _ cursor: FriQuerySiblingCursor,
+) {
+    storage.store(index: base, value: if cursor.valid { 1 } else { 0 })
+    storage.store(index: base + 1, value: if cursor.found { 1 } else { 0 })
+    storage.store(index: base + 2, value: cursor.remaining)
+    storage.store(index: base + 3, value: cursor.current_query)
+    storage.store(index: base + 4, value: if cursor.result.valid { 1 } else { 0 })
+    storage.store(index: base + 5, value: cursor.result.round_index)
+    storage.store(index: base + 6, value: cursor.result.round)
+    storage.store(index: base + 7, value: cursor.result.tree_node)
+}
+
+#[inline(always)]
+fn load_fri_query_sibling_cursor<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ base: u32,
+) -> FriQuerySiblingCursor {
+    FriQuerySiblingCursor {
+        valid: storage.load(index: base) == 1,
+        found: storage.load(index: base + 1) == 1,
+        remaining: storage.load(index: base + 2),
+        current_query: storage.load(index: base + 3),
+        result: FriQuerySiblingPlacement {
+            valid: storage.load(index: base + 4) == 1,
+            round_index: storage.load(index: base + 5),
+            round: storage.load(index: base + 6),
+            tree_node: storage.load(index: base + 7),
+        },
+    }
+}
+
+/// Advance one evaluation-opening cursor through one materialized FRI round.
+/// Repeated dispatch is the physical interpreter, while `fri_structure` owns
+/// the exact semantic transition.
+#[inline(always)]
+pub fn advance_fri_query_evaluation_storage<
+    const ROUND_WORDS: usize,
+    const CURSOR_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ cursors: StorageBuffer<u32, CURSOR_WORDS>,
+    _ cursor_base: u32,
+    _ round: u32,
+    _ opening: u32,
+    _ query: u32,
+) -> FriQueryEvaluationPlacement {
+    let cursor = if round == 0 {
+        begin_fri_query_evaluation_cursor(opening, query)
+    } else {
+        load_fri_query_evaluation_cursor(cursors, cursor_base)
+    }
+    let next = advance_fri_query_evaluation_cursor(
+        cursor,
+        load_fri_round_placement<ROUND_WORDS>(rounds, round),
+    )
+    store_fri_query_evaluation_cursor(cursors, cursor_base, next)
+    finish_fri_query_evaluation_cursor(next)
+}
+
+/// Advance one authentication-sibling cursor through one materialized FRI
+/// round without constructing a host-side authentication-path table.
+#[inline(always)]
+pub fn advance_fri_query_sibling_storage<
+    const ROUND_WORDS: usize,
+    const CURSOR_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ cursors: StorageBuffer<u32, CURSOR_WORDS>,
+    _ cursor_base: u32,
+    _ round: u32,
+    _ sibling: u32,
+    _ query: u32,
+) -> FriQuerySiblingPlacement {
+    let cursor = if round == 0 {
+        begin_fri_query_sibling_cursor(sibling, query)
+    } else {
+        load_fri_query_sibling_cursor(cursors, cursor_base)
+    }
+    let next = advance_fri_query_sibling_cursor(
+        cursor,
+        load_fri_round_placement<ROUND_WORDS>(rounds, round),
+    )
+    store_fri_query_sibling_cursor(cursors, cursor_base, next)
+    finish_fri_query_sibling_cursor(next)
+}

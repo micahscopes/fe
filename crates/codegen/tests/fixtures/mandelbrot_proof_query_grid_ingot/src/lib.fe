@@ -1,18 +1,28 @@
-//! Portable WebGPU placement of the production Mandelbrot FRI query grid.
+//! Portable WebGPU extraction of the production Mandelbrot FRI query grid.
 //!
 //! The 114-query count comes from the security policy, and the per-query
 //! opening geometry comes from the thirteen-round FRI schedule. The actor
 //! supplies only a portable workgroup tile. No query identity, opening count,
-//! dispatch count, or placement table is authored beside those denotations.
+//! dispatch count, placement table, or authentication path is authored beside
+//! those denotations.
 
 use fri_structure::{
     FriQueryRangePlan,
     FriSchedule,
+    FriSchedulePlacement,
+    FriScheduleShape,
     fri_query_evaluation_work_item,
     fri_query_grid_metadata,
     fri_query_grid_workgroups,
     fri_query_sample_work_item,
     fri_query_sibling_work_item,
+}
+use fri_structure_webgpu::{
+    FRI_QUERY_CURSOR_FIELDS,
+    advance_fri_query_evaluation_storage,
+    advance_fri_query_sibling_storage,
+    fri_round_placement_storage_words,
+    store_fri_round_placement,
 }
 use fri_baby_bear::fri_query_domain_tag
 use mandelbrot_proof_production_profile_baby_bear::{
@@ -49,6 +59,7 @@ type FoldSchedule = FriSchedule<1, {PRODUCTION_LDE_LOG}>
 
 const THREADS: usize = 64
 const RECEIPT_WORDS: usize = 4
+const DIGEST_WORDS: usize = 8
 const QUERY_COUNT: usize =
     fri_query_grid_metadata<QueryPlan, FoldSchedule>().query_count as usize
 const EVALUATIONS_PER_QUERY: usize =
@@ -70,8 +81,34 @@ const SIBLING_GROUPS: usize = fri_query_grid_workgroups(
 const EVALUATION_PADDING: usize = EVALUATION_GROUPS * THREADS - EVALUATION_ITEMS
 const SIBLING_PADDING: usize = SIBLING_GROUPS * THREADS - SIBLING_ITEMS
 const PADDING_RECEIPT_WORDS: usize = EVALUATION_PADDING + SIBLING_PADDING
-const EVALUATION_RECEIPT_WORDS: usize = EVALUATION_ITEMS * RECEIPT_WORDS
-const SIBLING_RECEIPT_WORDS: usize = SIBLING_ITEMS * RECEIPT_WORDS
+const EVALUATION_OPENING_WORDS: usize = EVALUATION_ITEMS * RECEIPT_WORDS
+const SIBLING_OPENING_WORDS: usize = SIBLING_ITEMS * DIGEST_WORDS
+const FRI_ROUNDS: usize =
+    <FoldSchedule as FriScheduleShape>::fri_schedule_metadata().rounds as usize
+const FOLDED_EVALUATIONS: usize =
+    <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+        .folded_evaluations as usize
+const LAYER_TREE_NODES: usize =
+    <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+        .layer_tree_nodes as usize
+const ROUND_PLACEMENT_WORDS: usize =
+    fri_round_placement_storage_words(FRI_ROUNDS)
+const FOLDED_EVALUATION_WORDS: usize = FOLDED_EVALUATIONS * RECEIPT_WORDS
+const LAYER_TREE_WORDS: usize = LAYER_TREE_NODES * DIGEST_WORDS
+const PROOF_DATA_WORDS: usize = FOLDED_EVALUATION_WORDS + LAYER_TREE_WORDS
+const LAYER_TREE_START: u32 = FOLDED_EVALUATION_WORDS.downcast_truncate()
+const EVALUATION_CURSOR_START: u32 = PROOF_DATA_WORDS.downcast_truncate()
+const EVALUATION_CURSOR_WORDS: usize =
+    EVALUATION_ITEMS * FRI_QUERY_CURSOR_FIELDS
+const EVALUATION_PROGRESS_START: u32 =
+    EVALUATION_CURSOR_START + EVALUATION_CURSOR_WORDS.downcast_truncate()
+const SIBLING_CURSOR_START: u32 =
+    EVALUATION_PROGRESS_START + EVALUATION_ITEMS.downcast_truncate()
+const SIBLING_CURSOR_WORDS: usize = SIBLING_ITEMS * FRI_QUERY_CURSOR_FIELDS
+const SIBLING_PROGRESS_START: u32 =
+    SIBLING_CURSOR_START + SIBLING_CURSOR_WORDS.downcast_truncate()
+const PROOF_ARENA_WORDS: usize =
+    SIBLING_PROGRESS_START as usize + SIBLING_ITEMS
 const QUERY_STATE_WORDS: usize =
     indexed_digest_squeeze_state_words(QUERY_COUNT)
 const QUERY_TAIL_WORDS: usize =
@@ -121,13 +158,33 @@ static_assert(QUERY_TRANSCRIPT_WORDS == 8)
 static_assert(QUERY_CONTROL_WORDS == 155)
 static_assert(QUERY_WORKSPACE_WORDS == 5928)
 static_assert(QUERY_PADDING_START == 123)
+static_assert(FRI_ROUNDS == 13)
+static_assert(FOLDED_EVALUATIONS == 8191)
+static_assert(LAYER_TREE_NODES == 16369)
+static_assert(ROUND_PLACEMENT_WORDS == 169)
+static_assert(PROOF_DATA_WORDS == 163716)
+static_assert(PROOF_ARENA_WORDS == 324798)
 
 actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
     query_control: Shared<u32, QUERY_CONTROL_WORDS>,
     query_workspace: Shared<u32, QUERY_WORKSPACE_WORDS>,
-    evaluation_receipts: Shared<u32, EVALUATION_RECEIPT_WORDS>,
-    sibling_receipts: Shared<u32, SIBLING_RECEIPT_WORDS>,
+    round_placements: Shared<u32, ROUND_PLACEMENT_WORDS>,
+    proof_arena: Shared<u32, PROOF_ARENA_WORDS>,
+    evaluation_openings: Shared<u32, EVALUATION_OPENING_WORDS>,
+    sibling_openings: Shared<u32, SIBLING_OPENING_WORDS>,
     padding_receipts: Shared<u32, PADDING_RECEIPT_WORDS>,
+
+    fn prepare_rounds(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
+    {
+        let lane = invocation.global.x
+        if lane >= FRI_ROUNDS.downcast_truncate() { return }
+        store_fri_round_placement<ROUND_PLACEMENT_WORDS>(
+            self.round_placements,
+            lane,
+            <FoldSchedule as FriSchedulePlacement>::fri_round_placement(lane),
+        )
+    }
 
     fn sample_queries(self, invocation: ComputeInvocation)
         uses (
@@ -187,8 +244,13 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
         }
     }
 
-    fn place_evaluations(self, invocation: ComputeInvocation)
-        uses (Kernel<Threads<THREADS, 1, 1>, Grid<EVALUATION_GROUPS, 1, 1>>)
+    fn open_evaluations(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<EVALUATION_GROUPS, 1, 1, FRI_ROUNDS>,
+            >
+        )
     {
         let lane = invocation.global.x
         let item = fri_query_evaluation_work_item<QueryPlan, FoldSchedule>(lane)
@@ -199,21 +261,56 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
             )
             return
         }
-        let base = lane * RECEIPT_WORDS.downcast_truncate()
-        self.evaluation_receipts.store(index: base, value: 1)
-        self.evaluation_receipts.store(
-            index: base + 1,
-            value: item.query_position,
+        let query = self.query_control.load(
+            index: QUERY_INDICES_START + item.query_position,
         )
-        self.evaluation_receipts.store(
-            index: base + 2,
-            value: item.query_identity,
+        let progress_index = EVALUATION_PROGRESS_START + lane
+        let round = self.proof_arena.load(index: progress_index)
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let cursor_base = EVALUATION_CURSOR_START
+            + lane * FRI_QUERY_CURSOR_FIELDS.downcast_truncate()
+        let placement = advance_fri_query_evaluation_storage<
+            ROUND_PLACEMENT_WORDS,
+            PROOF_ARENA_WORDS,
+        >(
+            self.round_placements,
+            self.proof_arena,
+            cursor_base,
+            round,
+            item.opening,
+            query,
         )
-        self.evaluation_receipts.store(index: base + 3, value: item.opening)
+        self.proof_arena.store(index: progress_index, value: round + 1)
+        if round + 1 != FRI_ROUNDS.downcast_truncate() { return }
+        if !placement.valid { return }
+        let source = placement.evaluation_index
+            * RECEIPT_WORDS.downcast_truncate()
+        let destination = lane * RECEIPT_WORDS.downcast_truncate()
+        self.evaluation_openings.store(
+            index: destination,
+            value: self.proof_arena.load(index: source),
+        )
+        self.evaluation_openings.store(
+            index: destination + 1,
+            value: self.proof_arena.load(index: source + 1),
+        )
+        self.evaluation_openings.store(
+            index: destination + 2,
+            value: self.proof_arena.load(index: source + 2),
+        )
+        self.evaluation_openings.store(
+            index: destination + 3,
+            value: self.proof_arena.load(index: source + 3),
+        )
     }
 
-    fn place_siblings(self, invocation: ComputeInvocation)
-        uses (Kernel<Threads<THREADS, 1, 1>, Grid<SIBLING_GROUPS, 1, 1>>)
+    fn open_siblings(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<SIBLING_GROUPS, 1, 1, FRI_ROUNDS>,
+            >
+        )
     {
         let lane = invocation.global.x
         let item = fri_query_sibling_work_item<QueryPlan, FoldSchedule>(lane)
@@ -226,20 +323,66 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
             )
             return
         }
-        let base = lane * RECEIPT_WORDS.downcast_truncate()
-        self.sibling_receipts.store(index: base, value: 1)
-        self.sibling_receipts.store(
-            index: base + 1,
-            value: item.query_position,
+        let query = self.query_control.load(
+            index: QUERY_INDICES_START + item.query_position,
         )
-        self.sibling_receipts.store(
-            index: base + 2,
-            value: item.query_identity,
+        let progress_index = SIBLING_PROGRESS_START + lane
+        let round = self.proof_arena.load(index: progress_index)
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let cursor_base = SIBLING_CURSOR_START
+            + lane * FRI_QUERY_CURSOR_FIELDS.downcast_truncate()
+        let placement = advance_fri_query_sibling_storage<
+            ROUND_PLACEMENT_WORDS,
+            PROOF_ARENA_WORDS,
+        >(
+            self.round_placements,
+            self.proof_arena,
+            cursor_base,
+            round,
+            item.sibling,
+            query,
         )
-        self.sibling_receipts.store(index: base + 3, value: item.sibling)
+        self.proof_arena.store(index: progress_index, value: round + 1)
+        if round + 1 != FRI_ROUNDS.downcast_truncate() { return }
+        if !placement.valid { return }
+        let source = LAYER_TREE_START
+            + placement.tree_node * DIGEST_WORDS.downcast_truncate()
+        let destination = lane * DIGEST_WORDS.downcast_truncate()
+        self.sibling_openings.store(
+            index: destination,
+            value: self.proof_arena.load(index: source),
+        )
+        self.sibling_openings.store(
+            index: destination + 1,
+            value: self.proof_arena.load(index: source + 1),
+        )
+        self.sibling_openings.store(
+            index: destination + 2,
+            value: self.proof_arena.load(index: source + 2),
+        )
+        self.sibling_openings.store(
+            index: destination + 3,
+            value: self.proof_arena.load(index: source + 3),
+        )
+        self.sibling_openings.store(
+            index: destination + 4,
+            value: self.proof_arena.load(index: source + 4),
+        )
+        self.sibling_openings.store(
+            index: destination + 5,
+            value: self.proof_arena.load(index: source + 5),
+        )
+        self.sibling_openings.store(
+            index: destination + 6,
+            value: self.proof_arena.load(index: source + 6),
+        )
+        self.sibling_openings.store(
+            index: destination + 7,
+            value: self.proof_arena.load(index: source + 7),
+        )
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        self.evaluation_receipts.load(index: 0).downcast_truncate()
+        self.evaluation_openings.load(index: 0).downcast_truncate()
     }
 }

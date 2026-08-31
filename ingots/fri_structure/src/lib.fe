@@ -642,11 +642,11 @@ fn invalid_query_sibling_placement() -> FriQuerySiblingPlacement {
 /// fixes semantic order while allowing array, storage, and future fused
 /// schedule readers to supply one round placement at a time.
 pub struct FriQueryEvaluationCursor {
-    valid: bool,
-    found: bool,
-    remaining: u32,
-    current_query: u32,
-    result: FriQueryEvaluationPlacement,
+    pub valid: bool,
+    pub found: bool,
+    pub remaining: u32,
+    pub current_query: u32,
+    pub result: FriQueryEvaluationPlacement,
 }
 impl Copy for FriQueryEvaluationCursor {}
 
@@ -708,11 +708,11 @@ pub fn finish_fri_query_evaluation_cursor(
 
 /// Stateful interpretation of one authentication-sibling coordinate.
 pub struct FriQuerySiblingCursor {
-    valid: bool,
-    found: bool,
-    remaining: u32,
-    current_query: u32,
-    result: FriQuerySiblingPlacement,
+    pub valid: bool,
+    pub found: bool,
+    pub remaining: u32,
+    pub current_query: u32,
+    pub result: FriQuerySiblingPlacement,
 }
 impl Copy for FriQuerySiblingCursor {}
 

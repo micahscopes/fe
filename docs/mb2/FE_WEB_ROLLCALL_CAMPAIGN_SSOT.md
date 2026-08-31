@@ -3062,10 +3062,29 @@ fallback. The semantic receipts are:
    and ordered AIR transcript now pass Chromium/SwiftShader, independent
    direct-DFT, and Plonky3 gates. The complete composition and toy FRI replay,
    production 114-query work topology, and all 114 transcript-derived query
-   indices are now exact on software WebGPU. Next use those indices to extract
-   and authenticate production codeword openings and Merkle paths without
-   introducing a host-side query table. Physical Radeon execution remains a
-   separate required gate. The current cold-start cost
+   indices are now exact on software WebGPU. The next production checkpoint
+   also derives all 13 FRI round placements in Fe and extracts 2,850 quartic
+   evaluation openings plus 15,048 eight-word Merkle siblings from one
+   device-resident proof arena. A shared stateful cursor now owns semantic
+   placement for scalar, array, four-round, and GPU-storage interpretations.
+   The first GPU interpretation exposed a `MemAllocDynamic` aggregate inside
+   a runtime loop and failed closed during SPIR-V lowering. The retained
+   interpretation instead advances the same cursor through 13 Fe-derived
+   repeated dispatches, persisting only physical cursor state between rounds.
+   On llvmpipe, independent Rust recurrences and Plonky3 sampling matched every
+   round word, query index, evaluation field, sibling digest, padding lane, and
+   bounds trap. Release bundle compilation took 135.93 seconds; software-GPU
+   execution plus readbacks took 2.49 seconds for 17,898 opening lanes and
+   emitted 737,609 WGSL bytes. An immediate warm rerun compiled in 52.35
+   seconds and executed plus read back in 21.42 milliseconds, so cold shader
+   and pipeline caches dominate the first receipt. The proof arena is
+   deliberately synthetic
+   oracle input at this boundary, so this proves device-resident selection
+   wiring, not authentication by the preceding production FRI and Merkle
+   stages. Connect the arena to those real producers, then compact duplicate
+   paths into the canonical receipt without introducing a host-side query
+   table. Physical Radeon execution remains a separate required gate. The
+   current cold-start cost
    also makes pipeline caching and semantics-preserving pass fusion a required
    practicality slice before scaling domains or integrating the gallery.
    The first complete 49-pass replay exposed a compiler semantic defect before
