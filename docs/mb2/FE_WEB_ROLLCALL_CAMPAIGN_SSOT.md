@@ -48,9 +48,21 @@ authority.
 Two older sequencing assumptions are now retired. Browser revm was originally
 placed first because it was the only unknown infrastructure risk; S0 is now a
 real Chrome-tested generic `fe-revm-browser` engine. BabyBear retargeting and a
-first real WebGPU proof placement are also complete. The current unknown is
-compact, scalable interpretation of the same BabyBear proof dependency graph
-across scalar and WebGPU placements.
+first real WebGPU proof placement are also complete. The 114-query scalar
+receipt boundary is now closed. The current unknown is exact physical-GPU
+execution of the current authenticated FRI checkpoint graph, followed by scalable
+WebGPU placement of the production policy and recursive parent proof. These
+remain interpretations of the same BabyBear dependency graph, not separate
+provers.
+
+The 2026-08-31 release opening-relation gate compiled the production verifier
+to a 2,801,240-byte Wasm module in 208.69 seconds, then authenticated 452 base
+and 452 interaction leaves from the retained 948,808-byte receipt in 16.21
+seconds. The independent path accounting matched 1,585 of 1,585 hashes and the
+mutation matrix remained fail-closed. A const-evaluation cycle discovered by
+this gate was removed by moving field-neutral FRI multiproof capacities into
+`fri_structure`; receipt schemas and field interpreters now derive one shared
+shape without depending on the consuming BabyBear impl graph.
 
 The attempted policy-sized scalar path supplied useful negative evidence. The
 114-query typed policy, receipt carrier, codec, prover/verifier boundaries, and
@@ -181,10 +193,179 @@ existing Definition of done, not a second campaign checklist:
   release structural gate passed in 833.02 seconds; native execution explicitly
   skipped because this sandbox exposes no `wgpu` adapter. Local Sonatina commits
   `5b96d731` and `95f558bf` are the required structured-control-flow companions
-  until they are published and pinned. This closes the complete toy FRI
-  placement and browser exactness checkpoint. It is not yet authenticated query
-  opening, canonical proof encoding, a production-sized schedule, or a
-  recursive proof.
+  until they are published and pinned. This closes the executed toy FRI
+  placement and browser exactness checkpoint.
+
+  A subsequent local checkpoint extends the Fe-owned proof tape from 741 to
+  902 words and adds transcript-selected query sampling, typed authenticated
+  opening extraction, 56 query evaluations, 96 Merkle siblings, and explicit
+  query validity receipts. All 17 Fe compute actors plus the display actor
+  lower into Naga-validated browser WGSL in one release structural gate. The
+  complete bundle compiled in 342.67 seconds with bounded per-stage compiler
+  memory. Native execution then explicitly skipped because this sandbox has no
+  GPU adapter, so this is compilation and validation evidence, not a value or
+  performance receipt from physical WebGPU.
+
+  Reaching that boundary also closed three general compiler blockers. Fe now
+  avoids re-entering implicit layout-hole planning while resolving a
+  self-branded ADT, and browser bundle compilation uses an isolated replicated
+  compiler database per stage so completed Salsa state can be released.
+  Local Sonatina commit `5202fc9a` lowers byte-exact `i1` private memory and
+  `i32 -> i1` truncation, and structurizes narrowly recognized conditional and
+  nested-loop corridors to the canonical loop exit. The focused Sonatina gates
+  pass 25/25 structurizer tests plus both Naga-valid private-heap probes. More
+  general noncanonical multi-exit transport remains deliberately fail-closed.
+  Proof receipt validation is now constant-work Fe code that accumulates
+  explicit validity bits rather than relying on data-dependent short-circuit
+  exits.
+
+  Physical-adapter exactness for the current authenticated FRI checkpoint graph, canonical
+  extraction of that GPU result into the production receipt, the 114-query
+  WebGPU policy, and recursive parent proving remain open.
+
+  The focused immutable browser lab now publishes that exact graph as 18
+  passes, 9,588,911 WGSL bytes, six typed resources, and 22 assets. Cold proof
+  lowering and atomic site publication took 253.55 seconds after the release
+  CLI build. A fresh headless Chromium profile executed all 18 passes through
+  SwiftShader. Clean mode produced five exact blue validity bands; the
+  Fe-authored mutation changed only FRI and overall to exact pink; clean
+  recovery reproduced all 902 proof words without reload. No console,
+  bootstrap, device-loss, or surface errors occurred. The captured clean,
+  tampered, and recovered tapes then passed the existing independent direct-DFT
+  and Plonky3 oracle, including query indices, evaluations, Merkle siblings,
+  reconstructed roots, and inter-layer folds.
+
+  The next local checkpoint widens the same graph from four selected trace
+  columns to the complete production toy AIR placement: 17 main columns plus
+  411 compiler-derived auxiliary columns. One typed, 428-batch stage grid
+  transforms all 1,712 canonical trace words into 6,848 disjoint-coset LDE
+  values. The Fe-owned proof tape grows from 902 to 3,042 words by appending
+  the canonical trace and one completion flag per column. It still uses six
+  physical resources and the portable eight-storage-binding ceiling. The
+  existing FRI checkpoint now projects its step, magnitude, active, and
+  terminal inputs from that full production LDE. It does not yet commit the
+  main and auxiliary AIR trees or derive the AIR composition codeword, so it
+  is not a complete STARK receipt.
+
+  A fresh release precompile emitted 18 passes, 9,735,409 WGSL bytes, and
+  2,182 Wasm bytes. Source plus dependency diagnostics took 99.21 seconds,
+  proof lowering finished at 532.37 seconds, and atomic site publication
+  finished at 537.54 seconds. Chromium 150 on SwiftShader compiled and mounted
+  the graph in 232.07 seconds. The first clean execution took 133.29 seconds;
+  warm tampered and recovered executions took 10.35 and 10.59 seconds. The
+  mutation changed exactly the FRI and overall bands to pink, and recovery
+  restored all five blue bands. An independent Rust model then matched all
+  1,712 browser trace words, all 428 completion flags, every one of the 6,848
+  browser LDE values against direct polynomial evaluation, and the complete
+  authenticated FRI checkpoint receipt. This closes software-browser
+  production-AIR LDE exactness. Physical Radeon parity remains open.
+
+  The next exact slice commits the production LDE matrices themselves. A new
+  compact `mandelbrot_proof_baby_bear_domains` ingot owns the nominal protocol
+  domains shared by scalar and WebGPU interpretations. This removes the need
+  for the GPU actor to import the entire scalar prover merely to recover domain
+  tags, and prevents placement code from rebuilding numeric tags. Six new
+  Fe-authored passes commit 16 main rows of 17 fields and 16 auxiliary rows of
+  411 fields, then reduce both ordered 16-leaf trees through four staged
+  Poseidon2 levels. The auxiliary sponge schedule is 2,288 repeated dispatches
+  over one compiled body, derived from the fixed-length sponge permutation
+  count. Both trees reuse the existing typed FRI scratch before that scratch is
+  reset for the FRI schedule; physical resources remain at six and every pass
+  stays within the portable binding ceiling.
+
+  The resulting immutable lab has 24 passes, 11,128,114 WGSL bytes, 2,182 Wasm
+  bytes, 28 assets, and a 3,060-word proof tape. Fresh publication took 439.56
+  seconds. Chromium 150 on SwiftShader mounted the graph in 230.79 seconds and
+  executed clean, tampered, and recovered frames in 63.79, 28.21, and 18.43
+  seconds. The exact five-band mutation behavior remained green/pink/green.
+  More importantly, the independent Rust and Plonky3 model reconstructed all
+  32 production leaf commitments and both four-level roots directly from the
+  6,848 independently derived LDE values, and matched every browser word. This
+  closes software-browser production AIR commitment exactness.
+
+  The following exact slice binds those commitments into the production AIR
+  transcript. A compact shared `mandelbrot_proof_baby_bear_encoding` ingot now
+  derives the injective row, public-input, and auxiliary-bit field encodings
+  used by both scalar and GPU placements. The aggregate scalar interpreter and
+  direct GPU field projection share one Fe-owned field-order and width source;
+  there is no copied shader offset table. Four packed trace leaves, four packed
+  auxiliary leaves, and the public digest are committed under their nominal
+  domains. The public digest, both trace roots, and both LDE roots are then
+  bound in an ordered four-step AIR transcript.
+
+  The resulting immutable lab has 30 passes, 14,155,138 WGSL bytes, 2,182 Wasm
+  bytes, 33 assets, and a 3,184-word proof tape. Fresh release publication took
+  789.82 seconds. Chromium 150 on SwiftShader mounted the graph in 344.01
+  seconds, executed the first clean frame in 386.93 seconds, and executed warm
+  tampered and recovered frames in 38.54 and 23.82 seconds. Clean, mutation,
+  and recovery behavior remained exact. The independent Rust and Plonky3
+  oracle matched every LDE value, packed field, root, and final AIR transcript
+  word from the captured browser tape. The receipt SHA-256 is
+  `c0e886d136dc5e944faca70505455cfc3ec46d31e61d91afc4aae374e5a14ccc`.
+
+  This closes software-browser exactness for the production toy trace, LDE,
+  commitments, and transcript. It does not close the STARK: the current FRI
+  checkpoint still starts from four selected main columns rather than the full
+  AIR composition codeword. The next semantic slice derives the composition
+  challenge from the final AIR transcript, evaluates and commits all production
+  constraints over the LDE, and feeds that composition codeword into FRI.
+
+  The 2026-08-30 composition checkpoint implements that slice.
+  The field-generic AIR core preserves one 708-constraint denotation while
+  exposing nominal fold checkpoints after the all-row, pair-row, first-row,
+  and last-row families. The WebGPU placement serializes those exact
+  checkpoints into three derived scratch regions, rather than selecting a
+  constraint family through an application opcode or copying its formula.
+  Eleven Fe-authored passes derive the composition challenge, fold constraints
+  `0 -> 653`, `653 -> 690`, `690 -> 702`, and `702 -> 708`, project all sixteen
+  quartic evaluations, commit their ordered tree, and bind the root into the
+  production transcript. The existing complete FRI schedule now consumes that
+  composition codeword instead of four diagnostic trace columns.
+
+  An entry-rooted zero-import Fe-Wasm gate checks all sixteen coset evaluations
+  against the existing independent BN254 bigint composition model, plus a
+  changed challenge, changed claim, and three fail-closed invalid inputs. The
+  original focused run passed 1/1 in 202.67 seconds. A fresh release rerun after
+  removing the exploratory value-observation path passed the same matrix in
+  590.64 seconds.
+
+  An earlier intermediate artifact had reported materialized-row parity code
+  `18` at coset point zero. That result does not reproduce in the current
+  compact entry. Two fresh compilations emitted byte-identical 564,183-byte
+  Wasm modules with SHA-256
+  `838a5d3994456f24c14044e158d5283aefeb698c5ba7cd7f07c65fbfa898838c`.
+  The exact module returned parity code zero immediately in Bun and passed all
+  sixteen rows under default optimized Wasmtime in 602.15 seconds. A separate
+  Fe regression materializes 411 branded 20-word values, dynamically selects
+  the first, middle, and last elements, subtracts every direct/materialized
+  pair, and also returns parity zero. The observation-only export and IR dump
+  hooks were removed. Because no current artifact reproduces code `18`, this
+  closes the present semantic gate without claiming an invented backend fix;
+  the earlier intermediate result remains stale checkpoint evidence rather
+  than a diagnosed current defect.
+
+  The complete browser-profile graph now contains 48 compute passes plus one
+  display pass, six physical resources, a 2,874-word derived scratch tape, and
+  no pass with more than eight storage bindings. Every stage lowered to
+  Naga-valid WGSL in 2,076.40 seconds; the complete release gate passed in
+  2,081.25 seconds. Full-graph lowering times for the new suffix were 431.96
+  seconds for pair rows, 162.19 for first row, 78.35 for last row, and 61.47
+  for projection. Isolated lowering of those same four stages took 366.87
+  seconds total, so the full-graph timing delta remains compiler-cost evidence
+  to investigate. Native execution skipped explicitly because this sandbox
+  exposes no adapter. Browser value parity, mutation/recovery, and a physical
+  hardware receipt for this composition graph remain open.
+
+  The externally hosted Chrome 149 endpoint was live but could not supply a
+  hardware adapter for this run. DevTools reported the AMD Radeon 780M and
+  WebGPU feature as configured, while `chrome://gpu` reported hardware
+  acceleration disabled after two GPU-process crashes. Both the allowlisted
+  `http://10.0.0.2:8000` origin and a secure intercepted localhost origin
+  returned `requestAdapter() == null` before any proof shader was requested.
+  Therefore this checkpoint is browser-runtime and independent-value evidence
+  on SwiftShader, not the required physical-GPU receipt. Restart the external
+  browser GPU process, confirm hardware acceleration, and rerun the same
+  focused lab before claiming physical-adapter parity.
   Larger production domains, fused shared-memory or subgroup placements, and
   real Chrome hardware parity for this staged path remain open, so G-NTT stays
   partial.
@@ -2617,20 +2798,20 @@ fallback. The semantic receipts are:
 
 ## Immediate burn-down order
 
-1. Add the first post-checkpoint WebGPU proof slice at toy scale. Expose one
+1. Completed: add the first post-checkpoint WebGPU proof slice at toy scale. Expose one
    ordinary Fe factor-2 FRI pair denotation from the existing BabyBear proof
    code, make the scalar fold and a portable one-invocation-per-pair placement
    consume it, and extend `mandelbrot_proof_gpu` without hand-authored WGSL.
    Gate the values against the scalar path and an independent field oracle,
    gate a mutation, then execute the exact card through real Chrome. This is
    the next `write -> derive -> prove -> place -> run -> measure` slice.
-2. Extend that placement into the complete toy `16 -> 8 -> 4 -> 2 -> 1` FRI
+2. Completed: extend that placement into the complete toy `16 -> 8 -> 4 -> 2 -> 1` FRI
    chain with ordered layer commitments and transcript-derived challenges.
    Keep large buffers device-resident and cross the host boundary only for
    required transcript observations and final typed receipt extraction. Record
    dispatch, readback, live-memory, shader-size, pipeline-compile, and
    device-loss evidence.
-3. Compact the policy-sized scalar boundary. Retain the 114-query Fe-derived
+3. Completed: compact the policy-sized scalar boundary. Retain the 114-query Fe-derived
    `FriQueryRangePlan` and typed receipt, but replace recursively expanded query
    execution with checked value-level loops over canonical request buffers.
    Re-run the four-process exact prover/verifier/mutation gate, and pin the
@@ -2780,12 +2961,39 @@ fallback. The semantic receipts are:
    focused Wasm, SPIR-V, and EVM gates there, and move the Fe dependency pin
    only when the exact scalar receipt and browser proof gates remain green. Do
    not blindly rebase the live 157-commit proof substrate.
-4. Carry the portable schedule to production-sized NTT/LDE, AIR composition,
+4. In progress: carry the portable schedule to production-sized NTT/LDE, AIR composition,
    Poseidon/Merkle, FRI folding, and opening extraction. Close typed proof
    regions as each buffer enters the graph, preserve direct-DFT, Plonky3, and
    independent bigint gates, and run each widened stage in Chrome before adding
    another. Add Merkle retention/recomputation and a peak-memory policy before
-   mobile-sized execution.
+   mobile-sized execution. The complete 428-column, four-row production toy
+   AIR LDE, separate main and auxiliary commitments, packed trace commitments,
+   and ordered AIR transcript now pass Chromium/SwiftShader, independent
+   direct-DFT, and Plonky3 gates. Next derive and commit the AIR composition
+   codeword and make it the input to the first FRI layer. Physical Radeon
+   execution remains a separate required gate. The current cold-start cost
+   also makes pipeline caching and semantics-preserving pass fusion a required
+   practicality slice before scaling domains or integrating the gallery.
+   The first complete 49-pass replay exposed a compiler semantic defect before
+   this gate could be claimed: Runtime MIR aggregate facts retained the first
+   structural value of a reassigned local, so an inlined quartic constraint
+   checkpoint could return its initial accumulator even though the authored Fe
+   helper had advanced it. Commit `4393a076b` snapshots propagated facts,
+   invalidates the reassigned fact and its transitive aggregate dependents, and
+   gates a wide mutable helper return on llvmpipe. Commit `16c89e589` separately
+   makes the value-based projection and liveness specializer fail closed for
+   repeated destinations instead of applying an SSA assumption to mutable
+   Runtime MIR. The focused real 78-constraint AIR helper then returned all
+   four independently derived `challenge^78` extension lanes on WebGPU.
+   With both guards enabled, the exact 49-pass graph compiled about 18 MB of
+   Fe-derived WGSL in 1,946.53 seconds, compiled every llvmpipe pipeline in
+   209.69 seconds, executed the clean graph in 301.82 seconds, and executed the
+   retained tamper case in 6.51 seconds. Every 428-column AIR LDE value,
+   composition lane, commitment root, transcript state, FRI layer, and query
+   opening matched the independent direct-DFT and Plonky3 models. The complete
+   release gate passed 1/1 in 2,465.82 seconds without a skip or device loss.
+   This closes the local software-WebGPU composition replay. Physical Radeon
+   execution and performance-oriented kernel fusion remain separate gates.
 5. G-RECEIPT is closed at the scalar 114-query boundary. Continue through
    G-RECURSE and G-BROWSER. The security-sized verifier is now bound to the
    private leaf authority, but the current recursive carrier and
