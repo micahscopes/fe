@@ -2098,8 +2098,7 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
                 if is_reifiable_aggregate_ref(kind)
                     && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
                     && is_struct_aggregate(db, pointee)
-                    && (!pointee.contains_array_value(db)
-                        || ref_param_has_only_value_reads(db, body, param.local)) =>
+                    && ref_param_has_only_value_reads(db, body, param.local) =>
             {
                 Some((param.local, pointee.as_ref().clone()))
             }
@@ -12917,6 +12916,93 @@ mod tests {
             space: AddressSpaceKind::Memory,
         }));
         assert!(!is_reifiable_aggregate_ref(&RefKind::Object));
+    }
+
+    #[test]
+    fn provider_aggregate_param_reification_rejects_write_through_without_arrays() {
+        let source = r#"
+struct Cell { value: u32 }
+
+pub fn read(cell: own Cell) -> u32 {
+    cell.value
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///provider_aggregate_write_through.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "read").unwrap();
+        let function = package.functions(&db)[0];
+        let mut body = function.instance(&db).body(&db);
+        let candidate = body.signature.params[0].local;
+        let pointee = body.signature.params[0].class.clone();
+        assert!(is_struct_aggregate(&db, &pointee));
+        assert!(!pointee.contains_array_value(&db));
+
+        let provider = RuntimeClass::Ref {
+            pointee: Box::new(pointee.clone()),
+            kind: RefKind::Provider {
+                provider_ty: body.locals[candidate.as_u32() as usize].semantic_ty,
+                space: AddressSpaceKind::Memory,
+            },
+            view: RefView::Whole,
+        };
+        body.signature.params[0].class = provider.clone();
+        body.locals[candidate.as_u32() as usize].carrier = RuntimeCarrier::Value(provider.clone());
+        body.locals[candidate.as_u32() as usize].root = RuntimeLocalRoot::None;
+        for block in &mut body.blocks {
+            for stmt in &mut block.stmts {
+                let RStmt::Assign { expr, .. } = stmt else {
+                    continue;
+                };
+                match expr {
+                    RExpr::Load { place } if matches!(place.root, PlaceRoot::Slot(root) if root == candidate) =>
+                    {
+                        place.root = PlaceRoot::Ref(candidate);
+                    }
+                    RExpr::AggregateExtract { value, index } if *value == candidate => {
+                        *expr = RExpr::Load {
+                            place: RuntimePlace {
+                                root: PlaceRoot::Ref(candidate),
+                                path: vec![PlaceElem::Field(hir::analysis::semantic::FieldIndex(
+                                    *index as u16,
+                                ))]
+                                .into_boxed_slice(),
+                            },
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(ref_param_has_only_value_reads(&db, &body, candidate));
+
+        let replacement = RLocalId::from_u32(body.locals.len() as u32);
+        body.locals.push(RLocal {
+            semantic_ty: body.locals[candidate.as_u32() as usize].semantic_ty,
+            carrier: RuntimeCarrier::Value(pointee),
+            root: RuntimeLocalRoot::None,
+        });
+        body.blocks[0].stmts.insert(
+            0,
+            RStmt::CopyInto {
+                dst: RuntimePlace {
+                    root: PlaceRoot::Ref(candidate),
+                    path: Box::default(),
+                },
+                src: replacement,
+            },
+        );
+
+        assert!(!ref_param_has_only_value_reads(&db, &body, candidate));
+        reify_static_aggregate_params(&db, &mut body);
+        assert_eq!(body.signature.params[0].class, provider);
+        assert!(matches!(
+            body.locals[candidate.as_u32() as usize].carrier,
+            RuntimeCarrier::Value(RuntimeClass::Ref { .. })
+        ));
     }
 
     #[test]
