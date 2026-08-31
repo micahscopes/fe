@@ -1,0 +1,229 @@
+//! Canonical sparse opening placement over retained FRI trees.
+//!
+//! One invocation owns one semantic FRI layer. It derives pair requests from
+//! transcript-selected query indices, normalizes duplicate leaves, and emits
+//! the same bottom-up, left-to-right authentication frontier used by the
+//! field-neutral Merkle multipath denotation. Physical storage remains packed
+//! by the offsets of the materialized FRI schedule.
+
+use fri_structure_webgpu::load_fri_round_placement
+use std::webgpu::StorageBuffer
+
+/// Compact one retained FRI layer directly from its device-resident values
+/// and complete Merkle tree. Output capacities remain conservative; counts
+/// identify the canonical prefixes consumed by receipt encoding.
+pub fn compact_fri_round_openings<
+    const QUERY_COUNT: usize,
+    const VALUE_WORDS: usize,
+    const NODE_WORDS: usize,
+    const QUERY_BUFFER_WORDS: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const METADATA_WORDS: usize,
+    const VALUE_OUTPUT_WORDS: usize,
+    const SIBLING_OUTPUT_WORDS: usize,
+>(
+    _ query_indices: StorageBuffer<u32, QUERY_BUFFER_WORDS>,
+    _ query_start: u32,
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ evaluation_start: u32,
+    _ tree_start: u32,
+    _ activity_start: u32,
+    _ round: u32,
+    _ metadata: StorageBuffer<u32, METADATA_WORDS>,
+    _ leaf_count_start: u32,
+    _ sibling_count_start: u32,
+    _ leaf_index_start: u32,
+    _ values: StorageBuffer<u32, VALUE_OUTPUT_WORDS>,
+    _ siblings: StorageBuffer<u32, SIBLING_OUTPUT_WORDS>,
+) -> bool
+where
+    QUERY_COUNT > 0,
+    VALUE_WORDS > 0,
+    NODE_WORDS > 0,
+{
+    let placement = load_fri_round_placement<ROUND_WORDS>(rounds, round)
+    if !placement.valid || placement.output_width == 0 { return false }
+
+    let queries: u32 = QUERY_COUNT.downcast_truncate()
+    let values_per_query: u32 = if placement.output_width > 1 { 2 } else { 1 }
+    let value_capacity = queries * values_per_query
+    let sibling_capacity = queries * 2 * placement.pair_depth
+    let value_output_start = placement.query_value_offset
+        * queries * VALUE_WORDS.downcast_truncate()
+    let sibling_output_start = placement.query_sibling_offset
+        * queries * NODE_WORDS.downcast_truncate()
+    let leaf_output_start = leaf_index_start
+        + placement.query_value_offset * queries
+
+    let mut cursor: u32 = 0
+    while cursor < value_capacity {
+        metadata.store(index: leaf_output_start + cursor, value: 0)
+        let word_start = value_output_start
+            + cursor * VALUE_WORDS.downcast_truncate()
+        let mut word: u32 = 0
+        while word < VALUE_WORDS.downcast_truncate() {
+            values.store(index: word_start + word, value: 0)
+            word = word + 1
+        }
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < sibling_capacity {
+        let word_start = sibling_output_start
+            + cursor * NODE_WORDS.downcast_truncate()
+        let mut word: u32 = 0
+        while word < NODE_WORDS.downcast_truncate() {
+            siblings.store(index: word_start + word, value: 0)
+            word = word + 1
+        }
+        cursor = cursor + 1
+    }
+    cursor = 0
+    while cursor < placement.tree_nodes {
+        arena.store(
+            index: activity_start + placement.tree_offset + cursor,
+            value: 0,
+        )
+        cursor = cursor + 1
+    }
+
+    if placement.output_width == 1 {
+        metadata.store(index: leaf_output_start, value: 0)
+        let source = evaluation_start
+            + placement.output_offset * VALUE_WORDS.downcast_truncate()
+        let mut word: u32 = 0
+        while word < VALUE_WORDS.downcast_truncate() {
+            values.store(
+                index: value_output_start + word,
+                value: arena.load(index: source + word),
+            )
+            word = word + 1
+        }
+        metadata.store(index: leaf_count_start + round, value: 1)
+        metadata.store(index: sibling_count_start + round, value: 0)
+        return true
+    }
+
+    cursor = 0
+    while cursor < queries {
+        let query = query_indices.load(index: query_start + cursor)
+        let local = query & (placement.pair_width - 1)
+        arena.store(
+            index: activity_start + placement.tree_offset + local,
+            value: 1,
+        )
+        arena.store(
+            index: activity_start + placement.tree_offset
+                + local + placement.pair_width,
+            value: 1,
+        )
+        cursor = cursor + 1
+    }
+
+    let mut leaf_count: u32 = 0
+    cursor = 0
+    while cursor < placement.output_width {
+        if arena.load(
+            index: activity_start + placement.tree_offset + cursor,
+        ) == 1 {
+            if leaf_count < value_capacity {
+                metadata.store(
+                    index: leaf_output_start + leaf_count,
+                    value: cursor,
+                )
+                let source = evaluation_start
+                    + (placement.output_offset + cursor)
+                        * VALUE_WORDS.downcast_truncate()
+                let destination = value_output_start
+                    + leaf_count * VALUE_WORDS.downcast_truncate()
+                let mut word: u32 = 0
+                while word < VALUE_WORDS.downcast_truncate() {
+                    values.store(
+                        index: destination + word,
+                        value: arena.load(index: source + word),
+                    )
+                    word = word + 1
+                }
+            }
+            leaf_count = leaf_count + 1
+        }
+        cursor = cursor + 1
+    }
+
+    let mut sibling_count: u32 = 0
+    let mut width = placement.output_width
+    let mut level_start: u32 = 0
+    let mut next_start = width
+    while width > 1 {
+        cursor = 0
+        while cursor < width {
+            let active = arena.load(
+                index: activity_start + placement.tree_offset
+                    + level_start + cursor,
+            ) == 1
+            let sibling_active = arena.load(
+                index: activity_start + placement.tree_offset
+                    + level_start + (cursor ^ 1),
+            ) == 1
+            if active && !sibling_active {
+                if sibling_count < sibling_capacity {
+                    let source = tree_start
+                        + (placement.tree_offset + level_start + (cursor ^ 1))
+                            * NODE_WORDS.downcast_truncate()
+                    let destination = sibling_output_start
+                        + sibling_count * NODE_WORDS.downcast_truncate()
+                    let mut word: u32 = 0
+                    while word < NODE_WORDS.downcast_truncate() {
+                        siblings.store(
+                            index: destination + word,
+                            value: arena.load(index: source + word),
+                        )
+                        word = word + 1
+                    }
+                }
+                sibling_count = sibling_count + 1
+            }
+            cursor = cursor + 1
+        }
+
+        let parents = width / 2
+        cursor = 0
+        while cursor < parents {
+            let left = arena.load(
+                index: activity_start + placement.tree_offset
+                    + level_start + cursor + cursor,
+            )
+            let right = arena.load(
+                index: activity_start + placement.tree_offset
+                    + level_start + cursor + cursor + 1,
+            )
+            arena.store(
+                index: activity_start + placement.tree_offset
+                    + next_start + cursor,
+                value: if left == 1 || right == 1 { 1 } else { 0 },
+            )
+            cursor = cursor + 1
+        }
+        level_start = next_start
+        next_start = next_start + parents
+        width = parents
+    }
+    let root_active = arena.load(
+        index: activity_start + placement.tree_offset + level_start,
+    ) == 1
+    let valid = leaf_count > 0
+        && leaf_count <= value_capacity
+        && sibling_count <= sibling_capacity
+        && root_active
+    metadata.store(
+        index: leaf_count_start + round,
+        value: if valid { leaf_count } else { 0 },
+    )
+    metadata.store(
+        index: sibling_count_start + round,
+        value: if valid { sibling_count } else { 0 },
+    )
+    valid
+}

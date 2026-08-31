@@ -3077,16 +3077,33 @@ fallback. The semantic receipts are:
    execution plus readbacks took 2.49 seconds for 17,898 opening lanes and
    emitted 737,609 WGSL bytes. An immediate warm rerun compiled in 52.35
    seconds and executed plus read back in 21.42 milliseconds, so cold shader
-   and pipeline caches dominate the first receipt. The proof arena is
-   deliberately synthetic
-   oracle input at this boundary, so this proves device-resident selection
-   wiring, not authentication by the preceding production FRI and Merkle
-   stages. Connect the arena to those real producers, then compact duplicate
-   paths into the canonical receipt without introducing a host-side query
-   table. Physical Radeon execution remains a separate required gate. The
-   current cold-start cost
-   also makes pipeline caching and semantics-preserving pass fusion a required
-   practicality slice before scaling domains or integrating the gallery.
+   and pipeline caches dominate the first receipt.
+
+   The following checkpoint compacts those raw openings into the canonical
+   ordered multipath directly on WebGPU. One Fe invocation owns each semantic
+   FRI round, derives requested leaves from the transcript-selected queries,
+   collapses duplicates into 1,227 ascending quartic leaves, and emits the
+   bottom-up, left-to-right frontier of 1,988 Poseidon2 digests. A separate
+   Rust traversal matches all thirteen validity bits, leaf and sibling counts,
+   leaf indices, field words, digest words, zeroed capacity lanes, padded work
+   receipts, and bounds traps. Raw and compact outputs intentionally reuse the
+   same buffers. Together with a combined metadata and padding buffer, this
+   keeps the actor at seven storage resources plus its fail-closed trap. A
+   separate-output design required ten storage bindings and was rejected under
+   the browser profile; no device limit was raised to accommodate it. The
+   release gate compiled 766,074 bytes of Fe-derived WGSL in 76.02 seconds and
+   executed raw extraction, in-place compaction, and all software-GPU readbacks
+   on llvmpipe in 417.93 milliseconds.
+
+   The proof arena remains deliberately synthetic oracle input at this
+   boundary. These gates prove device-resident selection and canonical
+   compaction wiring, not authentication by the preceding production FRI and
+   Merkle stages. Next connect the arena to those real producers and encode the
+   compact prefixes into the canonical receipt without introducing a host-side
+   query table. Physical Radeon execution remains a separate required gate.
+   The current cold-start cost also makes pipeline caching and
+   semantics-preserving pass fusion a required practicality slice before
+   scaling domains or integrating the gallery.
    The first complete 49-pass replay exposed a compiler semantic defect before
    this gate could be claimed: Runtime MIR aggregate facts retained the first
    structural value of a reassigned local, so an inlined quartic constraint

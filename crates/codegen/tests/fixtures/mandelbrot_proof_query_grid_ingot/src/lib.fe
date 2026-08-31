@@ -25,6 +25,7 @@ use fri_structure_webgpu::{
     store_fri_round_placement,
 }
 use fri_baby_bear::fri_query_domain_tag
+use fri_opening_webgpu::compact_fri_round_openings
 use mandelbrot_proof_production_profile_baby_bear::{
     PRODUCTION_LDE_LENGTH,
     PRODUCTION_LDE_LOG,
@@ -107,8 +108,21 @@ const SIBLING_CURSOR_START: u32 =
 const SIBLING_CURSOR_WORDS: usize = SIBLING_ITEMS * FRI_QUERY_CURSOR_FIELDS
 const SIBLING_PROGRESS_START: u32 =
     SIBLING_CURSOR_START + SIBLING_CURSOR_WORDS.downcast_truncate()
+const OPENING_ACTIVITY_START: u32 =
+    SIBLING_PROGRESS_START + SIBLING_ITEMS.downcast_truncate()
 const PROOF_ARENA_WORDS: usize =
-    SIBLING_PROGRESS_START as usize + SIBLING_ITEMS
+    OPENING_ACTIVITY_START as usize + LAYER_TREE_NODES
+const COMPACT_VALID_START: u32 = 0
+const COMPACT_LEAF_COUNT_START: u32 = FRI_ROUNDS.downcast_truncate()
+const COMPACT_SIBLING_COUNT_START: u32 =
+    COMPACT_LEAF_COUNT_START + FRI_ROUNDS.downcast_truncate()
+const COMPACT_LEAF_INDEX_START: u32 =
+    COMPACT_SIBLING_COUNT_START + FRI_ROUNDS.downcast_truncate()
+const COMPACT_METADATA_WORDS: usize =
+    3 * FRI_ROUNDS + EVALUATION_ITEMS
+const OPENING_PADDING_START: u32 = COMPACT_METADATA_WORDS.downcast_truncate()
+const OPENING_METADATA_WORDS: usize =
+    COMPACT_METADATA_WORDS + PADDING_RECEIPT_WORDS
 const QUERY_STATE_WORDS: usize =
     indexed_digest_squeeze_state_words(QUERY_COUNT)
 const QUERY_TAIL_WORDS: usize =
@@ -163,7 +177,10 @@ static_assert(FOLDED_EVALUATIONS == 8191)
 static_assert(LAYER_TREE_NODES == 16369)
 static_assert(ROUND_PLACEMENT_WORDS == 169)
 static_assert(PROOF_DATA_WORDS == 163716)
-static_assert(PROOF_ARENA_WORDS == 324798)
+static_assert(OPENING_ACTIVITY_START == 324798)
+static_assert(PROOF_ARENA_WORDS == 341167)
+static_assert(COMPACT_METADATA_WORDS == 2889)
+static_assert(OPENING_METADATA_WORDS == 2975)
 
 actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
     query_control: Shared<u32, QUERY_CONTROL_WORDS>,
@@ -172,7 +189,7 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
     proof_arena: Shared<u32, PROOF_ARENA_WORDS>,
     evaluation_openings: Shared<u32, EVALUATION_OPENING_WORDS>,
     sibling_openings: Shared<u32, SIBLING_OPENING_WORDS>,
-    padding_receipts: Shared<u32, PADDING_RECEIPT_WORDS>,
+    opening_metadata: Shared<u32, OPENING_METADATA_WORDS>,
 
     fn prepare_rounds(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
@@ -255,8 +272,9 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
         let lane = invocation.global.x
         let item = fri_query_evaluation_work_item<QueryPlan, FoldSchedule>(lane)
         if !item.valid {
-            self.padding_receipts.store(
-                index: lane - EVALUATION_ITEMS.downcast_truncate(),
+            self.opening_metadata.store(
+                index: OPENING_PADDING_START
+                    + lane - EVALUATION_ITEMS.downcast_truncate(),
                 value: lane + 1,
             )
             return
@@ -316,8 +334,8 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
         let item = fri_query_sibling_work_item<QueryPlan, FoldSchedule>(lane)
         if !item.valid {
             let evaluation_padding: u32 = EVALUATION_PADDING.downcast_truncate()
-            self.padding_receipts.store(
-                index: evaluation_padding
+            self.opening_metadata.store(
+                index: OPENING_PADDING_START + evaluation_padding
                     + lane - SIBLING_ITEMS.downcast_truncate(),
                 value: lane + 1,
             )
@@ -379,6 +397,43 @@ actor ProductionQueryGrid uses (Program<WebGpuBackend>) {
         self.sibling_openings.store(
             index: destination + 7,
             value: self.proof_arena.load(index: source + 7),
+        )
+    }
+
+    fn compact_openings(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
+    {
+        let round = invocation.global.x
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let valid = compact_fri_round_openings<
+            QUERY_COUNT,
+            RECEIPT_WORDS,
+            DIGEST_WORDS,
+            QUERY_CONTROL_WORDS,
+            ROUND_PLACEMENT_WORDS,
+            PROOF_ARENA_WORDS,
+            OPENING_METADATA_WORDS,
+            EVALUATION_OPENING_WORDS,
+            SIBLING_OPENING_WORDS,
+        >(
+            self.query_control,
+            QUERY_INDICES_START,
+            self.round_placements,
+            self.proof_arena,
+            0,
+            LAYER_TREE_START,
+            OPENING_ACTIVITY_START,
+            round,
+            self.opening_metadata,
+            COMPACT_LEAF_COUNT_START,
+            COMPACT_SIBLING_COUNT_START,
+            COMPACT_LEAF_INDEX_START,
+            self.evaluation_openings,
+            self.sibling_openings,
+        )
+        self.opening_metadata.store(
+            index: COMPACT_VALID_START + round,
+            value: if valid { 1 } else { 0 },
         )
     }
 

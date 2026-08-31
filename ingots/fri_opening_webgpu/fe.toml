@@ -1,0 +1,8 @@
+[ingot]
+name = "fri_opening_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"
+fri_structure_webgpu = "../fri_structure_webgpu"
+std = "../std"
