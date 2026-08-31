@@ -779,15 +779,30 @@ pub fn run(_ seed: u32) -> u32 {
 "#,
     );
     wasmparser::validate(&wasm).expect("address-carried effect copy emitted invalid Wasm");
+    let mut memory_copies = 0usize;
     let largest_body = wasmparser::Parser::new(0)
         .parse_all(&wasm)
         .filter_map(Result::ok)
         .filter_map(|payload| match payload {
-            wasmparser::Payload::CodeSectionEntry(body) => Some(body.range().len()),
+            wasmparser::Payload::CodeSectionEntry(body) => {
+                memory_copies += body
+                    .get_operators_reader()
+                    .expect("valid function operators")
+                    .into_iter()
+                    .filter(|operator| {
+                        matches!(operator, Ok(wasmparser::Operator::MemoryCopy { .. }))
+                    })
+                    .count();
+                Some(body.range().len())
+            }
             _ => None,
         })
         .max()
         .expect("compiled module should contain functions");
+    assert!(
+        memory_copies > 0,
+        "address-carried effect copy should use Wasm bulk memory",
+    );
     assert!(
         largest_body < 100_000,
         "address-carried effect copy expanded into a {largest_body}-byte scalar body",

@@ -51,8 +51,8 @@ use mir::{
     AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
     PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RefView,
     RuntimeBody, RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
-    RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
-    ScalarRepr, ScalarRole, VariantId,
+    RuntimeInstance, RuntimeInterfaceSignature, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage,
+    RuntimePlace, ScalarClass, ScalarRepr, ScalarRole, VariantId,
 };
 use rustc_hash::FxHashMap;
 #[cfg(feature = "sonatina-indirect-calls")]
@@ -71,8 +71,8 @@ use sonatina_ir::{
         cmp::{Eq as CmpEq, Feq, Fle, Flt, IsZero, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{
-            MemAllocDynamic, MemCheckpoint, MemRewind, Mload, Mstore, ObjIndex, ObjLoad, ObjProj,
-            ObjStore,
+            MemAllocDynamic, MemCheckpoint, MemRewind, Memcopy, Mload, Mstore, ObjIndex, ObjLoad,
+            ObjProj, ObjStore,
         },
         logic::{And, Or, Xor},
         native::inst_set::NativeInstSet,
@@ -102,6 +102,24 @@ fn wasm_lower_trace_detail(message: impl FnOnce() -> String) {
     if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some() {
         eprintln!("[fe wasm lowering] {}", message());
     }
+}
+
+/// Return pages belonging to prepared MIR bodies that have already been
+/// consumed by Wasm lowering. The owned body map releases each function as it
+/// is lowered; glibc otherwise keeps those pages resident until the complete
+/// Sonatina module and backend graph have both been constructed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn reclaim_consumed_prepared_body_slack() -> bool {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+
+    unsafe { malloc_trim(0) != 0 }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn reclaim_consumed_prepared_body_slack() -> bool {
+    false
 }
 
 /// Keep generated core-Wasm signatures within wasmparser's validated resource
@@ -3694,6 +3712,10 @@ where
     isa: &'a I,
     package: &'a RuntimePackage<'db>,
     prepared_bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+    /// Lightweight call interfaces retained after full prepared MIR bodies
+    /// are consumed during lowering. Calls need parameter and result classes,
+    /// not the callee's complete block graph.
+    prepared_interfaces: FxHashMap<RuntimeInstance<'db>, RuntimeInterfaceSignature<'db>>,
     func_symbols: FxHashMap<RuntimeInstance<'db>, String>,
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
     resource_element_cache: FxHashMap<TyId<'db>, GpuResourceElementType>,
@@ -3717,6 +3739,10 @@ where
     resumable_continuations: Vec<PreparedResumableContinuation<'db>>,
     wrapped_lane_names: HashSet<String>,
     validate_host_enum_params: bool,
+    /// Actual Wasm modules may express address-carried value copies as one
+    /// overlap-safe bulk-memory operation. The shared shader IR retains its
+    /// checked portable loop because SPIR-V has no equivalent instruction.
+    emit_wasm_bulk_memory: bool,
     /// Bodies whose arena-backed locals are compiler-proven not to escape.
     /// Only the Wasm lowering enables these scopes. Shader and native paths do
     /// not emit arena-control instructions their backends cannot realize.
@@ -3725,6 +3751,9 @@ where
     /// checkpoint. These callees may manipulate borrowed memory pointers, but
     /// may not cross a host/effect boundary or persist a typed transport.
     resumable_arena_safe_bodies: HashSet<RuntimeInstance<'db>>,
+    /// Prepared package bodies whose resumable segment analysis admitted a
+    /// scoped arena. Cache the decision before full MIR bodies are released.
+    resumable_scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
     /// Closed Fe wrappers which return one scalar pending token minted by the
     /// nominal actor AskBegin effect. The wrapper chain may inspect or forward
     /// the borrowed request while the enclosing segment is live, but cannot
@@ -3754,6 +3783,7 @@ struct PreparedResumableContinuation<'db> {
     linkage: RuntimeLinkage,
     body: RuntimeBody<'db>,
     func_ref: Option<FuncRef>,
+    scoped_arena: bool,
 }
 
 struct ScopedArenaAnalysis<'db> {
@@ -3819,6 +3849,50 @@ where
                 .find(|(source, _)| source == &declared || Some(source.as_str()) == assigned)
             {
                 func_symbols.insert(instance, export.clone());
+            }
+        }
+        if let Ok(needle) = std::env::var("FE_WASM_LOWER_TRACE_BODY") {
+            let selected = func_symbols
+                .iter()
+                .filter_map(|(instance, symbol)| symbol.contains(&needle).then_some(*instance))
+                .collect::<HashSet<_>>();
+            for (caller, body) in &prepared_bodies {
+                for block in &body.blocks {
+                    for stmt in &block.stmts {
+                        let RStmt::Assign {
+                            expr: RExpr::Call { callee, args },
+                            ..
+                        } = stmt
+                        else {
+                            continue;
+                        };
+                        if !selected.contains(callee) {
+                            continue;
+                        }
+                        let arguments = args
+                            .iter()
+                            .map(|argument| {
+                                let local = &body.locals[argument.as_u32() as usize];
+                                format!(
+                                    "{argument:?}: carrier={:?}, root={:?}",
+                                    local.carrier, local.root,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        eprintln!(
+                            "Fe Wasm selected residual call, caller=`{}`, callee=`{}`, arguments=[{arguments}]",
+                            func_symbols
+                                .get(caller)
+                                .cloned()
+                                .unwrap_or_else(|| mir::runtime_instance_symbol_key(db, *caller)),
+                            func_symbols
+                                .get(callee)
+                                .cloned()
+                                .unwrap_or_else(|| mir::runtime_instance_symbol_key(db, *callee)),
+                        );
+                    }
+                }
             }
         }
         let plans = mir::derive_runtime_resumable_plans(db, *package).map_err(|error| {
@@ -3904,15 +3978,21 @@ where
                     linkage: continuation_linkage.clone(),
                     body,
                     func_ref: None,
+                    scoped_arena: false,
                 });
             }
         }
+        let prepared_interfaces = prepared_bodies
+            .iter()
+            .map(|(instance, body)| (*instance, body.signature.clone()))
+            .collect();
         let mut lowerer = Self {
             db,
             builder,
             isa,
             package,
             prepared_bodies,
+            prepared_interfaces,
             func_symbols,
             func_map: FxHashMap::default(),
             resource_element_cache: FxHashMap::default(),
@@ -3923,8 +4003,10 @@ where
             resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
+            emit_wasm_bulk_memory: enable_scoped_arena,
             scoped_arena_bodies: HashSet::new(),
             resumable_arena_safe_bodies: HashSet::new(),
+            resumable_scoped_arena_bodies: HashSet::new(),
             resumable_pending_producer_bodies: HashSet::new(),
             resumable_pending_producers,
             resumable_rewind_safe_owners,
@@ -3946,6 +4028,20 @@ where
             lowerer.resumable_arena_safe_bodies = lowerer.derive_resumable_arena_safe_bodies();
             lowerer.resumable_pending_producer_bodies =
                 lowerer.derive_resumable_pending_producer_bodies();
+            lowerer.resumable_scoped_arena_bodies = lowerer
+                .prepared_bodies
+                .iter()
+                .filter_map(|(instance, body)| {
+                    lowerer
+                        .resumable_segment_uses_scoped_arena(body)
+                        .then_some(*instance)
+                })
+                .collect();
+            for index in 0..lowerer.resumable_continuations.len() {
+                let body = lowerer.resumable_continuations[index].body.clone();
+                lowerer.resumable_continuations[index].scoped_arena =
+                    lowerer.resumable_segment_uses_scoped_arena(&body);
+            }
             wasm_lower_trace(|| {
                 format!(
                     "derived scoped arena bodies, scoped={}",
@@ -4339,6 +4435,24 @@ where
         Ok(resource_ref_ty)
     }
 
+    /// Retrieve the object-reference type already declared for a semantic GPU
+    /// resource. Function-local resource copies are declared through
+    /// `gpu_resource_type` before statement lowering begins, so their later
+    /// type checks must preserve that same representation instead of treating
+    /// the nominal one-field struct as an arena-carried aggregate.
+    fn cached_gpu_resource_type(&self, resource_ty: TyId<'db>) -> Result<Type, LowerError> {
+        let resource_ty = resource_ty.as_view(self.db).unwrap_or(resource_ty);
+        self.resource_type_cache
+            .get(&resource_ty)
+            .copied()
+            .ok_or_else(|| {
+                LowerError::Internal(
+                    "semantic GPU resource reached lowering before its type was declared"
+                        .to_owned(),
+                )
+            })
+    }
+
     fn declare_functions(&mut self) -> Result<(), LowerError> {
         // DECLARED-EXTERNAL host imports dedup to ONE import per `(module, op-name)`
         // identity: the same `extern` reached through two effect-provider scopes
@@ -4472,11 +4586,14 @@ where
                 .ok_or_else(|| {
                     LowerError::Internal("runtime parameter local is missing".to_owned())
                 })?;
+            let semantic_ty = instantiated_runtime_local_ty(self.db, body.owner, semantic_ty);
             if semantic_gpu_resource(self.db, semantic_ty) {
                 args.push(self.gpu_resource_type(semantic_ty)?);
             } else if indirect_params.contains(&param.local) {
                 args.push(Type::I32);
-            } else if let Some(elem_tys) = self.scalar_tuple_element_tys(&param.class) {
+            } else if let Some(elem_tys) =
+                self.semantic_scalar_tuple_element_tys(semantic_ty, &param.class)?
+            {
                 args.extend(elem_tys);
             } else if matches!(linkage, Linkage::Private)
                 && self.is_memory_lowerable_object_ref(&param.class)
@@ -4541,8 +4658,7 @@ where
             }
             let body = self
                 .prepared_bodies
-                .get(&instance)
-                .cloned()
+                .remove(&instance)
                 .unwrap_or_else(|| instance.body(self.db));
             if body.blocks.is_empty() {
                 continue;
@@ -4554,13 +4670,20 @@ where
                 && function.linkage(self.db) == RuntimeLinkage::Internal
                 && !self.wrapped_lane_names.contains(&symbol);
             let scoped_arena = self.scoped_arena_bodies.contains(&instance)
-                || self.resumable_segment_uses_scoped_arena(&body);
+                || self.resumable_scoped_arena_bodies.contains(&instance);
             let indirect_aggregate_params = self
                 .indirect_aggregate_params
                 .get(&instance)
                 .cloned()
                 .unwrap_or_default();
             let indirect_aggregate_return = self.indirect_aggregate_returns.contains(&instance);
+            let trace_body = std::env::var("FE_WASM_LOWER_TRACE_BODY")
+                .ok()
+                .filter(|needle| symbol.contains(needle))
+                .map(|_| mir::format_runtime_body(self.db, &body));
+            if let Some(body) = &trace_body {
+                eprintln!("Fe Wasm selected Runtime MIR for `{symbol}`:\n{body}");
+            }
             let started = Instant::now();
             let lowered = PortableFunctionLowerer::new(
                 self,
@@ -4581,6 +4704,9 @@ where
                     )
                 });
             }
+            if let (Err(error), Some(body)) = (&lowered, trace_body) {
+                eprintln!("Fe Wasm lowering failed for `{symbol}`: {error:?}\n{body}");
+            }
             lowered.map_err(|error| match error {
                 LowerError::Unsupported(message) => LowerError::Unsupported(format!(
                     "{message}; while lowering Wasm function `{symbol}`"
@@ -4590,7 +4716,22 @@ where
                 )),
                 other => other,
             })?;
+            if self.emit_wasm_bulk_memory && ((index + 1) % 500 == 0 || index + 1 == total) {
+                let released = reclaim_consumed_prepared_body_slack();
+                wasm_lower_trace(|| {
+                    format!(
+                        "reclaimed consumed prepared bodies, completed={}/{total}, released={released}",
+                        index + 1,
+                    )
+                });
+            }
         }
+        wasm_lower_trace(|| {
+            format!(
+                "released lowered prepared bodies, remaining={}",
+                self.prepared_bodies.len(),
+            )
+        });
         for index in 0..self.resumable_continuations.len() {
             let symbol = self.resumable_continuations[index].symbol.clone();
             let body = self.resumable_continuations[index].body.clone();
@@ -4604,7 +4745,7 @@ where
                         "Wasm continuation `{symbol}` lowered before declaration"
                     ))
                 })?;
-            let scoped_arena = self.resumable_segment_uses_scoped_arena(&body);
+            let scoped_arena = self.resumable_continuations[index].scoped_arena;
             let lowered = PortableFunctionLowerer::new(
                 self,
                 body,
@@ -8173,6 +8314,122 @@ where
         self.flat_shape_visit(class, &mut HashSet::new())
     }
 
+    /// Derive the flattened value shape while preserving nominal GPU resource
+    /// leaves nested inside ordinary Copy products. `RuntimeClass` records the
+    /// resource's one-field source layout, but only the corresponding semantic
+    /// type records that the field denotes an external storage object. Losing
+    /// that identity made a placement record flatten to `i32` in callee
+    /// signatures while its caller correctly carried the declared Sonatina
+    /// object reference. Structs and arrays recurse through their instantiated
+    /// semantic fields. Payload enums retain the existing structural policy
+    /// until their variant-specific semantic field mapping is available.
+    fn semantic_flat_shape(
+        &mut self,
+        semantic_ty: TyId<'db>,
+        class: &RuntimeClass<'db>,
+    ) -> Result<Option<FlatShape>, LowerError> {
+        self.semantic_flat_shape_visit(semantic_ty, class, &mut HashSet::new())
+    }
+
+    fn semantic_flat_shape_visit(
+        &mut self,
+        semantic_ty: TyId<'db>,
+        class: &RuntimeClass<'db>,
+        active: &mut HashSet<LayoutId<'db>>,
+    ) -> Result<Option<FlatShape>, LowerError> {
+        let semantic_ty = semantic_ty.as_view(self.db).unwrap_or(semantic_ty);
+        if semantic_gpu_resource(self.db, semantic_ty) {
+            return Ok(Some(FlatShape::Leaf(self.gpu_resource_type(semantic_ty)?)));
+        }
+        match class {
+            RuntimeClass::Scalar(scalar) => Ok(scalar_ty_r1(scalar).ok().map(FlatShape::Leaf)),
+            RuntimeClass::AggregateValue { layout } => {
+                if !active.insert(*layout) {
+                    return Ok(None);
+                }
+                let shape = match layout.data(self.db) {
+                    Layout::Struct(struct_layout) => {
+                        let semantic_fields = semantic_ty.field_types(self.db);
+                        if semantic_fields.len() != struct_layout.fields.len() {
+                            struct_layout
+                                .fields
+                                .iter()
+                                .map(|field| self.flat_shape_visit(field, active))
+                                .collect::<Option<Vec<_>>>()
+                                .map(FlatShape::Product)
+                        } else {
+                            let mut fields = Vec::with_capacity(struct_layout.fields.len());
+                            let mut complete = true;
+                            for (field_ty, field_class) in
+                                semantic_fields.into_iter().zip(&struct_layout.fields)
+                            {
+                                let Some(field) =
+                                    self.semantic_flat_shape_visit(field_ty, field_class, active)?
+                                else {
+                                    complete = false;
+                                    break;
+                                };
+                                fields.push(field);
+                            }
+                            complete.then_some(FlatShape::Product(fields))
+                        }
+                    }
+                    Layout::Array(array_layout) => {
+                        let (_, args) = semantic_ty.decompose_ty_app(self.db);
+                        let Some(element_ty) = args.first().copied() else {
+                            let shape = self.flat_shape_visit(&array_layout.elem, active).and_then(
+                                |element| {
+                                    usize::try_from(array_layout.len)
+                                        .ok()
+                                        .map(|len| FlatShape::Product(vec![element; len]))
+                                },
+                            );
+                            active.remove(layout);
+                            return Ok(shape);
+                        };
+                        self.semantic_flat_shape_visit(element_ty, &array_layout.elem, active)?
+                            .and_then(|element| {
+                                usize::try_from(array_layout.len)
+                                    .ok()
+                                    .map(|len| FlatShape::Product(vec![element; len]))
+                            })
+                    }
+                    Layout::Enum(enum_layout)
+                        if enum_layout
+                            .variants
+                            .iter()
+                            .all(|variant| variant.fields.is_empty()) =>
+                    {
+                        Some(FlatShape::Leaf(Type::I32))
+                    }
+                    Layout::Enum(enum_layout) => {
+                        let mut variants = Vec::with_capacity(enum_layout.variants.len() + 1);
+                        variants.push(FlatShape::Leaf(Type::I32));
+                        let mut complete = true;
+                        for variant in &enum_layout.variants {
+                            let fields = variant
+                                .fields
+                                .iter()
+                                .map(|field| self.flat_shape_visit(field, active))
+                                .collect::<Option<Vec<_>>>();
+                            let Some(fields) = fields else {
+                                complete = false;
+                                break;
+                            };
+                            variants.push(FlatShape::Product(fields));
+                        }
+                        complete.then_some(FlatShape::Product(variants))
+                    }
+                };
+                active.remove(layout);
+                Ok(shape)
+            }
+            transport @ (RuntimeClass::RawAddr { .. } | RuntimeClass::Ref { .. }) => {
+                Ok(self.ty_for_class(transport).ok().map(FlatShape::Leaf))
+            }
+        }
+    }
+
     fn product_element_class(
         &self,
         layout: LayoutId<'db>,
@@ -8358,6 +8615,29 @@ where
         (matches!(class, RuntimeClass::AggregateValue { .. }) && !preserves_scalar_newtype_path)
             .then_some(leaves)
     }
+
+    fn semantic_scalar_tuple_element_tys(
+        &mut self,
+        semantic_ty: TyId<'db>,
+        class: &RuntimeClass<'db>,
+    ) -> Result<Option<Vec<Type>>, LowerError> {
+        let Some(shape) = self.semantic_flat_shape(semantic_ty, class)? else {
+            return Ok(None);
+        };
+        let mut leaves = Vec::new();
+        shape.leaf_types(&mut leaves);
+        let preserves_scalar_newtype_path = matches!(
+            class,
+            RuntimeClass::AggregateValue { layout }
+                if self.single_scalar_field(*layout).is_some()
+                    || self.fieldless_enum_tag(*layout).is_some()
+        );
+        Ok(
+            (matches!(class, RuntimeClass::AggregateValue { .. })
+                && !preserves_scalar_newtype_path)
+                .then_some(leaves),
+        )
+    }
 }
 
 fn scoped_arena_builtin_is_pure(builtin: &RuntimeBuiltin<'_>) -> bool {
@@ -8527,8 +8807,10 @@ where
         for (idx, local) in body.locals.iter().enumerate() {
             if let RuntimeCarrier::Value(class) = &local.carrier {
                 let local_id = RLocalId::from_u32(idx as u32);
-                if semantic_gpu_resource(module.db, local.semantic_ty) {
-                    let ty = module.gpu_resource_type(local.semantic_ty)?;
+                let semantic_ty =
+                    instantiated_runtime_local_ty(module.db, body.owner, local.semantic_ty);
+                if semantic_gpu_resource(module.db, semantic_ty) {
+                    let ty = module.gpu_resource_type(semantic_ty)?;
                     vars.insert(local_id, fb.declare_var(ty));
                     continue;
                 }
@@ -8557,7 +8839,9 @@ where
                             module.ty_for_class(class)?
                         };
                         vars.insert(local_id, fb.declare_var(ty));
-                    } else if let Some(elem_tys) = module.scalar_tuple_element_tys(class) {
+                    } else if let Some(elem_tys) =
+                        module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                    {
                         if body
                             .signature
                             .params
@@ -8583,7 +8867,9 @@ where
                     }
                     continue;
                 }
-                if let Some(elem_tys) = module.scalar_tuple_element_tys(class) {
+                if let Some(elem_tys) =
+                    module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                {
                     let elem_vars = elem_tys
                         .iter()
                         .map(|ty| fb.declare_var(*ty))
@@ -8602,8 +8888,9 @@ where
                 } else {
                     let ty = module.ty_for_class(class).map_err(|error| match error {
                         LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                            "{message}; while declaring Wasm local {local_id:?} in `{}`",
-                            module.function_symbol(body.owner)
+                            "{message}; while declaring Wasm local {local_id:?} with semantic type `{}` in `{}`",
+                            semantic_ty.pretty_print(module.db),
+                            module.function_symbol(body.owner),
                         )),
                         other => other,
                     })?;
@@ -9129,10 +9416,9 @@ where
     ) -> Result<(Vec<ValueId>, Option<ValueId>), LowerError> {
         let params = self
             .module
-            .prepared_bodies
+            .prepared_interfaces
             .get(&callee)
             .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
-            .signature
             .params
             .iter()
             .map(|param| param.class.clone())
@@ -9154,10 +9440,9 @@ where
             .unwrap_or_default();
         let callee_params = self
             .module
-            .prepared_bodies
+            .prepared_interfaces
             .get(&callee)
             .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
-            .signature
             .params
             .clone();
         let mut call_checkpoint = None;
@@ -9281,11 +9566,24 @@ where
         Ok((values, call_checkpoint))
     }
 
-    fn local_flat_shape(&self, local: RLocalId) -> Result<FlatShape, LowerError> {
-        let class = self.body.value_class(local).ok_or_else(|| {
-            LowerError::Internal(format!("flattened local {local:?} has no runtime class"))
-        })?;
-        self.module.flat_shape(class).ok_or_else(|| {
+    fn local_flat_shape(&mut self, local: RLocalId) -> Result<FlatShape, LowerError> {
+        let class = self
+            .body
+            .value_class(local)
+            .ok_or_else(|| {
+                LowerError::Internal(format!("flattened local {local:?} has no runtime class"))
+            })?
+            .clone();
+        let semantic_ty = self
+            .body
+            .local(local)
+            .map(|local| {
+                instantiated_runtime_local_ty(self.module.db, self.body.owner, local.semantic_ty)
+            })
+            .ok_or_else(|| LowerError::Internal(format!("flattened local {local:?} is missing")))?;
+        self.module
+            .semantic_flat_shape(semantic_ty, &class)?
+            .ok_or_else(|| {
             LowerError::Unsupported(format!(
                 "wasm target (R2.2): `{class:?}` is not a recursive product tree of wasm scalars"
             ))
@@ -9664,7 +9962,7 @@ where
     }
 
     fn enum_field_range(
-        &self,
+        &mut self,
         value: RLocalId,
         variant: VariantId<'db>,
         field: hir::analysis::semantic::FieldIndex,
@@ -10076,13 +10374,14 @@ where
                         )),
                     };
                 }
-                let callee_body = self.module.prepared_bodies.get(callee).ok_or_else(|| {
-                    LowerError::Internal(format!(
-                        "prepared Wasm body for `{}` is missing",
-                        self.module.function_symbol(*callee),
-                    ))
-                })?;
-                let callee_class = callee_body.signature.ret.as_ref().ok_or_else(|| {
+                let callee_interface =
+                    self.module.prepared_interfaces.get(callee).ok_or_else(|| {
+                        LowerError::Internal(format!(
+                            "prepared Wasm body for `{}` is missing",
+                            self.module.function_symbol(*callee),
+                        ))
+                    })?;
+                let callee_class = callee_interface.ret.as_ref().ok_or_else(|| {
                     LowerError::Unsupported(format!(
                         "wasm target: unit-returning call to `{}` cannot initialize an aggregate",
                         self.module.function_symbol(*callee),
@@ -10701,15 +11000,21 @@ where
         layout: LayoutId<'db>,
     ) -> Result<(), LowerError> {
         let byte_len = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+        let byte_len = i32::try_from(byte_len).map_err(|_| {
+            LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
+        })?;
+        let is = self.inst_set();
+        if self.module.emit_wasm_bulk_memory {
+            let len = self.fb.make_imm_value(Immediate::I32(byte_len));
+            self.fb
+                .insert_inst_no_result(Memcopy::new(is, destination, source, len));
+            return Ok(());
+        }
         let (copy_ty, stride) = if byte_len % 4 == 0 {
             (Type::I32, 4)
         } else {
             (Type::I8, 1)
         };
-        let byte_len = i32::try_from(byte_len).map_err(|_| {
-            LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
-        })?;
-        let is = self.inst_set();
         let copy_entry = self.fb.current_block().ok_or_else(|| {
             LowerError::Internal("aggregate copy has no current block".to_owned())
         })?;
@@ -12414,7 +12719,7 @@ where
             })?;
         let ret_class = self
             .module
-            .prepared_bodies
+            .prepared_interfaces
             .get(&callee)
             .ok_or_else(|| {
                 LowerError::Internal(format!(
@@ -12422,7 +12727,6 @@ where
                     self.module.function_symbol(callee),
                 ))
             })?
-            .signature
             .ret
             .clone();
         let ret_ty = if self.module.indirect_aggregate_returns.contains(&callee) {
@@ -12746,6 +13050,11 @@ where
     }
 
     fn local_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
+        if let Some(local_data) = self.body.local(local)
+            && semantic_gpu_resource(self.module.db, local_data.semantic_ty)
+        {
+            return self.module.cached_gpu_resource_type(local_data.semantic_ty);
+        }
         let class = self.body.value_class(local).cloned().ok_or_else(|| {
             LowerError::Internal(format!("local {local:?} carries no value class"))
         })?;

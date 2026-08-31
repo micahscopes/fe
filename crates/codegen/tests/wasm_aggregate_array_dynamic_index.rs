@@ -191,6 +191,79 @@ pub fn update(
 }
 "#;
 
+const LARGE_NESTED_MUTABLE_ARRAY_SOURCE: &str = r#"
+struct Brand {}
+
+struct Wide<const L: usize, M> { words: [u32; L] }
+
+impl<const L: usize, M> Copy for Wide<L, M> {}
+
+type BrandedWide = Wide<20, Brand>
+
+struct Carrier { marker: u32, values: [BrandedWide; 411] }
+
+impl Copy for Carrier {}
+
+const ZERO_WIDE: BrandedWide = Wide { words: [0; 20] }
+
+fn wide(_ index: u32) -> BrandedWide {
+    Wide {
+        words: [
+            index + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, index + 1001,
+        ],
+    }
+}
+
+fn wide_difference(_ left: BrandedWide, _ right: BrandedWide) -> BrandedWide {
+    let mut words = [0; 20]
+    let mut index: usize = 0
+    while index < 20 {
+        words[index] = left.words[index] - right.words[index]
+        index = index + 1
+    }
+    Wide { words: words }
+}
+
+fn wide_is_zero(_ value: BrandedWide) -> bool {
+    let mut index: usize = 0
+    while index < 20 {
+        if value.words[index] != 0 { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn fill(_ output: mut Carrier) {
+    let mut index: usize = 0
+    while index < 411 {
+        output.values[index] = wide(index.downcast_truncate())
+        index = index + 1
+    }
+}
+
+pub fn update(_ index: u32) -> (u32, u32, u32) {
+    let mut carrier = Carrier { marker: 17, values: [ZERO_WIDE; 411] }
+    fill(mut carrier)
+    let selected = carrier.values[index as usize]
+    (carrier.marker, selected.words[0], selected.words[19])
+}
+
+pub fn parity_code() -> u32 {
+    let mut carrier = Carrier { marker: 17, values: [ZERO_WIDE; 411] }
+    fill(mut carrier)
+    let mut index: usize = 0
+    while index < 411 {
+        let difference = wide_difference(
+            wide(index.downcast_truncate()), carrier.values[index],
+        )
+        if !wide_is_zero(difference) { return (index + 1).downcast_truncate() }
+        index = index + 1
+    }
+    0
+}
+"#;
+
 const GENERIC_COPY_SNAPSHOT_SOURCE: &str = r#"
 struct Cell { word: u32 }
 
@@ -436,6 +509,31 @@ fn nested_mutable_array_borrows_preserve_one_backing_object() {
         update.call(&mut store, (3, 5, 7, 11)).unwrap(),
         (3, 6, 8, 11)
     );
+}
+
+#[test]
+fn large_nested_mutable_array_preserves_indirect_backing_storage() {
+    let bytes = compile(
+        LARGE_NESTED_MUTABLE_ARRAY_SOURCE,
+        "wasm_large_nested_mutable_array",
+    );
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let update = instance
+        .get_typed_func::<i32, (i32, i32, i32)>(&mut store, "update")
+        .expect("large update export");
+    for index in [0, 1, 205, 410] {
+        assert_eq!(
+            update.call(&mut store, index).unwrap(),
+            (17, index + 1, index + 1001),
+        );
+    }
+    let parity = instance
+        .get_typed_func::<(), i32>(&mut store, "parity_code")
+        .expect("large aggregate parity export");
+    assert_eq!(parity.call(&mut store, ()).unwrap(), 0);
 }
 
 #[test]
