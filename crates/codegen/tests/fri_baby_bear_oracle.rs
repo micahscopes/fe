@@ -239,16 +239,27 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         [1, 3, 4, 14],
     ];
     for (opening, expected) in evaluations.into_iter().enumerate() {
+        let generic = call(
+            &mut store,
+            &instance,
+            "fri_schedule16_query_evaluation",
+            &[opening as u32, 5],
+            4,
+        );
+        assert_eq!(
+            generic, expected,
+            "wrong evaluation placement for opening {opening}",
+        );
         assert_eq!(
             call(
                 &mut store,
                 &instance,
-                "fri_schedule16_query_evaluation",
+                "fri_schedule16_query_evaluation_from_four_rounds",
                 &[opening as u32, 5],
                 4,
             ),
-            expected,
-            "wrong evaluation placement for opening {opening}",
+            generic,
+            "four-round evaluation placement diverged for opening {opening}",
         );
     }
     assert_eq!(
@@ -270,16 +281,27 @@ fn reusable_fri_schedule_derives_the_complete_16_to_1_placement() {
         [1, 1, 2, 17],
     ];
     for (sibling, expected) in siblings.into_iter().enumerate() {
+        let generic = call(
+            &mut store,
+            &instance,
+            "fri_schedule16_query_sibling",
+            &[sibling as u32, 5],
+            4,
+        );
+        assert_eq!(
+            generic, expected,
+            "wrong sibling placement for opening {sibling}",
+        );
         assert_eq!(
             call(
                 &mut store,
                 &instance,
-                "fri_schedule16_query_sibling",
+                "fri_schedule16_query_sibling_from_four_rounds",
                 &[sibling as u32, 5],
                 4,
             ),
-            expected,
-            "wrong sibling placement for opening {sibling}",
+            generic,
+            "four-round sibling placement diverged for opening {sibling}",
         );
     }
     assert_eq!(

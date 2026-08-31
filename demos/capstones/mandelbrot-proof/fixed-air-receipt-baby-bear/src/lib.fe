@@ -15,11 +15,12 @@ use canonical_words::{
     encode_canonical_words,
 }
 use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
-use core::ops::SaturatingAdd
 use mandelbrot_proof_air_core::{
     FriQueryPlan,
     FriQueryRangePlan,
     FriSchedule,
+    fri_multi_leaf_capacity,
+    fri_multi_sibling_capacity,
     radix2_query_geometry,
 }
 use mandelbrot_proof_baby_bear::{
@@ -41,7 +42,8 @@ use mandelbrot_proof_baby_bear::{
     bind_composition,
     composition_multi_query_opening_power_of_two,
     empty_composition_multi_opening,
-    fri_multi_sibling_capacity,
+    air_lde_request_capacity,
+    fri_composition_query_depth,
     verify_composition_multi_opening,
     write_composition_multi_query_opening_power_of_two,
     write_fri_schedule,
@@ -76,7 +78,27 @@ use mandelbrot_proof_fixed_air_baby_bear::{
 }
 use mandelbrot_proof_recursive::OrbitInterval
 use mandelbrot_proof_recursive_baby_bear::commit_recursive_leaf_statement
-use merkle_core::multi_path_matches_requests
+pub use mandelbrot_proof_production_profile_baby_bear::{
+    PRODUCTION_LDE_LENGTH,
+    PRODUCTION_LDE_LENGTH_U32,
+    PRODUCTION_LDE_LOG,
+    PRODUCTION_LIMBS,
+    PRODUCTION_QUERY_COUNT,
+    PRODUCTION_RECURSIVE_SECURITY_POLICY,
+    PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP,
+    PRODUCTION_SECURITY_COMMIT_POW_BITS,
+    PRODUCTION_SECURITY_EXTENSION_DEGREE,
+    PRODUCTION_SECURITY_FOLDING_ARITY,
+    PRODUCTION_SECURITY_HASH_COLLISION_BITS,
+    PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS,
+    PRODUCTION_SECURITY_QUERY_COUNT,
+    PRODUCTION_SECURITY_QUERY_POW_BITS,
+    PRODUCTION_SECURITY_TARGET_BITS,
+    PRODUCTION_SECURITY_VERIFIER_TASK_COUNT,
+    PRODUCTION_TRACE_LENGTH,
+    PRODUCTION_TRACE_LENGTH_U32,
+}
+use merkle_core::{merkle_multi_path_sibling_capacity, multi_path_matches_requests}
 use poseidon_baby_bear::{
     BINDING_PERMUTATIONS,
     PackedCommitment,
@@ -168,26 +190,6 @@ derive CanonicalWordStream for SparseBabyBearAirFriReceipt<
     Fri,
 > using CanonicalWordStreamProvider
 
-pub const PRODUCTION_LIMBS: usize = 4
-pub const PRODUCTION_TRACE_LENGTH: usize = 4096
-pub const PRODUCTION_LDE_LENGTH: usize = 8192
-pub const PRODUCTION_LDE_LOG: usize = 13
-pub const PRODUCTION_TRACE_LENGTH_U32: u32 =
-    PRODUCTION_TRACE_LENGTH.downcast_truncate()
-pub const PRODUCTION_LDE_LENGTH_U32: u32 =
-    PRODUCTION_LDE_LENGTH.downcast_truncate()
-/// Protocol-shape checkpoint only. A later audited soundness policy must
-/// derive the security-bearing query count before recursive proving.
-pub const PRODUCTION_QUERY_COUNT: usize = 4
-pub const PRODUCTION_SECURITY_TARGET_BITS: u32 = 100
-pub const PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS: u32 = 1024
-pub const PRODUCTION_SECURITY_EXTENSION_DEGREE: u32 = 4
-pub const PRODUCTION_SECURITY_FOLDING_ARITY: u32 = 2
-pub const PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP: u32 = 8192
-pub const PRODUCTION_SECURITY_HASH_COLLISION_BITS: u32 = 128
-pub const PRODUCTION_SECURITY_QUERY_POW_BITS: u32 = 0
-pub const PRODUCTION_SECURITY_COMMIT_POW_BITS: u32 = 0
-
 /// Security-affecting transcript data, including the exact structural shape
 /// produced by the AIR evaluator and the query count actually executed by the
 /// receipt. A verifier recomputes this value rather than trusting receipt
@@ -246,16 +248,6 @@ fn production_security_policy(
         ),
     )
 }
-
-/// CTFE-selected production security policy. The runtime profile separately
-/// derives the AIR shape from the real evaluator and rejects this policy if
-/// that evaluator no longer has the expected degree bound.
-pub const PRODUCTION_RECURSIVE_SECURITY_POLICY: DirectFriSecurityPolicy =
-    production_security_policy_for_bound(
-        PRODUCTION_SECURITY_TARGET_BITS,
-        PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS,
-        PRODUCTION_TRACE_LENGTH_U32 - 1,
-    )
 
 pub fn production_recursive_security_policy() -> DirectFriSecurityPolicy {
     PRODUCTION_RECURSIVE_SECURITY_POLICY
@@ -437,13 +429,20 @@ pub fn bind_sparse_air_security_profile<
     ).value
 }
 
-pub const PRODUCTION_AIR_MAX_LEAVES: usize = PRODUCTION_QUERY_COUNT * 4
+pub const PRODUCTION_AIR_MAX_LEAVES: usize =
+    air_lde_request_capacity(PRODUCTION_QUERY_COUNT)
 pub const PRODUCTION_AIR_MAX_SIBLINGS: usize =
-    PRODUCTION_AIR_MAX_LEAVES * PRODUCTION_LDE_LOG
+    merkle_multi_path_sibling_capacity(
+        PRODUCTION_AIR_MAX_LEAVES,
+        PRODUCTION_LDE_LOG,
+    )
 pub const PRODUCTION_COMPOSITION_MAX_LEAVES: usize =
-    PRODUCTION_QUERY_COUNT * 2
+    fri_multi_leaf_capacity(PRODUCTION_QUERY_COUNT)
 pub const PRODUCTION_COMPOSITION_MAX_SIBLINGS: usize =
-    fri_multi_sibling_capacity(PRODUCTION_LDE_LOG - 1, PRODUCTION_QUERY_COUNT)
+    fri_multi_sibling_capacity(
+        fri_composition_query_depth(PRODUCTION_LDE_LOG),
+        PRODUCTION_QUERY_COUNT,
+    )
 
 pub type ProductionSparseFriSchedule = FriSchedule<1, {PRODUCTION_LDE_LOG}>
 pub type ProductionSparseFriLayers =
@@ -485,19 +484,18 @@ pub type ProductionSparseBabyBearReceipt = SparseBabyBearAirFriReceipt<
     ProductionSparseFriQuery,
 >
 
-pub const PRODUCTION_SECURITY_QUERY_COUNT: usize =
-    PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count as usize
-pub const PRODUCTION_SECURITY_VERIFIER_TASK_COUNT: usize =
-    PRODUCTION_SECURITY_QUERY_COUNT.saturating_add(6)
 pub const PRODUCTION_SECURITY_AIR_MAX_LEAVES: usize =
-    PRODUCTION_SECURITY_QUERY_COUNT * 4
+    air_lde_request_capacity(PRODUCTION_SECURITY_QUERY_COUNT)
 pub const PRODUCTION_SECURITY_AIR_MAX_SIBLINGS: usize =
-    PRODUCTION_SECURITY_AIR_MAX_LEAVES * PRODUCTION_LDE_LOG
+    merkle_multi_path_sibling_capacity(
+        PRODUCTION_SECURITY_AIR_MAX_LEAVES,
+        PRODUCTION_LDE_LOG,
+    )
 pub const PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES: usize =
-    PRODUCTION_SECURITY_QUERY_COUNT * 2
+    fri_multi_leaf_capacity(PRODUCTION_SECURITY_QUERY_COUNT)
 pub const PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS: usize =
     fri_multi_sibling_capacity(
-        PRODUCTION_LDE_LOG - 1,
+        fri_composition_query_depth(PRODUCTION_LDE_LOG),
         PRODUCTION_SECURITY_QUERY_COUNT,
     )
 

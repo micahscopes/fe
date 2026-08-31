@@ -7,6 +7,23 @@
 
 use core::marker::Copy
 
+/// Two authenticated leaves are opened for every binary FRI query pair.
+pub const fn fri_multi_leaf_capacity(_ query_count: usize) -> usize {
+    query_count + query_count
+}
+
+/// A conservative sibling budget for the shared multipath at one FRI layer.
+///
+/// This is field-neutral schedule geometry. Keeping it in the leaf structure
+/// ingot lets receipt schemas and field interpreters derive the same shape
+/// without making const evaluation depend on either consumer's trait graph.
+pub const fn fri_multi_sibling_capacity(
+    _ pair_depth: usize,
+    _ query_count: usize,
+) -> usize {
+    fri_multi_leaf_capacity(query_count) * pair_depth
+}
+
 /// Terminal of the field-neutral Fiat-Shamir query plan. `NEXT_QUERY` is the
 /// first unused domain identity after the plan.
 pub struct FriQueryPlanDone<const NEXT_QUERY: u32> {}
@@ -548,4 +565,180 @@ impl<Schedule> FriScheduleQueryPlacement for Schedule
         }
         invalid_query_sibling_placement()
     }
+}
+
+/// Query an already materialized schedule placement. GPU consumers use this
+/// view after interpreting the semantic type tree once, keeping recursive FCO
+/// normalization out of every invocation while preserving derived offsets.
+pub fn fri_query_evaluation_from_rounds<const ROUNDS: usize>(
+    _ rounds: ref [FriRoundPlacement; ROUNDS],
+    _ opening: u32,
+    _ query: u32,
+) -> FriQueryEvaluationPlacement {
+    if ROUNDS == 0 || !rounds[0].valid || query >= rounds[0].output_width {
+        return invalid_query_evaluation_placement()
+    }
+    let mut remaining = opening
+    let mut current_query = query
+    let mut round_index: usize = 0
+    while round_index < ROUNDS {
+        let placement = rounds[round_index]
+        if !placement.valid {
+            return invalid_query_evaluation_placement()
+        }
+        let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
+        if remaining < opened {
+            let evaluation = if placement.output_width > 1 {
+                let pair = current_query & (placement.pair_width - 1)
+                pair + remaining * placement.pair_width
+            } else {
+                0
+            }
+            return FriQueryEvaluationPlacement {
+                valid: true,
+                round_index: round_index.downcast_truncate(),
+                round: placement.round,
+                evaluation_index: placement.output_offset + evaluation,
+            }
+        }
+        remaining = remaining - opened
+        current_query = if placement.output_width > 1 {
+            current_query & (placement.pair_width - 1)
+        } else {
+            0
+        }
+        round_index = round_index + 1
+    }
+    invalid_query_evaluation_placement()
+}
+
+pub fn fri_query_sibling_from_rounds<const ROUNDS: usize>(
+    _ rounds: ref [FriRoundPlacement; ROUNDS],
+    _ sibling: u32,
+    _ query: u32,
+) -> FriQuerySiblingPlacement {
+    if ROUNDS == 0 || !rounds[0].valid || query >= rounds[0].output_width {
+        return invalid_query_sibling_placement()
+    }
+    let mut remaining = sibling
+    let mut current_query = query
+    let mut round_index: usize = 0
+    while round_index < ROUNDS {
+        let placement = rounds[round_index]
+        if !placement.valid {
+            return invalid_query_sibling_placement()
+        }
+        let siblings = 2 * placement.pair_depth
+        if placement.pair_depth > 0 && remaining < siblings {
+            let side = remaining / placement.pair_depth
+            let level = remaining % placement.pair_depth
+            let leaf = (current_query & (placement.pair_width - 1))
+                + side * placement.pair_width
+            let node = placement.tree_offset
+                + fri_tree_level_offset(placement.output_width, level)
+                + ((leaf >> level) ^ 1)
+            return FriQuerySiblingPlacement {
+                valid: true,
+                round_index: round_index.downcast_truncate(),
+                round: placement.round,
+                tree_node: node,
+            }
+        }
+        remaining = remaining - siblings
+        current_query = if placement.output_width > 1 {
+            current_query & (placement.pair_width - 1)
+        } else {
+            0
+        }
+        round_index = round_index + 1
+    }
+    invalid_query_sibling_placement()
+}
+
+/// Four-round physical specialization used by the first complete browser FRI
+/// checkpoint. The general interpreter above remains the semantic reference;
+/// this form avoids a known const-array normalization cost in large actors.
+pub fn fri_query_evaluation_from_four_rounds(
+    _ rounds: ref [FriRoundPlacement; 4],
+    _ opening: u32,
+    _ query: u32,
+) -> FriQueryEvaluationPlacement {
+    if !rounds[0].valid || query >= rounds[0].output_width {
+        return invalid_query_evaluation_placement()
+    }
+    let mut remaining = opening
+    let mut current_query = query
+    let mut round_index: usize = 0
+    while round_index < 4 {
+        let placement = rounds[round_index]
+        if !placement.valid {
+            return invalid_query_evaluation_placement()
+        }
+        let opened: u32 = if placement.output_width > 1 { 2 } else { 1 }
+        if remaining < opened {
+            let evaluation = if placement.output_width > 1 {
+                let pair = current_query & (placement.pair_width - 1)
+                pair + remaining * placement.pair_width
+            } else {
+                0
+            }
+            return FriQueryEvaluationPlacement {
+                valid: true,
+                round_index: round_index.downcast_truncate(),
+                round: placement.round,
+                evaluation_index: placement.output_offset + evaluation,
+            }
+        }
+        remaining = remaining - opened
+        current_query = if placement.output_width > 1 {
+            current_query & (placement.pair_width - 1)
+        } else {
+            0
+        }
+        round_index = round_index + 1
+    }
+    invalid_query_evaluation_placement()
+}
+
+pub fn fri_query_sibling_from_four_rounds(
+    _ rounds: ref [FriRoundPlacement; 4],
+    _ sibling: u32,
+    _ query: u32,
+) -> FriQuerySiblingPlacement {
+    if !rounds[0].valid || query >= rounds[0].output_width {
+        return invalid_query_sibling_placement()
+    }
+    let mut remaining = sibling
+    let mut current_query = query
+    let mut round_index: usize = 0
+    while round_index < 4 {
+        let placement = rounds[round_index]
+        if !placement.valid {
+            return invalid_query_sibling_placement()
+        }
+        let siblings = 2 * placement.pair_depth
+        if placement.pair_depth > 0 && remaining < siblings {
+            let side = remaining / placement.pair_depth
+            let level = remaining % placement.pair_depth
+            let leaf = (current_query & (placement.pair_width - 1))
+                + side * placement.pair_width
+            let node = placement.tree_offset
+                + fri_tree_level_offset(placement.output_width, level)
+                + ((leaf >> level) ^ 1)
+            return FriQuerySiblingPlacement {
+                valid: true,
+                round_index: round_index.downcast_truncate(),
+                round: placement.round,
+                tree_node: node,
+            }
+        }
+        remaining = remaining - siblings
+        current_query = if placement.output_width > 1 {
+            current_query & (placement.pair_width - 1)
+        } else {
+            0
+        }
+        round_index = round_index + 1
+    }
+    invalid_query_sibling_placement()
 }

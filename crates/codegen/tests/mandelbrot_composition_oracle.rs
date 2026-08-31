@@ -2,7 +2,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{
+    BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_wasm_with_options,
+    layout_for,
+};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
@@ -1231,6 +1234,45 @@ fn compile_gate() -> Vec<u8> {
     bytes
 }
 
+fn compile_gate_entry(entry: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mandelbrot_composition_oracle_ingot");
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("Mandelbrot composition ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected composition diagnostics:\n{diagnostics}"
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
+        .unwrap_or_else(|error| panic!("composition entry `{entry}`: {error}"));
+    if let Some(filter) = std::env::var_os("MB2_COMPOSITION_RMIR_FILTER") {
+        let filter = filter.to_string_lossy();
+        for function in package.functions(&db) {
+            if function.symbol(&db).contains(filter.as_ref()) {
+                eprintln!(
+                    "composition RMIR `{}`:\n{}",
+                    function.symbol(&db),
+                    mir::format_runtime_body(&db, &function.instance(&db).body(&db)),
+                );
+            }
+        }
+    }
+    let bytes =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap_or_else(|error| panic!("composition entry `{entry}` Wasm: {error}"))
+            .bytes;
+    assert_wasm_function_signature_limits(&bytes);
+    wasmparser::validate(&bytes).expect("composition entry Wasm should validate");
+    bytes
+}
+
 fn call_words(
     store: &mut wasmtime::Store<()>,
     instance: &wasmtime::Instance,
@@ -1511,6 +1553,81 @@ fn assert_receipt_field_mutation_rejected(
         !call_receipt_verifier(store, instance, &mutated, length),
         "canonical verifier accepted mutated field at word {start}",
     );
+}
+
+#[test]
+fn composition_evaluations_match_independent_bigint_oracle() {
+    const ENTRY: &str = "composition4x16_challenge_evaluation_words";
+
+    let wasm = compile_gate_entry(ENTRY);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("composition Wasm module should load");
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("zero-import composition gate should instantiate");
+
+    let rows = trace4(3072, 0, 16).expect("canonical four-row escape trace");
+    for evaluation in 0..16u32 {
+        let output = call_words(
+            &mut store,
+            &instance,
+            ENTRY,
+            &[3072, 0, 16, 7, evaluation as i32],
+            21,
+        );
+        assert_eq!(output[0], 1, "evaluation {evaluation} must be valid");
+        assert_eq!(
+            plain_limbs(&output[1..]),
+            composition_at(&rows, 3072, 0, F::from_u32(7), evaluation).0,
+            "independent composition mismatch at coset point {evaluation}",
+        );
+    }
+
+    let changed_challenge = call_words(&mut store, &instance, ENTRY, &[3072, 0, 16, 11, 5], 21);
+    assert_eq!(changed_challenge[0], 1);
+    assert_eq!(
+        plain_limbs(&changed_challenge[1..]),
+        composition_at(&rows, 3072, 0, F::from_u32(11), 5).0,
+    );
+
+    let changed_claim_rows = trace4(3200, 0, 16).expect("second four-row escape trace");
+    let changed_claim = call_words(&mut store, &instance, ENTRY, &[3200, 0, 16, 7, 9], 21);
+    assert_eq!(changed_claim[0], 1);
+    assert_eq!(
+        plain_limbs(&changed_claim[1..]),
+        composition_at(&changed_claim_rows, 3200, 0, F::from_u32(7), 9).0,
+    );
+
+    for invalid in [[0, 0, 16, 7, 0], [4096, 0, 16, 7, 0], [3072, 0, 16, 7, 16]] {
+        let output = call_words(&mut store, &instance, ENTRY, &invalid, 21);
+        assert_eq!(
+            output,
+            vec![0; 21],
+            "invalid input must fail closed: {invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn materialized_air_rows_match_direct_trace_interpolation() {
+    const ENTRY: &str = "composition4x16_materialized_row_parity_code";
+
+    let wasm = compile_gate_entry(ENTRY);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("row parity Wasm module should load");
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("zero-import row parity gate should instantiate");
+
+    for evaluation in 0..16i32 {
+        assert_eq!(
+            call_words(&mut store, &instance, ENTRY, &[3072, 0, 16, evaluation], 1,),
+            vec![0],
+            "materialized AIR row differs at coset point {evaluation}",
+        );
+    }
 }
 
 #[test]

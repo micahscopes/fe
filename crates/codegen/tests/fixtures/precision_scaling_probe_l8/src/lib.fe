@@ -1,0 +1,40 @@
+//! THROWAWAY probe fixture (measurement only, not part of the suite):
+//! forces a full monomorphization of the general `precision::field::mul<L,
+//! M: Modulus<L>>` at L=8 with a toy modulus (low limb 1, so `mu =
+//! mont_mu(1, LIMB_BITS) = 8191` trivially, at any L -- compile time does not
+//! depend on primality), to measure how compile time scales with the limb
+//! count L. Mirrors `precision_field_bn254fr_oracle_ingot`'s per-limb wrapper
+//! pattern, reduced to a single limb0 export (sufficient to force the whole
+//! `mul` call graph -- Pad2, Rows, Mac, ShiftAppend, Head, Zero, SubBorrow,
+//! Select, canonicalize, row -- since Fe/Rust-style monomorphization is
+//! all-or-nothing per instantiation).
+//!
+//! NOT wired into any test runner; compiled ad hoc by a throwaway timing
+//! harness. Safe to delete.
+
+use precision::field::{mul, Limbs, LimbLast, LimbMore, Modulus, mont_mu, LIMB_BITS}
+
+pub struct ToyL8 {}
+
+impl Modulus<8> for ToyL8 {
+    fn p_limbs() -> Limbs<8> {
+        LimbMore { lead: 1, tail: LimbMore { lead: 40, tail: LimbMore { lead: 77, tail: LimbMore { lead: 114, tail: LimbMore { lead: 151, tail: LimbMore { lead: 188, tail: LimbMore { lead: 225, tail: LimbLast { value: 7 } } } } } } } }
+    }
+
+    fn mu() -> u32 { 8191 }
+}
+
+static_assert(mont_mu(1, LIMB_BITS) == 8191)
+
+fn build_a(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32) -> Limbs<8> {
+    LimbMore { lead: a0, tail: LimbMore { lead: a1, tail: LimbMore { lead: a2, tail: LimbMore { lead: a3, tail: LimbMore { lead: a4, tail: LimbMore { lead: a5, tail: LimbMore { lead: a6, tail: LimbLast { value: a7 } } } } } } } }
+}
+
+fn build_b(b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32) -> Limbs<8> {
+    LimbMore { lead: b0, tail: LimbMore { lead: b1, tail: LimbMore { lead: b2, tail: LimbMore { lead: b3, tail: LimbMore { lead: b4, tail: LimbMore { lead: b5, tail: LimbMore { lead: b6, tail: LimbLast { value: b7 } } } } } } } }
+}
+
+pub fn probe(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32) -> u32 {
+    let out = mul<8, ToyL8>(build_a(a0, a1, a2, a3, a4, a5, a6, a7), build_b(b0, b1, b2, b3, b4, b5, b6, b7))
+    out.lead
+}

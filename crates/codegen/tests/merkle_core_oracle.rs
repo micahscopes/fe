@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;

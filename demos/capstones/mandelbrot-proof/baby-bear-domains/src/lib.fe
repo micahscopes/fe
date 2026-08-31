@@ -1,0 +1,97 @@
+//! Nominal BabyBear commitment domains shared by Mandelbrot proof interpreters.
+//!
+//! Scalar, Wasm, WebGPU, and future recursive placements import these types.
+//! No placement reconstructs a numeric protocol tag or depends on the full
+//! scalar prover merely to name the committed message.
+
+use poseidon_baby_bear::{Poseidon2Domain, Poseidon2FieldDomain}
+
+const fn protocol_tag(_ label: String<4>) -> u32 {
+    let bytes = label.as_bytes()
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
+}
+
+pub struct MandelbrotRowBabyBearV1 {}
+pub struct MandelbrotPublicBabyBearV1 {}
+pub struct MandelbrotAuxiliaryBabyBearV1 {}
+pub struct MandelbrotStatementBabyBearV1 {}
+pub struct MandelbrotProofTranscriptBabyBearV1 {}
+pub struct MandelbrotMainLdeRowBabyBearV1 {}
+pub struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
+pub struct MandelbrotMainLdeTranscriptBabyBearV1 {}
+pub struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
+
+impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BR01")
+}
+
+impl Poseidon2Domain for MandelbrotPublicBabyBearV1 {
+    const TAG: u32 = protocol_tag("BP01")
+}
+
+impl Poseidon2Domain for MandelbrotAuxiliaryBabyBearV1 {
+    const TAG: u32 = protocol_tag("BA01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotStatementBabyBearV1 {
+    const TAG: u32 = protocol_tag("BS01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotProofTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BT01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotMainLdeRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BL01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BY01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BL02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BY02")
+}
+
+pub const fn row_domain_tag() -> u32 {
+    <MandelbrotRowBabyBearV1 as Poseidon2Domain>::TAG
+}
+
+pub const fn public_domain_tag() -> u32 {
+    <MandelbrotPublicBabyBearV1 as Poseidon2Domain>::TAG
+}
+
+pub const fn auxiliary_domain_tag() -> u32 {
+    <MandelbrotAuxiliaryBabyBearV1 as Poseidon2Domain>::TAG
+}
+
+pub const fn statement_domain_tag() -> u32 {
+    <MandelbrotStatementBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn proof_transcript_domain_tag() -> u32 {
+    <MandelbrotProofTranscriptBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn main_lde_row_domain_tag() -> u32 {
+    <MandelbrotMainLdeRowBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn auxiliary_lde_row_domain_tag() -> u32 {
+    <MandelbrotAuxiliaryLdeRowBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn main_lde_transcript_domain_tag() -> u32 {
+    <MandelbrotMainLdeTranscriptBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn auxiliary_lde_transcript_domain_tag() -> u32 {
+    <MandelbrotAuxiliaryLdeTranscriptBabyBearV1 as Poseidon2FieldDomain>::TAG
+}

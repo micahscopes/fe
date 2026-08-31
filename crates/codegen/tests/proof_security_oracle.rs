@@ -2,9 +2,9 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
+use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use std::path::Path;

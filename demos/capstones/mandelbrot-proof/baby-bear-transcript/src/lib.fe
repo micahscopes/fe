@@ -40,6 +40,20 @@ impl Poseidon2FieldDomain for MandelbrotCompositionTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BC03")
 }
 
+/// Public placement metadata for interpreters that stage the transcript over
+/// workgroups instead of evaluating the scalar sponge in one invocation.
+pub const fn composition_challenge_domain_tag() -> u32 {
+    <MandelbrotCompositionChallengeBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn composition_row_domain_tag() -> u32 {
+    <MandelbrotCompositionRowBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
+pub const fn composition_transcript_domain_tag() -> u32 {
+    <MandelbrotCompositionTranscriptBabyBearV1 as Poseidon2FieldDomain>::TAG
+}
+
 pub struct AirLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for AirLdeTranscriptDigest {}
 

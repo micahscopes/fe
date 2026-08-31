@@ -2,7 +2,7 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use std::path::Path;
 use url::Url;
@@ -177,17 +177,34 @@ fn expected_control_link_plan(
     let one = 1;
     let mut nodes = [0u32; 68];
     let phase_pairs = [
-        (0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 3),
-        (3, 3), (3, 4), (4, 3), (4, 5), (5, 5), (5, 6),
-        (6, 5), (6, 6), (6, 7), (7, 7), (7, 8), (8, 7),
-        (8, 9), (9, 9), (9, 10), (10, 9), (10, 11),
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 2),
+        (2, 0),
+        (2, 3),
+        (3, 3),
+        (3, 4),
+        (4, 3),
+        (4, 5),
+        (5, 5),
+        (5, 6),
+        (6, 5),
+        (6, 6),
+        (6, 7),
+        (7, 7),
+        (7, 8),
+        (8, 7),
+        (8, 9),
+        (9, 9),
+        (9, 10),
+        (10, 9),
+        (10, 11),
     ];
     for (index, (left, right)) in phase_pairs.into_iter().enumerate() {
         nodes[index] = baby_bear_mul(current[left], next[right]);
     }
-    let boundary_pairs = [
-        (11, 12), (12, 12), (12, 11), (12, 13), (13, 14), (14, 14),
-    ];
+    let boundary_pairs = [(11, 12), (12, 12), (12, 11), (12, 13), (13, 14), (14, 14)];
     for (index, (left, right)) in boundary_pairs.into_iter().enumerate() {
         nodes[23 + index] = baby_bear_mul(current[left], next[right]);
     }
@@ -228,38 +245,23 @@ fn expected_control_link_plan(
     let product_delta = baby_bear_sub(next[32], current[32]);
     let same_product = baby_bear_sub(one, product_delta);
     let product_rise = baby_bear_sub(next[35], current[35]);
-    nodes[49] = baby_bear_mul(
-        product_delta,
-        baby_bear_sub(product_delta, one),
-    );
+    nodes[49] = baby_bear_mul(product_delta, baby_bear_sub(product_delta, one));
     nodes[50] = baby_bear_mul(same_product, current[35]);
     nodes[51] = baby_bear_mul(nodes[50], baby_bear_sub(one, next[35]));
     nodes[52] = baby_bear_mul(same_product, product_rise);
     nodes[53] = baby_bear_mul(nodes[12], nodes[52]);
-    nodes[54] = baby_bear_mul(
-        same_product,
-        baby_bear_add(current[33], one),
-    );
+    nodes[54] = baby_bear_mul(same_product, baby_bear_add(current[33], one));
     nodes[55] = baby_bear_mul(same_product, next[35]);
     nodes[56] = baby_bear_mul(
         same_product,
-        baby_bear_sub(
-            baby_bear_add(current[36], one),
-            baby_bear_mul(2, next[35]),
-        ),
+        baby_bear_sub(baby_bear_add(current[36], one), baby_bear_mul(2, next[35])),
     );
     nodes[57] = baby_bear_mul(nodes[12], product_delta);
 
     let linear_delta = baby_bear_sub(next[33], current[33]);
     let retained_role = baby_bear_sub(one, linear_delta);
-    nodes[58] = baby_bear_mul(
-        linear_delta,
-        baby_bear_sub(linear_delta, one),
-    );
-    nodes[59] = baby_bear_mul(
-        retained_role,
-        baby_bear_add(current[34], one),
-    );
+    nodes[58] = baby_bear_mul(linear_delta, baby_bear_sub(linear_delta, one));
+    nodes[59] = baby_bear_mul(retained_role, baby_bear_add(current[34], one));
     nodes[60] = baby_bear_mul(nodes[19], linear_delta);
     nodes[61] = baby_bear_mul(retained_role, current[15]);
     nodes[62] = baby_bear_mul(retained_role, current[16]);

@@ -14,10 +14,13 @@ use fri_baby_bear::{
 use fri_structure::{
     FriQueryPlan,
     FriQueryPlanShape,
+    FriRoundPlacement,
     FriSchedule,
     FriSchedulePlacement,
     FriScheduleQueryPlacement,
     FriScheduleShape,
+    fri_query_evaluation_from_four_rounds,
+    fri_query_sibling_from_four_rounds,
 }
 use poseidon_baby_bear::Poseidon2FieldDomain
 type CheckpointFriSchedule16 = FriSchedule<1, 4>
@@ -108,6 +111,43 @@ pub fn fri_schedule16_query_sibling(
         sibling,
         query,
     )
+    (
+        if placement.valid { 1 } else { 0 },
+        placement.round_index,
+        placement.round,
+        placement.tree_node,
+    )
+}
+
+fn schedule16_rounds() -> [FriRoundPlacement; 4] {
+    [
+        <CheckpointFriSchedule16 as FriSchedulePlacement>::fri_round_placement(0),
+        <CheckpointFriSchedule16 as FriSchedulePlacement>::fri_round_placement(1),
+        <CheckpointFriSchedule16 as FriSchedulePlacement>::fri_round_placement(2),
+        <CheckpointFriSchedule16 as FriSchedulePlacement>::fri_round_placement(3),
+    ]
+}
+
+pub fn fri_schedule16_query_evaluation_from_four_rounds(
+    _ opening: u32,
+    _ query: u32,
+) -> (u32, u32, u32, u32) {
+    let rounds = schedule16_rounds()
+    let placement = fri_query_evaluation_from_four_rounds(ref rounds, opening, query)
+    (
+        if placement.valid { 1 } else { 0 },
+        placement.round_index,
+        placement.round,
+        placement.evaluation_index,
+    )
+}
+
+pub fn fri_schedule16_query_sibling_from_four_rounds(
+    _ sibling: u32,
+    _ query: u32,
+) -> (u32, u32, u32, u32) {
+    let rounds = schedule16_rounds()
+    let placement = fri_query_sibling_from_four_rounds(ref rounds, sibling, query)
     (
         if placement.valid { 1 } else { 0 },
         placement.round_index,

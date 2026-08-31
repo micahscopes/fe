@@ -1,0 +1,6 @@
+[ingot]
+name = "precision_scaling_probe_l8"
+version = "0.1.0"
+
+[dependencies]
+precision = "../../../../../demos/sketches/precision"

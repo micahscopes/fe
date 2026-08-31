@@ -60,6 +60,25 @@ pub const fn security_to_bits(_ value: u64) -> u32 {
     (value >> (SECURITY_FRACTIONAL_BITS as u64)).downcast_truncate()
 }
 
+/// Largest polynomial degree represented by a nonempty trace domain.
+///
+/// Keeping this derivation in the backend-neutral security layer lets policy
+/// callers name the semantic bound without repeating arithmetic in a
+/// production carrier's type-shape dependency graph. An empty domain fails
+/// closed at degree zero and is rejected by the policy constructor.
+pub const fn maximum_trace_polynomial_degree(_ trace_length: u32) -> u32 {
+    if trace_length == 0 { 0 } else { trace_length - 1 }
+}
+
+/// Number of semantic verifier tasks after attaching a fixed shared prefix to
+/// one independently checked task per Fiat-Shamir query.
+pub const fn direct_fri_verifier_task_count(
+    _ query_count: u32,
+    _ shared_tasks: u32,
+) -> u32 {
+    query_count.saturating_add(shared_tasks)
+}
+
 const fn is_power_of_two(_ value: u32) -> bool {
     value != 0 && (value & (value - 1)) == 0
 }

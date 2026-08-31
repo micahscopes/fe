@@ -110,16 +110,32 @@ impl core::marker::Copy for SignedWord {}
 
 pub const ESCAPES_BY_Q12_PUBLIC_WORDS: usize = 8
 
-/// Audited widths for the field-independent public claim encoding.
+/// Audited width for one field-independent public claim word. The indexed
+/// accessor is the semantic source for both scalar arrays and direct GPU
+/// projection, so dynamic placement never materializes a constant array.
+pub const fn escapes_by_q12_public_width(_ index: usize) -> u32 {
+    match index {
+        0 => 1
+        1 => 14
+        2 => 1
+        3 => 13
+        4 => 21
+        5 => 21
+        6 => 21
+        7 => 22
+        _ => 0
+    }
+}
+
 pub const ESCAPES_BY_Q12_PUBLIC_WIDTHS: [u32; ESCAPES_BY_Q12_PUBLIC_WORDS] = [
-    1,
-    14,
-    1,
-    13,
-    21,
-    21,
-    21,
-    22,
+    escapes_by_q12_public_width(0),
+    escapes_by_q12_public_width(1),
+    escapes_by_q12_public_width(2),
+    escapes_by_q12_public_width(3),
+    escapes_by_q12_public_width(4),
+    escapes_by_q12_public_width(5),
+    escapes_by_q12_public_width(6),
+    escapes_by_q12_public_width(7),
 ]
 
 /// Public statement already validated by the cheap proof-domain boundary.
@@ -200,26 +216,50 @@ impl core::marker::Copy for RangedAirRow {}
 pub const AUXILIARY_RANGE_BITS: usize = 21 + 15 + 15 + 30 + 30 + 31 + 18 + 12 + 19 + 12
 pub const AUXILIARY_ROW_BITS: usize = 2 * AUXILIARY_RANGE_BITS + 5
 
-/// Audited widths for the canonical commitment encoding. Their sum is 210,
-/// so every range-valid row has an injective representation in BN254 Fr.
+/// Audited width for one canonical commitment word. Their sum is 210, so
+/// every range-valid row has an injective representation. The accessor is the
+/// single source for aggregate and direct placement interpreters.
+pub const fn encoded_proof_row_width(_ index: usize) -> u32 {
+    match index {
+        0 => 21
+        1 => 1
+        2 => 15
+        3 => 1
+        4 => 15
+        5 => 30
+        6 => 30
+        7 => 31
+        8 => 1
+        9 => 18
+        10 => 12
+        11 => 1
+        12 => 19
+        13 => 12
+        14 => 1
+        15 => 1
+        16 => 1
+        _ => 0
+    }
+}
+
 pub const ENCODED_PROOF_ROW_WIDTHS: [u32; 17] = [
-    21,
-    1,
-    15,
-    1,
-    15,
-    30,
-    30,
-    31,
-    1,
-    18,
-    12,
-    1,
-    19,
-    12,
-    1,
-    1,
-    1,
+    encoded_proof_row_width(0),
+    encoded_proof_row_width(1),
+    encoded_proof_row_width(2),
+    encoded_proof_row_width(3),
+    encoded_proof_row_width(4),
+    encoded_proof_row_width(5),
+    encoded_proof_row_width(6),
+    encoded_proof_row_width(7),
+    encoded_proof_row_width(8),
+    encoded_proof_row_width(9),
+    encoded_proof_row_width(10),
+    encoded_proof_row_width(11),
+    encoded_proof_row_width(12),
+    encoded_proof_row_width(13),
+    encoded_proof_row_width(14),
+    encoded_proof_row_width(15),
+    encoded_proof_row_width(16),
 ]
 
 /// Stateful one-pass traversal of the canonical orbit. The current expanded
@@ -315,41 +355,70 @@ pub fn encode_proof_row(_ row: PaddedEscapeAirRow) -> EncodedProofRow {
 
 /// Canonical commitment words for one padded proof row. The order is the 15
 /// AIR words followed by `(active, unique_terminal)`.
+#[inline(always)]
+pub fn encoded_proof_row_word(_ row: EncodedProofRow, _ index: usize) -> u32 {
+    match index {
+        0 => row.air.step
+        1 => row.air.zr.sign
+        2 => row.air.zr.magnitude
+        3 => row.air.zi.sign
+        4 => row.air.zi.magnitude
+        5 => row.air.rr
+        6 => row.air.ii
+        7 => row.air.magnitude
+        8 => row.air.q_re.sign
+        9 => row.air.q_re.magnitude
+        10 => row.air.r_re
+        11 => row.air.q_im.sign
+        12 => row.air.q_im.magnitude
+        13 => row.air.r_im
+        14 => row.air.terminal
+        15 => row.active
+        16 => row.terminal
+        _ => 0
+    }
+}
+
 pub fn encoded_proof_row_words(_ row: own EncodedProofRow) -> [u32; 17] {
-    [
-        row.air.step,
-        row.air.zr.sign,
-        row.air.zr.magnitude,
-        row.air.zi.sign,
-        row.air.zi.magnitude,
-        row.air.rr,
-        row.air.ii,
-        row.air.magnitude,
-        row.air.q_re.sign,
-        row.air.q_re.magnitude,
-        row.air.r_re,
-        row.air.q_im.sign,
-        row.air.q_im.magnitude,
-        row.air.r_im,
-        row.air.terminal,
-        row.active,
-        row.terminal,
-    ]
+    let mut words: [u32; 17] = [0; 17]
+    let mut index: usize = 0
+    while index < 17 {
+        words[index] = encoded_proof_row_word(row, index)
+        index = index + 1
+    }
+    words
 }
 
 pub fn escapes_by_q12_public_words(
     _ public: own EscapesByQ12Public,
 ) -> [u32; ESCAPES_BY_Q12_PUBLIC_WORDS] {
     [
-        public.c_re.sign,
-        public.c_re.magnitude,
-        public.c_im.sign,
-        public.c_im.magnitude,
-        public.bound,
-        public.terminal_step,
-        public.trace_length,
-        public.padded_length,
+        escapes_by_q12_public_word(public, 0),
+        escapes_by_q12_public_word(public, 1),
+        escapes_by_q12_public_word(public, 2),
+        escapes_by_q12_public_word(public, 3),
+        escapes_by_q12_public_word(public, 4),
+        escapes_by_q12_public_word(public, 5),
+        escapes_by_q12_public_word(public, 6),
+        escapes_by_q12_public_word(public, 7),
     ]
+}
+
+pub fn escapes_by_q12_public_word(
+    _ public: EscapesByQ12Public,
+    _ index: usize,
+) -> u32 {
+    match index {
+        0 => public.c_re.sign
+        1 => public.c_re.magnitude
+        2 => public.c_im.sign
+        3 => public.c_im.magnitude
+        4 => public.bound
+        5 => public.terminal_step
+        6 => public.trace_length
+        7 => public.padded_length
+        _ => 0
+    }
 }
 
 pub fn derive_bit_range_witness<const N: usize>(_ value: u32) -> BitRangeWitness<N>
@@ -468,8 +537,85 @@ pub fn encoded_ranged_auxiliary_row_bit(_ ranged: RangedAirRow, _ index: usize) 
     ranged.terminal_high_any.any[cursor]
 }
 
+/// Direct indexed interpretation of the same canonical range-witness schema.
+///
+/// GPU placement needs one scalar word per invocation and must not first
+/// materialize a 411-word aggregate in private memory. This accessor preserves
+/// the exact ordered schema above while deriving a bit or inclusive prefix OR
+/// directly from the canonical main row. `encoded_ranged_auxiliary_row_bit`
+/// remains the aggregate semantic interpreter and independent gates compare
+/// this placement interpreter against it.
+#[inline(always)]
+fn serialized_value_range_bit(
+    _ value: u32,
+    _ width: usize,
+    _ index: usize,
+) -> u32 {
+    if index < width {
+        return (value >> index.downcast_truncate()) & 1
+    }
+    let prefix_index: u32 = (index - width).downcast_truncate()
+    // Every production width is at most 31. Shifting the requested prefix to
+    // the top bit avoids a runtime `(1 << 32)` edge while computing the same
+    // inclusive OR as `derive_bit_range_witness`.
+    let shift: u32 = 31 - prefix_index
+    if (value << shift) != 0 { 1 } else { 0 }
+}
+
+#[inline(always)]
+pub fn encoded_auxiliary_row_bit_direct(
+    _ row: EncodedAirRow,
+    _ index: usize,
+) -> u32 {
+    if index >= AUXILIARY_ROW_BITS {
+        return 0
+    }
+    let mut cursor = index
+    if cursor < 2 * 21 {
+        return serialized_value_range_bit(row.step, 21, cursor)
+    }
+    cursor = cursor - 2 * 21
+    if cursor < 2 * 15 {
+        return serialized_value_range_bit(row.zr.magnitude, 15, cursor)
+    }
+    cursor = cursor - 2 * 15
+    if cursor < 2 * 15 {
+        return serialized_value_range_bit(row.zi.magnitude, 15, cursor)
+    }
+    cursor = cursor - 2 * 15
+    if cursor < 2 * 30 {
+        return serialized_value_range_bit(row.rr, 30, cursor)
+    }
+    cursor = cursor - 2 * 30
+    if cursor < 2 * 30 {
+        return serialized_value_range_bit(row.ii, 30, cursor)
+    }
+    cursor = cursor - 2 * 30
+    if cursor < 2 * 31 {
+        return serialized_value_range_bit(row.magnitude, 31, cursor)
+    }
+    cursor = cursor - 2 * 31
+    if cursor < 2 * 18 {
+        return serialized_value_range_bit(row.q_re.magnitude, 18, cursor)
+    }
+    cursor = cursor - 2 * 18
+    if cursor < 2 * 12 {
+        return serialized_value_range_bit(row.r_re, 12, cursor)
+    }
+    cursor = cursor - 2 * 12
+    if cursor < 2 * 19 {
+        return serialized_value_range_bit(row.q_im.magnitude, 19, cursor)
+    }
+    cursor = cursor - 2 * 19
+    if cursor < 2 * 12 {
+        return serialized_value_range_bit(row.r_im, 12, cursor)
+    }
+    cursor = cursor - 2 * 12
+    serialized_value_range_bit(row.magnitude >> 26, 5, 5 + cursor)
+}
+
 pub fn encoded_auxiliary_row_bit(_ row: EncodedAirRow, _ index: usize) -> u32 {
-    encoded_ranged_auxiliary_row_bit(derive_ranged_air_row(row), index)
+    encoded_auxiliary_row_bit_direct(row, index)
 }
 
 fn air_encoding(_ row: EscapeAirRow) -> [u32; 15] {

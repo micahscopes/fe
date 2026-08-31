@@ -6,12 +6,12 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use p3_baby_bear::{
-    default_babybear_poseidon2_16, BabyBear, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL,
-    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, BABYBEAR_POSEIDON2_RC_16_INTERNAL,
+    BABYBEAR_POSEIDON2_RC_16_EXTERNAL_FINAL, BABYBEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL,
+    BABYBEAR_POSEIDON2_RC_16_INTERNAL, BabyBear, default_babybear_poseidon2_16,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
@@ -213,11 +213,7 @@ fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     reference_sponge(&message)
 }
 
-fn canonical_relation_arguments(
-    fields: [u32; 7],
-    expected: [u32; 8],
-    mutation: u32,
-) -> Vec<u32> {
+fn canonical_relation_arguments(fields: [u32; 7], expected: [u32; 8], mutation: u32) -> Vec<u32> {
     fields
         .into_iter()
         .chain(expected)
@@ -230,7 +226,10 @@ fn canonical_commitment_uses_one_codec_and_quadratic_plan() {
     let bytes = compiled_wasm();
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).expect("Poseidon2 module should load");
-    assert!(module.imports().next().is_none(), "fixture must remain zero-import");
+    assert!(
+        module.imports().next().is_none(),
+        "fixture must remain zero-import"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("Poseidon2 module should instantiate");

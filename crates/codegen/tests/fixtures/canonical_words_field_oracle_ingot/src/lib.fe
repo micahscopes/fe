@@ -17,6 +17,7 @@ use canonical_words::{
     encode_canonical_words,
 }
 use core::BrowserBytes
+use precision::baby_bear::BabyBear
 use precision::bn254_fr::Bn254Fr
 use precision::field::FieldElement
 
@@ -42,6 +43,10 @@ struct Envelope { valid: bool, fields: FieldArray<2> }
 impl core::marker::Copy for Envelope {}
 derive CanonicalWords for Envelope using CanonicalWordsProvider
 
+struct BabyBearEnvelope { header: u32, value: BabyBear, footer: bool }
+impl core::marker::Copy for BabyBearEnvelope {}
+derive CanonicalWords for BabyBearEnvelope using CanonicalWordsProvider
+
 struct SignedEnvelope { negative: i32, positive: i32 }
 impl core::marker::Copy for SignedEnvelope {}
 derive CanonicalWords for SignedEnvelope using CanonicalWordsProvider
@@ -58,6 +63,15 @@ struct LargeSnapshot { valid: bool, values: [u32; 1001] }
 impl core::marker::Copy for LargeSnapshot {}
 derive CanonicalWords for LargeSnapshot using CanonicalWordsProvider
 
+struct LargeBabyBearEnvelope {
+    header: u32,
+    values: [u32; 1001],
+    field: BabyBear,
+    footer: bool,
+}
+impl core::marker::Copy for LargeBabyBearEnvelope {}
+derive CanonicalWords for LargeBabyBearEnvelope using CanonicalWordsProvider
+
 struct SnapshotEnvelope { snapshot: LargeSnapshot }
 impl core::marker::Copy for SnapshotEnvelope {}
 derive CanonicalWords for SnapshotEnvelope using CanonicalWordsProvider
@@ -65,6 +79,13 @@ derive CanonicalWords for SnapshotEnvelope using CanonicalWordsProvider
 const EMPTY_LARGE_SNAPSHOT: LargeSnapshot = LargeSnapshot {
     valid: false,
     values: [0; 1001],
+}
+
+const EMPTY_LARGE_BABY_BEAR_ENVELOPE: LargeBabyBearEnvelope = LargeBabyBearEnvelope {
+    header: 0,
+    values: [0; 1001],
+    field: BabyBear::zero(),
+    footer: false,
 }
 
 fn write_snapshot_first(
@@ -106,6 +127,40 @@ const EMPTY_STREAM_ENVELOPE: StreamEnvelope = StreamEnvelope {
 }
 
 pub fn canonical_field_word_count() -> u32 { <Fr as CanonicalWords>::WORDS }
+
+/// Exercise the one-word field decoder through its ordinary mutable receiver.
+/// This is the compact form used by production BabyBear receipt decoding.
+pub fn canonical_baby_bear_decode(_ value: u32) -> (u32, u32) {
+    let encoded = BrowserWordWriter::allocate(1).write(value).finish()
+    let mut decoded = BabyBear::zero()
+    let reader = decoded.decode(BrowserWordReader::new(encoded))
+    (
+        if reader.complete() { 1 } else { 0 },
+        decoded.to_u32(),
+    )
+}
+
+/// Match the production receipt path where the reflection-derived codec
+/// projects a mutable field before invoking `WordField::decode`.
+pub fn canonical_nested_baby_bear_decode(_ value: u32) -> (u32, u32, u32, u32) {
+    let encoded = BrowserWordWriter::allocate(3)
+        .write(17)
+        .write(value)
+        .write(1)
+        .finish()
+    let mut decoded = BabyBearEnvelope {
+        header: 0,
+        value: BabyBear::zero(),
+        footer: false,
+    }
+    let reader = decoded.decode(BrowserWordReader::new(encoded))
+    (
+        if reader.complete() { 1 } else { 0 },
+        decoded.header,
+        decoded.value.to_u32(),
+        if decoded.footer { 1 } else { 0 },
+    )
+}
 
 pub fn canonical_field_one() -> BrowserBytes {
     let value = Fr::from_u32(1)
@@ -243,6 +298,32 @@ pub fn canonical_embedded_snapshot() -> BrowserBytes {
         ref value,
         BrowserWordWriter::allocate(<SnapshotEnvelope as CanonicalWords>::WORDS),
     ).finish()
+}
+
+pub fn canonical_large_baby_bear_roundtrip(_ value: u32) -> (u32, u32) {
+    if value >= 2013265921 { return (0, 0) }
+    let original = LargeBabyBearEnvelope {
+        header: 17,
+        values: [23; 1001],
+        field: BabyBear::from_u32(value),
+        footer: true,
+    }
+    let encoded = encode_canonical_words(
+        ref original,
+        BrowserWordWriter::allocate(<LargeBabyBearEnvelope as CanonicalWords>::WORDS),
+    ).finish()
+    let mut decoded = EMPTY_LARGE_BABY_BEAR_ENVELOPE
+    let reader = decoded.decode(BrowserWordReader::new(encoded))
+    if reader.complete()
+        && decoded.header == 17
+        && decoded.values[0] == 23
+        && decoded.values[1000] == 23
+        && decoded.footer
+    {
+        (1, decoded.field.to_u32())
+    } else {
+        (0, 0)
+    }
 }
 
 pub fn canonical_stream_envelope(_ count: u32) -> BrowserBytes {

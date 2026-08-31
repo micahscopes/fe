@@ -280,13 +280,7 @@ fn shared_plan_matches_independent_field_math_and_rejects_every_node_mutation() 
             "quadratic_relation_wrong_assertion_shape",
         ] {
             assert_eq!(
-                call_words(
-                    &mut store,
-                    &instance,
-                    function,
-                    &[a, b, c, output],
-                    1,
-                ),
+                call_words(&mut store, &instance, function, &[a, b, c, output], 1,),
                 [0],
                 "{function} must fail closed",
             );

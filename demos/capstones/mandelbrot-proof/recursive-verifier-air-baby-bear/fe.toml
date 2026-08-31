@@ -3,6 +3,11 @@ name = "mandelbrot_proof_recursive_verifier_air_baby_bear"
 version = "0.1.0"
 
 [dependencies]
+fri_baby_bear = "../../../../ingots/fri_baby_bear"
+mandelbrot_proof_air_core = "../air-core"
+mandelbrot_proof_baby_bear = "../baby-bear"
+mandelbrot_proof_baby_bear_transcript = "../baby-bear-transcript"
+mandelbrot_proof_production_profile_baby_bear = "../production-profile-baby-bear"
 mandelbrot_proof_fixed_air_receipt_baby_bear = "../fixed-air-receipt-baby-bear"
 mandelbrot_proof_fixed_air_baby_bear = "../fixed-air-baby-bear"
 mandelbrot_proof_recursive_air_baby_bear = "../recursive-air-baby-bear"

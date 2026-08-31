@@ -18,13 +18,19 @@ use poseidon_baby_bear::{
 }
 use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
 pub use fri_structure::{
+    FriQueryPlan,
+    FriQueryPlanMetadata,
+    FriQueryPlanShape,
     FriRoundPlacement,
     FriSchedule,
     FriScheduleDone,
     FriScheduleFold,
     FriScheduleMetadata,
     FriSchedulePlacement,
+    FriScheduleQueryPlacement,
     FriScheduleShape,
+    fri_query_evaluation_from_four_rounds,
+    fri_query_sibling_from_four_rounds,
 }
 
 const fn protocol_prefix(_ prefix: String<2>) -> u32 {

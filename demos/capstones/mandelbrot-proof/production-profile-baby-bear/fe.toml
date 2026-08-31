@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_proof_production_profile_baby_bear"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+precision = "../../../sketches/precision"
+proof_security = "../../../../ingots/proof_security"

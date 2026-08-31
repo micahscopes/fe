@@ -1,0 +1,74 @@
+//! Acyclic production shape and security policy for the BabyBear proof.
+//!
+//! Receipt carriers and verifier interpreters depend on these CTFE values,
+//! but this leaf ingot depends on neither. Trait discovery can therefore
+//! lower policy-shaped carriers without re-entering policy evaluation.
+
+use precision::baby_bear::BABY_BEAR_MODULUS
+use proof_security::{
+    DirectFriSecurityPolicy,
+    derive_conjectured_direct_fri_policy,
+    direct_fri_verifier_task_count,
+    maximum_trace_polynomial_degree,
+}
+
+pub const PRODUCTION_LIMBS: usize = 4
+pub const PRODUCTION_TRACE_LENGTH_U32: u32 = 4096
+pub const PRODUCTION_LDE_LENGTH_U32: u32 = 8192
+pub const PRODUCTION_TRACE_LENGTH: usize = PRODUCTION_TRACE_LENGTH_U32 as usize
+pub const PRODUCTION_LDE_LENGTH: usize = PRODUCTION_LDE_LENGTH_U32 as usize
+
+const fn power_of_two_log(_ value: usize) -> usize {
+    let mut remaining = value
+    let mut result: usize = 0
+    while remaining > 1 {
+        remaining = remaining >> 1
+        result = result + 1
+    }
+    result
+}
+
+pub const PRODUCTION_LDE_LOG: usize = power_of_two_log(PRODUCTION_LDE_LENGTH)
+
+/// Protocol-shape checkpoint only. It is retained as an exact four-query
+/// oracle and must not be confused with the security-bearing receipt.
+pub const PRODUCTION_QUERY_COUNT: usize = 4
+
+pub const PRODUCTION_SECURITY_TARGET_BITS: u32 = 100
+pub const PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS: u32 = 1024
+pub const PRODUCTION_SECURITY_EXTENSION_DEGREE: u32 = 4
+pub const PRODUCTION_SECURITY_FOLDING_ARITY: u32 = 2
+pub const PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP: u32 = 8192
+pub const PRODUCTION_SECURITY_HASH_COLLISION_BITS: u32 = 128
+pub const PRODUCTION_SECURITY_QUERY_POW_BITS: u32 = 0
+pub const PRODUCTION_SECURITY_COMMIT_POW_BITS: u32 = 0
+
+/// CTFE-selected production policy. The receipt verifier separately checks
+/// the real AIR shape against this conservative degree and constraint budget.
+pub const PRODUCTION_RECURSIVE_SECURITY_POLICY: DirectFriSecurityPolicy =
+    derive_conjectured_direct_fri_policy(
+        PRODUCTION_SECURITY_TARGET_BITS,
+        PRODUCTION_SECURITY_MAX_COMPOSED_PROOFS,
+        BABY_BEAR_MODULUS,
+        PRODUCTION_SECURITY_EXTENSION_DEGREE,
+        PRODUCTION_TRACE_LENGTH_U32,
+        PRODUCTION_LDE_LENGTH_U32,
+        maximum_trace_polynomial_degree(PRODUCTION_TRACE_LENGTH_U32),
+        PRODUCTION_SECURITY_FOLDING_ARITY,
+        PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP,
+        PRODUCTION_SECURITY_HASH_COLLISION_BITS,
+        PRODUCTION_SECURITY_QUERY_POW_BITS,
+        PRODUCTION_SECURITY_COMMIT_POW_BITS,
+    )
+
+pub const PRODUCTION_SECURITY_QUERY_COUNT: usize =
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count as usize
+
+pub const PRODUCTION_SECURITY_VERIFIER_TASK_COUNT: usize =
+    direct_fri_verifier_task_count(
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count,
+        6,
+    ) as usize
+
+static_assert(PRODUCTION_LDE_LENGTH == (1 << PRODUCTION_LDE_LOG))
+static_assert(PRODUCTION_SECURITY_QUERY_COUNT > PRODUCTION_QUERY_COUNT)

@@ -19,19 +19,29 @@ pub use fri_structure::{
     FriScheduleMetadata,
     FriSchedulePlacement,
     FriScheduleShape,
+    fri_multi_leaf_capacity,
+    fri_multi_sibling_capacity,
     fri_query_range_identity,
 }
-use mandelbrot_proof_kernel::AUXILIARY_ROW_BITS
 use precision::polynomial::{Radix2Field, radix2_log}
 
-/// A source of the canonical 17 main and 411 auxiliary columns.
+/// A zero-sized placement for rows which carry their column values inline.
+/// Keeping this nominal avoids a backend-flavoured dummy word at scalar call
+/// sites while letting resource-backed placements supply a real typed source.
+pub struct InlineAirColumns {}
+impl Copy for InlineAirColumns {}
+
+pub const INLINE_AIR_COLUMNS: InlineAirColumns = InlineAirColumns {}
+
+/// A semantic position in the canonical 17 main and 411 auxiliary columns.
 ///
 /// Prover views may interpolate directly from semantic trace rows. Verifier
-/// views may read authenticated LDE rows. Both are interpreted by the same
-/// constraint function below.
-pub trait AirColumnView<F: Radix2Field>: Copy {
-    fn main(ref self, _ column: usize) -> F
-    fn auxiliary(ref self, _ column: usize) -> F
+/// views may read authenticated LDE rows. `Source` selects the physical
+/// placement independently: inline values, typed memory, or a GPU resource.
+/// Every placement is interpreted by the same constraint function below.
+pub trait AirColumnView<F: Radix2Field, Source: Copy>: Copy {
+    fn main(ref self, _ source: Source, _ column: usize) -> F
+    fn auxiliary(ref self, _ source: Source, _ column: usize) -> F
 }
 
 pub struct SignedAirValue<F: Radix2Field> {
@@ -130,21 +140,28 @@ fn bit_residual<F: Radix2Field>(_ word: F) -> F {
     mul(word, sub(word, one<F>()))
 }
 
-fn row_from_view<F: Radix2Field, V: AirColumnView<F>>(_ view: ref V) -> AirRow<F> {
+fn row_from_view<
+    F: Radix2Field,
+    Source: Copy,
+    V: AirColumnView<F, Source>,
+>(
+    _ source: Source,
+    _ view: ref V,
+) -> AirRow<F> {
     AirRow<F> {
-        active: view.main(15),
-        terminal: view.main(16),
-        step: view.main(0),
-        zr: signed_air_value<F>(view.main(1), view.main(2)),
-        zi: signed_air_value<F>(view.main(3), view.main(4)),
-        rr: view.main(5),
-        ii: view.main(6),
-        magnitude: view.main(7),
-        q_re: signed_air_value<F>(view.main(8), view.main(9)),
-        r_re: view.main(10),
-        q_im: signed_air_value<F>(view.main(11), view.main(12)),
-        r_im: view.main(13),
-        air_terminal: view.main(14),
+        active: view.main(source, 15),
+        terminal: view.main(source, 16),
+        step: view.main(source, 0),
+        zr: signed_air_value<F>(view.main(source, 1), view.main(source, 2)),
+        zi: signed_air_value<F>(view.main(source, 3), view.main(source, 4)),
+        rr: view.main(source, 5),
+        ii: view.main(source, 6),
+        magnitude: view.main(source, 7),
+        q_re: signed_air_value<F>(view.main(source, 8), view.main(source, 9)),
+        r_re: view.main(source, 10),
+        q_im: signed_air_value<F>(view.main(source, 11), view.main(source, 12)),
+        r_im: view.main(source, 13),
+        air_terminal: view.main(source, 14),
     }
 }
 
@@ -219,23 +236,224 @@ fn transition_residuals<F: Radix2Field>(
 struct ConstraintFold<F: Radix2Field> { challenge: F, power: F, value: F }
 impl<F: Radix2Field> Copy for ConstraintFold<F> {}
 
+/// A serializable boundary in the canonical 708-constraint fold.
+///
+/// `ABSORBED` brands the exact semantic position. Placement interpreters may
+/// persist `power` and `value` between dispatches, but cannot feed a checkpoint
+/// to the wrong successor without a type error. The challenge is restored from
+/// the same transcript-owned value at every physical boundary.
+pub struct ConstraintFoldCheckpoint<F: Radix2Field, const ABSORBED: usize> {
+    challenge: F,
+    power: F,
+    value: F,
+}
+impl<F: Radix2Field, const ABSORBED: usize> Copy
+    for ConstraintFoldCheckpoint<F, ABSORBED> {}
+
+/// Boundary after the ordered pair-row constraint family. `all_rows` is
+/// retained because it has a distinct zerofier from the new fold value.
+pub struct PairRowsConstraintCheckpoint<F: Radix2Field> {
+    fold: ConstraintFoldCheckpoint<F, 690>,
+    all_rows: F,
+}
+impl<F: Radix2Field> Copy for PairRowsConstraintCheckpoint<F> {}
+
+/// Boundary after the ordered first-row constraint family. Earlier family
+/// numerators remain nominal fields instead of anonymous placement slots.
+pub struct FirstRowConstraintCheckpoint<F: Radix2Field> {
+    fold: ConstraintFoldCheckpoint<F, 702>,
+    all_rows: F,
+    pair_rows: F,
+}
+impl<F: Radix2Field> Copy for FirstRowConstraintCheckpoint<F> {}
+
+/// Boundary after all 708 constraints. The final fold value is the last-row
+/// numerator; the other families are retained for zerofier projection.
+pub struct ConstraintNumeratorCheckpoint<F: Radix2Field> {
+    fold: ConstraintFoldCheckpoint<F, 708>,
+    all_rows: F,
+    pair_rows: F,
+    first_row: F,
+}
+impl<F: Radix2Field> Copy for ConstraintNumeratorCheckpoint<F> {}
+
 impl<F: Radix2Field> ConstraintFold<F> {
+    #[inline(always)]
     fn new(_ challenge: F) -> Self {
         Self { challenge: challenge, power: one<F>(), value: zero<F>() }
     }
 
-    fn absorb(mut self, _ residual: F) -> Self {
-        self.value = add(self.value, mul(self.power, residual))
-        self.power = mul(self.power, self.challenge)
-        self
+    #[inline(always)]
+    fn absorb(self, _ residual: F) -> Self {
+        Self {
+            challenge: self.challenge,
+            power: mul(self.power, self.challenge),
+            value: add(self.value, mul(self.power, residual)),
+        }
     }
 
-    fn next_family(mut self) -> Self {
-        self.value = zero<F>()
-        self
+    #[inline(always)]
+    fn next_family(self) -> Self {
+        Self {
+            challenge: self.challenge,
+            power: self.power,
+            value: zero<F>(),
+        }
     }
 }
 
+#[inline(always)]
+fn checkpoint_from_fold<F: Radix2Field, const ABSORBED: usize>(
+    _ fold: ConstraintFold<F>,
+) -> ConstraintFoldCheckpoint<F, ABSORBED> {
+    ConstraintFoldCheckpoint<F, ABSORBED> {
+        challenge: fold.challenge,
+        power: fold.power,
+        value: fold.value,
+    }
+}
+
+#[inline(always)]
+fn fold_from_checkpoint<F: Radix2Field, const ABSORBED: usize>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, ABSORBED>,
+) -> ConstraintFold<F> {
+    ConstraintFold<F> {
+        challenge: checkpoint.challenge,
+        power: checkpoint.power,
+        value: checkpoint.value,
+    }
+}
+
+/// Rebuild a typed placement checkpoint from authenticated scratch words.
+/// The caller supplies the transcript-owned challenge rather than persisting
+/// a second mutable copy of it.
+#[inline(always)]
+pub fn restore_constraint_fold<F: Radix2Field, const ABSORBED: usize>(
+    _ challenge: F,
+    _ power: F,
+    _ value: F,
+) -> ConstraintFoldCheckpoint<F, ABSORBED> {
+    ConstraintFoldCheckpoint<F, ABSORBED> {
+        challenge: challenge,
+        power: power,
+        value: value,
+    }
+}
+
+#[inline(always)]
+pub fn constraint_fold_power<F: Radix2Field, const ABSORBED: usize>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, ABSORBED>,
+) -> F {
+    checkpoint.power
+}
+
+#[inline(always)]
+pub fn constraint_fold_value<F: Radix2Field, const ABSORBED: usize>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, ABSORBED>,
+) -> F {
+    checkpoint.value
+}
+
+#[inline(always)]
+pub fn restore_pair_rows_constraint_checkpoint<F: Radix2Field>(
+    _ fold: ConstraintFoldCheckpoint<F, 690>,
+    _ all_rows: F,
+) -> PairRowsConstraintCheckpoint<F> {
+    PairRowsConstraintCheckpoint<F> { fold: fold, all_rows: all_rows }
+}
+
+#[inline(always)]
+pub fn pair_rows_constraint_fold<F: Radix2Field>(
+    _ checkpoint: PairRowsConstraintCheckpoint<F>,
+) -> ConstraintFoldCheckpoint<F, 690> {
+    checkpoint.fold
+}
+
+#[inline(always)]
+pub fn pair_rows_all_rows<F: Radix2Field>(
+    _ checkpoint: PairRowsConstraintCheckpoint<F>,
+) -> F {
+    checkpoint.all_rows
+}
+
+#[inline(always)]
+pub fn restore_first_row_constraint_checkpoint<F: Radix2Field>(
+    _ fold: ConstraintFoldCheckpoint<F, 702>,
+    _ all_rows: F,
+    _ pair_rows: F,
+) -> FirstRowConstraintCheckpoint<F> {
+    FirstRowConstraintCheckpoint<F> {
+        fold: fold,
+        all_rows: all_rows,
+        pair_rows: pair_rows,
+    }
+}
+
+#[inline(always)]
+pub fn first_row_constraint_fold<F: Radix2Field>(
+    _ checkpoint: FirstRowConstraintCheckpoint<F>,
+) -> ConstraintFoldCheckpoint<F, 702> {
+    checkpoint.fold
+}
+
+#[inline(always)]
+pub fn first_row_all_rows<F: Radix2Field>(
+    _ checkpoint: FirstRowConstraintCheckpoint<F>,
+) -> F {
+    checkpoint.all_rows
+}
+
+#[inline(always)]
+pub fn first_row_pair_rows<F: Radix2Field>(
+    _ checkpoint: FirstRowConstraintCheckpoint<F>,
+) -> F {
+    checkpoint.pair_rows
+}
+
+#[inline(always)]
+pub fn restore_constraint_numerator_checkpoint<F: Radix2Field>(
+    _ fold: ConstraintFoldCheckpoint<F, 708>,
+    _ all_rows: F,
+    _ pair_rows: F,
+    _ first_row: F,
+) -> ConstraintNumeratorCheckpoint<F> {
+    ConstraintNumeratorCheckpoint<F> {
+        fold: fold,
+        all_rows: all_rows,
+        pair_rows: pair_rows,
+        first_row: first_row,
+    }
+}
+
+#[inline(always)]
+pub fn constraint_numerator_fold<F: Radix2Field>(
+    _ checkpoint: ConstraintNumeratorCheckpoint<F>,
+) -> ConstraintFoldCheckpoint<F, 708> {
+    checkpoint.fold
+}
+
+#[inline(always)]
+pub fn constraint_numerator_all_rows<F: Radix2Field>(
+    _ checkpoint: ConstraintNumeratorCheckpoint<F>,
+) -> F {
+    checkpoint.all_rows
+}
+
+#[inline(always)]
+pub fn constraint_numerator_pair_rows<F: Radix2Field>(
+    _ checkpoint: ConstraintNumeratorCheckpoint<F>,
+) -> F {
+    checkpoint.pair_rows
+}
+
+#[inline(always)]
+pub fn constraint_numerator_first_row<F: Radix2Field>(
+    _ checkpoint: ConstraintNumeratorCheckpoint<F>,
+) -> F {
+    checkpoint.first_row
+}
+
+#[inline(always)]
 fn absorb_residuals<F: Radix2Field, const N: usize>(
     _ fold: own ConstraintFold<F>,
     _ residuals: [F; N],
@@ -249,9 +467,16 @@ fn absorb_residuals<F: Radix2Field, const N: usize>(
     fold
 }
 
-fn absorb_range_columns<F: Radix2Field, const N: usize, V: AirColumnView<F>>(
+#[inline(always)]
+fn absorb_range_columns<
+    F: Radix2Field,
+    const N: usize,
+    Source: Copy,
+    V: AirColumnView<F, Source>,
+>(
     _ fold: own ConstraintFold<F>,
     _ value: F,
+    _ source: Source,
     _ view: ref V,
     _ start: usize,
 ) -> ConstraintFold<F> {
@@ -261,8 +486,8 @@ fn absorb_range_columns<F: Radix2Field, const N: usize, V: AirColumnView<F>>(
     let mut previous_any = zero<F>()
     let mut index: usize = 0
     while index < N {
-        let bit = view.auxiliary(start + index)
-        let any = view.auxiliary(start + N + index)
+        let bit = view.auxiliary(source, start + index)
+        let any = view.auxiliary(source, start + N + index)
         fold = fold.absorb(bit_residual(bit))
         fold = fold.absorb(bit_residual(any))
         fold = fold.absorb(add(sub(sub(any, previous_any), bit), mul(previous_any, bit)))
@@ -274,38 +499,49 @@ fn absorb_range_columns<F: Radix2Field, const N: usize, V: AirColumnView<F>>(
     fold.absorb(sub(value, reconstructed))
 }
 
+#[inline(always)]
 fn absorb_signed_range_columns<
     F: Radix2Field,
     const N: usize,
-    V: AirColumnView<F>,
+    Source: Copy,
+    V: AirColumnView<F, Source>,
 >(
     _ fold: own ConstraintFold<F>,
     _ sign: F,
     _ magnitude: F,
+    _ source: Source,
     _ view: ref V,
     _ start: usize,
 ) -> ConstraintFold<F> {
     let mut fold = fold.absorb(bit_residual(sign))
-    fold = absorb_range_columns<F, N, V>(fold, magnitude, view, start)
-    let nonzero = view.auxiliary(start + 2 * N - 1)
+    fold = absorb_range_columns<F, N, Source, V>(fold, magnitude, source, view, start)
+    let nonzero = view.auxiliary(source, start + 2 * N - 1)
     fold.absorb(mul(sign, sub(one<F>(), nonzero)))
 }
 
-fn absorb_terminal_range_columns<F: Radix2Field, V: AirColumnView<F>>(
+#[inline(always)]
+fn absorb_terminal_range_columns<
+    F: Radix2Field,
+    Source: Copy,
+    V: AirColumnView<F, Source>,
+>(
     _ fold: own ConstraintFold<F>,
     _ magnitude: F,
     _ terminal: F,
+    _ source: Source,
     _ view: ref V,
     _ magnitude_start: usize,
     _ terminal_start: usize,
 ) -> ConstraintFold<F> {
-    let mut fold = absorb_range_columns<F, 31, V>(fold, magnitude, view, magnitude_start)
+    let mut fold = absorb_range_columns<F, 31, Source, V>(
+        fold, magnitude, source, view, magnitude_start,
+    )
     fold = fold.absorb(bit_residual(terminal))
     let mut previous = zero<F>()
     let mut index: usize = 0
     while index < 5 {
-        let bit = view.auxiliary(magnitude_start + index + 26)
-        let any = view.auxiliary(terminal_start + index)
+        let bit = view.auxiliary(source, magnitude_start + index + 26)
+        let any = view.auxiliary(source, terminal_start + index)
         fold = fold.absorb(bit_residual(any))
         fold = fold.absorb(add(sub(sub(any, previous), bit), mul(previous, bit)))
         previous = any
@@ -314,73 +550,213 @@ fn absorb_terminal_range_columns<F: Radix2Field, V: AirColumnView<F>>(
     fold.absorb(sub(terminal, previous))
 }
 
-/// Fold all 708 constraints with consecutive powers of one transcript-derived
-/// challenge. The four outputs remain separate because their zerofiers differ.
-pub fn constraint_numerators<
-    F: Radix2Field,
-    Row: AirColumnView<F>,
-    Next: AirColumnView<F>,
->(
+/// Begin the canonical fold before any AIR residual has been absorbed.
+#[inline(always)]
+pub fn begin_constraint_fold<F: Radix2Field>(
     _ challenge: F,
+) -> ConstraintFoldCheckpoint<F, 0> {
+    checkpoint_from_fold<F, 0>(ConstraintFold<F>::new(challenge))
+}
+
+/// Absorb the 14 local/state residuals and the 64 step-range residuals.
+#[inline(always)]
+pub fn fold_local_step_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 0>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 78> {
+    let row = row_from_view<F, Source, Row>(source, row_view)
+    let mut fold = fold_from_checkpoint<F, 0>(checkpoint)
+    fold = absorb_residuals<F, 9>(fold, local_residuals(row))
+    fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
+    fold = absorb_range_columns<F, 21, Source, Row>(
+        fold, row.step, source, row_view, 0,
+    )
+    checkpoint_from_fold<F, 78>(fold)
+}
+
+/// Absorb both signed orbit-coordinate range witnesses.
+#[inline(always)]
+pub fn fold_orbit_coordinate_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 78>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 174> {
+    let mut fold = fold_from_checkpoint<F, 78>(checkpoint)
+    fold = absorb_signed_range_columns<F, 15, Source, Row>(
+        fold,
+        row_view.main(source, 1),
+        row_view.main(source, 2),
+        source,
+        row_view,
+        42,
+    )
+    fold = absorb_signed_range_columns<F, 15, Source, Row>(
+        fold,
+        row_view.main(source, 3),
+        row_view.main(source, 4),
+        source,
+        row_view,
+        72,
+    )
+    checkpoint_from_fold<F, 174>(fold)
+}
+
+/// Absorb the 30-bit real-square range witness.
+#[inline(always)]
+pub fn fold_real_square_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 174>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 265> {
+    let fold = absorb_range_columns<F, 30, Source, Row>(
+        fold_from_checkpoint<F, 174>(checkpoint),
+        row_view.main(source, 5),
+        source,
+        row_view,
+        102,
+    )
+    checkpoint_from_fold<F, 265>(fold)
+}
+
+/// Absorb the 30-bit imaginary-square range witness.
+#[inline(always)]
+pub fn fold_imaginary_square_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 265>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 356> {
+    let fold = absorb_range_columns<F, 30, Source, Row>(
+        fold_from_checkpoint<F, 265>(checkpoint),
+        row_view.main(source, 6),
+        source,
+        row_view,
+        162,
+    )
+    checkpoint_from_fold<F, 356>(fold)
+}
+
+/// Absorb the signed real quotient and its unsigned remainder ranges.
+#[inline(always)]
+pub fn fold_real_quotient_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 356>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 450> {
+    let mut fold = fold_from_checkpoint<F, 356>(checkpoint)
+    fold = absorb_signed_range_columns<F, 18, Source, Row>(
+        fold,
+        row_view.main(source, 8),
+        row_view.main(source, 9),
+        source,
+        row_view,
+        284,
+    )
+    fold = absorb_range_columns<F, 12, Source, Row>(
+        fold,
+        row_view.main(source, 10),
+        source,
+        row_view,
+        320,
+    )
+    checkpoint_from_fold<F, 450>(fold)
+}
+
+/// Absorb the signed imaginary quotient and its unsigned remainder ranges.
+#[inline(always)]
+pub fn fold_imaginary_quotient_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 450>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 547> {
+    let mut fold = fold_from_checkpoint<F, 450>(checkpoint)
+    fold = absorb_signed_range_columns<F, 19, Source, Row>(
+        fold,
+        row_view.main(source, 11),
+        row_view.main(source, 12),
+        source,
+        row_view,
+        344,
+    )
+    fold = absorb_range_columns<F, 12, Source, Row>(
+        fold,
+        row_view.main(source, 13),
+        source,
+        row_view,
+        382,
+    )
+    checkpoint_from_fold<F, 547>(fold)
+}
+
+/// Absorb the 31-bit magnitude witness and its terminal-threshold chain.
+#[inline(always)]
+pub fn fold_magnitude_terminal_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 547>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintFoldCheckpoint<F, 653> {
+    let fold = absorb_terminal_range_columns<F, Source, Row>(
+        fold_from_checkpoint<F, 547>(checkpoint),
+        row_view.main(source, 7),
+        row_view.main(source, 14),
+        source,
+        row_view,
+        222,
+        406,
+    )
+    checkpoint_from_fold<F, 653>(fold)
+}
+
+/// Fold the pair-row family from the exact all-rows checkpoint. Challenge
+/// powers continue while this family's numerator starts from zero.
+#[inline(always)]
+pub fn fold_pair_rows_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+    Next: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 653>,
+    _ source: Source,
     _ c_re: SignedAirValue<F>,
     _ c_im: SignedAirValue<F>,
     _ row_view: ref Row,
     _ next_view: ref Next,
-) -> ConstraintNumerators<F> {
-    let row = row_from_view<F, Row>(row_view)
-    let next = row_from_view<F, Next>(next_view)
+) -> PairRowsConstraintCheckpoint<F> {
+    let row = row_from_view<F, Source, Row>(source, row_view)
+    let next = row_from_view<F, Source, Next>(source, next_view)
     let one = one<F>()
     let continue_selector = mul(row.active, sub(one, row.terminal))
     let freeze_selector = add(row.terminal, sub(one, row.active))
-
-    let mut fold = ConstraintFold<F>::new(challenge)
-    fold = absorb_residuals<F, 9>(fold, local_residuals(row))
-    fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
-    let mut cursor: usize = 0
-    fold = absorb_range_columns<F, 21, Row>(fold, row.step, row_view, cursor)
-    cursor = cursor + 2 * 21
-    fold = absorb_signed_range_columns<F, 15, Row>(
-        fold, row.zr.sign, row.zr.magnitude, row_view, cursor,
-    )
-    cursor = cursor + 2 * 15
-    fold = absorb_signed_range_columns<F, 15, Row>(
-        fold, row.zi.sign, row.zi.magnitude, row_view, cursor,
-    )
-    cursor = cursor + 2 * 15
-    fold = absorb_range_columns<F, 30, Row>(fold, row.rr, row_view, cursor)
-    cursor = cursor + 2 * 30
-    fold = absorb_range_columns<F, 30, Row>(fold, row.ii, row_view, cursor)
-    cursor = cursor + 2 * 30
-    let magnitude_start = cursor
-    cursor = cursor + 2 * 31
-    fold = absorb_signed_range_columns<F, 18, Row>(
-        fold, row.q_re.sign, row.q_re.magnitude, row_view, cursor,
-    )
-    cursor = cursor + 2 * 18
-    fold = absorb_range_columns<F, 12, Row>(fold, row.r_re, row_view, cursor)
-    cursor = cursor + 2 * 12
-    fold = absorb_signed_range_columns<F, 19, Row>(
-        fold, row.q_im.sign, row.q_im.magnitude, row_view, cursor,
-    )
-    cursor = cursor + 2 * 19
-    fold = absorb_range_columns<F, 12, Row>(fold, row.r_im, row_view, cursor)
-    cursor = cursor + 2 * 12
-    if cursor + 5 != AUXILIARY_ROW_BITS {
-        return ConstraintNumerators<F> {
-            all_rows: zero<F>(),
-            pair_rows: zero<F>(),
-            first_row: zero<F>(),
-            last_row: zero<F>(),
-        }
-    }
-    fold = absorb_terminal_range_columns<F, Row>(
-        fold,
-        row.magnitude,
-        row.air_terminal,
-        row_view,
-        magnitude_start,
-        cursor,
-    )
+    let mut fold = fold_from_checkpoint<F, 653>(checkpoint)
     let all_rows = fold.value
 
     fold = fold.next_family()
@@ -402,9 +778,27 @@ pub fn constraint_numerators<
         fold = fold.absorb(mul(continue_selector, transition[column]))
         column = column + 1
     }
-    let pair_rows = fold.value
+    PairRowsConstraintCheckpoint<F> {
+        fold: checkpoint_from_fold<F, 690>(fold),
+        all_rows: all_rows,
+    }
+}
 
-    fold = fold.next_family()
+/// Fold the first-row family without rebuilding the preceding pair-row work.
+#[inline(always)]
+pub fn fold_first_row_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: PairRowsConstraintCheckpoint<F>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> FirstRowConstraintCheckpoint<F> {
+    let row = row_from_view<F, Source, Row>(source, row_view)
+    let one = one<F>()
+    let pair_rows = checkpoint.fold.value
+    let mut fold = fold_from_checkpoint<F, 690>(checkpoint.fold).next_family()
     fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
     fold = fold.absorb(sub(row.active, one))
     fold = fold.absorb(row.terminal)
@@ -413,17 +807,120 @@ pub fn constraint_numerators<
     fold = fold.absorb(row.zr.magnitude)
     fold = fold.absorb(row.zi.sign)
     fold = fold.absorb(row.zi.magnitude)
-    let first_row = fold.value
+    FirstRowConstraintCheckpoint<F> {
+        fold: checkpoint_from_fold<F, 702>(fold),
+        all_rows: checkpoint.all_rows,
+        pair_rows: pair_rows,
+    }
+}
 
-    fold = fold.next_family()
+/// Fold the last-row family and retain the four nominal numerator families.
+#[inline(always)]
+pub fn fold_last_row_constraints<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+>(
+    _ checkpoint: FirstRowConstraintCheckpoint<F>,
+    _ source: Source,
+    _ row_view: ref Row,
+) -> ConstraintNumeratorCheckpoint<F> {
+    let row = row_from_view<F, Source, Row>(source, row_view)
+    let one = one<F>()
+    let first_row = checkpoint.fold.value
+    let mut fold = fold_from_checkpoint<F, 702>(checkpoint.fold).next_family()
     fold = absorb_residuals<F, 5>(fold, row_state_residuals(row))
     fold = fold.absorb(mul(row.active, sub(one, row.terminal)))
-    ConstraintNumerators<F> {
-        all_rows: all_rows,
-        pair_rows: pair_rows,
+    ConstraintNumeratorCheckpoint<F> {
+        fold: checkpoint_from_fold<F, 708>(fold),
+        all_rows: checkpoint.all_rows,
+        pair_rows: checkpoint.pair_rows,
         first_row: first_row,
-        last_row: fold.value,
     }
+}
+
+/// Project the completed typed fold boundary into the four semantic numerator
+/// families consumed by the shared zerofier calculation.
+#[inline(always)]
+pub fn constraint_numerators_from_checkpoint<F: Radix2Field>(
+    _ checkpoint: ConstraintNumeratorCheckpoint<F>,
+) -> ConstraintNumerators<F> {
+    ConstraintNumerators<F> {
+        all_rows: checkpoint.all_rows,
+        pair_rows: checkpoint.pair_rows,
+        first_row: checkpoint.first_row,
+        last_row: checkpoint.fold.value,
+    }
+}
+
+/// Complete the pair, first-row, and last-row families from the exact
+/// all-rows checkpoint. This scalar facade composes the same typed boundaries
+/// used by staged placement interpreters.
+#[inline(always)]
+pub fn finish_constraint_numerators<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+    Next: AirColumnView<F, Source>,
+>(
+    _ checkpoint: ConstraintFoldCheckpoint<F, 653>,
+    _ source: Source,
+    _ c_re: SignedAirValue<F>,
+    _ c_im: SignedAirValue<F>,
+    _ row_view: ref Row,
+    _ next_view: ref Next,
+) -> ConstraintNumerators<F> {
+    let pair_rows = fold_pair_rows_constraints<F, Source, Row, Next>(
+        checkpoint, source, c_re, c_im, row_view, next_view,
+    )
+    let first_row = fold_first_row_constraints<F, Source, Row>(
+        pair_rows, source, row_view,
+    )
+    constraint_numerators_from_checkpoint(
+        fold_last_row_constraints<F, Source, Row>(first_row, source, row_view),
+    )
+}
+
+/// Fold all 708 constraints with consecutive powers of one transcript-derived
+/// challenge. The four outputs remain separate because their zerofiers differ.
+pub fn constraint_numerators<
+    F: Radix2Field,
+    Source: Copy,
+    Row: AirColumnView<F, Source>,
+    Next: AirColumnView<F, Source>,
+>(
+    _ source: Source,
+    _ challenge: F,
+    _ c_re: SignedAirValue<F>,
+    _ c_im: SignedAirValue<F>,
+    _ row_view: ref Row,
+    _ next_view: ref Next,
+) -> ConstraintNumerators<F> {
+    let fold0 = begin_constraint_fold<F>(challenge)
+    let fold78 = fold_local_step_constraints<F, Source, Row>(
+        fold0, source, row_view,
+    )
+    let fold174 = fold_orbit_coordinate_constraints<F, Source, Row>(
+        fold78, source, row_view,
+    )
+    let fold265 = fold_real_square_constraints<F, Source, Row>(
+        fold174, source, row_view,
+    )
+    let fold356 = fold_imaginary_square_constraints<F, Source, Row>(
+        fold265, source, row_view,
+    )
+    let fold450 = fold_real_quotient_constraints<F, Source, Row>(
+        fold356, source, row_view,
+    )
+    let fold547 = fold_imaginary_quotient_constraints<F, Source, Row>(
+        fold450, source, row_view,
+    )
+    let fold653 = fold_magnitude_terminal_constraints<F, Source, Row>(
+        fold547, source, row_view,
+    )
+    finish_constraint_numerators<F, Source, Row, Next>(
+        fold653, source, c_re, c_im, row_view, next_view,
+    )
 }
 
 /// Divide the four AIR numerator families by their trace-domain zerofiers.

@@ -1,0 +1,40 @@
+//! THROWAWAY probe fixture (measurement only, not part of the suite):
+//! forces a full monomorphization of the general `precision::field::mul<L,
+//! M: Modulus<L>>` at L=20 with a toy modulus (low limb 1, so `mu =
+//! mont_mu(1, LIMB_BITS) = 8191` trivially, at any L -- compile time does not
+//! depend on primality), to measure how compile time scales with the limb
+//! count L. Mirrors `precision_field_bn254fr_oracle_ingot`'s per-limb wrapper
+//! pattern, reduced to a single limb0 export (sufficient to force the whole
+//! `mul` call graph -- Pad2, Rows, Mac, ShiftAppend, Head, Zero, SubBorrow,
+//! Select, canonicalize, row -- since Fe/Rust-style monomorphization is
+//! all-or-nothing per instantiation).
+//!
+//! NOT wired into any test runner; compiled ad hoc by a throwaway timing
+//! harness. Safe to delete.
+
+use precision::field::{mul, Limbs, LimbLast, LimbMore, Modulus, mont_mu, LIMB_BITS}
+
+pub struct ToyL20 {}
+
+impl Modulus<20> for ToyL20 {
+    fn p_limbs() -> Limbs<20> {
+        LimbMore { lead: 1, tail: LimbMore { lead: 40, tail: LimbMore { lead: 77, tail: LimbMore { lead: 114, tail: LimbMore { lead: 151, tail: LimbMore { lead: 188, tail: LimbMore { lead: 225, tail: LimbMore { lead: 262, tail: LimbMore { lead: 299, tail: LimbMore { lead: 336, tail: LimbMore { lead: 373, tail: LimbMore { lead: 410, tail: LimbMore { lead: 447, tail: LimbMore { lead: 484, tail: LimbMore { lead: 521, tail: LimbMore { lead: 558, tail: LimbMore { lead: 595, tail: LimbMore { lead: 632, tail: LimbMore { lead: 669, tail: LimbLast { value: 7 } } } } } } } } } } } } } } } } } } } }
+    }
+
+    fn mu() -> u32 { 8191 }
+}
+
+static_assert(mont_mu(1, LIMB_BITS) == 8191)
+
+fn build_a(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32) -> Limbs<20> {
+    LimbMore { lead: a0, tail: LimbMore { lead: a1, tail: LimbMore { lead: a2, tail: LimbMore { lead: a3, tail: LimbMore { lead: a4, tail: LimbMore { lead: a5, tail: LimbMore { lead: a6, tail: LimbMore { lead: a7, tail: LimbMore { lead: a8, tail: LimbMore { lead: a9, tail: LimbMore { lead: a10, tail: LimbMore { lead: a11, tail: LimbMore { lead: a12, tail: LimbMore { lead: a13, tail: LimbMore { lead: a14, tail: LimbMore { lead: a15, tail: LimbMore { lead: a16, tail: LimbMore { lead: a17, tail: LimbMore { lead: a18, tail: LimbLast { value: a19 } } } } } } } } } } } } } } } } } } } }
+}
+
+fn build_b(b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> Limbs<20> {
+    LimbMore { lead: b0, tail: LimbMore { lead: b1, tail: LimbMore { lead: b2, tail: LimbMore { lead: b3, tail: LimbMore { lead: b4, tail: LimbMore { lead: b5, tail: LimbMore { lead: b6, tail: LimbMore { lead: b7, tail: LimbMore { lead: b8, tail: LimbMore { lead: b9, tail: LimbMore { lead: b10, tail: LimbMore { lead: b11, tail: LimbMore { lead: b12, tail: LimbMore { lead: b13, tail: LimbMore { lead: b14, tail: LimbMore { lead: b15, tail: LimbMore { lead: b16, tail: LimbMore { lead: b17, tail: LimbMore { lead: b18, tail: LimbLast { value: b19 } } } } } } } } } } } } } } } } } } } }
+}
+
+pub fn probe(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let out = mul<20, ToyL20>(build_a(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19), build_b(b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19))
+    out.lead
+}

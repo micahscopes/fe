@@ -39,6 +39,51 @@ fn const_generic_field_codec_runs_on_wasm() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance =
         wasmtime::Instance::new(&mut store, &module, &[]).expect("Wasm should instantiate");
+    let decode_baby_bear = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "canonical_baby_bear_decode")
+        .expect("BabyBear canonical decoder export");
+    for (word, expected) in [
+        (0_u32, (1, 0)),
+        (1_u32, (1, 1)),
+        (2_013_265_920_u32, (1, 2_013_265_920_i32)),
+        (2_013_265_921_u32, (0, 0)),
+        (u32::MAX, (0, 0)),
+    ] {
+        assert_eq!(
+            decode_baby_bear
+                .call(&mut store, word as i32)
+                .expect("BabyBear canonical decoder runs"),
+            expected,
+            "BabyBear canonical decoder differs for word {word}",
+        );
+    }
+    let decode_nested_baby_bear = instance
+        .get_typed_func::<i32, (i32, i32, i32, i32)>(
+            &mut store,
+            "canonical_nested_baby_bear_decode",
+        )
+        .expect("nested BabyBear canonical decoder export");
+    assert_eq!(
+        decode_nested_baby_bear
+            .call(&mut store, 97)
+            .expect("nested BabyBear canonical decoder runs"),
+        (1, 17, 97, 1),
+    );
+    assert_eq!(
+        decode_nested_baby_bear
+            .call(&mut store, 2_013_265_921_u32 as i32)
+            .expect("invalid nested BabyBear canonical decoder runs"),
+        (0, 17, 0, 0),
+    );
+    let decode_large_baby_bear = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "canonical_large_baby_bear_roundtrip")
+        .expect("large BabyBear canonical roundtrip export");
+    assert_eq!(
+        decode_large_baby_bear
+            .call(&mut store, 1_234_567)
+            .expect("large BabyBear canonical roundtrip runs"),
+        (1, 1_234_567),
+    );
     let count = instance
         .get_typed_func::<(), i32>(&mut store, "canonical_field_word_count")
         .expect("field count export");

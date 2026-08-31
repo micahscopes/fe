@@ -1,0 +1,220 @@
+//! Injective BabyBear encodings for the field-neutral Mandelbrot schemas.
+//!
+//! Commitment, scalar-proof, and GPU-placement interpreters consume this one
+//! packing boundary. It owns field order and bit widths, but no hash schedule.
+
+use mandelbrot_proof_kernel::{
+    AUXILIARY_ROW_BITS,
+    ENCODED_PROOF_ROW_WIDTHS,
+    ESCAPES_BY_Q12_PUBLIC_WIDTHS,
+    ESCAPES_BY_Q12_PUBLIC_WORDS,
+    EncodedProofRow,
+    EscapesByQ12Public,
+    derive_ranged_air_row,
+    encoded_auxiliary_row_bit_direct,
+    encoded_proof_row_word,
+    encoded_proof_row_width,
+    encoded_proof_row_words,
+    encoded_ranged_auxiliary_row_bit,
+    escapes_by_q12_public_width,
+    escapes_by_q12_public_word,
+    escapes_by_q12_public_words,
+}
+use precision::baby_bear::BabyBearModulus
+use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
+
+pub const ROW_FIELDS: usize = 7
+pub const PUBLIC_FIELDS: usize = 4
+pub const AUXILIARY_FIELDS: usize = 14
+pub const ROW_BITS: u32 = 210
+pub const PUBLIC_BITS: u32 = 114
+pub const AUXILIARY_BITS: u32 = AUXILIARY_ROW_BITS.downcast_truncate()
+
+#[inline(always)]
+fn low_mask(_ bits: u32) -> u32 {
+    if bits == 0 { 0 } else { ((1 as u32) << bits) - 1 }
+}
+
+#[inline(always)]
+fn encoded_word_is_valid(_ value: u32, _ width: u32) -> bool {
+    width <= 32 && (width == 32 || (value >> width) == 0)
+}
+
+/// Project one 30-bit BabyBear payload directly from the canonical row bit
+/// stream. This is the storage-placement interpreter for backends that must
+/// not carry the complete `PackedFieldBits` aggregate through a runtime loop.
+/// It consumes the same audited widths and word accessor as
+/// `encoded_row_fields`.
+pub fn encoded_row_field_direct(
+    _ row: EncodedProofRow,
+    _ field: u32,
+) -> u32 {
+    if field >= ROW_FIELDS.downcast_truncate() { return 0 }
+    let field_start = field * 30
+    let field_end = if field_start + 30 < ROW_BITS {
+        field_start + 30
+    } else {
+        ROW_BITS
+    }
+    let mut source_start: u32 = 0
+    let mut source: usize = 0
+    let mut packed: u32 = 0
+    while source < 17 {
+        let width = encoded_proof_row_width(source)
+        let source_end = source_start + width
+        if source_end > field_start && source_start < field_end {
+            let overlap_start = if source_start > field_start {
+                source_start
+            } else {
+                field_start
+            }
+            let overlap_end = if source_end < field_end {
+                source_end
+            } else {
+                field_end
+            }
+            let count = overlap_end - overlap_start
+            let source_offset = overlap_start - source_start
+            let target_offset = overlap_start - field_start
+            let payload = (encoded_proof_row_word(row, source) >> source_offset)
+                & low_mask(count)
+            packed = packed | (payload << target_offset)
+        }
+        source_start = source_end
+        source = source + 1
+    }
+    packed
+}
+
+pub fn encoded_row_fields_are_valid(_ row: EncodedProofRow) -> bool {
+    let mut valid = true
+    let mut source: usize = 0
+    while source < 17 {
+        valid = valid && encoded_word_is_valid(
+            encoded_proof_row_word(row, source),
+            encoded_proof_row_width(source),
+        )
+        source = source + 1
+    }
+    valid
+}
+
+/// Project one 30-bit field from the exact 411-bit auxiliary witness stream.
+/// The semantic accessor derives each bit directly from the nominal main row,
+/// so no copied offset table or materialized range-witness aggregate appears
+/// in this placement.
+pub fn encoded_auxiliary_field_direct(
+    _ row: EncodedProofRow,
+    _ field: u32,
+) -> u32 {
+    if field >= AUXILIARY_FIELDS.downcast_truncate() { return 0 }
+    let start = field * 30
+    let end = if start + 30 < AUXILIARY_BITS {
+        start + 30
+    } else {
+        AUXILIARY_BITS
+    }
+    let mut bit = start
+    let mut packed: u32 = 0
+    while bit < end {
+        packed = packed | (
+            encoded_auxiliary_row_bit_direct(row.air, bit as usize)
+                << (bit - start)
+        )
+        bit = bit + 1
+    }
+    packed
+}
+
+pub fn encoded_auxiliary_fields_are_valid(_ row: EncodedProofRow) -> bool {
+    encoded_row_fields_are_valid(row)
+}
+
+pub fn encoded_public_field_direct(
+    _ public: EscapesByQ12Public,
+    _ field: u32,
+) -> u32 {
+    if field >= PUBLIC_FIELDS.downcast_truncate() { return 0 }
+    let field_start = field * 30
+    let field_end = if field_start + 30 < PUBLIC_BITS {
+        field_start + 30
+    } else {
+        PUBLIC_BITS
+    }
+    let mut source_start: u32 = 0
+    let mut source: usize = 0
+    let mut packed: u32 = 0
+    while source < ESCAPES_BY_Q12_PUBLIC_WORDS {
+        let width = escapes_by_q12_public_width(source)
+        let source_end = source_start + width
+        if source_end > field_start && source_start < field_end {
+            let overlap_start = if source_start > field_start {
+                source_start
+            } else {
+                field_start
+            }
+            let overlap_end = if source_end < field_end {
+                source_end
+            } else {
+                field_end
+            }
+            let count = overlap_end - overlap_start
+            let source_offset = overlap_start - source_start
+            let target_offset = overlap_start - field_start
+            let payload = (escapes_by_q12_public_word(public, source)
+                >> source_offset) & low_mask(count)
+            packed = packed | (payload << target_offset)
+        }
+        source_start = source_end
+        source = source + 1
+    }
+    packed
+}
+
+pub fn encoded_public_fields_are_valid(_ public: EscapesByQ12Public) -> bool {
+    let mut valid = true
+    let mut source: usize = 0
+    while source < ESCAPES_BY_Q12_PUBLIC_WORDS {
+        valid = valid && encoded_word_is_valid(
+            escapes_by_q12_public_word(public, source),
+            escapes_by_q12_public_width(source),
+        )
+        source = source + 1
+    }
+    valid
+}
+
+pub fn encoded_row_fields(
+    _ row: own EncodedProofRow,
+) -> PackedFieldBits<BabyBearModulus, ROW_FIELDS> {
+    pack_bounded_words<BabyBearModulus, 17, ROW_FIELDS>(
+        encoded_proof_row_words(row),
+        ENCODED_PROOF_ROW_WIDTHS,
+    )
+}
+
+pub fn encoded_public_fields(
+    _ public: own EscapesByQ12Public,
+) -> PackedFieldBits<BabyBearModulus, PUBLIC_FIELDS> {
+    pack_bounded_words<BabyBearModulus, ESCAPES_BY_Q12_PUBLIC_WORDS, PUBLIC_FIELDS>(
+        escapes_by_q12_public_words(public),
+        ESCAPES_BY_Q12_PUBLIC_WIDTHS,
+    )
+}
+
+pub fn encoded_auxiliary_fields(
+    _ row: own EncodedProofRow,
+) -> PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS> {
+    let main = encoded_row_fields(row)
+    if !main.is_valid() {
+        return PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS>::empty().require(false)
+    }
+    let ranged = derive_ranged_air_row(row.air)
+    let mut packed = PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS>::empty()
+    let mut index: usize = 0
+    while index < AUXILIARY_ROW_BITS {
+        packed = packed.append(encoded_ranged_auxiliary_row_bit(ranged, index), 1)
+        index = index + 1
+    }
+    packed
+}

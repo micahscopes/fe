@@ -25,6 +25,16 @@ pub trait TwoToOneHasher<F: Copy> {
     fn hash2(_ left: F, _ right: F) -> F
 }
 
+/// Conservative fixed storage for a multipath that may retain one sibling at
+/// every level for every opened leaf. Canonical encoding still carries only
+/// the deduplicated frontier actually consumed by the traversal.
+pub const fn merkle_multi_path_sibling_capacity(
+    _ maximum_leaves: usize,
+    _ depth: usize,
+) -> usize {
+    maximum_leaves * depth
+}
+
 /// One exact hash task in a canonical deduplicated multipath reduction.
 /// `paired` selects another opened node at the same level; otherwise the
 /// sibling comes from `sibling_position` in the canonical authentication

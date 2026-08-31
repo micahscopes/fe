@@ -35,6 +35,12 @@ pub use fri_baby_bear::{
     fold_fri_pair_value_at_point,
     fold_fri_pair_value_at_power_of_two,
 }
+use fri_baby_bear::{
+    FriQueryDomainV2 as FriRelationQueryDomainV2,
+    bind_fri_layer_transcript_plan,
+    commit_fri_layer_row_plan,
+    derive_fri_fold_challenge_plan,
+}
 pub use mandelbrot_proof_baby_bear_transcript::{
     AirLdeTranscriptDigest,
     CompositionChallenge,
@@ -44,22 +50,24 @@ pub use mandelbrot_proof_baby_bear_transcript::{
     composition_challenge,
     composition_row_commitment,
 }
+pub use mandelbrot_proof_baby_bear_encoding::{
+    AUXILIARY_FIELDS,
+    PUBLIC_FIELDS,
+    ROW_FIELDS,
+    encoded_auxiliary_fields,
+    encoded_public_fields,
+    encoded_row_fields,
+}
 use mandelbrot_proof_kernel::{
     AUXILIARY_ROW_BITS,
-    ENCODED_PROOF_ROW_WIDTHS,
-    ESCAPES_BY_Q12_PUBLIC_WIDTHS,
-    ESCAPES_BY_Q12_PUBLIC_WORDS,
     MAX_PADDED_TRACE_LENGTH,
     EncodedProofRow,
     EscapesByQ12,
     EscapesByQ12Public,
     encoded_auxiliary_row_bit,
     encoded_proof_trace_exact,
-    derive_ranged_air_row,
     encode_signed_word,
     encoded_proof_row_words,
-    encoded_ranged_auxiliary_row_bit,
-    escapes_by_q12_public_words,
 }
 use mandelbrot_proof_air_core::{
     AirColumnView,
@@ -71,11 +79,26 @@ use mandelbrot_proof_air_core::{
     FriSchedule,
     FriScheduleDone,
     FriScheduleFold,
+    INLINE_AIR_COLUMNS,
+    InlineAirColumns,
     composition_value,
     constraint_numerators,
+    fri_multi_leaf_capacity,
+    fri_multi_sibling_capacity,
     fri_query_range_identity,
     radix2_query_geometry,
     signed_air_value,
+}
+use mandelbrot_proof_baby_bear_domains::{
+    MandelbrotAuxiliaryBabyBearV1,
+    MandelbrotAuxiliaryLdeRowBabyBearV1,
+    MandelbrotAuxiliaryLdeTranscriptBabyBearV1,
+    MandelbrotMainLdeRowBabyBearV1,
+    MandelbrotMainLdeTranscriptBabyBearV1,
+    MandelbrotProofTranscriptBabyBearV1,
+    MandelbrotPublicBabyBearV1,
+    MandelbrotRowBabyBearV1,
+    MandelbrotStatementBabyBearV1,
 }
 use merkle_core::{
     MerkleMultiPath,
@@ -102,13 +125,12 @@ use merkle_browser::{
 use poseidon_baby_bear::{
     PackedCommitment,
     Poseidon2Digest,
-    Poseidon2Domain,
-    Poseidon2FieldDomain,
     bind as poseidon_bind,
     commit_fields,
     commit_packed,
     compress as poseidon_compress,
     squeeze_ext4_indexed,
+    squeeze_ext4_indexed_plan,
 }
 use precision::baby_bear::{
     BABY_BEAR_MODULUS,
@@ -116,68 +138,10 @@ use precision::baby_bear::{
     BabyBearExt4,
     BabyBearModulus,
 }
-use precision::word_field_encoding::{PackedFieldBits, pack_bounded_words}
 use precision::polynomial::{radix2_log, radix2_word_coset_lde}
-
-pub const ROW_FIELDS: usize = 7
-pub const PUBLIC_FIELDS: usize = 4
-pub const AUXILIARY_FIELDS: usize = 14
+use quadratic_plan::QuadraticRelationInterpreter
 pub const MAIN_LDE_ROW_FIELDS: usize = 17
 const TRACE_FRONTIER_LEVELS: usize = 22
-
-const fn protocol_tag(_ label: String<4>) -> u32 {
-    let bytes = label.as_bytes()
-    ((bytes[0] as u32) << 24)
-        | ((bytes[1] as u32) << 16)
-        | ((bytes[2] as u32) << 8)
-        | (bytes[3] as u32)
-}
-
-struct MandelbrotRowBabyBearV1 {}
-struct MandelbrotPublicBabyBearV1 {}
-struct MandelbrotAuxiliaryBabyBearV1 {}
-struct MandelbrotStatementBabyBearV1 {}
-struct MandelbrotProofTranscriptBabyBearV1 {}
-struct MandelbrotMainLdeRowBabyBearV1 {}
-struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
-struct MandelbrotMainLdeTranscriptBabyBearV1 {}
-struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
-
-impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
-    const TAG: u32 = protocol_tag("BR01")
-}
-
-impl Poseidon2Domain for MandelbrotPublicBabyBearV1 {
-    const TAG: u32 = protocol_tag("BP01")
-}
-
-impl Poseidon2Domain for MandelbrotAuxiliaryBabyBearV1 {
-    const TAG: u32 = protocol_tag("BA01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotStatementBabyBearV1 {
-    const TAG: u32 = protocol_tag("BS01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotProofTranscriptBabyBearV1 {
-    const TAG: u32 = protocol_tag("BT01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotMainLdeRowBabyBearV1 {
-    const TAG: u32 = protocol_tag("BL01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeRowBabyBearV1 {
-    const TAG: u32 = protocol_tag("BY01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
-    const TAG: u32 = protocol_tag("BL02")
-}
-
-impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
-    const TAG: u32 = protocol_tag("BY02")
-}
 
 pub struct RowDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for RowDigest {}
@@ -862,8 +826,8 @@ impl<
 >
 where
     { PREVIOUS > 0 },
-    { ROUND == PREVIOUS + 1 },
     { ROUND > 0 },
+    { ROUND == PREVIOUS + 1 },
     { ROUND < 100 },
     INPUT > 0,
     INPUT > 1,
@@ -1372,12 +1336,12 @@ pub const EMPTY_CHECKPOINT4_AIR_LDE_CODEWORD16: BabyBearAirLdeCodeword<16> =
         auxiliary: [[BabyBear::zero(); AUXILIARY_ROW_BITS]; 16],
     }
 
-impl AirColumnView<BabyBearExt4> for AirLdeRow {
-    fn main(ref self, _ column: usize) -> BabyBearExt4 {
+impl AirColumnView<BabyBearExt4, InlineAirColumns> for AirLdeRow {
+    fn main(ref self, _ source: InlineAirColumns, _ column: usize) -> BabyBearExt4 {
         BabyBearExt4::from_base(self.main[column])
     }
 
-    fn auxiliary(ref self, _ column: usize) -> BabyBearExt4 {
+    fn auxiliary(ref self, _ source: InlineAirColumns, _ column: usize) -> BabyBearExt4 {
         BabyBearExt4::from_base(self.auxiliary[column])
     }
 }
@@ -1536,13 +1500,6 @@ pub struct FriQueryEnd<const ROUND: u32> {
     pub evaluation: BabyBearExt4,
 }
 impl<const ROUND: u32> core::marker::Copy for FriQueryEnd<ROUND> {}
-
-pub const fn fri_multi_sibling_capacity(
-    _ pair_depth: usize,
-    _ query_count: usize,
-) -> usize {
-    (query_count + query_count) * pair_depth
-}
 
 pub const fn air_lde_request_capacity(_ query_count: usize) -> usize {
     query_count * 4
@@ -2228,6 +2185,201 @@ where
     }
 }
 
+const FRI_RELATION_QUERY_FIELD_BITS: usize = 31
+
+fn relation_bool_field(_ value: bool) -> BabyBear {
+    BabyBear::from_u32(if value { 1 } else { 0 })
+}
+
+fn relation_constrain_zero<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    interpreter.constrain_zero(value).interpreter
+}
+
+fn relation_constrain_equal<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ left: BabyBear,
+    _ right: BabyBear,
+) -> I {
+    relation_constrain_zero(interpreter, left - right)
+}
+
+fn relation_constrain_one<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    relation_constrain_equal(interpreter, value, BabyBear::one())
+}
+
+fn relation_constrain_boolean<I: QuadraticRelationInterpreter<BabyBear>>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> I {
+    let product = interpreter.multiply(value, value - BabyBear::one())
+    relation_constrain_zero(product.interpreter, product.value)
+}
+
+struct FriRelationQueryIndex<I: QuadraticRelationInterpreter<BabyBear>> {
+    interpreter: I,
+    index: u32,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
+    for FriRelationQueryIndex<I> {}
+
+fn fri_relation_query_index<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const HALF: usize,
+>(
+    _ interpreter: I,
+    _ value: BabyBear,
+) -> FriRelationQueryIndex<I>
+where HALF > 0, { (HALF & (HALF - 1)) == 0 }, { HALF <= 134217728 }
+{
+    let plain = value.to_u32()
+    let half_u32: u32 = HALF.downcast_truncate()
+    let mask: u32 = half_u32 - 1
+    let index = plain & mask
+    let index_bits: usize = radix2_log<HALF>() as usize
+    let mut interpreter = interpreter
+    let mut reconstructed = BabyBear::zero()
+    let mut low = BabyBear::zero()
+    let mut weight = BabyBear::one()
+    let mut bit: usize = 0
+    while bit < FRI_RELATION_QUERY_FIELD_BITS {
+        let witness = BabyBear::from_u32(
+            (plain >> bit.downcast_truncate()) & 1,
+        )
+        interpreter = relation_constrain_boolean(interpreter, witness)
+        reconstructed = reconstructed + witness * weight
+        if bit < index_bits {
+            low = low + witness * weight
+        }
+        weight = weight + weight
+        bit = bit + 1
+    }
+    interpreter = relation_constrain_equal(interpreter, reconstructed, value)
+    interpreter = relation_constrain_equal(
+        interpreter,
+        low,
+        BabyBear::from_u32(index),
+    )
+    FriRelationQueryIndex { interpreter: interpreter, index: index }
+}
+
+pub struct FriAuthenticationRelationPlan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const QUERY_COUNT: usize,
+    Challenges: core::marker::Copy,
+> {
+    pub interpreter: I,
+    pub samples: FriQueryRangeSamples<QUERY_COUNT>,
+    pub challenges: Challenges,
+}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const QUERY_COUNT: usize,
+    Challenges: core::marker::Copy,
+> core::marker::Copy for FriAuthenticationRelationPlan<
+    I,
+    QUERY_COUNT,
+    Challenges,
+> {}
+
+struct FriQueryRangeRelationPlan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const QUERY_COUNT: usize,
+> {
+    interpreter: I,
+    samples: FriQueryRangeSamples<QUERY_COUNT>,
+}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const QUERY_COUNT: usize,
+> core::marker::Copy for FriQueryRangeRelationPlan<I, QUERY_COUNT> {}
+
+fn sample_fri_query_range_relation<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const ROUND: u32,
+    const HALF: usize,
+    const FIRST_QUERY: u32,
+    const COUNT: usize,
+>(
+    _ transcript: FriLayerTranscriptDigest<ROUND>,
+    _ interpreter: I,
+) -> FriQueryRangeRelationPlan<I, COUNT>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    { FIRST_QUERY > 0 },
+    { FIRST_QUERY < BABY_BEAR_MODULUS },
+    COUNT > 0,
+    HALF > 0,
+    { (HALF & (HALF - 1)) == 0 },
+    { HALF <= 134217728 },
+{
+    let mut interpreter = relation_constrain_one(
+        interpreter,
+        relation_bool_field(transcript.valid),
+    )
+    let mut indices = [0; COUNT]
+    let mut cursor: usize = 0
+    while cursor < COUNT {
+        let query = fri_query_range_identity(FIRST_QUERY, COUNT, cursor)
+        let squeezed = squeeze_ext4_indexed_plan<
+            I,
+            FriRelationQueryDomainV2,
+        >(interpreter, transcript.value, query)
+        interpreter = relation_constrain_one(
+            squeezed.interpreter,
+            relation_bool_field(squeezed.valid),
+        )
+        let index = fri_relation_query_index<I, HALF>(
+            interpreter,
+            squeezed.value.coefficient(0),
+        )
+        interpreter = index.interpreter
+        indices[cursor] = index.index
+        cursor = cursor + 1
+    }
+    FriQueryRangeRelationPlan {
+        interpreter: interpreter,
+        samples: FriQueryRangeSamples {
+            valid: true,
+            count: COUNT.downcast_truncate(),
+            indices: indices,
+        },
+    }
+}
+
+/// Memory placement for one relation-authenticated FRI layer. This is a
+/// generic method so one provider can serve every node derived from the
+/// schedule without adding another recursive trait-implementation family.
+pub trait BabyBearFriLayerOpeningRelation<I> {
+    fn authenticate_fri_layer_opening<
+        const ROUND: u32,
+        const N: usize,
+        const MAX_LEAVES: usize,
+        const MAX_SIBLINGS: usize,
+    >(
+        _ opening: ref FriLayerMultiOpening<
+            ROUND,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >,
+        _ root: FriLayerDigest<ROUND>,
+        _ interpreter: I,
+    ) -> I
+    where
+        { ROUND > 0 },
+        { ROUND < 100 },
+        N > 1,
+        N <= 2147483648,
+        { (N & (N - 1)) == 0 },
+        MAX_LEAVES > 0,
+}
+
 /// Authenticate every committed tail layer once, reconstruct the transcript,
 /// and sample the query plan only after the terminal root has been bound.
 pub trait BabyBearFriMultiAuthenticateTail<
@@ -2236,12 +2388,29 @@ pub trait BabyBearFriMultiAuthenticateTail<
     Plan,
     Samples,
     Layers,
-    Challenges,
+    Challenges: core::marker::Copy,
 > {
     fn authenticate_fri_multi_tail(
         _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
         _ layers: Layers,
     ) -> (bool, Samples, Challenges)
+
+    fn authenticate_fri_relation_tail<
+        I: QuadraticRelationInterpreter<BabyBear>,
+        Provider: BabyBearFriLayerOpeningRelation<I>,
+        const FIRST_QUERY: u32,
+        const QUERY_COUNT: usize,
+    >(
+        _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: ref Layers,
+        _ provider: Provider,
+        _ query_plan: FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>,
+        _ interpreter: I,
+    ) -> FriAuthenticationRelationPlan<I, QUERY_COUNT, Challenges>
+    where
+        { FIRST_QUERY > 0 },
+        { FIRST_QUERY < BABY_BEAR_MODULUS },
+        QUERY_COUNT > 0,
 }
 
 impl<
@@ -2272,8 +2441,8 @@ impl<
 >
 where
     { PREVIOUS > 0 },
-    { ROUND == PREVIOUS + 1 },
     { ROUND > 0 },
+    { ROUND == PREVIOUS + 1 },
     { ROUND < 100 },
     { NEXT_ROUND == ROUND + 1 },
     { INPUT_LOG == 1 },
@@ -2313,6 +2482,95 @@ where
                 tail: FriMultiChallengeDone { valid: valid },
             },
         )
+    }
+
+    fn authenticate_fri_relation_tail<
+        I: QuadraticRelationInterpreter<BabyBear>,
+        Provider: BabyBearFriLayerOpeningRelation<I>,
+        const FIRST_QUERY: u32,
+        const QUERY_COUNT: usize,
+    >(
+        _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: ref FriMultiQueryEnd<ROUND>,
+        _ provider: Provider,
+        _ query_plan: FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>,
+        _ interpreter: I,
+    ) -> FriAuthenticationRelationPlan<
+        I,
+        QUERY_COUNT,
+        FriMultiChallengeFold<ROUND, FriMultiChallengeDone<NEXT_ROUND>>,
+    >
+    where
+        { FIRST_QUERY > 0 },
+        { FIRST_QUERY < BABY_BEAR_MODULUS },
+        QUERY_COUNT > 0,
+    {
+        let challenge = derive_fri_fold_challenge_plan<I, ROUND>(
+            interpreter,
+            transcript.value,
+        )
+        let leaf = commit_fri_layer_row_plan<I, ROUND>(
+            challenge.interpreter,
+            layers.evaluation,
+        )
+        let bound = bind_fri_layer_transcript_plan<I, ROUND>(
+            leaf.interpreter,
+            transcript.value,
+            layers.root.value,
+        )
+        let final_transcript = FriLayerTranscriptDigest<ROUND> {
+            valid: transcript.valid && layers.root.valid,
+            value: bound.value,
+        }
+        let sampled = sample_fri_query_range_relation<
+            I,
+            ROUND,
+            QUERY_HALF,
+            FIRST_QUERY,
+            QUERY_COUNT,
+        >(final_transcript, bound.interpreter)
+        let mut interpreter = sampled.interpreter
+        interpreter = relation_constrain_one(
+            interpreter,
+            relation_bool_field(layers.valid),
+        )
+        interpreter = relation_constrain_one(
+            interpreter,
+            relation_bool_field(layers.root.valid),
+        )
+        interpreter = relation_constrain_one(
+            interpreter,
+            relation_bool_field(challenge.valid),
+        )
+        interpreter = relation_constrain_one(
+            interpreter,
+            relation_bool_field(leaf.is_valid()),
+        )
+        let mut lane: u32 = 0
+        while lane < 8 {
+            interpreter = relation_constrain_equal(
+                interpreter,
+                leaf.digest().field(lane),
+                layers.root.value.field(lane),
+            )
+            lane = lane + 1
+        }
+        interpreter = relation_constrain_one(
+            interpreter,
+            relation_bool_field(final_transcript.valid),
+        )
+        FriAuthenticationRelationPlan {
+            interpreter: interpreter,
+            samples: sampled.samples,
+            challenges: FriMultiChallengeFold {
+                valid: true,
+                challenge: FriFoldChallenge<ROUND> {
+                    valid: true,
+                    value: challenge.value,
+                },
+                tail: FriMultiChallengeDone { valid: true },
+            },
+        }
     }
 }
 
@@ -2447,6 +2705,112 @@ where
             },
         )
     }
+
+    fn authenticate_fri_relation_tail<
+        I: QuadraticRelationInterpreter<BabyBear>,
+        Provider: BabyBearFriLayerOpeningRelation<I>,
+        const FIRST_QUERY: u32,
+        const QUERY_COUNT: usize,
+    >(
+        _ transcript: FriLayerTranscriptDigest<PREVIOUS>,
+        _ layers: ref FriMultiQueryFold<
+            ROUND,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+            TailLayers,
+        >,
+        _ provider: Provider,
+        _ query_plan: FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>,
+        _ interpreter: I,
+    ) -> FriAuthenticationRelationPlan<
+        I,
+        QUERY_COUNT,
+        FriMultiChallengeFold<ROUND, TailChallenges>,
+    >
+    where
+        { FIRST_QUERY > 0 },
+        { FIRST_QUERY < BABY_BEAR_MODULUS },
+        QUERY_COUNT > 0,
+    {
+        let challenge = derive_fri_fold_challenge_plan<I, ROUND>(
+            interpreter,
+            transcript.value,
+        )
+        let interpreter = <Provider as BabyBearFriLayerOpeningRelation<I>
+            >::authenticate_fri_layer_opening<
+                ROUND,
+                OUTPUT,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(
+                ref layers.opening,
+                layers.root,
+                challenge.interpreter,
+            )
+        let bound = bind_fri_layer_transcript_plan<I, ROUND>(
+            interpreter,
+            transcript.value,
+            layers.root.value,
+        )
+        let next_transcript = FriLayerTranscriptDigest<ROUND> {
+            valid: transcript.valid && layers.root.valid,
+            value: bound.value,
+        }
+        let tail = <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiAuthenticateTail<
+            ROUND,
+            QUERY_HALF,
+            Plan,
+            Samples,
+            TailLayers,
+            TailChallenges,
+        >>::authenticate_fri_relation_tail(
+            next_transcript,
+            ref layers.tail,
+            provider,
+            query_plan,
+            bound.interpreter,
+        )
+        let requests = <FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>
+            as BabyBearFriPairRequests<
+                PAIR_WIDTH,
+                MAX_LEAVES,
+                FriQueryRangeSamples<QUERY_COUNT>,
+            >>::fri_pair_requests(ref tail.samples)
+        let exact = layers.valid && challenge.valid
+            && next_transcript.valid
+            && requests.valid
+            && requests.count == MAX_LEAVES.downcast_truncate()
+            && multi_path_matches_requests<
+                Poseidon2Digest,
+                OUTPUT,
+                MAX_LEAVES,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(ref layers.opening.path, ref requests.indices)
+        let interpreter = relation_constrain_one(
+            tail.interpreter,
+            relation_bool_field(exact),
+        )
+        FriAuthenticationRelationPlan {
+            interpreter: interpreter,
+            samples: tail.samples,
+            challenges: FriMultiChallengeFold {
+                valid: true,
+                challenge: FriFoldChallenge<ROUND> {
+                    valid: true,
+                    value: challenge.value,
+                },
+                tail: tail.challenges,
+            },
+        }
+    }
 }
 
 pub trait BabyBearFriMultiAuthenticateFirst<
@@ -2454,12 +2818,29 @@ pub trait BabyBearFriMultiAuthenticateFirst<
     Plan,
     Samples,
     Layers,
-    Challenges,
+    Challenges: core::marker::Copy,
 > {
     fn authenticate_fri_multi_first(
         _ transcript: CompositionTranscriptDigest,
         _ layers: Layers,
     ) -> (bool, Samples, Challenges)
+
+    fn authenticate_fri_relation_first<
+        I: QuadraticRelationInterpreter<BabyBear>,
+        Provider: BabyBearFriLayerOpeningRelation<I>,
+        const FIRST_QUERY: u32,
+        const QUERY_COUNT: usize,
+    >(
+        _ transcript: CompositionTranscriptDigest,
+        _ layers: ref Layers,
+        _ provider: Provider,
+        _ query_plan: FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>,
+        _ interpreter: I,
+    ) -> FriAuthenticationRelationPlan<I, QUERY_COUNT, Challenges>
+    where
+        { FIRST_QUERY > 0 },
+        { FIRST_QUERY < BABY_BEAR_MODULUS },
+        QUERY_COUNT > 0,
 }
 
 impl<
@@ -2585,6 +2966,112 @@ where
                 tail: tail.2,
             },
         )
+    }
+
+    fn authenticate_fri_relation_first<
+        I: QuadraticRelationInterpreter<BabyBear>,
+        Provider: BabyBearFriLayerOpeningRelation<I>,
+        const FIRST_QUERY: u32,
+        const QUERY_COUNT: usize,
+    >(
+        _ transcript: CompositionTranscriptDigest,
+        _ layers: ref FriMultiQueryFold<
+            1,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+            TailLayers,
+        >,
+        _ provider: Provider,
+        _ query_plan: FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>,
+        _ interpreter: I,
+    ) -> FriAuthenticationRelationPlan<
+        I,
+        QUERY_COUNT,
+        FriMultiChallengeFold<1, TailChallenges>,
+    >
+    where
+        { FIRST_QUERY > 0 },
+        { FIRST_QUERY < BABY_BEAR_MODULUS },
+        QUERY_COUNT > 0,
+    {
+        let challenge = derive_fri_fold_challenge_plan<I, 1>(
+            interpreter,
+            transcript.value,
+        )
+        let interpreter = <Provider as BabyBearFriLayerOpeningRelation<I>
+            >::authenticate_fri_layer_opening<
+                1,
+                OUTPUT,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(
+                ref layers.opening,
+                layers.root,
+                challenge.interpreter,
+            )
+        let bound = bind_fri_layer_transcript_plan<I, 1>(
+            interpreter,
+            transcript.value,
+            layers.root.value,
+        )
+        let next_transcript = FriLayerTranscriptDigest<1> {
+            valid: transcript.valid && layers.root.valid,
+            value: bound.value,
+        }
+        let tail = <FriScheduleFold<
+            NEXT_ROUND,
+            NEXT_INPUT_LOG,
+            NEXT_OUTPUT,
+            NEXT_PAIR_WIDTH,
+            NEXT_PAIR_DEPTH,
+            Rest,
+        > as BabyBearFriMultiAuthenticateTail<
+            1,
+            QUERY_HALF,
+            Plan,
+            Samples,
+            TailLayers,
+            TailChallenges,
+        >>::authenticate_fri_relation_tail(
+            next_transcript,
+            ref layers.tail,
+            provider,
+            query_plan,
+            bound.interpreter,
+        )
+        let requests = <FriQueryRangePlan<FIRST_QUERY, QUERY_COUNT>
+            as BabyBearFriPairRequests<
+                PAIR_WIDTH,
+                MAX_LEAVES,
+                FriQueryRangeSamples<QUERY_COUNT>,
+            >>::fri_pair_requests(ref tail.samples)
+        let exact = layers.valid && challenge.valid
+            && next_transcript.valid
+            && requests.valid
+            && requests.count == MAX_LEAVES.downcast_truncate()
+            && multi_path_matches_requests<
+                Poseidon2Digest,
+                OUTPUT,
+                MAX_LEAVES,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(ref layers.opening.path, ref requests.indices)
+        let interpreter = relation_constrain_one(
+            tail.interpreter,
+            relation_bool_field(exact),
+        )
+        FriAuthenticationRelationPlan {
+            interpreter: interpreter,
+            samples: tail.samples,
+            challenges: FriMultiChallengeFold {
+                valid: true,
+                challenge: FriFoldChallenge<1> {
+                    valid: true,
+                    value: challenge.value,
+                },
+                tail: tail.challenges,
+            },
+        }
     }
 }
 
@@ -2938,7 +3425,7 @@ pub struct FriCommitmentQuery<const COMPOSITION_DEPTH: usize, Layers> {
 impl<const COMPOSITION_DEPTH: usize, Layers: core::marker::Copy> core::marker::Copy
     for FriCommitmentQuery<COMPOSITION_DEPTH, Layers> {}
 
-const fn fri_composition_query_depth(_ input_log: usize) -> usize {
+pub const fn fri_composition_query_depth(_ input_log: usize) -> usize {
     if input_log == 0 { 0 } else { input_log - 1 }
 }
 
@@ -3078,41 +3565,6 @@ impl TwoToOneHasher<Poseidon2Digest> for DigestNodeHasher {
     fn hash2(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> Poseidon2Digest {
         poseidon_compress(left, right)
     }
-}
-
-pub fn encoded_row_fields(
-    _ row: own EncodedProofRow,
-) -> PackedFieldBits<BabyBearModulus, ROW_FIELDS> {
-    pack_bounded_words<BabyBearModulus, 17, ROW_FIELDS>(
-        encoded_proof_row_words(row),
-        ENCODED_PROOF_ROW_WIDTHS,
-    )
-}
-
-pub fn encoded_public_fields(
-    _ public: own EscapesByQ12Public,
-) -> PackedFieldBits<BabyBearModulus, PUBLIC_FIELDS> {
-    pack_bounded_words<BabyBearModulus, ESCAPES_BY_Q12_PUBLIC_WORDS, PUBLIC_FIELDS>(
-        escapes_by_q12_public_words(public),
-        ESCAPES_BY_Q12_PUBLIC_WIDTHS,
-    )
-}
-
-pub fn encoded_auxiliary_fields(
-    _ row: own EncodedProofRow,
-) -> PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS> {
-    let main = encoded_row_fields(row)
-    if !main.is_valid() {
-        return PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS>::empty().require(false)
-    }
-    let ranged = derive_ranged_air_row(row.air)
-    let mut packed = PackedFieldBits<BabyBearModulus, AUXILIARY_FIELDS>::empty()
-    let mut index: usize = 0
-    while index < AUXILIARY_ROW_BITS {
-        packed = packed.append(encoded_ranged_auxiliary_row_bit(ranged, index), 1)
-        index = index + 1
-    }
-    packed
 }
 
 fn row_digest(_ digest: PackedCommitment) -> RowDigest {
@@ -3885,7 +4337,13 @@ where
     }
     let c_re = encode_signed_word(c_re_q12)
     let c_im = encode_signed_word(c_im_q12)
-    let numerators = constraint_numerators<BabyBearExt4, AirLdeRow, AirLdeRow>(
+    let numerators = constraint_numerators<
+        BabyBearExt4,
+        InlineAirColumns,
+        AirLdeRow,
+        AirLdeRow,
+    >(
+        INLINE_AIR_COLUMNS,
         challenge.value,
         signed_air_value<BabyBearExt4>(
             BabyBearExt4::from_base(BabyBear::from_u32(c_re.sign)),
@@ -4439,7 +4897,7 @@ pub fn fri_fold_challenge(
 pub fn next_fri_fold_challenge<const PREVIOUS: u32, const ROUND: u32>(
     _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
 ) -> FriFoldChallenge<ROUND>
-where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
+where { PREVIOUS > 0 }, { ROUND > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
 {
     if !transcript.valid {
         return FriFoldChallenge<ROUND> { valid: false, value: BabyBearExt4::zero() }
@@ -4859,7 +5317,7 @@ pub fn bind_next_fri_layer<const PREVIOUS: u32, const ROUND: u32>(
     _ transcript: own FriLayerTranscriptDigest<PREVIOUS>,
     _ layer: own FriLayerDigest<ROUND>,
 ) -> FriLayerTranscriptDigest<ROUND>
-where { PREVIOUS > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
+where { PREVIOUS > 0 }, { ROUND > 0 }, { ROUND == PREVIOUS + 1 }, { ROUND < 100 }
 {
     if !transcript.valid || !layer.valid {
         return FriLayerTranscriptDigest<ROUND> { valid: false, value: Poseidon2Digest::zero() }
@@ -5682,6 +6140,7 @@ impl<
 >
 where
     { PREVIOUS > 0 },
+    { ROUND > 0 },
     { ROUND == PREVIOUS + 1 },
     { ROUND < 100 },
     INPUT > 0,
@@ -5775,6 +6234,7 @@ impl<
 >
 where
     { PREVIOUS > 0 },
+    { ROUND > 0 },
     { ROUND == PREVIOUS + 1 },
     { ROUND < 100 },
     INPUT > 0,

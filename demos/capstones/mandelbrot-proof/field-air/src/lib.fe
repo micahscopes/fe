@@ -16,6 +16,8 @@ use canonical_words::{CanonicalWords, CanonicalWordsProvider}
 use mandelbrot_proof_air_core::{
     AirColumnView,
     ConstraintNumerators,
+    INLINE_AIR_COLUMNS,
+    InlineAirColumns,
     constraint_numerators,
     signed_air_value,
 }
@@ -380,12 +382,12 @@ struct TracePoint4 { rows: [EncodedProofRow; 4], point: Fr }
 
 impl core::marker::Copy for TracePoint4 {}
 
-impl AirColumnView<Fr> for TracePoint4 {
-    fn main(ref self, _ column: usize) -> Fr {
+impl AirColumnView<Fr, InlineAirColumns> for TracePoint4 {
+    fn main(ref self, _ source: InlineAirColumns, _ column: usize) -> Fr {
         main_column_point4(self.rows, column, self.point)
     }
 
-    fn auxiliary(ref self, _ column: usize) -> Fr {
+    fn auxiliary(ref self, _ source: InlineAirColumns, _ column: usize) -> Fr {
         auxiliary_column_point4(self.rows, column, self.point)
     }
 }
@@ -397,12 +399,12 @@ fn main_lde_row_value(_ row: MainLdeRow, _ column: usize) -> Fr {
     main_lde_row_values(row)[column]
 }
 
-impl AirColumnView<Fr> for AirLdeRow {
-    fn main(ref self, _ column: usize) -> Fr {
+impl AirColumnView<Fr, InlineAirColumns> for AirLdeRow {
+    fn main(ref self, _ source: InlineAirColumns, _ column: usize) -> Fr {
         main_lde_row_value(self.main, column)
     }
 
-    fn auxiliary(ref self, _ column: usize) -> Fr {
+    fn auxiliary(ref self, _ source: InlineAirColumns, _ column: usize) -> Fr {
         if column >= AUXILIARY_ROW_BITS {
             return Fr::zero()
         }
@@ -419,22 +421,30 @@ pub fn write_air_lde_row4(
     _ output: mut AirLdeRow,
 ) {
     let view = TracePoint4 { rows: rows, point: point }
-    output.main.active = view.main(15)
-    output.main.terminal = view.main(16)
-    output.main.air.step = view.main(0)
-    output.main.air.zr = signed_field_point(view.main(1), view.main(2))
-    output.main.air.zi = signed_field_point(view.main(3), view.main(4))
-    output.main.air.rr = view.main(5)
-    output.main.air.ii = view.main(6)
-    output.main.air.magnitude = view.main(7)
-    output.main.air.q_re = signed_field_point(view.main(8), view.main(9))
-    output.main.air.r_re = view.main(10)
-    output.main.air.q_im = signed_field_point(view.main(11), view.main(12))
-    output.main.air.r_im = view.main(13)
-    output.main.air.terminal = view.main(14)
+    output.main.active = view.main(INLINE_AIR_COLUMNS, 15)
+    output.main.terminal = view.main(INLINE_AIR_COLUMNS, 16)
+    output.main.air.step = view.main(INLINE_AIR_COLUMNS, 0)
+    output.main.air.zr = signed_field_point(
+        view.main(INLINE_AIR_COLUMNS, 1), view.main(INLINE_AIR_COLUMNS, 2),
+    )
+    output.main.air.zi = signed_field_point(
+        view.main(INLINE_AIR_COLUMNS, 3), view.main(INLINE_AIR_COLUMNS, 4),
+    )
+    output.main.air.rr = view.main(INLINE_AIR_COLUMNS, 5)
+    output.main.air.ii = view.main(INLINE_AIR_COLUMNS, 6)
+    output.main.air.magnitude = view.main(INLINE_AIR_COLUMNS, 7)
+    output.main.air.q_re = signed_field_point(
+        view.main(INLINE_AIR_COLUMNS, 8), view.main(INLINE_AIR_COLUMNS, 9),
+    )
+    output.main.air.r_re = view.main(INLINE_AIR_COLUMNS, 10)
+    output.main.air.q_im = signed_field_point(
+        view.main(INLINE_AIR_COLUMNS, 11), view.main(INLINE_AIR_COLUMNS, 12),
+    )
+    output.main.air.r_im = view.main(INLINE_AIR_COLUMNS, 13)
+    output.main.air.terminal = view.main(INLINE_AIR_COLUMNS, 14)
     let mut column: usize = 0
     while column < AUXILIARY_ROW_BITS {
-        output.auxiliary.values[column] = view.auxiliary(column)
+        output.auxiliary.values[column] = view.auxiliary(INLINE_AIR_COLUMNS, column)
         column = column + 1
     }
 }
@@ -452,14 +462,14 @@ pub fn air_lde_row4_first_mismatch(
     let main = main_lde_row_values(row.main)
     let mut column: usize = 0
     while column < MAIN_LDE_ROW_FIELDS {
-        if !(view.main(column) - main[column]).is_zero() {
+        if !(view.main(INLINE_AIR_COLUMNS, column) - main[column]).is_zero() {
             return (column + 1).downcast_truncate()
         }
         column = column + 1
     }
     column = 0
     while column < AUXILIARY_ROW_BITS {
-        if !(view.auxiliary(column) - row.auxiliary.values[column]).is_zero() {
+        if !(view.auxiliary(INLINE_AIR_COLUMNS, column) - row.auxiliary.values[column]).is_zero() {
             return (MAIN_LDE_ROW_FIELDS + column + 1).downcast_truncate()
         }
         column = column + 1
@@ -478,7 +488,8 @@ pub fn mandelbrot_constraint_numerators_trace4(
 ) -> MandelbrotConstraintNumerators {
     let row_view = TracePoint4 { rows: rows, point: point }
     let next_view = TracePoint4 { rows: rows, point: next_point }
-    constraint_numerators<Fr, TracePoint4, TracePoint4>(
+    constraint_numerators<Fr, InlineAirColumns, TracePoint4, TracePoint4>(
+        INLINE_AIR_COLUMNS,
         challenge,
         signed_air_value<Fr>(c_re.sign, c_re.magnitude),
         signed_air_value<Fr>(c_im.sign, c_im.magnitude),
@@ -496,7 +507,8 @@ pub fn mandelbrot_constraint_numerators_opened(
     _ row: ref AirLdeRow,
     _ next: ref AirLdeRow,
 ) -> MandelbrotConstraintNumerators {
-    constraint_numerators<Fr, AirLdeRow, AirLdeRow>(
+    constraint_numerators<Fr, InlineAirColumns, AirLdeRow, AirLdeRow>(
+        INLINE_AIR_COLUMNS,
         challenge,
         signed_air_value<Fr>(c_re.sign, c_re.magnitude),
         signed_air_value<Fr>(c_im.sign, c_im.magnitude),

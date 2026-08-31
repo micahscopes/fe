@@ -7,17 +7,57 @@
 //! than treating a trace boolean as proof of its computation.
 
 use mandelbrot_proof_fixed_air_receipt_baby_bear::{
-    PRODUCTION_LDE_LOG,
-    PRODUCTION_LDE_LENGTH,
-    PRODUCTION_LIMBS,
     PRODUCTION_SECURITY_AIR_MAX_LEAVES,
     PRODUCTION_SECURITY_AIR_MAX_SIBLINGS,
-    PRODUCTION_TRACE_LENGTH,
+    PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES,
+    PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS,
+    ProductionSecuritySparseFriQuery,
+    ProductionSecuritySparseFriLayers,
+    ProductionSecuritySparseFriQueryPlan,
+    ProductionSecuritySparseFriQuerySamples,
     ProductionSecuritySparseBabyBearReceipt,
     ProductionSecurityVerifierTrace,
+    ProductionSparseFriChallenges,
+    ProductionSparseFriSchedule,
     bind_sparse_air_security_profile_plan,
     production_recursive_security_profile,
     sparse_air_security_profile_permutations,
+}
+use mandelbrot_proof_production_profile_baby_bear::{
+    PRODUCTION_LDE_LOG,
+    PRODUCTION_LDE_LENGTH,
+    PRODUCTION_LIMBS,
+    PRODUCTION_SECURITY_QUERY_COUNT,
+    PRODUCTION_TRACE_LENGTH,
+}
+use mandelbrot_proof_air_core::{
+    FriQueryRangePlan,
+    FriScheduleDone,
+    FriScheduleFold,
+    fri_query_range_identity,
+}
+use mandelbrot_proof_baby_bear::{
+    BabyBearFriLayerOpeningRelation,
+    BabyBearFriMultiAuthenticateFirst,
+    BabyBearFriPairRequests,
+    BabyBearFriQueryBuffer,
+    CompositionDigest,
+    CompositionMultiOpening,
+    CompositionTranscriptDigest,
+    FriFoldChallenge,
+    FriLayerDigest,
+    FriLayerMultiOpening,
+    FriLayerTranscriptDigest,
+    FriMultiChallengeDone,
+    FriMultiChallengeFold,
+    FriMultiQueryEnd,
+    FriMultiQueryFold,
+    FriQueryBuffer,
+    FriQueryRangeSamples,
+}
+use mandelbrot_proof_baby_bear_transcript::{
+    bind_composition_plan,
+    composition_row_commitment_plan,
 }
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
@@ -50,15 +90,23 @@ use merkle_core::{
     MerkleMultiPathTask,
     TwoToOneHasher,
     interpret_multi_root,
+    multi_path_matches_requests,
 }
 use merkle_browser::interpret_multi_root_in_browser
-use precision::baby_bear::BabyBear
-use precision::polynomial::Radix2Field
+use fri_baby_bear::{
+    FriQueryDomainV2,
+    bind_fri_layer_transcript_plan,
+    commit_fri_layer_row_plan,
+    derive_fri_fold_challenge_plan,
+}
+use precision::baby_bear::{BABY_BEAR_MODULUS, BabyBear, BabyBearExt4}
+use precision::polynomial::{Radix2Field, radix2_log}
 use poseidon_baby_bear::{
     POSEIDON2_PERMUTATION_MULTIPLICATIONS,
     Poseidon2Digest,
     compress,
     compress_plan,
+    squeeze_ext4_indexed_plan,
 }
 use quadratic_plan::{
     QuadraticRelationConstraintInterpreter,
@@ -144,6 +192,16 @@ struct ProductionInteractionLdeCommitmentArena {
     commitments: [Poseidon2Digest; PRODUCTION_SECURITY_AIR_MAX_LEAVES],
 }
 
+/// Composition and FRI layers deliberately use distinct nominal arenas. The
+/// physical digest widths match, but their typed leaf domains do not.
+struct ProductionCompositionCommitmentArena {
+    commitments: [Poseidon2Digest; PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES],
+}
+
+struct ProductionFriCommitmentArena<const MAX_LEAVES: usize> {
+    commitments: [Poseidon2Digest; MAX_LEAVES],
+}
+
 type ProductionBaseOpening = SparseBaseLdeMultiOpening<
     {
         PRODUCTION_LIMBS
@@ -211,6 +269,25 @@ type ProductionAirMultiPath = MerkleMultiPath<
     },
     {
         PRODUCTION_SECURITY_AIR_MAX_SIBLINGS
+    },
+>
+
+type ProductionCompositionOpening = CompositionMultiOpening<
+    {
+        PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS
+    },
+>
+
+type ProductionCompositionMultiPath = MerkleMultiPath<
+    Poseidon2Digest,
+    {
+        PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+    },
+    {
+        PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS
     },
 >
 
@@ -302,6 +379,7 @@ fn constrain_boolean<I: QuadraticRelationInterpreter<BabyBear>>(
     let product = interpreter.multiply(value, value - BabyBear::one())
     constrain_zero(product.interpreter, product.value)
 }
+
 
 pub struct ReceiptHeaderRelationPlan<I: QuadraticRelationInterpreter<BabyBear>> {
     pub interpreter: I,
@@ -1213,6 +1291,48 @@ uses (arena: mut ProductionInteractionLdeCommitmentArena)
     }
 }
 
+fn initialize_production_composition_commitment_arena()
+uses (arena: mut ProductionCompositionCommitmentArena)
+{
+    let mut index: usize = 0
+    while index < PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES {
+        arena.commitments[index] = Poseidon2Digest::zero()
+        index = index + 1
+    }
+}
+
+fn write_production_composition_commitment(
+    _ index: usize,
+    _ value: Poseidon2Digest,
+)
+uses (arena: mut ProductionCompositionCommitmentArena)
+{
+    if index < PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES {
+        arena.commitments[index] = value
+    }
+}
+
+fn initialize_production_fri_commitment_arena<const MAX_LEAVES: usize>()
+uses (arena: mut ProductionFriCommitmentArena<MAX_LEAVES>)
+{
+    let mut index: usize = 0
+    while index < MAX_LEAVES {
+        arena.commitments[index] = Poseidon2Digest::zero()
+        index = index + 1
+    }
+}
+
+fn write_production_fri_commitment<const MAX_LEAVES: usize>(
+    _ index: usize,
+    _ value: Poseidon2Digest,
+)
+uses (arena: mut ProductionFriCommitmentArena<MAX_LEAVES>)
+{
+    if index < MAX_LEAVES {
+        arena.commitments[index] = value
+    }
+}
+
 fn production_base_commitment_arena_relation_plan<I: QuadraticRelationInterpreter<BabyBear>>(
     _ path: ref ProductionAirMultiPath,
     _ expected_root: Poseidon2Digest,
@@ -1255,6 +1375,54 @@ uses (arena: mut ProductionInteractionLdeCommitmentArena)
     >(ref arena.commitments, path, expected_root, interpreter)
 }
 
+fn production_composition_commitment_arena_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ path: ref ProductionCompositionMultiPath,
+    _ expected_root: Poseidon2Digest,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I>
+uses (arena: mut ProductionCompositionCommitmentArena)
+{
+    merkle_multi_path_relation_plan_in_browser<
+        I,
+        {
+            PRODUCTION_LDE_LENGTH
+        },
+        {
+            PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+        },
+        {
+            PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS
+        },
+    >(ref arena.commitments, path, expected_root, interpreter)
+}
+
+fn production_fri_commitment_arena_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ path: ref MerkleMultiPath<
+        Poseidon2Digest,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ expected_root: Poseidon2Digest,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I>
+uses (arena: mut ProductionFriCommitmentArena<MAX_LEAVES>)
+where N > 1, N <= 2147483648, { (N & (N - 1)) == 0 }, MAX_LEAVES > 0
+{
+    merkle_multi_path_relation_plan_in_browser<
+        I,
+        N,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >(ref arena.commitments, path, expected_root, interpreter)
+}
+
 fn production_base_opening_tail_is_zero(
     _ opening: ref ProductionBaseOpening,
     _ start: usize,
@@ -1289,6 +1457,310 @@ fn production_interaction_opening_tail_is_zero(
         leaf = leaf + 1
     }
     true
+}
+
+fn production_composition_opening_tail_is_zero(
+    _ opening: ref ProductionCompositionOpening,
+    _ start: usize,
+) -> bool {
+    let mut leaf = start
+    while leaf < PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES {
+        if !opening.values[leaf].is_zero() { return false }
+        leaf = leaf + 1
+    }
+    true
+}
+
+fn production_fri_opening_tail_is_zero<
+    const ROUND: u32,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref FriLayerMultiOpening<
+        ROUND,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ start: usize,
+) -> bool
+where { ROUND > 0 }, { ROUND < 100 }
+{
+    let mut leaf = start
+    while leaf < MAX_LEAVES {
+        if !opening.values[leaf].is_zero() { return false }
+        leaf = leaf + 1
+    }
+    true
+}
+
+/// Authenticate the composition opening with the same interpreter-threaded
+/// row commitment and multipath topology used by every FRI layer below.
+pub fn production_composition_multi_opening_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ opening: ref ProductionCompositionOpening,
+    _ root: CompositionDigest,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I> {
+    let commitments: BrowserPtr<ProductionCompositionCommitmentArena> = alloc_browser_object<
+        ProductionCompositionCommitmentArena,
+    >()
+    if commitments.address() == 0 {
+        return unavailable_production_opening_relation_plan(interpreter)
+    }
+    let count: usize = opening.path.leaf_count as usize
+    let bounded = count > 0
+        && count <= PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+    let mut shape_valid = opening.valid && root.valid && bounded
+    if bounded {
+        shape_valid = shape_valid
+            && production_composition_opening_tail_is_zero(opening, count)
+    }
+    let mut interpreter = interpreter
+    with (commitments) {
+        initialize_production_composition_commitment_arena()
+        let mut leaf: usize = 0
+        while leaf < count
+            && leaf < PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES {
+            let planned = composition_row_commitment_plan(
+                interpreter,
+                opening.values[leaf],
+            )
+            interpreter = planned.interpreter
+            shape_valid = shape_valid && planned.value.valid
+            write_production_composition_commitment(
+                leaf,
+                planned.value.value,
+            )
+            leaf = leaf + 1
+        }
+        interpreter = constrain_one(interpreter, bool_field(shape_valid))
+        production_composition_commitment_arena_relation_plan(
+            ref opening.path,
+            root.value,
+            interpreter,
+        )
+    }
+}
+
+pub fn production_fri_layer_multi_opening_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+    const ROUND: u32,
+    const N: usize,
+    const MAX_LEAVES: usize,
+    const MAX_SIBLINGS: usize,
+>(
+    _ opening: ref FriLayerMultiOpening<
+        ROUND,
+        MAX_LEAVES,
+        MAX_SIBLINGS,
+    >,
+    _ root: FriLayerDigest<ROUND>,
+    _ interpreter: I,
+) -> MerkleMultiPathRelationPlan<I>
+where
+    { ROUND > 0 },
+    { ROUND < 100 },
+    N > 1,
+    N <= 2147483648,
+    { (N & (N - 1)) == 0 },
+    MAX_LEAVES > 0,
+{
+    let commitments: BrowserPtr<ProductionFriCommitmentArena<MAX_LEAVES>> = alloc_browser_object<
+        ProductionFriCommitmentArena<MAX_LEAVES>,
+    >()
+    if commitments.address() == 0 {
+        return unavailable_production_opening_relation_plan(interpreter)
+    }
+    let count: usize = opening.path.leaf_count as usize
+    let bounded = count > 0
+        && count <= MAX_LEAVES
+    let mut shape_valid = opening.valid && root.valid && bounded
+    if bounded {
+        shape_valid = shape_valid
+            && production_fri_opening_tail_is_zero<
+                ROUND,
+                MAX_LEAVES,
+                MAX_SIBLINGS,
+            >(opening, count)
+    }
+    let mut interpreter = interpreter
+    with (commitments) {
+        initialize_production_fri_commitment_arena<MAX_LEAVES>()
+        let mut leaf: usize = 0
+        while leaf < count
+            && leaf < MAX_LEAVES {
+            let planned = commit_fri_layer_row_plan<I, ROUND>(
+                interpreter,
+                opening.values[leaf],
+            )
+            interpreter = planned.interpreter
+            shape_valid = shape_valid && planned.is_valid()
+            write_production_fri_commitment<MAX_LEAVES>(leaf, planned.digest())
+            leaf = leaf + 1
+        }
+        interpreter = constrain_one(interpreter, bool_field(shape_valid))
+        production_fri_commitment_arena_relation_plan<
+            I,
+            N,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >(
+            ref opening.path,
+            root.value,
+            interpreter,
+        )
+    }
+}
+
+/// Production browser placement for the generic schedule interpreter. This
+/// implementation supplies only the commitment arena and Merkle traversal.
+/// The lower interpreter retains all FRI round and transcript semantics.
+struct ProductionFriLayerOpeningRelation {}
+impl core::marker::Copy for ProductionFriLayerOpeningRelation {}
+
+impl<I: QuadraticRelationInterpreter<BabyBear>>
+    BabyBearFriLayerOpeningRelation<I> for ProductionFriLayerOpeningRelation {
+    fn authenticate_fri_layer_opening<
+        const ROUND: u32,
+        const N: usize,
+        const MAX_LEAVES: usize,
+        const MAX_SIBLINGS: usize,
+    >(
+        _ opening: ref FriLayerMultiOpening<
+            ROUND,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >,
+        _ root: FriLayerDigest<ROUND>,
+        _ interpreter: I,
+    ) -> I
+    where
+        { ROUND > 0 },
+        { ROUND < 100 },
+        N > 1,
+        N <= 2147483648,
+        { (N & (N - 1)) == 0 },
+        MAX_LEAVES > 0,
+    {
+        let planned: MerkleMultiPathRelationPlan<I> = production_fri_layer_multi_opening_relation_plan<
+            I,
+            ROUND,
+            N,
+            MAX_LEAVES,
+            MAX_SIBLINGS,
+        >(opening, root, interpreter)
+        planned.interpreter
+    }
+}
+
+
+pub struct ProductionFriAuthenticationRelationPlan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    pub samples: ProductionSecuritySparseFriQuerySamples,
+    pub queries: FriQueryBuffer<{ PRODUCTION_SECURITY_QUERY_COUNT }>,
+    pub challenges: ProductionSparseFriChallenges,
+}
+impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
+    for ProductionFriAuthenticationRelationPlan<I> {}
+
+/// The complete `FriAuthentication` verifier task. Composition leaves, every
+/// committed FRI layer, the terminal transcript, all 114 Fiat-Shamir samples,
+/// and every derived request set flow through one quadratic interpreter.
+pub fn production_fri_authentication_relation_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ composition: ProductionSecurityCompositionDigest,
+    _ proof: ref ProductionSecuritySparseFriQuery,
+    _ trace: ProductionSecurityVerifierTrace,
+    _ interpreter: I,
+) -> ProductionFriAuthenticationRelationPlan<I> {
+    let mut interpreter = constrain_one(
+        interpreter,
+        bool_field(composition.is_valid()),
+    )
+    interpreter = constrain_one(interpreter, bool_field(proof.valid))
+    let composition_opening = production_composition_multi_opening_relation_plan(
+        ref proof.composition,
+        proof.composition_root,
+        interpreter,
+    )
+    let composition_transcript = bind_composition_plan(
+        composition_opening.interpreter,
+        composition.transcript(),
+        proof.composition_root,
+    )
+    let query_plan: ProductionSecuritySparseFriQueryPlan = FriQueryRangePlan {}
+    let authenticated = <ProductionSparseFriSchedule
+        as BabyBearFriMultiAuthenticateFirst<
+            {
+                PRODUCTION_LDE_LENGTH / 2
+            },
+            ProductionSecuritySparseFriQueryPlan,
+            ProductionSecuritySparseFriQuerySamples,
+            ProductionSecuritySparseFriLayers,
+            ProductionSparseFriChallenges,
+        >>::authenticate_fri_relation_first(
+            composition_transcript.value,
+            ref proof.layers,
+            ProductionFriLayerOpeningRelation {},
+            query_plan,
+            composition_transcript.interpreter,
+        )
+    let composition_requests = <ProductionSecuritySparseFriQueryPlan
+        as BabyBearFriPairRequests<
+            {
+                PRODUCTION_LDE_LENGTH / 2
+            },
+            {
+                PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+            },
+            ProductionSecuritySparseFriQuerySamples,
+        >>::fri_pair_requests(ref authenticated.samples)
+    let exact_composition = composition_requests.valid
+        && composition_requests.count
+            == PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES.downcast_truncate()
+        && multi_path_matches_requests<
+            Poseidon2Digest,
+            {
+                PRODUCTION_LDE_LENGTH
+            },
+            {
+                PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+            },
+            {
+                PRODUCTION_SECURITY_COMPOSITION_MAX_LEAVES
+            },
+            {
+                PRODUCTION_SECURITY_COMPOSITION_MAX_SIBLINGS
+            },
+        >(ref proof.composition.path, ref composition_requests.indices)
+    let queries = <ProductionSecuritySparseFriQueryPlan
+        as BabyBearFriQueryBuffer<
+            {
+                PRODUCTION_SECURITY_QUERY_COUNT
+            },
+            ProductionSecuritySparseFriQuerySamples,
+        >>::fri_query_buffer(ref authenticated.samples)
+    let task_valid = trace.shape_valid()
+        && trace.task_matches(4)
+        && trace.row(4).accepted
+        && queries.valid
+        && queries.count == PRODUCTION_SECURITY_QUERY_COUNT.downcast_truncate()
+    interpreter = constrain_one(
+        authenticated.interpreter,
+        bool_field(composition_transcript.value.valid),
+    )
+    interpreter = constrain_one(interpreter, bool_field(exact_composition))
+    interpreter = constrain_one(interpreter, bool_field(task_valid))
+    ProductionFriAuthenticationRelationPlan {
+        interpreter: interpreter,
+        samples: authenticated.samples,
+        queries: queries,
+        challenges: authenticated.challenges,
+    }
 }
 
 /// Authenticate the complete production base opening without materializing

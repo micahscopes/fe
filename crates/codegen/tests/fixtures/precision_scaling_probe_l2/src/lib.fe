@@ -1,0 +1,40 @@
+//! THROWAWAY probe fixture (measurement only, not part of the suite):
+//! forces a full monomorphization of the general `precision::field::mul<L,
+//! M: Modulus<L>>` at L=2 with a toy modulus (low limb 1, so `mu =
+//! mont_mu(1, LIMB_BITS) = 8191` trivially, at any L -- compile time does not
+//! depend on primality), to measure how compile time scales with the limb
+//! count L. Mirrors `precision_field_bn254fr_oracle_ingot`'s per-limb wrapper
+//! pattern, reduced to a single limb0 export (sufficient to force the whole
+//! `mul` call graph -- Pad2, Rows, Mac, ShiftAppend, Head, Zero, SubBorrow,
+//! Select, canonicalize, row -- since Fe/Rust-style monomorphization is
+//! all-or-nothing per instantiation).
+//!
+//! NOT wired into any test runner; compiled ad hoc by a throwaway timing
+//! harness. Safe to delete.
+
+use precision::field::{mul, Limbs, LimbLast, LimbMore, Modulus, mont_mu, LIMB_BITS}
+
+pub struct ToyL2 {}
+
+impl Modulus<2> for ToyL2 {
+    fn p_limbs() -> Limbs<2> {
+        LimbMore { lead: 1, tail: LimbLast { value: 7 } }
+    }
+
+    fn mu() -> u32 { 8191 }
+}
+
+static_assert(mont_mu(1, LIMB_BITS) == 8191)
+
+fn build_a(a0: u32, a1: u32) -> Limbs<2> {
+    LimbMore { lead: a0, tail: LimbLast { value: a1 } }
+}
+
+fn build_b(b0: u32, b1: u32) -> Limbs<2> {
+    LimbMore { lead: b0, tail: LimbLast { value: b1 } }
+}
+
+pub fn probe(a0: u32, a1: u32, b0: u32, b1: u32) -> u32 {
+    let out = mul<2, ToyL2>(build_a(a0, a1), build_b(b0, b1))
+    out.lead
+}

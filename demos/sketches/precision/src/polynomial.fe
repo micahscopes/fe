@@ -551,10 +551,12 @@ pub fn radix2_coset_lde<
         N > 0,
         { (N & (N - 1)) == 0 },
         { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        { radix2_field_domain_supported<N, FieldElement<L, M>>() },
         OUT > 0,
         OUT > N,
         { (OUT & (OUT - 1)) == 0 },
         { radix2_log_unchecked<OUT>() <= M::TWO_ADICITY },
+        { radix2_field_domain_supported<OUT, FieldElement<L, M>>() },
         { (OUT % N) == 0 },
         L >= 3,
         M: TwoAdicModulus<L> + U32EmbeddingModulus<L>,
@@ -596,10 +598,12 @@ pub fn radix2_word_coset_lde<
         N > 0,
         { (N & (N - 1)) == 0 },
         { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        { radix2_field_domain_supported<N, WordField<M>>() },
         OUT > 0,
         OUT > N,
         { (OUT & (OUT - 1)) == 0 },
         { radix2_log_unchecked<OUT>() <= M::TWO_ADICITY },
+        { radix2_field_domain_supported<OUT, WordField<M>>() },
         { (OUT % N) == 0 },
 {
     let lde = radix2_field_coset_lde<N, OUT, WordField<M>>(
@@ -621,10 +625,12 @@ pub fn radix2_ext4_coset_lde<
         N > 0,
         { (N & (N - 1)) == 0 },
         { radix2_log_unchecked<N>() <= M::TWO_ADICITY },
+        { radix2_field_domain_supported<N, BinomialExtension4<M>>() },
         OUT > 0,
         OUT > N,
         { (OUT & (OUT - 1)) == 0 },
         { radix2_log_unchecked<OUT>() <= M::TWO_ADICITY },
+        { radix2_field_domain_supported<OUT, BinomialExtension4<M>>() },
         { (OUT % N) == 0 },
 {
     let lde = radix2_field_coset_lde<N, OUT, BinomialExtension4<M>>(

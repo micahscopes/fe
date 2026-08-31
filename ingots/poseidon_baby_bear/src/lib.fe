@@ -1444,6 +1444,19 @@ impl Poseidon2FieldSponge {
     /// protocol prefix.
     #[inline(always)]
     pub fn begin_tag(_ tag: u32, _ expected: u32) -> Self {
+        Self::begin_prefixed_tag(tag, expected, expected)
+    }
+
+    /// Begin a fixed-length sponge whose second domain-separation word is
+    /// distinct from the number of following payload fields. Packed bit
+    /// schemas use their exact bit length as the prefix while the staged
+    /// interpreter still counts field payloads for fail-closed completion.
+    #[inline(always)]
+    pub fn begin_prefixed_tag(
+        _ tag: u32,
+        _ prefix: u32,
+        _ expected: u32,
+    ) -> Self {
         let mut lanes = [0; WIDTH]
         if tag >= BABY_BEAR_MODULUS {
             return Self {
@@ -1451,14 +1464,14 @@ impl Poseidon2FieldSponge {
                 valid: INVALID_WORD,
             }
         }
-        if expected >= BABY_BEAR_MODULUS {
+        if prefix >= BABY_BEAR_MODULUS || expected >= BABY_BEAR_MODULUS {
             return Self {
                 lanes: lanes, rate: 2, expected: expected, written: 0,
                 valid: INVALID_WORD,
             }
         }
         lanes[0] = BabyBear::from_u32(tag).to_montgomery_word()
-        lanes[1] = BabyBear::from_u32(expected).to_montgomery_word()
+        lanes[1] = BabyBear::from_u32(prefix).to_montgomery_word()
         Self {
             lanes: lanes,
             rate: 2,

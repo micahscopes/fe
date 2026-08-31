@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot_proof_baby_bear_domains"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../ingots/core"
+poseidon_baby_bear = "../../../../ingots/poseidon_baby_bear"

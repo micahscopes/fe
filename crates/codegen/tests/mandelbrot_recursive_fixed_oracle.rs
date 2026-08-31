@@ -1040,11 +1040,7 @@ where
     state.map(|value| value.as_canonical_u32())
 }
 
-fn reference_poseidon_digest_with<P>(
-    permutation: &P,
-    tag: &[u8; 4],
-    fields: &[u32],
-) -> [u32; 8]
+fn reference_poseidon_digest_with<P>(permutation: &P, tag: &[u8; 4], fields: &[u32]) -> [u32; 8]
 where
     P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
 {
@@ -1062,11 +1058,7 @@ fn reference_poseidon_digest(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     reference_poseidon_digest_with(&default_babybear_poseidon2_16(), tag, fields)
 }
 
-fn reference_digest_compress_with<P>(
-    permutation: &P,
-    left: [u32; 8],
-    right: [u32; 8],
-) -> [u32; 8]
+fn reference_digest_compress_with<P>(permutation: &P, left: [u32; 8], right: [u32; 8]) -> [u32; 8]
 where
     P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
 {
@@ -1078,10 +1070,7 @@ where
         .unwrap()
 }
 
-fn reference_merkle_root_with<P>(
-    permutation: &P,
-    mut leaves: Vec<[u32; 8]>,
-) -> [u32; 8]
+fn reference_merkle_root_with<P>(permutation: &P, mut leaves: Vec<[u32; 8]>) -> [u32; 8]
 where
     P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
 {
@@ -1130,25 +1119,39 @@ fn expected_sparse_control_plan(control: [u32; 38]) -> [u32; 3] {
     ]
 }
 
-fn expected_sparse_control_link_plan(
-    current: [u32; 38],
-    next: [u32; 38],
-) -> [u32; 68] {
+fn expected_sparse_control_link_plan(current: [u32; 38], next: [u32; 38]) -> [u32; 68] {
     let mut nodes = [0u32; 68];
     let phase_pairs = [
-        (0, 0), (0, 1), (1, 0), (1, 2), (2, 0), (2, 3),
-        (3, 3), (3, 4), (4, 3), (4, 5), (5, 5), (5, 6),
-        (6, 5), (6, 6), (6, 7), (7, 7), (7, 8), (8, 7),
-        (8, 9), (9, 9), (9, 10), (10, 9), (10, 11),
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 2),
+        (2, 0),
+        (2, 3),
+        (3, 3),
+        (3, 4),
+        (4, 3),
+        (4, 5),
+        (5, 5),
+        (5, 6),
+        (6, 5),
+        (6, 6),
+        (6, 7),
+        (7, 7),
+        (7, 8),
+        (8, 7),
+        (8, 9),
+        (9, 9),
+        (9, 10),
+        (10, 9),
+        (10, 11),
     ];
     for (index, (left, right)) in phase_pairs.into_iter().enumerate() {
         nodes[index] = bb_mul(current[left], next[right]);
     }
-    for (index, (left, right)) in [
-        (11, 12), (12, 12), (12, 11), (12, 13), (13, 14), (14, 14),
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, (left, right)) in [(11, 12), (12, 12), (12, 11), (12, 13), (13, 14), (14, 14)]
+        .into_iter()
+        .enumerate()
     {
         nodes[23 + index] = bb_mul(current[left], next[right]);
     }
@@ -1236,10 +1239,7 @@ fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 2
     let radix_finish_auxiliary = bb_mul(row[1], bb_sub(1, radix_flag_value));
     let product_value_auxiliary = bb_mul(row[0], row[1]);
     let product_sign_product = bb_mul(row[3], row[5]);
-    let product_sign_xor = bb_sub(
-        bb_add(row[3], row[5]),
-        bb_mul(two, product_sign_product),
-    );
+    let product_sign_xor = bb_sub(bb_add(row[3], row[5]), bb_mul(two, product_sign_product));
     let product_finish_signed_output = bb_mul(product_sign_xor, row[1]);
     let selected_difference_adjustment = bb_mul(row[5], bb_sub(row[2], row[1]));
     let selected_difference = bb_add(row[1], selected_difference_adjustment);
@@ -1278,10 +1278,7 @@ fn expected_sparse_arithmetic_link_plan(
     next_control: [u32; 38],
 ) -> [u32; 18] {
     let current_radix = bb_add(control[0], bb_add(control[1], control[2]));
-    let next_radix = bb_add(
-        next_control[0],
-        bb_add(next_control[1], next_control[2]),
-    );
+    let next_radix = bb_add(next_control[0], bb_add(next_control[1], next_control[2]));
     let radix_link = bb_mul(current_radix, next_radix);
     let carry_entry = bb_mul(control[2], next_control[3]);
     let current_carry = bb_add(control[3], control[4]);
@@ -1350,28 +1347,19 @@ fn expected_sparse_boundary_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 14]
             digit_source,
             bb_add(bb_mul(control[32], LIMBS as u32), control[33]),
         ),
-        bb_mul(
-            sign_source,
-            bb_add(31 * LIMBS as u32, control[32]),
-        ),
+        bb_mul(sign_source, bb_add(31 * LIMBS as u32, control[32])),
         bb_mul(
             limb_consumer,
             bb_add(bb_mul(computed_rank, LIMBS as u32), control[33]),
         ),
-        bb_mul(
-            sign_consumer,
-            bb_add(31 * LIMBS as u32, computed_rank),
-        ),
+        bb_mul(sign_consumer, bb_add(31 * LIMBS as u32, computed_rank)),
         bb_mul(sign_source, row[1]),
         bb_mul(bb_add(digit_source, consumers), row[0]),
         bb_mul(
             limb_consumer,
             bb_add(bb_mul(claimed_rank, LIMBS as u32), control[33]),
         ),
-        bb_mul(
-            sign_consumer,
-            bb_add(31 * LIMBS as u32, claimed_rank),
-        ),
+        bb_mul(sign_consumer, bb_add(31 * LIMBS as u32, claimed_rank)),
         bb_mul(consumers, row[1]),
     ]
 }
@@ -1414,8 +1402,7 @@ fn expected_sparse_round_plan(
     let product_output_rank = bb_add(product_low_rank, 2);
     let retained_limb = bb_add(bb_sub(limbs, 1), control[33]);
     let retained_address = bb_add(bb_mul(product_low_rank, limbs), retained_limb);
-    let output_digit_address =
-        bb_add(bb_mul(product_output_rank, limbs), control[33]);
+    let output_digit_address = bb_add(bb_mul(product_output_rank, limbs), control[33]);
     let guard_address = bb_add(
         11 * limbs,
         bb_add(
@@ -1488,9 +1475,7 @@ fn expected_sparse_linear_plan(
     let digit_address = |rank, limb| bb_add(bb_mul(rank, limbs), limb);
     let sign_address = |rank| bb_add(31 * limbs, rank);
     let nonzero_address = |rank| bb_add(31 * limbs + 31, rank);
-    let borrow_address = |node, right| {
-        bb_add(31 * limbs + 62, bb_add(bb_mul(2, node), right))
-    };
+    let borrow_address = |node, right| bb_add(31 * limbs + 62, bb_add(bb_mul(2, node), right));
     let same_address = |node| bb_add(31 * limbs + 70, node);
     let select_address = |node| bb_add(31 * limbs + 74, node);
 
@@ -1519,14 +1504,10 @@ fn expected_sparse_linear_plan(
     let right_rank = bb_add(right_even_rank, right_odd_rank);
     let output_node = bb_mul(bb_sub(control[32], 18), bb_inverse(4));
     let output_even_pair = bb_mul(bb_sub(output_node, one), bb_sub(output_node, 3));
-    let output_even_product =
-        bb_mul(output_even_pair, bb_sub(bb_mul(2, output_node), one));
+    let output_even_product = bb_mul(output_even_pair, bb_sub(bb_mul(2, output_node), one));
     let output_even = bb_sub(zero, bb_mul(output_even_product, bb_inverse(3)));
 
-    let digit_source_kind = bb_add(
-        bb_add(point, product),
-        bb_add(intermediate, output_role),
-    );
+    let digit_source_kind = bb_add(bb_add(point, product), bb_add(intermediate, output_role));
     let digit_source = bb_mul(control[1], digit_source_kind);
     let product_weight = bb_mul(product, bb_add(one, product_xy));
     let output_digit_weight = bb_mul(output_role, bb_add(one, bb_mul(3, output_even)));
@@ -1559,31 +1540,23 @@ fn expected_sparse_linear_plan(
     let left_difference_rank = bb_add(sum_rank, one);
     let right_difference_rank = bb_add(sum_rank, 2);
     let output_rank = bb_add(sum_rank, 3);
-    let nonselect_rank = bb_add(
-        sum_rank,
-        bb_add(control[16], bb_mul(2, control[17])),
-    );
+    let nonselect_rank = bb_add(sum_rank, bb_add(control[16], bb_mul(2, control[17])));
     let source_digit_address = digit_address(control[32], control[33]);
 
     let first_source_address = bb_mul(digit_source, source_digit_address);
-    let first_nonselect_address =
-        bb_mul(limb_nonselect, digit_address(left_rank, control[34]));
-    let first_select_address =
-        bb_mul(limb_select, digit_address(sum_rank, control[34]));
+    let first_nonselect_address = bb_mul(limb_nonselect, digit_address(left_rank, control[34]));
+    let first_select_address = bb_mul(limb_select, digit_address(sum_rank, control[34]));
     let first_finish_address = bb_mul(finish, sign_address(left_rank));
     let second_source_address = bb_mul(sign_source, sign_address(control[32]));
-    let second_nonselect_address =
-        bb_mul(limb_nonselect, digit_address(right_rank, control[34]));
+    let second_nonselect_address = bb_mul(limb_nonselect, digit_address(right_rank, control[34]));
     let second_select_address = bb_mul(
         limb_select,
         digit_address(left_difference_rank, control[34]),
     );
     let second_finish_address = bb_mul(finish, sign_address(right_rank));
     let third_source_address = bb_mul(nonzero_source, nonzero_address(control[32]));
-    let third_nonselect_address = bb_mul(
-        limb_nonselect,
-        digit_address(nonselect_rank, control[34]),
-    );
+    let third_nonselect_address =
+        bb_mul(limb_nonselect, digit_address(nonselect_rank, control[34]));
     let third_select_address = bb_mul(
         limb_select,
         digit_address(right_difference_rank, control[34]),
@@ -1592,23 +1565,17 @@ fn expected_sparse_linear_plan(
     let third_source_value = bb_mul(nonzero_source, row[0]);
     let third_nonselect_value = bb_mul(limb_nonselect, row[4]);
     let third_selected_value = bb_mul(bb_add(limb_select, finish), row[2]);
-    let fourth_source_address =
-        bb_mul(left_borrow_source, borrow_address(node, zero));
-    let fourth_select_address =
-        bb_mul(limb_select, digit_address(output_rank, control[34]));
+    let fourth_source_address = bb_mul(left_borrow_source, borrow_address(node, zero));
+    let fourth_select_address = bb_mul(limb_select, digit_address(output_rank, control[34]));
     let fourth_finish_address = bb_mul(finish, borrow_address(node, one));
-    let fifth_source_address =
-        bb_mul(right_borrow_source, borrow_address(node, one));
+    let fifth_source_address = bb_mul(right_borrow_source, borrow_address(node, one));
     let fifth_select_address = bb_mul(limb_select, same_address(node));
     let fifth_finish_address = bb_mul(finish, nonzero_address(output_rank));
     let fifth_source_value = bb_mul(right_borrow_source, row[3]);
     let fifth_consumer_value = bb_mul(bb_add(limb_select, finish), row[4]);
     let sixth_select_address = bb_mul(limb_select, select_address(node));
     let sixth_finish_address = bb_mul(finish, sign_address(output_rank));
-    let effective_right = bb_sub(
-        bb_add(row[1], control[35]),
-        bb_mul(2, arithmetic_plan[0]),
-    );
+    let effective_right = bb_sub(bb_add(row[1], control[35]), bb_mul(2, arithmetic_plan[0]));
     let different = bb_sub(
         bb_add(row[0], effective_right),
         bb_mul(2, arithmetic_plan[1]),
@@ -2100,10 +2067,7 @@ fn expected_sparse_product_address_plan(control: [u32; 38]) -> [u32; 17] {
         bb_add(bb_mul(current, 3 * limbs), product_range),
     );
 
-    let product_node = bb_mul(
-        bb_sub(bb_sub(major, 6), product_high),
-        bb_inverse(3),
-    );
+    let product_node = bb_mul(bb_sub(bb_sub(major, 6), product_high), bb_inverse(3));
     let current_rank = bb_sub(major, 2);
     let product_rank = bb_add(2, bb_add(bb_mul(2, product_node), product_high));
     let range_current = bb_mul(current, current_rank);
@@ -2670,10 +2634,7 @@ fn expected_sparse_base_evaluation_words(point: &ComplexFx, current: &ComplexFx)
     let rows = expected_sparse_rows(point, current);
     let mut base_fields = Vec::with_capacity(4 * 260);
     for index in 0..4 {
-        let arithmetic = expected_sparse_arithmetic_plan(
-            controls[index],
-            rows[index],
-        );
+        let arithmetic = expected_sparse_arithmetic_plan(controls[index], rows[index]);
         base_fields.extend(controls[index]);
         base_fields.extend(expected_sparse_control_plan(controls[index]));
         base_fields.extend(expected_sparse_control_link_plan(
@@ -2698,10 +2659,7 @@ fn expected_sparse_base_evaluation_words(point: &ComplexFx, current: &ComplexFx)
             rows[index],
             arithmetic,
         ));
-        base_fields.extend(expected_sparse_boundary_plan(
-            controls[index],
-            rows[index],
-        ));
+        base_fields.extend(expected_sparse_boundary_plan(controls[index], rows[index]));
     }
     assert_eq!(base_fields.len(), 4 * 260, "sparse base schema");
     base_fields
@@ -3360,7 +3318,10 @@ fn production_arithmetic_plan_matches_independent_nodes_and_rejects_mutations() 
             baseline[23], 0,
             "the clean arithmetic plan must satisfy the AIR"
         );
-        assert!(baseline[24] > 0, "the arithmetic plan must emit constraints");
+        assert!(
+            baseline[24] > 0,
+            "the arithmetic plan must emit constraints"
+        );
 
         for mutation in 1..=23u32 {
             let mut mutated_arguments = transition_arguments(&point, &current);
@@ -3380,7 +3341,11 @@ fn production_arithmetic_link_plan_matches_independent_nodes_and_rejects_mutatio
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes)
         .expect("focused arithmetic-link-plan Wasm module should load");
-    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("focused arithmetic-link-plan fixture should instantiate");
@@ -3398,11 +3363,8 @@ fn production_arithmetic_link_plan_matches_independent_nodes_and_rejects_mutatio
     let mut node_indices = [usize::MAX; 18];
     let mut semantic_indices = Vec::new();
     for index in 0..controls.len() - 1 {
-        let expected = expected_sparse_arithmetic_link_plan(
-            controls[index],
-            rows[index],
-            controls[index + 1],
-        );
+        let expected =
+            expected_sparse_arithmetic_link_plan(controls[index], rows[index], controls[index + 1]);
         let mut adds_index = false;
         for (node, value) in expected.into_iter().enumerate() {
             if value != 0 && node_indices[node] == usize::MAX {
@@ -3420,27 +3382,27 @@ fn production_arithmetic_link_plan_matches_independent_nodes_and_rejects_mutatio
     );
 
     for index in semantic_indices {
-        let expected = expected_sparse_arithmetic_link_plan(
-            controls[index],
-            rows[index],
-            controls[index + 1],
-        );
+        let expected =
+            expected_sparse_arithmetic_link_plan(controls[index], rows[index], controls[index + 1]);
         for challenge in [3u32, 7, 31, 127, 257] {
             let mut arguments = transition_arguments(&point, &current);
             arguments.extend([index as u32, challenge, 0]);
             let baseline = call(&mut store, &instance, entry, &arguments, 20);
             assert_eq!(&baseline[..18], expected.as_slice());
-            assert_eq!(baseline[18], 0, "the clean arithmetic link must satisfy the AIR");
-            assert_eq!(baseline[19], 38, "twenty link equations plus eighteen plan nodes");
+            assert_eq!(
+                baseline[18], 0,
+                "the clean arithmetic link must satisfy the AIR"
+            );
+            assert_eq!(
+                baseline[19], 38,
+                "twenty link equations plus eighteen plan nodes"
+            );
         }
     }
 
     for (node, index) in node_indices.into_iter().enumerate() {
-        let expected = expected_sparse_arithmetic_link_plan(
-            controls[index],
-            rows[index],
-            controls[index + 1],
-        );
+        let expected =
+            expected_sparse_arithmetic_link_plan(controls[index], rows[index], controls[index + 1]);
         let mut rejected = false;
         for challenge in [3u32, 7, 31, 127, 257] {
             let mut arguments = transition_arguments(&point, &current);
@@ -3463,9 +3425,13 @@ fn production_linear_plan_matches_independent_nodes_and_rejects_mutations() {
     let entry = "fixed_transition4_sparse_linear_plan_audit";
     let bytes = compile_fixture_entry(entry);
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, bytes)
-        .expect("focused linear-plan Wasm module should load");
-    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    let module =
+        wasmtime::Module::new(&engine, bytes).expect("focused linear-plan Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("focused linear-plan fixture should instantiate");
@@ -3518,7 +3484,10 @@ fn production_linear_plan_matches_independent_nodes_and_rejects_mutations() {
             arguments.extend([index as u32, challenge, 0]);
             let baseline = call(&mut store, &instance, entry, &arguments, 54);
             assert_eq!(&baseline[..52], expected.as_slice());
-            assert_eq!(baseline[52], 0, "the clean linear plan must satisfy the AIR");
+            assert_eq!(
+                baseline[52], 0,
+                "the clean linear plan must satisfy the AIR"
+            );
             assert_eq!(
                 baseline[53], 68,
                 "sixteen port constraints plus fifty-two plan nodes"
@@ -3550,7 +3519,11 @@ fn production_padding_terminal_is_linear_and_rejects_each_bus_imbalance() {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes)
         .expect("focused padding-terminal Wasm module should load");
-    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("focused padding-terminal fixture should instantiate");
@@ -3588,8 +3561,8 @@ fn production_round_plan_matches_independent_nodes_and_rejects_mutations() {
     let entry = "fixed_transition4_sparse_round_plan_audit";
     let bytes = compile_fixture_entry(entry);
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, bytes)
-        .expect("focused round-plan Wasm module should load");
+    let module =
+        wasmtime::Module::new(&engine, bytes).expect("focused round-plan Wasm module should load");
     assert_eq!(
         module.imports().count(),
         0,
@@ -3612,10 +3585,7 @@ fn production_round_plan_matches_independent_nodes_and_rejects_mutations() {
         tasks
             .iter()
             .position(|task| {
-                task[0] == 0
-                    && task[1] == 6
-                    && task[2] + 2 == LIMBS as u32
-                    && task[3] == 12
+                task[0] == 0 && task[1] == 6 && task[2] + 2 == LIMBS as u32 && task[3] == 12
             })
             .expect("the schedule must contain a rounding guard source"),
         tasks
@@ -3639,11 +3609,8 @@ fn production_round_plan_matches_independent_nodes_and_rejects_mutations() {
     let rows = expected_sparse_rows(&point, &current);
 
     for index in semantic_indices {
-        let expected = expected_sparse_round_plan(
-            controls[index],
-            controls[index + 1],
-            rows[index],
-        );
+        let expected =
+            expected_sparse_round_plan(controls[index], controls[index + 1], rows[index]);
         for challenge in [3u32, 7, 31, 127, 257] {
             let mut arguments = transition_arguments(&point, &current);
             arguments.extend([index as u32, challenge, 0]);
@@ -6069,9 +6036,13 @@ fn sparse_production_lde_codewords_match_independent_oracle() {
     let entry = "fixed_transition4_sparse_air_lde_encoded";
     let bytes = compile_sparse_auth_fixture_entry(entry);
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, &bytes)
-        .expect("focused sparse LDE Wasm module should load");
-    assert_eq!(module.imports().count(), 0, "fixture must remain zero-import");
+    let module =
+        wasmtime::Module::new(&engine, &bytes).expect("focused sparse LDE Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "fixture must remain zero-import"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .expect("focused sparse LDE fixture should instantiate");
@@ -6111,9 +6082,7 @@ fn sparse_production_lde_codewords_match_independent_oracle() {
 fn sparse_lde_multipaths_authenticate_production_codewords() {
     const BASE_FIELDS: usize = 260;
     const INTERACTION_FIELDS: usize = 152;
-    let bytes = compile_sparse_auth_fixture_entry(
-        "fixed_transition4_sparse_lde_multipath_audit",
-    );
+    let bytes = compile_sparse_auth_fixture_entry("fixed_transition4_sparse_lde_multipath_audit");
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bytes)
         .expect("sparse LDE multipath Wasm module should load");
