@@ -463,9 +463,70 @@ pub fn prepare_batched_coset_extension<
     }
 }
 
+/// Check one completed batch without imposing a destination buffer.
+///
+/// This is the zero-copy finish interpretation used when the transform's
+/// working storage is itself the retained codeword. It shares the exact
+/// progress predicate with the copying interpretation below.
+#[inline(always)]
+pub fn finish_batched_stage_grid<
+    const BATCHES: usize,
+    const N: usize,
+    const LANES: usize,
+    const VALUE_WORDS: usize,
+    const PROGRESS_WORDS: usize,
+    Plan: StageGrid,
+>(
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ invocation: ComputeInvocation,
+) -> BatchStageGridFinish
+where
+    BATCHES > 0,
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+    { VALUE_WORDS == BATCHES * N },
+    { PROGRESS_WORDS == BATCHES * LANES },
+    { Plan::POINTS == N },
+{
+    let global_lane = invocation.global.x
+    let total_lanes: u32 = (BATCHES * LANES).downcast_truncate()
+    if global_lane >= total_lanes {
+        return BatchStageGridFinish {
+            active: false,
+            valid: true,
+            batch: 0,
+            lane: 0,
+        }
+    }
+
+    let lanes: u32 = LANES.downcast_truncate()
+    let batch = global_lane / lanes
+    let lane = global_lane % lanes
+
+    let progress_base = batch * lanes
+    let mut complete = true
+    let mut checked: u32 = 0
+    while checked < lanes {
+        if progress.load(index: progress_base + checked)
+            != Plan::FACTORS.downcast_truncate()
+        {
+            complete = false
+        }
+        checked = checked + 1
+    }
+    BatchStageGridFinish {
+        active: true,
+        valid: complete,
+        batch: batch,
+        lane: lane,
+    }
+}
+
 /// Copy one completed batch into a larger application storage resource.
-/// The returned receipt lets the actor decide where its semantic validity word
-/// belongs without teaching the arithmetic library an application tape layout.
+/// The returned receipt lets the actor decide where semantic validity belongs
+/// without teaching the arithmetic library an application tape layout.
 pub fn finish_batched_stage_grid_into<
     const BATCHES: usize,
     const N: usize,
@@ -491,49 +552,31 @@ where
     { PROGRESS_WORDS == BATCHES * LANES },
     { Plan::POINTS == N },
 {
-    let global_lane = invocation.global.x
-    let total_lanes: u32 = (BATCHES * LANES).downcast_truncate()
-    if global_lane >= total_lanes {
-        return BatchStageGridFinish {
-            active: false,
-            valid: true,
-            batch: 0,
-            lane: 0,
-        }
+    let finish = finish_batched_stage_grid<
+        BATCHES,
+        N,
+        LANES,
+        VALUE_WORDS,
+        PROGRESS_WORDS,
+        Plan,
+    >(progress, invocation)
+    if !finish.active {
+        return finish
     }
 
-    let lanes: u32 = LANES.downcast_truncate()
     let points: u32 = N.downcast_truncate()
-    let batch = global_lane / lanes
-    let lane = global_lane % lanes
-    let value_base = batch * points
-    let destination_base = destination_start + batch * points
+    let lanes: u32 = LANES.downcast_truncate()
+    let value_base = finish.batch * points
+    let destination_base = destination_start + finish.batch * points
     destination.store(
-        index: destination_base + lane,
-        value: values.load(index: value_base + lane),
+        index: destination_base + finish.lane,
+        value: values.load(index: value_base + finish.lane),
     )
     destination.store(
-        index: destination_base + lane + lanes,
-        value: values.load(index: value_base + lane + lanes),
+        index: destination_base + finish.lane + lanes,
+        value: values.load(index: value_base + finish.lane + lanes),
     )
-
-    let progress_base = batch * lanes
-    let mut complete = true
-    let mut checked: u32 = 0
-    while checked < lanes {
-        if progress.load(index: progress_base + checked)
-            != Plan::FACTORS.downcast_truncate()
-        {
-            complete = false
-        }
-        checked = checked + 1
-    }
-    BatchStageGridFinish {
-        active: true,
-        valid: complete,
-        batch: batch,
-        lane: lane,
-    }
+    finish
 }
 
 /// Execute one forward NTT stage for every active physical butterfly lane.

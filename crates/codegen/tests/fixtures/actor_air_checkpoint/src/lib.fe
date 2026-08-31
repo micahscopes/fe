@@ -1,0 +1,95 @@
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+use mandelbrot_proof_air_core::{
+    AirColumnView,
+    begin_constraint_fold,
+    constraint_fold_power,
+    constraint_fold_value,
+    fold_local_step_constraints,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4}
+
+const MAIN_COLUMNS: usize = 17
+const AUXILIARY_COLUMNS: usize = 411
+
+struct AirSource {
+    values: Shared<u32, 428>,
+}
+
+impl Copy for AirSource {}
+
+struct AirRow {}
+impl Copy for AirRow {}
+
+impl AirColumnView<BabyBearExt4, AirSource> for AirRow {
+    fn main(
+        ref self,
+        _ source: AirSource,
+        _ column: usize,
+    ) -> BabyBearExt4 {
+        if column >= MAIN_COLUMNS { return BabyBearExt4::zero() }
+        BabyBearExt4::from_base(BabyBear::from_u32(source.values.load(
+            index: column.downcast_truncate(),
+        )))
+    }
+
+    fn auxiliary(
+        ref self,
+        _ source: AirSource,
+        _ column: usize,
+    ) -> BabyBearExt4 {
+        if column >= AUXILIARY_COLUMNS { return BabyBearExt4::zero() }
+        BabyBearExt4::from_base(BabyBear::from_u32(source.values.load(
+            index: (MAIN_COLUMNS + column).downcast_truncate(),
+        )))
+    }
+}
+
+actor AirCheckpointProbe uses (Program<WebGpuBackend>) {
+    air_columns: Shared<u32, 428>,
+    challenge: Shared<u32, 4>,
+    checkpoint: Shared<u32, 8>,
+
+    fn fold_local(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.local.x == 0 {
+            let challenge = BabyBearExt4::from_coordinate_words(
+                self.challenge.load(index: 0),
+                self.challenge.load(index: 1),
+                self.challenge.load(index: 2),
+                self.challenge.load(index: 3),
+            )
+            let source = AirSource { values: self.air_columns }
+            let row = AirRow {}
+            let fold0 = begin_constraint_fold<BabyBearExt4>(challenge)
+            let fold78 = fold_local_step_constraints<
+                BabyBearExt4,
+                AirSource,
+                AirRow,
+            >(fold0, source, ref row)
+            let power = constraint_fold_power<BabyBearExt4, 78>(fold78)
+            let value = constraint_fold_value<BabyBearExt4, 78>(fold78)
+            self.checkpoint.store(index: 0, value: power.coefficient_0().to_u32())
+            self.checkpoint.store(index: 1, value: power.coefficient_1().to_u32())
+            self.checkpoint.store(index: 2, value: power.coefficient_2().to_u32())
+            self.checkpoint.store(index: 3, value: power.coefficient_3().to_u32())
+            self.checkpoint.store(index: 4, value: value.coefficient_0().to_u32())
+            self.checkpoint.store(index: 5, value: value.coefficient_1().to_u32())
+            self.checkpoint.store(index: 6, value: value.coefficient_2().to_u32())
+            self.checkpoint.store(index: 7, value: value.coefficient_3().to_u32())
+        }
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.checkpoint.load(index: 0).downcast_truncate()
+    }
+}

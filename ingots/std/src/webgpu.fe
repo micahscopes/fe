@@ -606,6 +606,11 @@ impl DropWhilePresenting {
 #[gpu_resource(storage)]
 pub struct StorageBuffer<T, const N: usize> { binding: u32 }
 
+// A storage resource is an externally owned, aliasable WebGPU binding. Copying
+// this nominal handle neither copies its buffer nor changes ownership of the
+// underlying resource; it preserves the same typed binding capability.
+impl<T, const N: usize> core::marker::Copy for StorageBuffer<T, N> {}
+
 impl<T, const N: usize> StorageBuffer<T, N> {
     /// Loads element `index` from this shared resource.
     #[gpu_intrinsic(storage_load)]

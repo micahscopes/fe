@@ -1,29 +1,37 @@
 //! Browser-executed BabyBear proof placement checkpoint.
 //!
 //! The compute pass derives a four-row Q12 Mandelbrot witness through the
-//! production proof kernel, interprets one Conal factor vocabulary as four
-//! staged 4-to-16 BabyBear coset LDEs, and commits the resulting 64 field values
-//! with the production Poseidon2 sponge. One Fe-authored round interpreter
+//! production proof kernel, projects all 17 main and 411 Fe-derived auxiliary
+//! columns into one column-major tape, and interprets one Conal factor
+//! vocabulary as 428 staged 4-to-16 BabyBear coset LDEs. The production main
+//! and auxiliary codewords are committed into one ordered AIR transcript.
+//! Eight type-branded placement stages then evaluate the same 708-constraint
+//! composition denotation used by the scalar prover, commit all 16 quartic
+//! evaluations, and bind that root into the FRI transcript. One Fe-authored
+//! round interpreter
 //! then places the complete `16 -> 8 -> 4 -> 2 -> 1` FRI schedule. Each round
 //! derives its own transcript challenge, folds independent pairs, commits the
 //! resulting quartic evaluations, retains their exact ordered Merkle tree,
 //! and binds the layer root into the next transcript. The semantic schedule,
 //! round domains, pair operation, and Poseidon operations are shared with the
-//! scalar proof. Thin actor passes specialize only physical round capacities.
+//! scalar proof. A typed query plan then samples one final-transcript index and
+//! extracts the seven committed evaluations and six ordered authentication
+//! siblings needed to check every retained FRI layer. Thin actor passes
+//! specialize only physical round capacities.
 //! Per-invocation progress cursors make repeated dispatch race-free without a
 //! host-owned dispatch index. A Fe-authored mutation changes one round-one
 //! evaluation after the clean root is fixed; later challenges must diverge
 //! only through the authenticated transcript chain. The fragment pass
 //! visualizes the retained full fold schedule and status words.
 //!
-//! This is a mixed placement checkpoint. The four independent LDE columns use
+//! This is a mixed placement checkpoint. All 428 independent AIR columns use
 //! the portable stage-grid interpretation of canonical Conal factor trees. The
 //! paired commitment and FRI hash states are a second workgroup-map
 //! interpretation. Witness generation and final comparison remain scalar
-//! passes. This is an exact FRI-subsystem checkpoint whose starting transcript
-//! is the clean LDE commitment. It is not yet the full AIR transcript, a
-//! shared-memory butterfly interpreter, an authenticated query receipt, or a
-//! recursive proof.
+//! passes. The compact four-column commitment remains diagnostic evidence, but
+//! FRI now starts from the full production AIR composition transcript. This is
+//! not yet a shared-memory butterfly interpreter, a production 114-query GPU
+//! receipt, or a recursive proof.
 
 use std::webgpu::{
     ComputeInvocation,
@@ -44,19 +52,99 @@ use std::conal::{BalancedBinarySchedule, Pair, RBin}
 use std::web::view::{Extent, Param, Surface}
 use fmath::{from_i32, to_i32}
 use fri_baby_bear::{
+    FriQueryPlan,
+    FriQueryPlanMetadata,
+    FriQueryPlanShape,
+    FriRoundPlacement,
     FriSchedule,
     FriScheduleMetadata,
     FriSchedulePlacement,
     FriScheduleShape,
     fold_fri_pair_value_at_point,
     fri_fold_domain_tag,
+    fri_query_evaluation_from_four_rounds,
+    fri_query_domain_tag,
+    fri_query_sibling_from_four_rounds,
     fri_layer_row_domain_tag,
     fri_layer_transcript_domain_tag,
 }
-use mandelbrot_q12_words::Q12EscapeAirWordStream as EscapeAirWordStream
+use mandelbrot_proof_air_core::{
+    AirColumnView,
+    CompositionValue,
+    ConstraintFoldCheckpoint,
+    ConstraintNumeratorCheckpoint,
+    FirstRowConstraintCheckpoint,
+    PairRowsConstraintCheckpoint,
+    begin_constraint_fold,
+    composition_value,
+    constraint_fold_power,
+    constraint_fold_value,
+    constraint_numerator_first_row,
+    constraint_numerator_fold,
+    constraint_numerators_from_checkpoint,
+    first_row_constraint_fold,
+    first_row_pair_rows,
+    fold_first_row_constraints,
+    fold_imaginary_quotient_constraints,
+    fold_imaginary_square_constraints,
+    fold_last_row_constraints,
+    fold_local_step_constraints,
+    fold_magnitude_terminal_constraints,
+    fold_orbit_coordinate_constraints,
+    fold_pair_rows_constraints,
+    fold_real_quotient_constraints,
+    fold_real_square_constraints,
+    pair_rows_all_rows,
+    pair_rows_constraint_fold,
+    restore_constraint_fold,
+    restore_constraint_numerator_checkpoint,
+    restore_first_row_constraint_checkpoint,
+    restore_pair_rows_constraint_checkpoint,
+    signed_air_value,
+}
+use mandelbrot_proof_baby_bear_domains::{
+    auxiliary_domain_tag,
+    auxiliary_lde_row_domain_tag,
+    auxiliary_lde_transcript_domain_tag,
+    main_lde_row_domain_tag,
+    main_lde_transcript_domain_tag,
+    proof_transcript_domain_tag,
+    public_domain_tag,
+    row_domain_tag,
+    statement_domain_tag,
+}
+use mandelbrot_proof_baby_bear_transcript::{
+    composition_challenge_domain_tag,
+    composition_row_domain_tag,
+    composition_transcript_domain_tag,
+}
+use mandelbrot_proof_baby_bear_encoding::{
+    AUXILIARY_FIELDS,
+    PUBLIC_FIELDS,
+    ROW_FIELDS,
+    encoded_auxiliary_field_direct,
+    encoded_auxiliary_fields_are_valid,
+    encoded_public_field_direct,
+    encoded_public_fields_are_valid,
+    encoded_row_field_direct,
+    encoded_row_fields_are_valid,
+}
+use mandelbrot_proof_kernel::{
+    AUXILIARY_ROW_BITS,
+    ESCAPES_BY_Q12_PUBLIC_WORDS,
+    EncodedProofRow,
+    EscapeTraceStream,
+    EscapesByQ12,
+    EscapesByQ12Public,
+    encode_proof_row,
+    encode_signed_word,
+    encoded_auxiliary_row_bit_direct,
+    encoded_proof_row_word,
+    escapes_by_q12_public_word,
+}
 use canonical_words::CanonicalWords
 use parallel_ntt_webgpu::{
-    finish_batched_stage_grid_into,
+    finish_batched_stage_grid,
     forward_batched_stage_grid_lane,
     inverse_batched_stage_grid_lane,
     prepare_batched_coset_extension,
@@ -78,6 +166,8 @@ use poseidon_baby_bear::{
     begin_compression_placement,
     begin_digest_squeeze_placement_tag,
     begin_ext4_commitment_placement_tag,
+    begin_indexed_digest_squeeze_placement_tag,
+    fixed_length_sponge_permutations,
     poseidon2_workgroup_destination,
     poseidon2_round_constant_index,
     poseidon2_workgroup_lane_with_round_constant,
@@ -102,10 +192,19 @@ const LDE: usize = 16
 const COLUMN_COUNT: usize = 4
 const TRACE_WORDS: usize = COLUMN_COUNT * TRACE
 const LDE_WORDS: usize = COLUMN_COUNT * LDE
+const MAIN_COLUMN_COUNT: usize = 17
+const AIR_COLUMN_COUNT: usize = MAIN_COLUMN_COUNT + AUXILIARY_ROW_BITS
+const AIR_TRACE_WORDS: usize = AIR_COLUMN_COUNT * TRACE
+const AIR_LDE_WORDS: usize = AIR_COLUMN_COUNT * LDE
 const INPUT_LANES: usize = TRACE / 2
 const OUTPUT_LANES: usize = LDE / 2
-const INPUT_GRID_LANES: usize = COLUMN_COUNT * INPUT_LANES
-const OUTPUT_GRID_LANES: usize = COLUMN_COUNT * OUTPUT_LANES
+const INPUT_GRID_LANES: usize = AIR_COLUMN_COUNT * INPUT_LANES
+const OUTPUT_GRID_LANES: usize = AIR_COLUMN_COUNT * OUTPUT_LANES
+const GPU_WORKGROUP_LANES: usize = 256
+const INPUT_DISPATCH_X: usize =
+    (INPUT_GRID_LANES + GPU_WORKGROUP_LANES - 1) / GPU_WORKGROUP_LANES
+const OUTPUT_DISPATCH_X: usize =
+    (OUTPUT_GRID_LANES + GPU_WORKGROUP_LANES - 1) / GPU_WORKGROUP_LANES
 const DIGEST_FIELDS: usize = 8
 const COMMIT_STATE_WORDS: usize = 80
 const STATUS_WORDS: usize = 11
@@ -127,6 +226,30 @@ const FRI_VALID_TRANSCRIPTS: usize =
 const FRI_STATUS_WORDS: usize =
     FRI_VALID_ROUNDS + FRI_VALID_ROUNDS + FRI_VALID_TRANSCRIPTS
         + FRI_VALID_ROUNDS + 3
+const FRI_QUERY_EVALUATIONS: usize = 7
+const FRI_QUERY_PATH_SIBLINGS: usize = 6
+const FRI_QUERY_INDEX_WORDS: usize = FRI_VARIANTS
+const FRI_QUERY_EVALUATION_WORDS: usize =
+    FRI_VARIANTS * FRI_QUERY_EVALUATIONS * EXTENSION_WORDS
+const FRI_QUERY_SIBLING_WORDS: usize =
+    FRI_VARIANTS * FRI_QUERY_PATH_SIBLINGS * DIGEST_FIELDS
+const FRI_QUERY_STATUS_WORDS: usize = 2 * FRI_VARIANTS + 3
+const AIR_LDE_ROOT_WORDS: usize = 2 * DIGEST_FIELDS
+const AIR_LDE_ROOT_VALID_WORDS: usize = 2
+const PACKED_MAIN_TRACE_FIELDS: usize = TRACE * ROW_FIELDS
+const PACKED_AUXILIARY_TRACE_FIELDS: usize = TRACE * AUXILIARY_FIELDS
+const PACKED_PUBLIC_FIELDS: usize = PUBLIC_FIELDS
+const PRODUCTION_TRACE_DIGEST_WORDS: usize = 3 * DIGEST_FIELDS
+const PRODUCTION_TRACE_DIGEST_VALID_WORDS: usize = 3
+const AIR_TRANSCRIPT_WORDS: usize = DIGEST_FIELDS
+const AIR_TRANSCRIPT_VALID_WORDS: usize = 1
+const CANONICAL_PUBLIC_WORDS: usize = ESCAPES_BY_Q12_PUBLIC_WORDS
+const COMPOSITION_CHALLENGE_WORDS: usize = EXTENSION_WORDS
+const COMPOSITION_VALUE_WORDS: usize = LDE * EXTENSION_WORDS
+const COMPOSITION_ROOT_WORDS: usize = DIGEST_FIELDS
+const COMPOSITION_TRANSCRIPT_WORDS: usize = DIGEST_FIELDS
+const COMPOSITION_VALUE_VALID_WORDS: usize = LDE
+const COMPOSITION_VALID_WORDS: usize = 3
 const PROOF_WORDS: usize = TRACE_WORDS
     + LDE_WORDS
     + 2 * DIGEST_FIELDS
@@ -138,6 +261,28 @@ const PROOF_WORDS: usize = TRACE_WORDS
     + FRI_ROOT_WORDS
     + FRI_TRANSCRIPT_WORDS
     + FRI_STATUS_WORDS
+    + FRI_QUERY_INDEX_WORDS
+    + FRI_QUERY_EVALUATION_WORDS
+    + FRI_QUERY_SIBLING_WORDS
+    + FRI_QUERY_STATUS_WORDS
+    + AIR_TRACE_WORDS
+    + AIR_COLUMN_COUNT
+    + AIR_LDE_ROOT_WORDS
+    + AIR_LDE_ROOT_VALID_WORDS
+    + PACKED_MAIN_TRACE_FIELDS
+    + PACKED_AUXILIARY_TRACE_FIELDS
+    + PACKED_PUBLIC_FIELDS
+    + PRODUCTION_TRACE_DIGEST_WORDS
+    + PRODUCTION_TRACE_DIGEST_VALID_WORDS
+    + AIR_TRANSCRIPT_WORDS
+    + AIR_TRANSCRIPT_VALID_WORDS
+    + CANONICAL_PUBLIC_WORDS
+    + COMPOSITION_CHALLENGE_WORDS
+    + COMPOSITION_VALUE_WORDS
+    + COMPOSITION_ROOT_WORDS
+    + COMPOSITION_TRANSCRIPT_WORDS
+    + COMPOSITION_VALUE_VALID_WORDS
+    + COMPOSITION_VALID_WORDS
 
 struct ProofTapeRegions {
     trace: Region<ProofTapeRegions, [u32; TRACE_WORDS]>,
@@ -154,6 +299,37 @@ struct ProofTapeRegions {
     fri_roots: Region<ProofTapeRegions, [u32; FRI_ROOT_WORDS]>,
     fri_transcripts: Region<ProofTapeRegions, [u32; FRI_TRANSCRIPT_WORDS]>,
     fri_status: Region<ProofTapeRegions, [u32; FRI_STATUS_WORDS]>,
+    fri_query_indices: Region<ProofTapeRegions, [u32; FRI_QUERY_INDEX_WORDS]>,
+    fri_query_evaluations: Region<ProofTapeRegions, [u32; FRI_QUERY_EVALUATION_WORDS]>,
+    fri_query_siblings: Region<ProofTapeRegions, [u32; FRI_QUERY_SIBLING_WORDS]>,
+    fri_query_status: Region<ProofTapeRegions, [u32; FRI_QUERY_STATUS_WORDS]>,
+    air_trace: Region<ProofTapeRegions, [u32; AIR_TRACE_WORDS]>,
+    air_lde_valid: Region<ProofTapeRegions, [u32; AIR_COLUMN_COUNT]>,
+    main_lde_root: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    auxiliary_lde_root: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    air_lde_root_valid: Region<ProofTapeRegions, [u32; AIR_LDE_ROOT_VALID_WORDS]>,
+    packed_main_trace: Region<ProofTapeRegions, [u32; PACKED_MAIN_TRACE_FIELDS]>,
+    packed_auxiliary_trace: Region<ProofTapeRegions, [u32; PACKED_AUXILIARY_TRACE_FIELDS]>,
+    packed_public: Region<ProofTapeRegions, [u32; PACKED_PUBLIC_FIELDS]>,
+    main_trace_root: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    auxiliary_trace_root: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    public_digest: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    production_trace_digest_valid: Region<
+        ProofTapeRegions,
+        [u32; PRODUCTION_TRACE_DIGEST_VALID_WORDS],
+    >,
+    air_transcript: Region<ProofTapeRegions, [u32; AIR_TRANSCRIPT_WORDS]>,
+    air_transcript_valid: Region<ProofTapeRegions, [u32; AIR_TRANSCRIPT_VALID_WORDS]>,
+    canonical_public: Region<ProofTapeRegions, [u32; CANONICAL_PUBLIC_WORDS]>,
+    composition_challenge: Region<ProofTapeRegions, [u32; COMPOSITION_CHALLENGE_WORDS]>,
+    composition_values: Region<ProofTapeRegions, [u32; COMPOSITION_VALUE_WORDS]>,
+    composition_root: Region<ProofTapeRegions, [u32; COMPOSITION_ROOT_WORDS]>,
+    composition_transcript: Region<ProofTapeRegions, [u32; COMPOSITION_TRANSCRIPT_WORDS]>,
+    composition_value_valid: Region<
+        ProofTapeRegions,
+        [u32; COMPOSITION_VALUE_VALID_WORDS],
+    >,
+    composition_valid: Region<ProofTapeRegions, [u32; COMPOSITION_VALID_WORDS]>,
 }
 impl core::marker::Copy for ProofTapeRegions {}
 derive RegionSchema for ProofTapeRegions using RegionSchemaProvider
@@ -202,6 +378,16 @@ struct FriStatusRegions {
 impl core::marker::Copy for FriStatusRegions {}
 derive RegionSchema for FriStatusRegions using RegionSchemaProvider
 
+struct FriQueryStatusRegions {
+    index_valid: Region<FriQueryStatusRegions, [u32; FRI_VARIANTS]>,
+    opening_valid: Region<FriQueryStatusRegions, [u32; FRI_VARIANTS]>,
+    equal: Region<FriQueryStatusRegions, u32>,
+    correct: Region<FriQueryStatusRegions, u32>,
+    color: Region<FriQueryStatusRegions, u32>,
+}
+impl core::marker::Copy for FriQueryStatusRegions {}
+derive RegionSchema for FriQueryStatusRegions using RegionSchemaProvider
+
 const fn proof_tape_regions() -> ProofTapeRegions {
     <ProofTapeRegions as RegionSchema>::regions()
 }
@@ -220,6 +406,10 @@ const fn commitment_regions() -> CommitmentRegions {
 
 const fn fri_status_regions() -> FriStatusRegions {
     <FriStatusRegions as RegionSchema>::regions()
+}
+
+const fn fri_query_status_regions() -> FriQueryStatusRegions {
+    <FriQueryStatusRegions as RegionSchema>::regions()
 }
 
 #[inline(always)]
@@ -272,13 +462,13 @@ where
     store_region_indexed_word(tape, region, index, value)
 }
 
-type ProofLdeColumns = RBin<Pair, 2>
 type ProofLdeInputPlan = RBin<Pair, 2>
 type ProofLdeOutputPlan = RBin<Pair, 4>
 type ProofFriSchedule = FriSchedule<1, 4>
+const FRI_QUERY_IDENTITY: u32 = 1
+type ProofFriQueryPlan = FriQueryPlan<FRI_QUERY_IDENTITY, 1>
 type ProofFriLeafPairs = RBin<Pair, 3>
 type ProofFriVariants = RBin<Pair, 1>
-const LDE_TASKS: usize = <ProofLdeColumns as BalancedBinarySchedule>::LEAVES
 const INPUT_STAGES: usize = <ProofLdeInputPlan as FactorTree>::FACTORS
 const OUTPUT_STAGES: usize = <ProofLdeOutputPlan as FactorTree>::FACTORS
 const FRI_MAX_PAIR_LANES: usize =
@@ -296,18 +486,33 @@ const FRI_HASH_TAIL_WORDS: usize = FRI_VARIANTS * 10
 // Fe proves this concrete storage capacity against the schedule-derived
 // metadata below. Keeping the array length concrete avoids repeatedly
 // normalizing the recursive schedule inside every storage specialization.
-const FRI_TREE_NODES_PER_VARIANT: usize = 26
+// The complete 16-leaf AIR trees require 31 nodes per branded tree. The FRI
+// schedule reuses the same scratch after AIR commitment and occupies only the
+// first 26 nodes of either stride.
+const FRI_TREE_NODES_PER_VARIANT: usize = 31
 const FRI_TREE_WORDS: usize =
     FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT * DIGEST_FIELDS
 const FRI_TREE_VALID_WORDS: usize =
     FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT
 const FRI_PROGRESS_WORDS: usize = FRI_ROUNDS * FRI_WORKGROUP_LANES
+const FRI_QUERY_PROGRESS_WORDS: usize = FRI_WORKGROUP_LANES
+const FRI_QUERY_COPY_WORDS: usize =
+    FRI_QUERY_EVALUATION_WORDS + FRI_QUERY_SIBLING_WORDS
+const COMPOSITION_FOLD_WORDS_PER_ROW: usize = 2 * EXTENSION_WORDS
+const COMPOSITION_FOLD_WORDS: usize = LDE * COMPOSITION_FOLD_WORDS_PER_ROW
+const COMPOSITION_FAMILY_WORDS: usize = LDE * EXTENSION_WORDS
+const COMPOSITION_FOLD_VALID_WORDS: usize = LDE
 const FRI_SCRATCH_WORDS: usize = FRI_HASH_STATE_WORDS
     + FRI_HASH_VALID_WORDS
     + FRI_HASH_TAIL_WORDS
     + FRI_TREE_WORDS
     + FRI_TREE_VALID_WORDS
     + FRI_PROGRESS_WORDS
+    + FRI_QUERY_PROGRESS_WORDS
+    + FRI_QUERY_COPY_WORDS
+    + COMPOSITION_FOLD_WORDS
+    + 3 * COMPOSITION_FAMILY_WORDS
+    + COMPOSITION_FOLD_VALID_WORDS
 
 struct FriScratchRegions {
     hash_states: Region<FriScratchRegions, [u32; FRI_HASH_STATE_WORDS]>,
@@ -316,6 +521,25 @@ struct FriScratchRegions {
     tree: Region<FriScratchRegions, [u32; FRI_TREE_WORDS]>,
     tree_valid: Region<FriScratchRegions, [u32; FRI_TREE_VALID_WORDS]>,
     progress: Region<FriScratchRegions, [u32; FRI_PROGRESS_WORDS]>,
+    query_progress: Region<FriScratchRegions, [u32; FRI_QUERY_PROGRESS_WORDS]>,
+    query_copy_valid: Region<FriScratchRegions, [u32; FRI_QUERY_COPY_WORDS]>,
+    composition_fold: Region<FriScratchRegions, [u32; COMPOSITION_FOLD_WORDS]>,
+    composition_all_rows: Region<
+        FriScratchRegions,
+        [u32; COMPOSITION_FAMILY_WORDS],
+    >,
+    composition_pair_rows: Region<
+        FriScratchRegions,
+        [u32; COMPOSITION_FAMILY_WORDS],
+    >,
+    composition_first_row: Region<
+        FriScratchRegions,
+        [u32; COMPOSITION_FAMILY_WORDS],
+    >,
+    composition_fold_valid: Region<
+        FriScratchRegions,
+        [u32; COMPOSITION_FOLD_VALID_WORDS],
+    >,
 }
 impl core::marker::Copy for FriScratchRegions {}
 derive RegionSchema for FriScratchRegions using RegionSchemaProvider
@@ -335,6 +559,20 @@ const FRI_TREE_VALID_START: u32 =
     region_bounds(fri_scratch_regions().tree_valid).start
 const FRI_PROGRESS_START: u32 =
     region_bounds(fri_scratch_regions().progress).start
+const FRI_QUERY_PROGRESS_START: u32 =
+    region_bounds(fri_scratch_regions().query_progress).start
+const FRI_QUERY_COPY_VALID_START: u32 =
+    region_bounds(fri_scratch_regions().query_copy_valid).start
+const COMPOSITION_FOLD_START: u32 =
+    region_bounds(fri_scratch_regions().composition_fold).start
+const COMPOSITION_ALL_ROWS_START: u32 =
+    region_bounds(fri_scratch_regions().composition_all_rows).start
+const COMPOSITION_PAIR_ROWS_START: u32 =
+    region_bounds(fri_scratch_regions().composition_pair_rows).start
+const COMPOSITION_FIRST_ROW_START: u32 =
+    region_bounds(fri_scratch_regions().composition_first_row).start
+const COMPOSITION_FOLD_VALID_START: u32 =
+    region_bounds(fri_scratch_regions().composition_fold_valid).start
 
 #[inline(always)]
 fn fri_scratch_load(
@@ -351,20 +589,66 @@ fn fri_scratch_store(
     _ start: u32,
     _ index: u32,
     _ value: u32,
-) -> bool {
+) {
     scratch.store(index: start + index, value: value)
-    true
 }
 
 const fn proof_fri_metadata() -> FriScheduleMetadata {
     <ProofFriSchedule as FriScheduleShape>::fri_schedule_metadata()
 }
 
+const fn proof_fri_query_metadata() -> FriQueryPlanMetadata {
+    <ProofFriQueryPlan as FriQueryPlanShape>::fri_query_plan_metadata()
+}
+
+#[inline(always)]
+fn proof_fri_round_placements() -> [FriRoundPlacement; FRI_ROUNDS] {
+    [
+        <ProofFriSchedule as FriSchedulePlacement>::fri_round_placement(0),
+        <ProofFriSchedule as FriSchedulePlacement>::fri_round_placement(1),
+        <ProofFriSchedule as FriSchedulePlacement>::fri_round_placement(2),
+        <ProofFriSchedule as FriSchedulePlacement>::fri_round_placement(3),
+    ]
+}
+
 const HASH_STAGE_STEPS: usize =
     <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::STEPS
+const AIR_ROW_HASH_STATES: usize = LDE
+const AIR_ROW_HASH_LANES: usize = AIR_ROW_HASH_STATES * POSEIDON_LANES
+const MAIN_LDE_ROW_PERMUTATIONS: usize =
+    fixed_length_sponge_permutations(MAIN_COLUMN_COUNT)
+const AUXILIARY_LDE_ROW_PERMUTATIONS: usize =
+    fixed_length_sponge_permutations(AUXILIARY_ROW_BITS)
+const MAIN_LDE_ROW_SCHEDULE_STEPS: usize =
+    MAIN_LDE_ROW_PERMUTATIONS * HASH_STAGE_STEPS
+const AUXILIARY_LDE_ROW_SCHEDULE_STEPS: usize =
+    AUXILIARY_LDE_ROW_PERMUTATIONS * HASH_STAGE_STEPS
+const AIR_LDE_TREE_LEVELS: usize = 4
+const AIR_LDE_TREE_LEVEL_STEPS: usize = 1 + HASH_STAGE_STEPS
+const AIR_LDE_TREE_SCHEDULE_STEPS: usize =
+    AIR_LDE_TREE_LEVELS * AIR_LDE_TREE_LEVEL_STEPS
+const TRACE_HASH_STATES: usize = 2 * TRACE + 1
+const TRACE_HASH_LANES: usize = TRACE_HASH_STATES * POSEIDON_LANES
+const TRACE_COMMITMENT_PERMUTATIONS: usize = 2
+const TRACE_COMMITMENT_SCHEDULE_STEPS: usize =
+    TRACE_COMMITMENT_PERMUTATIONS * HASH_STAGE_STEPS
+const TRACE_TREE_LEVELS: usize = 2
+const TRACE_TREE_SCHEDULE_STEPS: usize =
+    TRACE_TREE_LEVELS * AIR_LDE_TREE_LEVEL_STEPS
+const AIR_TRANSCRIPT_BINDINGS: usize = 4
+const AIR_TRANSCRIPT_BINDING_STEPS: usize = 1 + 3 * HASH_STAGE_STEPS
+const AIR_TRANSCRIPT_SCHEDULE_STEPS: usize =
+    AIR_TRANSCRIPT_BINDINGS * AIR_TRANSCRIPT_BINDING_STEPS
 const FRI_CHALLENGE_PLACEMENT_STEPS: usize = 1 + 2 * HASH_STAGE_STEPS
+const COMPOSITION_CHALLENGE_SCHEDULE_STEPS: usize =
+    FRI_CHALLENGE_PLACEMENT_STEPS
+const COMPOSITION_LEAF_SCHEDULE_STEPS: usize = HASH_STAGE_STEPS
+const COMPOSITION_TREE_SCHEDULE_STEPS: usize = AIR_LDE_TREE_SCHEDULE_STEPS
+const COMPOSITION_TRANSCRIPT_SCHEDULE_STEPS: usize =
+    AIR_TRANSCRIPT_BINDING_STEPS
 const FRI_LEAF_PLACEMENT_STEPS: usize = 1 + HASH_STAGE_STEPS
 const FRI_BINDING_PLACEMENT_STEPS: usize = 1 + 3 * HASH_STAGE_STEPS
+const FRI_QUERY_PLACEMENT_STEPS: usize = 1 + 2 * HASH_STAGE_STEPS
 
 const fn fri_round_schedule_steps(_ tree_depth: usize) -> usize {
     FRI_CHALLENGE_PLACEMENT_STEPS
@@ -389,13 +673,19 @@ static_assert(runtime_fri_round_schedule_steps(3) == FRI_ROUND_1_STEPS.downcast_
 static_assert(runtime_fri_round_schedule_steps(2) == FRI_ROUND_2_STEPS.downcast_truncate())
 static_assert(runtime_fri_round_schedule_steps(1) == FRI_ROUND_3_STEPS.downcast_truncate())
 static_assert(runtime_fri_round_schedule_steps(0) == FRI_ROUND_4_STEPS.downcast_truncate())
-static_assert(LDE_TASKS == COLUMN_COUNT)
+static_assert(MAIN_COLUMN_COUNT == 17)
+static_assert(AUXILIARY_ROW_BITS == 411)
+static_assert(AIR_COLUMN_COUNT == 428)
+static_assert(AIR_TRACE_WORDS == 1712)
+static_assert(AIR_LDE_WORDS == 6848)
 static_assert(<ProofLdeInputPlan as FactorTree>::POINTS == TRACE)
 static_assert(<ProofLdeOutputPlan as FactorTree>::POINTS == LDE)
 static_assert(INPUT_STAGES == 2)
 static_assert(OUTPUT_STAGES == 4)
-static_assert(INPUT_GRID_LANES == 8)
-static_assert(OUTPUT_GRID_LANES == 32)
+static_assert(INPUT_GRID_LANES == 856)
+static_assert(OUTPUT_GRID_LANES == 3424)
+static_assert(INPUT_DISPATCH_X == 4)
+static_assert(OUTPUT_DISPATCH_X == 14)
 static_assert(proof_fri_metadata().rounds == FRI_ROUNDS.downcast_truncate())
 static_assert(proof_fri_metadata().first_round == 1)
 static_assert(proof_fri_metadata().next_round == 5)
@@ -410,20 +700,49 @@ static_assert(FRI_WORKGROUP_LANES == 256)
 static_assert(FRI_MAX_HASH_STATES == 16)
 static_assert(FRI_HASH_STATE_WORDS == 512)
 static_assert(proof_fri_metadata().layer_tree_nodes == 26)
-static_assert(FRI_TREE_NODES_PER_VARIANT == 26)
-static_assert(FRI_TREE_WORDS == 416)
-static_assert(FRI_TREE_VALID_WORDS == 52)
-static_assert(FRI_SCRATCH_WORDS == 2040)
+static_assert(proof_fri_metadata().query_evaluations == FRI_QUERY_EVALUATIONS.downcast_truncate())
+static_assert(proof_fri_metadata().query_path_siblings == FRI_QUERY_PATH_SIBLINGS.downcast_truncate())
+static_assert(proof_fri_query_metadata().samples == 1)
+static_assert(proof_fri_query_metadata().first_query == 1)
+static_assert(proof_fri_query_metadata().next_query == 2)
+static_assert(FRI_TREE_NODES_PER_VARIANT == 31)
+static_assert(FRI_TREE_WORDS == 496)
+static_assert(FRI_TREE_VALID_WORDS == 62)
+static_assert(COMPOSITION_FOLD_WORDS == 128)
+static_assert(COMPOSITION_FOLD_VALID_WORDS == 16)
+static_assert(FRI_SCRATCH_WORDS == 2874)
 static_assert(FRI_PROGRESS_WORDS == 1024)
+static_assert(FRI_QUERY_PROGRESS_WORDS == 256)
+static_assert(FRI_QUERY_COPY_WORDS == 152)
 static_assert(
     <FriScratchRegions as RegionSchema>::WORDS
         == FRI_SCRATCH_WORDS.downcast_truncate()
 )
 static_assert(HASH_STAGE_STEPS == 44)
+static_assert(AIR_ROW_HASH_STATES == 16)
+static_assert(AIR_ROW_HASH_LANES == 256)
+static_assert(MAIN_LDE_ROW_PERMUTATIONS == 3)
+static_assert(AUXILIARY_LDE_ROW_PERMUTATIONS == 52)
+static_assert(MAIN_LDE_ROW_SCHEDULE_STEPS == 132)
+static_assert(AUXILIARY_LDE_ROW_SCHEDULE_STEPS == 2288)
+static_assert(AIR_LDE_TREE_LEVELS == 4)
+static_assert(AIR_LDE_TREE_SCHEDULE_STEPS == 180)
+static_assert(TRACE_HASH_STATES == 9)
+static_assert(TRACE_HASH_LANES == 144)
+static_assert(TRACE_COMMITMENT_SCHEDULE_STEPS == 88)
+static_assert(TRACE_TREE_LEVELS == 2)
+static_assert(TRACE_TREE_SCHEDULE_STEPS == 90)
+static_assert(AIR_TRANSCRIPT_BINDING_STEPS == 133)
+static_assert(AIR_TRANSCRIPT_SCHEDULE_STEPS == 532)
+static_assert(COMPOSITION_CHALLENGE_SCHEDULE_STEPS == 89)
+static_assert(COMPOSITION_LEAF_SCHEDULE_STEPS == 44)
+static_assert(COMPOSITION_TREE_SCHEDULE_STEPS == 180)
+static_assert(COMPOSITION_TRANSCRIPT_SCHEDULE_STEPS == 133)
 static_assert(FRI_ROUND_1_STEPS == 403)
 static_assert(FRI_ROUND_2_STEPS == 358)
 static_assert(FRI_ROUND_3_STEPS == 313)
 static_assert(FRI_ROUND_4_STEPS == 268)
+static_assert(FRI_QUERY_PLACEMENT_STEPS == 89)
 static_assert(<ProofTapeRegions as RegionSchema>::WORDS == PROOF_WORDS.downcast_truncate())
 static_assert(<TraceRegions as RegionSchema>::WORDS == TRACE_WORDS.downcast_truncate())
 static_assert(<StatusRegions as RegionSchema>::WORDS == STATUS_WORDS.downcast_truncate())
@@ -627,6 +946,24 @@ fn load_digest(
 }
 
 #[inline(always)]
+fn store_digest(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ region: Region<ProofTapeRegions, [u32; DIGEST_FIELDS]>,
+    _ digest: Poseidon2Digest,
+) {
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        proof_store(
+            tape,
+            region,
+            field,
+            digest.field(index: field).to_u32(),
+        )
+        field = field + 1
+    }
+}
+
+#[inline(always)]
 fn load_fri_root_digest(
     _ tape: ProofTape<u32, PROOF_WORDS>,
     _ root_index: u32,
@@ -733,6 +1070,126 @@ fn load_fri_evaluation(
         proof_load(tape, region, base + 2),
         proof_load(tape, region, base + 3),
     )
+}
+
+#[inline(always)]
+fn store_composition_value(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ evaluation: u32,
+    _ value: BabyBearExt4,
+) {
+    let region = proof_tape_regions().composition_values
+    let base = evaluation * EXTENSION_WORDS.downcast_truncate()
+    proof_store(tape, region, base, value.coefficient_0().to_u32())
+    proof_store(tape, region, base + 1, value.coefficient_1().to_u32())
+    proof_store(tape, region, base + 2, value.coefficient_2().to_u32())
+    proof_store(tape, region, base + 3, value.coefficient_3().to_u32())
+}
+
+#[inline(always)]
+fn load_composition_value(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+    _ evaluation: u32,
+) -> BabyBearExt4 {
+    let region = proof_tape_regions().composition_values
+    let base = evaluation * EXTENSION_WORDS.downcast_truncate()
+    BabyBearExt4::from_coordinate_words(
+        proof_load(tape, region, base),
+        proof_load(tape, region, base + 1),
+        proof_load(tape, region, base + 2),
+        proof_load(tape, region, base + 3),
+    )
+}
+
+#[inline(always)]
+fn load_composition_challenge(
+    _ tape: ProofTape<u32, PROOF_WORDS>,
+) -> BabyBearExt4 {
+    let region = proof_tape_regions().composition_challenge
+    BabyBearExt4::from_coordinate_words(
+        proof_load(tape, region, 0),
+        proof_load(tape, region, 1),
+        proof_load(tape, region, 2),
+        proof_load(tape, region, 3),
+    )
+}
+
+#[inline(always)]
+fn store_composition_fold<const ABSORBED: usize>(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ row: u32,
+    _ checkpoint: ConstraintFoldCheckpoint<BabyBearExt4, ABSORBED>,
+) {
+    let power = constraint_fold_power<BabyBearExt4, ABSORBED>(checkpoint)
+    let value = constraint_fold_value<BabyBearExt4, ABSORBED>(checkpoint)
+    let base = row * COMPOSITION_FOLD_WORDS_PER_ROW.downcast_truncate()
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base, power.coefficient_0().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 1, power.coefficient_1().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 2, power.coefficient_2().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 3, power.coefficient_3().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 4, value.coefficient_0().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 5, value.coefficient_1().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 6, value.coefficient_2().to_u32())
+    fri_scratch_store(scratch, COMPOSITION_FOLD_START, base + 7, value.coefficient_3().to_u32())
+}
+
+#[inline(always)]
+fn load_composition_fold<const ABSORBED: usize>(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ challenge: BabyBearExt4,
+    _ row: u32,
+) -> ConstraintFoldCheckpoint<BabyBearExt4, ABSORBED> {
+    let base = row * COMPOSITION_FOLD_WORDS_PER_ROW.downcast_truncate()
+    let power = BabyBearExt4::from_coordinate_words(
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base),
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 1),
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 2),
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 3),
+    )
+    let value = BabyBearExt4::from_coordinate_words(
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 4),
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 5),
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 6),
+        fri_scratch_load(scratch, COMPOSITION_FOLD_START, base + 7),
+    )
+    restore_constraint_fold<BabyBearExt4, ABSORBED>(challenge, power, value)
+}
+
+#[inline(always)]
+fn store_composition_family(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ start: u32,
+    _ row: u32,
+    _ value: BabyBearExt4,
+) {
+    let base = row * EXTENSION_WORDS.downcast_truncate()
+    fri_scratch_store(scratch, start, base, value.coefficient_0().to_u32())
+    fri_scratch_store(scratch, start, base + 1, value.coefficient_1().to_u32())
+    fri_scratch_store(scratch, start, base + 2, value.coefficient_2().to_u32())
+    fri_scratch_store(scratch, start, base + 3, value.coefficient_3().to_u32())
+}
+
+#[inline(always)]
+fn load_composition_family(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ start: u32,
+    _ row: u32,
+) -> BabyBearExt4 {
+    let base = row * EXTENSION_WORDS.downcast_truncate()
+    BabyBearExt4::from_coordinate_words(
+        fri_scratch_load(scratch, start, base),
+        fri_scratch_load(scratch, start, base + 1),
+        fri_scratch_load(scratch, start, base + 2),
+        fri_scratch_load(scratch, start, base + 3),
+    )
+}
+
+#[inline(always)]
+fn composition_fold_is_valid(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ row: u32,
+) -> bool {
+    fri_scratch_load(scratch, COMPOSITION_FOLD_VALID_START, row) == 1
 }
 
 #[inline(always)]
@@ -929,6 +1386,1232 @@ fn tree_level_offset(_ output_width: u32, _ level: u32) -> u32 {
         current = current + 1
     }
     offset
+}
+
+#[inline(always)]
+fn air_lde_field(
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ row: u32,
+    _ column: u32,
+) -> BabyBear {
+    BabyBear::from_u32(values.load(
+        index: column * LDE.downcast_truncate() + row,
+    ))
+}
+
+/// Physical source for one authenticated production AIR position. The shared
+/// AIR owns the constraint equations; this placement owns the browser LDE
+/// resource and runtime row coordinate. Keeping the coordinate in the source
+/// lets the semantic current/next row views remain zero-sized type witnesses.
+struct GpuAirLdeSource {
+    values: ProofTape<u32, AIR_LDE_WORDS>,
+    row: u32,
+}
+
+impl core::marker::Copy for GpuAirLdeSource {}
+
+struct GpuAirLdeRow {}
+impl core::marker::Copy for GpuAirLdeRow {}
+
+struct GpuAirLdeNextRow {}
+impl core::marker::Copy for GpuAirLdeNextRow {}
+
+#[inline(always)]
+fn gpu_air_lde_main(
+    _ source: GpuAirLdeSource,
+    _ row: u32,
+    _ column: usize,
+) -> BabyBearExt4 {
+    if column >= MAIN_COLUMN_COUNT { return BabyBearExt4::zero() }
+    let column_index: u32 = column.downcast_truncate()
+    let lde_width: u32 = LDE.downcast_truncate()
+    BabyBearExt4::from_base(BabyBear::from_u32(source.values.load(
+        index: column_index * lde_width + row,
+    )))
+}
+
+#[inline(always)]
+fn gpu_air_lde_auxiliary(
+    _ source: GpuAirLdeSource,
+    _ row: u32,
+    _ column: usize,
+) -> BabyBearExt4 {
+    if column >= AUXILIARY_ROW_BITS { return BabyBearExt4::zero() }
+    let column_index: u32 = (MAIN_COLUMN_COUNT + column).downcast_truncate()
+    let lde_width: u32 = LDE.downcast_truncate()
+    BabyBearExt4::from_base(BabyBear::from_u32(source.values.load(
+        index: column_index * lde_width + row,
+    )))
+}
+
+impl AirColumnView<
+    BabyBearExt4,
+    GpuAirLdeSource,
+> for GpuAirLdeRow {
+    fn main(
+        ref self,
+        _ source: GpuAirLdeSource,
+        _ column: usize,
+    ) -> BabyBearExt4 {
+        gpu_air_lde_main(source, source.row, column)
+    }
+
+    fn auxiliary(
+        ref self,
+        _ source: GpuAirLdeSource,
+        _ column: usize,
+    ) -> BabyBearExt4 {
+        gpu_air_lde_auxiliary(source, source.row, column)
+    }
+}
+
+impl AirColumnView<
+    BabyBearExt4,
+    GpuAirLdeSource,
+> for GpuAirLdeNextRow {
+    fn main(
+        ref self,
+        _ source: GpuAirLdeSource,
+        _ column: usize,
+    ) -> BabyBearExt4 {
+        let row = (source.row + (LDE / TRACE).downcast_truncate())
+            % LDE.downcast_truncate()
+        gpu_air_lde_main(source, row, column)
+    }
+
+    fn auxiliary(
+        ref self,
+        _ source: GpuAirLdeSource,
+        _ column: usize,
+    ) -> BabyBearExt4 {
+        let row = (source.row + (LDE / TRACE).downcast_truncate())
+            % LDE.downcast_truncate()
+        gpu_air_lde_auxiliary(source, row, column)
+    }
+}
+
+/// Fold the selector-dependent pair-row family from the exact 653-constraint
+/// boundary. The constraint program remains shared with scalar interpreters.
+#[inline(always)]
+fn fold_production_pair_rows(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ checkpoint: ConstraintFoldCheckpoint<BabyBearExt4, 653>,
+    _ evaluation: u32,
+) -> PairRowsConstraintCheckpoint<BabyBearExt4> {
+    let regions = proof_tape_regions()
+    let sign_re = BabyBearExt4::from_base(BabyBear::from_u32(proof_load(
+        proof,
+        regions.canonical_public,
+        0,
+    )))
+    let magnitude_re = BabyBearExt4::from_base(BabyBear::from_u32(proof_load(
+        proof,
+        regions.canonical_public,
+        1,
+    )))
+    let sign_im = BabyBearExt4::from_base(BabyBear::from_u32(proof_load(
+        proof,
+        regions.canonical_public,
+        2,
+    )))
+    let magnitude_im = BabyBearExt4::from_base(BabyBear::from_u32(proof_load(
+        proof,
+        regions.canonical_public,
+        3,
+    )))
+    let source = GpuAirLdeSource {
+        values: values,
+        row: evaluation,
+    }
+    let row = GpuAirLdeRow {}
+    let next = GpuAirLdeNextRow {}
+    fold_pair_rows_constraints<
+        BabyBearExt4,
+        GpuAirLdeSource,
+        GpuAirLdeRow,
+        GpuAirLdeNextRow,
+    >(
+        checkpoint,
+        source,
+        signed_air_value<BabyBearExt4>(sign_re, magnitude_re),
+        signed_air_value<BabyBearExt4>(sign_im, magnitude_im),
+        ref row,
+        ref next,
+    )
+}
+
+#[inline(always)]
+fn fold_production_first_row(
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ checkpoint: PairRowsConstraintCheckpoint<BabyBearExt4>,
+    _ evaluation: u32,
+) -> FirstRowConstraintCheckpoint<BabyBearExt4> {
+    let source = GpuAirLdeSource { values: values, row: evaluation }
+    let row = GpuAirLdeRow {}
+    fold_first_row_constraints<
+        BabyBearExt4,
+        GpuAirLdeSource,
+        GpuAirLdeRow,
+    >(checkpoint, source, ref row)
+}
+
+#[inline(always)]
+fn fold_production_last_row(
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ checkpoint: FirstRowConstraintCheckpoint<BabyBearExt4>,
+    _ evaluation: u32,
+) -> ConstraintNumeratorCheckpoint<BabyBearExt4> {
+    let source = GpuAirLdeSource { values: values, row: evaluation }
+    let row = GpuAirLdeRow {}
+    fold_last_row_constraints<
+        BabyBearExt4,
+        GpuAirLdeSource,
+        GpuAirLdeRow,
+    >(checkpoint, source, ref row)
+}
+
+#[inline(always)]
+fn project_production_composition_value(
+    _ checkpoint: ConstraintNumeratorCheckpoint<BabyBearExt4>,
+    _ evaluation: u32,
+) -> CompositionValue<BabyBearExt4> {
+    let point = BabyBear::from_u32(7)
+        * BabyBear::two_adic_root(4).pow_u32(evaluation)
+    composition_value<BabyBearExt4, TRACE>(
+        BabyBearExt4::from_base(point),
+        constraint_numerators_from_checkpoint(checkpoint),
+    )
+}
+
+#[inline(always)]
+fn air_lde_range_is_canonical(
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ row: u32,
+    _ column: u32,
+    _ count: u32,
+) -> bool
+{
+    let mut valid = true
+    let mut index: u32 = 0
+    while index < count {
+        let word = values.load(
+            index: (column + index) * LDE.downcast_truncate() + row,
+        )
+        if word >= BABY_BEAR_MODULUS { valid = false }
+        index = index + 1
+    }
+    valid
+}
+
+#[inline(always)]
+fn initialize_air_lde_row_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ auxiliary: bool,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    let row = lane / POSEIDON_LANES.downcast_truncate()
+    let column = if auxiliary {
+        MAIN_COLUMN_COUNT.downcast_truncate()
+    } else {
+        0
+    }
+    let fields = [
+        air_lde_field(values, row, column),
+        air_lde_field(values, row, column + 1),
+        air_lde_field(values, row, column + 2),
+        air_lde_field(values, row, column + 3),
+        air_lde_field(values, row, column + 4),
+        air_lde_field(values, row, column + 5),
+    ]
+    let expected = if auxiliary {
+        AUXILIARY_ROW_BITS.downcast_truncate()
+    } else {
+        MAIN_COLUMN_COUNT.downcast_truncate()
+    }
+    let tag = if auxiliary {
+        auxiliary_lde_row_domain_tag()
+    } else {
+        main_lde_row_domain_tag()
+    }
+    let permutation = Poseidon2FieldSponge::begin_tag(tag, expected)
+        .begin_permutation<6>(ref fields)
+    initialize_hash_lane(
+        scratch,
+        row,
+        field_lane,
+        ref permutation,
+        air_lde_range_is_canonical(values, row, column, 6),
+    )
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, 0)
+}
+
+#[inline(always)]
+fn advance_main_lde_row_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    let row = lane / POSEIDON_LANES.downcast_truncate()
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= MAIN_LDE_ROW_SCHEDULE_STEPS.downcast_truncate() { return }
+    let block = step / HASH_STAGE_STEPS.downcast_truncate()
+    let hash_step = step % HASH_STAGE_STEPS.downcast_truncate()
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if hash_step < transition {
+        advance_hash_lane(proof, scratch, row, field_lane, hash_step)
+    } else if block == 0 {
+        let fields = [
+            air_lde_field(values, row, 6),
+            air_lde_field(values, row, 7),
+            air_lde_field(values, row, 8),
+            air_lde_field(values, row, 9),
+            air_lde_field(values, row, 10),
+            air_lde_field(values, row, 11),
+            air_lde_field(values, row, 12),
+            air_lde_field(values, row, 13),
+        ]
+        let sponge = Poseidon2FieldSponge::restore(
+            load_hash_buffer(scratch, row, true),
+            0,
+            MAIN_COLUMN_COUNT.downcast_truncate(),
+            6,
+        )
+        let permutation = sponge.begin_permutation<8>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            row,
+            field_lane,
+            ref permutation,
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row) == 1
+                && air_lde_range_is_canonical(values, row, 6, 8),
+        )
+    } else if block == 1 {
+        let fields = [
+            air_lde_field(values, row, 14),
+            air_lde_field(values, row, 15),
+            air_lde_field(values, row, 16),
+        ]
+        let sponge = Poseidon2FieldSponge::restore(
+            load_hash_buffer(scratch, row, true),
+            0,
+            MAIN_COLUMN_COUNT.downcast_truncate(),
+            14,
+        )
+        let permutation = sponge.begin_final_permutation<3>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            row,
+            field_lane,
+            ref permutation,
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row) == 1
+                && air_lde_range_is_canonical(values, row, 14, 3),
+        )
+    } else if field_lane == 0 {
+        store_tree_digest(scratch, tree_node(0, 0, row), hash_digest(scratch, row))
+        fri_scratch_store(
+            scratch,
+            FRI_TREE_VALID_START,
+            tree_node(0, 0, row),
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row),
+        )
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn advance_auxiliary_lde_row_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ values: ProofTape<u32, AIR_LDE_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    let row = lane / POSEIDON_LANES.downcast_truncate()
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= AUXILIARY_LDE_ROW_SCHEDULE_STEPS.downcast_truncate() { return }
+    let block = step / HASH_STAGE_STEPS.downcast_truncate()
+    let hash_step = step % HASH_STAGE_STEPS.downcast_truncate()
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if hash_step < transition {
+        advance_hash_lane(proof, scratch, row, field_lane, hash_step)
+    } else if block < 50 {
+        let start = 6 + block * SPONGE_RATE.downcast_truncate()
+        let auxiliary_start: u32 = MAIN_COLUMN_COUNT.downcast_truncate()
+        let column = auxiliary_start + start
+        let fields = [
+            air_lde_field(values, row, column),
+            air_lde_field(values, row, column + 1),
+            air_lde_field(values, row, column + 2),
+            air_lde_field(values, row, column + 3),
+            air_lde_field(values, row, column + 4),
+            air_lde_field(values, row, column + 5),
+            air_lde_field(values, row, column + 6),
+            air_lde_field(values, row, column + 7),
+        ]
+        let sponge = Poseidon2FieldSponge::restore(
+            load_hash_buffer(scratch, row, true),
+            0,
+            AUXILIARY_ROW_BITS.downcast_truncate(),
+            start,
+        )
+        let permutation = sponge.begin_permutation<8>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            row,
+            field_lane,
+            ref permutation,
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row) == 1
+                && air_lde_range_is_canonical(values, row, column, 8),
+        )
+    } else if block == 50 {
+        let column = (MAIN_COLUMN_COUNT + 406).downcast_truncate()
+        let fields = [
+            air_lde_field(values, row, column),
+            air_lde_field(values, row, column + 1),
+            air_lde_field(values, row, column + 2),
+            air_lde_field(values, row, column + 3),
+            air_lde_field(values, row, column + 4),
+        ]
+        let sponge = Poseidon2FieldSponge::restore(
+            load_hash_buffer(scratch, row, true),
+            0,
+            AUXILIARY_ROW_BITS.downcast_truncate(),
+            406,
+        )
+        let permutation = sponge.begin_final_permutation<5>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            row,
+            field_lane,
+            ref permutation,
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row) == 1
+                && air_lde_range_is_canonical(values, row, column, 5),
+        )
+    } else if field_lane == 0 {
+        store_tree_digest(scratch, tree_node(1, 0, row), hash_digest(scratch, row))
+        fri_scratch_store(
+            scratch,
+            FRI_TREE_VALID_START,
+            tree_node(1, 0, row),
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row),
+        )
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn advance_air_lde_trees(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= AIR_LDE_TREE_SCHEDULE_STEPS.downcast_truncate() { return }
+    let level = step / AIR_LDE_TREE_LEVEL_STEPS.downcast_truncate()
+    let level_step = step % AIR_LDE_TREE_LEVEL_STEPS.downcast_truncate()
+    let lde_width: u32 = LDE.downcast_truncate()
+    let child_width = lde_width >> level
+    let parent_width = child_width / 2
+    let active_lanes = 2 * parent_width * POSEIDON_LANES.downcast_truncate()
+    if lane < active_lanes {
+        let state = lane / POSEIDON_LANES.downcast_truncate()
+        let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+        let tree = state / parent_width
+        let parent = state % parent_width
+        let child_offset = tree_level_offset(LDE.downcast_truncate(), level)
+        let parent_offset = child_offset + child_width
+        let left = tree_node(tree, 0, child_offset + 2 * parent)
+        let right = left + 1
+        if level_step == 0 {
+            let permutation = begin_compression_placement(
+                load_tree_digest(scratch, left),
+                load_tree_digest(scratch, right),
+            )
+            initialize_hash_lane(
+                scratch,
+                state,
+                field_lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_TREE_VALID_START, left) == 1
+                    && fri_scratch_load(scratch, FRI_TREE_VALID_START, right) == 1,
+            )
+        } else {
+            let hash_step = level_step - 1
+            let transition =
+                <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+            if hash_step < transition {
+                advance_hash_lane(proof, scratch, state, field_lane, hash_step)
+            } else if field_lane == 0 {
+                let node = tree_node(tree, 0, parent_offset + parent)
+                let digest = hash_digest(scratch, state)
+                let valid = fri_scratch_load(scratch, FRI_HASH_VALID_START, state)
+                store_tree_digest(scratch, node, digest)
+                fri_scratch_store(scratch, FRI_TREE_VALID_START, node, valid)
+                if level + 1 == AIR_LDE_TREE_LEVELS.downcast_truncate() {
+                    let regions = proof_tape_regions()
+                    if tree == 0 {
+                        store_digest(proof, regions.main_lde_root, digest)
+                    } else {
+                        store_digest(proof, regions.auxiliary_lde_root, digest)
+                    }
+                    proof_store(proof, regions.air_lde_root_valid, tree, valid)
+                }
+            }
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn packed_trace_word(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ state: u32,
+    _ field: u32,
+) -> u32 {
+    let regions = proof_tape_regions()
+    if state < TRACE.downcast_truncate() {
+        proof_load(
+            proof,
+            regions.packed_main_trace,
+            state * ROW_FIELDS.downcast_truncate() + field,
+        )
+    } else if state < (2 * TRACE).downcast_truncate() {
+        proof_load(
+            proof,
+            regions.packed_auxiliary_trace,
+            (state - TRACE.downcast_truncate())
+                * AUXILIARY_FIELDS.downcast_truncate() + field,
+        )
+    } else {
+        proof_load(proof, regions.packed_public, field)
+    }
+}
+
+#[inline(always)]
+fn packed_trace_range_is_canonical(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ state: u32,
+    _ start: u32,
+    _ count: u32,
+) -> bool {
+    let mut valid = true
+    let mut field: u32 = 0
+    while field < count {
+        if packed_trace_word(proof, state, start + field) >= BABY_BEAR_MODULUS {
+            valid = false
+        }
+        field = field + 1
+    }
+    valid
+}
+
+#[inline(always)]
+fn initialize_trace_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= TRACE_HASH_LANES.downcast_truncate() { return }
+    let state = lane / POSEIDON_LANES.downcast_truncate()
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    if state < TRACE.downcast_truncate() {
+        let fields = [
+            BabyBear::from_u32(packed_trace_word(proof, state, 0)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 1)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 2)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 3)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 4)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 5)),
+        ]
+        let permutation = Poseidon2FieldSponge::begin_prefixed_tag(
+            row_domain_tag(),
+            210,
+            ROW_FIELDS.downcast_truncate(),
+        ).begin_permutation<6>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            state,
+            field_lane,
+            ref permutation,
+            packed_trace_range_is_canonical(proof, state, 0, 6),
+        )
+    } else if state < (2 * TRACE).downcast_truncate() {
+        let fields = [
+            BabyBear::from_u32(packed_trace_word(proof, state, 0)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 1)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 2)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 3)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 4)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 5)),
+        ]
+        let permutation = Poseidon2FieldSponge::begin_prefixed_tag(
+            auxiliary_domain_tag(),
+            AUXILIARY_ROW_BITS.downcast_truncate(),
+            AUXILIARY_FIELDS.downcast_truncate(),
+        ).begin_permutation<6>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            state,
+            field_lane,
+            ref permutation,
+            packed_trace_range_is_canonical(proof, state, 0, 6),
+        )
+    } else {
+        let fields = [
+            BabyBear::from_u32(packed_trace_word(proof, state, 0)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 1)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 2)),
+            BabyBear::from_u32(packed_trace_word(proof, state, 3)),
+        ]
+        let permutation = Poseidon2FieldSponge::begin_prefixed_tag(
+            public_domain_tag(),
+            114,
+            PUBLIC_FIELDS.downcast_truncate(),
+        ).begin_final_permutation<4>(ref fields)
+        initialize_hash_lane(
+            scratch,
+            state,
+            field_lane,
+            ref permutation,
+            packed_trace_range_is_canonical(proof, state, 0, 4),
+        )
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, 0)
+}
+
+#[inline(always)]
+fn advance_trace_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= TRACE_HASH_LANES.downcast_truncate() { return }
+    let state = lane / POSEIDON_LANES.downcast_truncate()
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= TRACE_COMMITMENT_SCHEDULE_STEPS.downcast_truncate() { return }
+    let block = step / HASH_STAGE_STEPS.downcast_truncate()
+    let hash_step = step % HASH_STAGE_STEPS.downcast_truncate()
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if block == 0 && hash_step < transition {
+        advance_hash_lane(proof, scratch, state, field_lane, hash_step)
+    } else if block == 0 {
+        if state < TRACE.downcast_truncate() {
+            let fields = [BabyBear::from_u32(packed_trace_word(proof, state, 6))]
+            let sponge = Poseidon2FieldSponge::restore(
+                load_hash_buffer(scratch, state, true),
+                0,
+                ROW_FIELDS.downcast_truncate(),
+                6,
+            )
+            let permutation = sponge.begin_final_permutation<1>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                state,
+                field_lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, state) == 1
+                    && packed_trace_range_is_canonical(proof, state, 6, 1),
+            )
+        } else if state < (2 * TRACE).downcast_truncate() {
+            let fields = [
+                BabyBear::from_u32(packed_trace_word(proof, state, 6)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 7)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 8)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 9)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 10)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 11)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 12)),
+                BabyBear::from_u32(packed_trace_word(proof, state, 13)),
+            ]
+            let sponge = Poseidon2FieldSponge::restore(
+                load_hash_buffer(scratch, state, true),
+                0,
+                AUXILIARY_FIELDS.downcast_truncate(),
+                6,
+            )
+            let permutation = sponge.begin_permutation<8>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                state,
+                field_lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, state) == 1
+                    && packed_trace_range_is_canonical(proof, state, 6, 8),
+            )
+        } else if field_lane == 0 {
+            let digest = hash_digest(scratch, state)
+            store_digest(proof, proof_tape_regions().public_digest, digest)
+            proof_store(
+                proof,
+                proof_tape_regions().production_trace_digest_valid,
+                2,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, state),
+            )
+        }
+    } else if state < (2 * TRACE).downcast_truncate() {
+        if hash_step < transition {
+            advance_hash_lane(proof, scratch, state, field_lane, hash_step)
+        } else if field_lane == 0 {
+            let tree = if state < TRACE.downcast_truncate() { 0 } else { 1 }
+            let row = state % TRACE.downcast_truncate()
+            let node = tree_node(tree, 0, row)
+            store_tree_digest(scratch, node, hash_digest(scratch, state))
+            fri_scratch_store(
+                scratch,
+                FRI_TREE_VALID_START,
+                node,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, state),
+            )
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn advance_trace_trees(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= TRACE_TREE_SCHEDULE_STEPS.downcast_truncate() { return }
+    let level = step / AIR_LDE_TREE_LEVEL_STEPS.downcast_truncate()
+    let level_step = step % AIR_LDE_TREE_LEVEL_STEPS.downcast_truncate()
+    let trace_width: u32 = TRACE.downcast_truncate()
+    let child_width = trace_width >> level
+    let parent_width = child_width / 2
+    let active_lanes = 2 * parent_width * POSEIDON_LANES.downcast_truncate()
+    if lane < active_lanes {
+        let state = lane / POSEIDON_LANES.downcast_truncate()
+        let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+        let tree = state / parent_width
+        let parent = state % parent_width
+        let child_offset = tree_level_offset(trace_width, level)
+        let parent_offset = child_offset + child_width
+        let left = tree_node(tree, 0, child_offset + 2 * parent)
+        let right = left + 1
+        if level_step == 0 {
+            let permutation = begin_compression_placement(
+                load_tree_digest(scratch, left),
+                load_tree_digest(scratch, right),
+            )
+            initialize_hash_lane(
+                scratch,
+                state,
+                field_lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_TREE_VALID_START, left) == 1
+                    && fri_scratch_load(scratch, FRI_TREE_VALID_START, right) == 1,
+            )
+        } else {
+            let hash_step = level_step - 1
+            let transition =
+                <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+            if hash_step < transition {
+                advance_hash_lane(proof, scratch, state, field_lane, hash_step)
+            } else if field_lane == 0 {
+                let node = tree_node(tree, 0, parent_offset + parent)
+                let digest = hash_digest(scratch, state)
+                let valid = fri_scratch_load(scratch, FRI_HASH_VALID_START, state)
+                store_tree_digest(scratch, node, digest)
+                fri_scratch_store(scratch, FRI_TREE_VALID_START, node, valid)
+                if level + 1 == TRACE_TREE_LEVELS.downcast_truncate() {
+                    let regions = proof_tape_regions()
+                    if tree == 0 {
+                        store_digest(proof, regions.main_trace_root, digest)
+                    } else {
+                        store_digest(proof, regions.auxiliary_trace_root, digest)
+                    }
+                    proof_store(
+                        proof,
+                        regions.production_trace_digest_valid,
+                        tree,
+                        valid,
+                    )
+                }
+            }
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn advance_air_transcript(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= POSEIDON_LANES.downcast_truncate() { return }
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= AIR_TRANSCRIPT_SCHEDULE_STEPS.downcast_truncate() { return }
+    let binding = step / AIR_TRANSCRIPT_BINDING_STEPS.downcast_truncate()
+    let relative = step % AIR_TRANSCRIPT_BINDING_STEPS.downcast_truncate()
+    let regions = proof_tape_regions()
+    if relative == 0 {
+        let left = if binding == 0 {
+            load_digest(proof, regions.public_digest)
+        } else {
+            load_digest(proof, regions.air_transcript)
+        }
+        let right = if binding == 0 {
+            load_digest(proof, regions.main_trace_root)
+        } else if binding == 1 {
+            load_digest(proof, regions.auxiliary_trace_root)
+        } else if binding == 2 {
+            load_digest(proof, regions.main_lde_root)
+        } else {
+            load_digest(proof, regions.auxiliary_lde_root)
+        }
+        let tag = if binding == 0 {
+            statement_domain_tag()
+        } else if binding == 1 {
+            proof_transcript_domain_tag()
+        } else if binding == 2 {
+            main_lde_transcript_domain_tag()
+        } else {
+            auxiliary_lde_transcript_domain_tag()
+        }
+        let input_valid = if binding == 0 {
+            proof_load(proof, regions.production_trace_digest_valid, 2) == 1
+                && proof_load(proof, regions.production_trace_digest_valid, 0) == 1
+        } else if binding == 1 {
+            proof_load(proof, regions.air_transcript_valid, 0) == 1
+                && proof_load(proof, regions.production_trace_digest_valid, 1) == 1
+        } else if binding == 2 {
+            proof_load(proof, regions.air_transcript_valid, 0) == 1
+                && proof_load(proof, regions.air_lde_root_valid, 0) == 1
+        } else {
+            proof_load(proof, regions.air_transcript_valid, 0) == 1
+                && proof_load(proof, regions.air_lde_root_valid, 1) == 1
+        }
+        let placed = begin_binding_placement_tag(tag, left, right)
+        initialize_hash_lane(
+            scratch,
+            0,
+            lane,
+            ref placed.permutation,
+            input_valid,
+        )
+        if lane < 10 {
+            fri_scratch_store(
+                scratch,
+                FRI_HASH_TAILS_START,
+                lane,
+                placed.remaining[lane as usize].to_u32(),
+            )
+        }
+    } else {
+        let block_relative = relative - 1
+        let block = block_relative / HASH_STAGE_STEPS.downcast_truncate()
+        let hash_step = block_relative % HASH_STAGE_STEPS.downcast_truncate()
+        let transition =
+            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+        if hash_step < transition {
+            advance_hash_lane(proof, scratch, 0, lane, hash_step)
+        } else if block == 0 {
+            let output = load_hash_buffer(scratch, 0, true)
+            let mut fields = [BabyBear::zero(); 8]
+            let mut field: usize = 0
+            while field < 8 {
+                fields[field] = BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    field.downcast_truncate(),
+                ))
+                field = field + 1
+            }
+            let permutation = Poseidon2FieldSponge::restore(output, 0, 16, 6)
+                .begin_permutation<8>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                0,
+                lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0) == 1,
+            )
+        } else if block == 1 {
+            let output = load_hash_buffer(scratch, 0, true)
+            let fields = [
+                BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    8,
+                )),
+                BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    9,
+                )),
+            ]
+            let permutation = Poseidon2FieldSponge::restore(output, 0, 16, 14)
+                .begin_final_permutation<2>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                0,
+                lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0) == 1,
+            )
+        } else if lane == 0 {
+            store_digest(proof, regions.air_transcript, hash_digest(scratch, 0))
+            proof_store(
+                proof,
+                regions.air_transcript_valid,
+                0,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0),
+            )
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+/// Workgroup interpretation of `composition_challenge`. The scalar transcript
+/// and this staged placement share the nominal `BC01` domain and exact digest
+/// message; only the physical permutation schedule differs.
+#[inline(always)]
+fn advance_composition_challenge_placement(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= POSEIDON_LANES.downcast_truncate() { return }
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= COMPOSITION_CHALLENGE_SCHEDULE_STEPS.downcast_truncate() { return }
+    let regions = proof_tape_regions()
+    if step == 0 {
+        let placed = begin_digest_squeeze_placement_tag(
+            composition_challenge_domain_tag(),
+            load_digest(proof, regions.air_transcript),
+        )
+        initialize_hash_lane(
+            scratch,
+            0,
+            lane,
+            ref placed.permutation,
+            proof_load(proof, regions.air_transcript_valid, 0) == 1,
+        )
+        if lane < 2 {
+            fri_scratch_store(
+                scratch,
+                FRI_HASH_TAILS_START,
+                lane,
+                placed.remaining[lane as usize].to_u32(),
+            )
+        }
+    } else {
+        let relative = step - 1
+        let block = relative / HASH_STAGE_STEPS.downcast_truncate()
+        let hash_step = relative % HASH_STAGE_STEPS.downcast_truncate()
+        let transition =
+            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+        if hash_step < transition {
+            advance_hash_lane(proof, scratch, 0, lane, hash_step)
+        } else if block == 0 {
+            let fields = [
+                BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    0,
+                )),
+                BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    1,
+                )),
+            ]
+            let permutation = Poseidon2FieldSponge::restore(
+                load_hash_buffer(scratch, 0, true),
+                0,
+                DIGEST_FIELDS.downcast_truncate(),
+                6,
+            ).begin_final_permutation<2>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                0,
+                lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0) == 1,
+            )
+        } else {
+            if lane < EXTENSION_WORDS.downcast_truncate() {
+                proof_store(
+                    proof,
+                    regions.composition_challenge,
+                    lane,
+                    hash_digest(scratch, 0).field(index: lane).to_u32(),
+                )
+            }
+            if lane == 0 {
+                proof_store(
+                    proof,
+                    regions.composition_valid,
+                    0,
+                    fri_scratch_load(scratch, FRI_HASH_VALID_START, 0),
+                )
+            }
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn initialize_composition_leaf_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let row = lane / POSEIDON_LANES.downcast_truncate()
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    let permutation = begin_ext4_commitment_placement_tag(
+        composition_row_domain_tag(),
+        load_composition_value(proof, row),
+    )
+    initialize_hash_lane(
+        scratch,
+        row,
+        field_lane,
+        ref permutation,
+        proof_load(
+            proof,
+            proof_tape_regions().composition_value_valid,
+            row,
+        ) == 1,
+    )
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, 0)
+}
+
+#[inline(always)]
+fn advance_composition_leaf_commitments(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let row = lane / POSEIDON_LANES.downcast_truncate()
+    let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= COMPOSITION_LEAF_SCHEDULE_STEPS.downcast_truncate() { return }
+    let transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    if step < transition {
+        advance_hash_lane(proof, scratch, row, field_lane, step)
+    } else if field_lane == 0 {
+        let node = tree_node(0, 0, row)
+        store_tree_digest(scratch, node, hash_digest(scratch, row))
+        fri_scratch_store(
+            scratch,
+            FRI_TREE_VALID_START,
+            node,
+            fri_scratch_load(scratch, FRI_HASH_VALID_START, row),
+        )
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn advance_composition_tree_placement(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= AIR_ROW_HASH_LANES.downcast_truncate() { return }
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= COMPOSITION_TREE_SCHEDULE_STEPS.downcast_truncate() { return }
+    let level = step / AIR_LDE_TREE_LEVEL_STEPS.downcast_truncate()
+    let level_step = step % AIR_LDE_TREE_LEVEL_STEPS.downcast_truncate()
+    let lde_width: u32 = LDE.downcast_truncate()
+    let child_width = lde_width >> level
+    let parent_width = child_width / 2
+    let active_lanes = parent_width * POSEIDON_LANES.downcast_truncate()
+    if lane < active_lanes {
+        let parent = lane / POSEIDON_LANES.downcast_truncate()
+        let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+        let child_offset = tree_level_offset(LDE.downcast_truncate(), level)
+        let parent_offset = child_offset + child_width
+        let left = tree_node(0, 0, child_offset + 2 * parent)
+        let right = left + 1
+        if level_step == 0 {
+            let permutation = begin_compression_placement(
+                load_tree_digest(scratch, left),
+                load_tree_digest(scratch, right),
+            )
+            initialize_hash_lane(
+                scratch,
+                parent,
+                field_lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_TREE_VALID_START, left) == 1
+                    && fri_scratch_load(scratch, FRI_TREE_VALID_START, right) == 1,
+            )
+        } else {
+            let hash_step = level_step - 1
+            let transition =
+                <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+            if hash_step < transition {
+                advance_hash_lane(proof, scratch, parent, field_lane, hash_step)
+            } else if field_lane == 0 {
+                let node = tree_node(0, 0, parent_offset + parent)
+                let digest = hash_digest(scratch, parent)
+                let valid = fri_scratch_load(
+                    scratch,
+                    FRI_HASH_VALID_START,
+                    parent,
+                )
+                store_tree_digest(scratch, node, digest)
+                fri_scratch_store(scratch, FRI_TREE_VALID_START, node, valid)
+                if level + 1 == AIR_LDE_TREE_LEVELS.downcast_truncate() {
+                    store_digest(
+                        proof,
+                        proof_tape_regions().composition_root,
+                        digest,
+                    )
+                    proof_store(
+                        proof,
+                        proof_tape_regions().composition_valid,
+                        1,
+                        valid,
+                    )
+                }
+            }
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
+}
+
+#[inline(always)]
+fn advance_composition_transcript_placement(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.local.x
+    if lane >= POSEIDON_LANES.downcast_truncate() { return }
+    let step = fri_scratch_load(scratch, FRI_PROGRESS_START, lane)
+    if step >= COMPOSITION_TRANSCRIPT_SCHEDULE_STEPS.downcast_truncate() { return }
+    let regions = proof_tape_regions()
+    if step == 0 {
+        let placed = begin_binding_placement_tag(
+            composition_transcript_domain_tag(),
+            load_digest(proof, regions.air_transcript),
+            load_digest(proof, regions.composition_root),
+        )
+        initialize_hash_lane(
+            scratch,
+            0,
+            lane,
+            ref placed.permutation,
+            proof_load(proof, regions.air_transcript_valid, 0) == 1
+                && proof_load(proof, regions.composition_valid, 1) == 1,
+        )
+        if lane < 10 {
+            fri_scratch_store(
+                scratch,
+                FRI_HASH_TAILS_START,
+                lane,
+                placed.remaining[lane as usize].to_u32(),
+            )
+        }
+    } else {
+        let relative = step - 1
+        let block = relative / HASH_STAGE_STEPS.downcast_truncate()
+        let hash_step = relative % HASH_STAGE_STEPS.downcast_truncate()
+        let transition =
+            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+        if hash_step < transition {
+            advance_hash_lane(proof, scratch, 0, lane, hash_step)
+        } else if block == 0 {
+            let mut fields = [BabyBear::zero(); 8]
+            let mut field: usize = 0
+            while field < 8 {
+                fields[field] = BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    field.downcast_truncate(),
+                ))
+                field = field + 1
+            }
+            let permutation = Poseidon2FieldSponge::restore(
+                load_hash_buffer(scratch, 0, true),
+                0,
+                16,
+                6,
+            ).begin_permutation<8>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                0,
+                lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0) == 1,
+            )
+        } else if block == 1 {
+            let fields = [
+                BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    8,
+                )),
+                BabyBear::from_u32(fri_scratch_load(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    9,
+                )),
+            ]
+            let permutation = Poseidon2FieldSponge::restore(
+                load_hash_buffer(scratch, 0, true),
+                0,
+                16,
+                14,
+            ).begin_final_permutation<2>(ref fields)
+            initialize_hash_lane(
+                scratch,
+                0,
+                lane,
+                ref permutation,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0) == 1,
+            )
+        } else if lane == 0 {
+            store_digest(
+                proof,
+                regions.composition_transcript,
+                hash_digest(scratch, 0),
+            )
+            proof_store(
+                proof,
+                regions.composition_valid,
+                2,
+                fri_scratch_load(scratch, FRI_HASH_VALID_START, 0),
+            )
+        }
+    }
+    fri_scratch_store(scratch, FRI_PROGRESS_START, lane, step + 1)
 }
 
 #[inline(always)]
@@ -1164,30 +2847,10 @@ where
                 regions.fri_observed
             }
             if ROUND_INDEX == 0 {
-                let lde_words: u32 = LDE.downcast_truncate()
-                positive = BabyBearExt4::from_coordinate_words(
-                    proof_load(proof, regions.lde, pair),
-                    proof_load(proof, regions.lde, pair + lde_words),
-                    proof_load(proof, regions.lde, pair + 2 * lde_words),
-                    proof_load(proof, regions.lde, pair + 3 * lde_words),
-                )
-                negative = BabyBearExt4::from_coordinate_words(
-                    proof_load(proof, regions.lde, pair + output_width),
-                    proof_load(
-                        proof,
-                        regions.lde,
-                        pair + output_width + lde_words,
-                    ),
-                    proof_load(
-                        proof,
-                        regions.lde,
-                        pair + output_width + 2 * lde_words,
-                    ),
-                    proof_load(
-                        proof,
-                        regions.lde,
-                        pair + output_width + 3 * lde_words,
-                    ),
+                positive = load_composition_value(proof, pair)
+                negative = load_composition_value(
+                    proof,
+                    pair + output_width,
                 )
                 if variant == 1 && tamper >= 0.5 && pair == 1 {
                     positive = BabyBearExt4::from_coordinate_fields(
@@ -1579,14 +3242,291 @@ where
     )
 }
 
+#[inline(always)]
+fn advance_fri_query_sample(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let regions = proof_tape_regions()
+    let fri_status = fri_status_regions()
+    let query_status = fri_query_status_regions()
+    let lane = invocation.local.x
+    let lane_count: u32 = FRI_WORKGROUP_LANES.downcast_truncate()
+    if lane >= lane_count { return }
+    let step = fri_scratch_load(
+        scratch,
+        FRI_QUERY_PROGRESS_START,
+        lane,
+    )
+    if step >= FRI_QUERY_PLACEMENT_STEPS.downcast_truncate() { return }
+
+    let hash_stage_steps: u32 = HASH_STAGE_STEPS.downcast_truncate()
+    let hash_transition =
+        <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+    // Static assertions above bind these concrete shader capacities to the
+    // recursive query plan once. Re-normalizing that plan in every invocation
+    // needlessly multiplies compiler work.
+    let query_identity = FRI_QUERY_IDENTITY
+    let schedule_valid = query_identity < BABY_BEAR_MODULUS
+        && FRI_QUERY_EVALUATIONS == 7
+        && FRI_QUERY_PATH_SIBLINGS == 6
+
+    if step == 0 {
+        if lane < (FRI_VARIANTS * POSEIDON_LANES).downcast_truncate() {
+            let variant = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            let transcript_index = fri_transcript_value_index(
+                variant,
+                FRI_ROUNDS.downcast_truncate(),
+            )
+            let transcript = load_fri_transcript_digest(
+                proof,
+                transcript_index,
+            )
+            let placed = begin_indexed_digest_squeeze_placement_tag(
+                fri_query_domain_tag(),
+                transcript,
+                query_identity,
+            )
+            let input_valid = schedule_valid && proof_load(
+                proof,
+                subregion(regions.fri_status, fri_status.transcript_valid),
+                transcript_index,
+            ) == 1
+            initialize_hash_lane(
+                scratch,
+                variant,
+                field_lane,
+                ref placed.permutation,
+                input_valid,
+            )
+            if field_lane < 3 {
+                fri_scratch_store(
+                    scratch,
+                    FRI_HASH_TAILS_START,
+                    variant * 10 + field_lane,
+                    placed.remaining[field_lane as usize].to_u32(),
+                )
+            }
+        }
+    } else {
+        let relative = step - 1
+        let block = relative / hash_stage_steps
+        let hash_step = relative % hash_stage_steps
+        if lane < (FRI_VARIANTS * POSEIDON_LANES).downcast_truncate() {
+            let variant = lane / POSEIDON_LANES.downcast_truncate()
+            let field_lane = lane % POSEIDON_LANES.downcast_truncate()
+            if hash_step < hash_transition {
+                advance_hash_lane(
+                    proof,
+                    scratch,
+                    variant,
+                    field_lane,
+                    hash_step,
+                )
+            } else if block == 0 {
+                let output = load_hash_buffer(scratch, variant, true)
+                let tail = [
+                    BabyBear::from_u32(fri_scratch_load(
+                        scratch,
+                        FRI_HASH_TAILS_START,
+                        variant * 10,
+                    )),
+                    BabyBear::from_u32(fri_scratch_load(
+                        scratch,
+                        FRI_HASH_TAILS_START,
+                        variant * 10 + 1,
+                    )),
+                    BabyBear::from_u32(fri_scratch_load(
+                        scratch,
+                        FRI_HASH_TAILS_START,
+                        variant * 10 + 2,
+                    )),
+                ]
+                let sponge = Poseidon2FieldSponge::restore(
+                    lanes: output,
+                    rate: 0,
+                    expected: 9,
+                    written: 6,
+                )
+                let permutation = sponge.begin_final_permutation<3>(
+                    fields: ref tail,
+                )
+                initialize_hash_lane(
+                    scratch,
+                    variant,
+                    field_lane,
+                    ref permutation,
+                    fri_scratch_load(
+                        scratch,
+                        FRI_HASH_VALID_START,
+                        variant,
+                    ) == 1,
+                )
+            } else if field_lane == 0 {
+                let digest = hash_digest(scratch, variant)
+                let valid = fri_scratch_load(
+                    scratch,
+                    FRI_HASH_VALID_START,
+                    variant,
+                ) == 1
+                proof_store(
+                    proof,
+                    regions.fri_query_indices,
+                    variant,
+                    digest.field(index: 0).to_u32()
+                        & (FRI_MAX_OUTPUT - 1).downcast_truncate(),
+                )
+                proof_store(
+                    proof,
+                    subregion(regions.fri_query_status, query_status.index_valid),
+                    variant,
+                    if valid { 1 } else { 0 },
+                )
+            }
+        }
+    }
+    fri_scratch_store(
+        scratch,
+        FRI_QUERY_PROGRESS_START,
+        lane,
+        step + 1,
+    )
+}
+
+// Retain four readable projections from the production main AIR matrix as a
+// diagnostic commitment and mutation rail. The protocol FRI input is the full
+// composition codeword above; these columns no longer carry proof semantics.
+const AIR_STEP_COLUMN: usize = 0
+const AIR_MAGNITUDE_COLUMN: usize = 7
+const AIR_ACTIVE_COLUMN: usize = 15
+const AIR_TERMINAL_COLUMN: usize = 16
+
+#[inline(always)]
+fn compact_lde_column(_ air_column: u32) -> u32 {
+    if air_column == AIR_STEP_COLUMN.downcast_truncate() {
+        0
+    } else if air_column == AIR_MAGNITUDE_COLUMN.downcast_truncate() {
+        1
+    } else if air_column == AIR_ACTIVE_COLUMN.downcast_truncate() {
+        2
+    } else if air_column == AIR_TERMINAL_COLUMN.downcast_truncate() {
+        3
+    } else {
+        COLUMN_COUNT.downcast_truncate()
+    }
+}
+
+/// Store one canonical production AIR row in column-major transform order.
+/// Main words and the 411 auxiliary words are both interpreted from the same
+/// nominal `EncodedProofRow`; no host witness or copied offset table enters the
+/// GPU resource boundary.
+#[inline(always)]
+fn store_air_trace_row(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ trace: Region<ProofTapeRegions, [u32; AIR_TRACE_WORDS]>,
+    _ row_index: u32,
+    _ row: EncodedProofRow,
+) {
+    let trace_rows: u32 = TRACE.downcast_truncate()
+    let mut column: usize = 0
+    while column < MAIN_COLUMN_COUNT {
+        let column_word: u32 = column.downcast_truncate()
+        proof_store(
+            proof,
+            trace,
+            column_word * trace_rows + row_index,
+            encoded_proof_row_word(row, column),
+        )
+        column = column + 1
+    }
+
+    column = 0
+    while column < AUXILIARY_ROW_BITS {
+        let column_word: u32 =
+            (MAIN_COLUMN_COUNT + column).downcast_truncate()
+        proof_store(
+            proof,
+            trace,
+            column_word * trace_rows + row_index,
+            encoded_auxiliary_row_bit_direct(row.air, column),
+        )
+        column = column + 1
+    }
+}
+
+/// Materialize the shared injective BabyBear packing for one production row.
+/// Hash placement consumes these fields later, so the witness pass does not
+/// duplicate any sponge or transcript policy.
+#[inline(always)]
+fn store_packed_trace_row(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ row_index: u32,
+    _ row: EncodedProofRow,
+) -> bool {
+    let regions = proof_tape_regions()
+    let mut field: u32 = 0
+    while field < ROW_FIELDS.downcast_truncate() {
+        proof_store(
+            proof,
+            regions.packed_main_trace,
+            row_index * ROW_FIELDS.downcast_truncate() + field,
+            encoded_row_field_direct(row, field),
+        )
+        field = field + 1
+    }
+    field = 0
+    while field < AUXILIARY_FIELDS.downcast_truncate() {
+        proof_store(
+            proof,
+            regions.packed_auxiliary_trace,
+            row_index * AUXILIARY_FIELDS.downcast_truncate() + field,
+            encoded_auxiliary_field_direct(row, field),
+        )
+        field = field + 1
+    }
+    encoded_row_fields_are_valid(row)
+        && encoded_auxiliary_fields_are_valid(row)
+}
+
+#[inline(always)]
+fn store_packed_public(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ public: EscapesByQ12Public,
+) -> bool {
+    let regions = proof_tape_regions()
+    let mut word: usize = 0
+    while word < ESCAPES_BY_Q12_PUBLIC_WORDS {
+        proof_store(
+            proof,
+            regions.canonical_public,
+            word.downcast_truncate(),
+            escapes_by_q12_public_word(public, word),
+        )
+        word = word + 1
+    }
+    let mut field: u32 = 0
+    while field < PUBLIC_FIELDS.downcast_truncate() {
+        proof_store(
+            proof,
+            regions.packed_public,
+            field,
+            encoded_public_field_direct(public, field),
+        )
+        field = field + 1
+    }
+    encoded_public_fields_are_valid(public)
+}
+
 actor MandelbrotProofGpuCheckpoint uses (
     Program<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
     SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     proof: ProofTape<u32, PROOF_WORDS>,
-    lde_inverse_values: ProofTape<u32, TRACE_WORDS>,
+    lde_inverse_values: ProofTape<u32, AIR_TRACE_WORDS>,
     lde_inverse_progress: ProofTape<u32, INPUT_GRID_LANES>,
-    lde_values: ProofTape<u32, LDE_WORDS>,
+    lde_values: ProofTape<u32, AIR_LDE_WORDS>,
     lde_progress: ProofTape<u32, OUTPUT_GRID_LANES>,
     fri_scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
     tamper: f32,
@@ -1610,43 +3550,60 @@ actor MandelbrotProofGpuCheckpoint uses (
             regions.status,
             status_regions().trace_valid,
         )
+        let air_trace = regions.air_trace
 
         // c = 0.75 + 0i escapes on row three, giving an exact four-row
-        // power-of-two trace. This first fixed-size GPU checkpoint spells out
-        // the four stream positions so the call-free SPIR-V legality pass can
-        // inline the production recurrence. No witness row enters from the
-        // host and no recurrence is duplicated here.
-        let mut stream = EscapeAirWordStream::new(3072, 0, 4)
+        // power-of-two trace. The ordinary production kernel derives every
+        // main and auxiliary word. No witness row enters from the host.
+        let claim = EscapesByQ12::new(3072, 0, 4)
+        let mut stream = EscapeTraceStream::new(claim)
 
-        let row0 = stream.current_proof_words()
-        proof_store(self.proof, trace_step, 0, row0.0)
-        proof_store(self.proof, trace_magnitude, 0, row0.1)
-        proof_store(self.proof, trace_active, 0, row0.2)
-        proof_store(self.proof, trace_terminal, 0, row0.3)
-
-        stream.advance()
-        let row1 = stream.current_proof_words()
-        proof_store(self.proof, trace_step, 1, row1.0)
-        proof_store(self.proof, trace_magnitude, 1, row1.1)
-        proof_store(self.proof, trace_active, 1, row1.2)
-        proof_store(self.proof, trace_terminal, 1, row1.3)
+        let row0 = encode_proof_row(stream.current_proof_row())
+        store_air_trace_row(self.proof, air_trace, 0, row0)
+        let packed0 = store_packed_trace_row(self.proof, 0, row0)
+        proof_store(self.proof, trace_step, 0, encoded_proof_row_word(row0, AIR_STEP_COLUMN))
+        proof_store(self.proof, trace_magnitude, 0, encoded_proof_row_word(row0, AIR_MAGNITUDE_COLUMN))
+        proof_store(self.proof, trace_active, 0, encoded_proof_row_word(row0, AIR_ACTIVE_COLUMN))
+        proof_store(self.proof, trace_terminal, 0, encoded_proof_row_word(row0, AIR_TERMINAL_COLUMN))
 
         stream.advance()
-        let row2 = stream.current_proof_words()
-        proof_store(self.proof, trace_step, 2, row2.0)
-        proof_store(self.proof, trace_magnitude, 2, row2.1)
-        proof_store(self.proof, trace_active, 2, row2.2)
-        proof_store(self.proof, trace_terminal, 2, row2.3)
+        let row1 = encode_proof_row(stream.current_proof_row())
+        store_air_trace_row(self.proof, air_trace, 1, row1)
+        let packed1 = store_packed_trace_row(self.proof, 1, row1)
+        proof_store(self.proof, trace_step, 1, encoded_proof_row_word(row1, AIR_STEP_COLUMN))
+        proof_store(self.proof, trace_magnitude, 1, encoded_proof_row_word(row1, AIR_MAGNITUDE_COLUMN))
+        proof_store(self.proof, trace_active, 1, encoded_proof_row_word(row1, AIR_ACTIVE_COLUMN))
+        proof_store(self.proof, trace_terminal, 1, encoded_proof_row_word(row1, AIR_TERMINAL_COLUMN))
 
         stream.advance()
-        let row3 = stream.current_proof_words()
-        proof_store(self.proof, trace_step, 3, row3.0)
-        proof_store(self.proof, trace_magnitude, 3, row3.1)
-        proof_store(self.proof, trace_active, 3, row3.2)
-        proof_store(self.proof, trace_terminal, 3, row3.3)
+        let row2 = encode_proof_row(stream.current_proof_row())
+        store_air_trace_row(self.proof, air_trace, 2, row2)
+        let packed2 = store_packed_trace_row(self.proof, 2, row2)
+        proof_store(self.proof, trace_step, 2, encoded_proof_row_word(row2, AIR_STEP_COLUMN))
+        proof_store(self.proof, trace_magnitude, 2, encoded_proof_row_word(row2, AIR_MAGNITUDE_COLUMN))
+        proof_store(self.proof, trace_active, 2, encoded_proof_row_word(row2, AIR_ACTIVE_COLUMN))
+        proof_store(self.proof, trace_terminal, 2, encoded_proof_row_word(row2, AIR_TERMINAL_COLUMN))
 
-        let trace_valid = stream.is_valid()
-            && stream.is_terminal()
+        stream.advance()
+        let row3 = encode_proof_row(stream.current_proof_row())
+        store_air_trace_row(self.proof, air_trace, 3, row3)
+        let packed3 = store_packed_trace_row(self.proof, 3, row3)
+        proof_store(self.proof, trace_step, 3, encoded_proof_row_word(row3, AIR_STEP_COLUMN))
+        proof_store(self.proof, trace_magnitude, 3, encoded_proof_row_word(row3, AIR_MAGNITUDE_COLUMN))
+        proof_store(self.proof, trace_active, 3, encoded_proof_row_word(row3, AIR_ACTIVE_COLUMN))
+        proof_store(self.proof, trace_terminal, 3, encoded_proof_row_word(row3, AIR_TERMINAL_COLUMN))
+
+        let public = EscapesByQ12Public {
+            c_re: encode_signed_word(claim.c.re),
+            c_im: encode_signed_word(claim.c.im),
+            bound: claim.bound,
+            terminal_step: row3.air.step,
+            trace_length: row3.air.step + 1,
+            padded_length: TRACE.downcast_truncate(),
+        }
+        let public_valid = store_packed_public(self.proof, public)
+        let trace_valid = stream.is_valid() && row3.terminal == 1
+            && packed0 && packed1 && packed2 && packed3 && public_valid
         proof_store(
             self.proof,
             trace_valid_region,
@@ -1671,15 +3628,20 @@ actor MandelbrotProofGpuCheckpoint uses (
     }
 
     fn prepare_lde_inverse(self, invocation: ComputeInvocation)
-        uses (Prove<Threads<INPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
+        uses (
+            Prove<
+                Threads<GPU_WORKGROUP_LANES, 1, 1>,
+                Once<INPUT_DISPATCH_X, 1, 1>,
+            >
+        )
     {
-        let trace_start = region_bounds(proof_tape_regions().trace).start
+        let trace_start = region_bounds(proof_tape_regions().air_trace).start
         prepare_batched_stage_grid<
-            COLUMN_COUNT,
+            AIR_COLUMN_COUNT,
             TRACE,
             INPUT_LANES,
             PROOF_WORDS,
-            TRACE_WORDS,
+            AIR_TRACE_WORDS,
             INPUT_GRID_LANES,
         >(
             self.proof,
@@ -1693,16 +3655,16 @@ actor MandelbrotProofGpuCheckpoint uses (
     fn advance_lde_inverse(self, invocation: ComputeInvocation)
         uses (
             Prove<
-                Threads<INPUT_GRID_LANES, 1, 1>,
-                Repeat<1, 1, 1, INPUT_STAGES>,
+                Threads<GPU_WORKGROUP_LANES, 1, 1>,
+                Repeat<INPUT_DISPATCH_X, 1, 1, INPUT_STAGES>,
             >
         )
     {
         inverse_batched_stage_grid_lane<
-            COLUMN_COUNT,
+            AIR_COLUMN_COUNT,
             TRACE,
             INPUT_LANES,
-            TRACE_WORDS,
+            AIR_TRACE_WORDS,
             INPUT_GRID_LANES,
             BabyBear,
             ProofLdeInputPlan,
@@ -1714,17 +3676,22 @@ actor MandelbrotProofGpuCheckpoint uses (
     }
 
     fn prepare_lde_forward(self, invocation: ComputeInvocation)
-        uses (Prove<Threads<OUTPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
+        uses (
+            Prove<
+                Threads<GPU_WORKGROUP_LANES, 1, 1>,
+                Once<OUTPUT_DISPATCH_X, 1, 1>,
+            >
+        )
     {
         let prepared = prepare_batched_coset_extension<
-            COLUMN_COUNT,
+            AIR_COLUMN_COUNT,
             TRACE,
             LDE,
             INPUT_LANES,
             OUTPUT_LANES,
-            TRACE_WORDS,
+            AIR_TRACE_WORDS,
             INPUT_GRID_LANES,
-            LDE_WORDS,
+            AIR_LDE_WORDS,
             OUTPUT_GRID_LANES,
             BabyBear,
             ProofLdeInputPlan,
@@ -1740,10 +3707,7 @@ actor MandelbrotProofGpuCheckpoint uses (
         if prepared.active && prepared.lane == 0 {
             proof_store(
                 self.proof,
-                subregion(
-                    proof_tape_regions().status,
-                    status_regions().lde_valid,
-                ),
+                proof_tape_regions().air_lde_valid,
                 prepared.batch,
                 if prepared.valid { 1 } else { 0 },
             )
@@ -1753,16 +3717,16 @@ actor MandelbrotProofGpuCheckpoint uses (
     fn advance_lde_forward(self, invocation: ComputeInvocation)
         uses (
             Prove<
-                Threads<OUTPUT_GRID_LANES, 1, 1>,
-                Repeat<1, 1, 1, OUTPUT_STAGES>,
+                Threads<GPU_WORKGROUP_LANES, 1, 1>,
+                Repeat<OUTPUT_DISPATCH_X, 1, 1, OUTPUT_STAGES>,
             >
         )
     {
         forward_batched_stage_grid_lane<
-            COLUMN_COUNT,
+            AIR_COLUMN_COUNT,
             LDE,
             OUTPUT_LANES,
-            LDE_WORDS,
+            AIR_LDE_WORDS,
             OUTPUT_GRID_LANES,
             BabyBear,
             ProofLdeOutputPlan,
@@ -1774,39 +3738,703 @@ actor MandelbrotProofGpuCheckpoint uses (
     }
 
     fn finish_lde(self, invocation: ComputeInvocation)
-        uses (Prove<Threads<OUTPUT_GRID_LANES, 1, 1>, Once<1, 1, 1>>)
+        uses (
+            Prove<
+                Threads<GPU_WORKGROUP_LANES, 1, 1>,
+                Once<OUTPUT_DISPATCH_X, 1, 1>,
+            >
+        )
     {
         let regions = proof_tape_regions()
         let lde_start = region_bounds(regions.lde).start
         let lde_valid = subregion(regions.status, status_regions().lde_valid)
-        let finish = finish_batched_stage_grid_into<
-            COLUMN_COUNT,
+        let finish = finish_batched_stage_grid<
+            AIR_COLUMN_COUNT,
             LDE,
             OUTPUT_LANES,
-            LDE_WORDS,
+            AIR_LDE_WORDS,
             OUTPUT_GRID_LANES,
-            PROOF_WORDS,
             ProofLdeOutputPlan,
         >(
-            self.lde_values,
             self.lde_progress,
-            self.proof,
-            lde_start,
             invocation,
         )
         if finish.active && finish.lane == 0 {
             let prepared = proof_load(
                 self.proof,
-                lde_valid,
+                regions.air_lde_valid,
                 finish.batch,
             ) == 1
             proof_store(
                 self.proof,
-                lde_valid,
+                regions.air_lde_valid,
                 finish.batch,
                 if prepared && finish.valid { 1 } else { 0 },
             )
         }
+        if finish.active {
+            let compact_column = compact_lde_column(finish.batch)
+            if compact_column < COLUMN_COUNT.downcast_truncate() {
+                let lde_points: u32 = LDE.downcast_truncate()
+                let lde_lanes: u32 = OUTPUT_LANES.downcast_truncate()
+                let source = finish.batch * lde_points + finish.lane
+                let destination = lde_start + compact_column * lde_points
+                    + finish.lane
+                self.proof.store(
+                    index: destination,
+                    value: self.lde_values.load(index: source),
+                )
+                self.proof.store(
+                    index: destination + lde_lanes,
+                    value: self.lde_values.load(index: source + lde_lanes),
+                )
+                if finish.lane == 0 {
+                    proof_store(
+                        self.proof,
+                        lde_valid,
+                        compact_column,
+                        proof_load(
+                            self.proof,
+                            regions.air_lde_valid,
+                            finish.batch,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fn initialize_main_lde_commitments(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<AIR_ROW_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        initialize_air_lde_row_commitments(
+            self.proof,
+            self.fri_scratch,
+            self.lde_values,
+            false,
+            invocation,
+        )
+    }
+
+    fn advance_main_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<AIR_ROW_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, MAIN_LDE_ROW_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_main_lde_row_commitments(
+            self.proof,
+            self.fri_scratch,
+            self.lde_values,
+            invocation,
+        )
+    }
+
+    fn initialize_auxiliary_lde_commitments(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<AIR_ROW_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        initialize_air_lde_row_commitments(
+            self.proof,
+            self.fri_scratch,
+            self.lde_values,
+            true,
+            invocation,
+        )
+    }
+
+    fn advance_auxiliary_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<AIR_ROW_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, AUXILIARY_LDE_ROW_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_auxiliary_lde_row_commitments(
+            self.proof,
+            self.fri_scratch,
+            self.lde_values,
+            invocation,
+        )
+    }
+
+    fn initialize_air_lde_trees(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<AIR_ROW_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let lane = invocation.local.x
+        if lane < AIR_ROW_HASH_LANES.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                lane,
+                0,
+            )
+        }
+    }
+
+    fn advance_air_lde_tree_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<AIR_ROW_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, AIR_LDE_TREE_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_air_lde_trees(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn initialize_production_trace_commitments(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<TRACE_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        initialize_trace_commitments(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn advance_production_trace_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<TRACE_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, TRACE_COMMITMENT_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_trace_commitments(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn initialize_production_trace_trees(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<AIR_ROW_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let lane = invocation.local.x
+        if lane < AIR_ROW_HASH_LANES.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                lane,
+                0,
+            )
+        }
+    }
+
+    fn advance_production_trace_tree_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<AIR_ROW_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, TRACE_TREE_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_trace_trees(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn initialize_production_air_transcript(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<POSEIDON_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let lane = invocation.local.x
+        if lane < POSEIDON_LANES.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                lane,
+                0,
+            )
+        }
+        if lane == 0 {
+            proof_store(
+                self.proof,
+                proof_tape_regions().air_transcript_valid,
+                0,
+                0,
+            )
+        }
+    }
+
+    fn advance_production_air_transcript(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<POSEIDON_LANES, 1, 1>,
+                Repeat<1, 1, 1, AIR_TRANSCRIPT_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_air_transcript(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn initialize_composition_challenge(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<POSEIDON_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let lane = invocation.local.x
+        if lane < POSEIDON_LANES.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                lane,
+                0,
+            )
+        }
+        if lane == 0 {
+            proof_store(
+                self.proof,
+                proof_tape_regions().composition_valid,
+                0,
+                0,
+            )
+        }
+    }
+
+    fn advance_composition_challenge(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<POSEIDON_LANES, 1, 1>,
+                Repeat<1, 1, 1, COMPOSITION_CHALLENGE_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_composition_challenge_placement(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn evaluate_production_air_local_step(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let regions = proof_tape_regions()
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold0 = begin_constraint_fold<BabyBearExt4>(challenge)
+            let fold78 = fold_local_step_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold0, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold78)
+            let challenge_valid = proof_load(
+                self.proof,
+                regions.composition_valid,
+                0,
+            ) == 1
+            fri_scratch_store(
+                self.fri_scratch,
+                COMPOSITION_FOLD_VALID_START,
+                evaluation,
+                if challenge_valid { 1 } else { 0 },
+            )
+        }
+    }
+
+    fn evaluate_production_air_orbit_coordinates(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold78 = load_composition_fold<78>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let fold174 = fold_orbit_coordinate_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold78, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold174)
+        }
+    }
+
+    fn evaluate_production_air_real_square(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold174 = load_composition_fold<174>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let fold265 = fold_real_square_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold174, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold265)
+        }
+    }
+
+    fn evaluate_production_air_imaginary_square(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold265 = load_composition_fold<265>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let fold356 = fold_imaginary_square_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold265, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold356)
+        }
+    }
+
+    fn evaluate_production_air_real_quotient(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold356 = load_composition_fold<356>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let fold450 = fold_real_quotient_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold356, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold450)
+        }
+    }
+
+    fn evaluate_production_air_imaginary_quotient(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold450 = load_composition_fold<450>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let fold547 = fold_imaginary_quotient_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold450, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold547)
+        }
+    }
+
+    fn evaluate_production_air_magnitude_terminal(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let source = GpuAirLdeSource {
+                values: self.lde_values,
+                row: evaluation,
+            }
+            let row = GpuAirLdeRow {}
+            let fold547 = load_composition_fold<547>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let fold653 = fold_magnitude_terminal_constraints<
+                BabyBearExt4,
+                GpuAirLdeSource,
+                GpuAirLdeRow,
+            >(fold547, source, ref row)
+            store_composition_fold(self.fri_scratch, evaluation, fold653)
+        }
+    }
+
+    fn evaluate_production_air_pair_rows(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let fold653 = load_composition_fold<653>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let checkpoint = fold_production_pair_rows(
+                self.proof,
+                self.lde_values,
+                fold653,
+                evaluation,
+            )
+            store_composition_fold(
+                self.fri_scratch,
+                evaluation,
+                pair_rows_constraint_fold(checkpoint),
+            )
+            store_composition_family(
+                self.fri_scratch,
+                COMPOSITION_ALL_ROWS_START,
+                evaluation,
+                pair_rows_all_rows(checkpoint),
+            )
+        }
+    }
+
+    fn evaluate_production_air_first_row(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let fold690 = load_composition_fold<690>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let checkpoint = restore_pair_rows_constraint_checkpoint(
+                fold690,
+                load_composition_family(
+                    self.fri_scratch,
+                    COMPOSITION_ALL_ROWS_START,
+                    evaluation,
+                ),
+            )
+            let checkpoint = fold_production_first_row(
+                self.lde_values,
+                checkpoint,
+                evaluation,
+            )
+            store_composition_fold(
+                self.fri_scratch,
+                evaluation,
+                first_row_constraint_fold(checkpoint),
+            )
+            store_composition_family(
+                self.fri_scratch,
+                COMPOSITION_PAIR_ROWS_START,
+                evaluation,
+                first_row_pair_rows(checkpoint),
+            )
+        }
+    }
+
+    fn evaluate_production_air_last_row(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let fold702 = load_composition_fold<702>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let checkpoint = restore_first_row_constraint_checkpoint(
+                fold702,
+                load_composition_family(
+                    self.fri_scratch,
+                    COMPOSITION_ALL_ROWS_START,
+                    evaluation,
+                ),
+                load_composition_family(
+                    self.fri_scratch,
+                    COMPOSITION_PAIR_ROWS_START,
+                    evaluation,
+                ),
+            )
+            let checkpoint = fold_production_last_row(
+                self.lde_values,
+                checkpoint,
+                evaluation,
+            )
+            store_composition_fold(
+                self.fri_scratch,
+                evaluation,
+                constraint_numerator_fold(checkpoint),
+            )
+            store_composition_family(
+                self.fri_scratch,
+                COMPOSITION_FIRST_ROW_START,
+                evaluation,
+                constraint_numerator_first_row(checkpoint),
+            )
+        }
+    }
+
+    fn project_production_air_composition(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<LDE, 1, 1>, Once<1, 1, 1>>)
+    {
+        let evaluation = invocation.local.x
+        if evaluation < LDE.downcast_truncate() {
+            let challenge = load_composition_challenge(self.proof)
+            let fold708 = load_composition_fold<708>(
+                self.fri_scratch, challenge, evaluation,
+            )
+            let checkpoint = restore_constraint_numerator_checkpoint(
+                fold708,
+                load_composition_family(
+                    self.fri_scratch,
+                    COMPOSITION_ALL_ROWS_START,
+                    evaluation,
+                ),
+                load_composition_family(
+                    self.fri_scratch,
+                    COMPOSITION_PAIR_ROWS_START,
+                    evaluation,
+                ),
+                load_composition_family(
+                    self.fri_scratch,
+                    COMPOSITION_FIRST_ROW_START,
+                    evaluation,
+                ),
+            )
+            let composed = project_production_composition_value(
+                checkpoint,
+                evaluation,
+            )
+            store_composition_value(self.proof, evaluation, composed.value)
+            proof_store(
+                self.proof,
+                proof_tape_regions().composition_value_valid,
+                evaluation,
+                if composed.valid && composition_fold_is_valid(
+                    self.fri_scratch,
+                    evaluation,
+                ) { 1 } else { 0 },
+            )
+        }
+    }
+
+    fn initialize_composition_commitments(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<AIR_ROW_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        initialize_composition_leaf_commitments(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn advance_composition_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<AIR_ROW_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, COMPOSITION_LEAF_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_composition_leaf_commitments(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn initialize_composition_tree(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<AIR_ROW_HASH_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let lane = invocation.local.x
+        if lane < AIR_ROW_HASH_LANES.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                lane,
+                0,
+            )
+        }
+        if lane == 0 {
+            proof_store(
+                self.proof,
+                proof_tape_regions().composition_valid,
+                1,
+                0,
+            )
+        }
+    }
+
+    fn advance_composition_tree(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<AIR_ROW_HASH_LANES, 1, 1>,
+                Repeat<1, 1, 1, COMPOSITION_TREE_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_composition_tree_placement(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn initialize_composition_transcript(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<POSEIDON_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let lane = invocation.local.x
+        if lane < POSEIDON_LANES.downcast_truncate() {
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_PROGRESS_START,
+                lane,
+                0,
+            )
+        }
+        if lane == 0 {
+            proof_store(
+                self.proof,
+                proof_tape_regions().composition_valid,
+                2,
+                0,
+            )
+        }
+    }
+
+    fn advance_composition_transcript(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<POSEIDON_LANES, 1, 1>,
+                Repeat<1, 1, 1, COMPOSITION_TRANSCRIPT_SCHEDULE_STEPS>,
+            >
+        )
+    {
+        advance_composition_transcript_placement(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
     }
 
     fn initialize_commitments(self) uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>) {
@@ -2005,6 +4633,38 @@ actor MandelbrotProofGpuCheckpoint uses (
         let status_layout = status_regions()
         let clean_root = load_digest(tape: self.proof, region: regions.clean_root)
         let observed_root = load_digest(tape: self.proof, region: regions.observed_root)
+        let main_lde_root = load_digest(
+            tape: self.proof,
+            region: regions.main_lde_root,
+        )
+        let auxiliary_lde_root = load_digest(
+            tape: self.proof,
+            region: regions.auxiliary_lde_root,
+        )
+        let main_trace_root = load_digest(
+            tape: self.proof,
+            region: regions.main_trace_root,
+        )
+        let auxiliary_trace_root = load_digest(
+            tape: self.proof,
+            region: regions.auxiliary_trace_root,
+        )
+        let public_digest = load_digest(
+            tape: self.proof,
+            region: regions.public_digest,
+        )
+        let air_transcript = load_digest(
+            tape: self.proof,
+            region: regions.air_transcript,
+        )
+        let composition_root = load_digest(
+            tape: self.proof,
+            region: regions.composition_root,
+        )
+        let composition_transcript = load_digest(
+            tape: self.proof,
+            region: regions.composition_transcript,
+        )
         let tampered = self.tamper >= 0.5
         let roots_equal = clean_root.equals(observed_root)
         let trace_valid = stored_flag(
@@ -2014,6 +4674,9 @@ actor MandelbrotProofGpuCheckpoint uses (
         let lde_valid = all_lde_columns_valid(
             self.proof,
             subregion(regions.status, status_layout.lde_valid),
+        ) && all_air_lde_columns_valid(
+            self.proof,
+            regions.air_lde_valid,
         )
         let commitments_valid = commitment_state_valid(
             tape: self.proof,
@@ -2022,9 +4685,60 @@ actor MandelbrotProofGpuCheckpoint uses (
             tape: self.proof,
             state: regions.observed_commitment,
         )
-        let root_nonzero = commitments_valid
+        let air_roots_valid = proof_load(
+            self.proof,
+            regions.air_lde_root_valid,
+            0,
+        ) == 1 && proof_load(
+            self.proof,
+            regions.air_lde_root_valid,
+            1,
+        ) == 1 && !main_lde_root.equals(Poseidon2Digest::zero())
+            && !auxiliary_lde_root.equals(Poseidon2Digest::zero())
+        let production_trace_valid = proof_load(
+            self.proof,
+            regions.production_trace_digest_valid,
+            0,
+        ) == 1 && proof_load(
+            self.proof,
+            regions.production_trace_digest_valid,
+            1,
+        ) == 1 && proof_load(
+            self.proof,
+            regions.production_trace_digest_valid,
+            2,
+        ) == 1 && !main_trace_root.equals(Poseidon2Digest::zero())
+            && !auxiliary_trace_root.equals(Poseidon2Digest::zero())
+            && !public_digest.equals(Poseidon2Digest::zero())
+        let production_transcript_valid = proof_load(
+            self.proof,
+            regions.air_transcript_valid,
+            0,
+        ) == 1 && !air_transcript.equals(Poseidon2Digest::zero())
+        let composition_valid = proof_load(
+            self.proof,
+            regions.composition_valid,
+            0,
+        ) == 1 && proof_load(
+            self.proof,
+            regions.composition_valid,
+            1,
+        ) == 1 && proof_load(
+            self.proof,
+            regions.composition_valid,
+            2,
+        ) == 1 && all_composition_values_valid(
+            self.proof,
+            regions.composition_value_valid,
+        ) && !composition_root.equals(Poseidon2Digest::zero())
+            && !composition_transcript.equals(Poseidon2Digest::zero())
+        let root_nonzero = commitments_valid && air_roots_valid
+            && production_trace_valid && production_transcript_valid
+            && composition_valid
             && !clean_root.equals(Poseidon2Digest::zero())
-        let mode_correct = trace_valid && lde_valid && commitments_valid && (
+        let mode_correct = trace_valid && lde_valid && commitments_valid
+            && air_roots_valid && production_trace_valid
+            && production_transcript_valid && composition_valid && (
             if tampered { !roots_equal } else { roots_equal }
         )
 
@@ -2083,8 +4797,18 @@ actor MandelbrotProofGpuCheckpoint uses (
             )
             round = round + 1
         }
+        fri_scratch_store(
+            self.fri_scratch,
+            FRI_QUERY_PROGRESS_START,
+            lane,
+            0,
+        )
         if lane < DIGEST_FIELDS.downcast_truncate() {
-            let value = proof_load(self.proof, regions.clean_root, lane)
+            let value = proof_load(
+                self.proof,
+                regions.composition_transcript,
+                lane,
+            )
             let mut variant: u32 = 0
             while variant < FRI_VARIANTS.downcast_truncate() {
                 proof_store(
@@ -2098,10 +4822,11 @@ actor MandelbrotProofGpuCheckpoint uses (
             }
         }
         if lane < FRI_VARIANTS.downcast_truncate() {
-            let initial_valid = commitment_state_valid(
-                tape: self.proof,
-                state: regions.clean_commitment,
-            ) && proof_fri_metadata().rounds
+            let initial_valid = proof_load(
+                self.proof,
+                regions.composition_valid,
+                2,
+            ) == 1 && proof_fri_metadata().rounds
                 == FRI_ROUNDS.downcast_truncate()
             proof_store(
                 self.proof,
@@ -2176,12 +4901,136 @@ actor MandelbrotProofGpuCheckpoint uses (
         )
     }
 
+    fn sample_fri_query(self, invocation: ComputeInvocation)
+        uses (
+            Prove<
+                Threads<FRI_WORKGROUP_LANES, 1, 1>,
+                Repeat<1, 1, 1, FRI_QUERY_PLACEMENT_STEPS>,
+            >
+        )
+    {
+        advance_fri_query_sample(
+            self.proof,
+            self.fri_scratch,
+            invocation,
+        )
+    }
+
+    fn extract_fri_query(self, invocation: ComputeInvocation)
+        uses (Prove<Threads<FRI_WORKGROUP_LANES, 1, 1>, Once<1, 1, 1>>)
+    {
+        let regions = proof_tape_regions()
+        let lane = invocation.local.x
+        let evaluation_words: u32 =
+            FRI_QUERY_EVALUATION_WORDS.downcast_truncate()
+        let sibling_words: u32 = FRI_QUERY_SIBLING_WORDS.downcast_truncate()
+        if lane < evaluation_words {
+            let placements = proof_fri_round_placements()
+            let words_per_variant: u32 =
+                (FRI_QUERY_EVALUATIONS * EXTENSION_WORDS).downcast_truncate()
+            let variant = lane / words_per_variant
+            let local = lane % words_per_variant
+            let opening = local / EXTENSION_WORDS.downcast_truncate()
+            let coefficient = local % EXTENSION_WORDS.downcast_truncate()
+            let query = proof_load(
+                self.proof,
+                regions.fri_query_indices,
+                variant,
+            )
+            let placement = fri_query_evaluation_from_four_rounds(
+                ref placements,
+                opening,
+                query,
+            )
+            let source = if variant == 0 {
+                regions.fri_clean
+            } else {
+                regions.fri_observed
+            }
+            let placement_valid = placement.valid
+                && (placement.evaluation_index
+                    < FRI_EVALUATIONS.downcast_truncate())
+            let value = if placement_valid {
+                proof_load(
+                    self.proof,
+                    source,
+                    placement.evaluation_index
+                        * EXTENSION_WORDS.downcast_truncate() + coefficient,
+                )
+            } else {
+                0
+            }
+            proof_store(
+                self.proof,
+                regions.fri_query_evaluations,
+                lane,
+                value,
+            )
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_QUERY_COPY_VALID_START,
+                lane,
+                if placement_valid && value < BABY_BEAR_MODULUS { 1 } else { 0 },
+            )
+        } else if lane < evaluation_words + sibling_words {
+            let placements = proof_fri_round_placements()
+            let sibling_lane = lane - evaluation_words
+            let words_per_variant: u32 =
+                (FRI_QUERY_PATH_SIBLINGS * DIGEST_FIELDS).downcast_truncate()
+            let variant = sibling_lane / words_per_variant
+            let local = sibling_lane % words_per_variant
+            let sibling = local / DIGEST_FIELDS.downcast_truncate()
+            let field = local % DIGEST_FIELDS.downcast_truncate()
+            let query = proof_load(
+                self.proof,
+                regions.fri_query_indices,
+                variant,
+            )
+            let placement = fri_query_sibling_from_four_rounds(
+                ref placements,
+                sibling,
+                query,
+            )
+            let node = tree_node(variant, 0, placement.tree_node)
+            let placement_valid = placement.valid
+                && (placement.tree_node
+                    < FRI_TREE_NODES_PER_VARIANT.downcast_truncate())
+                && fri_scratch_load(
+                    self.fri_scratch,
+                    FRI_TREE_VALID_START,
+                    node,
+                ) == 1
+            let value = if placement_valid {
+                fri_scratch_load(
+                    self.fri_scratch,
+                    FRI_TREE_START,
+                    node * DIGEST_FIELDS.downcast_truncate() + field,
+                )
+            } else {
+                0
+            }
+            proof_store(
+                self.proof,
+                regions.fri_query_siblings,
+                sibling_lane,
+                value,
+            )
+            fri_scratch_store(
+                self.fri_scratch,
+                FRI_QUERY_COPY_VALID_START,
+                lane,
+                if placement_valid && value < BABY_BEAR_MODULUS { 1 } else { 0 },
+            )
+        }
+    }
+
     fn finalize_fri_schedule(self)
         uses (Prove<Threads<1, 1, 1>, Once<1, 1, 1>>)
     {
         let regions = proof_tape_regions()
         let status_layout = status_regions()
         let fri_layout = fri_status_regions()
+        let query_layout = fri_query_status_regions()
         let valid = all_fri_schedule_valid(
             self.proof,
             subregion(regions.fri_status, fri_layout.challenge_valid),
@@ -2197,11 +5046,29 @@ actor MandelbrotProofGpuCheckpoint uses (
         )
         let tampered = self.tamper >= 0.5
         let fri_correct = valid && if tampered { !equal } else { equal }
+        let clean_query_valid = fri_query_opening_valid(
+            self.proof,
+            self.fri_scratch,
+            0,
+        )
+        let observed_query_valid = fri_query_opening_valid(
+            self.proof,
+            self.fri_scratch,
+            1,
+        )
+        let query_equal = fri_query_receipts_equal(self.proof)
+        let query_valid = all_fri_query_progress_valid(self.fri_scratch)
+            && clean_query_valid && observed_query_valid
+        let query_correct = query_valid && if tampered {
+            !query_equal
+        } else {
+            query_equal
+        }
         let previous_correct = stored_flag(
             self.proof,
             subregion(regions.status, status_layout.mode_correct),
         )
-        let overall = previous_correct && fri_correct
+        let overall = previous_correct && fri_correct && query_correct
 
         proof_store(
             self.proof,
@@ -2220,6 +5087,36 @@ actor MandelbrotProofGpuCheckpoint uses (
             subregion(regions.fri_status, fri_layout.color),
             0,
             status_word(fri_correct, tampered),
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_query_status, query_layout.opening_valid),
+            0,
+            if clean_query_valid { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_query_status, query_layout.opening_valid),
+            1,
+            if observed_query_valid { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_query_status, query_layout.equal),
+            0,
+            if query_equal { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_query_status, query_layout.correct),
+            0,
+            if query_correct { 1 } else { 0 },
+        )
+        proof_store(
+            self.proof,
+            subregion(regions.fri_query_status, query_layout.color),
+            0,
+            status_word(query_correct, tampered),
         )
         proof_store(
             self.proof,
@@ -2317,6 +5214,43 @@ fn all_lde_columns_valid(
         && proof_load(tape, region, 3) == 1
 }
 
+fn all_air_lde_columns_valid(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ status: Region<ProofTapeRegions, [u32; AIR_COLUMN_COUNT]>,
+) -> bool {
+    let mut valid: u32 = 1
+    let mut column: u32 = 0
+    while column < AIR_COLUMN_COUNT.downcast_truncate() {
+        if proof_load(proof, status, column) != 1 {
+            valid = 0
+        }
+        column = column + 1
+    }
+    valid == 1
+}
+
+fn all_composition_values_valid(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ status: Region<ProofTapeRegions, [u32; COMPOSITION_VALUE_VALID_WORDS]>,
+) -> bool {
+    let mut valid: u32 = 1
+    let mut evaluation: u32 = 0
+    while evaluation < LDE.downcast_truncate() {
+        if proof_load(proof, status, evaluation) != 1 {
+            valid = 0
+        }
+        evaluation = evaluation + 1
+    }
+    valid == 1
+}
+
+// Receipt validation is deliberately constant-work. Consume every public
+// receipt word and combine explicit 0/1 masks rather than short-circuiting a
+// boolean fold when an earlier word is invalid.
+fn validation_word(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
 fn all_fri_schedule_valid(
     _ tape: ProofTape<u32, PROOF_WORDS>,
     _ challenges: Region<ProofTapeRegions, [u32; FRI_VALID_ROUNDS]>,
@@ -2324,23 +5258,23 @@ fn all_fri_schedule_valid(
     _ transcripts: Region<ProofTapeRegions, [u32; FRI_VALID_TRANSCRIPTS]>,
     _ rounds: Region<ProofTapeRegions, [u32; FRI_VALID_ROUNDS]>,
 ) -> bool {
-    let mut valid = true
+    let mut valid: u32 = 1
     let mut index: usize = 0
     while index < FRI_VALID_ROUNDS {
         let word: u32 = index.downcast_truncate()
-        valid = valid
-            && proof_load(tape, challenges, word) == 1
-            && proof_load(tape, roots, word) == 1
-            && proof_load(tape, rounds, word) == 1
+        valid = valid & validation_word(proof_load(tape, challenges, word) == 1)
+        valid = valid & validation_word(proof_load(tape, roots, word) == 1)
+        valid = valid & validation_word(proof_load(tape, rounds, word) == 1)
         index = index + 1
     }
     index = 0
     while index < FRI_VALID_TRANSCRIPTS {
-        valid = valid
-            && proof_load(tape, transcripts, index.downcast_truncate()) == 1
+        valid = valid & validation_word(
+            proof_load(tape, transcripts, index.downcast_truncate()) == 1,
+        )
         index = index + 1
     }
-    valid
+    valid == 1
 }
 
 fn all_fri_progress_valid(
@@ -2348,23 +5282,22 @@ fn all_fri_progress_valid(
 ) -> bool {
     let rounds: u32 = FRI_ROUNDS.downcast_truncate()
     let lanes: u32 = FRI_WORKGROUP_LANES.downcast_truncate()
-    let mut valid = true
+    let mut valid: u32 = 1
     let mut round: u32 = 0
     while round < rounds {
         let expected = runtime_fri_round_schedule_steps(rounds - round - 1)
         let base = round * lanes
         let mut lane: u32 = 0
         while lane < lanes {
-            valid = valid && fri_scratch_load(
-                scratch,
-                FRI_PROGRESS_START,
-                base + lane,
-            ) == expected
+            valid = valid & validation_word(
+                fri_scratch_load(scratch, FRI_PROGRESS_START, base + lane)
+                    == expected,
+            )
             lane = lane + 1
         }
         round = round + 1
     }
-    valid
+    valid == 1
 }
 
 fn all_fri_tree_nodes_valid(
@@ -2372,17 +5305,121 @@ fn all_fri_tree_nodes_valid(
 ) -> bool {
     let nodes: u32 = (FRI_VARIANTS * FRI_TREE_NODES_PER_VARIANT)
         .downcast_truncate()
-    let mut valid = true
+    let mut valid: u32 = 1
     let mut node: u32 = 0
     while node < nodes {
-        valid = valid && fri_scratch_load(
-            scratch,
-            FRI_TREE_VALID_START,
-            node,
-        ) == 1
+        valid = valid & validation_word(
+            fri_scratch_load(scratch, FRI_TREE_VALID_START, node) == 1,
+        )
         node = node + 1
     }
-    valid
+    valid == 1
+}
+
+fn all_fri_query_progress_valid(
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+) -> bool {
+    let mut valid: u32 = 1
+    let mut lane: u32 = 0
+    while lane < FRI_QUERY_PROGRESS_WORDS.downcast_truncate() {
+        valid = valid & validation_word(
+            fri_scratch_load(scratch, FRI_QUERY_PROGRESS_START, lane)
+                == FRI_QUERY_PLACEMENT_STEPS.downcast_truncate(),
+        )
+        lane = lane + 1
+    }
+    valid == 1
+}
+
+fn fri_query_opening_valid(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+    _ scratch: ProofTape<u32, FRI_SCRATCH_WORDS>,
+    _ variant: u32,
+) -> bool {
+    let regions = proof_tape_regions()
+    let query_status = fri_query_status_regions()
+    let variants: u32 = FRI_VARIANTS.downcast_truncate()
+    let safe_variant = if variant < variants { variant } else { 0 }
+    let mut valid = validation_word(variant < variants)
+    valid = valid & validation_word(
+        proof_load(
+            proof,
+            subregion(regions.fri_query_status, query_status.index_valid),
+            safe_variant,
+        ) == 1,
+    )
+    let query = proof_load(proof, regions.fri_query_indices, safe_variant)
+    valid = valid & validation_word(query < FRI_MAX_OUTPUT.downcast_truncate())
+    let evaluation_words: u32 =
+        (FRI_QUERY_EVALUATIONS * EXTENSION_WORDS).downcast_truncate()
+    let evaluation_base = safe_variant * evaluation_words
+    let mut word: u32 = 0
+    while word < evaluation_words {
+        valid = valid & validation_word(
+            fri_scratch_load(
+                scratch,
+                FRI_QUERY_COPY_VALID_START,
+                evaluation_base + word,
+            ) == 1,
+        )
+        word = word + 1
+    }
+    let sibling_words: u32 =
+        (FRI_QUERY_PATH_SIBLINGS * DIGEST_FIELDS).downcast_truncate()
+    let evaluation_total: u32 =
+        FRI_QUERY_EVALUATION_WORDS.downcast_truncate()
+    let sibling_base = evaluation_total + safe_variant * sibling_words
+    word = 0
+    while word < sibling_words {
+        valid = valid & validation_word(
+            fri_scratch_load(
+                scratch,
+                FRI_QUERY_COPY_VALID_START,
+                sibling_base + word,
+            ) == 1,
+        )
+        word = word + 1
+    }
+    valid == 1
+}
+
+fn fri_query_receipts_equal(
+    _ proof: ProofTape<u32, PROOF_WORDS>,
+) -> bool {
+    let regions = proof_tape_regions()
+    let mut equal = validation_word(
+        proof_load(proof, regions.fri_query_indices, 0)
+            == proof_load(proof, regions.fri_query_indices, 1),
+    )
+    let evaluation_words: u32 =
+        (FRI_QUERY_EVALUATIONS * EXTENSION_WORDS).downcast_truncate()
+    let mut word: u32 = 0
+    while word < evaluation_words {
+        equal = equal & validation_word(
+            proof_load(proof, regions.fri_query_evaluations, word)
+                == proof_load(
+                proof,
+                regions.fri_query_evaluations,
+                evaluation_words + word,
+            ),
+        )
+        word = word + 1
+    }
+    let sibling_words: u32 =
+        (FRI_QUERY_PATH_SIBLINGS * DIGEST_FIELDS).downcast_truncate()
+    word = 0
+    while word < sibling_words {
+        equal = equal & validation_word(
+            proof_load(proof, regions.fri_query_siblings, word)
+                == proof_load(
+                proof,
+                regions.fri_query_siblings,
+                sibling_words + word,
+            ),
+        )
+        word = word + 1
+    }
+    equal == 1
 }
 
 fn fri_outputs_equal(
@@ -2390,16 +5427,16 @@ fn fri_outputs_equal(
     _ left: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
     _ right: Region<ProofTapeRegions, [u32; FRI_EVALUATION_WORDS]>,
 ) -> bool {
-    let mut equal = true
+    let mut equal: u32 = 1
     let mut word: usize = 0
     while word < FRI_EVALUATION_WORDS {
         let index: u32 = word.downcast_truncate()
-        equal = equal
-            && proof_load(tape, left, index)
-                == proof_load(tape, right, index)
+        equal = equal & validation_word(
+            proof_load(tape, left, index) == proof_load(tape, right, index),
+        )
         word = word + 1
     }
-    equal
+    equal == 1
 }
 
 fn stored_flag(

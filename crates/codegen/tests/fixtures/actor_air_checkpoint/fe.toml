@@ -1,0 +1,7 @@
+[ingot]
+name = "actor_air_checkpoint"
+version = "0.1.0"
+
+[dependencies]
+mandelbrot_proof_air_core = { path = "../../../../../demos/capstones/mandelbrot-proof/air-core" }
+precision = { path = "../../../../../demos/sketches/precision" }

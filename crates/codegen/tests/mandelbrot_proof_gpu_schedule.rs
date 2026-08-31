@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    resolve_web_entry, WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle,
-    WebBundleMode,
+    WebBinding, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
+    resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -244,7 +244,7 @@ fn compile_lde_passes(
                                     .find(|(_, candidate)| candidate.binding == binding.binding)
                                     .expect("owned pass binding")
                                     .0
-                                     .1
+                                    .1
                             };
                         wgpu::BindGroupEntry {
                             binding: binding.binding,

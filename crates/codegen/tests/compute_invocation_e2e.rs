@@ -52,6 +52,36 @@ fn compile_invocation_graph() -> WebBundle {
     .expect("compute invocation fixture should compile into a WebBundle")
 }
 
+fn compile_air_checkpoint_graph() -> WebBundle {
+    let dir = repo_root().join("crates/codegen/tests/fixtures/actor_air_checkpoint");
+    let mut db = DriverDataBase::default();
+    let url = Url::from_directory_path(&dir)
+        .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "AIR checkpoint ingot initialization diagnostics"
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("AIR checkpoint fixture should resolve to one ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "AIR checkpoint source diagnostics:\n{diagnostics}"
+    );
+    let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)
+        .expect("the AIR checkpoint actor should derive its typed WebGPU entry");
+    assert_eq!(mode, WebBundleMode::Render);
+    WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some("actor_air_checkpoint".into())),
+    )
+    .expect("AIR checkpoint fixture should compile into a WebBundle")
+}
+
 fn request_browser_profile_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
     let instance = wgpu::Instance::default();
@@ -144,6 +174,58 @@ fn expected_checkpoints() -> Vec<u32> {
         expected.extend(value);
     }
     expected
+}
+
+const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
+const BABY_BEAR_EXT_NONRESIDUE: u32 = 11;
+
+fn add_mod(left: u32, right: u32) -> u32 {
+    ((u64::from(left) + u64::from(right)) % u64::from(BABY_BEAR_MODULUS)) as u32
+}
+
+fn mul_mod(left: u32, right: u32) -> u32 {
+    (u64::from(left) * u64::from(right) % u64::from(BABY_BEAR_MODULUS)) as u32
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TestExt4([u32; 4]);
+
+impl TestExt4 {
+    fn mul(self, other: Self) -> Self {
+        let mut coefficients = [0u32; 7];
+        for left in 0..4 {
+            for right in 0..4 {
+                coefficients[left + right] = add_mod(
+                    coefficients[left + right],
+                    mul_mod(self.0[left], other.0[right]),
+                );
+            }
+        }
+        for degree in (4..=6).rev() {
+            coefficients[degree - 4] = add_mod(
+                coefficients[degree - 4],
+                mul_mod(coefficients[degree], BABY_BEAR_EXT_NONRESIDUE),
+            );
+        }
+        Self(
+            coefficients[..4]
+                .try_into()
+                .expect("four extension coefficients"),
+        )
+    }
+
+    fn pow(self, mut exponent: u32) -> Self {
+        let mut base = self;
+        let mut result = Self([1, 0, 0, 0]);
+        while exponent != 0 {
+            if exponent & 1 == 1 {
+                result = result.mul(base);
+            }
+            base = base.mul(base);
+            exponent >>= 1;
+        }
+        result
+    }
 }
 
 #[test]
@@ -343,6 +425,203 @@ fn typed_compute_invocation_executes_every_fixed_dispatch_lane_on_webgpu() {
         &[0; 16],
         "one clean trap lane per invocation"
     );
+    drop(data);
+    staging.unmap();
+}
+
+#[test]
+fn quartic_air_checkpoint_helper_return_executes_all_lanes_on_webgpu() {
+    let bundle = compile_air_checkpoint_graph();
+    let compute = &bundle.manifest.passes[0];
+    assert_eq!(compute.source_entry, "fold_local");
+    assert_eq!(compute.dispatch, Some([1, 1, 1]));
+    assert_eq!(compute.layout.workgroup_size, [1, 1, 1]);
+
+    let binding = |name: &str| {
+        compute
+            .layout
+            .bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .unwrap_or_else(|| panic!("missing `{name}` compute binding"))
+    };
+    let resource_bytes = |name: &str| {
+        let resource = bundle
+            .manifest
+            .resources
+            .iter()
+            .find(|resource| resource.name == name)
+            .unwrap_or_else(|| panic!("missing `{name}` resource"));
+        resource
+            .length
+            .checked_mul(resource.stride)
+            .unwrap_or_else(|| panic!("`{name}` byte span overflow"))
+    };
+    let air_binding = binding("air_columns");
+    let challenge_binding = binding("challenge");
+    let checkpoint_binding = binding("checkpoint");
+    let trap_binding = binding("trap");
+    let air_bytes = resource_bytes("air_columns");
+    let challenge_bytes = resource_bytes("challenge");
+    let checkpoint_bytes = resource_bytes("checkpoint");
+    assert_eq!(air_bytes, 428 * 4);
+    assert_eq!(challenge_bytes, 4 * 4);
+    assert_eq!(checkpoint_bytes, 8 * 4);
+    assert_eq!(trap_binding.span, 4);
+
+    let Some((adapter, device, queue)) = request_browser_profile_device() else {
+        return;
+    };
+    eprintln!(
+        "  quartic AIR checkpoint WebGPU adapter (no required features): {}",
+        adapter.get_info().name
+    );
+
+    let air = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Fe zero AIR row"),
+        size: u64::from(air_bytes),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let challenge = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Fe quartic challenge"),
+        size: u64::from(challenge_bytes),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let checkpoint = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Fe AIR checkpoint"),
+        size: u64::from(checkpoint_bytes),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let trap = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Fe AIR checkpoint trap"),
+        size: u64::from(trap_binding.span),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("AIR checkpoint test-only readback"),
+        size: u64::from(checkpoint_bytes + trap_binding.span),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&air, 0, &vec![0; air_bytes as usize]);
+    let challenge_words = [3u32, 5, 7, 11];
+    let challenge_data = challenge_words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
+    queue.write_buffer(&challenge, 0, &challenge_data);
+
+    let layout_entries = compute
+        .layout
+        .bindings
+        .iter()
+        .map(|binding| wgpu::BindGroupLayoutEntry {
+            binding: binding.binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage {
+                    read_only: binding.access == WebBindingAccess::Read,
+                },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        })
+        .collect::<Vec<_>>();
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("AIR checkpoint bindings"),
+        entries: &layout_entries,
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("AIR checkpoint pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Fe AIR checkpoint WGSL"),
+        source: wgpu::ShaderSource::Wgsl(bundle.pass_wgsl[0].source.as_str().into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Fe AIR checkpoint pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Fe AIR checkpoint resources"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: air_binding.binding,
+                resource: air.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: challenge_binding.binding,
+                resource: challenge.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: checkpoint_binding.binding,
+                resource: checkpoint.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: trap_binding.binding,
+                resource: trap.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Fe AIR checkpoint execution"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fold one AIR checkpoint"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&checkpoint, 0, &staging, 0, u64::from(checkpoint_bytes));
+    encoder.copy_buffer_to_buffer(
+        &trap,
+        0,
+        &staging,
+        u64::from(checkpoint_bytes),
+        u64::from(trap_binding.span),
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        tx.send(result)
+            .expect("map callback receiver should remain open");
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
+        })
+        .expect("AIR checkpoint WebGPU submission should complete");
+    rx.recv()
+        .expect("map callback should fire")
+        .expect("test-only staging buffer should map");
+    let data = slice.get_mapped_range();
+    let result = words(&data);
+    let expected_power = TestExt4(challenge_words).pow(78);
+    assert_eq!(
+        &result[..4],
+        &expected_power.0,
+        "the 78-constraint Fe helper must preserve all quartic checkpoint lanes"
+    );
+    assert_eq!(result[8], 0, "the AIR checkpoint must not trip");
     drop(data);
     staging.unmap();
 }
