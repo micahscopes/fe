@@ -19,6 +19,7 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
     derive_receipt_header_relation_auxiliary,
     production_base_lde_multi_opening_relation_plan,
     production_interaction_lde_multi_opening_relation_plan,
+    production_opening_transcript_parent_plan,
     production_receipt_header_relation_inputs,
     production_security_transcript_relation_inputs,
     production_security_transcript_relation_plan,
@@ -27,6 +28,24 @@ use mandelbrot_proof_recursive_verifier_air_baby_bear::{
 use poseidon_baby_bear::Poseidon2Digest
 use precision::baby_bear::BabyBear
 use quadratic_plan::QuadraticRelationValueInterpreter
+
+fn zero_interval(
+    _ start_iteration: u32,
+    _ end_iteration: u32,
+    _ statement_digest: Poseidon2Digest,
+    _ start_digest: Poseidon2Digest,
+    _ end_digest: Poseidon2Digest,
+) -> RecursiveCommittedInterval<4> {
+    RecursiveCommittedInterval {
+        valid: true,
+        leaves: 1,
+        statement: RecursiveStatementDigest { valid: true, value: statement_digest },
+        start_iteration: start_iteration,
+        end_iteration: end_iteration,
+        start: RecursiveBoundaryDigest { valid: true, value: start_digest },
+        end: RecursiveBoundaryDigest { valid: true, value: end_digest },
+    }
+}
 
 fn flag(_ value: bool) -> u32 {
     if value { 1 } else { 0 }
@@ -250,5 +269,128 @@ pub fn audit_retained_production_recursive_transcript_relation(
         digest.field(5).to_u32(),
         digest.field(6).to_u32(),
         digest.field(7).to_u32(),
+    )
+}
+
+/// Bind two adjacent retained child receipts and their first four verifier
+/// stages to the exact ordered merge relation through one interpreter. The
+/// remaining 116 verifier task relations deliberately remain outside this
+/// partial parent checkpoint.
+pub fn audit_retained_adjacent_opening_transcript_parent_relation(
+    _ mutation: u32,
+    _ left_receipt_ptr: u32,
+    _ left_receipt_len: u32,
+    _ left_trace_ptr: u32,
+    _ left_trace_len: u32,
+    _ right_receipt_ptr: u32,
+    _ right_receipt_len: u32,
+    _ right_trace_ptr: u32,
+    _ right_trace_len: u32,
+    _ statement_digest: Poseidon2Digest,
+    _ boundary0_digest: Poseidon2Digest,
+    _ boundary1_digest: Poseidon2Digest,
+    _ boundary2_digest: Poseidon2Digest,
+) -> (
+    u32, u32, u32, u32, u32, u32, u32, u32,
+    u32, u32, u32, u32, u32, u32, u32,
+) {
+    let mut left_receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(
+        BrowserBytes { ptr: left_receipt_ptr, len: left_receipt_len },
+        mut left_receipt,
+    ) {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let mut right_receipt = empty_production_security_sparse_baby_bear_receipt()
+    if !decode_production_security_sparse_baby_bear_receipt(
+        BrowserBytes { ptr: right_receipt_ptr, len: right_receipt_len },
+        mut right_receipt,
+    ) {
+        return (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    let left_trace = decode_production_security_verifier_trace(
+        BrowserBytes { ptr: left_trace_ptr, len: left_trace_len },
+    )
+    let right_trace = decode_production_security_verifier_trace(
+        BrowserBytes { ptr: right_trace_ptr, len: right_trace_len },
+    )
+
+    if mutation == 1 {
+        left_receipt.valid = false
+    } else if mutation == 2 {
+        right_receipt.valid = false
+    } else if mutation == 3 {
+        let mut row = left_trace.row(0)
+        row.task = left_trace.row(1).task
+        let _replaced = left_trace.replace_row(0, row)
+    } else if mutation == 4 {
+        let mut row = right_trace.row(0)
+        row.task = right_trace.row(1).task
+        let _replaced = right_trace.replace_row(0, row)
+    } else if mutation == 10 {
+        left_receipt.base_root.value = changed_digest(left_receipt.base_root.value)
+    }
+
+    let left = zero_interval(
+        0,
+        1,
+        statement_digest,
+        boundary0_digest,
+        boundary1_digest,
+    )
+    let mut right = zero_interval(
+        1,
+        2,
+        statement_digest,
+        boundary1_digest,
+        boundary2_digest,
+    )
+    let mut parent = RecursiveCommittedInterval<4> {
+        valid: true,
+        leaves: 2,
+        statement: left.statement,
+        start_iteration: 0,
+        end_iteration: 2,
+        start: left.start,
+        end: right.end,
+    }
+    if mutation == 5 {
+        right.start.value = changed_digest(right.start.value)
+    } else if mutation == 6 {
+        parent.leaves = 3
+    } else if mutation == 7 {
+        parent.end.value = changed_digest(parent.end.value)
+    } else if mutation == 8 {
+        right.statement.value = changed_digest(right.statement.value)
+    } else if mutation == 9 {
+        right.start_iteration = 0
+    }
+
+    let plan = production_opening_transcript_parent_plan(
+        left,
+        ref left_receipt,
+        left_trace,
+        right,
+        ref right_receipt,
+        right_trace,
+        parent,
+        QuadraticRelationValueInterpreter::new(),
+    )
+    (
+        1,
+        1,
+        flag(left_trace.shape_valid()),
+        flag(right_trace.shape_valid()),
+        flag(plan.interpreter.finish()),
+        flag(plan.left_composition.is_valid()),
+        flag(plan.right_composition.is_valid()),
+        flag(plan.parent.valid),
+        plan.parent.leaves,
+        plan.parent.start_iteration,
+        plan.parent.end_iteration,
+        flag(left_trace.task_matches(0)),
+        flag(right_trace.task_matches(0)),
+        flag(left_trace.task_matches(3)),
+        flag(right_trace.task_matches(3)),
     )
 }

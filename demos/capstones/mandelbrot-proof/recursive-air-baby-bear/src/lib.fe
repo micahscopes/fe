@@ -319,8 +319,8 @@ fn constrain_digest_equal<I: QuadraticRelationInterpreter<BabyBear>>(
     interpreter
 }
 
-struct RecursiveMergePlan<I: QuadraticRelationInterpreter<BabyBear>> {
-    interpreter: I,
+pub struct RecursiveMergePlan<I: QuadraticRelationInterpreter<BabyBear>> {
+    pub interpreter: I,
 }
 impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
     for RecursiveMergePlan<I> {}
@@ -328,7 +328,7 @@ impl<I: QuadraticRelationInterpreter<BabyBear>> core::marker::Copy
 /// The sole authored recursive merge relation. Its interpreter determines
 /// whether this is direct evaluation, witness generation, or constraint
 /// emission. Reordering or adding a relation invalidates old capacities.
-fn recursive_merge_plan<
+pub fn recursive_merge_plan<
     I: QuadraticRelationInterpreter<BabyBear>,
     const L: usize,
 >(

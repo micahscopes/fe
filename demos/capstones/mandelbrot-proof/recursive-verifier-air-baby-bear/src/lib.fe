@@ -37,6 +37,10 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_interaction_lde_leaf_commitment_plan,
 }
 use mandelbrot_proof_recursive_baby_bear::RecursiveCommittedInterval
+use mandelbrot_proof_recursive_air_baby_bear::{
+    derive_recursive_merge_auxiliary,
+    recursive_merge_plan,
+}
 use core::{BrowserPtr, alloc_browser_object}
 use merkle_core::{
     MerkleMultiPath,
@@ -827,6 +831,46 @@ impl<
     I: QuadraticRelationInterpreter<BabyBear>,
 > core::marker::Copy for ProductionSecurityTranscriptRelationPlan<I> {}
 
+pub type ProductionSecurityCompositionDigest = SparseCompositionTranscriptDigest<
+    {
+        PRODUCTION_LIMBS
+    },
+    {
+        PRODUCTION_TRACE_LENGTH
+    },
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+>
+
+/// One interpreter threaded through the first four shared production
+/// verifier stages. Later FRI, AIR-request, and query relations extend this
+/// same plan rather than trusting their stored trace booleans.
+pub struct ProductionOpeningTranscriptChildPlan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    pub composition: ProductionSecurityCompositionDigest,
+}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> core::marker::Copy for ProductionOpeningTranscriptChildPlan<I> {}
+
+/// Two ordered child plans followed by the exact 423-product merge relation.
+/// This remains a partial recursive parent until the remaining verifier task
+/// relations are inserted before the merge.
+pub struct ProductionOpeningTranscriptParentPlan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> {
+    pub interpreter: I,
+    pub left_composition: ProductionSecurityCompositionDigest,
+    pub right_composition: ProductionSecurityCompositionDigest,
+    pub parent: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+}
+impl<
+    I: QuadraticRelationInterpreter<BabyBear>,
+> core::marker::Copy for ProductionOpeningTranscriptParentPlan<I> {}
+
 /// Project the exact scalar verifier rows into the transcript relation. Task
 /// order remains compiler-derived: rows one, two, and three are respectively
 /// the base opening, interaction opening, and security transcript stages.
@@ -922,6 +966,91 @@ pub fn production_security_transcript_relation_plan<I: QuadraticRelationInterpre
     ProductionSecurityTranscriptRelationPlan {
         interpreter: interpreter,
         composition: composition.value,
+    }
+}
+
+/// Compose the receipt-header, base-opening, interaction-opening, and security
+/// transcript relations without resetting or copying the interpreter.
+pub fn production_opening_transcript_child_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ statement: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+    _ shift: BabyBear,
+    _ receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ trace: ProductionSecurityVerifierTrace,
+    _ interpreter: I,
+) -> ProductionOpeningTranscriptChildPlan<I> {
+    let header_inputs = production_receipt_header_relation_inputs(
+        shift,
+        receipt,
+        trace,
+    )
+    let header = receipt_header_relation_plan(
+        header_inputs,
+        derive_receipt_header_relation_auxiliary(header_inputs),
+        interpreter,
+    )
+    let base = production_base_lde_multi_opening_relation_plan(
+        ref receipt.base,
+        receipt.base_root,
+        header.interpreter,
+    )
+    let interaction = production_interaction_lde_multi_opening_relation_plan(
+        ref receipt.interaction,
+        receipt.interaction_root,
+        base.interpreter,
+    )
+    let transcript = production_security_transcript_relation_plan(
+        production_security_transcript_relation_inputs(statement, receipt, trace),
+        interaction.interpreter,
+    )
+    ProductionOpeningTranscriptChildPlan {
+        interpreter: transcript.interpreter,
+        composition: transcript.composition,
+    }
+}
+
+/// Compose two adjacent partial child-verifier relations and their public
+/// parent projection through one quadratic interpreter. No host boolean or
+/// separately authored merge topology participates.
+pub fn production_opening_transcript_parent_plan<
+    I: QuadraticRelationInterpreter<BabyBear>,
+>(
+    _ left: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+    _ left_receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ left_trace: ProductionSecurityVerifierTrace,
+    _ right: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+    _ right_receipt: ref ProductionSecuritySparseBabyBearReceipt,
+    _ right_trace: ProductionSecurityVerifierTrace,
+    _ parent: RecursiveCommittedInterval<{ PRODUCTION_LIMBS }>,
+    _ interpreter: I,
+) -> ProductionOpeningTranscriptParentPlan<I> {
+    let left_plan = production_opening_transcript_child_plan(
+        left,
+        BabyBear::from_u32(7),
+        left_receipt,
+        left_trace,
+        interpreter,
+    )
+    let right_plan = production_opening_transcript_child_plan(
+        right,
+        BabyBear::from_u32(7),
+        right_receipt,
+        right_trace,
+        left_plan.interpreter,
+    )
+    let merge = recursive_merge_plan(
+        left,
+        right,
+        parent,
+        derive_recursive_merge_auxiliary(left, right, parent),
+        right_plan.interpreter,
+    )
+    ProductionOpeningTranscriptParentPlan {
+        interpreter: merge.interpreter,
+        left_composition: left_plan.composition,
+        right_composition: right_plan.composition,
+        parent: parent,
     }
 }
 

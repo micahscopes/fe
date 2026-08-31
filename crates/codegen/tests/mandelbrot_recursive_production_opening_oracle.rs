@@ -20,12 +20,18 @@ use wasmtime::Val;
 const CHILD_MODE: &str = "FE_MANDELBROT_RECURSIVE_OPENING_CHILD";
 const RECEIPT_PATH: &str = "MB2_PRODUCTION_SECURITY_RECEIPT";
 const TRACE_PATH: &str = "MB2_PRODUCTION_SECURITY_TRACE";
+const RIGHT_RECEIPT_PATH: &str = "MB2_PRODUCTION_SECURITY_RIGHT_RECEIPT";
+const RIGHT_TRACE_PATH: &str = "MB2_PRODUCTION_SECURITY_RIGHT_TRACE";
 const WASM_PATH: &str = "FE_MANDELBROT_RECURSIVE_OPENING_WASM";
 const GATE: &str = "retained_production_receipt_authenticates_both_opening_roles";
 const ENTRY: &str = "audit_retained_production_opening_relations";
 const RECURSIVE_ENTRY: &str = "audit_retained_production_recursive_transcript_relation";
+const PARENT_ENTRY: &str = "audit_retained_adjacent_opening_transcript_parent_relation";
 const RECEIPT_BYTES: usize = 948_808;
 const RECEIPT_SHA256: &str = "c789a067f63b4ab73d8a4c0b36932e4252b6270b0be3e17cc5d5c27980be3ceb";
+const RIGHT_RECEIPT_BYTES: usize = 953_560;
+const RIGHT_RECEIPT_SHA256: &str =
+    "035bdb10e47d2b85ee1b7756b7e633e0fd6b18aee148baef9212bd0843878323";
 const TRACE_BYTES: usize = 972;
 const TRACE_SHA256: &str = "537df3ee19012a933816b92688f0c648fe2519cee1b1dadcbd442d502865d865";
 
@@ -52,17 +58,26 @@ fn reference_field_commitment(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     state[..8].try_into().unwrap()
 }
 
-fn reference_zero_interval_digests() -> [[u32; 8]; 3] {
+fn reference_zero_recursive_digests() -> [[u32; 8]; 4] {
     let mut claim = vec![0u32; 10];
     claim.push(8);
-    let start = vec![0u32; 12];
-    let mut end = vec![0u32; 12];
-    end[0] = 1;
+    let mut boundary0 = vec![0u32; 12];
+    let mut boundary1 = boundary0.clone();
+    let mut boundary2 = boundary0.clone();
+    boundary0[0] = 0;
+    boundary1[0] = 1;
+    boundary2[0] = 2;
     [
         reference_field_commitment(b"RS01", &claim),
-        reference_field_commitment(b"RB01", &start),
-        reference_field_commitment(b"RB01", &end),
+        reference_field_commitment(b"RB01", &boundary0),
+        reference_field_commitment(b"RB01", &boundary1),
+        reference_field_commitment(b"RB01", &boundary2),
     ]
+}
+
+fn reference_zero_interval_digests() -> [[u32; 8]; 3] {
+    let digests = reference_zero_recursive_digests();
+    [digests[0], digests[1], digests[2]]
 }
 
 fn compile_gate(entry: &str, path: &Path) {
@@ -161,6 +176,91 @@ fn call_recursive_audit(
     std::array::from_fn(|index| match results[index] {
         Val::I32(value) => value as u32,
         ref other => panic!("unexpected recursive transcript result {index}: {other:?}"),
+    })
+}
+
+fn call_parent_audit(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    left_receipt: &[u8],
+    left_trace: &[u8],
+    right_receipt: &[u8],
+    right_trace: &[u8],
+    mutation: u32,
+    declared_lengths: [usize; 4],
+) -> [u32; 15] {
+    instance
+        .get_typed_func::<(), ()>(&mut *store, "fe_cabi_reset")
+        .expect("canonical arena reset export")
+        .call(&mut *store, ())
+        .expect("canonical arena reset should run");
+    let allocate = instance
+        .get_typed_func::<(i32, i32), i32>(&mut *store, "fe_cabi_alloc")
+        .expect("canonical allocator export");
+    let left_receipt_pointer = allocate
+        .call(
+            &mut *store,
+            (i32::try_from(left_receipt.len() + 4).unwrap(), 4),
+        )
+        .expect("left receipt allocation should succeed");
+    let left_trace_pointer = allocate
+        .call(
+            &mut *store,
+            (i32::try_from(left_trace.len() + 4).unwrap(), 4),
+        )
+        .expect("left trace allocation should succeed");
+    let right_receipt_pointer = allocate
+        .call(
+            &mut *store,
+            (i32::try_from(right_receipt.len() + 4).unwrap(), 4),
+        )
+        .expect("right receipt allocation should succeed");
+    let right_trace_pointer = allocate
+        .call(
+            &mut *store,
+            (i32::try_from(right_trace.len() + 4).unwrap(), 4),
+        )
+        .expect("right trace allocation should succeed");
+    let memory = instance
+        .get_memory(&mut *store, "memory")
+        .expect("recursive parent memory");
+    for (pointer, bytes) in [
+        (left_receipt_pointer, left_receipt),
+        (left_trace_pointer, left_trace),
+        (right_receipt_pointer, right_receipt),
+        (right_trace_pointer, right_trace),
+    ] {
+        memory
+            .write(&mut *store, pointer as usize, bytes)
+            .expect("adjacent evidence should fit Wasm memory");
+    }
+    let function = instance
+        .get_func(&mut *store, PARENT_ENTRY)
+        .expect("partial recursive parent relation export");
+    let mut results = vec![Val::I32(0); 15];
+    let mut arguments = vec![
+        Val::I32(mutation as i32),
+        Val::I32(left_receipt_pointer),
+        Val::I32(i32::try_from(declared_lengths[0]).unwrap()),
+        Val::I32(left_trace_pointer),
+        Val::I32(i32::try_from(declared_lengths[1]).unwrap()),
+        Val::I32(right_receipt_pointer),
+        Val::I32(i32::try_from(declared_lengths[2]).unwrap()),
+        Val::I32(right_trace_pointer),
+        Val::I32(i32::try_from(declared_lengths[3]).unwrap()),
+    ];
+    arguments.extend(
+        reference_zero_recursive_digests()
+            .into_iter()
+            .flatten()
+            .map(|value| Val::I32(value as i32)),
+    );
+    function
+        .call(&mut *store, &arguments, &mut results)
+        .expect("partial recursive parent relation should execute");
+    std::array::from_fn(|index| match results[index] {
+        Val::I32(value) => value as u32,
+        ref other => panic!("unexpected partial parent result {index}: {other:?}"),
     })
 }
 
@@ -452,6 +552,106 @@ fn execute_recursive_gate(receipt_path: &Path, trace_path: &Path, wasm_path: &Pa
     );
 }
 
+fn execute_parent_gate(
+    left_receipt_path: &Path,
+    left_trace_path: &Path,
+    right_receipt_path: &Path,
+    right_trace_path: &Path,
+    wasm_path: &Path,
+) {
+    let started = Instant::now();
+    let left_receipt =
+        std::fs::read(left_receipt_path).expect("left retained receipt should be readable");
+    let left_trace =
+        std::fs::read(left_trace_path).expect("left retained trace should be readable");
+    let right_receipt =
+        std::fs::read(right_receipt_path).expect("right retained receipt should be readable");
+    let right_trace =
+        std::fs::read(right_trace_path).expect("right retained trace should be readable");
+    assert_eq!(left_receipt.len(), RECEIPT_BYTES);
+    assert_eq!(hex::encode(Sha256::digest(&left_receipt)), RECEIPT_SHA256);
+    assert_eq!(right_receipt.len(), RIGHT_RECEIPT_BYTES);
+    assert_eq!(
+        hex::encode(Sha256::digest(&right_receipt)),
+        RIGHT_RECEIPT_SHA256
+    );
+    for trace in [&left_trace, &right_trace] {
+        assert_eq!(trace.len(), TRACE_BYTES);
+        assert_eq!(hex::encode(Sha256::digest(trace)), TRACE_SHA256);
+    }
+
+    let wasm = std::fs::read(wasm_path).expect("partial parent Wasm should be readable");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("partial parent module should load");
+    assert!(
+        module.imports().next().is_none(),
+        "gate must remain zero-import"
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("partial parent module should instantiate");
+    let lengths = [
+        left_receipt.len(),
+        left_trace.len(),
+        right_receipt.len(),
+        right_trace.len(),
+    ];
+
+    let clean = call_parent_audit(
+        &mut store,
+        &instance,
+        &left_receipt,
+        &left_trace,
+        &right_receipt,
+        &right_trace,
+        0,
+        lengths,
+    );
+    assert_eq!(&clean[..8], &[1; 8], "joined child and merge relations");
+    assert_eq!(&clean[8..11], &[2, 0, 2], "public parent projection");
+    assert_eq!(&clean[11..], &[1; 4], "joined task identities");
+
+    for mutation in 1..=10 {
+        let result = call_parent_audit(
+            &mut store,
+            &instance,
+            &left_receipt,
+            &left_trace,
+            &right_receipt,
+            &right_trace,
+            mutation,
+            lengths,
+        );
+        assert_eq!(
+            result[4], 0,
+            "partial parent mutation {mutation} must reject"
+        );
+    }
+
+    for (length_index, result_index) in [(0, 0), (2, 1), (1, 2), (3, 3)] {
+        let mut truncated = lengths;
+        truncated[length_index] -= 4;
+        let result = call_parent_audit(
+            &mut store,
+            &instance,
+            &left_receipt,
+            &left_trace,
+            &right_receipt,
+            &right_trace,
+            0,
+            truncated,
+        );
+        assert_eq!(
+            result[result_index], 0,
+            "truncated adjacent evidence {length_index} must reject"
+        );
+    }
+    eprintln!(
+        "partial recursive parent gate: joined both children and merge relation in {:.2?}",
+        started.elapsed(),
+    );
+}
+
 fn required_path(name: &str) -> PathBuf {
     std::env::var_os(name)
         .map(PathBuf::from)
@@ -469,6 +669,14 @@ fn run_requested_child() -> bool {
         "execute" => execute_gate(&receipt, &wasm),
         "compile-recursive" => compile_gate(RECURSIVE_ENTRY, &wasm),
         "execute-recursive" => execute_recursive_gate(&receipt, &required_path(TRACE_PATH), &wasm),
+        "compile-parent" => compile_gate(PARENT_ENTRY, &wasm),
+        "execute-parent" => execute_parent_gate(
+            &receipt,
+            &required_path(TRACE_PATH),
+            &required_path(RIGHT_RECEIPT_PATH),
+            &required_path(RIGHT_TRACE_PATH),
+            &wasm,
+        ),
         _ => panic!("unknown recursive production opening child mode {mode}"),
     }
     true
@@ -490,6 +698,29 @@ fn run_child(mode: &str, receipt: &Path, trace: Option<&Path>, wasm: &Path) -> E
     command
         .status()
         .unwrap_or_else(|error| panic!("recursive production opening {mode} child: {error}"))
+}
+
+fn run_parent_child(
+    mode: &str,
+    left_receipt: &Path,
+    left_trace: &Path,
+    right_receipt: &Path,
+    right_trace: &Path,
+    wasm: &Path,
+) -> ExitStatus {
+    Command::new(std::env::current_exe().expect("current test executable"))
+        .arg(GATE)
+        .arg("--exact")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env(CHILD_MODE, mode)
+        .env(RECEIPT_PATH, left_receipt)
+        .env(TRACE_PATH, left_trace)
+        .env(RIGHT_RECEIPT_PATH, right_receipt)
+        .env(RIGHT_TRACE_PATH, right_trace)
+        .env(WASM_PATH, wasm)
+        .status()
+        .unwrap_or_else(|error| panic!("partial recursive parent {mode} child: {error}"))
 }
 
 #[test]
@@ -539,6 +770,42 @@ fn retained_production_receipt_and_trace_form_one_recursive_transcript_relation(
             let retained = scratch.keep();
             panic!(
                 "recursive production transcript {mode} failed; retained evidence at {}",
+                retained.display(),
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires both retained adjacent receipts and canonical verifier traces"]
+fn retained_adjacent_children_and_merge_form_one_partial_parent_relation() {
+    if run_requested_child() {
+        return;
+    }
+    let left_receipt = required_path(RECEIPT_PATH);
+    let left_trace = required_path(TRACE_PATH);
+    let right_receipt = required_path(RIGHT_RECEIPT_PATH);
+    let right_trace = required_path(RIGHT_TRACE_PATH);
+    let scratch_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fe-test-scratch");
+    std::fs::create_dir_all(&scratch_root).expect("workspace test scratch directory");
+    let scratch = tempfile::Builder::new()
+        .prefix("recursive-production-parent-")
+        .tempdir_in(scratch_root)
+        .expect("workspace-backed recursive parent scratch");
+    let wasm = scratch.path().join("partial-parent.wasm");
+    for mode in ["compile-parent", "execute-parent"] {
+        let status = run_parent_child(
+            mode,
+            &left_receipt,
+            &left_trace,
+            &right_receipt,
+            &right_trace,
+            &wasm,
+        );
+        if !status.success() {
+            let retained = scratch.keep();
+            panic!(
+                "partial recursive parent {mode} failed; retained evidence at {}",
                 retained.display(),
             );
         }

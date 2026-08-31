@@ -646,6 +646,40 @@ existing Definition of done, not a second campaign checklist:
   relation. The accepted row booleans therefore remain witnesses awaiting
   their internal execution relations. No recursive cryptographic parent
   receipt is emitted or implied.
+
+  The following adjacent-parent checkpoint now threads two of those joined
+  child plans through the exact ordered recursive merge relation without
+  resetting or copying the interpreter. The current release compiler emitted
+  a fresh 16,096,150-byte zero-import Fe prover for the distinct `1 -> 2`
+  security-policy leaf in 6,167.17 seconds. Its SHA-256 is
+  `3cbd8c751178747663d6a75f8478413125038b7c814c115abde361ff528bec03`.
+  Executing that persisted artifact took 419.09 seconds and reproduced the
+  canonical 953,560-byte receipt with SHA-256
+  `035bdb10e47d2b85ee1b7756b7e633e0fd6b18aee148baef9212bd0843878323`.
+  Its 972-byte verifier trace is byte-identical to the left trace because all
+  120 compiler-derived task identities and acceptance results agree for the
+  zero fixed point; the prior adjacent trace gate independently established
+  that the right receipt cannot replay as the left public interval.
+
+  One 4,343,159-byte zero-import parent module with SHA-256
+  `46af039318c03437d21a9c1bc58ac1b36438d17bd37aa7daad99258bb9d6aad8`
+  compiled in 344.96 seconds. It decodes both distinct receipts and both
+  canonical traces in Fe, accepts independently derived Plonky3 statement and
+  boundary digests as public inputs, executes the first four verifier-stage
+  relations for each child, then executes the sole authored 423-product merge
+  relation through the same `QuadraticRelationValueInterpreter`. The exact
+  clean, ten-mutation, and four-stream-truncation matrix passed in 50.43
+  seconds. Mutations cover either receipt, either child task topology, the
+  shared boundary, parent leaf count and end digest, child statement,
+  adjacency, and an authenticated opening root.
+
+  This is one partial parent execution relation over two real security-policy
+  children, not a recursive cryptographic proof. Each child still lacks
+  internal relations for `FriAuthentication`, `AirRequestSet`, and all 114
+  query rows. Those 116 relations must join the existing child plan before its
+  accepted trace suffix can be trusted, and a later proving layer must commit
+  and authenticate the complete child and merge relation before emitting a
+  recursive parent receipt.
 - [ ] **G-BROWSER:** the Fe resident region picker proves through WebGPU and
   verifies through both Fe-Wasm and revm-Wasm with cancellation, backpressure,
   mutation, timing, and device-loss evidence. A click selects one private
