@@ -58,7 +58,8 @@ use rustc_hash::FxHashMap;
 #[cfg(feature = "sonatina-indirect-calls")]
 use sonatina_ir::inst::{control_flow::CallIndirect, data::GetFunctionPtr};
 use sonatina_ir::{
-    BlockId, GlobalVariableData, Immediate, Linkage, Module, Signature, Type, ValueId,
+    BlockId, GlobalVariableData, GlobalVariableRef, Immediate, Linkage, Module, Signature, Type,
+    ValueId,
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     global_variable::GvInitializer,
@@ -188,7 +189,17 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[], &[], None, None, None, &[])
+    compile_runtime_package_wasm_with_canonical_lanes(
+        db,
+        package,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        None,
+        &[],
+    )
 }
 
 /// Build the shared Sonatina module for a shader target. Shader entrypoints
@@ -201,7 +212,19 @@ pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, &[], false, true)
+    compile_runtime_package_wasm_inner(
+        db,
+        package,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        None,
+        &[],
+        false,
+        true,
+    )
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -230,6 +253,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     canonical_lanes: &[crate::CanonicalLane],
     export_aliases: &[(String, String)],
     resident_transition: Option<&super::WasmResidentTransition>,
+    resident_aux_transitions: &[super::WasmResidentTransition],
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
     resident_policies: &[super::WasmResidentPolicy],
@@ -240,6 +264,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         canonical_lanes,
         export_aliases,
         resident_transition,
+        resident_aux_transitions,
         resident_initializer,
         resident_projection,
         resident_policies,
@@ -255,6 +280,7 @@ fn compile_runtime_package_wasm_inner(
     canonical_lanes: &[crate::CanonicalLane],
     export_aliases: &[(String, String)],
     resident_transition: Option<&super::WasmResidentTransition>,
+    resident_aux_transitions: &[super::WasmResidentTransition],
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
     resident_policies: &[super::WasmResidentPolicy],
@@ -317,6 +343,9 @@ fn compile_runtime_package_wasm_inner(
     if let Some(transition) = resident_transition {
         wrapped_lane_names.insert(transition.source.clone());
     }
+    for transition in resident_aux_transitions {
+        wrapped_lane_names.insert(transition.source.clone());
+    }
     if let Some(initializer) = resident_initializer {
         wrapped_lane_names.insert(initializer.source.clone());
     }
@@ -360,14 +389,20 @@ fn compile_runtime_package_wasm_inner(
         lowerer.synthesize_canonical_lane(lane)?;
     }
     if let Some(transition) = resident_transition {
-        lowerer.synthesize_resident_transition(
+        let state = lowerer.synthesize_resident_transition(
             transition,
             resident_initializer,
             resident_projection,
         )?;
-    } else if resident_initializer.is_some() || resident_projection.is_some() {
+        for auxiliary in resident_aux_transitions {
+            lowerer.synthesize_aux_resident_transition(auxiliary, &state)?;
+        }
+    } else if resident_initializer.is_some()
+        || resident_projection.is_some()
+        || !resident_aux_transitions.is_empty()
+    {
         return Err(LowerError::Unsupported(
-            "resident actor initializer/projection requires a resident transition".to_owned(),
+            "resident actor initializer, projection, and auxiliary transitions require a primary resident transition".to_owned(),
         ));
     }
     for (policy_index, policy) in resident_policies.iter().enumerate() {
@@ -3725,6 +3760,16 @@ fn collect_pending_producer_lineage(
     }
 }
 
+/// One compiler-owned state cell shared by every typed transition of a
+/// resident actor. Event transports and exports may differ, but the complete
+/// state shape and initialization authority do not.
+struct ResidentActorStorage {
+    result_tys: Vec<Type>,
+    state_globals: Vec<GlobalVariableRef>,
+    state_initialized: GlobalVariableRef,
+    state_tag_limits: Vec<(usize, u32)>,
+}
+
 struct PortableModuleLowerer<'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -5151,7 +5196,7 @@ where
         transition: &super::WasmResidentTransition,
         initializer: Option<&super::WasmResidentInitializer>,
         projection: Option<&super::WasmResidentProjection>,
-    ) -> Result<(), LowerError> {
+    ) -> Result<ResidentActorStorage, LowerError> {
         match &transition.transport {
             super::WasmResidentEventTransport::Direct { event_fields } => self
                 .synthesize_direct_resident_transition(
@@ -5195,7 +5240,7 @@ where
         initializer: Option<&super::WasmResidentInitializer>,
         projection: Option<&super::WasmResidentProjection>,
         event_fields: usize,
-    ) -> Result<(), LowerError> {
+    ) -> Result<ResidentActorStorage, LowerError> {
         if event_fields == 0 {
             return Err(LowerError::Unsupported(
                 "resident actor transition must declare at least one event field".to_owned(),
@@ -5606,6 +5651,196 @@ where
         fb.insert_return_values(&results);
         fb.seal_all();
         fb.finish();
+        Ok(ResidentActorStorage {
+            result_tys,
+            state_globals,
+            state_initialized,
+            state_tag_limits: transition.state_tag_limits.clone(),
+        })
+    }
+
+    /// Add one direct event entry to an already-materialized resident actor.
+    /// The auxiliary behavior is admitted only when its complete non-resource
+    /// argument and result shapes exactly match the primary transition. It
+    /// therefore cannot acquire a second state store or drift into a parallel
+    /// application protocol.
+    fn synthesize_aux_resident_transition(
+        &mut self,
+        transition: &super::WasmResidentTransition,
+        state: &ResidentActorStorage,
+    ) -> Result<(), LowerError> {
+        let super::WasmResidentEventTransport::Direct { event_fields } = transition.transport
+        else {
+            return Err(LowerError::Unsupported(format!(
+                "auxiliary resident transition `{}` must use direct event transport",
+                transition.source
+            )));
+        };
+        if event_fields == 0 {
+            return Err(LowerError::Unsupported(
+                "auxiliary resident actor transition must declare at least one event field"
+                    .to_owned(),
+            ));
+        }
+        if transition.state_tag_limits != state.state_tag_limits {
+            return Err(LowerError::Unsupported(format!(
+                "auxiliary resident transition `{}` has a different complete-state enum contract",
+                transition.source
+            )));
+        }
+
+        let candidates = self
+            .func_map
+            .iter()
+            .filter(|(instance, _)| self.function_symbol(**instance) == transition.source)
+            .map(|(_, func_ref)| *func_ref)
+            .collect::<Vec<_>>();
+        let [callee] = candidates.as_slice() else {
+            return Err(LowerError::Unsupported(format!(
+                "auxiliary resident transition `{}` must select exactly one lowered Fe behavior (found {})",
+                transition.source,
+                candidates.len()
+            )));
+        };
+        let (callee_args, result_tys) = self.builder.sig(*callee, |signature| {
+            (signature.args().to_vec(), signature.ret_tys().to_vec())
+        });
+        if callee_args.len() < event_fields {
+            return Err(LowerError::Unsupported(format!(
+                "auxiliary resident transition `{}` has {} arguments, fewer than its {} event leaves",
+                transition.source,
+                callee_args.len(),
+                event_fields
+            )));
+        }
+        let event_tys = &callee_args[..event_fields];
+        let actor_tys = &callee_args[event_fields..];
+        if actor_tys.len() != transition.actor_param_is_resource.len() {
+            return Err(LowerError::Unsupported(format!(
+                "auxiliary resident transition `{}` has {} flattened actor arguments but its resource mask has {} entries",
+                transition.source,
+                actor_tys.len(),
+                transition.actor_param_is_resource.len()
+            )));
+        }
+        let state_tys = actor_tys
+            .iter()
+            .zip(&transition.actor_param_is_resource)
+            .filter_map(|(ty, is_resource)| (!is_resource).then_some(*ty))
+            .collect::<Vec<_>>();
+        if state_tys != state.result_tys || result_tys != state.result_tys {
+            return Err(LowerError::Unsupported(format!(
+                "auxiliary resident transition `{}` must consume and return the primary transition's complete non-resource state {:?}; got {state_tys:?} -> {result_tys:?}",
+                transition.source, state.result_tys
+            )));
+        }
+        for (index, limit) in &transition.event_tag_limits {
+            if *limit == 0
+                || event_tys
+                    .get(*index)
+                    .and_then(|ty| fieldless_tag_immediate(*ty, *limit - 1))
+                    .is_none()
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "auxiliary resident transition `{}` has invalid event enum constraint ({index}, {limit}) for {event_tys:?}",
+                    transition.source
+                )));
+            }
+        }
+
+        let mut wrapper_args = event_tys.to_vec();
+        wrapper_args.extend(
+            actor_tys
+                .iter()
+                .zip(&transition.actor_param_is_resource)
+                .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
+        );
+        let wrapper = self
+            .builder
+            .declare_function(Signature::new(
+                &transition.export,
+                Linkage::Public,
+                &wrapper_args,
+                &state.result_tys,
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare auxiliary resident transition wrapper `{}`: {error}",
+                    transition.export
+                ))
+            })?;
+
+        let is = self.isa.inst_set();
+        let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
+        let entry = fb.append_block();
+        let invoke = fb.append_block();
+        let invalid = fb.append_block();
+        fb.switch_to_block(entry);
+        let wrapper_values = fb.args().to_vec();
+        let initialized_address = fb.make_global_value(state.state_initialized);
+        let initialized_value =
+            fb.insert_inst(Mload::new(is, initialized_address, Type::I32), Type::I32);
+        let one = fb.make_imm_value(Immediate::I32(1));
+        let mut ready = fb.insert_inst(CmpEq::new(is, initialized_value, one), Type::I1);
+        for (index, limit) in &transition.event_tag_limits {
+            let mut tag_valid = None;
+            for tag in 0..*limit {
+                let expected = fb.make_imm_value(
+                    fieldless_tag_immediate(event_tys[*index], tag)
+                        .expect("auxiliary enum tag type validated above"),
+                );
+                let equal =
+                    fb.insert_inst(CmpEq::new(is, wrapper_values[*index], expected), Type::I1);
+                tag_valid = Some(match tag_valid {
+                    Some(previous) => fb.insert_inst(Or::new(is, previous, equal), Type::I1),
+                    None => equal,
+                });
+            }
+            ready = fb.insert_inst(
+                And::new(
+                    is,
+                    ready,
+                    tag_valid.expect("nonzero auxiliary enum limit validated above"),
+                ),
+                Type::I1,
+            );
+        }
+        fb.insert_inst_no_result(Br::new(is, ready, invoke, invalid));
+
+        fb.switch_to_block(invalid);
+        fb.insert_inst_no_result(Unreachable::new(is));
+
+        fb.switch_to_block(invoke);
+        let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+        args.extend(wrapper_values[..event_fields].iter().copied());
+        let mut resource_index = event_fields;
+        let mut state_index = 0usize;
+        for is_resource in &transition.actor_param_is_resource {
+            if *is_resource {
+                args.push(wrapper_values[resource_index]);
+                resource_index += 1;
+            } else {
+                let global = state.state_globals[state_index];
+                let ty = state.result_tys[state_index];
+                let address = fb.make_global_value(global);
+                args.push(fb.insert_inst(Mload::new(is, address, ty), ty));
+                state_index += 1;
+            }
+        }
+        let results = fb.insert_call_results(*callee, args);
+        for ((global, ty), value) in state
+            .state_globals
+            .iter()
+            .copied()
+            .zip(state.result_tys.iter().copied())
+            .zip(results.iter().copied())
+        {
+            let address = fb.make_global_value(global);
+            fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
+        }
+        fb.insert_return_values(&results);
+        fb.seal_all();
+        fb.finish();
         Ok(())
     }
 
@@ -5807,7 +6042,7 @@ where
         accumulate_f32_fields: &[usize],
         coalesce_tag_field: usize,
         coalesce_tag_variant: u32,
-    ) -> Result<(), LowerError> {
+    ) -> Result<ResidentActorStorage, LowerError> {
         if event_fields == 0 || event_stride <= 0 {
             return Err(LowerError::Unsupported(
                 "batched resident transition requires a non-empty, positive-stride event"
@@ -6331,7 +6566,12 @@ where
         fb.insert_return_values(&final_state);
         fb.seal_all();
         fb.finish();
-        Ok(())
+        Ok(ResidentActorStorage {
+            result_tys,
+            state_globals,
+            state_initialized,
+            state_tag_limits: transition.state_tag_limits.clone(),
+        })
     }
 
     fn synthesize_canonical_lane(&mut self, lane: &crate::CanonicalLane) -> Result<(), LowerError> {

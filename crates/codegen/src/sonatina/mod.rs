@@ -168,6 +168,13 @@ pub struct WasmCompileOptions {
     /// authored Fe behavior stays private; the fixed wrapper and state-seeding
     /// exports are the host contract.
     resident_transition: Option<WasmResidentTransition>,
+    /// Additional typed transitions over the same resident actor state. Each
+    /// transition has its own event transport and fixed export, while all of
+    /// them consume and replace the exact complete state established by the
+    /// primary transition. This is the target-neutral substrate for GPU
+    /// results, worker messages, and other actor inputs that must not be
+    /// couriered through application JavaScript.
+    resident_aux_transitions: Vec<WasmResidentTransition>,
     /// Optional authored complete-state initializer paired with the resident
     /// transition. It is hidden behind a fixed zero-argument export.
     resident_initializer: Option<WasmResidentInitializer>,
@@ -277,6 +284,34 @@ impl WasmCompileOptions {
             source: source.into(),
             export: export.into(),
             state_replace_export: state_replace_export.into(),
+            transport: WasmResidentEventTransport::Direct { event_fields },
+            event_tag_limits,
+            state_tag_limits,
+            actor_param_is_resource,
+        });
+        self
+    }
+
+    /// Add another compiler-owned entry into the same resident actor. The
+    /// lowering validates its complete non-resource state against the primary
+    /// transition before sharing any globals. Auxiliary transitions currently
+    /// use the direct scalar transport; richer transports remain ordinary
+    /// compiler extensions rather than host protocols.
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn with_resident_actor_aux_transition_checked(
+        mut self,
+        source: impl Into<String>,
+        export: impl Into<String>,
+        event_fields: usize,
+        actor_param_is_resource: Vec<bool>,
+        event_tag_limits: Vec<(usize, u32)>,
+        state_tag_limits: Vec<(usize, u32)>,
+    ) -> Self {
+        self.resident_aux_transitions.push(WasmResidentTransition {
+            source: source.into(),
+            export: export.into(),
+            state_replace_export: String::new(),
             transport: WasmResidentEventTransport::Direct { event_fields },
             event_tag_limits,
             state_tag_limits,
@@ -400,6 +435,7 @@ pub fn compile_runtime_package_wasm_with_options(
             &options.canonical_lanes,
             &options.export_aliases,
             options.resident_transition.as_ref(),
+            &options.resident_aux_transitions,
             options.resident_initializer.as_ref(),
             options.resident_projection.as_ref(),
             &options.resident_policies,
@@ -477,6 +513,7 @@ pub fn prepare_runtime_package_wasm_with_options(
             &options.canonical_lanes,
             &options.export_aliases,
             options.resident_transition.as_ref(),
+            &options.resident_aux_transitions,
             options.resident_initializer.as_ref(),
             options.resident_projection.as_ref(),
             &options.resident_policies,

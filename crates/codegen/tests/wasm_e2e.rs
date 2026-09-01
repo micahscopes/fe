@@ -1739,6 +1739,58 @@ fn compile_resident_actor_transition(
     bytes
 }
 
+/// Compile two authored transitions into one compiler-owned resident state.
+/// The helper remains target-neutral: neither transition is a surface or a
+/// browser callback, and the auxiliary event is just another typed message.
+fn compile_resident_actor_transitions(
+    name: &str,
+    source: &str,
+    primary: &str,
+    primary_event_fields: usize,
+    auxiliary: &str,
+    auxiliary_event_fields: usize,
+    actor_fields: usize,
+) -> Vec<u8> {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{name}")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "multi-transition resident actor fixture diagnostics:\n{diagnostics}"
+    );
+    let package = mir::build_wasm_runtime_package_for_entries(
+        &db,
+        top_mod,
+        &[primary.to_owned(), auxiliary.to_owned()],
+    )
+    .expect("multi-transition resident actor runtime package");
+    let options = WasmCompileOptions::default()
+        .with_resident_actor_transition(
+            primary,
+            "fe_actor_transition_v1",
+            "fe_actor_state_replace_v1",
+            primary_event_fields,
+            vec![false; actor_fields],
+        )
+        .with_resident_actor_aux_transition_checked(
+            auxiliary,
+            "fe_actor_message_v1",
+            auxiliary_event_fields,
+            vec![false; actor_fields],
+            Vec::new(),
+            Vec::new(),
+        );
+    let bytes = compile_runtime_package_wasm_with_options(&db, &package, options)
+        .expect("multi-transition resident actor Wasm")
+        .bytes;
+    wasmparser::validate(&bytes).expect("produced invalid multi-transition resident actor Wasm");
+    bytes
+}
+
 /// Compile the same Fe source through the EVM backend (the cross-backend twin).
 /// Returns the EVM runtime bytecode, proving one source lowers on both targets.
 fn compile_to_evm(name: &str, source: &str) -> Vec<u8> {
@@ -1936,6 +1988,77 @@ actor CounterActor {
             "score differs at event {step}"
         );
     }
+}
+
+/// Distinct typed messages must enter one actor without a JavaScript state
+/// mirror or separate policy store. This is the compiler primitive later used
+/// by browser standards adapters and by non-web providers alike.
+#[test]
+fn multiple_typed_transitions_share_one_resident_actor_state() {
+    let source = r#"
+pub struct Tick {
+    pub amount: i32,
+}
+
+pub struct Batch {
+    pub positive: i32,
+    pub negative: i32,
+}
+
+pub struct CounterState {
+    pub total: i32,
+    pub messages: u32,
+}
+
+actor CounterActor {
+    total: i32,
+    messages: u32,
+
+    fn tick(self, event: own Tick) -> CounterState {
+        CounterState {
+            total: self.total + event.amount,
+            messages: self.messages + 1,
+        }
+    }
+
+    fn receive(self, batch: own Batch) -> CounterState {
+        CounterState {
+            total: self.total + batch.positive - batch.negative,
+            messages: self.messages + 10,
+        }
+    }
+}
+"#;
+    let wasm = compile_resident_actor_transitions(
+        "resident_multi_transition_actor.fe",
+        source,
+        "tick",
+        1,
+        "receive",
+        2,
+        2,
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let replace = instance
+        .get_typed_func::<(i32, i32), ()>(&mut store, "fe_actor_state_replace_v1")
+        .expect("shared resident state seed export");
+    let tick = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "fe_actor_transition_v1")
+        .expect("primary resident transition export");
+    let receive = instance
+        .get_typed_func::<(i32, i32), (i32, i32)>(&mut store, "fe_actor_message_v1")
+        .expect("auxiliary resident transition export");
+
+    assert!(
+        receive.call(&mut store, (7, 2)).is_err(),
+        "every entry must fail closed before the one shared state is seeded"
+    );
+    replace
+        .call(&mut store, (100, 0))
+        .expect("seed one complete resident state");
+    assert_eq!(tick.call(&mut store, 3).unwrap(), (103, 1));
+    assert_eq!(receive.call(&mut store, (11, 4)).unwrap(), (110, 11));
+    assert_eq!(tick.call(&mut store, -6).unwrap(), (104, 12));
 }
 
 /// THE MILESTONE: `#[target(wasm)] pub fn add(a, b) -> a + b`, compiled Fe ->
