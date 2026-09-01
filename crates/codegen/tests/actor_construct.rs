@@ -587,6 +587,12 @@ fn nominal_readback_derives_one_binary_actor_boundary_without_manifest_semantics
     let replace = instance
         .get_typed_func::<i32, ()>(&mut store, "fe_surface_state_replace_v1")
         .expect("fixed resident state replacement export");
+    let allocate = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .expect("fixed canonical allocator export");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("fixed canonical memory export");
     let accept = instance
         .get_typed_func::<(i32, i32, i64), i32>(&mut store, "fe_gpu_readback_transition_v1")
         .expect("fixed typed readback transition");
@@ -594,8 +600,33 @@ fn nominal_readback_derives_one_binary_actor_boundary_without_manifest_semantics
         accept.call(&mut store, (0, 16, 0)).is_err(),
         "readback must fail closed until complete actor state is seeded"
     );
+    let pointer = allocate.call(&mut store, (16, 4)).unwrap();
+    memory
+        .write(
+            &mut store,
+            pointer as usize,
+            &[17, 0, 0, 0, 19, 0, 0, 0, 23, 0, 0, 0, 29, 0, 0, 0],
+        )
+        .unwrap();
     replace.call(&mut store, 7).unwrap();
-    assert_eq!(accept.call(&mut store, (0, 16, 0)).unwrap(), 23);
+    assert_eq!(accept.call(&mut store, (pointer, 16, 0)).unwrap(), 8);
+
+    replace.call(&mut store, 7).unwrap();
+    memory
+        .write(&mut store, pointer as usize + 8, &[24, 0, 0, 0])
+        .unwrap();
+    assert_eq!(
+        accept.call(&mut store, (pointer, 16, 0)).unwrap(),
+        0,
+        "one changed GPU word must be observed by authored Fe"
+    );
+
+    replace.call(&mut store, 7).unwrap();
+    assert_eq!(
+        accept.call(&mut store, (pointer, 12, 0)).unwrap(),
+        0,
+        "a truncated GPU message must fail closed in authored Fe"
+    );
 }
 
 #[test]

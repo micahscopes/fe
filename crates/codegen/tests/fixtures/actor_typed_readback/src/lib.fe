@@ -1,4 +1,4 @@
-use core::BrowserBytes
+use core::{BrowserBytes, BrowserPtr}
 use std::webgpu::{
     ComputeSurface,
     FixedDispatch,
@@ -35,7 +35,20 @@ actor TypedReadbackProbe uses (GpuProgram<WebGpuBackend>) {
     fn accept(self, message: own ReceiptBytes) -> ReadbackState
         uses (ReadbackTransition<ReceiptBytes>)
     {
-        ReadbackState { accepted: self.accepted + message.bytes.len }
+        let bytes = message.bytes
+        let aligned = (bytes.ptr & 3) == 0
+        let word0: BrowserPtr<u32> = BrowserPtr::from_u32(bytes.ptr)
+        let word1: BrowserPtr<u32> = BrowserPtr::from_u32(bytes.ptr + 4)
+        let word2: BrowserPtr<u32> = BrowserPtr::from_u32(bytes.ptr + 8)
+        let word3: BrowserPtr<u32> = BrowserPtr::from_u32(bytes.ptr + 12)
+        let valid = aligned && bytes.len == 16
+            && word0.read() == 17
+            && word1.read() == 19
+            && word2.read() == 23
+            && word3.read() == 29
+        ReadbackState {
+            accepted: if valid { self.accepted + 1 } else { 0 },
+        }
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
