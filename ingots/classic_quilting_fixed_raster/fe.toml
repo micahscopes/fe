@@ -1,0 +1,10 @@
+[ingot]
+name = "classic_quilting_fixed_raster"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../fe-worktrees/mb2/ingots/core" }
+std = { path = "../../../fe-worktrees/mb2/ingots/std" }
+quilting_domain = { path = "../quilting_domain" }
+quilting_quaternion = { path = "../quilting_quaternion" }
+quilting_qb = { path = "../quilting_qb" }

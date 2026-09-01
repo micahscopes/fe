@@ -6,11 +6,16 @@
 
 use std::fmt;
 
+pub mod fixed_raster_source;
+
 #[cfg(feature = "quilting-export")]
 pub mod quilting_export;
 
 #[cfg(all(test, feature = "fe-oracle"))]
 mod fe_oracle;
+
+#[cfg(all(test, feature = "raster-oracle"))]
+mod raster_oracle;
 
 pub const MAGIC: [u8; 8] = *b"CQATLAS\0";
 pub const SCHEMA_VERSION: u32 = 1;
