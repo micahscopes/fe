@@ -1,0 +1,73 @@
+//! Isolated lowering gate for the heaviest sparse base-plan shader.
+
+use mandelbrot_proof_fixed_air_baby_bear::SPARSE_BASE_AIR_FIELDS
+use mandelbrot_proof_fixed_air_webgpu::{
+    SparseBaseLinearPlanPartition,
+    transition_witness_workspace_words,
+    write_sparse_base_air_partition_lane,
+}
+use mandelbrot_proof_production_profile_baby_bear::{
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+}
+use mandelbrot_proof_recursive::ComplexFixed
+use precision::fixed::Fixed
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Grid,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+const THREADS: usize = 64
+const TRACE_GROUPS: usize =
+    (PRODUCTION_TRACE_LENGTH + THREADS - 1) / THREADS
+const BASE_TRACE_WORDS: usize =
+    PRODUCTION_TRACE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const TRANSITION_WORKSPACE_WORDS: usize =
+    transition_witness_workspace_words<PRODUCTION_LIMBS>()
+
+fn directed_point() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: true, limbs: [0, 0, 6144, 0] },
+        imaginary: Fixed { negative: false, limbs: [0, 0, 1024, 0] },
+    }
+}
+
+fn directed_current() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: false, limbs: [0, 0, 2048, 1] },
+        imaginary: Fixed { negative: true, limbs: [0, 0, 3072, 0] },
+    }
+}
+
+actor ProductionSparseLinearPlan uses (Program<WebGpuBackend>) {
+    transition_workspace: Shared<u32, TRANSITION_WORKSPACE_WORDS>,
+    base_trace: Shared<u32, BASE_TRACE_WORDS>,
+    validity: Shared<u32, PRODUCTION_TRACE_LENGTH>,
+
+    fn write_linear_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        write_sparse_base_air_partition_lane<
+            SparseBaseLinearPlanPartition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            directed_point(), directed_current(), self.transition_workspace,
+            self.base_trace, self.validity, invocation,
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let color: u32 = 4278255360
+        color.downcast_truncate()
+    }
+}
