@@ -1,0 +1,15 @@
+[ingot]
+name = "mandelbrot_proof_fixed_air_webgpu"
+version = "0.1.0"
+
+[dependencies]
+canonical_words = "../../../../ingots/canonical_words"
+core = "../../../../ingots/core"
+mandelbrot_proof_fixed_air = "../fixed-air"
+mandelbrot_proof_fixed_air_baby_bear = "../fixed-air-baby-bear"
+mandelbrot_proof_fixed_air_core = "../fixed-air-core"
+mandelbrot_proof_recursive = "../recursive"
+precision = "../../../sketches/precision"
+quadratic_plan = "../../../../ingots/quadratic_plan"
+region_layout = "../../../../ingots/region_layout"
+std = "../../../../ingots/std"
