@@ -13,17 +13,30 @@ pub struct ComplexF32Bits {
     pub im_bits: u32,
 }
 
+struct OrbitWriter<const N: usize> {
+    orbit: Shared<ComplexF32Bits, N>,
+    cursor: u32,
+}
+impl<const N: usize> core::marker::Copy for OrbitWriter<N> {}
+
+fn write_known<const N: usize>(_ writer: OrbitWriter<N>) -> OrbitWriter<N>
+where N > 0 {
+    writer.orbit.store(
+        index: writer.cursor,
+        value: ComplexF32Bits {
+            re_bits: 1065353216,
+            im_bits: 3221225472,
+        },
+    )
+    OrbitWriter { orbit: writer.orbit, cursor: writer.cursor + 1 }
+}
+
 actor KnownColor uses (Program<WebGpuBackend>) {
     orbit: Shared<ComplexF32Bits, 1>,
 
     fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        self.orbit.store(
-            index: 0,
-            value: ComplexF32Bits {
-                re_bits: 1065353216,
-                im_bits: 3221225472,
-            },
-        )
+        let writer: OrbitWriter<1> = OrbitWriter { orbit: self.orbit, cursor: 0 }
+        let complete = write_known(writer)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {

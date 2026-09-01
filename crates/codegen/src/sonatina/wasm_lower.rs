@@ -2412,6 +2412,26 @@ fn instantiated_runtime_local_ty<'db>(
     semantic.normalized_ty(db, ty)
 }
 
+/// Resolve a semantic function result through the concrete runtime instance.
+/// Runtime interface classes preserve ordinary aggregate layout, but nested
+/// GPU resources additionally need their nominal semantic type to retain the
+/// external resource leaf in a flattened private-call ABI.
+fn instantiated_runtime_return_ty<'db>(
+    db: &'db DriverDataBase,
+    instance: RuntimeInstance<'db>,
+) -> Option<TyId<'db>> {
+    let semantic = instance.key(db).semantic(db)?;
+    let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return None;
+    };
+    let ty = instantiate_with_generic_args(
+        db,
+        func.return_ty(db),
+        semantic.key(db).subst(db).generic_args(db),
+    );
+    Some(semantic.normalized_ty(db, ty))
+}
+
 /// The i32-width unsigned scalar repr that a narrowed `usize` carries on wasm32.
 const USIZE_WASM_REPR: ScalarRepr = ScalarRepr::Int {
     bits: 32,
@@ -4625,7 +4645,20 @@ where
             match &body.signature.ret {
                 None => Vec::new(),
                 Some(class) => {
-                    if let Some(elem_tys) = self.scalar_tuple_element_tys(class) {
+                    let semantic_ty = instantiated_runtime_return_ty(self.db, body.owner);
+                    if let Some(semantic_ty) = semantic_ty
+                        && semantic_gpu_resource(self.db, semantic_ty)
+                    {
+                        vec![self.gpu_resource_type(semantic_ty)?]
+                    } else if let Some(elem_tys) = semantic_ty
+                        .map(|semantic_ty| {
+                            self.semantic_scalar_tuple_element_tys(semantic_ty, class)
+                        })
+                        .transpose()?
+                        .flatten()
+                    {
+                        elem_tys
+                    } else if let Some(elem_tys) = self.scalar_tuple_element_tys(class) {
                         elem_tys
                     } else {
                         vec![self.ty_for_class(class).map_err(|error| match error {
@@ -10381,7 +10414,7 @@ where
                             self.module.function_symbol(*callee),
                         ))
                     })?;
-                let callee_class = callee_interface.ret.as_ref().ok_or_else(|| {
+                let callee_class = callee_interface.ret.as_ref().cloned().ok_or_else(|| {
                     LowerError::Unsupported(format!(
                         "wasm target: unit-returning call to `{}` cannot initialize an aggregate",
                         self.module.function_symbol(*callee),
@@ -10398,7 +10431,15 @@ where
                         self.module.function_symbol(*callee),
                     )));
                 }
-                let callee_shape = self.module.flat_shape(callee_class).ok_or_else(|| {
+                let callee_shape = if let Some(semantic_ty) =
+                    instantiated_runtime_return_ty(self.module.db, *callee)
+                {
+                    self.module
+                        .semantic_flat_shape(semantic_ty, &callee_class)?
+                } else {
+                    self.module.flat_shape(&callee_class)
+                }
+                .ok_or_else(|| {
                     LowerError::Unsupported(format!(
                         "wasm target: call to `{}` returns an aggregate that cannot be recursively flattened",
                         self.module.function_symbol(*callee),
