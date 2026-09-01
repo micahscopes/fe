@@ -23,7 +23,7 @@ use sonatina_codegen::isa::spirv::{
     SpirvArtifact, SpirvBackend, SpirvBuiltinArgument, SpirvExternalResource,
 };
 use sonatina_codegen::optim::{
-    Pass, Pipeline, Step,
+    Pass,
     inliner::{Inliner, InlinerConfig},
     run_function_passes_on,
 };
@@ -348,34 +348,30 @@ fn inline_spirv_calls_from_roots(
     roots: &[sonatina_ir::module::FuncRef],
 ) {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
-    const ROOTED_INLINE_FUNCTION_THRESHOLD: usize = 64;
-    if module.funcs().len() <= ROOTED_INLINE_FUNCTION_THRESHOLD {
-        if trace {
-            eprintln!(
-                "fe spirv inliner: strategy=module, functions={}",
-                module.funcs().len()
-            );
-        }
-        inline_spirv_calls_module_wide(module);
-        return;
-    }
-
     // The SPIR-V translator currently consumes only the first (entry) function
     // and deliberately rejects calls. Flatten outward from only the selected
     // shader roots. Expanding every helper bottom-up first retains many enormous
     // intermediate copies for generated proof graphs, even though the backend
-    // will never translate those helper bodies. Rooted inlining instead treats
-    // helpers as immutable sources and materializes only the call-free entries.
+    // will never translate those helper bodies. Function count is not a useful
+    // proxy for that expansion: a proof kernel with only a few dozen helpers can
+    // contain a dense generated graph. Rooted inlining therefore applies to
+    // every shader module and treats helpers as immutable sources, materializing
+    // only the call-free entries.
     // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
     let mut inliner_config = spirv_inliner_config();
     // GVN's sparse predicated solver can require many GiB on one generated
     // proof entry after only a few frontiers. It is not a legality pass, and
     // the local CFG/SCCP sequence already removes the dead structure exposed
-    // by each inline. Keep GVN in the established small-module pipeline only.
+    // by each inline.
     let cleanup = spirv_rooted_inline_cleanup_passes();
 
-    const MAX_FRONTIERS: usize = 16;
+    // One frontier corresponds to one semantic call-graph layer, not one
+    // source-level recursion. FCO-derived factor trees retain typed wrappers
+    // around each plan node, so a valid RBin<Pair, 12> stage is deeper than 16
+    // layers after MIR lowering. Instruction growth remains the physical OOM
+    // fuse below; this bound only rejects unexpectedly deep finite graphs.
+    const MAX_FRONTIERS: usize = 64;
     const MAX_ROOT_GROWTH: usize = 10_000_000;
     let initial_root_insts = spirv_root_instruction_count(module, roots);
     if trace {
@@ -432,20 +428,6 @@ fn inline_spirv_calls_from_roots(
     }
 }
 
-fn inline_spirv_calls_module_wide(module: &mut sonatina_ir::Module) {
-    let mut pipeline = Pipeline::new();
-    pipeline.inliner_config = spirv_inliner_config();
-    pipeline.add_step(Step::Inline);
-    pipeline.add_step(Step::FuncPasses(
-        spirv_module_inline_cleanup_passes().to_vec(),
-    ));
-    pipeline.add_step(Step::Inline);
-    pipeline.add_step(Step::FuncPasses(
-        spirv_module_inline_cleanup_passes().to_vec(),
-    ));
-    pipeline.run(module);
-}
-
 fn spirv_inliner_config() -> InlinerConfig {
     InlinerConfig {
         enable_full_inliner: true,
@@ -484,17 +466,6 @@ fn spirv_rooted_inline_cleanup_passes() -> [Pass; 5] {
         Pass::BranchCanonicalize,
         Pass::Sccp,
         Pass::ScalarCanonicalize,
-        Pass::CfgCleanup,
-    ]
-}
-
-fn spirv_module_inline_cleanup_passes() -> [Pass; 6] {
-    [
-        Pass::CfgCleanup,
-        Pass::BranchCanonicalize,
-        Pass::Sccp,
-        Pass::ScalarCanonicalize,
-        Pass::Gvn,
         Pass::CfgCleanup,
     ]
 }

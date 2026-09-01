@@ -61,6 +61,54 @@ fn compile_stage_grid() -> WebBundle {
     .expect("stage-grid fixture should compile into a WebBundle")
 }
 
+#[test]
+fn production_depth_factor_tree_stage_is_call_free() {
+    let dir = repo_root().join("crates/codegen/tests/fixtures/parallel_ntt_webgpu_deep_plan_ingot");
+    let mut db = DriverDataBase::default();
+    let url = Url::from_directory_path(&dir)
+        .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "deep stage-grid ingot initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("deep stage-grid fixture should resolve to one ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "deep stage-grid source diagnostics:\n{diagnostics}",
+    );
+    let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)
+        .expect("the deep actor should derive its typed WebGPU entry");
+    assert_eq!(mode, WebBundleMode::Render);
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some("parallel_ntt_webgpu_deep_plan".into())),
+    )
+    .expect("the production-depth stage should flatten and validate");
+
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    let advance = &bundle.manifest.passes[0];
+    assert_eq!(advance.source_entry, "advance");
+    assert_eq!(advance.layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(advance.dispatch, Some([32, 1, 1]));
+    assert_eq!(advance.repeat, 12);
+    assert_eq!(bundle.manifest.passes[1].source_entry, "paint");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(
+        &naga::front::wgsl::parse_str(&bundle.pass_wgsl[0].source)
+            .expect("deep stage WGSL should parse"),
+    )
+    .expect("deep stage WGSL should validate for the browser profile");
+}
+
 fn request_browser_profile_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
     let instance = wgpu::Instance::default();
