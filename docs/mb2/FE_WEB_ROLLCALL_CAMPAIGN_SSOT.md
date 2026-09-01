@@ -3249,6 +3249,36 @@ fallback. The semantic receipts are:
    release gate passed 1/1 in 2,465.82 seconds without a skip or device loss.
    This closes the local software-WebGPU composition replay. Physical Radeon
    execution and performance-oriented kernel fusion remain separate gates.
+
+   The focused production FRI actor now carries its own complete 114-query
+   opening boundary after the thirteen exact fold-and-commit rounds. Four
+   Fe-authored passes squeeze the `FQ02` Fiat-Shamir queries from the terminal
+   transcript, walk the typed FRI placement cursor across all rounds, extract
+   2,850 quartic evaluation candidates and 15,048 eight-field sibling
+   candidates, then compact duplicates into canonical ordered multipaths. The
+   temporary compaction activity is no longer stored in the immutable proof
+   arena. A distinct activity region and the canonical metadata occupy one
+   typed tail of the opening workspace, keeping the actor at seven declared
+   resources plus the fail-closed trap and therefore within the portable
+   eight-storage-binding minimum. No proof-specific query or round table moved
+   into the browser host.
+
+   The independent Rust model separately derives every indexed Poseidon2
+   squeeze, stateful evaluation and sibling cursor, activity bit, compact leaf,
+   sibling frontier, zeroed capacity lane, padding receipt, validity bit, and
+   metadata word. Its focused release geometry gate passes 1/1 in 0.04 seconds.
+   The release structural gate compiled and Naga-validated all eighteen WGSL
+   passes, checked their exact repeats, tapers, cooperation, resource lengths,
+   and binding counts, and passed 1/1 in 339.11 seconds. A fresh focused web
+   build emitted 2,846,543 WGSL bytes, zero Wasm bytes, and completed lowering
+   in 388.60 seconds and the full build in 438.61 seconds. Authoritative Chrome
+   exactness remains open: the external Chrome process lost its WebGPU instance
+   during the first readback attempt, and its same-origin `requestAdapter()`
+   subsequently returned null even after closing all proof tabs. Relaunch the
+   external browser, execute exactly one focused proof page, and compare all
+   seven buffers before attaching the production AIR composition input or
+   claiming this opening actor on physical hardware.
+
 5. G-RECEIPT is closed at the scalar 114-query boundary. Continue through
    G-RECURSE and G-BROWSER. The security-sized verifier is now bound to the
    private leaf authority, but the current recursive carrier and

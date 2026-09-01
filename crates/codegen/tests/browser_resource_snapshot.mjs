@@ -126,7 +126,8 @@ try {
     const surface = document.querySelector("fe-surface");
     if (!surface) throw new Error("the page has no fe-surface");
     if (surface.state === "error") {
-      const notice = surface.shadowRoot?.querySelector(".notice")?.textContent;
+      const notices = [...(surface.shadowRoot?.querySelectorAll(".notice") ?? [])];
+      const notice = notices.at(-1)?.textContent;
       throw new Error(
         \`Fe surface failed before resource readback: \${notice ?? "unknown error"}\`,
       );

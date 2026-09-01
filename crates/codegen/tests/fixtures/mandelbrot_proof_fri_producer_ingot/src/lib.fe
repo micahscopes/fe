@@ -30,21 +30,39 @@ use fri_prover_webgpu::{
     initialize_fri_leaf_lane,
     initialize_fri_prover_lane,
 }
+use fri_baby_bear::fri_query_domain_tag
+use fri_opening_webgpu::compact_fri_round_openings
 use fri_structure::{
+    FriQueryRangePlan,
     FriSchedule,
     FriSchedulePlacement,
     FriScheduleShape,
+    fri_query_evaluation_work_item,
+    fri_query_grid_metadata,
+    fri_query_grid_workgroups,
+    fri_query_sample_work_item,
+    fri_query_sibling_work_item,
 }
 use fri_structure_webgpu::{
+    FRI_QUERY_CURSOR_FIELDS,
+    advance_fri_query_evaluation_storage,
+    advance_fri_query_sibling_storage,
     fri_round_placement_storage_words,
     store_fri_round_placement,
 }
 use mandelbrot_proof_production_profile_baby_bear::{
     PRODUCTION_LDE_LENGTH,
     PRODUCTION_LDE_LOG,
+    PRODUCTION_SECURITY_QUERY_COUNT,
 }
-use poseidon_baby_bear::DIGEST_FIELDS
-use poseidon_baby_bear_webgpu::POSEIDON2_LANES
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
+use poseidon_baby_bear_webgpu::{
+    INDEXED_DIGEST_SQUEEZE_STEPS,
+    POSEIDON2_LANES,
+    advance_indexed_digest_squeeze_lane,
+    indexed_digest_squeeze_workgroups,
+    indexed_digest_squeeze_workspace_words,
+}
 use std::webgpu::{
     CooperativeDispatch as Cooperate,
     ComputeInvocation,
@@ -61,6 +79,7 @@ use std::webgpu::{
 }
 
 type FoldSchedule = FriSchedule<1, {PRODUCTION_LDE_LOG}>
+type QueryPlan = FriQueryRangePlan<1, {PRODUCTION_SECURITY_QUERY_COUNT}>
 
 const THREADS: usize = 64
 const EXTENSION_WORDS: usize = 4
@@ -122,6 +141,82 @@ const ROUND_CURSOR: u32 = ROOT_VALID_START + FRI_ROUNDS.downcast_truncate()
 const ROUND_VALID: u32 = ROUND_CURSOR + 1
 const PROVER_COMPLETE: u32 = ROUND_VALID + 1
 const CONTROL_WORDS: usize = PROVER_COMPLETE as usize + 1
+
+const QUERY_COUNT: usize =
+    fri_query_grid_metadata<QueryPlan, FoldSchedule>().query_count as usize
+const EVALUATIONS_PER_QUERY: usize =
+    fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+        .evaluations_per_query as usize
+const SIBLINGS_PER_QUERY: usize =
+    fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+        .siblings_per_query as usize
+const EVALUATION_ITEMS: usize =
+    fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+        .evaluation_items as usize
+const SIBLING_ITEMS: usize =
+    fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+        .sibling_items as usize
+const EVALUATION_GROUPS: usize = fri_query_grid_workgroups(
+    EVALUATION_ITEMS.downcast_truncate(),
+    THREADS.downcast_truncate(),
+) as usize
+const SIBLING_GROUPS: usize = fri_query_grid_workgroups(
+    SIBLING_ITEMS.downcast_truncate(),
+    THREADS.downcast_truncate(),
+) as usize
+const EVALUATION_PADDING: usize =
+    EVALUATION_GROUPS * THREADS - EVALUATION_ITEMS
+const SIBLING_PADDING: usize =
+    SIBLING_GROUPS * THREADS - SIBLING_ITEMS
+const EVALUATION_OPENING_WORDS: usize =
+    EVALUATION_ITEMS * EXTENSION_WORDS
+const SIBLING_OPENING_WORDS: usize = SIBLING_ITEMS * DIGEST_FIELDS
+
+const QUERY_WORKSPACE_WORDS: usize =
+    indexed_digest_squeeze_workspace_words(QUERY_COUNT)
+const QUERY_SAMPLE_GROUPS: usize =
+    indexed_digest_squeeze_workgroups(QUERY_COUNT, THREADS)
+const QUERY_SAMPLE_WORK_ITEMS: u32 =
+    (QUERY_COUNT * POSEIDON2_LANES).downcast_truncate()
+const QUERY_SAMPLE_PADDING: usize =
+    QUERY_SAMPLE_GROUPS * THREADS - QUERY_COUNT * POSEIDON2_LANES
+const QUERY_HALF_MASK: u32 =
+    (PRODUCTION_LDE_LENGTH / 2 - 1).downcast_truncate()
+
+const EVALUATION_CURSOR_START: u32 = 0
+const EVALUATION_CURSOR_WORDS: usize =
+    EVALUATION_ITEMS * FRI_QUERY_CURSOR_FIELDS
+const EVALUATION_PROGRESS_START: u32 =
+    EVALUATION_CURSOR_WORDS.downcast_truncate()
+const SIBLING_CURSOR_START: u32 = EVALUATION_PROGRESS_START
+    + EVALUATION_ITEMS.downcast_truncate()
+const SIBLING_CURSOR_WORDS: usize = SIBLING_ITEMS * FRI_QUERY_CURSOR_FIELDS
+const SIBLING_PROGRESS_START: u32 =
+    SIBLING_CURSOR_START + SIBLING_CURSOR_WORDS.downcast_truncate()
+const OPENING_ACTIVITY_START: u32 =
+    SIBLING_PROGRESS_START + SIBLING_ITEMS.downcast_truncate()
+const OPENING_STATE_WORDS: usize =
+    OPENING_ACTIVITY_START as usize + LAYER_TREE_NODES
+
+const OPENING_METADATA_START: u32 = OPENING_STATE_WORDS.downcast_truncate()
+const COMPACT_VALID_START: u32 = OPENING_METADATA_START
+const COMPACT_LEAF_COUNT_START: u32 = COMPACT_VALID_START
+    + FRI_ROUNDS.downcast_truncate()
+const COMPACT_SIBLING_COUNT_START: u32 = COMPACT_LEAF_COUNT_START
+    + FRI_ROUNDS.downcast_truncate()
+const COMPACT_LEAF_INDEX_START: u32 =
+    COMPACT_SIBLING_COUNT_START + FRI_ROUNDS.downcast_truncate()
+const COMPACT_METADATA_WORDS: usize = 3 * FRI_ROUNDS + EVALUATION_ITEMS
+const OPENING_PADDING_START: u32 = OPENING_METADATA_START
+    + COMPACT_METADATA_WORDS.downcast_truncate()
+const QUERY_INDICES_START: u32 = OPENING_PADDING_START
+    + (EVALUATION_PADDING + SIBLING_PADDING).downcast_truncate()
+const QUERY_VALIDITY_START: u32 =
+    QUERY_INDICES_START + QUERY_COUNT.downcast_truncate()
+const QUERY_PADDING_START: u32 =
+    QUERY_VALIDITY_START + QUERY_COUNT.downcast_truncate()
+const OPENING_WORKSPACE_WORDS: usize = QUERY_PADDING_START as usize
+    + QUERY_SAMPLE_PADDING
 
 const fn arena_layout() -> FriProverArenaLayout {
     FriProverArenaLayout {
@@ -198,6 +293,39 @@ static_assert(ROUND_VALID == 309)
 static_assert(PROVER_COMPLETE == 310)
 static_assert(CONTROL_WORDS == 311)
 static_assert(POSEIDON2_LANES == 16)
+static_assert(QUERY_COUNT == PRODUCTION_SECURITY_QUERY_COUNT)
+static_assert(QUERY_COUNT == 114)
+static_assert(EVALUATIONS_PER_QUERY == 25)
+static_assert(SIBLINGS_PER_QUERY == 132)
+static_assert(EVALUATION_ITEMS == 2850)
+static_assert(SIBLING_ITEMS == 15048)
+static_assert(EVALUATION_GROUPS == 45)
+static_assert(SIBLING_GROUPS == 236)
+static_assert(EVALUATION_PADDING == 30)
+static_assert(SIBLING_PADDING == 56)
+static_assert(EVALUATION_OPENING_WORDS == 11400)
+static_assert(SIBLING_OPENING_WORDS == 120384)
+static_assert(INDEXED_DIGEST_SQUEEZE_STEPS == 89)
+static_assert(QUERY_SAMPLE_GROUPS == 29)
+static_assert(QUERY_SAMPLE_PADDING == 32)
+static_assert(QUERY_WORKSPACE_WORDS == 5928)
+static_assert(FRI_QUERY_CURSOR_FIELDS == 8)
+static_assert(EVALUATION_PROGRESS_START == 22800)
+static_assert(SIBLING_CURSOR_START == 25650)
+static_assert(SIBLING_PROGRESS_START == 146034)
+static_assert(OPENING_ACTIVITY_START == 161082)
+static_assert(OPENING_STATE_WORDS == 177451)
+static_assert(OPENING_METADATA_START == 177451)
+static_assert(COMPACT_VALID_START == 177451)
+static_assert(COMPACT_LEAF_COUNT_START == 177464)
+static_assert(COMPACT_SIBLING_COUNT_START == 177477)
+static_assert(COMPACT_LEAF_INDEX_START == 177490)
+static_assert(COMPACT_METADATA_WORDS == 2889)
+static_assert(OPENING_PADDING_START == 180340)
+static_assert(QUERY_INDICES_START == 180426)
+static_assert(QUERY_VALIDITY_START == 180540)
+static_assert(QUERY_PADDING_START == 180654)
+static_assert(OPENING_WORKSPACE_WORDS == 180686)
 
 pub struct FriRoundCycle {}
 
@@ -205,6 +333,10 @@ actor ProductionFriProver uses (Program<WebGpuBackend>) {
     round_placements: Shared<u32, ROUND_PLACEMENT_WORDS>,
     arena: Shared<u32, ARENA_WORDS>,
     control: Shared<u32, CONTROL_WORDS>,
+    query_workspace: Shared<u32, QUERY_WORKSPACE_WORDS>,
+    opening_workspace: Shared<u32, OPENING_WORKSPACE_WORDS>,
+    evaluation_openings: Shared<u32, EVALUATION_OPENING_WORDS>,
+    sibling_openings: Shared<u32, SIBLING_OPENING_WORDS>,
 
     fn prepare_rounds(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
@@ -539,8 +671,299 @@ actor ProductionFriProver uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn sample_queries(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    QUERY_SAMPLE_GROUPS,
+                    1,
+                    1,
+                    INDEXED_DIGEST_SQUEEZE_STEPS,
+                >,
+            >
+        )
+    {
+        let query_position = invocation.global.x
+            / POSEIDON2_LANES.downcast_truncate()
+        let item = fri_query_sample_work_item<QueryPlan>(query_position)
+        let rounds: u32 = FRI_ROUNDS.downcast_truncate()
+        let digest_fields: u32 = DIGEST_FIELDS.downcast_truncate()
+        let final_transcript = TRANSCRIPTS_START + rounds * digest_fields
+        let input_valid = item.valid
+            && self.control.load(index: PROVER_COMPLETE) == 1
+            && self.control.load(
+                index: TRANSCRIPT_VALID_START
+                    + FRI_ROUNDS.downcast_truncate(),
+            ) == 1
+        let transcript = Poseidon2Digest::from_u32s([
+            self.control.load(index: final_transcript),
+            self.control.load(index: final_transcript + 1),
+            self.control.load(index: final_transcript + 2),
+            self.control.load(index: final_transcript + 3),
+            self.control.load(index: final_transcript + 4),
+            self.control.load(index: final_transcript + 5),
+            self.control.load(index: final_transcript + 6),
+            self.control.load(index: final_transcript + 7),
+        ])
+        let step = advance_indexed_digest_squeeze_lane<
+            QUERY_COUNT,
+            QUERY_WORKSPACE_WORDS,
+        >(
+            self.query_workspace,
+            invocation,
+            fri_query_domain_tag(),
+            transcript,
+            item.query_identity,
+            input_valid,
+        )
+        if !step.active {
+            self.opening_workspace.store(
+                index: QUERY_PADDING_START
+                    + invocation.global.x - QUERY_SAMPLE_WORK_ITEMS,
+                value: invocation.global.x + 1,
+            )
+        } else if !step.valid && step.field_lane == 0 {
+            self.opening_workspace.store(
+                index: QUERY_INDICES_START + step.state,
+                value: 0,
+            )
+            self.opening_workspace.store(
+                index: QUERY_VALIDITY_START + step.state,
+                value: 0,
+            )
+        } else if step.complete {
+            self.opening_workspace.store(
+                index: QUERY_INDICES_START + step.state,
+                value: step.value.coefficient(0).to_u32() & QUERY_HALF_MASK,
+            )
+            self.opening_workspace.store(
+                index: QUERY_VALIDITY_START + step.state,
+                value: 1,
+            )
+        }
+    }
+
+    fn open_evaluations(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<EVALUATION_GROUPS, 1, 1, FRI_ROUNDS>,
+            >
+        )
+    {
+        let lane = invocation.global.x
+        let item = fri_query_evaluation_work_item<QueryPlan, FoldSchedule>(lane)
+        if !item.valid {
+            self.opening_workspace.store(
+                index: OPENING_PADDING_START
+                    + lane - EVALUATION_ITEMS.downcast_truncate(),
+                value: lane + 1,
+            )
+            return
+        }
+        let query = self.opening_workspace.load(
+            index: QUERY_INDICES_START + item.query_position,
+        )
+        let progress_index = EVALUATION_PROGRESS_START + lane
+        let round = self.opening_workspace.load(index: progress_index)
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let cursor_base = EVALUATION_CURSOR_START
+            + lane * FRI_QUERY_CURSOR_FIELDS.downcast_truncate()
+        let placement = advance_fri_query_evaluation_storage<
+            ROUND_PLACEMENT_WORDS,
+            OPENING_WORKSPACE_WORDS,
+        >(
+            self.round_placements,
+            self.opening_workspace,
+            cursor_base,
+            round,
+            item.opening,
+            query,
+        )
+        self.opening_workspace.store(index: progress_index, value: round + 1)
+        if round + 1 != FRI_ROUNDS.downcast_truncate()
+            || !placement.valid
+            || self.control.load(index: PROVER_COMPLETE) != 1
+            || self.arena.load(
+                index: EVALUATION_VALID_START + placement.evaluation_index,
+            ) != 1 {
+            return
+        }
+        let source = EVALUATIONS_START
+            + placement.evaluation_index
+                * EXTENSION_WORDS.downcast_truncate()
+        let destination = lane * EXTENSION_WORDS.downcast_truncate()
+        self.evaluation_openings.store(
+            index: destination,
+            value: self.arena.load(index: source),
+        )
+        self.evaluation_openings.store(
+            index: destination + 1,
+            value: self.arena.load(index: source + 1),
+        )
+        self.evaluation_openings.store(
+            index: destination + 2,
+            value: self.arena.load(index: source + 2),
+        )
+        self.evaluation_openings.store(
+            index: destination + 3,
+            value: self.arena.load(index: source + 3),
+        )
+    }
+
+    fn open_siblings(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<SIBLING_GROUPS, 1, 1, FRI_ROUNDS>,
+            >
+        )
+    {
+        let lane = invocation.global.x
+        let item = fri_query_sibling_work_item<QueryPlan, FoldSchedule>(lane)
+        if !item.valid {
+            self.opening_workspace.store(
+                index: OPENING_PADDING_START
+                    + EVALUATION_PADDING.downcast_truncate()
+                    + lane - SIBLING_ITEMS.downcast_truncate(),
+                value: lane + 1,
+            )
+            return
+        }
+        let query = self.opening_workspace.load(
+            index: QUERY_INDICES_START + item.query_position,
+        )
+        let progress_index = SIBLING_PROGRESS_START + lane
+        let round = self.opening_workspace.load(index: progress_index)
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let cursor_base = SIBLING_CURSOR_START
+            + lane * FRI_QUERY_CURSOR_FIELDS.downcast_truncate()
+        let placement = advance_fri_query_sibling_storage<
+            ROUND_PLACEMENT_WORDS,
+            OPENING_WORKSPACE_WORDS,
+        >(
+            self.round_placements,
+            self.opening_workspace,
+            cursor_base,
+            round,
+            item.sibling,
+            query,
+        )
+        self.opening_workspace.store(index: progress_index, value: round + 1)
+        if round + 1 != FRI_ROUNDS.downcast_truncate()
+            || !placement.valid
+            || self.control.load(index: PROVER_COMPLETE) != 1
+            || self.arena.load(
+                index: NODE_VALID_START + placement.tree_node,
+            ) != 1 {
+            return
+        }
+        let source = TREE_START
+            + placement.tree_node * DIGEST_FIELDS.downcast_truncate()
+        let destination = lane * DIGEST_FIELDS.downcast_truncate()
+        self.sibling_openings.store(
+            index: destination,
+            value: self.arena.load(index: source),
+        )
+        self.sibling_openings.store(
+            index: destination + 1,
+            value: self.arena.load(index: source + 1),
+        )
+        self.sibling_openings.store(
+            index: destination + 2,
+            value: self.arena.load(index: source + 2),
+        )
+        self.sibling_openings.store(
+            index: destination + 3,
+            value: self.arena.load(index: source + 3),
+        )
+        self.sibling_openings.store(
+            index: destination + 4,
+            value: self.arena.load(index: source + 4),
+        )
+        self.sibling_openings.store(
+            index: destination + 5,
+            value: self.arena.load(index: source + 5),
+        )
+        self.sibling_openings.store(
+            index: destination + 6,
+            value: self.arena.load(index: source + 6),
+        )
+        self.sibling_openings.store(
+            index: destination + 7,
+            value: self.arena.load(index: source + 7),
+        )
+    }
+
+    fn compact_openings(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
+    {
+        let round = invocation.global.x
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let mut query: u32 = 0
+        while query < QUERY_COUNT.downcast_truncate() {
+            if self.opening_workspace.load(
+                index: QUERY_VALIDITY_START + query,
+            ) != 1 {
+                self.opening_workspace.store(
+                    index: COMPACT_VALID_START + round,
+                    value: 0,
+                )
+                return
+            }
+            query = query + 1
+        }
+        // Every metadata-valid bit already carries prover completion, final
+        // transcript validity, and squeeze completion from `sample_queries`.
+        // Compaction consumes that proof boundary instead of retaining either
+        // the prover control buffer or the Poseidon scratch workspace.
+        let valid = compact_fri_round_openings<
+                QUERY_COUNT,
+                EXTENSION_WORDS,
+                DIGEST_FIELDS,
+                OPENING_WORKSPACE_WORDS,
+                ROUND_PLACEMENT_WORDS,
+                ARENA_WORDS,
+                OPENING_WORKSPACE_WORDS,
+                OPENING_WORKSPACE_WORDS,
+                EVALUATION_OPENING_WORDS,
+                SIBLING_OPENING_WORDS,
+            >(
+                self.opening_workspace,
+                QUERY_INDICES_START,
+                self.round_placements,
+                self.arena,
+                EVALUATIONS_START,
+                TREE_START,
+                self.opening_workspace,
+                OPENING_ACTIVITY_START,
+                round,
+                self.opening_workspace,
+                COMPACT_LEAF_COUNT_START,
+                COMPACT_SIBLING_COUNT_START,
+                COMPACT_LEAF_INDEX_START,
+                self.evaluation_openings,
+                self.sibling_openings,
+            )
+        self.opening_workspace.store(
+            index: COMPACT_VALID_START + round,
+            value: if valid { 1 } else { 0 },
+        )
+    }
+
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        let color: u32 = if self.control.load(index: PROVER_COMPLETE) == 1 {
+        let mut openings_valid = true
+        let mut round: u32 = 0
+        while round < FRI_ROUNDS.downcast_truncate() {
+            openings_valid = openings_valid
+                && self.opening_workspace.load(
+                    index: COMPACT_VALID_START + round,
+                ) == 1
+            round = round + 1
+        }
+        let color: u32 = if self.control.load(index: PROVER_COMPLETE) == 1
+            && openings_valid {
             4278255360
         } else {
             4294901760

@@ -30,6 +30,10 @@ const LEAF_HASH_STEPS: u32 = 44;
 const TREE_STEPS: u32 = 540;
 const TREE_STEP_DECREMENT: u32 = 45;
 const BINDING_STEPS: u32 = 133;
+const QUERY_SAMPLE_STEPS: u32 = 89;
+const QUERY_SAMPLE_GROUPS: u32 = 29;
+const EVALUATION_GROUPS: u32 = 45;
+const SIBLING_GROUPS: u32 = 236;
 const TAPERED_WORKGROUPS: u64 = 605_295;
 const PADDED_WORKGROUPS_PER_ROUND: u32 = 830_465;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
@@ -62,6 +66,43 @@ const ROUND_VALID: usize = ROUND_CURSOR + 1;
 const PROVER_COMPLETE: usize = ROUND_VALID + 1;
 const BROWSER_RECEIPT_DIR: &str = "MB2_FRI_BROWSER_RECEIPT_DIR";
 const EXTENSION_NONRESIDUE: u32 = 11;
+const QUERY_WORKSPACE_WORDS: u32 = 5_928;
+const OPENING_METADATA_START: usize = 177_451;
+const OPENING_WORKSPACE_WORDS: u32 = 180_686;
+const EVALUATION_OPENING_WORDS: u32 = 11_400;
+const SIBLING_OPENING_WORDS: u32 = 120_384;
+const OPENING_METADATA_WORDS: u32 = 3_235;
+const QUERY_COUNT: usize = 114;
+const EVALUATIONS_PER_QUERY: usize = 25;
+const SIBLINGS_PER_QUERY: usize = 132;
+const EVALUATION_ITEMS: usize = QUERY_COUNT * EVALUATIONS_PER_QUERY;
+const SIBLING_ITEMS: usize = QUERY_COUNT * SIBLINGS_PER_QUERY;
+const ROUND_PLACEMENT_FIELDS: usize = 13;
+const QUERY_CURSOR_FIELDS: usize = 8;
+const QUERY_SAMPLE_WORK_ITEMS: usize = QUERY_COUNT * POSEIDON_WIDTH;
+const QUERY_STATE_WORDS: usize = QUERY_COUNT * 2 * POSEIDON_WIDTH;
+const QUERY_TAIL_WORDS: usize = QUERY_COUNT * 3;
+const QUERY_VALID_START: usize = QUERY_STATE_WORDS + QUERY_TAIL_WORDS;
+const QUERY_PROGRESS_START: usize = QUERY_VALID_START + QUERY_COUNT;
+const QUERY_PROGRESS_WORDS: usize = QUERY_COUNT * POSEIDON_WIDTH;
+const QUERY_HALF_MASK: u32 = COMPOSITION_VALUES as u32 / 2 - 1;
+const EVALUATION_CURSOR_WORDS: usize = EVALUATION_ITEMS * QUERY_CURSOR_FIELDS;
+const EVALUATION_PROGRESS_START: usize = EVALUATION_CURSOR_WORDS;
+const SIBLING_CURSOR_START: usize = EVALUATION_PROGRESS_START + EVALUATION_ITEMS;
+const SIBLING_CURSOR_WORDS: usize = SIBLING_ITEMS * QUERY_CURSOR_FIELDS;
+const SIBLING_PROGRESS_START: usize = SIBLING_CURSOR_START + SIBLING_CURSOR_WORDS;
+const OPENING_ACTIVITY_START: usize = SIBLING_PROGRESS_START + SIBLING_ITEMS;
+const COMPACT_VALID_START: usize = 0;
+const COMPACT_LEAF_COUNT_START: usize = FRI_ROUNDS;
+const COMPACT_SIBLING_COUNT_START: usize = 2 * FRI_ROUNDS;
+const COMPACT_LEAF_INDEX_START: usize = 3 * FRI_ROUNDS;
+const COMPACT_METADATA_WORDS: usize = 3 * FRI_ROUNDS + EVALUATION_ITEMS;
+const EVALUATION_PADDING: usize = EVALUATION_GROUPS as usize * THREADS as usize - EVALUATION_ITEMS;
+const SIBLING_PADDING: usize = SIBLING_GROUPS as usize * THREADS as usize - SIBLING_ITEMS;
+const OPENING_PADDING_START: usize = COMPACT_METADATA_WORDS;
+const QUERY_INDICES_START: usize = OPENING_PADDING_START + EVALUATION_PADDING + SIBLING_PADDING;
+const OPENING_QUERY_VALIDITY_START: usize = QUERY_INDICES_START + QUERY_COUNT;
+const QUERY_PADDING_START: usize = OPENING_QUERY_VALIDITY_START + QUERY_COUNT;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -104,8 +145,8 @@ fn compile_fri_producer() -> WebBundle {
 #[test]
 fn production_fri_actor_schedule_lowers_to_browser_webgpu() {
     let bundle = compile_fri_producer();
-    assert_eq!(bundle.manifest.passes.len(), 14);
-    assert_eq!(bundle.manifest.resources.len(), 3);
+    assert_eq!(bundle.manifest.passes.len(), 18);
+    assert_eq!(bundle.manifest.resources.len(), 7);
 
     let prepare = &bundle.manifest.passes[0];
     assert_eq!(prepare.source_entry, "prepare_rounds");
@@ -204,8 +245,30 @@ fn production_fri_actor_schedule_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[0].cycle, None);
     assert_eq!(bundle.manifest.passes[1].cycle, None);
     assert_eq!(bundle.manifest.passes[2].cycle, None);
-    assert_eq!(bundle.manifest.passes[13].source_entry, "paint");
-    assert_eq!(bundle.manifest.passes[13].cycle, None);
+    let query_passes = [
+        (
+            "sample_queries",
+            QUERY_SAMPLE_STEPS,
+            [QUERY_SAMPLE_GROUPS, 1, 1],
+        ),
+        (
+            "open_evaluations",
+            FRI_ROUNDS as u32,
+            [EVALUATION_GROUPS, 1, 1],
+        ),
+        ("open_siblings", FRI_ROUNDS as u32, [SIBLING_GROUPS, 1, 1]),
+        ("compact_openings", 1, [1, 1, 1]),
+    ];
+    for (index, (entry, repeat, dispatch)) in query_passes.iter().copied().enumerate() {
+        let pass = &bundle.manifest.passes[index + 13];
+        assert_eq!(pass.source_entry, entry);
+        assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
+        assert_eq!(pass.dispatch, Some(dispatch));
+        assert_eq!(pass.repeat, repeat);
+        assert_eq!(pass.cycle, None);
+    }
+    assert_eq!(bundle.manifest.passes[17].source_entry, "paint");
+    assert_eq!(bundle.manifest.passes[17].cycle, None);
 
     let mut derived_workgroups = 0_u64;
     for cycle_iteration in 0..FRI_ROUNDS as u32 {
@@ -266,6 +329,31 @@ fn production_fri_actor_schedule_lowers_to_browser_webgpu() {
     );
     assert_eq!(resource_length("arena"), Some(ARENA_WORDS));
     assert_eq!(resource_length("control"), Some(CONTROL_WORDS));
+    assert_eq!(
+        resource_length("query_workspace"),
+        Some(QUERY_WORKSPACE_WORDS)
+    );
+    assert_eq!(
+        resource_length("opening_workspace"),
+        Some(OPENING_WORKSPACE_WORDS),
+    );
+    assert_eq!(
+        resource_length("evaluation_openings"),
+        Some(EVALUATION_OPENING_WORDS),
+    );
+    assert_eq!(
+        resource_length("sibling_openings"),
+        Some(SIBLING_OPENING_WORDS),
+    );
+    assert_eq!(resource_length("opening_metadata"), None);
+    assert!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .all(|pass| pass.layout.bindings.len() <= 8),
+        "every production proof pass must fit the portable WebGPU storage-binding minimum",
+    );
     assert_eq!(FRI_ROUNDS, 13);
 }
 
@@ -322,6 +410,22 @@ struct IndependentFriReceipt {
     tree: Vec<u32>,
     node_validity: Vec<u32>,
     control: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RoundPlacement {
+    index: u32,
+    round: u32,
+    input_log: u32,
+    input_width: u32,
+    output_width: u32,
+    output_offset: u32,
+    tree_offset: u32,
+    tree_nodes: u32,
+    query_value_offset: u32,
+    query_sibling_offset: u32,
+    pair_width: u32,
+    pair_depth: u32,
 }
 
 fn add_mod(left: u32, right: u32) -> u32 {
@@ -451,6 +555,279 @@ fn reference_round_placements() -> Vec<u32> {
     assert_eq!(output_offset as usize, FOLDED_EVALUATIONS);
     assert_eq!(tree_offset as usize, LAYER_TREE_NODES);
     output
+}
+
+fn reference_round_placement_rows() -> Vec<RoundPlacement> {
+    reference_round_placements()
+        .chunks_exact(ROUND_PLACEMENT_FIELDS)
+        .map(|words| {
+            assert_eq!(words[0], 1);
+            RoundPlacement {
+                index: words[1],
+                round: words[2],
+                input_log: words[3],
+                input_width: words[4],
+                output_width: words[5],
+                output_offset: words[6],
+                tree_offset: words[7],
+                tree_nodes: words[8],
+                query_value_offset: words[9],
+                query_sibling_offset: words[10],
+                pair_width: words[11],
+                pair_depth: words[12],
+            }
+        })
+        .collect()
+}
+
+fn reference_indexed_squeeze(tag: [u8; 4], digest: &[u32; DIGEST_WORDS], index: u32) -> Extension4 {
+    let mut fields = Vec::with_capacity(DIGEST_WORDS + 1);
+    fields.extend(digest);
+    fields.push(index);
+    let output = reference_field_commitment(tag, &fields);
+    Extension4(
+        output[..EXTENSION_WORDS]
+            .try_into()
+            .expect("four extension coefficients"),
+    )
+}
+
+fn tree_level_offset(width: u32, level: u32) -> u32 {
+    let mut offset = 0;
+    let mut level_width = width;
+    for _ in 0..level {
+        offset += level_width;
+        level_width /= 2;
+    }
+    offset
+}
+
+fn reference_evaluation_cursor(
+    rounds: &[RoundPlacement],
+    opening: u32,
+    query: u32,
+) -> [u32; QUERY_CURSOR_FIELDS] {
+    let mut remaining = opening;
+    let mut current_query = query;
+    let mut result = None;
+    for placement in rounds {
+        if result.is_some() {
+            continue;
+        }
+        assert!(current_query < placement.output_width);
+        let opened = if placement.output_width > 1 { 2 } else { 1 };
+        if remaining < opened {
+            let evaluation = if placement.output_width > 1 {
+                let pair = current_query & (placement.pair_width - 1);
+                pair + remaining * placement.pair_width
+            } else {
+                0
+            };
+            result = Some((
+                placement.index,
+                placement.round,
+                placement.output_offset + evaluation,
+            ));
+        } else {
+            remaining -= opened;
+            current_query = if placement.output_width > 1 {
+                current_query & (placement.pair_width - 1)
+            } else {
+                0
+            };
+        }
+    }
+    let (round_index, round, evaluation_index) = result.expect("derived evaluation placement");
+    [
+        1,
+        1,
+        remaining,
+        current_query,
+        1,
+        round_index,
+        round,
+        evaluation_index,
+    ]
+}
+
+fn reference_sibling_cursor(
+    rounds: &[RoundPlacement],
+    sibling: u32,
+    query: u32,
+) -> [u32; QUERY_CURSOR_FIELDS] {
+    let mut remaining = sibling;
+    let mut current_query = query;
+    let mut result = None;
+    for placement in rounds {
+        if result.is_some() {
+            continue;
+        }
+        assert!(current_query < placement.output_width);
+        let siblings = 2 * placement.pair_depth;
+        if placement.pair_depth > 0 && remaining < siblings {
+            let side = remaining / placement.pair_depth;
+            let level = remaining % placement.pair_depth;
+            let leaf = (current_query & (placement.pair_width - 1)) + side * placement.pair_width;
+            result = Some((
+                placement.index,
+                placement.round,
+                placement.tree_offset
+                    + tree_level_offset(placement.output_width, level)
+                    + ((leaf >> level) ^ 1),
+            ));
+        } else {
+            remaining -= siblings;
+            current_query = if placement.output_width > 1 {
+                current_query & (placement.pair_width - 1)
+            } else {
+                0
+            };
+        }
+    }
+    let (round_index, round, tree_node) = result.expect("derived sibling placement");
+    [
+        1,
+        1,
+        remaining,
+        current_query,
+        1,
+        round_index,
+        round,
+        tree_node,
+    ]
+}
+
+fn expected_compact_openings(
+    queries: &[u32],
+    rounds: &[RoundPlacement],
+    receipt: &IndependentFriReceipt,
+) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+    let mut metadata = vec![0; COMPACT_METADATA_WORDS];
+    let mut values = vec![0; EVALUATION_OPENING_WORDS as usize];
+    let mut siblings = vec![0; SIBLING_OPENING_WORDS as usize];
+    let mut activity = vec![0; LAYER_TREE_NODES];
+
+    for placement in rounds {
+        let round = placement.index as usize;
+        let value_slot = placement.query_value_offset as usize * QUERY_COUNT;
+        let sibling_slot = placement.query_sibling_offset as usize * QUERY_COUNT;
+        let leaf_index_start = COMPACT_LEAF_INDEX_START + value_slot;
+        let value_word_start = value_slot * EXTENSION_WORDS;
+        let sibling_word_start = sibling_slot * DIGEST_WORDS;
+        metadata[COMPACT_VALID_START + round] = 1;
+
+        if placement.output_width == 1 {
+            metadata[COMPACT_LEAF_COUNT_START + round] = 1;
+            values[value_word_start..value_word_start + EXTENSION_WORDS].copy_from_slice(
+                &receipt.evaluations[placement.output_offset as usize * EXTENSION_WORDS
+                    ..(placement.output_offset as usize + 1) * EXTENSION_WORDS],
+            );
+            continue;
+        }
+
+        let tree_start = placement.tree_offset as usize;
+        for query in queries {
+            let local = query & (placement.pair_width - 1);
+            activity[tree_start + local as usize] = 1;
+            activity[tree_start + (local + placement.pair_width) as usize] = 1;
+        }
+
+        let mut leaf_count = 0;
+        for leaf in 0..placement.output_width as usize {
+            if activity[tree_start + leaf] == 1 {
+                metadata[leaf_index_start + leaf_count] = leaf as u32;
+                let evaluation = placement.output_offset as usize + leaf;
+                values[value_word_start + leaf_count * EXTENSION_WORDS
+                    ..value_word_start + (leaf_count + 1) * EXTENSION_WORDS]
+                    .copy_from_slice(
+                        &receipt.evaluations
+                            [evaluation * EXTENSION_WORDS..(evaluation + 1) * EXTENSION_WORDS],
+                    );
+                leaf_count += 1;
+            }
+        }
+
+        let mut sibling_count = 0;
+        let mut width = placement.output_width as usize;
+        let mut level_start = 0;
+        let mut next_start = width;
+        while width > 1 {
+            for node in 0..width {
+                let active = activity[tree_start + level_start + node] == 1;
+                let sibling_active = activity[tree_start + level_start + (node ^ 1)] == 1;
+                if active && !sibling_active {
+                    let tree_node = tree_start + level_start + (node ^ 1);
+                    siblings[sibling_word_start + sibling_count * DIGEST_WORDS
+                        ..sibling_word_start + (sibling_count + 1) * DIGEST_WORDS]
+                        .copy_from_slice(
+                            &receipt.tree[tree_node * DIGEST_WORDS..(tree_node + 1) * DIGEST_WORDS],
+                        );
+                    sibling_count += 1;
+                }
+            }
+            let parents = width / 2;
+            for parent in 0..parents {
+                activity[tree_start + next_start + parent] = u32::from(
+                    activity[tree_start + level_start + 2 * parent] == 1
+                        || activity[tree_start + level_start + 2 * parent + 1] == 1,
+                );
+            }
+            level_start = next_start;
+            next_start += parents;
+            width = parents;
+        }
+        assert_eq!(activity[tree_start + level_start], 1);
+        metadata[COMPACT_LEAF_COUNT_START + round] = leaf_count as u32;
+        metadata[COMPACT_SIBLING_COUNT_START + round] = sibling_count as u32;
+    }
+
+    (metadata, values, siblings, activity)
+}
+
+fn expected_opening_workspace(
+    queries: &[u32],
+    rounds: &[RoundPlacement],
+    activity: &[u32],
+    metadata: &[u32],
+) -> Vec<u32> {
+    let mut workspace = Vec::with_capacity(OPENING_WORKSPACE_WORDS as usize);
+    for query in queries {
+        for opening in 0..EVALUATIONS_PER_QUERY as u32 {
+            workspace.extend(reference_evaluation_cursor(rounds, opening, *query));
+        }
+    }
+    assert_eq!(workspace.len(), EVALUATION_PROGRESS_START);
+    workspace.resize(SIBLING_CURSOR_START, FRI_ROUNDS as u32);
+    for query in queries {
+        for sibling in 0..SIBLINGS_PER_QUERY as u32 {
+            workspace.extend(reference_sibling_cursor(rounds, sibling, *query));
+        }
+    }
+    assert_eq!(workspace.len(), SIBLING_PROGRESS_START);
+    workspace.resize(OPENING_ACTIVITY_START, FRI_ROUNDS as u32);
+    workspace.extend(activity);
+    assert_eq!(workspace.len(), OPENING_METADATA_START);
+    workspace.extend(metadata);
+    assert_eq!(workspace.len(), OPENING_WORKSPACE_WORDS as usize);
+    workspace
+}
+
+fn expected_opening_metadata(queries: &[u32], compact_metadata: &[u32]) -> Vec<u32> {
+    let mut metadata = vec![0; OPENING_METADATA_WORDS as usize];
+    metadata[..COMPACT_METADATA_WORDS].copy_from_slice(compact_metadata);
+    let padding = (EVALUATION_ITEMS..EVALUATION_GROUPS as usize * THREADS as usize)
+        .chain(SIBLING_ITEMS..SIBLING_GROUPS as usize * THREADS as usize)
+        .map(|lane| lane as u32 + 1)
+        .collect::<Vec<_>>();
+    metadata[OPENING_PADDING_START..QUERY_INDICES_START].copy_from_slice(&padding);
+    metadata[QUERY_INDICES_START..OPENING_QUERY_VALIDITY_START].copy_from_slice(queries);
+    metadata[OPENING_QUERY_VALIDITY_START..QUERY_PADDING_START].fill(1);
+    metadata[QUERY_PADDING_START..].copy_from_slice(
+        &(QUERY_SAMPLE_WORK_ITEMS..QUERY_SAMPLE_GROUPS as usize * THREADS as usize)
+            .map(|lane| lane as u32 + 1)
+            .collect::<Vec<_>>(),
+    );
+    metadata
 }
 
 fn independent_fri_receipt() -> IndependentFriReceipt {
@@ -608,6 +985,30 @@ fn independent_production_fri_reference_has_derived_geometry() {
             .all(|word| *word < BABY_BEAR_MODULUS),
         "the independent receipt must remain canonically field encoded",
     );
+    let final_transcript: &[u32; DIGEST_WORDS] = receipt.control
+        [FRI_ROUNDS * DIGEST_WORDS..(FRI_ROUNDS + 1) * DIGEST_WORDS]
+        .try_into()
+        .expect("final FRI transcript");
+    let queries = (1..=QUERY_COUNT as u32)
+        .map(|identity| {
+            reference_indexed_squeeze(*b"FQ02", final_transcript, identity).0[0] & QUERY_HALF_MASK
+        })
+        .collect::<Vec<_>>();
+    let rounds = reference_round_placement_rows();
+    let (metadata, evaluations, siblings, activity) =
+        expected_compact_openings(&queries, &rounds, &receipt);
+    assert_eq!(queries.len(), QUERY_COUNT);
+    assert!(queries.iter().all(|query| *query <= QUERY_HALF_MASK));
+    assert_eq!(metadata.len(), COMPACT_METADATA_WORDS);
+    assert_eq!(evaluations.len(), EVALUATION_OPENING_WORDS as usize);
+    assert_eq!(siblings.len(), SIBLING_OPENING_WORDS as usize);
+    assert_eq!(activity.len(), LAYER_TREE_NODES);
+    let opening_metadata = expected_opening_metadata(&queries, &metadata);
+    assert_eq!(
+        expected_opening_workspace(&queries, &rounds, &activity, &opening_metadata).len(),
+        OPENING_WORKSPACE_WORDS as usize,
+    );
+    assert_eq!(opening_metadata.len(), OPENING_METADATA_WORDS as usize);
 }
 
 #[test]
@@ -627,9 +1028,19 @@ fn production_fri_browser_buffers_match_independent_plonky3_recurrence() {
     let placements = read_u32le(&receipt_dir.join("round_placements.u32le"));
     let arena = read_u32le(&receipt_dir.join("arena.u32le"));
     let control = read_u32le(&receipt_dir.join("control.u32le"));
+    let query_workspace = read_u32le(&receipt_dir.join("query_workspace.u32le"));
+    let opening_workspace = read_u32le(&receipt_dir.join("opening_workspace.u32le"));
+    let evaluation_openings = read_u32le(&receipt_dir.join("evaluation_openings.u32le"));
+    let sibling_openings = read_u32le(&receipt_dir.join("sibling_openings.u32le"));
     assert_eq!(placements.len(), ROUND_PLACEMENT_WORDS as usize);
     assert_eq!(arena.len(), ARENA_WORDS as usize);
     assert_eq!(control.len(), CONTROL_WORDS as usize);
+    assert_eq!(query_workspace.len(), QUERY_WORKSPACE_WORDS as usize);
+    assert_eq!(opening_workspace.len(), OPENING_WORKSPACE_WORDS as usize);
+    assert_eq!(evaluation_openings.len(), EVALUATION_OPENING_WORDS as usize);
+    assert_eq!(sibling_openings.len(), SIBLING_OPENING_WORDS as usize);
+    let opening_metadata = &opening_workspace[OPENING_METADATA_START..];
+    assert_eq!(opening_metadata.len(), OPENING_METADATA_WORDS as usize);
 
     let expected = independent_fri_receipt();
     assert_words_eq(
@@ -667,5 +1078,55 @@ fn production_fri_browser_buffers_match_independent_plonky3_recurrence() {
         "all challenges, roots, transcripts, and actor completion state",
         &control,
         &expected.control,
+    );
+
+    let final_transcript: &[u32; DIGEST_WORDS] = expected.control
+        [FRI_ROUNDS * DIGEST_WORDS..(FRI_ROUNDS + 1) * DIGEST_WORDS]
+        .try_into()
+        .expect("final FRI transcript");
+    let queries = (1..=QUERY_COUNT as u32)
+        .map(|identity| {
+            reference_indexed_squeeze(*b"FQ02", final_transcript, identity).0[0] & QUERY_HALF_MASK
+        })
+        .collect::<Vec<_>>();
+    assert_words_eq(
+        "all transcript-derived production query indices",
+        &opening_metadata[QUERY_INDICES_START..OPENING_QUERY_VALIDITY_START],
+        &queries,
+    );
+    assert_words_eq(
+        "query squeeze validity",
+        &query_workspace[QUERY_VALID_START..QUERY_PROGRESS_START],
+        &vec![1; QUERY_COUNT],
+    );
+    assert_words_eq(
+        "query squeeze progress",
+        &query_workspace[QUERY_PROGRESS_START..],
+        &vec![QUERY_SAMPLE_STEPS; QUERY_PROGRESS_WORDS],
+    );
+
+    let rounds = reference_round_placement_rows();
+    let (compact_metadata, compact_evaluations, compact_siblings, activity) =
+        expected_compact_openings(&queries, &rounds, &expected);
+    let expected_metadata = expected_opening_metadata(&queries, &compact_metadata);
+    assert_words_eq(
+        "all query cursors, opening progress, and canonical activity words",
+        &opening_workspace,
+        &expected_opening_workspace(&queries, &rounds, &activity, &expected_metadata),
+    );
+    assert_words_eq(
+        "canonical compact evaluation prefixes",
+        &evaluation_openings,
+        &compact_evaluations,
+    );
+    assert_words_eq(
+        "canonical compact Merkle sibling frontiers",
+        &sibling_openings,
+        &compact_siblings,
+    );
+    assert_words_eq(
+        "canonical opening metadata, padding receipts, and query tape",
+        opening_metadata,
+        &expected_metadata,
     );
 }

@@ -19,6 +19,7 @@ pub fn compact_fri_round_openings<
     const QUERY_BUFFER_WORDS: usize,
     const ROUND_WORDS: usize,
     const ARENA_WORDS: usize,
+    const ACTIVITY_WORDS: usize,
     const METADATA_WORDS: usize,
     const VALUE_OUTPUT_WORDS: usize,
     const SIBLING_OUTPUT_WORDS: usize,
@@ -29,6 +30,7 @@ pub fn compact_fri_round_openings<
     _ arena: StorageBuffer<u32, ARENA_WORDS>,
     _ evaluation_start: u32,
     _ tree_start: u32,
+    _ activity: StorageBuffer<u32, ACTIVITY_WORDS>,
     _ activity_start: u32,
     _ round: u32,
     _ metadata: StorageBuffer<u32, METADATA_WORDS>,
@@ -82,7 +84,7 @@ where
     }
     cursor = 0
     while cursor < placement.tree_nodes {
-        arena.store(
+        activity.store(
             index: activity_start + placement.tree_offset + cursor,
             value: 0,
         )
@@ -110,11 +112,11 @@ where
     while cursor < queries {
         let query = query_indices.load(index: query_start + cursor)
         let local = query & (placement.pair_width - 1)
-        arena.store(
+        activity.store(
             index: activity_start + placement.tree_offset + local,
             value: 1,
         )
-        arena.store(
+        activity.store(
             index: activity_start + placement.tree_offset
                 + local + placement.pair_width,
             value: 1,
@@ -125,7 +127,7 @@ where
     let mut leaf_count: u32 = 0
     cursor = 0
     while cursor < placement.output_width {
-        if arena.load(
+        if activity.load(
             index: activity_start + placement.tree_offset + cursor,
         ) == 1 {
             if leaf_count < value_capacity {
@@ -159,11 +161,11 @@ where
     while width > 1 {
         cursor = 0
         while cursor < width {
-            let active = arena.load(
+            let active = activity.load(
                 index: activity_start + placement.tree_offset
                     + level_start + cursor,
             ) == 1
-            let sibling_active = arena.load(
+            let sibling_active = activity.load(
                 index: activity_start + placement.tree_offset
                     + level_start + (cursor ^ 1),
             ) == 1
@@ -191,15 +193,15 @@ where
         let parents = width / 2
         cursor = 0
         while cursor < parents {
-            let left = arena.load(
+            let left = activity.load(
                 index: activity_start + placement.tree_offset
                     + level_start + cursor + cursor,
             )
-            let right = arena.load(
+            let right = activity.load(
                 index: activity_start + placement.tree_offset
                     + level_start + cursor + cursor + 1,
             )
-            arena.store(
+            activity.store(
                 index: activity_start + placement.tree_offset
                     + next_start + cursor,
                 value: if left == 1 || right == 1 { 1 } else { 0 },
@@ -210,7 +212,7 @@ where
         next_start = next_start + parents
         width = parents
     }
-    let root_active = arena.load(
+    let root_active = activity.load(
         index: activity_start + placement.tree_offset + level_start,
     ) == 1
     let valid = leaf_count > 0
