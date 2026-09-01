@@ -2875,6 +2875,7 @@ dependencies = [
  "p3-symmetric",
  "pollster",
  "rustc-hash 2.1.3",
+ "salsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",

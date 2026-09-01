@@ -1329,6 +1329,63 @@ existing Definition of done, not a second campaign checklist:
   landable slices are in
   `/workspace/scratch/mb2-fe-compile-parallelism-audit-2026-08-24.md`.
 
+  Immediate actor-stage pilot, refined by the production proof-graph trace on
+  2026-09-01:
+
+  1. Land root-only SPIR-V legality inlining first. The backend observes only
+     selected shader roots, so module-wide helper expansion is redundant work.
+     Keep the bounded frontier, residual-call rejection, Naga validation, and
+     artifact gates unchanged.
+  2. Extract the current ordered actor loop into a serial planner producing
+     owned `ActorCompileUnit` values. One unit is one compute or fullscreen
+     stage, or one indivisible authored vertex/fragment pair. Each unit retains
+     its authored stage index and complete compiler-derived interface.
+  3. Use one short-lived replicated input database per bounded batch, then call
+     `salsa::par_map` outside tracked queries over that batch. Salsa forks own
+     dependency sharing, memoization, blocking, and cancellation. Each worker
+     returns only an owned shader artifact, layout, diagnostics, measurements,
+     and its authored index. Drop the complete batch database and backend arenas
+     together before starting the next batch.
+  4. Assemble and publish serially by authored index. Primary-shader selection,
+     pass cycles, resource projection, path collision checks, manifest order,
+     hashes, and last-good publication remain in the existing deterministic
+     path. `jobs = 1` uses the same planner, worker, and assembler as every
+     parallel run.
+  5. Gate `jobs = 1` against `jobs = 2` before changing defaults. Compare the
+     complete `WebBundle`, materialized file inventory, Wasm, WGSL, SPIR-V
+     layout, diagnostics, source digests, pass order, proof words, roots,
+     transcripts, challenges, codewords, and mutation matrix. Repeat with
+     deliberately perturbed worker completion order. A failed worker must
+     produce the same stable diagnostic and preserve the same last-good output.
+  6. Measure cold and warm release median/p95, per-unit wall time, CPU
+     utilization, and process peak RSS on the production base-trace/LDE graph.
+     Start with two workers. Increase the cap only from measured headroom, and
+     keep one shared process budget so nested gallery, actor, and oracle pools
+     cannot oversubscribe the machine.
+  7. Once the actor pilot passes, reuse the same Salsa-owned plan/execute/gather
+     construction for independent Wasm and GPU artifacts, then for unique
+     gallery compile requests. DOM mutation, bundle materialization, shared
+     Wasmtime stores, proof-forest internals, and authored semantic dependency
+     order remain serial until separately justified.
+
+  This slice introduces no handwritten semantic cache or invalidation table.
+  In-process reuse belongs to Salsa. Any later cross-process artifact store is
+  content-addressed only and has no correctness-bearing invalidation policy.
+
+  Pilot evidence on 2026-09-01:
+
+  - [x] Actor stages are owned compile units, with authored raster pairs kept
+    indivisible and assembly restored to authored index order.
+  - [x] Short-lived batches use a registered Salsa database view and
+    `salsa::par_map`; the default batch width is two and the bounded diagnostic
+    override accepts one through four workers.
+  - [x] One worker and two workers materialize byte-identical complete bundles
+    for the compute/resource/fragment acceptance actor.
+  - [x] All 17 release `actor_construct` gates pass, including authored raster,
+    typed readback, repeated and cycled dispatch, and failure diagnostics.
+  - [ ] Measure and exactness-gate the production base-trace/LDE graph under
+    one and two workers before widening the pilot to other artifact classes.
+
 ## F. Rollcall cryptographic capstone
 
 - [~] Current exact full-workspace release CI baseline. The repo-root Fe test

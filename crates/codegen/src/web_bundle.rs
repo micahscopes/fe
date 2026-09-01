@@ -34,8 +34,9 @@ use hir::hir_def::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
-    Access, LayoutMode, Role, SpirvBuiltinArgument, SpirvBuiltinSource, SpirvExternalResource,
-    SpirvLayout, SpirvResourceElement, SpirvResourceField, SpirvScalarKind, WordKind,
+    Access, LayoutMode, Role, SpirvArtifact, SpirvBuiltinArgument, SpirvBuiltinSource,
+    SpirvExternalResource, SpirvLayout, SpirvResourceElement, SpirvResourceField, SpirvScalarKind,
+    WordKind,
 };
 
 use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
@@ -382,6 +383,10 @@ pub struct WebBuildOptions {
     /// Ordered, deduplicated message-lane entries. An empty set means the GPU
     /// source entry is also the sole canonical lane for direct API callers.
     pub canonical_entries: Vec<String>,
+    /// Maximum number of independent actor shader stages demanded from Salsa
+    /// at once. This is a compiler placement policy only; it cannot affect the
+    /// authored pass order or any emitted artifact identity.
+    pub stage_compile_jobs: usize,
 }
 
 impl WebBuildOptions {
@@ -393,6 +398,7 @@ impl WebBuildOptions {
             provenance: WebProvenance::new(source_id),
             canonical_policy: WebCanonicalPolicy::Disabled,
             canonical_entries: Vec::new(),
+            stage_compile_jobs: 2,
         }
     }
 
@@ -408,6 +414,7 @@ impl WebBuildOptions {
             provenance: WebProvenance::new(source_id),
             canonical_policy: WebCanonicalPolicy::Disabled,
             canonical_entries: Vec::new(),
+            stage_compile_jobs: 2,
         }
     }
 
@@ -421,6 +428,14 @@ impl WebBuildOptions {
         if !self.canonical_entries.contains(&entry) {
             self.canonical_entries.push(entry);
         }
+        self
+    }
+
+    /// Select bounded actor-stage compiler parallelism. Values above four are
+    /// capped so two large generated proof kernels cannot multiply into an
+    /// unbounded memory commitment; zero retains one serial worker.
+    pub fn with_stage_compile_jobs(mut self, jobs: usize) -> Self {
+        self.stage_compile_jobs = jobs.clamp(1, 4);
         self
     }
 
@@ -4766,11 +4781,26 @@ impl WebBundleFile {
     }
 }
 
-/// Run one bounded compilation unit against an input-equivalent database whose
-/// query lifetime ends with the unit. Salsa interned values intentionally live
-/// for a database's lifetime; a large pass graph must therefore make physical
-/// derivation and emission boundaries explicit instead of retaining every
-/// stage's specialized HIR and MIR until the complete page bundle is finished.
+/// Narrow Salsa view used to attach forked stage workers to the concrete
+/// driver APIs that have not yet been generalized over compiler database
+/// traits. The cast is implemented by Salsa's database macro, not by worker
+/// code or an unchecked pointer conversion.
+#[salsa::db]
+trait ActorStageCompilerDb: salsa::Database {
+    fn driver_db(&self) -> &DriverDataBase;
+}
+
+#[salsa::db]
+impl ActorStageCompilerDb for DriverDataBase {
+    fn driver_db(&self) -> &DriverDataBase {
+        self
+    }
+}
+
+/// Run one non-parallel compiler unit against an input-equivalent database
+/// whose specialized query lifetime ends with the unit. Actor-program
+/// derivation uses this boundary before the owned plan is split into shader
+/// batches below.
 fn with_isolated_compiler_database<T>(
     source_db: &DriverDataBase,
     source_mod: TopLevelMod<'_>,
@@ -4789,18 +4819,18 @@ fn with_isolated_compiler_database<T>(
         .ok_or_else(|| {
             WebBundleError::Lower("GPU actor source module has no compiler-owned URL".to_owned())
         })?;
-    let stage_db = source_db.replicate_inputs();
-    let stage_file = stage_db
+    let unit_db = source_db.replicate_inputs();
+    let unit_file = unit_db
         .workspace()
-        .get(&stage_db, &source_url)
+        .get(&unit_db, &source_url)
         .ok_or_else(|| {
             WebBundleError::Lower(format!(
-                "isolated GPU stage database lost source `{source_url}`"
+                "isolated GPU compiler database lost source `{source_url}`"
             ))
         })?;
-    let stage_mod = stage_db.top_mod(stage_file);
-    let result = compile(&stage_db, stage_mod);
-    drop(stage_db);
+    let unit_mod = unit_db.top_mod(unit_file);
+    let result = compile(&unit_db, unit_mod);
+    drop(unit_db);
     reclaim_completed_compiler_database();
     if trace {
         eprintln!(
@@ -4809,6 +4839,263 @@ fn with_isolated_compiler_database<T>(
         );
     }
     result
+}
+
+#[derive(Debug, Clone)]
+struct ActorShaderCompileUnit {
+    stage_index: usize,
+    source_entry: String,
+    kind: ActorShaderCompileKind,
+}
+
+#[derive(Debug, Clone)]
+enum ActorShaderCompileKind {
+    Compute {
+        workgroup_size: [u32; 3],
+        dispatch: [u32; 3],
+        invocation_context: bool,
+    },
+    Fragment,
+    Raster {
+        vertex_entry: String,
+    },
+}
+
+impl ActorShaderCompileKind {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Compute { .. } => "compute",
+            Self::Fragment => "fragment",
+            Self::Raster { .. } => "raster",
+        }
+    }
+}
+
+fn plan_actor_shader_compile_units(
+    program: &WebActorProgram,
+    resources: &[WebResource],
+) -> Result<Vec<ActorShaderCompileUnit>, WebBundleError> {
+    let mut units = Vec::with_capacity(program.stages.len());
+    let mut index = 0;
+    while index < program.stages.len() {
+        let stage = &program.stages[index];
+        match &stage.kind {
+            WebActorStageKind::Vertex { .. } => {
+                let Some(WebActorStage {
+                    source_entry: fragment_entry,
+                    kind: WebActorStageKind::RasterFragment { .. },
+                }) = program.stages.get(index + 1)
+                else {
+                    return Err(WebBundleError::Lower(
+                        "authored raster vertex behavior lost its adjacent fragment pair"
+                            .to_owned(),
+                    ));
+                };
+                if !resources.is_empty() {
+                    return Err(WebBundleError::Lower(
+                        "authored raster resources are not wired into both stages yet".to_owned(),
+                    ));
+                }
+                units.push(ActorShaderCompileUnit {
+                    stage_index: index,
+                    source_entry: fragment_entry.clone(),
+                    kind: ActorShaderCompileKind::Raster {
+                        vertex_entry: stage.source_entry.clone(),
+                    },
+                });
+                index += 2;
+            }
+            WebActorStageKind::Compute {
+                workgroup_size,
+                dispatch,
+                invocation_context,
+                ..
+            } => {
+                units.push(ActorShaderCompileUnit {
+                    stage_index: index,
+                    source_entry: stage.source_entry.clone(),
+                    kind: ActorShaderCompileKind::Compute {
+                        workgroup_size: *workgroup_size,
+                        dispatch: *dispatch,
+                        invocation_context: *invocation_context,
+                    },
+                });
+                index += 1;
+            }
+            WebActorStageKind::Fragment => {
+                units.push(ActorShaderCompileUnit {
+                    stage_index: index,
+                    source_entry: stage.source_entry.clone(),
+                    kind: ActorShaderCompileKind::Fragment,
+                });
+                index += 1;
+            }
+            WebActorStageKind::RasterFragment { .. } => {
+                return Err(WebBundleError::Lower(
+                    "authored raster fragment behavior lost its adjacent vertex pair".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(units)
+}
+
+fn compile_actor_shader_unit(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    unit: &ActorShaderCompileUnit,
+    resources: &[WebResource],
+) -> Result<SpirvArtifact, WebBundleError> {
+    match &unit.kind {
+        ActorShaderCompileKind::Compute {
+            workgroup_size,
+            dispatch,
+            invocation_context,
+        } => {
+            let builtin_arguments = (*invocation_context)
+                .then(compute_invocation_builtin_arguments)
+                .unwrap_or_default();
+            let context_leaves = (!builtin_arguments.is_empty())
+                .then_some(u32::try_from(builtin_arguments.len()).unwrap());
+            let package =
+                mir::build_wasm_runtime_package_for_entry(db, top_mod, &unit.source_entry)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let external = stage_external_resources(
+                db,
+                &package,
+                &unit.source_entry,
+                resources,
+                Access::ReadWrite,
+                context_leaves,
+            )?;
+            compile_runtime_package_spirv_compute_with_interface(
+                db,
+                &package,
+                *workgroup_size,
+                *dispatch,
+                &external,
+                &builtin_arguments,
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))
+        }
+        ActorShaderCompileKind::Fragment => {
+            let package =
+                mir::build_wasm_runtime_package_for_entry(db, top_mod, &unit.source_entry)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let external = stage_external_resources(
+                db,
+                &package,
+                &unit.source_entry,
+                resources,
+                Access::Read,
+                None,
+            )?;
+            compile_runtime_package_spirv_render_with_resources(db, &package, &external)
+                .map_err(|error| WebBundleError::Lower(error.to_string()))
+        }
+        ActorShaderCompileKind::Raster { vertex_entry } => {
+            let package = mir::build_wasm_runtime_package_for_entries(
+                db,
+                top_mod,
+                &[vertex_entry.clone(), unit.source_entry.clone()],
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            compile_runtime_package_spirv_authored_raster(
+                db,
+                &package,
+                vertex_entry,
+                &unit.source_entry,
+            )
+            .map_err(|error| WebBundleError::Lower(error.to_string()))
+        }
+    }
+}
+
+/// Compile actor shaders in small, independent Salsa demand batches.
+///
+/// Each batch owns one input-equivalent database. Salsa forks that database for
+/// its worker demands, retains dependency and invalidation ownership, and
+/// releases every specialized query result when the batch ends. Only owned
+/// backend artifacts cross the boundary. Results are sorted back into authored
+/// stage order before manifest assembly, so completion order cannot affect the
+/// bundle.
+fn compile_actor_shader_artifacts(
+    source_db: &DriverDataBase,
+    source_mod: TopLevelMod<'_>,
+    program: &WebActorProgram,
+    resources: &[WebResource],
+    requested_jobs: usize,
+) -> Result<Vec<Option<SpirvArtifact>>, WebBundleError> {
+    let units = plan_actor_shader_compile_units(program, resources)?;
+    let jobs = requested_jobs.clamp(1, 4);
+    let trace = std::env::var_os("FE_WEB_STAGE_TRACE").is_some()
+        || std::env::var_os("FE_WASM_LOWER_TRACE").is_some();
+    let source_url = source_mod
+        .source_file(source_db)
+        .url(source_db)
+        .ok_or_else(|| {
+            WebBundleError::Lower("GPU actor source module has no compiler-owned URL".to_owned())
+        })?;
+    let shared_resources = Arc::new(resources.to_vec());
+    let mut artifacts = std::iter::repeat_with(|| None)
+        .take(program.stages.len())
+        .collect::<Vec<_>>();
+
+    for (batch_index, batch) in units.chunks(jobs).enumerate() {
+        let started = std::time::Instant::now();
+        if trace {
+            eprintln!(
+                "[fe web compiler batch] begin batch={batch_index}, units={}, jobs={jobs}",
+                batch.len()
+            );
+        }
+        let batch_db = source_db.replicate_inputs();
+        let batch_view: &dyn ActorStageCompilerDb = &batch_db;
+        ActorStageCompilerDb::zalsa_register_downcaster(batch_view);
+        let mut compiled: Vec<(usize, Result<SpirvArtifact, WebBundleError>)> =
+            salsa::par_map(batch_view, batch.to_vec(), |stage_view, unit| {
+                let stage_db = stage_view.driver_db();
+                let result = (|| {
+                    let stage_file =
+                        stage_db
+                            .workspace()
+                            .get(stage_db, &source_url)
+                            .ok_or_else(|| {
+                                WebBundleError::Lower(format!(
+                                    "isolated GPU stage database lost source `{source_url}`"
+                                ))
+                            })?;
+                    let stage_mod = stage_db.top_mod(stage_file);
+                    compile_actor_shader_unit(
+                        stage_db,
+                        stage_mod,
+                        &unit,
+                        shared_resources.as_slice(),
+                    )
+                })()
+                .map_err(|error| {
+                    WebBundleError::Lower(format!(
+                        "GPU actor stage `{}` ({}) failed: {error}",
+                        unit.source_entry,
+                        unit.kind.label(),
+                    ))
+                });
+                (unit.stage_index, result)
+            });
+        drop(batch_db);
+        reclaim_completed_compiler_database();
+        compiled.sort_by_key(|(stage_index, _)| *stage_index);
+        for (stage_index, artifact) in compiled {
+            artifacts[stage_index] = Some(artifact?);
+        }
+        if trace {
+            eprintln!(
+                "[fe web compiler batch] end batch={batch_index}, elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+        }
+    }
+    Ok(artifacts)
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -4880,6 +5167,13 @@ impl WebBundle {
             .map(|resource| resource.field_index)
             .collect::<Vec<_>>();
         let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
+        let mut shader_artifacts = compile_actor_shader_artifacts(
+            db,
+            top_mod,
+            &program,
+            &resources,
+            options.stage_compile_jobs,
+        )?;
         let mut passes = Vec::with_capacity(program.stages.len());
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
         // The top-level compatibility artifact/layout follows the derived
@@ -4903,32 +5197,11 @@ impl WebBundle {
                             .to_owned(),
                     ));
                 };
-                if !resources.is_empty() {
-                    return Err(WebBundleError::Lower(
-                        "authored raster resources are not wired into both stages yet".to_owned(),
-                    ));
-                }
-                let vertex_entry = &stage.source_entry;
-                let artifact = with_isolated_compiler_database(
-                    db,
-                    top_mod,
-                    fragment_entry,
-                    |stage_db, stage_mod| {
-                        let package = mir::build_wasm_runtime_package_for_entries(
-                            stage_db,
-                            stage_mod,
-                            &[vertex_entry.clone(), fragment_entry.clone()],
-                        )
-                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-                        compile_runtime_package_spirv_authored_raster(
-                            stage_db,
-                            &package,
-                            vertex_entry,
-                            fragment_entry,
-                        )
-                        .map_err(|error| WebBundleError::Lower(error.to_string()))
-                    },
-                )?;
+                let artifact = shader_artifacts[index].take().ok_or_else(|| {
+                    WebBundleError::Lower(format!(
+                        "authored raster stage `{fragment_entry}` lost its compiled artifact"
+                    ))
+                })?;
                 let shader =
                     normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
                 validate_browser_wgsl(&shader)?;
@@ -4966,49 +5239,19 @@ impl WebBundle {
             }
             let (artifact, dispatch, repeat, taper, cooperation, cycle, kind) = match &stage.kind {
                 WebActorStageKind::Compute {
-                    workgroup_size,
                     dispatch,
                     repeat,
                     taper,
                     cooperation,
                     cycle,
-                    invocation_context,
+                    ..
                 } => {
-                    let builtin_arguments = (*invocation_context)
-                        .then(compute_invocation_builtin_arguments)
-                        .unwrap_or_default();
-                    let context_leaves = (!builtin_arguments.is_empty())
-                        .then_some(u32::try_from(builtin_arguments.len()).unwrap());
-                    let artifact = with_isolated_compiler_database(
-                        db,
-                        top_mod,
-                        &stage.source_entry,
-                        |stage_db, stage_mod| {
-                            let package = mir::build_wasm_runtime_package_for_entry(
-                                stage_db,
-                                stage_mod,
-                                &stage.source_entry,
-                            )
-                            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-                            let external = stage_external_resources(
-                                stage_db,
-                                &package,
-                                &stage.source_entry,
-                                &resources,
-                                Access::ReadWrite,
-                                context_leaves,
-                            )?;
-                            compile_runtime_package_spirv_compute_with_interface(
-                                stage_db,
-                                &package,
-                                *workgroup_size,
-                                *dispatch,
-                                &external,
-                                &builtin_arguments,
-                            )
-                            .map_err(|error| WebBundleError::Lower(error.to_string()))
-                        },
-                    );
+                    let artifact = shader_artifacts[index].take().ok_or_else(|| {
+                        WebBundleError::Lower(format!(
+                            "compute stage `{}` lost its compiled artifact",
+                            stage.source_entry
+                        ))
+                    })?;
                     (
                         artifact,
                         Some(*dispatch),
@@ -5020,31 +5263,12 @@ impl WebBundle {
                     )
                 }
                 WebActorStageKind::Fragment => {
-                    let artifact = with_isolated_compiler_database(
-                        db,
-                        top_mod,
-                        &stage.source_entry,
-                        |stage_db, stage_mod| {
-                            let package = mir::build_wasm_runtime_package_for_entry(
-                                stage_db,
-                                stage_mod,
-                                &stage.source_entry,
-                            )
-                            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-                            let external = stage_external_resources(
-                                stage_db,
-                                &package,
-                                &stage.source_entry,
-                                &resources,
-                                Access::Read,
-                                None,
-                            )?;
-                            compile_runtime_package_spirv_render_with_resources(
-                                stage_db, &package, &external,
-                            )
-                            .map_err(|error| WebBundleError::Lower(error.to_string()))
-                        },
-                    );
+                    let artifact = shader_artifacts[index].take().ok_or_else(|| {
+                        WebBundleError::Lower(format!(
+                            "fragment stage `{}` lost its compiled artifact",
+                            stage.source_entry
+                        ))
+                    })?;
                     (artifact, None, 1, None, None, None, "fragment")
                 }
                 WebActorStageKind::Vertex { .. } => unreachable!("handled as an adjacent pair"),
@@ -5052,12 +5276,6 @@ impl WebBundle {
                     unreachable!("actor construction rejects unpaired raster fragments")
                 }
             };
-            let artifact = artifact.map_err(|error| {
-                WebBundleError::Lower(format!(
-                    "GPU actor stage `{}` ({kind}) failed: {error}",
-                    stage.source_entry
-                ))
-            })?;
             let shader =
                 normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
             validate_browser_wgsl(&shader)?;

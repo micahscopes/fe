@@ -542,6 +542,34 @@ fn attributed_actor_builds_a_materialized_v6_pass_graph() {
 }
 
 #[test]
+fn serial_and_parallel_actor_stage_demands_materialize_identically() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let serial = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("stage-demand-parity.fe".to_owned()))
+            .with_stage_compile_jobs(1),
+    )
+    .expect("serial actor stage demands");
+    let parallel = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("stage-demand-parity.fe".to_owned()))
+            .with_stage_compile_jobs(2),
+    )
+    .expect("parallel actor stage demands");
+
+    assert_eq!(
+        serial.materialized_files().expect("serial files"),
+        parallel.materialized_files().expect("parallel files"),
+        "Salsa demand completion order must not alter any bundle byte",
+    );
+}
+
+#[test]
 fn nominal_readback_derives_one_binary_actor_boundary_without_manifest_semantics() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_typed_readback");
