@@ -178,7 +178,7 @@ pub struct FixedMandelbrotTransitionWitness<const L: usize> {
 impl<const L: usize> core::marker::Copy for FixedMandelbrotTransitionWitness<L> {}
 derive CanonicalWords for FixedMandelbrotTransitionWitness<L> using CanonicalWordsProvider
 
-fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
+pub fn empty_product_witness<const L: usize>() -> FixedProductWitness<L> {
     FixedProductWitness {
         valid: false,
         low_digits: [0; L],
@@ -201,7 +201,7 @@ fn words_are_zero<const L: usize>(_ words: [u32; L]) -> bool {
     true
 }
 
-fn empty_linear_witness<const L: usize>() -> FixedLinearWitness<L> {
+pub fn empty_linear_witness<const L: usize>() -> FixedLinearWitness<L> {
     FixedLinearWitness {
         valid: false,
         same_sign: false,
@@ -332,7 +332,7 @@ pub fn fixed_product_carry_range_witness_holds<const L: usize>(
     true
 }
 
-fn empty_transition_witness<const L: usize>() -> FixedMandelbrotTransitionWitness<L> {
+pub fn empty_transition_witness<const L: usize>() -> FixedMandelbrotTransitionWitness<L> {
     FixedMandelbrotTransitionWitness {
         valid: false,
         xx: empty_product_witness<L>(),
@@ -406,7 +406,7 @@ pub fn fixed_range_witness_holds<const L: usize>(
         && (!value.negative || witness.nonzero)
 }
 
-fn derive_fixed_linear_witness<const L: usize>(
+pub fn derive_fixed_linear_witness<const L: usize>(
     _ left: Fixed<L>,
     _ right: Fixed<L>,
     _ subtract_right: bool,

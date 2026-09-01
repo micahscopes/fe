@@ -1145,7 +1145,7 @@ fn radix_reconstruction_before<const L: usize>(
     reconstructed
 }
 
-fn empty_sparse_row<F: Radix2Field>() -> SparseTaskRow<F> {
+pub fn empty_sparse_row<F: Radix2Field>() -> SparseTaskRow<F> {
     SparseTaskRow {
         value: zero<F>(),
         auxiliary: zero<F>(),
@@ -1165,9 +1165,29 @@ pub fn sparse_radix_row_from_witness<F: Radix2Field, const L: usize>(
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseTaskRow<F> {
+    let node = match task {
+        SparseTransitionTask::RadixBit(node, _, _) => node,
+        SparseTransitionTask::RadixLimb(node, _) => node,
+        SparseTransitionTask::RadixFinish(node) => node,
+        _ => return empty_sparse_row<F>(),
+    }
+    sparse_radix_row<F, L>(
+        task,
+        range_node_digits(node, point, current, next, witness),
+        range_node_negative(node, point, current, next, witness),
+    )
+}
+
+/// Interpret one radix task from its selected signed digit vector. This local
+/// denotation lets scalar and GPU schedules choose dependency placement without
+/// materializing the complete transition witness.
+pub fn sparse_radix_row<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ digits: [u32; L],
+    _ negative: bool,
+) -> SparseTaskRow<F> {
     match task {
-        SparseTransitionTask::RadixBit(node, limb, bit) => {
-            let digits = range_node_digits(node, point, current, next, witness)
+        SparseTransitionTask::RadixBit(_, limb, bit) => {
             let range = derive_radix_range_witness(digits)
             let before = radix_reconstruction_before(range, limb, bit)
             let value = range.limbs[limb as usize].bits[bit as usize]
@@ -1182,8 +1202,7 @@ pub fn sparse_radix_row_from_witness<F: Radix2Field, const L: usize>(
                 ),
             }
         }
-        SparseTransitionTask::RadixLimb(node, limb) => {
-            let digits = range_node_digits(node, point, current, next, witness)
+        SparseTransitionTask::RadixLimb(_, limb) => {
             let range = derive_radix_range_witness(digits)
             let prefix = range.limbs[limb as usize].nonzero_prefix[12]
             SparseTaskRow {
@@ -1197,14 +1216,11 @@ pub fn sparse_radix_row_from_witness<F: Radix2Field, const L: usize>(
                 state_after: natural<F>(prefix),
             }
         }
-        SparseTransitionTask::RadixFinish(node) => {
-            let digits = range_node_digits(node, point, current, next, witness)
+        SparseTransitionTask::RadixFinish(_) => {
             let range = derive_radix_range_witness(digits)
             SparseTaskRow {
                 value: boolean<F>(range.nonzero),
-                auxiliary: boolean<F>(
-                    range_node_negative(node, point, current, next, witness),
-                ),
+                auxiliary: boolean<F>(negative),
                 accumulator_before: zero<F>(),
                 accumulator_after: zero<F>(),
                 state_before: natural<F>(range.limbs[L - 1].nonzero_prefix[12]),
@@ -1270,9 +1286,20 @@ pub fn sparse_carry_row_from_witness<F: Radix2Field, const L: usize>(
     _ task: SparseTransitionTask,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseTaskRow<F> {
+    let node = match task {
+        SparseTransitionTask::CarryBit(node, _, _, _) => node,
+        SparseTransitionTask::CarryFinish(node, _) => node,
+        _ => return empty_sparse_row<F>(),
+    }
+    sparse_carry_row<F, L>(task, product_node_witness(node, witness))
+}
+
+pub fn sparse_carry_row<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ product: FixedProductWitness<L>,
+) -> SparseTaskRow<F> {
     match task {
-        SparseTransitionTask::CarryBit(node, coefficient, slack, bit) => {
-            let product = product_node_witness(node, witness)
+        SparseTransitionTask::CarryBit(_, coefficient, slack, bit) => {
             let range = derive_fixed_product_carry_range_witness(product)
             let bounded = fixed_product_bounded_carry(range, coefficient)
             let bits = if slack { bounded.slack_bits } else { bounded.bits }
@@ -1292,8 +1319,7 @@ pub fn sparse_carry_row_from_witness<F: Radix2Field, const L: usize>(
                 state_after: natural<F>(retained),
             }
         }
-        SparseTransitionTask::CarryFinish(node, coefficient) => {
-            let product = product_node_witness(node, witness)
+        SparseTransitionTask::CarryFinish(_, coefficient) => {
             let range = derive_fixed_product_carry_range_witness(product)
             let bounded = fixed_product_bounded_carry(range, coefficient)
             SparseTaskRow {
@@ -1377,10 +1403,27 @@ pub fn sparse_product_row_from_witness<F: Radix2Field, const L: usize>(
     _ current: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseTaskRow<F> {
+    let node = match task {
+        SparseTransitionTask::ProductTerm(node, _, _) => node,
+        SparseTransitionTask::ProductCoefficient(node, _) => node,
+        _ => return empty_sparse_row<F>(),
+    }
+    sparse_product_row<F, L>(
+        task,
+        product_left_value(node, current),
+        product_right_value(node, current),
+        product_node_witness(node, witness),
+    )
+}
+
+pub fn sparse_product_row<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ product: FixedProductWitness<L>,
+) -> SparseTaskRow<F> {
     match task {
-        SparseTransitionTask::ProductTerm(node, coefficient, term) => {
-            let left = product_left_value(node, current)
-            let right = product_right_value(node, current)
+        SparseTransitionTask::ProductTerm(_, coefficient, term) => {
             let left_index = convolution_left_index<L>(coefficient, term)
             let right_index = convolution_right_index<L>(coefficient, term)
             let left_digit = left.limbs[left_index as usize]
@@ -1395,7 +1438,7 @@ pub fn sparse_product_row_from_witness<F: Radix2Field, const L: usize>(
                 0
             } else {
                 fixed_product_carry(
-                    product_node_witness(node, witness),
+                    product,
                     coefficient - 1,
                 )
             }
@@ -1408,10 +1451,7 @@ pub fn sparse_product_row_from_witness<F: Radix2Field, const L: usize>(
                 state_after: natural<F>(carry_in),
             }
         }
-        SparseTransitionTask::ProductCoefficient(node, coefficient) => {
-            let product = product_node_witness(node, witness)
-            let left = product_left_value(node, current)
-            let right = product_right_value(node, current)
+        SparseTransitionTask::ProductCoefficient(_, coefficient) => {
             let terms = convolution_term_count<L>(coefficient)
             let carry_in = if coefficient == 0 {
                 0
@@ -1457,9 +1497,27 @@ pub fn sparse_round_row_from_witness<F: Radix2Field, const L: usize>(
     _ current: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseTaskRow<F> {
+    let node = match task {
+        SparseTransitionTask::ProductRound(node, _) => node,
+        SparseTransitionTask::ProductFinish(node) => node,
+        _ => return empty_sparse_row<F>(),
+    }
+    sparse_round_row<F, L>(
+        task,
+        product_left_value(node, current),
+        product_right_value(node, current),
+        product_node_witness(node, witness),
+    )
+}
+
+pub fn sparse_round_row<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ product: FixedProductWitness<L>,
+) -> SparseTaskRow<F> {
     match task {
-        SparseTransitionTask::ProductRound(node, output_index) => {
-            let product = product_node_witness(node, witness)
+        SparseTransitionTask::ProductRound(_, output_index) => {
             let round_up = if product.round_up { 1 } else { 0 }
             let carry_in = if output_index == 0 {
                 round_up
@@ -1477,10 +1535,7 @@ pub fn sparse_round_row_from_witness<F: Radix2Field, const L: usize>(
                 state_after: natural<F>(round_up),
             }
         }
-        SparseTransitionTask::ProductFinish(node) => {
-            let product = product_node_witness(node, witness)
-            let left = product_left_value(node, current)
-            let right = product_right_value(node, current)
+        SparseTransitionTask::ProductFinish(_) => {
             let output_range = derive_radix_range_witness(product.output.limbs)
             SparseTaskRow {
                 value: boolean<F>(product.output.negative),
@@ -1550,11 +1605,27 @@ pub fn sparse_linear_row_from_witness<F: Radix2Field, const L: usize>(
     _ point: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseTaskRow<F> {
+    let node = match task {
+        SparseTransitionTask::LinearLimb(node, _, _) => node,
+        SparseTransitionTask::LinearFinish(node) => node,
+        _ => return empty_sparse_row<F>(),
+    }
+    sparse_linear_row<F, L>(
+        task,
+        linear_left_value(node, witness),
+        linear_right_value(node, point, witness),
+        linear_node_witness(node, witness),
+    )
+}
+
+pub fn sparse_linear_row<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ left: Fixed<L>,
+    _ right: Fixed<L>,
+    _ linear: FixedLinearWitness<L>,
+) -> SparseTaskRow<F> {
     match task {
-        SparseTransitionTask::LinearLimb(node, role, limb) => {
-            let linear = linear_node_witness(node, witness)
-            let left = linear_left_value(node, witness)
-            let right = linear_right_value(node, point, witness)
+        SparseTransitionTask::LinearLimb(_, role, limb) => {
             match role {
                 LinearLimbRole::Sum => SparseTaskRow {
                     value: natural<F>(left.limbs[limb as usize]),
@@ -1611,10 +1682,7 @@ pub fn sparse_linear_row_from_witness<F: Radix2Field, const L: usize>(
                 LinearLimbRole::Invalid => empty_sparse_row<F>(),
             }
         }
-        SparseTransitionTask::LinearFinish(node) => {
-            let linear = linear_node_witness(node, witness)
-            let left = linear_left_value(node, witness)
-            let right = linear_right_value(node, point, witness)
+        SparseTransitionTask::LinearFinish(_) => {
             let output_range = derive_radix_range_witness(linear.output.limbs)
             SparseTaskRow {
                 value: boolean<F>(left.negative),
@@ -1658,8 +1726,36 @@ pub fn sparse_boundary_row_from_witness<F: Radix2Field, const L: usize>(
 ) -> SparseTaskRow<F> {
     match task {
         SparseTransitionTask::BoundarySign(coordinate) => {
-            let computed = boundary_computed(coordinate, witness)
-            let claimed = boundary_claimed(coordinate, next)
+            sparse_boundary_row<F, L>(
+                task,
+                boundary_computed(coordinate, witness),
+                boundary_claimed(coordinate, next),
+                witness.valid,
+            )
+        }
+        SparseTransitionTask::BoundaryLimb(coordinate, _) => {
+            sparse_boundary_row<F, L>(
+                task,
+                boundary_computed(coordinate, witness),
+                boundary_claimed(coordinate, next),
+                witness.valid,
+            )
+        }
+        SparseTransitionTask::TransitionFinish => {
+            sparse_boundary_row<F, L>(task, next.real, next.real, witness.valid)
+        }
+        _ => empty_sparse_row<F>(),
+    }
+}
+
+pub fn sparse_boundary_row<F: Radix2Field, const L: usize>(
+    _ task: SparseTransitionTask,
+    _ computed: Fixed<L>,
+    _ claimed: Fixed<L>,
+    _ transition_valid: bool,
+) -> SparseTaskRow<F> {
+    match task {
+        SparseTransitionTask::BoundarySign(_) => {
             SparseTaskRow {
                 value: boolean<F>(computed.negative),
                 auxiliary: boolean<F>(claimed.negative),
@@ -1669,9 +1765,7 @@ pub fn sparse_boundary_row_from_witness<F: Radix2Field, const L: usize>(
                 state_after: zero<F>(),
             }
         }
-        SparseTransitionTask::BoundaryLimb(coordinate, limb) => {
-            let computed = boundary_computed(coordinate, witness)
-            let claimed = boundary_claimed(coordinate, next)
+        SparseTransitionTask::BoundaryLimb(_, limb) => {
             SparseTaskRow {
                 value: natural<F>(computed.limbs[limb as usize]),
                 auxiliary: natural<F>(claimed.limbs[limb as usize]),
@@ -1682,7 +1776,7 @@ pub fn sparse_boundary_row_from_witness<F: Radix2Field, const L: usize>(
             }
         }
         SparseTransitionTask::TransitionFinish => SparseTaskRow {
-            value: boolean<F>(witness.valid),
+            value: boolean<F>(transition_valid),
             auxiliary: zero<F>(),
             accumulator_before: zero<F>(),
             accumulator_after: zero<F>(),
@@ -8052,7 +8146,7 @@ pub fn sparse_linear_plan_witness<F: Radix2Field, const L: usize>(
 ) -> SparseLinearPlanWitness<F>
 where L > 1,
 {
-    sparse_linear_copy_plan<
+    interpret_sparse_linear_plan<
         QuadraticWitnessInterpreter<F, SPARSE_LINEAR_PORT_MULTIPLICATIONS>,
         F,
         L,
@@ -8062,7 +8156,33 @@ where L > 1,
         row,
         arithmetic_plan,
         QuadraticWitnessInterpreter::new(),
-    ).interpreter.finish()
+    ).finish()
+}
+
+/// Interpret the single authored signed-linear dependency plan using a caller
+/// selected placement. Scalar witnesses retain the in-memory interpreter;
+/// WebGPU uses a streaming word sink so every committed node goes directly to
+/// its trace column without a second formula or a private plan array.
+pub fn interpret_sparse_linear_plan<
+    I: QuadraticPlanInterpreter<F>,
+    F: Radix2Field,
+    const L: usize,
+>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ interpreter: I,
+) -> I
+where L > 1,
+{
+    sparse_linear_copy_plan<I, F, L>(
+        control,
+        next_control,
+        row,
+        arithmetic_plan,
+        interpreter,
+    ).interpreter
 }
 
 struct SparseLinearConstrainedPorts<F: Radix2Field> {

@@ -307,6 +307,19 @@ impl<F: Radix2Field> core::marker::Copy
     for SparseBaseAirRow<F> {}
 derive CanonicalWords for SparseBaseAirRow<F> using CanonicalWordsProvider
 
+/// Shared semantic inputs for one sparse base AIR row. Scalar construction and
+/// GPU partition interpreters consume this same nominal context; a placement
+/// policy selects which derived subrecord to evaluate without introducing a
+/// second witness formula or column schema.
+pub struct SparseBaseAirInputs<const L: usize> {
+    pub index: u32,
+    pub point: ComplexFixed<L>,
+    pub current: ComplexFixed<L>,
+    pub next: ComplexFixed<L>,
+    pub witness: FixedMandelbrotTransitionWitness<L>,
+}
+impl<const L: usize> core::marker::Copy for SparseBaseAirInputs<L> {}
+
 pub struct SparseTraceLeaf<const L: usize> {
     pub limb_count: BabyBear,
     pub task_count: BabyBear,
@@ -4529,6 +4542,138 @@ pub fn sparse_trace_leaf_from_witness<const L: usize>(
         control: sparse_trace_control_at<L>(index),
         row: row,
     }
+}
+
+pub fn sparse_base_air_inputs<const L: usize>(
+    _ index: u32,
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+) -> SparseBaseAirInputs<L> {
+    SparseBaseAirInputs {
+        index: index,
+        point: point,
+        current: current,
+        next: next,
+        witness: witness,
+    }
+}
+
+pub fn sparse_base_air_control<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseControlRow<BabyBear> {
+    sparse_base_air_control_at<L>(input.index)
+}
+
+pub fn sparse_base_air_control_at<const L: usize>(
+    _ index: u32,
+) -> SparseControlRow<BabyBear> {
+    sparse_control_row_at<BabyBear, L>(index)
+}
+
+pub fn sparse_base_air_control_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseControlPlanWitness<BabyBear> {
+    sparse_base_air_control_plan_at<L>(input.index)
+}
+
+pub fn sparse_base_air_control_plan_at<const L: usize>(
+    _ index: u32,
+) -> SparseControlPlanWitness<BabyBear> {
+    sparse_control_plan_witness(sparse_base_air_control_at<L>(index))
+}
+
+pub fn sparse_base_air_control_link_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseControlLinkPlanWitness<BabyBear> {
+    sparse_base_air_control_link_plan_at<L>(input.index)
+}
+
+pub fn sparse_base_air_control_link_plan_at<const L: usize>(
+    _ index: u32,
+) -> SparseControlLinkPlanWitness<BabyBear> {
+    sparse_control_link_plan_witness(
+        sparse_base_air_control_at<L>(index),
+        sparse_control_row_at<BabyBear, L>(index + 1),
+    )
+}
+
+pub fn sparse_base_air_witness<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseTaskRow<BabyBear> {
+    sparse_transition_row_from_witness<BabyBear, L>(
+        input.index,
+        input.point,
+        input.current,
+        input.next,
+        input.witness,
+    )
+}
+
+pub fn sparse_base_air_arithmetic_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseArithmeticPlanWitness<BabyBear> {
+    sparse_arithmetic_plan_witness(
+        sparse_base_air_control(input),
+        sparse_base_air_witness(input),
+    )
+}
+
+pub fn sparse_base_air_arithmetic_link_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseArithmeticLinkPlanWitness<BabyBear> {
+    sparse_arithmetic_link_plan_witness(
+        sparse_base_air_control(input),
+        sparse_base_air_witness(input),
+        sparse_control_row_at<BabyBear, L>(input.index + 1),
+        sparse_transition_row_from_witness<BabyBear, L>(
+            input.index + 1,
+            input.point,
+            input.current,
+            input.next,
+            input.witness,
+        ),
+    )
+}
+
+pub fn sparse_base_air_round_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseRoundPlanWitness<BabyBear>
+where L > 1,
+{
+    let control = sparse_base_air_control(input)
+    sparse_round_plan_witness<BabyBear, L>(
+        control,
+        sparse_control_row_at<BabyBear, L>(input.index + 1),
+        sparse_base_air_witness(input),
+    )
+}
+
+pub fn sparse_base_air_linear_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseLinearPlanWitness<BabyBear>
+where L > 1,
+{
+    let control = sparse_base_air_control(input)
+    let row = sparse_base_air_witness(input)
+    sparse_linear_plan_witness<BabyBear, L>(
+        control,
+        sparse_control_row_at<BabyBear, L>(input.index + 1),
+        row,
+        sparse_arithmetic_plan_witness(control, row),
+    )
+}
+
+pub fn sparse_base_air_boundary_plan<const L: usize>(
+    _ input: ref SparseBaseAirInputs<L>,
+) -> SparseBoundaryPlanWitness<BabyBear>
+where L > 1,
+{
+    sparse_boundary_plan_witness<BabyBear, L>(
+        sparse_base_air_control(input),
+        sparse_base_air_witness(input),
+    )
 }
 
 pub fn sparse_base_air_row_from_witness<const L: usize>(
