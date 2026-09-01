@@ -113,6 +113,7 @@ use mandelbrot_proof_recursive_baby_bear::{
     RecursiveCommittedInterval,
     commit_recursive_leaf_statement,
 }
+use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
 use merkle_core::{
     MerkleMultiPath,
     MerkleRoot,
@@ -217,10 +218,6 @@ impl Poseidon2FieldDomain for MandelbrotSparseBoundaryGammaBabyBearV1 {
 
 /// Production proof domains begin only after the base LDE is committed. They
 /// are intentionally distinct from the `*01` semantic-checkpoint domains.
-struct MandelbrotSparseBaseLdeLeafBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseBaseLdeLeafBabyBearV1 {
-    const TAG: u32 = protocol_tag("LD01")
-}
 struct MandelbrotSparseInteractionLdeLeafBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparseInteractionLdeLeafBabyBearV1 {
     const TAG: u32 = protocol_tag("LD02")

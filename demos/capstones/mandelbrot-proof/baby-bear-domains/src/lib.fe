@@ -23,6 +23,7 @@ pub struct MandelbrotMainLdeRowBabyBearV1 {}
 pub struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
 pub struct MandelbrotMainLdeTranscriptBabyBearV1 {}
 pub struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
+pub struct MandelbrotSparseBaseLdeLeafBabyBearV1 {}
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -58,6 +59,13 @@ impl Poseidon2FieldDomain for MandelbrotMainLdeTranscriptBabyBearV1 {
 
 impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
     const TAG: u32 = protocol_tag("BY02")
+}
+
+/// Production sparse base-LDE leaf domain. It lives in this focused domain
+/// ingot so scalar, Wasm, and WebGPU interpreters select the same nominal
+/// protocol identity without copying its numeric tag.
+impl Poseidon2FieldDomain for MandelbrotSparseBaseLdeLeafBabyBearV1 {
+    const TAG: u32 = protocol_tag("LD01")
 }
 
 pub const fn row_domain_tag() -> u32 {
