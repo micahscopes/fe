@@ -1,4 +1,5 @@
 use std::webgpu::{
+    CooperativeDispatch as Cooperate,
     ComputeSurface as Kernel,
     CycledDispatch as Cycle,
     FixedDispatch as Once,
@@ -28,7 +29,10 @@ actor CycledReceipt uses (Program<WebGpuBackend>) {
             Threads<1, 1, 1>,
             Cycle<
                 ProtocolRound,
-                Taper<Repeat<1, 1, 1, 3>, 0, 0, 0, 1>,
+                Cooperate<
+                    Taper<Repeat<1, 1, 1, 3>, 0, 0, 0, 1>,
+                    2,
+                >,
                 3,
             >,
         >,

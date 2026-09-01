@@ -173,6 +173,18 @@ pub struct TaperedDispatch<
     const REPEAT_DECREMENT: usize,
 > {}
 
+/// Bound one dispatch's queued repeat work before yielding GPU ownership.
+///
+/// The fixed browser adapter submits at most `REPEAT_BATCH` repetitions, waits
+/// for that queue prefix to complete, then resumes the same ordered dispatch.
+/// This is a physical pacing interpretation only. It does not alter values,
+/// phase order, cycle order, or the authored dependency graph.
+#[gpu_dispatch(cooperative)]
+pub struct CooperativeDispatch<
+    Dispatch,
+    const REPEAT_BATCH: usize,
+> {}
+
 /// Place one dispatch policy inside a repeated, ordered actor pass cycle.
 ///
 /// Consecutive compute behaviors carrying the same `Group` are one cycle body.

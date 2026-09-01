@@ -102,6 +102,10 @@ fn nominal_cycle_executes_the_complete_actor_body_in_storage_order() {
     assert_eq!(compute[0].repeat, 1);
     assert_eq!(compute[1].repeat, 3);
     assert_eq!(
+        compute[1].cooperation,
+        Some(fe_codegen::WebDispatchCooperation { repeat_batch: 2 })
+    );
+    assert_eq!(
         compute[1].taper,
         Some(fe_codegen::WebDispatchTaper {
             shifts: [0, 0, 0],

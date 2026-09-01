@@ -406,6 +406,7 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
             dispatch: [1, 1, 1],
             repeat: 1,
             taper: None,
+            cooperation: None,
             cycle: None,
             invocation_context: false,
         }
@@ -562,6 +563,7 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
             dispatch: [2, 2, 1],
             repeat: 1,
             taper: None,
+            cooperation: None,
             cycle: None,
             invocation_context: true,
         }
@@ -648,6 +650,7 @@ fn repeated_dispatch_is_derived_from_its_nominal_fe_policy() {
             dispatch: [1, 1, 1],
             repeat: 4,
             taper: None,
+            cooperation: None,
             cycle: None,
             invocation_context: false,
         }
@@ -698,6 +701,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
             dispatch: [1, 1, 1],
             repeat: 1,
             taper: None,
+            cooperation: None,
             cycle: Some(cycle.clone()),
             invocation_context: false,
         }
@@ -712,6 +716,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
                 shifts: [0, 0, 0],
                 repeat_decrement: 1,
             }),
+            cooperation: Some(fe_codegen::WebDispatchCooperation { repeat_batch: 2 }),
             cycle: Some(cycle),
             invocation_context: false,
         }
@@ -727,6 +732,10 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     assert_eq!(passes.len(), 3);
     assert_eq!(passes[0].repeat, 1);
     assert_eq!(passes[1].repeat, 3);
+    assert_eq!(
+        passes[1].cooperation,
+        Some(fe_codegen::WebDispatchCooperation { repeat_batch: 2 })
+    );
     assert_eq!(
         passes[1].taper,
         Some(fe_codegen::WebDispatchTaper {
@@ -746,6 +755,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     assert_eq!(encoded["passes"][0]["cycle"]["repeat"], 3);
     assert_eq!(encoded["passes"][1]["cycle"], encoded["passes"][0]["cycle"]);
     assert_eq!(encoded["passes"][1]["taper"]["repeat_decrement"], 1);
+    assert_eq!(encoded["passes"][1]["cooperation"]["repeat_batch"], 2);
     assert!(encoded["passes"][2].get("cycle").is_none());
 }
 

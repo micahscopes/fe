@@ -159,6 +159,9 @@ fn production_fri_actor_schedule_lowers_to_browser_webgpu() {
         assert_eq!(pass.dispatch, Some(dispatch));
         assert_eq!(pass.repeat, repeat);
         assert_eq!(pass.taper, taper);
+        let cooperation = matches!(entry, "hash_leaves" | "reduce_tree")
+            .then_some(fe_codegen::WebDispatchCooperation { repeat_batch: 8 });
+        assert_eq!(pass.cooperation, cooperation);
         let cycle = pass
             .cycle
             .expect("every FRI phase belongs to one round cycle");

@@ -441,7 +441,7 @@ test("poster readback removes row padding and normalizes canvas channel order", 
   );
 });
 
-test("poster copy is encoded after rendering in the same GPU submission", () => {
+test("poster copy is encoded after rendering in the same GPU submission", async () => {
   globalThis.GPUBufferUsage = { COPY_DST: 1, MAP_READ: 2 };
   const trace = [];
   const buffer = {};
@@ -471,7 +471,7 @@ test("poster copy is encoded after rendering in the same GPU submission", () => 
   surface._graph = false;
   surface._gpu = { device, pipeline: {}, bindGroup: null, uniformBuffer: null };
 
-  const readback = surface._presentOn(
+  const readback = await surface._presentOn(
     context,
     [],
     { width: 1, height: 1, format: "rgba8unorm" },
@@ -580,7 +580,7 @@ test("one authored raster pass takes the GPU pass-graph path", () => {
   );
 });
 
-test("ordered render passes clear once and preserve earlier Fe-authored color", () => {
+test("ordered render passes clear once and preserve earlier Fe-authored color", async () => {
   const loadOps = [];
   const draws = [];
   const encoder = {
@@ -614,9 +614,103 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
     ],
   };
 
-  surface._presentOn(context, []);
+  await surface._presentOn(context, []);
   assert.deepEqual(loadOps, ["clear", "load"]);
   assert.deepEqual(draws, [3, 54]);
+});
+
+test("Fe-derived cooperative dispatch batches preserve stage order and await queue idle", async () => {
+  const submissions = [];
+  let queueIdle = 0;
+  const device = {
+    createCommandEncoder() {
+      const dispatches = [];
+      let pipeline = null;
+      return {
+        beginComputePass() {
+          return {
+            setPipeline(next) { pipeline = next; },
+            setBindGroup() {},
+            dispatchWorkgroups(x, y, z) { dispatches.push([pipeline.name, x, y, z]); },
+            end() {},
+          };
+        },
+        finish() { return { dispatches }; },
+      };
+    },
+    queue: {
+      submit(commands) { submissions.push(commands[0].dispatches); },
+      async onSubmittedWorkDone() { queueIdle += 1; },
+    },
+  };
+  const compute = (name, repeat, cooperation = undefined) => ({
+    pass: {
+      layout: { mode: "compute" },
+      dispatch: [3, 1, 1],
+      repeat,
+      cooperation,
+    },
+    pipeline: { name },
+    bindGroup: null,
+    inputs: [],
+  });
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = true;
+  surface._memberIndexByName = new Map();
+  surface._gpu = {
+    device,
+    generation: 7,
+    passRecords: [
+      compute("cooperative", 5, { repeat_batch: 2 }),
+      compute("successor", 1),
+    ],
+  };
+
+  await surface._presentOn({}, []);
+
+  assert.deepEqual(
+    submissions.map((submission) => submission.map(([name]) => name)),
+    [
+      ["cooperative", "cooperative"],
+      ["cooperative", "cooperative"],
+      ["cooperative"],
+      ["successor"],
+    ],
+  );
+  assert.equal(queueIdle, 3);
+});
+
+test("cooperative presentations serialize complete frame snapshots", async () => {
+  let releaseFirst;
+  const firstBoundary = new Promise((resolve) => { releaseFirst = resolve; });
+  const presentations = [];
+  const frames = [];
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._presentationTail = Promise.resolve();
+  surface._presentNow = async (_context, uniforms) => {
+    presentations.push([...uniforms]);
+    if (uniforms[0] === 1) await firstBoundary;
+  };
+  surface._fsm = "live";
+  surface._mode = "webgpu";
+  surface._adoptedCanvas = {};
+  surface._adoptedContext = {};
+  surface._uniforms = [0];
+  surface._members = [{ name: "value" }];
+  surface._refreshControlValues = () => {};
+  surface._dispatch = (type, detail) => {
+    if (type === "fe-frame") frames.push(detail.params);
+  };
+
+  const first = surface._render([1]);
+  const second = surface._render([2]);
+  await Promise.resolve();
+  assert.deepEqual(presentations, [[1]]);
+  releaseFirst();
+  await Promise.all([first, second]);
+
+  assert.deepEqual(presentations, [[1], [2]]);
+  assert.deepEqual(frames, [{ value: 1 }, { value: 2 }]);
 });
 
 test("authored raster varyings never become Fe actor or resource arguments", () => {

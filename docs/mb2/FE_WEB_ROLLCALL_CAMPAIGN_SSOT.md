@@ -3154,6 +3154,33 @@ fallback. The semantic receipts are:
    independent recurrence, then attach the real production composition and
    opening/receipt stages.
 
+   The generic backpressure slice is now implemented and executed. Fe's
+   nominal `CooperativeDispatch<Dispatch, REPEAT_BATCH>` policy selects a
+   physical queue boundary without changing the nested dispatch, actor cycle,
+   or dependency graph. The compiler transports only the derived batch size;
+   the fixed browser adapter has no FRI name, round table, or proof predicate.
+   It submits at most that many repeated dispatches, waits for the exact queue
+   prefix to become idle, and resumes the serialized presentation. The
+   production actor applies batch size eight only to `hash_leaves` and
+   `reduce_tree`, yielding 522 queue-drain boundaries while retaining all
+   605,295 workgroups and 2,195,973 WGSL bytes. The fixed runtime passed 33/33
+   policy tests, including an exact `2 + 2 + 1` batch trace followed by its
+   successor stage and two concurrent frame requests retaining their complete
+   ordered state snapshots. The generic three-cycle llvmpipe gate retained exact
+   storage receipt `[3, 111223]`, and the production structural gate passed
+   1/1 in 306.83 seconds.
+
+   Fresh external Chrome 149 runs reached `ready` in `webgpu` mode at 10.13
+   and 12.47 seconds and painted exact RGBA `[0, 255, 0, 255]` without a
+   console error or device loss. Browser-only instrumentation on the latter
+   run observed exactly 537 command-buffer submissions and 522 queue-idle
+   waits. This proves that the Fe-selected pacing is being consumed, but does
+   not yet prove that batch size eight eliminates the original whole-machine
+   stall: the run still observed a 3.37-second main-thread tick gap and a
+   3.71-second maximum queue wait under a cold, instrumented load. Keep batch
+   size tuning and user-observed Radeon responsiveness open rather than
+   trading away exactness or claiming smoothness from the green pixel.
+
    The first complete 49-pass replay exposed a compiler semantic defect before
    this gate could be claimed: Runtime MIR aggregate facts retained the first
    structural value of a reassigned local, so an inlined quartic constraint

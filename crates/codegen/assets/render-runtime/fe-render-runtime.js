@@ -806,6 +806,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._gestureFrame = null;
     this._gesturePresenting = false;
     this._gestureDirty = false;
+    this._presentationTail = Promise.resolve();
     this._gpu = null; // one legacy pipeline, or { passRecords, resourceBuffers } for a graph.
     this._surfaceInitializerKernel = null;
     this._liveContext = null; // GPUCanvasContext on `_liveCanvas`
@@ -1354,7 +1355,7 @@ export class FeSurfaceElement extends HTMLElement {
         : null;
       if (!this._applyBackingExtent(gpu)) return;
       this._resizePresentationCanvases();
-      this._render();
+      await this._render();
     } finally {
       this._resizePending = false;
     }
@@ -1592,8 +1593,16 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _presentOn(context, uniforms, capture = null) {
+    const previous = this._presentationTail ?? Promise.resolve();
+    const presentation = previous.then(() => this._presentNow(context, uniforms, capture));
+    this._presentationTail = presentation.catch(() => {});
+    return presentation;
+  }
+
+  async _presentNow(context, uniforms, capture = null) {
     if (this._graph) {
-      const { device, passRecords } = this._gpu;
+      const gpu = this._gpu;
+      const { device, passRecords } = gpu;
       for (const record of passRecords) {
         for (const input of record.inputs) {
           const values = input.binding.members.map((member) => {
@@ -1619,7 +1628,7 @@ export class FeSurfaceElement extends HTMLElement {
         encoder = device.createCommandEncoder();
         encoded = false;
       };
-      const executeRecord = (record, cycleIteration = null) => {
+      const executeRecord = async (record, cycleIteration = null) => {
         if (record.pass.layout.mode === "compute") {
           let dispatch = record.pass.dispatch;
           if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
@@ -1649,17 +1658,36 @@ export class FeSurfaceElement extends HTMLElement {
           } else if (cycleIteration !== null && record.pass.taper !== undefined) {
             throw new Error("fe render runtime: malformed compiler-derived dispatch taper");
           }
-          const compute = encoder.beginComputePass();
-          compute.setPipeline(record.pipeline);
-          if (record.bindGroup) compute.setBindGroup(0, record.bindGroup);
           if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > 65535) {
             throw new Error("fe render runtime: invalid compiler-derived compute repeat count");
           }
-          for (let iteration = 0; iteration < repeat; iteration += 1) {
-            compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+          const cooperation = record.pass.cooperation;
+          let repeatBatch = repeat;
+          if (cooperation !== undefined && cooperation !== null) {
+            repeatBatch = cooperation.repeat_batch;
+            if (
+              !Number.isSafeInteger(repeatBatch) || repeatBatch < 1 || repeatBatch > 65535
+            ) {
+              throw new Error("fe render runtime: invalid compiler-derived cooperative dispatch batch");
+            }
           }
-          compute.end();
-          encoded = true;
+          let remaining = repeat;
+          while (remaining > 0) {
+            const batch = Math.min(remaining, repeatBatch);
+            const compute = encoder.beginComputePass();
+            compute.setPipeline(record.pipeline);
+            if (record.bindGroup) compute.setBindGroup(0, record.bindGroup);
+            for (let iteration = 0; iteration < batch; iteration += 1) {
+              compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+            }
+            compute.end();
+            encoded = true;
+            remaining -= batch;
+            if (cooperation !== undefined && cooperation !== null) {
+              submitEncoder();
+              await awaitSharedGpuQueueIdle(gpu);
+            }
+          }
         } else {
           texture ??= context.getCurrentTexture();
           const render = encoder.beginRenderPass({
@@ -1688,7 +1716,7 @@ export class FeSurfaceElement extends HTMLElement {
         const record = passRecords[passIndex];
         const cycle = record.pass.cycle;
         if (cycle === undefined || cycle === null) {
-          executeRecord(record);
+          await executeRecord(record);
           passIndex += 1;
           continue;
         }
@@ -1717,7 +1745,7 @@ export class FeSurfaceElement extends HTMLElement {
         submitEncoder();
         for (let iteration = 0; iteration < cycle.repeat; iteration += 1) {
           for (let memberIndex = passIndex; memberIndex < cycleEnd; memberIndex += 1) {
-            executeRecord(passRecords[memberIndex], iteration);
+            await executeRecord(passRecords[memberIndex], iteration);
           }
           submitEncoder();
         }
@@ -1880,7 +1908,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._adoptedCanvas.width = width;
       this._adoptedCanvas.height = height;
       this._adoptedContext = context;
-      this._presentOn(context, this._uniforms);
+      await this._presentOn(context, this._uniforms);
       await awaitSharedGpuQueueIdle(gpu);
       return;
     }
@@ -1911,7 +1939,7 @@ export class FeSurfaceElement extends HTMLElement {
         throw new Error(`fe render runtime: poster context configuration failed: ${error?.message ?? String(error)}`, { cause: error });
       }
       try {
-        const readback = this._presentOn(context, this._uniforms, { width, height, format: gpu.format });
+        const readback = await this._presentOn(context, this._uniforms, { width, height, format: gpu.format });
         const pixels = await readCanvasReadback(readback);
         publishSharedGpuQueueIdle(gpu);
         this._paintPosterPixels(pixels, width, height);
@@ -1949,7 +1977,7 @@ export class FeSurfaceElement extends HTMLElement {
     const gpu = this._gpu;
     try {
       await awaitSharedGpuQueueIdle(gpu);
-      const readback = this._presentOn(context, this._uniforms, {
+      const readback = await this._presentOn(context, this._uniforms, {
         width: this._backingWidth,
         height: this._backingHeight,
         format: gpu.format,
@@ -2024,7 +2052,7 @@ export class FeSurfaceElement extends HTMLElement {
       if (this._mode === "wasm-2d") {
         this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, this._uniforms);
       } else {
-        this._presentOn(this._adoptedContext, this._uniforms);
+        await this._presentOn(this._adoptedContext, this._uniforms);
       }
       this._enterLive();
       return;
@@ -2069,7 +2097,7 @@ export class FeSurfaceElement extends HTMLElement {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
     this._liveContext = context;
-    this._presentOn(context, this._uniforms);
+    await this._presentOn(context, this._uniforms);
     this._posterCanvas.hidden = true;
     this._liveCanvas.hidden = false;
     this._enterLive();
@@ -2114,8 +2142,9 @@ export class FeSurfaceElement extends HTMLElement {
 
   // -- render --------------------------------------------------------------
 
-  _render(next) {
+  async _render(next) {
     if (next) this._replaceSurfaceState(next);
+    const presentationUniforms = this._uniforms.slice();
     if (this._fsm !== "live") {
       // The resident actor plus its presentation mirror still update while
       // hidden; no GPU/CPU presentation work is spent until it becomes live.
@@ -2123,21 +2152,21 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     if (this._adoptedCanvas) {
-      if (this._mode === "webgpu") this._presentOn(this._adoptedContext, this._uniforms);
-      else this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+      if (this._mode === "webgpu") await this._presentOn(this._adoptedContext, presentationUniforms);
+      else this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, presentationUniforms);
     } else if (this._mode === "webgpu") {
-      this._presentOn(this._liveContext, this._uniforms);
+      await this._presentOn(this._liveContext, presentationUniforms);
     } else {
-      this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, this._uniforms);
+      this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, presentationUniforms);
     }
     this._refreshControlValues();
-    this._dispatch("fe-frame", { params: this._paramsSnapshot() });
+    this._dispatch("fe-frame", { params: this._paramsSnapshot(presentationUniforms) });
   }
 
-  _paramsSnapshot() {
+  _paramsSnapshot(uniforms = this._uniforms) {
     const snapshot = {};
     this._members.forEach((member, index) => {
-      snapshot[member.name] = this._uniforms[index];
+      snapshot[member.name] = uniforms[index];
     });
     return snapshot;
   }
@@ -2807,13 +2836,13 @@ export class FeSurfaceElement extends HTMLElement {
         : this._runSurfaceTransition(event);
       if (!next) return;
       this._uniforms = next;
-      this._render();
+      void this._render().catch((error) => this._fail(error));
       return;
     }
 
     const next = this._uniforms.slice();
     next[index] = value;
-    this._render(next);
+    void this._render(next).catch((error) => this._fail(error));
   }
 
   /** Seed or explicitly replace the complete state of a resident Fe actor.
@@ -3084,7 +3113,7 @@ export class FeSurfaceElement extends HTMLElement {
         this._refreshControlValues();
       }
       try {
-        this._render();
+        await this._render();
         const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
         if (queue?.onSubmittedWorkDone) await awaitSharedGpuQueueIdle(this._gpu);
       } finally {
@@ -3110,7 +3139,7 @@ export class FeSurfaceElement extends HTMLElement {
       if (this._surfaceTransitionKernel) {
         if (!this._deliverSurfaceBoundary(SurfaceEventKind.AnimationFrame, timestamp, true)) return;
       }
-      this._render();
+      await this._render();
       const queue = this._mode === "webgpu" ? this._gpu?.device?.queue : null;
       if (queue?.onSubmittedWorkDone) {
         await awaitSharedGpuQueueIdle(this._gpu);
@@ -3348,7 +3377,7 @@ export async function mountRenderSurface(options) {
       return surface._uniforms;
     },
     render(next) {
-      surface._render(next);
+      void surface._render(next).catch((error) => surface._fail(error));
       return surface._uniforms;
     },
   };

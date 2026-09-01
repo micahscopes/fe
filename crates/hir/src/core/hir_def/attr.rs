@@ -75,6 +75,7 @@ pub enum GpuDispatch {
     Fixed,
     Repeated,
     Tapered,
+    Cooperative,
     Cycled,
 }
 
@@ -568,6 +569,7 @@ impl<'db> AttrListId<'db> {
             "fixed" => Some(GpuDispatch::Fixed),
             "repeated" => Some(GpuDispatch::Repeated),
             "tapered" => Some(GpuDispatch::Tapered),
+            "cooperative" => Some(GpuDispatch::Cooperative),
             "cycled" => Some(GpuDispatch::Cycled),
             _ => None,
         }

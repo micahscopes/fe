@@ -46,6 +46,7 @@ use mandelbrot_proof_production_profile_baby_bear::{
 use poseidon_baby_bear::DIGEST_FIELDS
 use poseidon_baby_bear_webgpu::POSEIDON2_LANES
 use std::webgpu::{
+    CooperativeDispatch as Cooperate,
     ComputeInvocation,
     ComputeSurface as Kernel,
     CycledDispatch as Cycle,
@@ -390,9 +391,12 @@ actor ProductionFriProver uses (Program<WebGpuBackend>) {
                 Threads<THREADS, 1, 1>,
                 Cycle<
                     FriRoundCycle,
-                    Taper<
-                        Repeat<PROVER_GROUPS, 1, 1, FRI_LEAF_HASH_STEPS>,
-                        1, 0, 0, 0,
+                    Cooperate<
+                        Taper<
+                            Repeat<PROVER_GROUPS, 1, 1, FRI_LEAF_HASH_STEPS>,
+                            1, 0, 0, 0,
+                        >,
+                        8,
                     >,
                     FRI_ROUNDS,
                 >,
@@ -440,9 +444,12 @@ actor ProductionFriProver uses (Program<WebGpuBackend>) {
                 Threads<THREADS, 1, 1>,
                 Cycle<
                     FriRoundCycle,
-                    Taper<
-                        Repeat<TREE_GROUPS, 1, 1, PROVER_TREE_STEPS>,
-                        1, 0, 0, {1 + FRI_LEAF_HASH_STEPS},
+                    Cooperate<
+                        Taper<
+                            Repeat<TREE_GROUPS, 1, 1, PROVER_TREE_STEPS>,
+                            1, 0, 0, {1 + FRI_LEAF_HASH_STEPS},
+                        >,
+                        8,
                     >,
                     FRI_ROUNDS,
                 >,
