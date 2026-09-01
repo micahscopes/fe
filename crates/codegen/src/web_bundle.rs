@@ -100,6 +100,16 @@ const TYPED_SURFACE_QUALITY_EXPORT: &str = "fe_surface_quality_v1";
 /// Fixed discovery point for the actor-level Fe shared-device policy. Its
 /// private supervision state remains resident in generated Wasm.
 const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
+/// Fixed delivery point for one compiler-derived GPU result message. The
+/// authored behavior and message type remain Fe vocabulary; the browser sees
+/// only the canonical `(pointer, length)` transport plus inert resource
+/// handles required by the actor's lowered calling convention.
+const TYPED_GPU_READBACK_TRANSITION_EXPORT: &str = "fe_gpu_readback_transition_v1";
+/// Fixed binary discovery point for the physical WebGPU binding whose bytes
+/// instantiate the nominal message accepted by
+/// [`TYPED_GPU_READBACK_TRANSITION_EXPORT`]. This is a zero-argument Wasm
+/// function, not another manifest field or application-authored identifier.
+const TYPED_GPU_READBACK_BINDING_EXPORT: &str = "fe_gpu_readback_binding_v1";
 /// Compiler-emitted host page for render bundles. It reads `manifest.json` and
 /// drives the two lowerings of the render kernel it describes: `shader.wgsl`
 /// via WebGPU, with a per-pixel `module.wasm` fallback. Emitted verbatim next to
@@ -497,6 +507,10 @@ pub struct WebActorResource {
     pub name: String,
     pub length: u32,
     pub element: WebActorResourceElement,
+    /// Compiler-only semantic role. The generated runtime manifest continues
+    /// to expose only physical binding data, so adding a readback capability
+    /// does not grow a JSON application protocol.
+    pub kind: GpuResource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1210,9 +1224,9 @@ fn actor_resources(
         let Some(attrs) = nominal_attrs(db, ty) else {
             continue;
         };
-        if attrs.gpu_resource(db) != Some(GpuResource::Storage) {
+        let Some(kind) = attrs.gpu_resource(db) else {
             continue;
-        }
+        };
         let [element_ty, length_ty, ..] = ty.generic_args(db) else {
             return Err(WebBundleError::EntryDerivation(
                 "storage resource type requires element and length arguments".to_owned(),
@@ -1242,6 +1256,7 @@ fn actor_resources(
             element: resource_element(db, *element_ty, &name)?,
             name,
             length,
+            kind,
         });
     }
     Ok(resources)
@@ -2195,6 +2210,22 @@ struct TypedSurfaceTransitionContract {
     scheduled: bool,
 }
 
+/// One nominal Fe message crossing from a completed GPU storage resource into
+/// the actor that owns it. This is compiler state only. The fixed browser host
+/// discovers the two versioned Wasm functions and otherwise transports bytes
+/// without learning the message or behavior name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedGpuReadbackContract {
+    source_entry: String,
+    binding: u32,
+    params: Vec<WebControlWasmType>,
+    results: Vec<WebControlWasmType>,
+    event_fields: usize,
+    event_tag_limits: Vec<(usize, u32)>,
+    state_tag_limits: Vec<(usize, u32)>,
+    actor_param_is_resource: Vec<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypedSurfaceScheduleContract {
     event_fields: usize,
@@ -2746,6 +2777,372 @@ fn typed_surface_transition_contract(
         actor_param_is_resource,
         scheduled,
     }))
+}
+
+fn normalized_semantic_ty<'db>(db: &'db DriverDataBase, ty: TyId<'db>) -> TyId<'db> {
+    ty.as_view(db).unwrap_or(ty)
+}
+
+fn readback_behavior_message_ty<'db>(
+    db: &'db DriverDataBase,
+    behavior: Func<'db>,
+) -> Result<Option<TyId<'db>>, WebBundleError> {
+    let mut messages = Vec::new();
+    for role in behavior.actor_roles(db).data(db) {
+        let Some(path) = role.key_path.to_opt() else {
+            continue;
+        };
+        let Some(role_ty) = resolve_metadata_ty(db, path, behavior.scope()) else {
+            continue;
+        };
+        let Some(attrs) = nominal_attrs(db, role_ty) else {
+            continue;
+        };
+        if attrs.gpu_control(db) != Some(GpuControl::Readback) {
+            continue;
+        }
+        let [message_ty] = role_ty.generic_args(db) else {
+            return Err(WebBundleError::SurfaceProjection(
+                "ReadbackTransition must carry exactly one nominal message type".to_owned(),
+            ));
+        };
+        messages.push(*message_ty);
+    }
+    match messages.as_slice() {
+        [] => Ok(None),
+        [message] => Ok(Some(*message)),
+        _ => Err(WebBundleError::SurfaceProjection(format!(
+            "one actor behavior declares {} ReadbackTransition message roles; exactly one is allowed",
+            messages.len()
+        ))),
+    }
+}
+
+fn append_readback_message_wasm_types(
+    message: &CanonicalType,
+    output: &mut Vec<WebControlWasmType>,
+) -> Result<(), WebBundleError> {
+    let CanonicalType::Record(fields) = message else {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback message must be a nominal record containing exactly one BrowserBytes field, got {message:?}"
+        )));
+    };
+    let [field] = fields.as_slice() else {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback message must contain exactly one BrowserBytes field, got {message:?}"
+        )));
+    };
+    if field.ty != CanonicalType::Bytes {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback message field `{}` must be BrowserBytes, got {:?}",
+            field.name, field.ty
+        )));
+    }
+    output.extend([WebControlWasmType::I32, WebControlWasmType::I32]);
+    Ok(())
+}
+
+/// Derive a complete readback contract from the actor's nominal resource and
+/// behavior types. Physical binding order, message ABI, resource custody, and
+/// resident state shape all come from the resolved Fe program. No authored
+/// name or numeric selector participates in host discovery.
+fn typed_gpu_readback_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    program: &WebActorProgram,
+) -> Result<Option<TypedGpuReadbackContract>, WebBundleError> {
+    let readback_resources = program
+        .resources
+        .iter()
+        .enumerate()
+        .filter(|(_, resource)| resource.kind == GpuResource::Readback)
+        .collect::<Vec<_>>();
+    let readback_resource = match readback_resources.as_slice() {
+        [] => return Ok(None),
+        [(binding, resource)] => (*binding, *resource),
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{}` declares {} readback resources; the fixed v1 boundary admits exactly one",
+                program.actor,
+                readback_resources.len()
+            )));
+        }
+    };
+
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor.behaviors.iter().any(|behavior| {
+                    behavior
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == source_entry)
+                })
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU readback for `{source_entry}` has no containing actor"
+            ))
+        })?;
+    let actor_name = actor
+        .state
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .unwrap_or_else(|| "<unnamed>".to_owned());
+    let declaration = hir::lower::module_actor_decls(db, top_mod)
+        .into_iter()
+        .find(|declaration| declaration.name == actor_name)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU readback actor `{actor_name}` has no structural declaration"
+            ))
+        })?;
+    let semantic_fields = actor.state.hir_fields(db).data(db);
+    if declaration.fields.len() != semantic_fields.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback actor `{actor_name}` has inconsistent structural and semantic state fields"
+        )));
+    }
+
+    let mut readback_behaviors = Vec::new();
+    for behavior in &actor.behaviors {
+        if let Some(message_ty) = readback_behavior_message_ty(db, *behavior)? {
+            readback_behaviors.push((*behavior, message_ty));
+        }
+    }
+    let (behavior, role_message_ty) = match readback_behaviors.as_slice() {
+        [(behavior, message_ty)] => (*behavior, *message_ty),
+        [] => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has a readback resource but no ReadbackTransition<M> behavior"
+            )));
+        }
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` declares {} readback behaviors; the fixed v1 boundary admits exactly one",
+                readback_behaviors.len()
+            )));
+        }
+    };
+    let behavior_name = behavior
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has an unnamed readback behavior"
+            ))
+        })?;
+
+    let assumptions = PredicateListId::empty_list(db);
+    let resource_field_index = usize::try_from(readback_resource.1.field_index).unwrap();
+    let resource_field = semantic_fields.get(resource_field_index).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "GPU readback resource `{}` has an invalid actor field index",
+            readback_resource.1.name
+        ))
+    })?;
+    let resource_type_ref = resource_field.type_ref().to_opt().ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "GPU readback resource `{}` has no resolved type",
+            readback_resource.1.name
+        ))
+    })?;
+    let resource_ty = lower_hir_ty(db, resource_type_ref, actor.state.scope(), assumptions);
+    let [_, _, resource_message_ty] = resource_ty.generic_args(db) else {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback resource `{}` must carry element, extent, and message type arguments",
+            readback_resource.1.name
+        )));
+    };
+    if normalized_semantic_ty(db, *resource_message_ty)
+        != normalized_semantic_ty(db, role_message_ty)
+    {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback resource `{}` and behavior `{behavior_name}` carry different nominal message types",
+            readback_resource.1.name
+        )));
+    }
+
+    let arg_tys = behavior.arg_tys(db);
+    let expected_args = 1 + declaration.fields.len();
+    if arg_tys.len() != expected_args {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback behavior `{behavior_name}` must take one owned message before {} actor fields; found {} semantic arguments",
+            declaration.fields.len(),
+            arg_tys.len()
+        )));
+    }
+    if normalized_semantic_ty(db, *arg_tys[0].skip_binder())
+        != normalized_semantic_ty(db, role_message_ty)
+    {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback behavior `{behavior_name}` argument does not match ReadbackTransition<M>"
+        )));
+    }
+
+    let resource_field_indices = program
+        .resources
+        .iter()
+        .map(|resource| resource.field_index)
+        .collect::<Vec<_>>();
+    let message = canonical_type_from_semantic(db, role_message_ty, "gpu_readback_message")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    let mut params = Vec::new();
+    append_readback_message_wasm_types(&message, &mut params)?;
+    let event_fields = params.len();
+    let mut actor_param_is_resource = Vec::new();
+    let mut state_fields = Vec::new();
+    for (index, ((field, semantic_field), arg_ty)) in declaration
+        .fields
+        .iter()
+        .zip(semantic_fields)
+        .zip(&arg_tys[1..])
+        .enumerate()
+    {
+        let type_ref = semantic_field.type_ref().to_opt().ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU readback actor field `{}` has no resolved type",
+                field.name
+            ))
+        })?;
+        let declared_ty = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
+        if normalized_semantic_ty(db, declared_ty)
+            != normalized_semantic_ty(db, *arg_ty.skip_binder())
+        {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "GPU readback behavior `{behavior_name}` argument `{}` differs from its actor field type",
+                field.name
+            )));
+        }
+        if resource_field_indices.contains(&(index as u32)) {
+            params.push(WebControlWasmType::I64);
+            actor_param_is_resource.push(true);
+            continue;
+        }
+        let canonical = canonical_type_from_semantic(
+            db,
+            declared_ty,
+            &format!("gpu_readback_state.{}", field.name),
+        )
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+        let before = params.len();
+        append_canonical_wasm_types(&canonical, &mut params, "gpu_readback_state")?;
+        actor_param_is_resource.extend(std::iter::repeat_n(false, params.len() - before));
+        state_fields.push(CanonicalField::new(field.name.clone(), canonical));
+    }
+    let expected_state = CanonicalType::Record(state_fields);
+    let returned_state =
+        canonical_type_from_semantic(db, behavior.return_ty(db), "gpu_readback_state_response")
+            .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    if returned_state != expected_state {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback behavior `{behavior_name}` must return the actor's complete non-resource state: expected {expected_state:?}, got {returned_state:?}"
+        )));
+    }
+    let mut results = Vec::new();
+    append_canonical_wasm_types(&returned_state, &mut results, "gpu_readback_state_response")?;
+    if results.is_empty() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback actor `{actor_name}` must retain at least one non-resource state leaf"
+        )));
+    }
+    let mut state_tag_limits = Vec::new();
+    let state_leaf_count = surface_scalar_tag_limits(
+        &returned_state,
+        "gpu_readback_state_response",
+        0,
+        &mut state_tag_limits,
+    )?;
+    if state_leaf_count != results.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback state flattened inconsistently: canonical shape has {state_leaf_count} leaves but Wasm ABI has {}",
+            results.len()
+        )));
+    }
+    Ok(Some(TypedGpuReadbackContract {
+        source_entry: behavior_name,
+        binding: u32::try_from(readback_resource.0).unwrap(),
+        params,
+        results,
+        event_fields,
+        event_tag_limits: Vec::new(),
+        state_tag_limits,
+        actor_param_is_resource,
+    }))
+}
+
+fn with_typed_gpu_readback(
+    options: WasmCompileOptions,
+    contract: &TypedGpuReadbackContract,
+    auxiliary: bool,
+) -> WasmCompileOptions {
+    let options = if auxiliary {
+        options.with_resident_actor_aux_transition_checked(
+            &contract.source_entry,
+            TYPED_GPU_READBACK_TRANSITION_EXPORT,
+            contract.event_fields,
+            contract.actor_param_is_resource.clone(),
+            contract.event_tag_limits.clone(),
+            contract.state_tag_limits.clone(),
+        )
+    } else {
+        options.with_resident_actor_transition_checked(
+            &contract.source_entry,
+            TYPED_GPU_READBACK_TRANSITION_EXPORT,
+            TYPED_SURFACE_STATE_REPLACE_EXPORT,
+            contract.event_fields,
+            contract.actor_param_is_resource.clone(),
+            contract.event_tag_limits.clone(),
+            contract.state_tag_limits.clone(),
+        )
+    };
+    options
+        .with_canonical_arena()
+        .with_fixed_i32_export(TYPED_GPU_READBACK_BINDING_EXPORT, contract.binding as i32)
+}
+
+fn verify_typed_gpu_readback_exports(
+    wasm: &[u8],
+    contract: &TypedGpuReadbackContract,
+) -> Result<(), WebBundleError> {
+    let (params, results) = wasm_export_signature(wasm, TYPED_GPU_READBACK_TRANSITION_EXPORT)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU readback behavior `{}` has no fixed Wasm export `{TYPED_GPU_READBACK_TRANSITION_EXPORT}`",
+                contract.source_entry
+            ))
+        })?;
+    let mut expected_params = contract.params[..contract.event_fields].to_vec();
+    expected_params.extend(
+        contract.params[contract.event_fields..]
+            .iter()
+            .zip(&contract.actor_param_is_resource)
+            .filter_map(|(ty, is_resource)| is_resource.then_some(*ty)),
+    );
+    if params != expected_params || results != contract.results {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback export has measured Wasm signature {params:?} -> {results:?}; expected {expected_params:?} -> {:?} from the nominal Fe message and complete actor state",
+            contract.results
+        )));
+    }
+    let (binding_params, binding_results) =
+        wasm_export_signature(wasm, TYPED_GPU_READBACK_BINDING_EXPORT).ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU readback behavior `{}` has no fixed binding export `{TYPED_GPU_READBACK_BINDING_EXPORT}`",
+                contract.source_entry
+            ))
+        })?;
+    if !binding_params.is_empty() || binding_results != [WebControlWasmType::I32] {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "GPU readback binding export has measured Wasm signature {binding_params:?} -> {binding_results:?}; expected [] -> [I32]"
+        )));
+    }
+    Ok(())
 }
 
 fn surface_schedule_arg_order(db: &DriverDataBase, func: Func<'_>) -> Option<bool> {
@@ -4308,7 +4705,7 @@ fn stage_external_resources(
         .filter_map(|(index, param)| {
             let ty = body.local(param.local)?.semantic_ty;
             nominal_attrs(db, ty)
-                .is_some_and(|attrs| attrs.gpu_resource(db) == Some(GpuResource::Storage))
+                .is_some_and(|attrs| attrs.gpu_resource(db).is_some())
                 .then_some(index as u32 + context_offset)
         })
         .collect::<Vec<_>>();
@@ -4482,6 +4879,7 @@ impl WebBundle {
             .iter()
             .map(|resource| resource.field_index)
             .collect::<Vec<_>>();
+        let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
         let mut passes = Vec::with_capacity(program.stages.len());
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
         // The top-level compatibility artifact/layout follows the derived
@@ -4725,6 +5123,7 @@ impl WebBundle {
             || initializer.is_some()
             || quality_policy.is_some()
             || recovery_policy.is_some()
+            || readback.is_some()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -4760,12 +5159,25 @@ impl WebBundle {
                 schedule_policy.as_ref(),
                 &options.source_entry,
             )?;
+            let readback_is_auxiliary = readback.is_some()
+                && typed_transition
+                    .as_ref()
+                    .is_some_and(|contract| contract.scheduled);
+            if readback.is_some() && control_export.is_some() && !readback_is_auxiliary {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "GPU actor `{}` combines typed readback with a non-resident surface transition; select SurfaceScheduling<P> so both messages share one actor state",
+                    program.actor
+                )));
+            }
             let mut control_entries = Vec::new();
             if let Some(control_export) = control_export.as_deref() {
                 control_entries.push(control_export.to_owned());
             }
             if let Some(initializer) = initializer.as_ref() {
                 control_entries.push(initializer.source_entry.clone());
+            }
+            if let Some(readback) = readback.as_ref() {
+                control_entries.push(readback.source_entry.clone());
             }
             let internal_funcs = schedule_policy
                 .as_ref()
@@ -4790,6 +5202,10 @@ impl WebBundle {
                         .expect("typed transition has a source export"),
                     contract,
                 );
+            }
+            if let Some(readback) = readback.as_ref() {
+                wasm_options =
+                    with_typed_gpu_readback(wasm_options, readback, readback_is_auxiliary);
             }
             if let Some(initializer) = initializer.as_ref() {
                 wasm_options = with_surface_initializer(wasm_options, initializer);
@@ -4834,6 +5250,9 @@ impl WebBundle {
                 .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
             if let Some(initializer) = initializer.as_ref() {
                 verify_surface_initializer_export(&wasm, initializer)?;
+            }
+            if let Some(readback) = readback.as_ref() {
+                verify_typed_gpu_readback_exports(&wasm, readback)?;
             }
             let control = control_export
                 .as_deref()

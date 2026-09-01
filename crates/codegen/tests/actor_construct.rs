@@ -26,7 +26,7 @@ use fe_codegen::{
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
-use hir::hir_def::{HirIngot, TopLevelMod};
+use hir::hir_def::{GpuResource, HirIngot, TopLevelMod};
 use sonatina_codegen::isa::spirv::{
     Access, SpirvExternalResource, SpirvResourceElement, SpirvResourceField, SpirvScalarKind,
 };
@@ -539,6 +539,88 @@ fn attributed_actor_builds_a_materialized_v6_pass_graph() {
     assert!(paths.contains(&"passes/000-compute.wgsl".to_owned()));
     assert!(paths.contains(&"passes/001-fragment.wgsl".to_owned()));
     assert!(!paths.contains(&"module.wasm".to_owned()));
+}
+
+#[test]
+fn nominal_readback_derives_one_binary_actor_boundary_without_manifest_semantics() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_typed_readback");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "typed readback fixture diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("typed readback GPU plan")
+        .expect("typed readback actor");
+    assert_eq!(program.resources.len(), 1);
+    assert_eq!(program.resources[0].kind, GpuResource::Readback);
+    assert_eq!(program.resources[0].name, "output");
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("typed-readback.fe".to_owned())),
+    )
+    .expect("typed readback bundle");
+    assert!(!bundle.wasm.is_empty());
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    let manifest = serde_json::to_value(&bundle.manifest).unwrap();
+    let resource = manifest["resources"][0].as_object().unwrap();
+    assert!(
+        !resource.contains_key("kind") && !resource.contains_key("readback"),
+        "readback meaning belongs to the binary Fe ABI, not JSON: {resource:?}"
+    );
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("readback Wasm module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("readback Wasm instance");
+    let binding = instance
+        .get_typed_func::<(), i32>(&mut store, "fe_gpu_readback_binding_v1")
+        .expect("fixed readback binding export");
+    assert_eq!(binding.call(&mut store, ()).unwrap(), 0);
+    let replace = instance
+        .get_typed_func::<i32, ()>(&mut store, "fe_surface_state_replace_v1")
+        .expect("fixed resident state replacement export");
+    let accept = instance
+        .get_typed_func::<(i32, i32, i64), i32>(&mut store, "fe_gpu_readback_transition_v1")
+        .expect("fixed typed readback transition");
+    assert!(
+        accept.call(&mut store, (0, 16, 0)).is_err(),
+        "readback must fail closed until complete actor state is seeded"
+    );
+    replace.call(&mut store, 7).unwrap();
+    assert_eq!(accept.call(&mut store, (0, 16, 0)).unwrap(), 23);
+}
+
+#[test]
+fn nominal_readback_rejects_a_different_message_identity() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_typed_readback_mismatch");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "typed readback mismatch fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("typed-readback-mismatch.fe".to_owned())),
+    )
+    .expect_err("different nominal message types must fail closed");
+    let message = format!("{error}");
+    assert!(
+        message.contains("different nominal message types"),
+        "unexpected typed readback mismatch diagnostic: {message}"
+    );
 }
 
 #[test]

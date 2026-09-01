@@ -1,0 +1,44 @@
+use core::BrowserBytes
+use std::webgpu::{
+    ComputeSurface,
+    FixedDispatch,
+    FragmentSurface,
+    GpuProgram,
+    ReadbackTransition,
+    ReadbackWords,
+    WebGpuBackend,
+    Workgroup,
+}
+
+struct ReceiptBytes {
+    bytes: BrowserBytes,
+}
+impl core::marker::Copy for ReceiptBytes {}
+
+struct ReadbackState {
+    accepted: u32,
+}
+
+actor TypedReadbackProbe uses (GpuProgram<WebGpuBackend>) {
+    output: ReadbackWords<ReceiptBytes, 4>,
+    accepted: u32,
+
+    fn produce(self)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        self.output.store(index: 0, value: 17)
+        self.output.store(index: 1, value: 19)
+        self.output.store(index: 2, value: 23)
+        self.output.store(index: 3, value: 29)
+    }
+
+    fn accept(self, message: own ReceiptBytes) -> ReadbackState
+        uses (ReadbackTransition<ReceiptBytes>)
+    {
+        ReadbackState { accepted: self.accepted + message.bytes.len }
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        self.accepted.downcast_truncate()
+    }
+}

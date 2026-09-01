@@ -7,7 +7,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fitBackingExtent, rasterDrawVertexCount, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fitBackingExtent, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("shared GPU lifecycle channel replays ordered typed facts and reports bounded gaps", async () => {
@@ -441,6 +441,32 @@ test("poster readback removes row padding and normalizes canvas channel order", 
   );
 });
 
+test("mapped WebGPU bytes become an owned snapshot before unmap", async () => {
+  globalThis.GPUMapMode = { READ: 1 };
+  const trace = [];
+  const mapped = new Uint8Array([17, 19, 23, 29]);
+  const buffer = {
+    async mapAsync(mode) { trace.push(["map", mode]); },
+    getMappedRange(offset, length) {
+      trace.push(["range", offset, length]);
+      return mapped.buffer;
+    },
+    unmap() {
+      trace.push(["unmap"]);
+      mapped.fill(0);
+    },
+    destroy() { trace.push(["destroy"]); },
+  };
+  const snapshot = await readGpuBufferSnapshot({ buffer, byteLength: 4 });
+  assert.deepEqual([...snapshot], [17, 19, 23, 29]);
+  assert.deepEqual(trace, [
+    ["map", GPUMapMode.READ],
+    ["range", 0, 4],
+    ["unmap"],
+    ["destroy"],
+  ]);
+});
+
 test("poster copy is encoded after rendering in the same GPU submission", async () => {
   globalThis.GPUBufferUsage = { COPY_DST: 1, MAP_READ: 2 };
   const trace = [];
@@ -617,6 +643,113 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
   await surface._presentOn(context, []);
   assert.deepEqual(loadOps, ["clear", "load"]);
   assert.deepEqual(draws, [3, 54]);
+});
+
+test("typed actor readback follows all Fe GPU passes in the same submission", async () => {
+  globalThis.GPUBufferUsage = { COPY_DST: 1, MAP_READ: 2 };
+  const trace = [];
+  const source = { name: "source" };
+  const staging = { name: "staging" };
+  const device = {
+    createBuffer(descriptor) {
+      trace.push(["create-staging", descriptor.size, descriptor.usage]);
+      return staging;
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          trace.push(["compute"]);
+          return {
+            setPipeline() {},
+            setBindGroup() {},
+            dispatchWorkgroups() { trace.push(["dispatch"]); },
+            end() { trace.push(["compute-end"]); },
+          };
+        },
+        copyBufferToBuffer(from, fromOffset, to, toOffset, length) {
+          trace.push(["copy", from, fromOffset, to, toOffset, length]);
+        },
+        finish() { trace.push(["finish"]); return {}; },
+      };
+    },
+    queue: { submit() { trace.push(["submit"]); } },
+  };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = true;
+  surface._memberIndexByName = new Map();
+  surface._gpuReadbackResource = { name: "output", byteLength: 4 };
+  surface._deliverGpuReadback = async readback => {
+    trace.push(["deliver", readback.buffer, readback.byteLength]);
+  };
+  surface._gpu = {
+    device,
+    passRecords: [{
+      pass: { layout: { mode: "compute" }, dispatch: [1, 1, 1], repeat: 1 },
+      pipeline: {},
+      bindGroup: null,
+      inputs: [],
+    }],
+    resourceBuffers: new Map([["output", source]]),
+  };
+
+  await surface._presentOn({}, []);
+
+  assert.deepEqual(trace, [
+    ["compute"],
+    ["dispatch"],
+    ["compute-end"],
+    ["create-staging", 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ],
+    ["copy", source, 0, staging, 0, 4],
+    ["finish"],
+    ["submit"],
+    ["deliver", staging, 4],
+  ]);
+});
+
+test("typed actor readback transfers exact opaque bytes into resident Fe state", async () => {
+  globalThis.GPUMapMode = { READ: 1 };
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const mapped = new Uint8Array([17, 19, 23, 29]);
+  const resets = [];
+  const calls = [];
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._members = [{ name: "accepted" }];
+  surface._resources = [{ name: "receipt" }];
+  surface._uniforms = [7];
+  surface._surfaceTransitionMemory = memory;
+  surface._surfaceTransitionAlloc = (length, alignment) => {
+    calls.push(["alloc", length, alignment]);
+    return 32;
+  };
+  surface._wasmArenaReset = () => resets.push("reset");
+  surface._gpuReadbackKernel = (pointer, length, resource) => {
+    calls.push([
+      "transition",
+      pointer,
+      length,
+      resource,
+      [...new Uint8Array(memory.buffer, pointer, length)],
+    ]);
+    return 23;
+  };
+  surface._refreshControlValues = () => calls.push(["refresh"]);
+
+  const buffer = {
+    async mapAsync() {},
+    getMappedRange() { return mapped.buffer; },
+    unmap() { mapped.fill(0); },
+    destroy() {},
+  };
+  const next = await surface._deliverGpuReadback({ buffer, byteLength: 4 });
+
+  assert.deepEqual(next, [23]);
+  assert.deepEqual(surface._uniforms, [23]);
+  assert.deepEqual(resets, ["reset", "reset"]);
+  assert.deepEqual(calls, [
+    ["alloc", 4, 4],
+    ["transition", 32, 4, 0n, [17, 19, 23, 29]],
+    ["refresh"],
+  ]);
 });
 
 test("Fe-derived cooperative dispatch batches preserve stage order and await queue idle", async () => {

@@ -1,0 +1,46 @@
+use core::BrowserBytes
+use std::webgpu::{
+    ComputeSurface,
+    FixedDispatch,
+    FragmentSurface,
+    GpuProgram,
+    ReadbackTransition,
+    ReadbackWords,
+    WebGpuBackend,
+    Workgroup,
+}
+
+struct ProducedBytes {
+    bytes: BrowserBytes,
+}
+impl core::marker::Copy for ProducedBytes {}
+
+struct AcceptedBytes {
+    bytes: BrowserBytes,
+}
+impl core::marker::Copy for AcceptedBytes {}
+
+struct ReadbackState {
+    accepted: u32,
+}
+
+actor MismatchedReadbackProbe uses (GpuProgram<WebGpuBackend>) {
+    output: ReadbackWords<ProducedBytes, 1>,
+    accepted: u32,
+
+    fn produce(self)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        self.output.store(index: 0, value: 17)
+    }
+
+    fn accept(self, message: own AcceptedBytes) -> ReadbackState
+        uses (ReadbackTransition<AcceptedBytes>)
+    {
+        ReadbackState { accepted: self.accepted + message.bytes.len }
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        self.accepted.downcast_truncate()
+    }
+}

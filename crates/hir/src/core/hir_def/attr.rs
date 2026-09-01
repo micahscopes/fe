@@ -42,6 +42,9 @@ pub enum GpuStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuResource {
     Storage,
+    /// Storage-written bytes returned through one compiler-derived typed
+    /// message transition after GPU completion.
+    Readback,
 }
 
 /// GPU operation implemented directly by the compiler backend.
@@ -59,6 +62,9 @@ pub enum GpuControl {
     SurfaceSchedule,
     SurfaceQuality,
     SurfaceRecovery,
+    /// A typed GPU result delivered into the same resident actor state as the
+    /// surface transition. The browser adapter only transports opaque bytes.
+    Readback,
 }
 
 /// Target-neutral stateful actor transition selected by a nominal role type.
@@ -504,6 +510,7 @@ impl<'db> AttrListId<'db> {
     pub fn gpu_resource(self, db: &'db dyn HirDb) -> Option<GpuResource> {
         match self.single_ident_arg(db, "gpu_resource")?.as_str() {
             "storage" => Some(GpuResource::Storage),
+            "readback" => Some(GpuResource::Readback),
             _ => None,
         }
     }
@@ -523,6 +530,7 @@ impl<'db> AttrListId<'db> {
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             "surface_quality" => Some(GpuControl::SurfaceQuality),
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
+            "readback" => Some(GpuControl::Readback),
             _ => None,
         }
     }

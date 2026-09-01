@@ -185,6 +185,10 @@ pub struct WasmCompileOptions {
     /// crosses the host boundary as data. A policy may retain private state
     /// (presentation scheduling) or be pure (backing-quality selection).
     resident_policies: Vec<WasmResidentPolicy>,
+    /// Compiler-owned scalar facts published through the binary module ABI.
+    /// These replace semantic manifest fields with fixed, versioned exports;
+    /// applications neither author their names nor interpret their values.
+    fixed_i32_exports: Vec<(String, i32)>,
     /// Compiler-owned public ABI aliases. The selected Fe source name remains
     /// ordinary application vocabulary while a fixed host contract can
     /// discover its export without a side manifest.
@@ -414,6 +418,14 @@ impl WasmCompileOptions {
         }
         self
     }
+
+    pub(crate) fn with_fixed_i32_export(mut self, export: impl Into<String>, value: i32) -> Self {
+        let export = export.into();
+        self.fixed_i32_exports
+            .retain(|(existing, _)| existing != &export);
+        self.fixed_i32_exports.push((export, value));
+        self
+    }
 }
 
 /// Lower a runtime package through the existing Wasm path and emit Wasm with
@@ -439,6 +451,7 @@ pub fn compile_runtime_package_wasm_with_options(
             options.resident_initializer.as_ref(),
             options.resident_projection.as_ref(),
             &options.resident_policies,
+            &options.fixed_i32_exports,
         )?;
     // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
     // EVM-specific one) and `EvmCompile::optimize` runs it with no target
@@ -517,6 +530,7 @@ pub fn prepare_runtime_package_wasm_with_options(
             options.resident_initializer.as_ref(),
             options.resident_projection.as_ref(),
             &options.resident_policies,
+            &options.fixed_i32_exports,
         )?;
     if options.optimize {
         sonatina_codegen::optim::Pipeline::size().run(&mut module);

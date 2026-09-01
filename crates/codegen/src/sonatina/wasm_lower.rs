@@ -45,7 +45,7 @@ use hir::{
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
-    hir_def::{ArithBinOp, BinOp, CompBinOp, GpuIntrinsic, GpuResource, HostType, UnOp},
+    hir_def::{ArithBinOp, BinOp, CompBinOp, GpuIntrinsic, HostType, UnOp},
 };
 use mir::{
     AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
@@ -165,7 +165,7 @@ fn semantic_gpu_resource(db: &DriverDataBase, ty: TyId<'_>) -> bool {
     struct_
         .scope()
         .attrs(db)
-        .is_some_and(|attrs| attrs.gpu_resource(db) == Some(GpuResource::Storage))
+        .is_some_and(|attrs| attrs.gpu_resource(db).is_some())
 }
 
 fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
@@ -199,6 +199,7 @@ pub fn compile_runtime_package_wasm(
         None,
         None,
         &[],
+        &[],
     )
 }
 
@@ -221,6 +222,7 @@ pub(crate) fn compile_runtime_package_shader_ir(
         &[],
         None,
         None,
+        &[],
         &[],
         false,
         true,
@@ -257,6 +259,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
     resident_policies: &[super::WasmResidentPolicy],
+    fixed_i32_exports: &[(String, i32)],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     compile_runtime_package_wasm_inner(
         db,
@@ -268,6 +271,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         resident_initializer,
         resident_projection,
         resident_policies,
+        fixed_i32_exports,
         true,
         true,
     )
@@ -284,6 +288,7 @@ fn compile_runtime_package_wasm_inner(
     resident_initializer: Option<&super::WasmResidentInitializer>,
     resident_projection: Option<&super::WasmResidentProjection>,
     resident_policies: &[super::WasmResidentPolicy],
+    fixed_i32_exports: &[(String, i32)],
     validate_host_enum_params: bool,
     enable_scoped_arena: bool,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
@@ -407,6 +412,9 @@ fn compile_runtime_package_wasm_inner(
     }
     for (policy_index, policy) in resident_policies.iter().enumerate() {
         lowerer.synthesize_resident_policy(policy, policy_index)?;
+    }
+    for (export, value) in fixed_i32_exports {
+        lowerer.synthesize_fixed_i32_export(export, *value)?;
     }
     let import_modules = lowerer.import_modules();
     wasm_lower_trace(|| "finished portable Sonatina module".to_owned());
@@ -6024,6 +6032,34 @@ where
             fb.insert_inst_no_result(Mstore::new(is, address, value, ty));
         }
         fb.insert_return_values(&results[policy.state_fields..]);
+        fb.seal_all();
+        fb.finish();
+        Ok(())
+    }
+
+    /// Publish one compiler-derived scalar fact through the module's fixed
+    /// binary ABI. It is deliberately a function rather than a manifest field
+    /// or mutable global, so discovery and validation use the same ordinary
+    /// Wasm export machinery as the rest of the host contract.
+    fn synthesize_fixed_i32_export(&mut self, export: &str, value: i32) -> Result<(), LowerError> {
+        let function = self
+            .builder
+            .declare_function(Signature::new_single(
+                export,
+                Linkage::Public,
+                &[],
+                Type::I32,
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare fixed i32 export `{export}`: {error}"
+                ))
+            })?;
+        let mut fb = self.builder.func_builder::<InstInserter>(function);
+        let entry = fb.append_block();
+        fb.switch_to_block(entry);
+        let value = fb.make_imm_value(Immediate::I32(value));
+        fb.insert_return(value);
         fb.seal_all();
         fb.finish();
         Ok(())

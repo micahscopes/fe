@@ -119,6 +119,35 @@ async function readCanvasReadback(readback) {
   }
 }
 
+/** Encode one standards WebGPU buffer copy without interpreting its contents.
+ * The compiler-selected binding and exact physical extent are resolved before
+ * this helper is called. Message meaning remains in the receiving Fe type. */
+function encodeGpuBufferReadback(device, encoder, source, byteLength) {
+  const buffer = device.createBuffer({
+    size: byteLength,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  encoder.copyBufferToBuffer(source, 0, buffer, 0, byteLength);
+  return { buffer, byteLength };
+}
+
+/** Materialize an owned snapshot from WebGPU's mapped-range Web IDL view.
+ * The copy is required because `unmap()` invalidates the returned ArrayBuffer. */
+export async function readGpuBufferSnapshot(readback) {
+  const { buffer, byteLength } = readback;
+  try {
+    await buffer.mapAsync(GPUMapMode.READ);
+    return new Uint8Array(buffer.getMappedRange(0, byteLength)).slice();
+  } finally {
+    try {
+      buffer.unmap();
+    } catch {
+      // A failed map or device loss can leave the buffer unmapped already.
+    }
+    buffer.destroy();
+  }
+}
+
 export function rasterDrawVertexCount(pass) {
   const count = pass.draw_vertices ?? 3;
   if (!Number.isSafeInteger(count) || count <= 0) {
@@ -794,6 +823,9 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
+    this._gpuReadbackKernel = null;
+    this._gpuReadbackBinding = null;
+    this._gpuReadbackResource = null;
     this._pendingSurfaceEvents = [];
     this._passes = [];
     this._resources = [];
@@ -1059,6 +1091,9 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceScheduleKernel = null;
       this._surfaceRecoveryKernel = null;
       this._surfaceQualityKernel = null;
+      this._gpuReadbackKernel = null;
+      this._gpuReadbackBinding = null;
+      this._gpuReadbackResource = null;
       const arenaReset = instance?.exports.fe_cabi_reset;
       if (arenaReset !== undefined && typeof arenaReset !== "function") {
         throw new Error("fe render runtime: canonical arena reset export is not callable");
@@ -1079,18 +1114,52 @@ export class FeSurfaceElement extends HTMLElement {
         this._surfaceTransitionKernel = null;
         this._surfaceTransitionSchedule = "immediate";
       }
+      const gpuReadback = instance?.exports.fe_gpu_readback_transition_v1;
+      const gpuReadbackBinding = instance?.exports.fe_gpu_readback_binding_v1;
+      if ((gpuReadback === undefined) !== (gpuReadbackBinding === undefined)) {
+        throw new Error(
+          "fe render runtime: typed GPU readback requires paired transition and binding exports",
+        );
+      }
+      if (gpuReadback !== undefined) {
+        if (typeof gpuReadback !== "function" || typeof gpuReadbackBinding !== "function") {
+          throw new Error("fe render runtime: typed GPU readback exports are not callable");
+        }
+        const binding = gpuReadbackBinding();
+        if (!Number.isSafeInteger(binding) || binding < 0 || binding > 0xffffffff) {
+          throw new Error("fe render runtime: typed GPU readback returned an invalid binding");
+        }
+        const resource = this._resources.find(
+          candidate => candidate.group === 0 && candidate.binding === binding,
+        );
+        if (!resource) {
+          throw new Error(
+            `fe render runtime: typed GPU readback binding ${binding} has no physical resource`,
+          );
+        }
+        const byteLength = resource.stride * resource.length;
+        if (
+          !Number.isSafeInteger(byteLength) || byteLength < 4 ||
+          byteLength > 0x7fffffff || byteLength % 4 !== 0
+        ) {
+          throw new Error("fe render runtime: typed GPU readback resource has an invalid extent");
+        }
+        this._gpuReadbackKernel = gpuReadback;
+        this._gpuReadbackBinding = binding;
+        this._gpuReadbackResource = { ...resource, byteLength };
+      }
       this._surfaceTransitionStateResident =
-        typeof residentScheduled === "function";
+        typeof residentScheduled === "function" || this._gpuReadbackKernel !== null;
       if (this._surfaceTransitionStateResident) {
         const replaceState = instance?.exports.fe_surface_state_replace_v1;
         if (typeof replaceState !== "function") {
           throw new Error(
-            "fe render runtime: resident surface transition is missing its fixed state replacement export",
+            "fe render runtime: resident actor is missing its fixed state replacement export",
           );
         }
         this._surfaceStateReplaceKernel = replaceState;
       }
-      if (this._surfaceTransitionSchedule === "resident") {
+      if (this._surfaceTransitionSchedule === "resident" || this._gpuReadbackKernel) {
         const memory = instance?.exports.memory;
         const alloc = instance?.exports.fe_cabi_alloc;
         if (
@@ -1099,7 +1168,7 @@ export class FeSurfaceElement extends HTMLElement {
           typeof this._wasmArenaReset !== "function"
         ) {
           throw new Error(
-            "fe render runtime: scheduled surface transition is missing fixed memory/allocator/reset exports",
+            "fe render runtime: resident byte transport is missing fixed memory/allocator/reset exports",
           );
         }
         this._surfaceTransitionMemory = memory;
@@ -1765,7 +1834,25 @@ export class FeSurfaceElement extends HTMLElement {
           )
         : null;
       if (readback) encoded = true;
+      const actorReadbackSource = this._gpuReadbackResource
+        ? gpu.resourceBuffers.get(this._gpuReadbackResource.name)
+        : null;
+      if (this._gpuReadbackResource && !actorReadbackSource) {
+        throw new Error(
+          "fe render runtime: typed GPU readback resource has no live device buffer",
+        );
+      }
+      const actorReadback = actorReadbackSource
+        ? encodeGpuBufferReadback(
+            device,
+            encoder,
+            actorReadbackSource,
+            this._gpuReadbackResource.byteLength,
+          )
+        : null;
+      if (actorReadback) encoded = true;
       submitEncoder();
+      if (actorReadback) await this._deliverGpuReadback(actorReadback);
       return readback;
     }
     const { device, pipeline, bindGroup, uniformBuffer } = this._gpu;
@@ -2376,6 +2463,9 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
+    this._gpuReadbackKernel = null;
+    this._gpuReadbackBinding = null;
+    this._gpuReadbackResource = null;
     this._surfaceStateReplaceKernel = null;
     this._surfaceTransitionStateResident = false;
     this._surfaceScheduleKernel = null;
@@ -2867,6 +2957,33 @@ export class FeSurfaceElement extends HTMLElement {
     } finally {
       this._wasmArenaReset();
     }
+  }
+
+  /** Deliver one opaque GPU buffer snapshot into its compiler-selected Fe
+   * message transition. The host owns only WebGPU mapping and Wasm memory
+   * transfer. Fe owns decoding, validation, state change, and any reply. */
+  async _deliverGpuReadback(readback) {
+    const bytes = await readGpuBufferSnapshot(readback);
+    const next = this._runWasmArenaEpoch(() => {
+      const pointer = this._surfaceTransitionAlloc(bytes.byteLength, 4);
+      if (!Number.isInteger(pointer) || pointer < 0) {
+        throw new Error("fe render runtime: GPU readback message allocation failed");
+      }
+      const memory = this._surfaceTransitionMemory;
+      if (pointer + bytes.byteLength > memory.buffer.byteLength) {
+        throw new Error("fe render runtime: GPU readback message exceeds Wasm memory");
+      }
+      new Uint8Array(memory.buffer, pointer, bytes.byteLength).set(bytes);
+      const reply = this._gpuReadbackKernel(
+        pointer,
+        bytes.byteLength,
+        ...this._surfaceResourceArgs(),
+      );
+      return this._surfaceReplyValues(reply, "typed GPU readback");
+    });
+    this._uniforms = next;
+    this._refreshControlValues();
+    return next;
   }
 
   _runSurfaceFrame(events) {
