@@ -1,9 +1,12 @@
 //! Executed value and schedule gate for the factor-tree WebGPU NTT.
 //!
-//! The Fe actor derives four repeated dispatches from `Dit<4>` and places each
-//! eight-butterfly matching across two workgroups. This test validates the
-//! browser-profile WGSL, executes it through wgpu, and compares every value to
-//! direct polynomial evaluation rather than another butterfly implementation.
+//! The Fe actor derives repeated dispatches from `Dit<4>` and `Dit<5>`, places
+//! their butterfly matchings across workgroups, and passes the inverse result
+//! into a validated coset extension. This test validates browser-profile WGSL,
+//! executes it through wgpu, and compares every value to direct polynomial
+//! evaluation rather than another butterfly implementation. A mutated private
+//! cursor additionally proves that the validation receipt fails closed before
+//! the next phase may consume it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +24,10 @@ const TWO_ADICITY: u32 = 27;
 const POINTS: usize = 16;
 const BUTTERFLIES: usize = POINTS / 2;
 const STAGES: u32 = 4;
-const COMPUTE_PASSES: usize = 5;
+const LDE_POINTS: usize = POINTS * 2;
+const LDE_BUTTERFLIES: usize = LDE_POINTS / 2;
+const LDE_STAGES: u32 = 5;
+const COMPUTE_PASSES: usize = 9;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -91,13 +97,17 @@ fn production_depth_factor_tree_stage_is_call_free() {
     )
     .expect("the production-depth stage should flatten and validate");
 
-    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(bundle.manifest.passes.len(), 3);
     let advance = &bundle.manifest.passes[0];
     assert_eq!(advance.source_entry, "advance");
     assert_eq!(advance.layout.workgroup_size, [64, 1, 1]);
     assert_eq!(advance.dispatch, Some([32, 1, 1]));
     assert_eq!(advance.repeat, 12);
-    assert_eq!(bundle.manifest.passes[1].source_entry, "paint");
+    let validate = &bundle.manifest.passes[1];
+    assert_eq!(validate.source_entry, "validate");
+    assert_eq!(validate.layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(validate.dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[2].source_entry, "paint");
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::default(),
@@ -107,6 +117,15 @@ fn production_depth_factor_tree_stage_is_call_free() {
             .expect("deep stage WGSL should parse"),
     )
     .expect("deep stage WGSL should validate for the browser profile");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(
+        &naga::front::wgsl::parse_str(&bundle.pass_wgsl[1].source)
+            .expect("deep validation WGSL should parse"),
+    )
+    .expect("deep validation WGSL should validate for the browser profile");
 }
 
 fn request_browser_profile_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
@@ -175,6 +194,32 @@ fn direct_ntt(values: &[u32]) -> Vec<u32> {
                 .0 as u32
         })
         .collect()
+}
+
+fn direct_coset_evaluation(coefficients: &[u32], points: usize, shift: u32) -> Vec<u32> {
+    let log_n = points.ilog2();
+    let maximal_root = pow_mod(31, 15);
+    let root = pow_mod(u64::from(maximal_root), 1 << (TWO_ADICITY - log_n));
+    let modulus = u64::from(MODULUS);
+    (0..points)
+        .map(|index| {
+            let point =
+                u64::from(shift) * u64::from(pow_mod(u64::from(root), index as u32)) % modulus;
+            coefficients
+                .iter()
+                .fold((0u64, 1u64), |(sum, power), coefficient| {
+                    (
+                        (sum + u64::from(*coefficient % MODULUS) * power) % modulus,
+                        power * point % modulus,
+                    )
+                })
+                .0 as u32
+        })
+        .collect()
+}
+
+fn validation_marker(points: u32, stages: u32) -> u32 {
+    0x8000_0000 | (stages << 24) | points
 }
 
 fn vectors() -> Vec<Vec<u32>> {
@@ -265,6 +310,28 @@ struct ExecutablePass {
     repeat: u32,
 }
 
+fn submit_passes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    passes: &[ExecutablePass],
+    label: &'static str,
+) {
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    for pass in passes {
+        let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        });
+        compute.set_pipeline(&pass.pipeline);
+        compute.set_bind_group(0, &pass.bind_group, &[]);
+        for _ in 0..pass.repeat {
+            compute.dispatch_workgroups(pass.dispatch[0], pass.dispatch[1], pass.dispatch[2]);
+        }
+    }
+    queue.submit(Some(encoder.finish()));
+}
+
 #[test]
 fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
     let bundle = compile_stage_grid();
@@ -273,7 +340,11 @@ fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
     let advance = &bundle.manifest.passes[1];
     let prepare_inverse = &bundle.manifest.passes[2];
     let advance_inverse = &bundle.manifest.passes[3];
-    let finish_inverse = &bundle.manifest.passes[4];
+    let validate_inverse = &bundle.manifest.passes[4];
+    let prepare_lde = &bundle.manifest.passes[5];
+    let advance_lde = &bundle.manifest.passes[6];
+    let validate_lde = &bundle.manifest.passes[7];
+    let finish_inverse = &bundle.manifest.passes[8];
     assert_eq!(prepare.source_entry, "prepare");
     assert_eq!(prepare.layout.workgroup_size, [4, 1, 1]);
     assert_eq!(prepare.dispatch, Some([2, 1, 1]));
@@ -290,6 +361,22 @@ fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
     assert_eq!(advance_inverse.layout.workgroup_size, [4, 1, 1]);
     assert_eq!(advance_inverse.dispatch, Some([2, 1, 1]));
     assert_eq!(advance_inverse.repeat, STAGES);
+    assert_eq!(validate_inverse.source_entry, "validate_inverse");
+    assert_eq!(validate_inverse.layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(validate_inverse.dispatch, Some([1, 1, 1]));
+    assert_eq!(validate_inverse.repeat, 1);
+    assert_eq!(prepare_lde.source_entry, "prepare_lde");
+    assert_eq!(prepare_lde.layout.workgroup_size, [4, 1, 1]);
+    assert_eq!(prepare_lde.dispatch, Some([4, 1, 1]));
+    assert_eq!(prepare_lde.repeat, 1);
+    assert_eq!(advance_lde.source_entry, "advance_lde");
+    assert_eq!(advance_lde.layout.workgroup_size, [4, 1, 1]);
+    assert_eq!(advance_lde.dispatch, Some([4, 1, 1]));
+    assert_eq!(advance_lde.repeat, LDE_STAGES);
+    assert_eq!(validate_lde.source_entry, "validate_lde");
+    assert_eq!(validate_lde.layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(validate_lde.dispatch, Some([1, 1, 1]));
+    assert_eq!(validate_lde.repeat, 1);
     assert_eq!(finish_inverse.source_entry, "finish_inverse");
     assert_eq!(finish_inverse.layout.workgroup_size, [4, 1, 1]);
     assert_eq!(finish_inverse.dispatch, Some([2, 1, 1]));
@@ -361,6 +448,7 @@ fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
     assert_eq!(resource_shapes["roundtrip"], (POINTS as u32, 4));
     assert_eq!(resource_shapes["inverse_progress"], (BUTTERFLIES as u32, 4),);
     assert_eq!(resource_shapes["inverse_valid"], (BUTTERFLIES as u32, 4),);
+    assert_eq!(resource_shapes.len(), 8);
     let resources = bundle
         .manifest
         .resources
@@ -492,21 +580,12 @@ fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
         queue.write_buffer(&resources["inverse_progress"], 0, &bytes(&zero_lanes));
         queue.write_buffer(&resources["inverse_valid"], 0, &bytes(&zero_lanes));
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("factor-tree stage-grid execution"),
-        });
-        for pass in &executable {
-            let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("compiler-derived factor-tree stage"),
-                timestamp_writes: None,
-            });
-            compute.set_pipeline(&pass.pipeline);
-            compute.set_bind_group(0, &pass.bind_group, &[]);
-            for _ in 0..pass.repeat {
-                compute.dispatch_workgroups(pass.dispatch[0], pass.dispatch[1], pass.dispatch[2]);
-            }
-        }
-        queue.submit(Some(encoder.finish()));
+        submit_passes(
+            &device,
+            &queue,
+            &executable[..5],
+            "factor-tree transform and inverse validation",
+        );
 
         assert_eq!(
             read_words(&device, &queue, &resources["values"], POINTS),
@@ -539,6 +618,23 @@ fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
             "every GPU lane must observe the type-derived stage order",
         );
         assert_eq!(
+            read_words(&device, &queue, &resources["inverse_progress"], BUTTERFLIES,),
+            std::iter::once(validation_marker(POINTS as u32, STAGES))
+                .chain(std::iter::repeat_n(STAGES, BUTTERFLIES - 1))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            read_words(&device, &queue, &resources["inverse_valid"], BUTTERFLIES,),
+            vec![1; BUTTERFLIES],
+        );
+
+        submit_passes(
+            &device,
+            &queue,
+            &executable[5..],
+            "validated coset extension and inverse finish",
+        );
+        assert_eq!(
             read_words(&device, &queue, &resources["roundtrip"], POINTS),
             input
                 .iter()
@@ -547,12 +643,53 @@ fn factor_tree_stage_grid_matches_direct_polynomial_evaluation_on_webgpu() {
             "the inverse stage grid and N^-1 pass must recover canonical inputs",
         );
         assert_eq!(
-            read_words(&device, &queue, &resources["inverse_progress"], BUTTERFLIES,),
-            vec![STAGES; BUTTERFLIES],
+            read_words(&device, &queue, &resources["stage_receipt"], LDE_POINTS),
+            direct_coset_evaluation(&input, LDE_POINTS, 7),
+            "validated inverse coefficients must extend on the requested coset",
         );
         assert_eq!(
-            read_words(&device, &queue, &resources["inverse_valid"], BUTTERFLIES,),
-            vec![1; BUTTERFLIES],
+            read_words(&device, &queue, &resources["source"], LDE_BUTTERFLIES,),
+            std::iter::once(validation_marker(LDE_POINTS as u32, LDE_STAGES))
+                .chain(std::iter::repeat_n(LDE_STAGES, LDE_BUTTERFLIES - 1,))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut incomplete_inverse = vec![STAGES; BUTTERFLIES];
+        incomplete_inverse[3] -= 1;
+        queue.write_buffer(
+            &resources["inverse_progress"],
+            0,
+            &bytes(&incomplete_inverse),
+        );
+        queue.write_buffer(
+            &resources["stage_receipt"],
+            0,
+            &bytes(&vec![u32::MAX; LDE_POINTS]),
+        );
+        queue.write_buffer(
+            &resources["source"],
+            0,
+            &bytes(&vec![u32::MAX; LDE_BUTTERFLIES]),
+        );
+        submit_passes(
+            &device,
+            &queue,
+            &executable[4..=5],
+            "validate incomplete inverse before coset preparation",
+        );
+        assert_eq!(
+            read_words(&device, &queue, &resources["inverse_progress"], 1),
+            vec![0],
+            "one incomplete cursor must invalidate the batch receipt",
+        );
+        assert_eq!(
+            read_words(&device, &queue, &resources["stage_receipt"], LDE_POINTS),
+            vec![0; LDE_POINTS],
+            "an invalid batch receipt must fail closed before coset extension",
+        );
+        assert_eq!(
+            read_words(&device, &queue, &resources["source"], LDE_BUTTERFLIES,),
+            vec![0; LDE_BUTTERFLIES],
         );
     }
 

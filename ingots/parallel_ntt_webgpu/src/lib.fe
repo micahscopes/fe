@@ -66,6 +66,31 @@ pub struct BatchStageGridFinish {
 
 impl core::marker::Copy for BatchStageGridFinish {}
 
+/// A batch-level receipt produced after every private butterfly cursor has
+/// reached the exact factor-tree depth. Validation is a distinct dispatch:
+/// one invocation scans one batch, then replaces its first retired cursor
+/// with a plan-derived marker. Later phases can therefore check the whole
+/// batch in constant work per lane instead of rescanning every cursor from
+/// every lane.
+pub struct BatchStageGridValidation {
+    pub active: bool,
+    pub valid: bool,
+    pub batch: u32,
+}
+
+impl core::marker::Copy for BatchStageGridValidation {}
+
+fn stage_grid_validation_marker<Plan: StageGrid>() -> u32 {
+    // The high bit distinguishes a validated batch from an ordinary stage
+    // cursor. The remaining fields bind the receipt to its point count and
+    // factor depth. WebGPU dispatch dimensions are already u32-bounded.
+    let factors: u32 = Plan::FACTORS.downcast_truncate()
+    let points: u32 = Plan::POINTS.downcast_truncate()
+    2147483648
+        | (factors << 24)
+        | points
+}
+
 fn inactive_stage() -> Radix2Stage {
     Radix2Stage {
         index: 0,
@@ -349,6 +374,190 @@ where
         invocation,
         true,
     )
+}
+
+/// Validate every private cursor in each transform exactly once.
+///
+/// The dispatch must expose at least `BATCHES` global x invocations. A queue
+/// boundary after the repeated stage grid makes every cursor visible. One
+/// invocation owns one disjoint batch and publishes a plan-derived marker in
+/// that batch's retired first cursor. This preserves the full exactness check
+/// while reducing validation from `BATCHES * LANES * LANES` reads to
+/// `BATCHES * LANES` reads.
+pub fn validate_batched_stage_grid<
+    const BATCHES: usize,
+    const N: usize,
+    const LANES: usize,
+    const PROGRESS_WORDS: usize,
+    Plan: StageGrid,
+>(
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ invocation: ComputeInvocation,
+) -> BatchStageGridValidation
+where
+    BATCHES > 0,
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { LANES * 2 == N },
+    { PROGRESS_WORDS == BATCHES * LANES },
+    { Plan::POINTS == N },
+{
+    let batch = invocation.global.x
+    if batch >= BATCHES.downcast_truncate() {
+        return BatchStageGridValidation {
+            active: false,
+            valid: true,
+            batch: 0,
+        }
+    }
+
+    let lanes: u32 = LANES.downcast_truncate()
+    let progress_base = batch * lanes
+    let expected: u32 = Plan::FACTORS.downcast_truncate()
+    let mut valid = true
+    let mut lane: u32 = 0
+    while lane < lanes {
+        valid = valid && progress.load(index: progress_base + lane) == expected
+        lane = lane + 1
+    }
+    progress.store(
+        index: progress_base,
+        value: if valid { stage_grid_validation_marker<Plan>() } else { 0 },
+    )
+    BatchStageGridValidation {
+        active: true,
+        valid: valid,
+        batch: batch,
+    }
+}
+
+fn batch_stage_grid_is_validated<
+    const BATCHES: usize,
+    const N: usize,
+    const LANES: usize,
+    const PROGRESS_WORDS: usize,
+    Plan: StageGrid,
+>(
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ batch: u32,
+) -> bool
+where
+    BATCHES > 0,
+    N > 0,
+    N > 1,
+    { LANES * 2 == N },
+    { PROGRESS_WORDS == BATCHES * LANES },
+    { Plan::POINTS == N },
+{
+    batch < BATCHES.downcast_truncate()
+        && progress.load(index: batch * LANES.downcast_truncate())
+            == stage_grid_validation_marker<Plan>()
+}
+
+/// Prepare a coset extension from an explicitly validated inverse stage grid.
+/// The validation marker is shared by every output lane, so preparation is
+/// constant work per lane while retaining the exact all-cursor predicate.
+pub fn prepare_validated_batched_coset_extension<
+    const BATCHES: usize,
+    const N: usize,
+    const OUT: usize,
+    const INPUT_LANES: usize,
+    const OUTPUT_LANES: usize,
+    const COEFFICIENT_WORDS: usize,
+    const INVERSE_PROGRESS_WORDS: usize,
+    const VALUE_WORDS: usize,
+    const PROGRESS_WORDS: usize,
+    F: StorageRadix2Field,
+    InputPlan: StageGrid,
+    OutputPlan: StageGrid,
+>(
+    _ coefficients: StorageBuffer<u32, COEFFICIENT_WORDS>,
+    _ inverse_progress: StorageBuffer<u32, INVERSE_PROGRESS_WORDS>,
+    _ values: StorageBuffer<u32, VALUE_WORDS>,
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ shift: F,
+    _ invocation: ComputeInvocation,
+) -> BatchCosetPreparation where
+    BATCHES > 0,
+    N > 0,
+    N > 1,
+    { (N & (N - 1)) == 0 },
+    { INPUT_LANES * 2 == N },
+    OUT > 0,
+    OUT > N,
+    { (OUT & (OUT - 1)) == 0 },
+    { (OUT % N) == 0 },
+    { OUTPUT_LANES * 2 == OUT },
+    { COEFFICIENT_WORDS == BATCHES * N },
+    { INVERSE_PROGRESS_WORDS == BATCHES * INPUT_LANES },
+    { VALUE_WORDS == BATCHES * OUT },
+    { PROGRESS_WORDS == BATCHES * OUTPUT_LANES },
+    { radix2_field_domain_supported<N, F>() },
+    { radix2_field_domain_supported<OUT, F>() },
+    { InputPlan::POINTS == N },
+    { OutputPlan::POINTS == OUT },
+{
+    let global_lane = invocation.global.x
+    let total_lanes: u32 = (BATCHES * OUTPUT_LANES).downcast_truncate()
+    if global_lane >= total_lanes {
+        return BatchCosetPreparation {
+            active: false,
+            valid: true,
+            batch: 0,
+            lane: 0,
+        }
+    }
+
+    let input_points: u32 = N.downcast_truncate()
+    let output_lanes: u32 = OUTPUT_LANES.downcast_truncate()
+    let output_points: u32 = OUT.downcast_truncate()
+    let batch = global_lane / output_lanes
+    let lane = global_lane % output_lanes
+    let completed = batch_stage_grid_is_validated<
+        BATCHES,
+        N,
+        INPUT_LANES,
+        INVERSE_PROGRESS_WORDS,
+        InputPlan,
+    >(inverse_progress, batch)
+    let one = F::radix2_root(0)
+    let shift_valid = !shift.radix2_is_zero()
+        && !shift.radix2_pow(output_points).radix2_sub(one).radix2_is_zero()
+    let batch_valid = completed && shift_valid
+    let scale = F::from_storage(input_points).radix2_inverse_or_zero()
+    let input_base = batch * input_points
+    let output_base = batch * output_points
+    let second = lane + output_lanes
+
+    let mut first_value = F::radix2_zero()
+    if batch_valid && lane < input_points {
+        first_value = F::from_storage(
+            coefficients.load(index: input_base + lane),
+        ).radix2_mul(scale).radix2_mul(shift.radix2_pow(lane))
+    }
+    values.store(
+        index: output_base + bit_reversed_index<OUT>(lane),
+        value: first_value.to_storage(),
+    )
+
+    let mut second_value = F::radix2_zero()
+    if batch_valid && second < input_points {
+        second_value = F::from_storage(
+            coefficients.load(index: input_base + second),
+        ).radix2_mul(scale).radix2_mul(shift.radix2_pow(second))
+    }
+    values.store(
+        index: output_base + bit_reversed_index<OUT>(second),
+        value: second_value.to_storage(),
+    )
+    progress.store(index: global_lane, value: 0)
+    BatchCosetPreparation {
+        active: true,
+        valid: batch_valid,
+        batch: batch,
+        lane: lane,
+    }
 }
 
 /// Turn completed inverse transforms into bit-reversed coset-extension inputs.

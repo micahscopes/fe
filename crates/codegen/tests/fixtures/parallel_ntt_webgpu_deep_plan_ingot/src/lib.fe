@@ -1,12 +1,16 @@
 //! Compile-only call-depth gate for a production-depth factor-tree NTT stage.
 
-use parallel_ntt_webgpu::inverse_batched_stage_grid_lane
+use parallel_ntt_webgpu::{
+    inverse_batched_stage_grid_lane,
+    validate_batched_stage_grid,
+}
 use parallel_structure::FactorTree
 use precision::baby_bear::BabyBear
 use std::conal::{Pair, RBin}
 use std::webgpu::{
     ComputeInvocation,
     ComputeSurface as Kernel,
+    FixedDispatch as Grid,
     FragmentSurface as Pixel,
     GpuProgram as Program,
     RepeatedDispatch as Repeat,
@@ -41,6 +45,14 @@ actor DeepPlanNtt uses (Program<WebGpuBackend>) {
         inverse_batched_stage_grid_lane<
             1, POINTS, LANES, POINTS, LANES, BabyBear, Plan,
         >(self.values, self.progress, invocation)
+    }
+
+    fn validate(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        validate_batched_stage_grid<
+            1, POINTS, LANES, LANES, Plan,
+        >(self.progress, invocation)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {

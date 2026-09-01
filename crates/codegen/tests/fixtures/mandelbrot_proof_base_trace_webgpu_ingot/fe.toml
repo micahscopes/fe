@@ -9,4 +9,6 @@ mandelbrot_proof_fixed_air_core = "../../../../../demos/capstones/mandelbrot-pro
 mandelbrot_proof_fixed_air_webgpu = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-webgpu"
 mandelbrot_proof_production_profile_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/production-profile-baby-bear"
 mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/recursive"
+parallel_ntt_webgpu = "../../../../../ingots/parallel_ntt_webgpu"
+parallel_structure = "../../../../../ingots/parallel_structure"
 precision = "../../../../../demos/sketches/precision"

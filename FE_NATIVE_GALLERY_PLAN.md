@@ -1724,7 +1724,27 @@ All four are focused ingots and may remain so permanently.
   polynomial evaluation, and the production checkpoint's four batched LDEs
   execute on llvmpipe. Larger proof domains, fused workgroup placement,
   barriers/shared memory, optional subgroups, and external Chrome hardware
-  parity remain.
+  parity remain. The production sparse base-trace graph now specializes the
+  same typed `RBin<Pair, 12>` and `RBin<Pair, 13>` plans for all 260 fields at
+  4,096 trace rows and 8,192 LDE rows. Its 28-pass, eight-resource bundle
+  performs the inverse and forward stage grids in 12 and 13 repeated
+  dispatches. A distinct batch validation dispatch checks every private
+  cursor exactly once and publishes a plan-derived receipt before the next
+  phase may consume it. This reduces validation reads from 6,543,114,240 to
+  1,597,440 without weakening the all-cursor predicate. A focused N=16 to
+  N=32 llvmpipe gate executes the same validation, validated coset-extension,
+  forward stage-grid, and final validation path. It compares every output with
+  direct polynomial evaluation and proves that one incomplete inverse cursor
+  invalidates the batch receipt and zeroes the entire next-stage preparation.
+  Its actor stays at the portable eight-storage-buffer limit by reusing retired
+  typed buffers between ordered phases; the gate passed on llvmpipe in 24.09
+  seconds. The complete production lowering gate passed in 921.87 seconds,
+  15:29.37 wall-clock
+  including the Cargo harness, and every emitted shader parsed and validated
+  under the browser WGSL profile. A preceding identical lowering peaked at
+  1,023,620 KiB RSS. The production-sized graph has not yet executed
+  numerically on WebGPU, so this evidence does not replace the existing
+  direct-DFT and llvmpipe oracles or close G-NTT.
 - **G-LAYOUT, partial.** Commits `5400eff03` and `36f52db3b` make region
   coordinates schema-branded, require nested layouts to fit through const
   predicates, and make reusable cyclic lane indices unforgeable. The
@@ -1821,6 +1841,18 @@ identical diagnostics, artifacts, proof values, and mutation results. Do not
 parallelize one mutable proof forest, one Wasmtime store, DOM mutation, or
 ordered transcript dependencies. This is a host implementation policy, not a
 second semantic schedule beside the Fe/Conal WebGPU program.
+
+The first bounded artifact pilot compiles actor shader units in deterministic
+Salsa batches using at most two short-lived database replicas, while keeping
+each raster pair indivisible and final assembly in source order. The complete
+actor-construction release suite passes, and materializing the same bundle
+with one or two jobs is byte-identical. On the production sparse base-trace
+plus LDE bundle, the two-job run completed in 921.87 seconds. The comparable
+single-job run reached the final marker-lowering boundary in 1,096.27 seconds
+before a subsequently fixed Fe expression-lowering failure, so the observed
+roughly 13 percent improvement is useful but is not yet a clean jobs-one to
+jobs-two benchmark. A fully green production jobs-one measurement remains an
+open performance gate, not a semantic prerequisite for the next proof stage.
 
 Dual dev/release probes apply to compiler-cost fixtures, not to every complete
 semantic proof oracle. Heavy proof integration targets are hidden behind the

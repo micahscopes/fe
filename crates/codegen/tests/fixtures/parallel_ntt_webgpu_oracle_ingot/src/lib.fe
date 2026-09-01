@@ -5,10 +5,13 @@
 //! baseline does not rely on one fused workgroup or shared memory.
 
 use parallel_ntt_webgpu::{
+    forward_batched_stage_grid_lane,
     finish_inverse_stage_grid,
     forward_stage_grid_lane,
     inverse_stage_grid_lane,
     prepare_stage_grid,
+    prepare_validated_batched_coset_extension,
+    validate_batched_stage_grid,
 }
 use parallel_structure::{Dit, FactorTree}
 use precision::baby_bear::BabyBear
@@ -31,13 +34,26 @@ const WORKGROUPS: usize = (BUTTERFLIES + THREADS - 1) / THREADS
 type Plan = Dit<4>
 const STAGES: usize = <Plan as FactorTree>::FACTORS
 const STAGE_RECEIPT_WORDS: usize = STAGES * BUTTERFLIES
+const LDE_POINTS: usize = POINTS * 2
+const LDE_BUTTERFLIES: usize = LDE_POINTS / 2
+const LDE_WORKGROUPS: usize =
+    (LDE_BUTTERFLIES + THREADS - 1) / THREADS
+type LdePlan = Dit<5>
+const LDE_STAGES: usize = <LdePlan as FactorTree>::FACTORS
 
 static_assert(<Plan as FactorTree>::POINTS == POINTS)
 static_assert(STAGES == 4)
 static_assert(BUTTERFLIES == 8)
 static_assert(WORKGROUPS == 2)
+static_assert(<LdePlan as FactorTree>::POINTS == LDE_POINTS)
+static_assert(LDE_STAGES == 5)
+static_assert(LDE_BUTTERFLIES == 16)
+static_assert(LDE_WORKGROUPS == 4)
 
 actor PortableNttGrid uses (Program<WebGpuBackend>) {
+    // The actor intentionally stays within the portable eight-storage-buffer
+    // minimum. Once inverse validation retires the input and stage receipt,
+    // the LDE phase reuses them as its progress grid and evaluation buffer.
     source: Shared<u32, POINTS>,
     values: Shared<u32, POINTS>,
     progress: Shared<u32, BUTTERFLIES>,
@@ -122,6 +138,72 @@ actor PortableNttGrid uses (Program<WebGpuBackend>) {
                 value: if step.valid { 1 } else { 0 },
             )
         }
+    }
+
+    fn validate_inverse(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        validate_batched_stage_grid<
+            1, POINTS, BUTTERFLIES, BUTTERFLIES, Plan,
+        >(self.inverse_progress, invocation)
+    }
+
+    fn prepare_lde(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Once<LDE_WORKGROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_validated_batched_coset_extension<
+            1,
+            POINTS,
+            LDE_POINTS,
+            BUTTERFLIES,
+            LDE_BUTTERFLIES,
+            POINTS,
+            BUTTERFLIES,
+            LDE_POINTS,
+            LDE_BUTTERFLIES,
+            BabyBear,
+            Plan,
+            LdePlan,
+        >(
+            self.roundtrip,
+            self.inverse_progress,
+            self.stage_receipt,
+            self.source,
+            BabyBear::from_u32(7),
+            invocation,
+        )
+    }
+
+    fn advance_lde(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<LDE_WORKGROUPS, 1, 1, LDE_STAGES>,
+            >
+        )
+    {
+        forward_batched_stage_grid_lane<
+            1,
+            LDE_POINTS,
+            LDE_BUTTERFLIES,
+            LDE_POINTS,
+            LDE_BUTTERFLIES,
+            BabyBear,
+            LdePlan,
+        >(self.stage_receipt, self.source, invocation)
+    }
+
+    fn validate_lde(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        validate_batched_stage_grid<
+            1, LDE_POINTS, LDE_BUTTERFLIES, LDE_BUTTERFLIES, LdePlan,
+        >(self.source, invocation)
     }
 
     fn finish_inverse(self, invocation: ComputeInvocation)
