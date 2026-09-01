@@ -194,12 +194,14 @@ pub fn compile_runtime_package_wasm(
 /// Build the shared Sonatina module for a shader target. Shader entrypoints
 /// never receive untyped host values: compiler-derived WebGPU bindings and the
 /// resident Wasm wrapper mediate that boundary. Accordingly this path omits
-/// host-forgery enum traps that WebGPU render stages cannot realize.
+/// host-forgery enum traps that WebGPU render stages cannot realize. Shader
+/// helpers also use the same compiler-proven scoped arena frames as Wasm so
+/// inlined aggregate materialization can be reclaimed inside bounded loops.
 pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, &[], false, false)
+    compile_runtime_package_wasm_inner(db, package, &[], &[], None, None, None, &[], false, true)
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the

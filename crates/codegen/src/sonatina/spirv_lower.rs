@@ -14,6 +14,7 @@
 //! honest rung this slice earns is R-val: validated, NOT executed). Execution on
 //! a real GPU runtime (lavapipe) is a later slice.
 
+use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
 use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
@@ -21,13 +22,11 @@ use sonatina_codegen::Backend as _;
 use sonatina_codegen::isa::spirv::{
     SpirvArtifact, SpirvBackend, SpirvBuiltinArgument, SpirvExternalResource,
 };
-use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
-use sonatina_codegen::{domtree::DomTree, loop_analysis::LoopTree};
-use sonatina_ir::{
-    InstDowncast, cfg::ControlFlowGraph, inst::data::MemAllocDynamic, ir_writer::FuncWriter,
+use sonatina_codegen::optim::{
+    Pass, Pipeline, Step,
+    inliner::{Inliner, InlinerConfig},
+    run_function_passes_on,
 };
-
-use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
 
 /// Lower a MIR runtime package to naga-validated SPIR-V by reusing the wasm-path
 /// Sonatina `Module`.
@@ -81,7 +80,6 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
-    ensure_spirv_entry_has_no_loop_allocation(&module)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -130,7 +128,6 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_calls(&mut module);
     ensure_spirv_entry_call_free(&module)?;
-    ensure_spirv_entry_has_no_loop_allocation(&module)?;
 
     let mut backend = SpirvBackend::new()
         .with_compute()
@@ -293,7 +290,7 @@ pub fn compile_runtime_package_spirv_authored_raster(
     fragment_entry: &str,
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_calls(&mut module);
+    inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
     ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
 
     SpirvBackend::new()
@@ -329,13 +326,128 @@ pub fn compile_render_wgsl<'db>(
 }
 
 fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
+    let roots = module.funcs().into_iter().take(1).collect::<Vec<_>>();
+    inline_spirv_calls_from_roots(module, &roots);
+}
+
+fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&str]) {
+    let roots = module
+        .funcs()
+        .into_iter()
+        .filter(|&function| {
+            module.ctx.func_sig(function, |signature| {
+                entry_names.contains(&signature.name())
+            })
+        })
+        .collect::<Vec<_>>();
+    inline_spirv_calls_from_roots(module, &roots);
+}
+
+fn inline_spirv_calls_from_roots(
+    module: &mut sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+) {
+    let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
+    const ROOTED_INLINE_FUNCTION_THRESHOLD: usize = 64;
+    if module.funcs().len() <= ROOTED_INLINE_FUNCTION_THRESHOLD {
+        if trace {
+            eprintln!(
+                "fe spirv inliner: strategy=module, functions={}",
+                module.funcs().len()
+            );
+        }
+        inline_spirv_calls_module_wide(module);
+        return;
+    }
+
     // The SPIR-V translator currently consumes only the first (entry) function
-    // and deliberately rejects calls. Reuse Sonatina's CFG-aware full inliner
-    // and constant/CFG cleanup here, while retaining every declared function:
-    // the stock optimization pipelines include dead-function elimination whose
+    // and deliberately rejects calls. Flatten outward from only the selected
+    // shader roots. Expanding every helper bottom-up first retains many enormous
+    // intermediate copies for generated proof graphs, even though the backend
+    // will never translate those helper bodies. Rooted inlining instead treats
+    // helpers as immutable sources and materializes only the call-free entries.
+    // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
+    let mut inliner_config = spirv_inliner_config();
+    // GVN's sparse predicated solver can require many GiB on one generated
+    // proof entry after only a few frontiers. It is not a legality pass, and
+    // the local CFG/SCCP sequence already removes the dead structure exposed
+    // by each inline. Keep GVN in the established small-module pipeline only.
+    let cleanup = spirv_rooted_inline_cleanup_passes();
+
+    const MAX_FRONTIERS: usize = 16;
+    const MAX_ROOT_GROWTH: usize = 10_000_000;
+    let initial_root_insts = spirv_root_instruction_count(module, roots);
+    if trace {
+        eprintln!(
+            "fe spirv inliner: strategy=rooted, functions={}, roots={}, initial_insts={initial_root_insts}",
+            module.funcs().len(),
+            roots.len()
+        );
+    }
+    for frontier in 0..MAX_FRONTIERS {
+        let consumed_growth =
+            spirv_root_instruction_count(module, roots).saturating_sub(initial_root_insts);
+        let Some(remaining_growth) = MAX_ROOT_GROWTH.checked_sub(consumed_growth) else {
+            break;
+        };
+        if remaining_growth == 0 {
+            break;
+        }
+        inliner_config.max_total_growth = remaining_growth;
+        let stats = Inliner::new(inliner_config).run_one_frontier_from_roots(module, roots);
+        if trace {
+            eprintln!(
+                "fe spirv rooted inliner: frontier={frontier}, changed={}, after_inline_insts={}",
+                stats.changed,
+                spirv_root_instruction_count(module, roots)
+            );
+        }
+        if trace {
+            for pass in cleanup {
+                eprintln!(
+                    "fe spirv rooted cleanup: frontier={frontier}, pass={}, before_insts={}",
+                    pass.as_str(),
+                    spirv_root_instruction_count(module, roots)
+                );
+                run_function_passes_on(module, roots, &[pass]);
+                eprintln!(
+                    "fe spirv rooted cleanup: frontier={frontier}, pass={}, after_insts={}",
+                    pass.as_str(),
+                    spirv_root_instruction_count(module, roots)
+                );
+            }
+        } else {
+            run_function_passes_on(module, roots, &cleanup);
+        }
+        if trace {
+            eprintln!(
+                "fe spirv rooted inliner: frontier={frontier}, after_cleanup_insts={}",
+                spirv_root_instruction_count(module, roots)
+            );
+        }
+        if !stats.changed {
+            break;
+        }
+    }
+}
+
+fn inline_spirv_calls_module_wide(module: &mut sonatina_ir::Module) {
     let mut pipeline = Pipeline::new();
-    pipeline.inliner_config = InlinerConfig {
+    pipeline.inliner_config = spirv_inliner_config();
+    pipeline.add_step(Step::Inline);
+    pipeline.add_step(Step::FuncPasses(
+        spirv_module_inline_cleanup_passes().to_vec(),
+    ));
+    pipeline.add_step(Step::Inline);
+    pipeline.add_step(Step::FuncPasses(
+        spirv_module_inline_cleanup_passes().to_vec(),
+    ));
+    pipeline.run(module);
+}
+
+fn spirv_inliner_config() -> InlinerConfig {
+    InlinerConfig {
         enable_full_inliner: true,
         // In the SPIR-V lane the inliner is a LEGALITY pass, not an optimization:
         // `ensure_spirv_entry_call_free` below makes any residual call in the entry
@@ -363,26 +475,46 @@ fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
         // fix removed.
         max_total_growth: 10_000_000,
         ..InlinerConfig::default()
-    };
-    pipeline.add_step(Step::Inline);
-    pipeline.add_step(Step::FuncPasses(vec![
+    }
+}
+
+fn spirv_rooted_inline_cleanup_passes() -> [Pass; 5] {
+    [
+        Pass::CfgCleanup,
+        Pass::BranchCanonicalize,
+        Pass::Sccp,
+        Pass::ScalarCanonicalize,
+        Pass::CfgCleanup,
+    ]
+}
+
+fn spirv_module_inline_cleanup_passes() -> [Pass; 6] {
+    [
         Pass::CfgCleanup,
         Pass::BranchCanonicalize,
         Pass::Sccp,
         Pass::ScalarCanonicalize,
         Pass::Gvn,
         Pass::CfgCleanup,
-    ]));
-    pipeline.add_step(Step::Inline);
-    pipeline.add_step(Step::FuncPasses(vec![
-        Pass::CfgCleanup,
-        Pass::BranchCanonicalize,
-        Pass::Sccp,
-        Pass::ScalarCanonicalize,
-        Pass::Gvn,
-        Pass::CfgCleanup,
-    ]));
-    pipeline.run(module);
+    ]
+}
+
+fn spirv_root_instruction_count(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+) -> usize {
+    roots
+        .iter()
+        .map(|&root| {
+            module.func_store.view(root, |function| {
+                function
+                    .layout
+                    .iter_block()
+                    .map(|block| function.layout.iter_inst(block).count())
+                    .sum::<usize>()
+            })
+        })
+        .sum()
 }
 
 fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), LowerError> {
@@ -417,66 +549,6 @@ fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), Lowe
     match residual {
         Some(callee) => Err(LowerError::Spirv(format!(
             "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// Report the exact entry block when portable aggregate materialization would
-/// allocate inside a shader loop. Sonatina deliberately rejects that shape
-/// because its private heap has a compile-time capacity. Keeping the check at
-/// this driver boundary adds the Fe entry and lowered block to the diagnostic,
-/// instead of losing both in the backend's module-level error.
-fn ensure_spirv_entry_has_no_loop_allocation(
-    module: &sonatina_ir::Module,
-) -> Result<(), LowerError> {
-    let Some(&entry) = module.funcs().first() else {
-        return Err(LowerError::Spirv(
-            "SPIR-V module has no entry function".to_owned(),
-        ));
-    };
-    let entry_name = module
-        .ctx
-        .get_sig(entry)
-        .map(|signature| signature.name().to_owned())
-        .unwrap_or_else(|| format!("{entry:?}"));
-    let allocation = module.func_store.view(entry, |function| {
-        let mut cfg = ControlFlowGraph::default();
-        cfg.compute(function);
-        let mut domtree = DomTree::new();
-        domtree.compute(&cfg);
-        let mut loops = LoopTree::new();
-        loops.compute(&cfg, &domtree);
-        let inst_set = function.inst_set();
-        function.layout.iter_block().find_map(|block| {
-            if loops.loop_of_block(block).is_none() {
-                return None;
-            }
-            let contains_allocation = function.layout.iter_inst(block).any(|inst| {
-                <&MemAllocDynamic as InstDowncast>::downcast(inst_set, function.dfg.inst(inst))
-                    .is_some()
-            });
-            contains_allocation.then(|| {
-                let function_ir = FuncWriter::new(entry, function).dump_string();
-                let marker = format!("    {block}:");
-                let block_ir = function_ir
-                    .find(&marker)
-                    .map(|start| {
-                        let tail = &function_ir[start..];
-                        let end = tail[marker.len()..]
-                            .find("\n    block")
-                            .map(|offset| marker.len() + offset)
-                            .unwrap_or(tail.len());
-                        tail[..end].trim_end().to_owned()
-                    })
-                    .unwrap_or_else(|| "<lowered block unavailable>".to_owned());
-                (block, block_ir)
-            })
-        })
-    });
-    match allocation {
-        Some((block, instructions)) => Err(LowerError::Spirv(format!(
-            "SPIR-V entry `{entry_name}` contains MemAllocDynamic inside loop block {block:?}; lowered block:\n{instructions}"
         ))),
         None => Ok(()),
     }
