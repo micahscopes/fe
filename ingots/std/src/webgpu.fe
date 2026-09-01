@@ -157,6 +157,22 @@ pub struct RepeatedDispatch<
     const N: usize,
 > {}
 
+/// Contract an inner dispatch as its enclosing actor cycle advances.
+///
+/// Each shift divides the corresponding workgroup dimension by two per cycle
+/// iteration, rounding up to one. `REPEAT_DECREMENT` removes that many inner
+/// repetitions per iteration and may reach zero on the final iteration. This
+/// changes physical placement only. The enclosing `CycledDispatch` still fixes
+/// semantic phase order, and the host receives no application cursor or table.
+#[gpu_dispatch(tapered)]
+pub struct TaperedDispatch<
+    Dispatch,
+    const X_SHIFT: usize,
+    const Y_SHIFT: usize,
+    const Z_SHIFT: usize,
+    const REPEAT_DECREMENT: usize,
+> {}
+
 /// Place one dispatch policy inside a repeated, ordered actor pass cycle.
 ///
 /// Consecutive compute behaviors carrying the same `Group` are one cycle body.

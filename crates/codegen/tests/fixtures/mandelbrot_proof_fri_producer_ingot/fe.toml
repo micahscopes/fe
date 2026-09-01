@@ -1,0 +1,12 @@
+[ingot]
+name = "mandelbrot_proof_fri_producer_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+fri_prover_webgpu = "../../../../../ingots/fri_prover_webgpu"
+fri_structure = "../../../../../ingots/fri_structure"
+fri_structure_webgpu = "../../../../../ingots/fri_structure_webgpu"
+mandelbrot_proof_production_profile_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/production-profile-baby-bear"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
+poseidon_baby_bear_webgpu = "../../../../../ingots/poseidon_baby_bear_webgpu"

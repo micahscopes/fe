@@ -74,6 +74,7 @@ pub enum ActorTransition {
 pub enum GpuDispatch {
     Fixed,
     Repeated,
+    Tapered,
     Cycled,
 }
 
@@ -566,6 +567,7 @@ impl<'db> AttrListId<'db> {
         match self.single_ident_arg(db, "gpu_dispatch")?.as_str() {
             "fixed" => Some(GpuDispatch::Fixed),
             "repeated" => Some(GpuDispatch::Repeated),
+            "tapered" => Some(GpuDispatch::Tapered),
             "cycled" => Some(GpuDispatch::Cycled),
             _ => None,
         }

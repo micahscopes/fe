@@ -447,6 +447,7 @@ pub enum WebActorStageKind {
         workgroup_size: [u32; 3],
         dispatch: [u32; 3],
         repeat: u32,
+        taper: Option<WebDispatchTaper>,
         cycle: Option<WebActorPassCycle>,
         invocation_context: bool,
     },
@@ -472,6 +473,14 @@ pub enum WebActorStageKind {
 pub struct WebActorPassCycle {
     pub group: String,
     pub repeat: u32,
+}
+
+/// Compiler-derived physical contraction applied at actor-cycle boundaries.
+/// It never changes the ordered semantic cycle body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebDispatchTaper {
+    pub shifts: [u32; 3],
+    pub repeat_decrement: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -542,7 +551,16 @@ fn compute_stage_shape(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
     role_path: PathId<'_>,
-) -> Result<([u32; 3], [u32; 3], u32, Option<WebActorPassCycle>), WebBundleError> {
+) -> Result<
+    (
+        [u32; 3],
+        [u32; 3],
+        u32,
+        Option<WebDispatchTaper>,
+        Option<WebActorPassCycle>,
+    ),
+    WebBundleError,
+> {
     let args = role_path.generic_args(db).data(db);
     let [workgroup_arg, dispatch_arg] = args.as_slice() else {
         return Err(WebBundleError::EntryDerivation(
@@ -588,8 +606,7 @@ fn compute_stage_shape(
     })?;
     dispatch_attrs.gpu_dispatch(db).ok_or_else(|| {
         WebBundleError::EntryDerivation(
-            "compute-stage dispatch type must carry an attributed GPU dispatch policy"
-                .to_owned(),
+            "compute-stage dispatch type must carry an attributed GPU dispatch policy".to_owned(),
         )
     })?;
     let workgroup_size = semantic_const_triplet(db, workgroup_ty).ok_or_else(|| {
@@ -597,7 +614,7 @@ fn compute_stage_shape(
             "GPU workgroup dimensions must be three concrete u32-sized constants".to_owned(),
         )
     })?;
-    let (dispatch, repeat, cycle) = compute_dispatch_shape(db, dispatch_ty)?;
+    let (dispatch, repeat, taper, cycle) = compute_dispatch_shape(db, dispatch_ty)?;
     if workgroup_size.contains(&0) || dispatch.contains(&0) || repeat == 0 {
         return Err(WebBundleError::EntryDerivation(
             "GPU workgroup, fixed dispatch dimensions, and repeat count must be nonzero".to_owned(),
@@ -608,13 +625,41 @@ fn compute_stage_shape(
             "repeated dispatch count exceeds the portable 65535-command envelope".to_owned(),
         ));
     }
-    Ok((workgroup_size, dispatch, repeat, cycle))
+    if taper.is_some() && cycle.is_none() {
+        return Err(WebBundleError::EntryDerivation(
+            "tapered dispatch must be nested inside an actor pass cycle".to_owned(),
+        ));
+    }
+    if let (Some(taper), Some(cycle)) = (taper, cycle.as_ref()) {
+        let total_decrement = u64::from(taper.repeat_decrement)
+            .checked_mul(u64::from(cycle.repeat - 1))
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "tapered dispatch repeat decrement overflows its cycle".to_owned(),
+                )
+            })?;
+        if total_decrement > u64::from(repeat) {
+            return Err(WebBundleError::EntryDerivation(
+                "tapered dispatch repeat count reaches zero before its final cycle iteration"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok((workgroup_size, dispatch, repeat, taper, cycle))
 }
 
 fn compute_dispatch_shape(
     db: &DriverDataBase,
     dispatch_ty: TyId<'_>,
-) -> Result<([u32; 3], u32, Option<WebActorPassCycle>), WebBundleError> {
+) -> Result<
+    (
+        [u32; 3],
+        u32,
+        Option<WebDispatchTaper>,
+        Option<WebActorPassCycle>,
+    ),
+    WebBundleError,
+> {
     let attrs = nominal_attrs(db, dispatch_ty).ok_or_else(|| {
         WebBundleError::EntryDerivation(
             "compute-stage dispatch policy is not an attributed nominal type".to_owned(),
@@ -628,7 +673,7 @@ fn compute_dispatch_shape(
                         .to_owned(),
                 )
             })?;
-            Ok((dispatch, 1, None))
+            Ok((dispatch, 1, None, None))
         }
         Some(GpuDispatch::Repeated) => {
             let dispatch = semantic_const_triplet(db, dispatch_ty).ok_or_else(|| {
@@ -647,7 +692,67 @@ fn compute_dispatch_shape(
                             .to_owned(),
                     )
                 })?;
-            Ok((dispatch, repeat, None))
+            Ok((dispatch, repeat, None, None))
+        }
+        Some(GpuDispatch::Tapered) => {
+            let [inner, x_shift, y_shift, z_shift, repeat_decrement, ..] =
+                dispatch_ty.generic_args(db)
+            else {
+                return Err(WebBundleError::EntryDerivation(
+                    "tapered dispatch requires an inner policy, three dimension shifts, and a repeat decrement"
+                        .to_owned(),
+                ));
+            };
+            if matches!(inner.data(db), TyData::ConstTy(_)) {
+                return Err(WebBundleError::EntryDerivation(
+                    "tapered dispatch inner policy must be a nominal Fe type".to_owned(),
+                ));
+            }
+            let shifts = [
+                semantic_const_u32(db, *x_shift),
+                semantic_const_u32(db, *y_shift),
+                semantic_const_u32(db, *z_shift),
+            ]
+            .map(|value| {
+                value.ok_or_else(|| {
+                    WebBundleError::EntryDerivation(
+                        "tapered dispatch shifts must be concrete u32-sized integers".to_owned(),
+                    )
+                })
+            });
+            let [x_shift, y_shift, z_shift] = shifts;
+            let shifts = [x_shift?, y_shift?, z_shift?];
+            let repeat_decrement = semantic_const_u32(db, *repeat_decrement).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "tapered dispatch repeat decrement must be a concrete u32-sized integer"
+                        .to_owned(),
+                )
+            })?;
+            if shifts.iter().any(|shift| *shift > 31) {
+                return Err(WebBundleError::EntryDerivation(
+                    "tapered dispatch dimension shifts must not exceed 31".to_owned(),
+                ));
+            }
+            if shifts == [0, 0, 0] && repeat_decrement == 0 {
+                return Err(WebBundleError::EntryDerivation(
+                    "tapered dispatch must contract a dimension or repeat count".to_owned(),
+                ));
+            }
+            let (dispatch, repeat, nested_taper, cycle) = compute_dispatch_shape(db, *inner)?;
+            if nested_taper.is_some() || cycle.is_some() {
+                return Err(WebBundleError::EntryDerivation(
+                    "tapered dispatch inner policy must be fixed or repeated".to_owned(),
+                ));
+            }
+            Ok((
+                dispatch,
+                repeat,
+                Some(WebDispatchTaper {
+                    shifts,
+                    repeat_decrement,
+                }),
+                None,
+            ))
         }
         Some(GpuDispatch::Cycled) => {
             let [group, inner, count, ..] = dispatch_ty.generic_args(db) else {
@@ -671,7 +776,7 @@ fn compute_dispatch_shape(
                     "cycled dispatch count must be between 1 and 65535".to_owned(),
                 ));
             }
-            let (dispatch, repeat, nested) = compute_dispatch_shape(db, *inner)?;
+            let (dispatch, repeat, taper, nested) = compute_dispatch_shape(db, *inner)?;
             if nested.is_some() {
                 return Err(WebBundleError::EntryDerivation(
                     "nested actor pass cycles are not yet supported".to_owned(),
@@ -680,6 +785,7 @@ fn compute_dispatch_shape(
             Ok((
                 dispatch,
                 repeat,
+                taper,
                 Some(WebActorPassCycle {
                     group: group.pretty_print(db).to_string(),
                     repeat: cycles,
@@ -1146,7 +1252,7 @@ pub fn actor_gpu_program(
                 (kind, Some(payload))
             }
             GpuStage::Compute => {
-                let (workgroup_size, dispatch, repeat, cycle) =
+                let (workgroup_size, dispatch, repeat, taper, cycle) =
                     compute_stage_shape(db, *behavior, role_path)?;
                 let invocation_context = compute_invocation_context(db, *behavior)?;
                 (
@@ -1154,6 +1260,7 @@ pub fn actor_gpu_program(
                         workgroup_size,
                         dispatch,
                         repeat,
+                        taper,
                         cycle,
                         invocation_context,
                     },
@@ -3856,6 +3963,10 @@ pub struct WebPass {
     /// fixed pass decodes as one.
     #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
     pub repeat: u32,
+    /// Physical work contraction derived from Fe's `TaperedDispatch` type.
+    /// It is interpreted only at an enclosing actor-cycle boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taper: Option<WebDispatchTaper>,
     /// Consecutive passes with the same compiler-assigned group form one
     /// ordered body that is repeated as a unit. The originating group identity
     /// and count come from Fe's `CycledDispatch` policy.
@@ -4379,6 +4490,7 @@ impl WebBundle {
                     shader_bytes: shader.len() as u64,
                     dispatch: None,
                     repeat: 1,
+                    taper: None,
                     cycle: None,
                     draw_vertices: Some(*vertex_count),
                     layout: layout.clone(),
@@ -4394,11 +4506,12 @@ impl WebBundle {
                 index += 2;
                 continue;
             }
-            let (artifact, dispatch, repeat, cycle, kind) = match &stage.kind {
+            let (artifact, dispatch, repeat, taper, cycle, kind) = match &stage.kind {
                 WebActorStageKind::Compute {
                     workgroup_size,
                     dispatch,
                     repeat,
+                    taper,
                     cycle,
                     invocation_context,
                 } => {
@@ -4441,6 +4554,7 @@ impl WebBundle {
                         artifact,
                         Some(*dispatch),
                         *repeat,
+                        *taper,
                         cycle.clone(),
                         "compute",
                     )
@@ -4471,7 +4585,7 @@ impl WebBundle {
                             .map_err(|error| WebBundleError::Lower(error.to_string()))
                         },
                     );
-                    (artifact, None, 1, None, "fragment")
+                    (artifact, None, 1, None, None, "fragment")
                 }
                 WebActorStageKind::Vertex { .. } => unreachable!("handled as an adjacent pair"),
                 WebActorStageKind::RasterFragment { .. } => {
@@ -4505,8 +4619,7 @@ impl WebBundle {
                         cycle_groups.len() - 1
                     });
                 WebPassCycle {
-                    group: u32::try_from(group)
-                        .expect("actor pass cycle group count fits in u32"),
+                    group: u32::try_from(group).expect("actor pass cycle group count fits in u32"),
                     repeat: cycle.repeat,
                 }
             });
@@ -4516,6 +4629,7 @@ impl WebBundle {
                 shader_bytes: shader.len() as u64,
                 dispatch,
                 repeat,
+                taper,
                 cycle,
                 draw_vertices: None,
                 layout: layout.clone(),
@@ -5057,6 +5171,7 @@ impl WebBundle {
             shader_bytes: wgsl.len() as u64,
             dispatch: None,
             repeat: 1,
+            taper: None,
             cycle: None,
             draw_vertices: None,
             layout: layout.clone(),

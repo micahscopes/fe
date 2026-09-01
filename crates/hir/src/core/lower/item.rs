@@ -302,7 +302,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_dispatch",
                 GPU_IDENT_FORM,
-                "`#[gpu_dispatch(fixed)]`, `#[gpu_dispatch(repeated)]`, or `#[gpu_dispatch(cycled)]`",
+                "`#[gpu_dispatch(fixed)]`, `#[gpu_dispatch(repeated)]`, `#[gpu_dispatch(tapered)]`, or `#[gpu_dispatch(cycled)]`",
             ),
             AttrRule::supported("gpu_draw", GPU_IDENT_FORM, "`#[gpu_draw(triangle_list)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),

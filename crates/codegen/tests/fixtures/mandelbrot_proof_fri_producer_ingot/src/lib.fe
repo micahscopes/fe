@@ -1,0 +1,543 @@
+//! Production-sized, schedule-derived BabyBear FRI actor gate.
+//!
+//! The actor owns one composition codeword and transcript, then interprets the
+//! complete typed FRI schedule into challenges, folded layers, ordered Merkle
+//! trees, roots, and successor transcripts. The host supplies inputs and
+//! dispatches the actor; it does not implement any proof-protocol step.
+
+use fri_prover_webgpu::{
+    FRI_BINDING_STEPS,
+    FRI_CHALLENGE_STEPS,
+    FRI_LEAF_HASH_STEPS,
+    FriProverArenaLayout,
+    FriProverControlLayout,
+    advance_fri_binding_lane,
+    advance_fri_challenge_lane,
+    advance_fri_leaf_lane,
+    advance_fri_tree_lane,
+    begin_fri_binding_lane,
+    begin_fri_round_lane,
+    begin_fri_tree_lane,
+    finish_fri_round_lane,
+    fold_fri_round_lane,
+    fri_prover_progress_words,
+    fri_prover_state_words,
+    fri_prover_states,
+    fri_prover_tail_words,
+    fri_prover_tree_steps,
+    fri_prover_valid_words,
+    fri_prover_workgroups,
+    initialize_fri_leaf_lane,
+    initialize_fri_prover_lane,
+}
+use fri_structure::{
+    FriSchedule,
+    FriSchedulePlacement,
+    FriScheduleShape,
+}
+use fri_structure_webgpu::{
+    fri_round_placement_storage_words,
+    store_fri_round_placement,
+}
+use mandelbrot_proof_production_profile_baby_bear::{
+    PRODUCTION_LDE_LENGTH,
+    PRODUCTION_LDE_LOG,
+}
+use poseidon_baby_bear::DIGEST_FIELDS
+use poseidon_baby_bear_webgpu::POSEIDON2_LANES
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    CycledDispatch as Cycle,
+    FixedDispatch as Grid,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    RepeatedDispatch as Repeat,
+    StorageBuffer as Shared,
+    TaperedDispatch as Taper,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+type FoldSchedule = FriSchedule<1, {PRODUCTION_LDE_LOG}>
+
+const THREADS: usize = 64
+const EXTENSION_WORDS: usize = 4
+const FRI_ROUNDS: usize =
+    <FoldSchedule as FriScheduleShape>::fri_schedule_metadata().rounds as usize
+const FOLDED_EVALUATIONS: usize =
+    <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+        .folded_evaluations as usize
+const LAYER_TREE_NODES: usize =
+    <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+        .layer_tree_nodes as usize
+const ROUND_PLACEMENT_WORDS: usize =
+    fri_round_placement_storage_words(FRI_ROUNDS)
+const PROVER_STATES: usize = fri_prover_states<FoldSchedule>()
+const PROVER_GROUPS: usize = fri_prover_workgroups<FoldSchedule>(THREADS)
+const PROVER_LANES: usize = PROVER_GROUPS * THREADS
+const PAIR_GROUPS: usize = (PROVER_STATES + THREADS - 1) / THREADS
+const TREE_GROUPS: usize = PROVER_GROUPS / 2
+const PROVER_TREE_STEPS: usize = fri_prover_tree_steps<FoldSchedule>()
+const INPUT_GROUPS: usize = (PRODUCTION_LDE_LENGTH + THREADS - 1) / THREADS
+
+const COMPOSITION_START: u32 = 0
+const COMPOSITION_WORDS: usize = PRODUCTION_LDE_LENGTH * EXTENSION_WORDS
+const COMPOSITION_VALID: u32 = COMPOSITION_WORDS.downcast_truncate()
+const EVALUATIONS_START: u32 = COMPOSITION_VALID + 1
+const EVALUATION_WORDS: usize = FOLDED_EVALUATIONS * EXTENSION_WORDS
+const EVALUATION_VALID_START: u32 =
+    EVALUATIONS_START + EVALUATION_WORDS.downcast_truncate()
+const TREE_START: u32 =
+    EVALUATION_VALID_START + FOLDED_EVALUATIONS.downcast_truncate()
+const TREE_WORDS: usize = LAYER_TREE_NODES * DIGEST_FIELDS
+const NODE_VALID_START: u32 = TREE_START + TREE_WORDS.downcast_truncate()
+const STATE_START: u32 =
+    NODE_VALID_START + LAYER_TREE_NODES.downcast_truncate()
+const STATE_WORDS: usize = fri_prover_state_words<FoldSchedule>()
+const STATE_VALID_START: u32 = STATE_START + STATE_WORDS.downcast_truncate()
+const STATE_VALID_WORDS: usize = fri_prover_valid_words<FoldSchedule>()
+const TAIL_START: u32 =
+    STATE_VALID_START + STATE_VALID_WORDS.downcast_truncate()
+const TAIL_WORDS: usize = fri_prover_tail_words()
+const PROGRESS_START: u32 = TAIL_START + TAIL_WORDS.downcast_truncate()
+const PROGRESS_WORDS: usize =
+    fri_prover_progress_words<FoldSchedule>(THREADS)
+const ARENA_WORDS: usize = PROGRESS_START as usize + PROGRESS_WORDS
+
+const TRANSCRIPTS_START: u32 = 0
+const TRANSCRIPT_WORDS: usize = (FRI_ROUNDS + 1) * DIGEST_FIELDS
+const TRANSCRIPT_VALID_START: u32 = TRANSCRIPT_WORDS.downcast_truncate()
+const CHALLENGES_START: u32 =
+    TRANSCRIPT_VALID_START + (FRI_ROUNDS + 1).downcast_truncate()
+const CHALLENGE_WORDS: usize = FRI_ROUNDS * EXTENSION_WORDS
+const CHALLENGE_VALID_START: u32 =
+    CHALLENGES_START + CHALLENGE_WORDS.downcast_truncate()
+const ROOTS_START: u32 =
+    CHALLENGE_VALID_START + FRI_ROUNDS.downcast_truncate()
+const ROOT_WORDS: usize = FRI_ROUNDS * DIGEST_FIELDS
+const ROOT_VALID_START: u32 = ROOTS_START + ROOT_WORDS.downcast_truncate()
+const ROUND_CURSOR: u32 = ROOT_VALID_START + FRI_ROUNDS.downcast_truncate()
+const ROUND_VALID: u32 = ROUND_CURSOR + 1
+const PROVER_COMPLETE: u32 = ROUND_VALID + 1
+const CONTROL_WORDS: usize = PROVER_COMPLETE as usize + 1
+
+const fn arena_layout() -> FriProverArenaLayout {
+    FriProverArenaLayout {
+        composition: COMPOSITION_START,
+        composition_valid: COMPOSITION_VALID,
+        evaluations: EVALUATIONS_START,
+        evaluation_valid: EVALUATION_VALID_START,
+        tree: TREE_START,
+        node_valid: NODE_VALID_START,
+        state: STATE_START,
+        state_valid: STATE_VALID_START,
+        tails: TAIL_START,
+        progress: PROGRESS_START,
+    }
+}
+
+const fn control_layout() -> FriProverControlLayout {
+    FriProverControlLayout {
+        transcripts: TRANSCRIPTS_START,
+        transcript_valid: TRANSCRIPT_VALID_START,
+        challenges: CHALLENGES_START,
+        challenge_valid: CHALLENGE_VALID_START,
+        roots: ROOTS_START,
+        root_valid: ROOT_VALID_START,
+        round_cursor: ROUND_CURSOR,
+        round_valid: ROUND_VALID,
+        complete: PROVER_COMPLETE,
+    }
+}
+
+static_assert(PRODUCTION_LDE_LOG == 13)
+static_assert(PRODUCTION_LDE_LENGTH == 8192)
+static_assert(FRI_ROUNDS == 13)
+static_assert(FOLDED_EVALUATIONS == 8191)
+static_assert(LAYER_TREE_NODES == 16369)
+static_assert(ROUND_PLACEMENT_WORDS == 169)
+static_assert(PROVER_STATES == 4096)
+static_assert(PROVER_GROUPS == 1024)
+static_assert(PROVER_LANES == 65536)
+static_assert(PAIR_GROUPS == 64)
+static_assert(TREE_GROUPS == 512)
+static_assert(INPUT_GROUPS == 128)
+static_assert(FRI_CHALLENGE_STEPS == 89)
+static_assert(FRI_LEAF_HASH_STEPS == 44)
+static_assert(PROVER_TREE_STEPS == 540)
+static_assert(FRI_BINDING_STEPS == 133)
+static_assert(COMPOSITION_WORDS == 32768)
+static_assert(COMPOSITION_VALID == 32768)
+static_assert(EVALUATIONS_START == 32769)
+static_assert(EVALUATION_WORDS == 32764)
+static_assert(EVALUATION_VALID_START == 65533)
+static_assert(TREE_START == 73724)
+static_assert(TREE_WORDS == 130952)
+static_assert(NODE_VALID_START == 204676)
+static_assert(STATE_START == 221045)
+static_assert(STATE_WORDS == 131072)
+static_assert(STATE_VALID_START == 352117)
+static_assert(STATE_VALID_WORDS == 4096)
+static_assert(TAIL_START == 356213)
+static_assert(TAIL_WORDS == 10)
+static_assert(PROGRESS_START == 356223)
+static_assert(PROGRESS_WORDS == 65536)
+static_assert(ARENA_WORDS == 421759)
+static_assert(TRANSCRIPT_WORDS == 112)
+static_assert(TRANSCRIPT_VALID_START == 112)
+static_assert(CHALLENGES_START == 126)
+static_assert(CHALLENGE_WORDS == 52)
+static_assert(CHALLENGE_VALID_START == 178)
+static_assert(ROOTS_START == 191)
+static_assert(ROOT_WORDS == 104)
+static_assert(ROOT_VALID_START == 295)
+static_assert(ROUND_CURSOR == 308)
+static_assert(ROUND_VALID == 309)
+static_assert(PROVER_COMPLETE == 310)
+static_assert(CONTROL_WORDS == 311)
+static_assert(POSEIDON2_LANES == 16)
+
+pub struct FriRoundCycle {}
+
+actor ProductionFriProver uses (Program<WebGpuBackend>) {
+    round_placements: Shared<u32, ROUND_PLACEMENT_WORDS>,
+    arena: Shared<u32, ARENA_WORDS>,
+    control: Shared<u32, CONTROL_WORDS>,
+
+    fn prepare_rounds(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
+    {
+        let lane = invocation.global.x
+        if lane >= FRI_ROUNDS.downcast_truncate() { return }
+        store_fri_round_placement<ROUND_PLACEMENT_WORDS>(
+            self.round_placements,
+            lane,
+            <FoldSchedule as FriSchedulePlacement>::fri_round_placement(lane),
+        )
+    }
+
+    /// Deterministic Fe-authored input for the independent browser oracle.
+    /// Production composition and transcript buffers connect at this same
+    /// typed resource boundary without changing the FRI schedule.
+    fn seed_prover_input(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<INPUT_GROUPS, 1, 1>,
+            >
+        )
+    {
+        let lane = invocation.global.x
+        if lane < PRODUCTION_LDE_LENGTH.downcast_truncate() {
+            let base = COMPOSITION_START + lane * EXTENSION_WORDS.downcast_truncate()
+            self.arena.store(index: base, value: lane + 1)
+            self.arena.store(index: base + 1, value: lane * 3 + 5)
+            self.arena.store(index: base + 2, value: lane * 7 + 11)
+            self.arena.store(index: base + 3, value: lane * 13 + 17)
+        }
+        if lane < DIGEST_FIELDS.downcast_truncate() {
+            self.control.store(
+                index: TRANSCRIPTS_START + lane,
+                value: lane * 17 + 5,
+            )
+        }
+        if lane == 0 {
+            self.arena.store(index: COMPOSITION_VALID, value: 1)
+            self.control.store(index: TRANSCRIPT_VALID_START, value: 1)
+        }
+    }
+
+    fn initialize_prover(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<PROVER_GROUPS, 1, 1>,
+            >
+        )
+    {
+        initialize_fri_prover_lane<
+            FRI_ROUNDS,
+            FOLDED_EVALUATIONS,
+            LAYER_TREE_NODES,
+            PROVER_LANES,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn begin_round(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<Grid<PROVER_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        begin_fri_round_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn derive_challenge(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Repeat<1, 1, 1, FRI_CHALLENGE_STEPS>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_challenge_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn fold_round(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<Grid<PAIR_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        fold_fri_round_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn initialize_leaves(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<Grid<PROVER_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        initialize_fri_leaf_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn hash_leaves(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<
+                        Repeat<PROVER_GROUPS, 1, 1, FRI_LEAF_HASH_STEPS>,
+                        1, 0, 0, 0,
+                    >,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_leaf_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn begin_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<Grid<TREE_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        begin_fri_tree_lane<PROVER_LANES, ARENA_WORDS>(
+            self.arena,
+            arena_layout(),
+            invocation,
+        )
+    }
+
+    fn reduce_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<
+                        Repeat<TREE_GROUPS, 1, 1, PROVER_TREE_STEPS>,
+                        1, 0, 0, {1 + FRI_LEAF_HASH_STEPS},
+                    >,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_tree_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn begin_binding(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Grid<1, 1, 1>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        begin_fri_binding_lane<PROVER_LANES, ARENA_WORDS>(
+            self.arena,
+            arena_layout(),
+            invocation,
+        )
+    }
+
+    fn bind_transcript(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Repeat<1, 1, 1, FRI_BINDING_STEPS>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_binding_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            ROUND_PLACEMENT_WORDS,
+            ARENA_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.arena,
+            arena_layout(),
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn finish_round(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<FriRoundCycle, Grid<1, 1, 1>, FRI_ROUNDS>,
+            >
+        )
+    {
+        finish_fri_round_lane<
+            FRI_ROUNDS,
+            ROUND_PLACEMENT_WORDS,
+            CONTROL_WORDS,
+        >(
+            self.round_placements,
+            self.control,
+            control_layout(),
+            invocation,
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let color: u32 = if self.control.load(index: PROVER_COMPLETE) == 1 {
+            4278255360
+        } else {
+            4294901760
+        }
+        color.downcast_truncate()
+    }
+}

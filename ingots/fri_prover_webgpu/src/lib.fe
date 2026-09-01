@@ -1,0 +1,1212 @@
+//! Sequential-dependency, parallel-placement interpreter for BabyBear FRI.
+//!
+//! One typed FRI schedule fixes every challenge, pair fold, ordered Merkle
+//! tree, and transcript binding. Independent work within each phase occupies a
+//! dense WebGPU lane grid; repeated dispatch boundaries preserve the semantic
+//! dependency between phases and rounds. No host protocol cursor or round
+//! table participates in execution.
+
+use fri_baby_bear::{
+    fold_fri_pair_value_at_point,
+    fri_fold_domain_tag,
+    fri_layer_row_domain_tag,
+    fri_layer_transcript_domain_tag,
+}
+use fri_structure::{
+    FriRoundPlacement,
+    FriSchedulePlacement,
+    FriScheduleShape,
+}
+use fri_structure_webgpu::load_fri_round_placement
+use poseidon_baby_bear::{
+    DIGEST_FIELDS,
+    Poseidon2Digest,
+    Poseidon2WorkgroupPlan,
+    Poseidon2WorkgroupSchedule,
+    begin_compression_placement,
+    begin_ext4_commitment_placement_tag,
+}
+use poseidon_baby_bear_webgpu::{
+    DIGEST_BINDING_STEPS,
+    DIGEST_SQUEEZE_STEPS,
+    POSEIDON2_LANES,
+    POSEIDON2_STAGE_STEPS,
+    advance_digest_binding_storage_lane,
+    advance_digest_squeeze_storage_lane,
+    advance_poseidon2_permutation_lane,
+    initialize_poseidon2_permutation_lane,
+    poseidon2_permutation_digest,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+
+const EXTENSION_WORDS: usize = 4
+const LEAF_STEPS: usize = 1 + POSEIDON2_STAGE_STEPS
+
+pub const FRI_CHALLENGE_STEPS: usize = DIGEST_SQUEEZE_STEPS
+pub const FRI_LEAF_HASH_STEPS: usize = POSEIDON2_STAGE_STEPS
+pub const FRI_BINDING_STEPS: usize = DIGEST_BINDING_STEPS
+
+pub const fn fri_prover_round_steps(_ input_log: u32) -> u32 {
+    if input_log == 0 { return 0 }
+    let squeeze: u32 = DIGEST_SQUEEZE_STEPS.downcast_truncate()
+    let leaf: u32 = LEAF_STEPS.downcast_truncate()
+    let binding: u32 = DIGEST_BINDING_STEPS.downcast_truncate()
+    squeeze + 1 + leaf + (input_log - 1) * leaf + binding
+}
+
+pub const fn fri_prover_schedule_steps<Schedule>() -> usize
+where Schedule: FriScheduleShape + FriSchedulePlacement
+{
+    let metadata = <Schedule as FriScheduleShape>::fri_schedule_metadata()
+    let mut total: usize = 0
+    let mut index: u32 = 0
+    while index < metadata.rounds {
+        let placement =
+            <Schedule as FriSchedulePlacement>::fri_round_placement(index)
+        if !placement.valid || placement.index != index {
+            return 0
+        }
+        total = total + fri_prover_round_steps(placement.input_log) as usize
+        index = index + 1
+    }
+    total
+}
+
+pub const fn fri_prover_tree_steps<Schedule>() -> usize
+where Schedule: FriSchedulePlacement
+{
+    fri_prover_tree_levels<Schedule>() * LEAF_STEPS
+}
+
+pub const fn fri_prover_tree_levels<Schedule>() -> usize
+where Schedule: FriSchedulePlacement
+{
+    let first = <Schedule as FriSchedulePlacement>::fri_round_placement(0)
+    if first.valid && first.input_log > 0 {
+        first.input_log as usize - 1
+    } else {
+        0
+    }
+}
+
+pub const fn fri_prover_states<Schedule>() -> usize
+where Schedule: FriSchedulePlacement
+{
+    let first = <Schedule as FriSchedulePlacement>::fri_round_placement(0)
+    if first.valid { first.output_width as usize } else { 0 }
+}
+
+pub const fn fri_prover_workgroups<Schedule>(_ threads: usize) -> usize
+where Schedule: FriSchedulePlacement
+{
+    if threads == 0 { return 0 }
+    let lanes = fri_prover_states<Schedule>() * POSEIDON2_LANES
+    (lanes + threads - 1) / threads
+}
+
+pub const fn fri_prover_progress_words<Schedule>(_ threads: usize) -> usize
+where Schedule: FriSchedulePlacement
+{
+    fri_prover_workgroups<Schedule>(threads) * threads
+}
+
+pub const fn fri_prover_state_words<Schedule>() -> usize
+where Schedule: FriSchedulePlacement
+{
+    fri_prover_states<Schedule>() * 2 * POSEIDON2_LANES
+}
+
+pub const fn fri_prover_valid_words<Schedule>() -> usize
+where Schedule: FriSchedulePlacement
+{
+    fri_prover_states<Schedule>()
+}
+
+pub const fn fri_prover_tail_words() -> usize { 10 }
+
+pub struct FriProverArenaLayout {
+    pub composition: u32,
+    pub composition_valid: u32,
+    pub evaluations: u32,
+    pub evaluation_valid: u32,
+    pub tree: u32,
+    pub node_valid: u32,
+    pub state: u32,
+    pub state_valid: u32,
+    pub tails: u32,
+    pub progress: u32,
+}
+impl core::marker::Copy for FriProverArenaLayout {}
+
+pub struct FriProverControlLayout {
+    pub transcripts: u32,
+    pub transcript_valid: u32,
+    pub challenges: u32,
+    pub challenge_valid: u32,
+    pub roots: u32,
+    pub root_valid: u32,
+    pub round_cursor: u32,
+    pub round_valid: u32,
+    pub complete: u32,
+}
+impl core::marker::Copy for FriProverControlLayout {}
+
+struct FriProverStep {
+    valid: bool,
+    round_index: u32,
+    local_step: u32,
+    placement: FriRoundPlacement,
+}
+impl core::marker::Copy for FriProverStep {}
+
+fn invalid_step() -> FriProverStep {
+    FriProverStep {
+        valid: false,
+        round_index: 0,
+        local_step: 0,
+        placement: FriRoundPlacement {
+            valid: false,
+            index: 0,
+            round: 0,
+            input_log: 0,
+            input_width: 0,
+            output_width: 0,
+            output_offset: 0,
+            tree_offset: 0,
+            tree_nodes: 0,
+            query_value_offset: 0,
+            query_sibling_offset: 0,
+            pair_width: 0,
+            pair_depth: 0,
+        },
+    }
+}
+
+#[inline(always)]
+fn round_placement_valid(_ placement: FriRoundPlacement, _ index: u32) -> bool {
+    placement.valid
+        && placement.index == index
+        && placement.round == index + 1
+        && placement.output_width > 0
+        && placement.input_width == placement.output_width * 2
+        && placement.tree_nodes == placement.output_width * 2 - 1
+}
+
+fn locate_step<const ROUNDS: usize, const ROUND_WORDS: usize>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ step: u32,
+) -> FriProverStep {
+    let mut remaining = step
+    let mut index: u32 = 0
+    while index < ROUNDS.downcast_truncate() {
+        let placement = load_fri_round_placement<ROUND_WORDS>(rounds, index)
+        let steps = fri_prover_round_steps(placement.input_log)
+        if steps == 0 { return invalid_step() }
+        if placement.valid && remaining < steps {
+            return FriProverStep {
+                valid: placement.index == index
+                    && placement.round == index + 1
+                    && placement.output_width > 0
+                    && placement.input_width == placement.output_width * 2
+                    && placement.tree_nodes == placement.output_width * 2 - 1,
+                round_index: index,
+                local_step: remaining,
+                placement: placement,
+            }
+        }
+        remaining = remaining - steps
+        index = index + 1
+    }
+    invalid_step()
+}
+
+#[inline(always)]
+fn load_digest<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ start: u32,
+    _ index: u32,
+) -> Poseidon2Digest {
+    let base = start + index * DIGEST_FIELDS.downcast_truncate()
+    Poseidon2Digest::from_u32s([
+        storage.load(index: base),
+        storage.load(index: base + 1),
+        storage.load(index: base + 2),
+        storage.load(index: base + 3),
+        storage.load(index: base + 4),
+        storage.load(index: base + 5),
+        storage.load(index: base + 6),
+        storage.load(index: base + 7),
+    ])
+}
+
+#[inline(always)]
+fn store_digest<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ start: u32,
+    _ index: u32,
+    _ digest: Poseidon2Digest,
+) {
+    let base = start + index * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        storage.store(
+            index: base + field,
+            value: digest.field(field).to_u32(),
+        )
+        field = field + 1
+    }
+}
+
+#[inline(always)]
+fn load_ext4<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ start: u32,
+    _ index: u32,
+) -> BabyBearExt4 {
+    let base = start + index * EXTENSION_WORDS.downcast_truncate()
+    BabyBearExt4::from_coefficients([
+        BabyBear::from_u32(storage.load(index: base)),
+        BabyBear::from_u32(storage.load(index: base + 1)),
+        BabyBear::from_u32(storage.load(index: base + 2)),
+        BabyBear::from_u32(storage.load(index: base + 3)),
+    ])
+}
+
+#[inline(always)]
+fn ext4_is_canonical<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ start: u32,
+    _ index: u32,
+) -> bool {
+    let base = start + index * EXTENSION_WORDS.downcast_truncate()
+    storage.load(index: base) < BABY_BEAR_MODULUS
+        && storage.load(index: base + 1) < BABY_BEAR_MODULUS
+        && storage.load(index: base + 2) < BABY_BEAR_MODULUS
+        && storage.load(index: base + 3) < BABY_BEAR_MODULUS
+}
+
+#[inline(always)]
+fn store_ext4<const WORDS: usize>(
+    _ storage: StorageBuffer<u32, WORDS>,
+    _ start: u32,
+    _ index: u32,
+    _ value: BabyBearExt4,
+) {
+    let base = start + index * EXTENSION_WORDS.downcast_truncate()
+    storage.store(index: base, value: value.coefficient(0).to_u32())
+    storage.store(index: base + 1, value: value.coefficient(1).to_u32())
+    storage.store(index: base + 2, value: value.coefficient(2).to_u32())
+    storage.store(index: base + 3, value: value.coefficient(3).to_u32())
+}
+
+#[inline(always)]
+fn tree_level_offset(_ width: u32, _ level: u32) -> u32 {
+    let mut offset: u32 = 0
+    let mut level_width = width
+    let mut cursor: u32 = 0
+    while cursor < level {
+        offset = offset + level_width
+        level_width = level_width / 2
+        cursor = cursor + 1
+    }
+    offset
+}
+
+#[inline(always)]
+fn fri_shift(_ round_index: u32) -> BabyBear {
+    let mut shift = BabyBear::from_u32(7)
+    let mut index: u32 = 0
+    while index < round_index {
+        shift = shift * shift
+        index = index + 1
+    }
+    shift
+}
+
+/// Initialize all validity channels and one lane-local schedule cursor.
+pub fn initialize_fri_prover_lane<
+    const ROUNDS: usize,
+    const EVALUATIONS: usize,
+    const TREE_NODES: usize,
+    const LANES: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    arena.store(index: arena_layout.progress + lane, value: 0)
+    if lane < EVALUATIONS.downcast_truncate() {
+        arena.store(index: arena_layout.evaluation_valid + lane, value: 0)
+    }
+    if lane < TREE_NODES.downcast_truncate() {
+        arena.store(index: arena_layout.node_valid + lane, value: 0)
+    }
+    if lane < ROUNDS.downcast_truncate() {
+        control.store(
+            index: control_layout.challenge_valid + lane,
+            value: 0,
+        )
+        control.store(index: control_layout.root_valid + lane, value: 0)
+        control.store(
+            index: control_layout.transcript_valid + lane + 1,
+            value: 0,
+        )
+    }
+    if lane == 0 {
+        control.store(index: control_layout.round_cursor, value: 0)
+        control.store(index: control_layout.round_valid, value: 0)
+        control.store(index: control_layout.complete, value: 0)
+    }
+}
+
+#[inline(always)]
+fn current_fri_round<
+    const ROUNDS: usize,
+    const ROUND_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+) -> FriProverStep {
+    let index = control.load(index: control_layout.round_cursor)
+    if index >= ROUNDS.downcast_truncate() { return invalid_step() }
+    let placement = load_fri_round_placement<ROUND_WORDS>(rounds, index)
+    FriProverStep {
+        valid: round_placement_valid(placement, index),
+        round_index: index,
+        local_step: 0,
+        placement: placement,
+    }
+}
+
+/// Reset lane-local phase state and validate the actor-owned current round.
+pub fn begin_fri_round_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    arena.store(index: arena_layout.progress + lane, value: 0)
+    if lane != 0 { return }
+
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    control.store(
+        index: control_layout.round_valid,
+        value: if scheduled.valid { 1 } else { 0 },
+    )
+    control.store(index: control_layout.complete, value: 0)
+    if scheduled.round_index < ROUNDS.downcast_truncate() {
+        control.store(
+            index: control_layout.challenge_valid + scheduled.round_index,
+            value: 0,
+        )
+        control.store(
+            index: control_layout.root_valid + scheduled.round_index,
+            value: 0,
+        )
+    }
+}
+
+/// Advance the current round's transcript-derived quartic challenge.
+pub fn advance_fri_challenge_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    let progress = arena_layout.progress + lane
+    let step = arena.load(index: progress)
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    if scheduled.valid && lane < POSEIDON2_LANES.downcast_truncate() {
+        let round_index = scheduled.round_index
+        advance_digest_squeeze_storage_lane(
+            arena,
+            arena_layout.state,
+            arena_layout.state_valid,
+            arena_layout.tails,
+            control,
+            control_layout.challenges
+                + round_index * EXTENSION_WORDS.downcast_truncate(),
+            control_layout.challenge_valid + round_index,
+            0,
+            lane,
+            step,
+            fri_fold_domain_tag(scheduled.placement.round),
+            load_digest(control, control_layout.transcripts, round_index),
+            control.load(index: control_layout.round_valid) == 1
+                && control.load(
+                    index: control_layout.transcript_valid + round_index,
+                ) == 1,
+        )
+    }
+    arena.store(index: progress, value: step + 1)
+}
+
+/// Fold all independent positive/negative evaluation pairs for one round.
+pub fn fold_fri_round_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let pair = invocation.global.x
+    if pair >= LANES.downcast_truncate() { return }
+    arena.store(index: arena_layout.progress + pair, value: 0)
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    if !scheduled.valid || pair >= scheduled.placement.output_width { return }
+
+    let placement = scheduled.placement
+    let round_index = scheduled.round_index
+    let previous = placement.output_offset - placement.input_width
+    let positive_index = if round_index == 0 { pair } else { previous + pair }
+    let negative_index = positive_index + placement.output_width
+    let source = if round_index == 0 {
+        arena_layout.composition
+    } else {
+        arena_layout.evaluations
+    }
+    let source_valid = if round_index == 0 {
+        arena.load(index: arena_layout.composition_valid) == 1
+    } else {
+        arena.load(index: arena_layout.evaluation_valid + positive_index) == 1
+            && arena.load(
+                index: arena_layout.evaluation_valid + negative_index,
+            ) == 1
+    }
+    let valid = control.load(index: control_layout.round_valid) == 1
+        && source_valid
+        && ext4_is_canonical(arena, source, positive_index)
+        && ext4_is_canonical(arena, source, negative_index)
+        && control.load(
+            index: control_layout.challenge_valid + round_index,
+        ) == 1
+    let point = fri_shift(round_index)
+        * BabyBear::two_adic_root(placement.input_log).pow_u32(pair)
+    let folded = if valid && !point.is_zero() {
+        fold_fri_pair_value_at_point(
+            load_ext4(arena, source, positive_index),
+            load_ext4(arena, source, negative_index),
+            load_ext4(control, control_layout.challenges, round_index),
+            point,
+        )
+    } else {
+        BabyBearExt4::zero()
+    }
+    let output = placement.output_offset + pair
+    store_ext4(arena, arena_layout.evaluations, output, folded)
+    arena.store(
+        index: arena_layout.evaluation_valid + output,
+        value: if valid && !point.is_zero() { 1 } else { 0 },
+    )
+}
+
+/// Initialize all leaf hashes for the current folded codeword.
+pub fn initialize_fri_leaf_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    let state = lane / POSEIDON2_LANES.downcast_truncate()
+    let field_lane = lane % POSEIDON2_LANES.downcast_truncate()
+    if !scheduled.valid || state >= scheduled.placement.output_width { return }
+
+    let output = scheduled.placement.output_offset + state
+    let permutation = begin_ext4_commitment_placement_tag(
+        fri_layer_row_domain_tag(scheduled.placement.round),
+        load_ext4(arena, arena_layout.evaluations, output),
+    )
+    initialize_poseidon2_permutation_lane(
+        arena,
+        arena_layout.state,
+        arena_layout.state_valid,
+        state,
+        field_lane,
+        ref permutation,
+        control.load(index: control_layout.round_valid) == 1
+            && arena.load(index: arena_layout.evaluation_valid + output) == 1,
+    )
+}
+
+/// Advance and materialize the current round's independent leaf hashes.
+pub fn advance_fri_leaf_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    let progress = arena_layout.progress + lane
+    let step = arena.load(index: progress)
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    let state = lane / POSEIDON2_LANES.downcast_truncate()
+    let field_lane = lane % POSEIDON2_LANES.downcast_truncate()
+    if scheduled.valid && state < scheduled.placement.output_width {
+        let transition =
+            <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+        if step < transition {
+            let advanced = advance_poseidon2_permutation_lane(
+                arena,
+                arena_layout.state,
+                arena_layout.state_valid,
+                state,
+                field_lane,
+                step,
+            )
+            if !advanced && field_lane == 0 {
+                arena.store(index: arena_layout.state_valid + state, value: 0)
+            }
+        } else if field_lane == 0 {
+            let node = scheduled.placement.tree_offset + state
+            let digest = poseidon2_permutation_digest(
+                arena,
+                arena_layout.state,
+                state,
+            )
+            let valid = arena.load(index: arena_layout.state_valid + state) == 1
+            store_digest(arena, arena_layout.tree, node, digest)
+            arena.store(
+                index: arena_layout.node_valid + node,
+                value: if valid { 1 } else { 0 },
+            )
+            if scheduled.placement.output_width == 1 {
+                store_digest(
+                    control,
+                    control_layout.roots,
+                    scheduled.round_index,
+                    digest,
+                )
+                control.store(
+                    index: control_layout.root_valid + scheduled.round_index,
+                    value: if valid { 1 } else { 0 },
+                )
+            }
+        }
+    }
+    arena.store(index: progress, value: step + 1)
+}
+
+/// Reset lane-local progress before the ordered Merkle reduction.
+pub fn begin_fri_tree_lane<
+    const LANES: usize,
+    const ARENA_WORDS: usize,
+>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane < LANES.downcast_truncate() {
+        arena.store(index: arena_layout.progress + lane, value: 0)
+    }
+}
+
+/// Place the fixed ordered Merkle DAG over repeated queue submissions.
+pub fn advance_fri_tree_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    let progress = arena_layout.progress + lane
+    let step = arena.load(index: progress)
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    let tree_depth = if scheduled.valid {
+        scheduled.placement.input_log - 1
+    } else {
+        0
+    }
+    let phase_steps = tree_depth * LEAF_STEPS.downcast_truncate()
+    if scheduled.valid && step < phase_steps {
+        let level = step / LEAF_STEPS.downcast_truncate()
+        let level_step = step % LEAF_STEPS.downcast_truncate()
+        let child_width = scheduled.placement.output_width >> level
+        let parent_width = child_width / 2
+        let state = lane / POSEIDON2_LANES.downcast_truncate()
+        let field_lane = lane % POSEIDON2_LANES.downcast_truncate()
+        if state < parent_width {
+            let child_offset = tree_level_offset(
+                scheduled.placement.output_width,
+                level,
+            )
+            let parent_offset = child_offset + child_width
+            let left_node = scheduled.placement.tree_offset
+                + child_offset
+                + state * 2
+            let right_node = left_node + 1
+            let parent_node = scheduled.placement.tree_offset
+                + parent_offset
+                + state
+            if level_step == 0 {
+                let permutation = begin_compression_placement(
+                    load_digest(arena, arena_layout.tree, left_node),
+                    load_digest(arena, arena_layout.tree, right_node),
+                )
+                initialize_poseidon2_permutation_lane(
+                    arena,
+                    arena_layout.state,
+                    arena_layout.state_valid,
+                    state,
+                    field_lane,
+                    ref permutation,
+                    arena.load(index: arena_layout.node_valid + left_node) == 1
+                        && arena.load(
+                            index: arena_layout.node_valid + right_node,
+                        ) == 1,
+                )
+            } else {
+                let hash_step = level_step - 1
+                let transition =
+                    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+                if hash_step < transition {
+                    let advanced = advance_poseidon2_permutation_lane(
+                        arena,
+                        arena_layout.state,
+                        arena_layout.state_valid,
+                        state,
+                        field_lane,
+                        hash_step,
+                    )
+                    if !advanced && field_lane == 0 {
+                        arena.store(
+                            index: arena_layout.state_valid + state,
+                            value: 0,
+                        )
+                    }
+                } else if field_lane == 0 {
+                    let digest = poseidon2_permutation_digest(
+                        arena,
+                        arena_layout.state,
+                        state,
+                    )
+                    let valid = arena.load(
+                        index: arena_layout.state_valid + state,
+                    ) == 1
+                    store_digest(arena, arena_layout.tree, parent_node, digest)
+                    arena.store(
+                        index: arena_layout.node_valid + parent_node,
+                        value: if valid { 1 } else { 0 },
+                    )
+                    if level + 1 == tree_depth {
+                        store_digest(
+                            control,
+                            control_layout.roots,
+                            scheduled.round_index,
+                            digest,
+                        )
+                        control.store(
+                            index: control_layout.root_valid
+                                + scheduled.round_index,
+                            value: if valid { 1 } else { 0 },
+                        )
+                    }
+                }
+            }
+        }
+    }
+    arena.store(index: progress, value: step + 1)
+}
+
+/// Reset lane-local progress before transcript binding.
+pub fn begin_fri_binding_lane<
+    const LANES: usize,
+    const ARENA_WORDS: usize,
+>(
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ invocation: ComputeInvocation,
+) {
+    begin_fri_tree_lane<LANES, ARENA_WORDS>(arena, arena_layout, invocation)
+}
+
+/// Bind the ordered layer root into the successor transcript.
+pub fn advance_fri_binding_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let lane = invocation.global.x
+    if lane >= LANES.downcast_truncate() { return }
+    let progress = arena_layout.progress + lane
+    let step = arena.load(index: progress)
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    if scheduled.valid && lane < POSEIDON2_LANES.downcast_truncate() {
+        let round_index = scheduled.round_index
+        advance_digest_binding_storage_lane(
+            arena,
+            arena_layout.state,
+            arena_layout.state_valid,
+            arena_layout.tails,
+            control,
+            control_layout.transcripts
+                + (round_index + 1) * DIGEST_FIELDS.downcast_truncate(),
+            control_layout.transcript_valid + round_index + 1,
+            0,
+            lane,
+            step,
+            fri_layer_transcript_domain_tag(scheduled.placement.round),
+            load_digest(control, control_layout.transcripts, round_index),
+            load_digest(control, control_layout.roots, round_index),
+            control.load(index: control_layout.round_valid) == 1
+                && control.load(
+                    index: control_layout.transcript_valid + round_index,
+                ) == 1
+                && control.load(
+                    index: control_layout.root_valid + round_index,
+                ) == 1,
+        )
+    }
+    arena.store(index: progress, value: step + 1)
+}
+
+/// Advance the Fe-owned round cursor after every phase has completed.
+pub fn finish_fri_round_lane<
+    const ROUNDS: usize,
+    const ROUND_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    if invocation.global.x != 0 { return }
+    let scheduled = current_fri_round<ROUNDS, ROUND_WORDS, CONTROL_WORDS>(
+        rounds,
+        control,
+        control_layout,
+    )
+    if scheduled.round_index >= ROUNDS.downcast_truncate() {
+        control.store(index: control_layout.complete, value: 0)
+        return
+    }
+    let next = scheduled.round_index + 1
+    let valid = scheduled.valid
+        && control.load(index: control_layout.round_valid) == 1
+        && control.load(
+            index: control_layout.challenge_valid + scheduled.round_index,
+        ) == 1
+        && control.load(
+            index: control_layout.root_valid + scheduled.round_index,
+        ) == 1
+        && control.load(
+            index: control_layout.transcript_valid + next,
+        ) == 1
+    control.store(
+        index: control_layout.complete,
+        value: if next == ROUNDS.downcast_truncate() && valid { 1 } else { 0 },
+    )
+    control.store(index: control_layout.round_valid, value: 0)
+    control.store(index: control_layout.round_cursor, value: next)
+}
+
+/// Advance one physical lane through the complete schedule-derived FRI proof.
+pub fn advance_fri_prover_lane<
+    const ROUNDS: usize,
+    const LANES: usize,
+    const ROUND_WORDS: usize,
+    const ARENA_WORDS: usize,
+    const CONTROL_WORDS: usize,
+>(
+    _ rounds: StorageBuffer<u32, ROUND_WORDS>,
+    _ arena: StorageBuffer<u32, ARENA_WORDS>,
+    _ arena_layout: FriProverArenaLayout,
+    _ control: StorageBuffer<u32, CONTROL_WORDS>,
+    _ control_layout: FriProverControlLayout,
+    _ invocation: ComputeInvocation,
+) {
+    let global_lane = invocation.global.x
+    if global_lane >= LANES.downcast_truncate() { return }
+    let progress_index = arena_layout.progress + global_lane
+    let step = arena.load(index: progress_index)
+    let scheduled = locate_step<ROUNDS, ROUND_WORDS>(rounds, step)
+    if !scheduled.valid {
+        arena.store(index: progress_index, value: step + 1)
+        return
+    }
+
+    let placement = scheduled.placement
+    let round_index = scheduled.round_index
+    let local_step = scheduled.local_step
+    let transcript = load_digest(
+        control,
+        control_layout.transcripts,
+        round_index,
+    )
+    let challenge_end: u32 = DIGEST_SQUEEZE_STEPS.downcast_truncate()
+    let fold_step = challenge_end
+    let leaf_start = fold_step + 1
+    let tree_start = leaf_start + LEAF_STEPS.downcast_truncate()
+    let tree_depth = placement.input_log - 1
+    let binding_start = tree_start
+        + tree_depth * LEAF_STEPS.downcast_truncate()
+
+    if local_step < challenge_end {
+        if global_lane < POSEIDON2_LANES.downcast_truncate() {
+            advance_digest_squeeze_storage_lane(
+                arena,
+                arena_layout.state,
+                arena_layout.state_valid,
+                arena_layout.tails,
+                control,
+                control_layout.challenges
+                    + round_index * EXTENSION_WORDS.downcast_truncate(),
+                control_layout.challenge_valid + round_index,
+                0,
+                global_lane,
+                local_step,
+                fri_fold_domain_tag(placement.round),
+                transcript,
+                control.load(
+                    index: control_layout.transcript_valid + round_index,
+                ) == 1,
+            )
+        }
+    } else if local_step == fold_step {
+        if global_lane < placement.output_width {
+            let pair = global_lane
+            let previous = placement.output_offset - placement.input_width
+            let positive_index = if round_index == 0 {
+                pair
+            } else {
+                previous + pair
+            }
+            let negative_index = positive_index + placement.output_width
+            let source = if round_index == 0 {
+                arena_layout.composition
+            } else {
+                arena_layout.evaluations
+            }
+            let source_valid = if round_index == 0 {
+                arena.load(index: arena_layout.composition_valid) == 1
+            } else {
+                arena.load(
+                    index: arena_layout.evaluation_valid + positive_index,
+                ) == 1 && arena.load(
+                    index: arena_layout.evaluation_valid + negative_index,
+                ) == 1
+            }
+            let challenge = load_ext4(
+                control,
+                control_layout.challenges,
+                round_index,
+            )
+            let valid = source_valid
+                && ext4_is_canonical(arena, source, positive_index)
+                && ext4_is_canonical(arena, source, negative_index)
+                && control.load(
+                    index: control_layout.challenge_valid + round_index,
+                ) == 1
+            let point = fri_shift(round_index)
+                * BabyBear::two_adic_root(placement.input_log).pow_u32(pair)
+            let folded = if valid && !point.is_zero() {
+                fold_fri_pair_value_at_point(
+                    load_ext4(arena, source, positive_index),
+                    load_ext4(arena, source, negative_index),
+                    challenge,
+                    point,
+                )
+            } else {
+                BabyBearExt4::zero()
+            }
+            let output = placement.output_offset + pair
+            store_ext4(arena, arena_layout.evaluations, output, folded)
+            arena.store(
+                index: arena_layout.evaluation_valid + output,
+                value: if valid && !point.is_zero() { 1 } else { 0 },
+            )
+        }
+    } else if local_step < tree_start {
+        let relative = local_step - leaf_start
+        let state = global_lane / POSEIDON2_LANES.downcast_truncate()
+        let field_lane = global_lane % POSEIDON2_LANES.downcast_truncate()
+        if state < placement.output_width {
+            let output = placement.output_offset + state
+            if relative == 0 {
+                let permutation = begin_ext4_commitment_placement_tag(
+                    fri_layer_row_domain_tag(placement.round),
+                    load_ext4(arena, arena_layout.evaluations, output),
+                )
+                initialize_poseidon2_permutation_lane(
+                    arena,
+                    arena_layout.state,
+                    arena_layout.state_valid,
+                    state,
+                    field_lane,
+                    ref permutation,
+                    arena.load(
+                        index: arena_layout.evaluation_valid + output,
+                    ) == 1,
+                )
+                if field_lane == 0 {
+                    control.store(
+                        index: control_layout.root_valid + round_index,
+                        value: 0,
+                    )
+                }
+            } else {
+                let hash_step = relative - 1
+                let transition =
+                    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+                if hash_step < transition {
+                    let advanced = advance_poseidon2_permutation_lane(
+                        arena,
+                        arena_layout.state,
+                        arena_layout.state_valid,
+                        state,
+                        field_lane,
+                        hash_step,
+                    )
+                    if !advanced && field_lane == 0 {
+                        arena.store(
+                            index: arena_layout.state_valid + state,
+                            value: 0,
+                        )
+                    }
+                } else if field_lane == 0 {
+                    let node = placement.tree_offset + state
+                    let digest = poseidon2_permutation_digest(
+                        arena,
+                        arena_layout.state,
+                        state,
+                    )
+                    let valid = arena.load(
+                        index: arena_layout.state_valid + state,
+                    ) == 1
+                    store_digest(arena, arena_layout.tree, node, digest)
+                    arena.store(
+                        index: arena_layout.node_valid + node,
+                        value: if valid { 1 } else { 0 },
+                    )
+                    if placement.output_width == 1 {
+                        store_digest(
+                            control,
+                            control_layout.roots,
+                            round_index,
+                            digest,
+                        )
+                        control.store(
+                            index: control_layout.root_valid + round_index,
+                            value: if valid { 1 } else { 0 },
+                        )
+                    }
+                }
+            }
+        }
+    } else if local_step < binding_start {
+        let relative = local_step - tree_start
+        let level = relative / LEAF_STEPS.downcast_truncate()
+        let level_step = relative % LEAF_STEPS.downcast_truncate()
+        let child_width = placement.output_width >> level
+        let parent_width = child_width / 2
+        let state = global_lane / POSEIDON2_LANES.downcast_truncate()
+        let field_lane = global_lane % POSEIDON2_LANES.downcast_truncate()
+        if state < parent_width {
+            let child_offset = tree_level_offset(placement.output_width, level)
+            let parent_offset = child_offset + child_width
+            let left_node = placement.tree_offset + child_offset + state * 2
+            let right_node = left_node + 1
+            let parent_node = placement.tree_offset + parent_offset + state
+            if level_step == 0 {
+                let permutation = begin_compression_placement(
+                    load_digest(arena, arena_layout.tree, left_node),
+                    load_digest(arena, arena_layout.tree, right_node),
+                )
+                initialize_poseidon2_permutation_lane(
+                    arena,
+                    arena_layout.state,
+                    arena_layout.state_valid,
+                    state,
+                    field_lane,
+                    ref permutation,
+                    arena.load(
+                        index: arena_layout.node_valid + left_node,
+                    ) == 1 && arena.load(
+                        index: arena_layout.node_valid + right_node,
+                    ) == 1,
+                )
+            } else {
+                let hash_step = level_step - 1
+                let transition =
+                    <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
+                if hash_step < transition {
+                    let advanced = advance_poseidon2_permutation_lane(
+                        arena,
+                        arena_layout.state,
+                        arena_layout.state_valid,
+                        state,
+                        field_lane,
+                        hash_step,
+                    )
+                    if !advanced && field_lane == 0 {
+                        arena.store(
+                            index: arena_layout.state_valid + state,
+                            value: 0,
+                        )
+                    }
+                } else if field_lane == 0 {
+                    let digest = poseidon2_permutation_digest(
+                        arena,
+                        arena_layout.state,
+                        state,
+                    )
+                    let valid = arena.load(
+                        index: arena_layout.state_valid + state,
+                    ) == 1
+                    store_digest(
+                        arena,
+                        arena_layout.tree,
+                        parent_node,
+                        digest,
+                    )
+                    arena.store(
+                        index: arena_layout.node_valid + parent_node,
+                        value: if valid { 1 } else { 0 },
+                    )
+                    if level + 1 == tree_depth {
+                        store_digest(
+                            control,
+                            control_layout.roots,
+                            round_index,
+                            digest,
+                        )
+                        control.store(
+                            index: control_layout.root_valid + round_index,
+                            value: if valid { 1 } else { 0 },
+                        )
+                    }
+                }
+            }
+        }
+    } else {
+        let relative = local_step - binding_start
+        if global_lane < POSEIDON2_LANES.downcast_truncate() {
+            advance_digest_binding_storage_lane(
+                arena,
+                arena_layout.state,
+                arena_layout.state_valid,
+                arena_layout.tails,
+                control,
+                control_layout.transcripts
+                    + (round_index + 1) * DIGEST_FIELDS.downcast_truncate(),
+                control_layout.transcript_valid + round_index + 1,
+                0,
+                global_lane,
+                relative,
+                fri_layer_transcript_domain_tag(placement.round),
+                transcript,
+                load_digest(control, control_layout.roots, round_index),
+                control.load(
+                    index: control_layout.transcript_valid + round_index,
+                ) == 1 && control.load(
+                    index: control_layout.root_valid + round_index,
+                ) == 1,
+            )
+        }
+    }
+
+    arena.store(index: progress_index, value: step + 1)
+}

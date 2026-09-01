@@ -1,17 +1,16 @@
 //! Executed gate for Fe-derived actor pass cycles.
 //!
 //! Two authored compute phases form one nominal three-round body. The second
-//! phase has an inner repeat of two, so correct interleaving leaves the receipt
-//! at `112233`. Executing each pass's outer repeat independently cannot produce
-//! that value.
+//! phase tapers its inner repeats from three to two to one, so correct
+//! interleaving leaves the receipt at `111223`. Executing each pass's outer
+//! repeat independently cannot produce that value.
 
 use std::path::{Path, PathBuf};
 
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
-    resolve_web_entry,
+    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
 use url::Url;
@@ -101,7 +100,14 @@ fn nominal_cycle_executes_the_complete_actor_body_in_storage_order() {
     assert_eq!(compute[0].source_entry, "begin_round");
     assert_eq!(compute[1].source_entry, "record_round");
     assert_eq!(compute[0].repeat, 1);
-    assert_eq!(compute[1].repeat, 2);
+    assert_eq!(compute[1].repeat, 3);
+    assert_eq!(
+        compute[1].taper,
+        Some(fe_codegen::WebDispatchTaper {
+            shifts: [0, 0, 0],
+            repeat_decrement: 1,
+        })
+    );
     let cycle = compute[0].cycle.expect("first cycle member");
     assert_eq!(cycle.repeat, 3);
     assert_eq!(compute[1].cycle, Some(cycle));
@@ -208,16 +214,18 @@ fn nominal_cycle_executes_the_complete_actor_body_in_storage_order() {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("actor pass cycle execution"),
     });
-    for _ in 0..cycle.repeat {
+    for cycle_iteration in 0..cycle.repeat {
         for (stage, pipeline) in compute.iter().zip(&pipelines) {
             let dispatch = stage.dispatch.expect("fixed compute dispatch");
+            let repeat = stage.repeat
+                - cycle_iteration * stage.taper.map_or(0, |taper| taper.repeat_decrement);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("compiler-derived actor cycle member"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            for _ in 0..stage.repeat {
+            for _ in 0..repeat {
                 pass.dispatch_workgroups(dispatch[0], dispatch[1], dispatch[2]);
             }
         }
@@ -241,7 +249,7 @@ fn nominal_cycle_executes_the_complete_actor_body_in_storage_order() {
         .expect("map callback should fire")
         .expect("test-only staging buffer should map");
     let data = slice.get_mapped_range();
-    assert_eq!(words(&data), vec![3, 112233]);
+    assert_eq!(words(&data), vec![3, 111223]);
     drop(data);
     staging.unmap();
 }

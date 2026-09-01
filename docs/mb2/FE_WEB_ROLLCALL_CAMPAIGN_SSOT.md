@@ -3121,6 +3121,39 @@ fallback. The semantic receipts are:
    cold compilation time make semantics-preserving pass fusion through the
    typed factor/workgroup interpreter an immediate practicality slice. Physical
    Radeon execution remains a separate required gate.
+
+   The production FRI producer now interprets `FriSchedule<1, 13>` as one
+   Fe-owned actor cycle over an 8,192-value quartic BabyBear codeword. It
+   derives every transcript challenge, factor-2 fold, domain-tagged Poseidon2
+   leaf, ordered Merkle parent, layer root, and successor transcript through
+   thirteen rounds, ending at one retained value. `CycledDispatch` preserves
+   the semantic phase body, while the new generic `TaperedDispatch` placement
+   halves active workgroups with each round and contracts the retained tree
+   work by the exact per-level step count. The fixed host reads only this
+   compiler-derived placement metadata. It contains no FRI round table,
+   challenge code, tree cursor, or proof-specific scheduling branch. The
+   physical work count falls from 10,796,045 padded workgroups to 605,295,
+   a 17.84-fold contraction, without changing the staged Fe kernels.
+
+   The focused release structural gate compiled all fourteen passes, parsed
+   and Naga-validated every browser WGSL module, checked the exact taper
+   metadata and work count, and passed 1/1 in 332.78 seconds. `fe web dev`
+   emitted 2,195,973 WGSL bytes and zero Wasm bytes for the focused page. A
+   separate generic three-cycle taper gate executed on llvmpipe without a skip
+   and returned exact storage receipt `[3, 111223]`. A
+   clean external Linux Chrome 149 WebGPU process executed the complete graph
+   to `ready` in `webgpu` mode and painted exact RGBA `[0, 255, 0, 255]`
+   without device loss. The observed warm browser run was approximately seven
+   seconds, but monopolized the machine's GPU during that interval. This green
+   receipt proves all actor-owned schedule, canonical-field, challenge, folded
+   evaluation, Merkle-root, transcript, and final-round validity channels. It
+   is not yet the independent Plonky3 buffer comparison: the focused actor
+   still seeds a deterministic synthetic composition codeword and exposes only
+   its completion color. Next add generic cycle backpressure, read back and
+   compare the challenges, roots, transcripts, and folded values against the
+   independent recurrence, then attach the real production composition and
+   opening/receipt stages.
+
    The first complete 49-pass replay exposed a compiler semantic defect before
    this gate could be claimed: Runtime MIR aggregate facts retained the first
    structural value of a reassigned local, so an inlined quartic constraint

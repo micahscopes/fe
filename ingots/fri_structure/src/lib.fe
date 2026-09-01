@@ -509,7 +509,7 @@ pub struct FriRoundPlacement {
 }
 impl Copy for FriRoundPlacement {}
 
-fn invalid_round_placement() -> FriRoundPlacement {
+const fn invalid_round_placement() -> FriRoundPlacement {
     FriRoundPlacement {
         valid: false,
         index: 0,
@@ -528,13 +528,13 @@ fn invalid_round_placement() -> FriRoundPlacement {
 }
 
 pub trait FriSchedulePlacement {
-    fn fri_round_placement(_ index: u32) -> FriRoundPlacement
+    const fn fri_round_placement(_ index: u32) -> FriRoundPlacement
 }
 
 impl<const NEXT_ROUND: u32> FriSchedulePlacement
     for FriScheduleDone<NEXT_ROUND>
 {
-    fn fri_round_placement(_ index: u32) -> FriRoundPlacement {
+    const fn fri_round_placement(_ index: u32) -> FriRoundPlacement {
         invalid_round_placement()
     }
 }
@@ -554,7 +554,7 @@ impl<
     PAIR_DEPTH,
     Tail,
 > {
-    fn fri_round_placement(_ index: u32) -> FriRoundPlacement {
+    const fn fri_round_placement(_ index: u32) -> FriRoundPlacement {
         if index == 0 {
             FriRoundPlacement {
                 valid: true,

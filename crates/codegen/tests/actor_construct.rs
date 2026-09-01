@@ -22,8 +22,7 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
     WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
-    actor_gpu_program, actor_web_entry,
-    compile_runtime_package_spirv_compute_with_resources,
+    actor_gpu_program, actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
@@ -406,6 +405,7 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
             repeat: 1,
+            taper: None,
             cycle: None,
             invocation_context: false,
         }
@@ -561,6 +561,7 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
             workgroup_size: [2, 2, 1],
             dispatch: [2, 2, 1],
             repeat: 1,
+            taper: None,
             cycle: None,
             invocation_context: true,
         }
@@ -646,6 +647,7 @@ fn repeated_dispatch_is_derived_from_its_nominal_fe_policy() {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
             repeat: 4,
+            taper: None,
             cycle: None,
             invocation_context: false,
         }
@@ -695,6 +697,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
             repeat: 1,
+            taper: None,
             cycle: Some(cycle.clone()),
             invocation_context: false,
         }
@@ -704,7 +707,11 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
-            repeat: 2,
+            repeat: 3,
+            taper: Some(fe_codegen::WebDispatchTaper {
+                shifts: [0, 0, 0],
+                repeat_decrement: 1,
+            }),
             cycle: Some(cycle),
             invocation_context: false,
         }
@@ -719,7 +726,14 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     let passes = &bundle.manifest.passes;
     assert_eq!(passes.len(), 3);
     assert_eq!(passes[0].repeat, 1);
-    assert_eq!(passes[1].repeat, 2);
+    assert_eq!(passes[1].repeat, 3);
+    assert_eq!(
+        passes[1].taper,
+        Some(fe_codegen::WebDispatchTaper {
+            shifts: [0, 0, 0],
+            repeat_decrement: 1,
+        })
+    );
     let first_cycle = passes[0].cycle.expect("first cycle member");
     let second_cycle = passes[1].cycle.expect("second cycle member");
     assert_eq!(first_cycle.group, 0);
@@ -731,6 +745,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     assert_eq!(encoded["passes"][0]["cycle"]["group"], 0);
     assert_eq!(encoded["passes"][0]["cycle"]["repeat"], 3);
     assert_eq!(encoded["passes"][1]["cycle"], encoded["passes"][0]["cycle"]);
+    assert_eq!(encoded["passes"][1]["taper"]["repeat_decrement"], 1);
     assert!(encoded["passes"][2].get("cycle").is_none());
 }
 

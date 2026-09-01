@@ -1609,17 +1609,49 @@ export class FeSurfaceElement extends HTMLElement {
           );
         }
       }
-      const encoder = device.createCommandEncoder();
+      let encoder = device.createCommandEncoder();
+      let encoded = false;
       let texture = null;
       let rendered = false;
-      const executeRecord = (record) => {
+      const submitEncoder = () => {
+        if (!encoded) return;
+        device.queue.submit([encoder.finish()]);
+        encoder = device.createCommandEncoder();
+        encoded = false;
+      };
+      const executeRecord = (record, cycleIteration = null) => {
         if (record.pass.layout.mode === "compute") {
+          let dispatch = record.pass.dispatch;
+          if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
+          let repeat = record.pass.repeat ?? 1;
+          const taper = record.pass.taper;
+          if (taper !== undefined && taper !== null) {
+            if (!Number.isSafeInteger(cycleIteration) || cycleIteration < 0) {
+              throw new Error("fe render runtime: tapered dispatch escaped its actor cycle");
+            }
+            if (
+              !Array.isArray(taper.shifts) || taper.shifts.length !== 3 ||
+              taper.shifts.some((shift) => !Number.isSafeInteger(shift) || shift < 0 || shift > 31) ||
+              !Number.isSafeInteger(taper.repeat_decrement) || taper.repeat_decrement < 0
+            ) {
+              throw new Error("fe render runtime: invalid compiler-derived dispatch taper");
+            }
+            dispatch = dispatch.map((dimension, axis) => {
+              const exponent = cycleIteration * taper.shifts[axis];
+              if (exponent >= 31) return 1;
+              return Math.max(1, Math.ceil(dimension / (2 ** exponent)));
+            });
+            repeat -= cycleIteration * taper.repeat_decrement;
+            if (repeat < 0) {
+              throw new Error("fe render runtime: dispatch taper exhausted before cycle completion");
+            }
+            if (repeat === 0) return;
+          } else if (cycleIteration !== null && record.pass.taper !== undefined) {
+            throw new Error("fe render runtime: malformed compiler-derived dispatch taper");
+          }
           const compute = encoder.beginComputePass();
           compute.setPipeline(record.pipeline);
           if (record.bindGroup) compute.setBindGroup(0, record.bindGroup);
-          const dispatch = record.pass.dispatch;
-          if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
-          const repeat = record.pass.repeat ?? 1;
           if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > 65535) {
             throw new Error("fe render runtime: invalid compiler-derived compute repeat count");
           }
@@ -1627,6 +1659,7 @@ export class FeSurfaceElement extends HTMLElement {
             compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
           }
           compute.end();
+          encoded = true;
         } else {
           texture ??= context.getCurrentTexture();
           const render = encoder.beginRenderPass({
@@ -1647,6 +1680,7 @@ export class FeSurfaceElement extends HTMLElement {
           render.draw(rasterDrawVertexCount(record.pass));
           render.end();
           rendered = true;
+          encoded = true;
         }
       };
       let passIndex = 0;
@@ -1676,10 +1710,16 @@ export class FeSurfaceElement extends HTMLElement {
           }
           cycleEnd += 1;
         }
+        // A cycle is a compiler-derived dependency body. Queue submissions are
+        // ordered, so bounding each iteration in its own command buffer keeps
+        // the semantic phase order while avoiding protocol-sized encoders that
+        // destabilize browser WebGPU implementations.
+        submitEncoder();
         for (let iteration = 0; iteration < cycle.repeat; iteration += 1) {
           for (let memberIndex = passIndex; memberIndex < cycleEnd; memberIndex += 1) {
-            executeRecord(passRecords[memberIndex]);
+            executeRecord(passRecords[memberIndex], iteration);
           }
+          submitEncoder();
         }
         passIndex = cycleEnd;
       }
@@ -1696,7 +1736,8 @@ export class FeSurfaceElement extends HTMLElement {
             capture.format,
           )
         : null;
-      device.queue.submit([encoder.finish()]);
+      if (readback) encoded = true;
+      submitEncoder();
       return readback;
     }
     const { device, pipeline, bindGroup, uniformBuffer } = this._gpu;

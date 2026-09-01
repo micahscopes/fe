@@ -6,6 +6,7 @@ use std::webgpu::{
     GpuProgram as Program,
     RepeatedDispatch as Repeat,
     StorageBuffer as Shared,
+    TaperedDispatch as Taper,
     Workgroup as Threads,
     WebGpuBackend,
 }
@@ -23,7 +24,14 @@ actor CycledReceipt uses (Program<WebGpuBackend>) {
     }
 
     fn record_round(self) uses (
-        Kernel<Threads<1, 1, 1>, Cycle<ProtocolRound, Repeat<1, 1, 1, 2>, 3>>,
+        Kernel<
+            Threads<1, 1, 1>,
+            Cycle<
+                ProtocolRound,
+                Taper<Repeat<1, 1, 1, 3>, 0, 0, 0, 1>,
+                3,
+            >,
+        >,
     ) {
         let round = self.receipt.load(index: 0)
         let digits = self.receipt.load(index: 1)
@@ -32,7 +40,7 @@ actor CycledReceipt uses (Program<WebGpuBackend>) {
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
         let receipt = self.receipt.load(index: 1)
-        let color: u32 = if receipt == 112233 { 4278255360 } else { 4294901760 }
+        let color: u32 = if receipt == 111223 { 4278255360 } else { 4294901760 }
         color.downcast_truncate()
     }
 }
