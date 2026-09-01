@@ -3181,6 +3181,54 @@ fallback. The semantic receipts are:
    size tuning and user-observed Radeon responsiveness open rather than
    trading away exactness or claiming smoothness from the green pixel.
 
+   The independent production-buffer gate is now closed, and it materially
+   corrected the meaning of that green pixel. A generic CDP observer, which
+   knows only caller-selected compiler-declared `U32` resource names, copied
+   the complete `round_placements`, `arena`, and `control` buffers from an
+   external Chrome 149 WebGPU run. The first raw comparison found that the
+   deterministic composition codeword was exact but the first nontrivial FRI
+   fold differed from an independently implemented Plonky3 recurrence. The
+   browser actor had reached its own completion state while almost every
+   nonzero exponent used a zero two-adic root. This is precisely why actor
+   completion is retained as a liveness signal, never an exactness oracle.
+
+   A minimized ordinary Fe root-power expression localized the defect to
+   Sonatina's structured SPIR-V loop emission. When a loop header phi had
+   several predecessors outside the loop, the emitter selected one as a
+   synthetic preheader and unconditionally replayed its edge after the
+   preceding structured branch. That overwrote the path-specific value emitted
+   by a sibling branch that exited another loop into the same header. The fix
+   emits conventional preheader initialization only when there is exactly one
+   outside predecessor. With several, the preceding structured arms retain
+   ownership of their exact edges. A focused pure-lowering regression models
+   the direct-edge plus sibling-loop-exit topology and Naga-validates the
+   resulting WGSL. It passes in both debug and release. The BabyBear oracle
+   also exercises dynamic log-13 root powers for exponents `0`, `1`, `2`, `3`,
+   `17`, and `4095` through zero-import Wasm and browser SPIR-V; its complete
+   release suite passes 6/6.
+
+   A fresh-cache rebuild with the corrected compiler completed in 304.36
+   seconds and emitted fourteen passes, 2,193,827 WGSL bytes, and zero Wasm
+   bytes. The external Chrome run completed in `webgpu` mode with no console
+   error or device loss. Its immutable raw receipt contains 169 placement
+   words, 421,759 arena words, and 311 control words, totaling 1,688,956 bytes.
+   Their SHA-256 digests are respectively
+   `d459a6f4bc85ec2906b17c38efb7b2b87e67fb11ed3fff2f292a5c0da690c5a0`,
+   `85d6a73c95f4e9eac3cc5a3a74c1ed2d11f42da27f45b7526919d997d93a84ed`,
+   and
+   `d9aaa882cccc0dac84ba0ae364f7c0f8ac2b13945fea0b224900983e25a0ca37`.
+   The ignored release gate
+   `production_fri_browser_buffers_match_independent_plonky3_recurrence`
+   then passed 1/1. It compares all 169 derived placement words, 32,768
+   composition words, 32,764 folded-evaluation words, 8,191 fold-validity
+   words, 130,952 ordered Merkle words, 16,369 node-validity words, and all
+   311 challenge, root, transcript, and completion-control words. This is the
+   first independent exactness receipt for the complete production-sized
+   thirteen-round browser FRI actor. Its input remains a deterministic
+   synthetic composition codeword, so connecting the production AIR
+   composition and authenticated opening/receipt stages remains the next
+   protocol boundary.
+
    The first complete 49-pass replay exposed a compiler semantic defect before
    this gate could be claimed: Runtime MIR aggregate facts retained the first
    structural value of a reassigned local, so an inlined quartic constraint

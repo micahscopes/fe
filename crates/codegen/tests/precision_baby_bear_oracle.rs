@@ -376,6 +376,21 @@ fn baby_bear_word_field_matches_independent_u64_oracle() {
                 "root must have exact order 2^{log_order}",
             );
         }
+        if log_order == 13 {
+            for exponent in [0, 1, 2, 3, 17, 4_095] {
+                assert_eq!(
+                    call(
+                        &mut store,
+                        &instance,
+                        "baby_bear_two_adic_root_power",
+                        &[log_order, exponent],
+                        1,
+                    ),
+                    vec![pow_mod(u64::from(root), exponent)],
+                    "dynamic root power mismatch for exponent {exponent}",
+                );
+            }
+        }
     }
     assert_eq!(
         call(
@@ -422,6 +437,39 @@ fn baby_bear_multiply_lowers_to_browser_u32_spirv() {
     validator
         .validate(&module)
         .expect("BabyBear WGSL should validate in the browser profile");
+}
+
+#[test]
+fn baby_bear_dynamic_two_adic_root_power_lowers_to_browser_spirv() {
+    let db = initialized_db();
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, fixture_url())
+        .expect("BabyBear oracle fixture ingot");
+    let top_mod = ingot.root_mod(&db);
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "baby_bear_two_adic_root_power")
+            .expect("dynamic BabyBear root power should build a runtime package");
+    let artifact =
+        fe_codegen::compile_runtime_package_spirv_with_workgroup(&db, &package, [1, 1, 1])
+            .expect("dynamic BabyBear root power should lower to SPIR-V");
+    let wgsl = artifact
+        .wgsl
+        .expect("Naga should emit dynamic BabyBear root-power WGSL");
+    assert!(
+        !wgsl.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("var edge_") && line.contains("_1:")
+        }),
+        "a loop header with several outside predecessors must not duplicate one outside phi edge:\n{wgsl}",
+    );
+    let module = naga::front::wgsl::parse_str(&wgsl).expect("root-power WGSL should parse");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .expect("root-power WGSL should validate in the browser profile");
 }
 
 #[test]

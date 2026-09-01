@@ -323,3 +323,7 @@ pub fn baby_bear_pow(_ value: u32, _ exponent: u32) -> u32 {
 pub fn baby_bear_two_adic_root(_ log_order: u32) -> u32 {
     BabyBear::two_adic_root(log_order).to_u32()
 }
+
+pub fn baby_bear_two_adic_root_power(_ log_order: u32, _ exponent: u32) -> u32 {
+    BabyBear::two_adic_root(log_order).pow_u32(exponent).to_u32()
+}
