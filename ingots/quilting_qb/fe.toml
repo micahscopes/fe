@@ -1,0 +1,8 @@
+[ingot]
+name = "quilting_qb"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../fe-worktrees/mb2/ingots/core" }
+quilting_domain = { path = "../quilting_domain" }
+quilting_quaternion = { path = "../quilting_quaternion" }
