@@ -447,6 +447,7 @@ pub enum WebActorStageKind {
         workgroup_size: [u32; 3],
         dispatch: [u32; 3],
         repeat: u32,
+        cycle: Option<WebActorPassCycle>,
         invocation_context: bool,
     },
     /// Authored vertex behavior. The payload tree is derived from the role's
@@ -462,6 +463,15 @@ pub enum WebActorStageKind {
     RasterFragment {
         varying: CanonicalType,
     },
+}
+
+/// One consecutive actor pass body repeated as a unit. `group` is retained
+/// only while compiling the actor graph; the transport receives a compact
+/// compiler-assigned group number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebActorPassCycle {
+    pub group: String,
+    pub repeat: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,7 +542,7 @@ fn compute_stage_shape(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
     role_path: PathId<'_>,
-) -> Result<([u32; 3], [u32; 3], u32), WebBundleError> {
+) -> Result<([u32; 3], [u32; 3], u32, Option<WebActorPassCycle>), WebBundleError> {
     let args = role_path.generic_args(db).data(db);
     let [workgroup_arg, dispatch_arg] = args.as_slice() else {
         return Err(WebBundleError::EntryDerivation(
@@ -576,9 +586,9 @@ fn compute_stage_shape(
             "compute-stage dispatch argument is not an attributed nominal type".to_owned(),
         )
     })?;
-    let dispatch_policy = dispatch_attrs.gpu_dispatch(db).ok_or_else(|| {
+    dispatch_attrs.gpu_dispatch(db).ok_or_else(|| {
         WebBundleError::EntryDerivation(
-            "compute-stage dispatch type must carry `#[gpu_dispatch(fixed)]` or `#[gpu_dispatch(repeated)]`"
+            "compute-stage dispatch type must carry an attributed GPU dispatch policy"
                 .to_owned(),
         )
     })?;
@@ -587,24 +597,7 @@ fn compute_stage_shape(
             "GPU workgroup dimensions must be three concrete u32-sized constants".to_owned(),
         )
     })?;
-    let dispatch = semantic_const_triplet(db, dispatch_ty).ok_or_else(|| {
-        WebBundleError::EntryDerivation(
-            "fixed dispatch dimensions must be three concrete u32-sized constants".to_owned(),
-        )
-    })?;
-    let repeat = match dispatch_policy {
-        GpuDispatch::Fixed => 1,
-        GpuDispatch::Repeated => dispatch_ty
-            .generic_args(db)
-            .get(3)
-            .and_then(|count| semantic_const_u32(db, *count))
-            .ok_or_else(|| {
-                WebBundleError::EntryDerivation(
-                    "repeated dispatch requires a fourth concrete u32-sized repeat count"
-                        .to_owned(),
-                )
-            })?,
-    };
+    let (dispatch, repeat, cycle) = compute_dispatch_shape(db, dispatch_ty)?;
     if workgroup_size.contains(&0) || dispatch.contains(&0) || repeat == 0 {
         return Err(WebBundleError::EntryDerivation(
             "GPU workgroup, fixed dispatch dimensions, and repeat count must be nonzero".to_owned(),
@@ -615,7 +608,88 @@ fn compute_stage_shape(
             "repeated dispatch count exceeds the portable 65535-command envelope".to_owned(),
         ));
     }
-    Ok((workgroup_size, dispatch, repeat))
+    Ok((workgroup_size, dispatch, repeat, cycle))
+}
+
+fn compute_dispatch_shape(
+    db: &DriverDataBase,
+    dispatch_ty: TyId<'_>,
+) -> Result<([u32; 3], u32, Option<WebActorPassCycle>), WebBundleError> {
+    let attrs = nominal_attrs(db, dispatch_ty).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "compute-stage dispatch policy is not an attributed nominal type".to_owned(),
+        )
+    })?;
+    match attrs.gpu_dispatch(db) {
+        Some(GpuDispatch::Fixed) => {
+            let dispatch = semantic_const_triplet(db, dispatch_ty).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "fixed dispatch dimensions must be three concrete u32-sized constants"
+                        .to_owned(),
+                )
+            })?;
+            Ok((dispatch, 1, None))
+        }
+        Some(GpuDispatch::Repeated) => {
+            let dispatch = semantic_const_triplet(db, dispatch_ty).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "repeated dispatch dimensions must be three concrete u32-sized constants"
+                        .to_owned(),
+                )
+            })?;
+            let repeat = dispatch_ty
+                .generic_args(db)
+                .get(3)
+                .and_then(|count| semantic_const_u32(db, *count))
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(
+                        "repeated dispatch requires a fourth concrete u32-sized repeat count"
+                            .to_owned(),
+                    )
+                })?;
+            Ok((dispatch, repeat, None))
+        }
+        Some(GpuDispatch::Cycled) => {
+            let [group, inner, count, ..] = dispatch_ty.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "cycled dispatch requires a group type, inner dispatch policy, and cycle count"
+                        .to_owned(),
+                ));
+            };
+            if matches!(group.data(db), TyData::ConstTy(_)) {
+                return Err(WebBundleError::EntryDerivation(
+                    "cycled dispatch group must be a nominal Fe type".to_owned(),
+                ));
+            }
+            let cycles = semantic_const_u32(db, *count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "cycled dispatch count must be a concrete u32-sized integer".to_owned(),
+                )
+            })?;
+            if cycles == 0 || cycles > 65_535 {
+                return Err(WebBundleError::EntryDerivation(
+                    "cycled dispatch count must be between 1 and 65535".to_owned(),
+                ));
+            }
+            let (dispatch, repeat, nested) = compute_dispatch_shape(db, *inner)?;
+            if nested.is_some() {
+                return Err(WebBundleError::EntryDerivation(
+                    "nested actor pass cycles are not yet supported".to_owned(),
+                ));
+            }
+            Ok((
+                dispatch,
+                repeat,
+                Some(WebActorPassCycle {
+                    group: group.pretty_print(db).to_string(),
+                    repeat: cycles,
+                }),
+            ))
+        }
+        None => Err(WebBundleError::EntryDerivation(
+            "compute-stage dispatch type lacks a recognized GPU dispatch attribute".to_owned(),
+        )),
+    }
 }
 
 fn compute_invocation_context(
@@ -1072,7 +1146,7 @@ pub fn actor_gpu_program(
                 (kind, Some(payload))
             }
             GpuStage::Compute => {
-                let (workgroup_size, dispatch, repeat) =
+                let (workgroup_size, dispatch, repeat, cycle) =
                     compute_stage_shape(db, *behavior, role_path)?;
                 let invocation_context = compute_invocation_context(db, *behavior)?;
                 (
@@ -1080,6 +1154,7 @@ pub fn actor_gpu_program(
                         workgroup_size,
                         dispatch,
                         repeat,
+                        cycle,
                         invocation_context,
                     },
                     None,
@@ -1131,11 +1206,53 @@ pub fn actor_gpu_program(
             WebActorStageKind::Compute { .. } | WebActorStageKind::Fragment => index += 1,
         }
     }
+    validate_actor_pass_cycles(&stages)?;
     Ok(Some(WebActorProgram {
         actor: actor_name,
         stages,
         resources: actor_resources(db, actor)?,
     }))
+}
+
+fn validate_actor_pass_cycles(stages: &[WebActorStage]) -> Result<(), WebBundleError> {
+    let mut completed = std::collections::HashSet::new();
+    let mut active: Option<&str> = None;
+    let mut active_repeat = 0;
+    for stage in stages {
+        let cycle = match &stage.kind {
+            WebActorStageKind::Compute { cycle, .. } => cycle.as_ref(),
+            _ => None,
+        };
+        match cycle {
+            Some(cycle) if active == Some(cycle.group.as_str()) => {
+                if active_repeat != cycle.repeat {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "actor pass cycle `{}` uses inconsistent repeat counts",
+                        cycle.group
+                    )));
+                }
+            }
+            Some(cycle) => {
+                if let Some(previous) = active.take() {
+                    completed.insert(previous.to_owned());
+                }
+                if completed.contains(&cycle.group) {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "actor pass cycle `{}` must occupy one consecutive stage range",
+                        cycle.group
+                    )));
+                }
+                active = Some(cycle.group.as_str());
+                active_repeat = cycle.repeat;
+            }
+            None => {
+                if let Some(previous) = active.take() {
+                    completed.insert(previous.to_owned());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn behavior_surface_control_kind(
@@ -3739,12 +3856,23 @@ pub struct WebPass {
     /// fixed pass decodes as one.
     #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
     pub repeat: u32,
+    /// Consecutive passes with the same compiler-assigned group form one
+    /// ordered body that is repeated as a unit. The originating group identity
+    /// and count come from Fe's `CycledDispatch` policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<WebPassCycle>,
     /// Compiler-derived non-indexed draw count. This transitional transport is
     /// consumed by the fixed host; the source of truth is the Fe draw-policy
     /// type (`TriangleList<N>`), never page JavaScript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_vertices: Option<u32>,
     pub layout: WebLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebPassCycle {
+    pub group: u32,
+    pub repeat: u32,
 }
 
 const fn one_u32() -> u32 {
@@ -4192,6 +4320,7 @@ impl WebBundle {
         // shader merely because it is last in source order.
         let mut primary_shader = None;
         let mut primary_layout = None;
+        let mut cycle_groups = Vec::<String>::new();
         let mut index = 0;
         while index < program.stages.len() {
             let stage = &program.stages[index];
@@ -4250,6 +4379,7 @@ impl WebBundle {
                     shader_bytes: shader.len() as u64,
                     dispatch: None,
                     repeat: 1,
+                    cycle: None,
                     draw_vertices: Some(*vertex_count),
                     layout: layout.clone(),
                 });
@@ -4264,14 +4394,15 @@ impl WebBundle {
                 index += 2;
                 continue;
             }
-            let (artifact, dispatch, repeat, kind) = match stage.kind {
+            let (artifact, dispatch, repeat, cycle, kind) = match &stage.kind {
                 WebActorStageKind::Compute {
                     workgroup_size,
                     dispatch,
                     repeat,
+                    cycle,
                     invocation_context,
                 } => {
-                    let builtin_arguments = invocation_context
+                    let builtin_arguments = (*invocation_context)
                         .then(compute_invocation_builtin_arguments)
                         .unwrap_or_default();
                     let context_leaves = (!builtin_arguments.is_empty())
@@ -4298,15 +4429,21 @@ impl WebBundle {
                             compile_runtime_package_spirv_compute_with_interface(
                                 stage_db,
                                 &package,
-                                workgroup_size,
-                                dispatch,
+                                *workgroup_size,
+                                *dispatch,
                                 &external,
                                 &builtin_arguments,
                             )
                             .map_err(|error| WebBundleError::Lower(error.to_string()))
                         },
                     );
-                    (artifact, Some(dispatch), repeat, "compute")
+                    (
+                        artifact,
+                        Some(*dispatch),
+                        *repeat,
+                        cycle.clone(),
+                        "compute",
+                    )
                 }
                 WebActorStageKind::Fragment => {
                     let artifact = with_isolated_compiler_database(
@@ -4334,7 +4471,7 @@ impl WebBundle {
                             .map_err(|error| WebBundleError::Lower(error.to_string()))
                         },
                     );
-                    (artifact, None, 1, "fragment")
+                    (artifact, None, 1, None, "fragment")
                 }
                 WebActorStageKind::Vertex { .. } => unreachable!("handled as an adjacent pair"),
                 WebActorStageKind::RasterFragment { .. } => {
@@ -4359,12 +4496,27 @@ impl WebBundle {
                 &resource_field_indices,
             )?;
             let path = format!("{PASS_DIR}/{index:03}-{kind}.wgsl");
+            let cycle = cycle.map(|cycle| {
+                let group = cycle_groups
+                    .iter()
+                    .position(|group| group == &cycle.group)
+                    .unwrap_or_else(|| {
+                        cycle_groups.push(cycle.group);
+                        cycle_groups.len() - 1
+                    });
+                WebPassCycle {
+                    group: u32::try_from(group)
+                        .expect("actor pass cycle group count fits in u32"),
+                    repeat: cycle.repeat,
+                }
+            });
             passes.push(WebPass {
                 source_entry: stage.source_entry.clone(),
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
                 dispatch,
                 repeat,
+                cycle,
                 draw_vertices: None,
                 layout: layout.clone(),
             });
@@ -4905,6 +5057,7 @@ impl WebBundle {
             shader_bytes: wgsl.len() as u64,
             dispatch: None,
             repeat: 1,
+            cycle: None,
             draw_vertices: None,
             layout: layout.clone(),
         }];

@@ -157,6 +157,15 @@ pub struct RepeatedDispatch<
     const N: usize,
 > {}
 
+/// Place one dispatch policy inside a repeated, ordered actor pass cycle.
+///
+/// Consecutive compute behaviors carrying the same `Group` are one cycle body.
+/// The compiler and fixed host execute that complete body `N` times. This lets
+/// Fe express a dependency such as challenge, fold, commit, and bind once,
+/// while a typed protocol schedule supplies its round count.
+#[gpu_dispatch(cycled)]
+pub struct CycledDispatch<Group, Dispatch, const N: usize> {}
+
 /// One non-indexed triangle-list draw. Vertex/index-buffer variants can join
 /// this policy family without changing the stage role or browser ABI.
 #[gpu_draw(triangle_list)]

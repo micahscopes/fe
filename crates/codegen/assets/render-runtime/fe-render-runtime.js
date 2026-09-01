@@ -1612,7 +1612,7 @@ export class FeSurfaceElement extends HTMLElement {
       const encoder = device.createCommandEncoder();
       let texture = null;
       let rendered = false;
-      for (const record of passRecords) {
+      const executeRecord = (record) => {
         if (record.pass.layout.mode === "compute") {
           const compute = encoder.beginComputePass();
           compute.setPipeline(record.pipeline);
@@ -1648,6 +1648,40 @@ export class FeSurfaceElement extends HTMLElement {
           render.end();
           rendered = true;
         }
+      };
+      let passIndex = 0;
+      while (passIndex < passRecords.length) {
+        const record = passRecords[passIndex];
+        const cycle = record.pass.cycle;
+        if (cycle === undefined || cycle === null) {
+          executeRecord(record);
+          passIndex += 1;
+          continue;
+        }
+        if (
+          !Number.isSafeInteger(cycle.group) || cycle.group < 0 || cycle.group > 0xffffffff ||
+          !Number.isSafeInteger(cycle.repeat) || cycle.repeat < 1 || cycle.repeat > 65535
+        ) {
+          throw new Error("fe render runtime: invalid compiler-derived actor pass cycle");
+        }
+        let cycleEnd = passIndex;
+        while (cycleEnd < passRecords.length) {
+          const member = passRecords[cycleEnd];
+          const memberCycle = member.pass.cycle;
+          if (memberCycle === undefined || memberCycle === null || memberCycle.group !== cycle.group) {
+            break;
+          }
+          if (memberCycle.repeat !== cycle.repeat || member.pass.layout.mode !== "compute") {
+            throw new Error("fe render runtime: inconsistent compiler-derived actor pass cycle");
+          }
+          cycleEnd += 1;
+        }
+        for (let iteration = 0; iteration < cycle.repeat; iteration += 1) {
+          for (let memberIndex = passIndex; memberIndex < cycleEnd; memberIndex += 1) {
+            executeRecord(passRecords[memberIndex]);
+          }
+        }
+        passIndex = cycleEnd;
       }
       if (capture && !texture) {
         throw new Error("fe render runtime: cannot capture a pass graph with no render pass");

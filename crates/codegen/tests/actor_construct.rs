@@ -20,8 +20,9 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalType, WasmCompileOptions, WebActorResourceElement, WebActorStageKind, WebBuildOptions,
-    WebBuiltinSource, WebBundle, WebBundleMode, actor_gpu_program, actor_web_entry,
+    CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
+    WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
+    actor_gpu_program, actor_web_entry,
     compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
@@ -405,6 +406,7 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
             repeat: 1,
+            cycle: None,
             invocation_context: false,
         }
     );
@@ -559,6 +561,7 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
             workgroup_size: [2, 2, 1],
             dispatch: [2, 2, 1],
             repeat: 1,
+            cycle: None,
             invocation_context: true,
         }
     );
@@ -643,6 +646,7 @@ fn repeated_dispatch_is_derived_from_its_nominal_fe_policy() {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
             repeat: 4,
+            cycle: None,
             invocation_context: false,
         }
     );
@@ -664,6 +668,70 @@ fn repeated_dispatch_is_derived_from_its_nominal_fe_policy() {
         encoded["passes"][1].get("repeat").is_none(),
         "ordinary single-execution passes keep the additive field absent"
     );
+}
+
+#[test]
+fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_cycled_dispatch");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "cycled dispatch fixture diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("cycled dispatch derivation")
+        .expect("GPU actor");
+    let cycle = WebActorPassCycle {
+        group: "ProtocolRound".to_owned(),
+        repeat: 3,
+    };
+    assert_eq!(
+        program.stages[0].kind,
+        WebActorStageKind::Compute {
+            workgroup_size: [1, 1, 1],
+            dispatch: [1, 1, 1],
+            repeat: 1,
+            cycle: Some(cycle.clone()),
+            invocation_context: false,
+        }
+    );
+    assert_eq!(
+        program.stages[1].kind,
+        WebActorStageKind::Compute {
+            workgroup_size: [1, 1, 1],
+            dispatch: [1, 1, 1],
+            repeat: 2,
+            cycle: Some(cycle),
+            invocation_context: false,
+        }
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("cycled-dispatch.fe".to_owned())),
+    )
+    .expect("cycled dispatch pass graph");
+    let passes = &bundle.manifest.passes;
+    assert_eq!(passes.len(), 3);
+    assert_eq!(passes[0].repeat, 1);
+    assert_eq!(passes[1].repeat, 2);
+    let first_cycle = passes[0].cycle.expect("first cycle member");
+    let second_cycle = passes[1].cycle.expect("second cycle member");
+    assert_eq!(first_cycle.group, 0);
+    assert_eq!(first_cycle.repeat, 3);
+    assert_eq!(second_cycle, first_cycle);
+    assert_eq!(passes[2].cycle, None);
+
+    let encoded = serde_json::to_value(&bundle.manifest).expect("manifest JSON");
+    assert_eq!(encoded["passes"][0]["cycle"]["group"], 0);
+    assert_eq!(encoded["passes"][0]["cycle"]["repeat"], 3);
+    assert_eq!(encoded["passes"][1]["cycle"], encoded["passes"][0]["cycle"]);
+    assert!(encoded["passes"][2].get("cycle").is_none());
 }
 
 #[test]

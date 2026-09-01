@@ -1,0 +1,38 @@
+use std::webgpu::{
+    ComputeSurface as Kernel,
+    CycledDispatch as Cycle,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    RepeatedDispatch as Repeat,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+pub struct ProtocolRound {}
+
+actor CycledReceipt uses (Program<WebGpuBackend>) {
+    receipt: Shared<u32, 2>,
+
+    fn begin_round(self) uses (
+        Kernel<Threads<1, 1, 1>, Cycle<ProtocolRound, Once<1, 1, 1>, 3>>,
+    ) {
+        let round = self.receipt.load(index: 0)
+        self.receipt.store(index: 0, value: round + 1)
+    }
+
+    fn record_round(self) uses (
+        Kernel<Threads<1, 1, 1>, Cycle<ProtocolRound, Repeat<1, 1, 1, 2>, 3>>,
+    ) {
+        let round = self.receipt.load(index: 0)
+        let digits = self.receipt.load(index: 1)
+        self.receipt.store(index: 1, value: digits * 10 + round)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let receipt = self.receipt.load(index: 1)
+        let color: u32 = if receipt == 112233 { 4278255360 } else { 4294901760 }
+        color.downcast_truncate()
+    }
+}

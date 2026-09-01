@@ -74,6 +74,7 @@ pub enum ActorTransition {
 pub enum GpuDispatch {
     Fixed,
     Repeated,
+    Cycled,
 }
 
 /// Primitive topology carried by a nominal authored-raster draw type.
@@ -565,6 +566,7 @@ impl<'db> AttrListId<'db> {
         match self.single_ident_arg(db, "gpu_dispatch")?.as_str() {
             "fixed" => Some(GpuDispatch::Fixed),
             "repeated" => Some(GpuDispatch::Repeated),
+            "cycled" => Some(GpuDispatch::Cycled),
             _ => None,
         }
     }
