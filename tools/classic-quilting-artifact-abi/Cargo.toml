@@ -8,6 +8,20 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "export-classic-quilting-fixtures"
+path = "src/bin/export_classic_quilting_fixtures.rs"
+required-features = ["quilting-export"]
+
+[features]
+default = []
+quilting-export = ["dep:quilting-core", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+quilting-core = { path = "../../../../quilting/crates/quilting-core", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
 [lints.rust]
 unsafe_code = "forbid"
 

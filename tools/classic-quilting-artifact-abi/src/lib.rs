@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+#[cfg(feature = "quilting-export")]
+pub mod quilting_export;
+
 pub const MAGIC: [u8; 8] = *b"CQATLAS\0";
 pub const SCHEMA_VERSION: u32 = 1;
 pub const ENDIANNESS_MARKER: u32 = 0x0102_0304;

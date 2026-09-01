@@ -99,3 +99,6 @@ Rust Quilting source tree and are the next M0 slice. The generator must use
 this codec (or byte-for-byte equivalent code), emit keys `[1,1,1]`, `[1,1,2]`,
 `[1,2,2]`, and `[2,4,8]` at seed 42, add the near-degenerate typed rejection,
 and record its exact command and independent validation summary.
+
+That follow-on fixture/export slice is recorded in
+`mb2-classic-quilting-M0-fixtures.md`.
