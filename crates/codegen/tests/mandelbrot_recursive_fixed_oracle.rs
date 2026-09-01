@@ -17,7 +17,7 @@ use num_bigint::BigUint;
 use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use url::Url;
 use wasmtime::Val;
 
@@ -33,6 +33,9 @@ const TRANSITION_WITNESS_WORDS: usize = 1 + 3 * PRODUCT_WITNESS_WORDS + 4 * LINE
 const PRODUCT_CARRY_RANGE_WORDS: usize = LIMBS * 2 * 18 * 2;
 const POSEIDON_WIDTH: usize = 16;
 const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
+const PRODUCTION_TRACE_ROWS: usize = 4_096;
+const SPARSE_BASE_FIELDS: usize = 260;
+const SPARSE_BASE_BROWSER_RECEIPT_DIR: &str = "MB2_SPARSE_BASE_BROWSER_RECEIPT_DIR";
 
 fn expected_fixed_air_constraint_count(limbs: u32) -> u32 {
     let radix_range = 40 * limbs + 2;
@@ -2629,40 +2632,70 @@ fn extend_ext4_words(destination: &mut Vec<u32>, value: Ext4) {
     destination.extend(value.0);
 }
 
+fn expected_sparse_base_row_words(
+    controls: &[[u32; 38]],
+    rows: &[[u32; 6]],
+    index: usize,
+) -> Vec<u32> {
+    let padding_control = expected_sparse_control_fields([14, 0, 0, 0, 0]);
+    let control = controls.get(index).copied().unwrap_or(padding_control);
+    let next_control = controls.get(index + 1).copied().unwrap_or(padding_control);
+    let row = rows.get(index).copied().unwrap_or([0; 6]);
+    let arithmetic = expected_sparse_arithmetic_plan(control, row);
+    let mut words = Vec::with_capacity(SPARSE_BASE_FIELDS);
+    words.extend(control);
+    words.extend(expected_sparse_control_plan(control));
+    words.extend(expected_sparse_control_link_plan(control, next_control));
+    words.extend(row);
+    words.extend(arithmetic);
+    words.extend(expected_sparse_arithmetic_link_plan(
+        control,
+        row,
+        next_control,
+    ));
+    words.extend(expected_sparse_round_plan(control, next_control, row));
+    words.extend(expected_sparse_linear_plan(
+        control,
+        next_control,
+        row,
+        arithmetic,
+    ));
+    words.extend(expected_sparse_boundary_plan(control, row));
+    assert_eq!(words.len(), SPARSE_BASE_FIELDS, "sparse base row schema");
+    words
+}
+
 fn expected_sparse_base_evaluation_words(point: &ComplexFx, current: &ComplexFx) -> Vec<u32> {
     let controls = expected_sparse_control_rows();
     let rows = expected_sparse_rows(point, current);
-    let mut base_fields = Vec::with_capacity(4 * 260);
+    let mut base_fields = Vec::with_capacity(4 * SPARSE_BASE_FIELDS);
     for index in 0..4 {
-        let arithmetic = expected_sparse_arithmetic_plan(controls[index], rows[index]);
-        base_fields.extend(controls[index]);
-        base_fields.extend(expected_sparse_control_plan(controls[index]));
-        base_fields.extend(expected_sparse_control_link_plan(
-            controls[index],
-            controls[index + 1],
-        ));
-        base_fields.extend(rows[index]);
-        base_fields.extend(arithmetic);
-        base_fields.extend(expected_sparse_arithmetic_link_plan(
-            controls[index],
-            rows[index],
-            controls[index + 1],
-        ));
-        base_fields.extend(expected_sparse_round_plan(
-            controls[index],
-            controls[index + 1],
-            rows[index],
-        ));
-        base_fields.extend(expected_sparse_linear_plan(
-            controls[index],
-            controls[index + 1],
-            rows[index],
-            arithmetic,
-        ));
-        base_fields.extend(expected_sparse_boundary_plan(controls[index], rows[index]));
+        base_fields.extend(expected_sparse_base_row_words(&controls, &rows, index));
     }
-    assert_eq!(base_fields.len(), 4 * 260, "sparse base schema");
+    assert_eq!(
+        base_fields.len(),
+        4 * SPARSE_BASE_FIELDS,
+        "sparse base schema",
+    );
     base_fields
+}
+
+fn expected_sparse_production_base_trace_words(
+    point: &ComplexFx,
+    current: &ComplexFx,
+) -> Vec<u32> {
+    let controls = expected_sparse_control_rows();
+    let rows = expected_sparse_rows(point, current);
+    assert_eq!(controls.len(), PRODUCTION_TRACE_ROWS);
+    assert_eq!(rows.len(), PRODUCTION_TRACE_ROWS);
+    let mut columns = vec![0; PRODUCTION_TRACE_ROWS * SPARSE_BASE_FIELDS];
+    for row in 0..PRODUCTION_TRACE_ROWS {
+        let words = expected_sparse_base_row_words(&controls, &rows, row);
+        for (column, word) in words.into_iter().enumerate() {
+            columns[column * PRODUCTION_TRACE_ROWS + row] = word;
+        }
+    }
+    columns
 }
 
 fn expected_sparse_air_prefix_words(
@@ -3229,6 +3262,21 @@ fn read_words(
     bytes
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect()
+}
+
+fn read_u32le_file(path: &Path) -> Vec<u32> {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("read browser receipt {}: {error}", path.display()));
+    assert_eq!(
+        bytes.len() % 4,
+        0,
+        "browser receipt {} is not a u32 tape",
+        path.display(),
+    );
+    bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().expect("one little-endian u32")))
         .collect()
 }
 
@@ -6174,4 +6222,48 @@ fn sparse_lde_multipaths_authenticate_production_codewords() {
         [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         "one generated opening must accept cleanly and reject every directed or unknown mutation",
     );
+}
+
+#[test]
+#[ignore = "requires an explicit real-Chrome sparse base trace receipt"]
+fn production_sparse_base_trace_browser_words_match_independent_model() {
+    let receipt_dir = std::env::var_os(SPARSE_BASE_BROWSER_RECEIPT_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "set {SPARSE_BASE_BROWSER_RECEIPT_DIR} to the directory emitted by the generic browser resource snapshot"
+            )
+        });
+    let actual = read_u32le_file(&receipt_dir.join("base_trace.u32le"));
+    let validity = read_u32le_file(&receipt_dir.join("validity.u32le"));
+    let status = read_u32le_file(&receipt_dir.join("status.u32le"));
+    assert_eq!(
+        actual.len(),
+        PRODUCTION_TRACE_ROWS * SPARSE_BASE_FIELDS,
+        "production base trace word count",
+    );
+    assert_eq!(validity, vec![1; PRODUCTION_TRACE_ROWS]);
+    assert_eq!(status, [1]);
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let expected = expected_sparse_production_base_trace_words(&point, &current);
+    if let Some((index, (actual, expected))) = actual
+        .iter()
+        .zip(&expected)
+        .enumerate()
+        .find(|(_, (actual, expected))| actual != expected)
+    {
+        let row = index % PRODUCTION_TRACE_ROWS;
+        let column = index / PRODUCTION_TRACE_ROWS;
+        panic!(
+            "production sparse base trace differs at column {column}, row {row}: browser={actual}, independent={expected}"
+        );
+    }
 }
