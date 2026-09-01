@@ -25,3 +25,6 @@ trace_*.txt
 *.snap.new
 target-browser-wire/
 target-sonatina-overlay/
+
+# standalone checked contract/oracle tools
+/tools/classic-quilting-artifact-abi/target/
