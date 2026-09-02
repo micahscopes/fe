@@ -237,6 +237,7 @@ pub fn lower_host_abi_with_metadata(
         }
         for member in &mut namespace.members {
             match member {
+                NamespaceMember::Const(_) => {}
                 NamespaceMember::Attribute(attribute) => {
                     if attribute.attributes != ExtendedAttributesDef::default() {
                         exposures.push(ExposureBinding {
@@ -964,6 +965,7 @@ pub fn lower_host_abi(world: &World, options: &HostAbiOptions) -> Result<abi::Wo
     for namespace in world.namespaces.values() {
         for member in &namespace.members {
             match member {
+                NamespaceMember::Const(_) => {}
                 NamespaceMember::Attribute(attribute) => {
                     let context = format!(
                         "namespace `{}` attribute `{}`",
@@ -1401,6 +1403,7 @@ fn collect_world_unions(world: &World) -> std::collections::BTreeMap<String, Typ
     for namespace in world.namespaces.values() {
         for member in &namespace.members {
             match member {
+                NamespaceMember::Const(_) => {}
                 NamespaceMember::Attribute(attribute) => collect(&attribute.type_),
                 NamespaceMember::Operation(operation) => {
                     for argument in &operation.arguments {

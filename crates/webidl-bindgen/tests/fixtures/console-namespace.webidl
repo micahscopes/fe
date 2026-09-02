@@ -1,5 +1,6 @@
 [Exposed=(Window,Worker)]
 namespace console {
+    const unsigned long INFO = 0x0004;
     readonly attribute unsigned long level;
     undefined log(DOMString message);
 };

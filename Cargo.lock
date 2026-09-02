@@ -10032,8 +10032,7 @@ dependencies = [
 [[package]]
 name = "weedle2"
 version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "998d2c24ec099a87daf9467808859f9d82b61f1d9c9701251aea037f514eae0e"
+source = "git+https://github.com/micahscopes/uniffi-rs?rev=ba3cbc44740f5067d801ca611ffb1c1dcf0ca3d6#ba3cbc44740f5067d801ca611ffb1c1dcf0ca3d6"
 dependencies = [
  "nom",
 ]
