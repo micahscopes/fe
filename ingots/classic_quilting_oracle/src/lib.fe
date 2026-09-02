@@ -49,6 +49,7 @@ use quilting_atlas::sampling::{
     poisson_conflict,
     poisson_radius_squared,
 }
+use quilting_atlas::triangulation::{incircle_sign, orientation, should_flip_edge}
 
 pub fn atlas_key_a(_ ordinal: u32) -> u32 {
     canonical_key_at(ordinal as usize).a
@@ -104,6 +105,10 @@ pub fn atlas_schedule_maximum_lane_load() -> u32 {
 
 fn fixed_barycentric(_ a: u32, _ b: u32, _ c: u32) -> FixedBarycentric {
     FixedBarycentric { a: a, b: b, c: c }
+}
+
+fn fixed_plane_point(_ b: u32, _ c: u32) -> FixedBarycentric {
+    fixed_barycentric(16384 - b - c, b, c)
 }
 
 pub fn atlas_boundary_a(_ patch: u32, _ boundary: u32) -> u32 {
@@ -390,6 +395,59 @@ pub fn atlas_candidate_conflict_cell_span(
         left_bucket,
         right_bucket,
     )
+}
+
+pub fn atlas_orientation(
+    _ first_b: u32,
+    _ first_c: u32,
+    _ second_b: u32,
+    _ second_c: u32,
+    _ third_b: u32,
+    _ third_c: u32,
+) -> i32 {
+    orientation(
+        fixed_plane_point(first_b, first_c),
+        fixed_plane_point(second_b, second_c),
+        fixed_plane_point(third_b, third_c),
+    )
+}
+
+pub fn atlas_incircle_sign(
+    _ first_b: u32,
+    _ first_c: u32,
+    _ second_b: u32,
+    _ second_c: u32,
+    _ third_b: u32,
+    _ third_c: u32,
+    _ query_b: u32,
+    _ query_c: u32,
+) -> i32 {
+    incircle_sign(
+        fixed_plane_point(first_b, first_c),
+        fixed_plane_point(second_b, second_c),
+        fixed_plane_point(third_b, third_c),
+        fixed_plane_point(query_b, query_c),
+    )
+}
+
+pub fn atlas_should_flip_edge(
+    _ current_first: u32,
+    _ current_second: u32,
+    _ proposed_first: u32,
+    _ proposed_second: u32,
+    _ normalized_incircle_sign: i32,
+) -> u32 {
+    if should_flip_edge(
+        current_first,
+        current_second,
+        proposed_first,
+        proposed_second,
+        normalized_incircle_sign,
+    ) {
+        1
+    } else {
+        0
+    }
 }
 
 fn permutation_code(_ permutation: EdgePermutation) -> u32 {
