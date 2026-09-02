@@ -3489,6 +3489,25 @@ browser proof flow merely to complete this list.
    compatibility oracle. Completion means the equivalent first-class pointer
    cases pass and the forgeable `BrowserPtr` and `MemPtr` wrappers can be
    deleted, not merely wrapped again.
+8. Decide the durable GPU compiler boundary from measured artifacts rather
+   than extending the Wasm-shaped shader path by inertia. The Riffcat semantic
+   addressing audit is
+   `/workspace/scratch/riffcat-semantic-addressing-report-2026-09-02.md`; the
+   evidence-complete review bundle is
+   `/workspace/scratch/mb2-sonatina-vsdg-pro-consultation-2026-09-02.tar.gz`.
+   Exact merging contracts the production round from 6,934 to 3,179 Sonatina
+   instructions. Preserving every lowerable resource helper then expands it to
+   8,913 root instructions, 63,288 Naga expressions, and 2,063,940 WGSL bytes.
+   Retaining only helpers that perform real resource access recovers the full
+   regression at 7,276 instructions, 51,198 expressions, and 1,600,494 bytes,
+   with a focused callable-accessor versus inlined-cursor regression. Compare
+   three boundaries before deepening the arena ABI: Sonatina v1 hardening,
+   native typed Fe-to-Naga lowering, and a shared VSDG plus separation-logic
+   graph owned by future Sonatina v2. The decision experiment must use the
+   same resource fixture, one balanced arena helper, Naga validation, browser
+   execution, independent value oracles, size, compile-time, and peak-memory
+   measurements. An interim Fe-side graph must carry an explicit transplant
+   and deletion gate so it cannot ossify into a parallel language backend.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
