@@ -700,7 +700,91 @@ fn invalid_immutable_policy_fails_closed_before_shader_lowering() {
 }
 
 #[test]
-fn attributed_actor_builds_a_materialized_v6_pass_graph() {
+fn content_addressed_resource_is_verified_selected_and_materialized() {
+    const BYTES: &[u8] = b"0123456789abcde\n";
+    const SHA256: &str = "dc08b6f2c7aaeca6d88cd9c82797b328160ccb3b1a84243b8eadb296744426c4";
+
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_content_addressed_resource");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "content asset diagnostics:\n{diagnostics}"
+    );
+
+    let missing = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("content-addressed.fe".to_owned())),
+    )
+    .expect_err("content-addressed resource without bytes must fail closed");
+    assert!(
+        missing.to_string().contains(SHA256),
+        "missing asset error must name its exact identity: {missing}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("content-addressed.fe".to_owned()))
+            .with_resource_asset(BYTES.to_vec()),
+    )
+    .expect("verified content-addressed bundle");
+    assert_eq!(bundle.manifest.protocol_version, 7);
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("content actor must derive exactly one resource")
+    };
+    assert_eq!(
+        resource.policy.initialization,
+        WebResourceInitialization::ContentAddressed {
+            sha256: SHA256.to_owned(),
+        }
+    );
+    let artifact = resource.artifact.as_ref().expect("resource artifact");
+    assert_eq!(artifact.path, format!("resources/sha256-{SHA256}.bin"));
+    assert_eq!(artifact.bytes, BYTES.len() as u64);
+    assert_eq!(artifact.sha256, SHA256);
+
+    let materialized = bundle
+        .materialized_files()
+        .expect("content materialization");
+    let asset = materialized
+        .iter()
+        .find(|file| file.path() == artifact.path)
+        .expect("materialized content-addressed artifact");
+    assert_eq!(asset.bytes(), BYTES);
+}
+
+#[test]
+fn content_addressed_resource_length_is_checked_against_layout() {
+    const SHORT_BYTES: &[u8] = b"0123456789abcde";
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_content_addressed_wrong_length");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "short content diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("short-content.fe".to_owned()))
+            .with_resource_asset(SHORT_BYTES.to_vec()),
+    )
+    .expect_err("15 content bytes cannot initialize four u32 lanes");
+    assert!(
+        error.to_string().contains("expects 16 bytes") && error.to_string().contains("contains 15"),
+        "unexpected content length error: {error}"
+    );
+}
+
+#[test]
+fn attributed_actor_builds_a_materialized_v7_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");
     assert!(!driver::init_ingot(&mut db, &url));
@@ -710,9 +794,9 @@ fn attributed_actor_builds_a_materialized_v6_pass_graph() {
         top_mod,
         WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
     )
-    .expect("v6 actor pass graph");
+    .expect("v7 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 6);
+    assert_eq!(bundle.manifest.protocol_version, 7);
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);

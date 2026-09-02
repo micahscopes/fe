@@ -385,7 +385,8 @@ fn source_fingerprint(path: &Utf8PathBuf) -> u64 {
         .filter(|entry| {
             entry.file_type().is_file()
                 && (entry.path().extension().is_some_and(|ext| ext == "fe")
-                    || entry.file_name() == "fe.toml")
+                    || entry.file_name() == "fe.toml"
+                    || is_resource_asset_path(entry.path()))
         })
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
@@ -394,6 +395,17 @@ fn source_fingerprint(path: &Utf8PathBuf) -> u64 {
         hash_source(&source, &mut hasher);
     }
     hasher.finish()
+}
+
+fn is_resource_asset_path(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "bin")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "sha256"))
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "assets"))
 }
 
 fn watch_entry(entry: &DirEntry) -> bool {
@@ -442,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_tracks_fe_and_manifest_but_not_unrelated_files() {
+    fn fingerprint_tracks_fe_manifest_and_content_assets_but_not_unrelated_files() {
         let temp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(temp.path().join("main.fe"), "fn main() {}").unwrap();
@@ -452,6 +464,14 @@ mod tests {
         assert_eq!(first, source_fingerprint(&root));
         std::fs::write(temp.path().join("main.fe"), "fn main() { 1 }").unwrap();
         assert_ne!(first, source_fingerprint(&root));
+
+        let assets = temp.path().join("assets/sha256");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join(format!("{}.bin", "0".repeat(64))), b"first").unwrap();
+        let with_asset = source_fingerprint(&root);
+        assert_ne!(first, with_asset);
+        std::fs::write(assets.join(format!("{}.bin", "0".repeat(64))), b"second").unwrap();
+        assert_ne!(with_asset, source_fingerprint(&root));
     }
 
     #[test]

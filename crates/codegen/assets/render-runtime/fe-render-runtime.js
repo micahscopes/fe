@@ -1,4 +1,4 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5/v6).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5/v6/v7).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
@@ -13,6 +13,8 @@
 //   - the GPU lane reads shaders, passes, resources, and layouts from the
 //     manifest;
 //   - legacy bundles may fall back to module.wasm per pixel in a 2D canvas.
+// v7 adds authenticated immutable resource artifacts and replays them after
+// device replacement.
 // Uniform controls are generated from the manifest's input binding members.
 //
 // One shared WebGPU adapter/device serves every surface mounted on a page,
@@ -646,6 +648,70 @@ async function fetchOrThrow(url, label) {
   return response;
 }
 
+function byteHex(bytes) {
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Fetch and authenticate one compiler-declared immutable resource artifact.
+ * Zeroed and GPU-derived resources return null without touching the network.
+ * The same helper runs on every pass-graph rebuild, so device replacement
+ * replays the exact logical bytes rather than retaining stale GPU handles. */
+export async function fetchVerifiedResourceArtifact(
+  resource,
+  manifestUrl,
+  { fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto } = {},
+) {
+  const initialization = resource.policy?.initialization ?? { kind: "zeroed" };
+  if (initialization.kind !== "content_addressed") {
+    if (resource.artifact) {
+      throw new Error(
+        `fe render runtime: resource \`${resource.name}\` declares an artifact without content-addressed initialization`,
+      );
+    }
+    return null;
+  }
+  const artifact = resource.artifact;
+  if (!artifact) {
+    throw new Error(
+      `fe render runtime: resource \`${resource.name}\` has no content-addressed artifact`,
+    );
+  }
+  const expectedBytes = resource.stride * resource.length;
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 || artifact.bytes !== expectedBytes) {
+    throw new Error(
+      `fe render runtime: resource \`${resource.name}\` artifact length disagrees with its layout`,
+    );
+  }
+  if (initialization.sha256 !== artifact.sha256 || !/^[0-9a-f]{64}$/.test(artifact.sha256)) {
+    throw new Error(
+      `fe render runtime: resource \`${resource.name}\` has inconsistent SHA-256 identity`,
+    );
+  }
+  if (typeof fetchImpl !== "function" || !cryptoImpl?.subtle) {
+    throw new Error("fe render runtime: resource verification capabilities are unavailable");
+  }
+  const url = new URL(artifact.path, manifestUrl);
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    throw new Error(
+      `fe render runtime: could not fetch resource \`${resource.name}\` (${url}): ${response.status}`,
+    );
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength !== artifact.bytes) {
+    throw new Error(
+      `fe render runtime: resource \`${resource.name}\` fetched ${bytes.byteLength} bytes, expected ${artifact.bytes}`,
+    );
+  }
+  const digest = byteHex(new Uint8Array(await cryptoImpl.subtle.digest("SHA-256", bytes)));
+  if (digest !== artifact.sha256) {
+    throw new Error(
+      `fe render runtime: resource \`${resource.name}\` failed SHA-256 verification`,
+    );
+  }
+  return bytes;
+}
+
 function resolveCanvas(canvasOption) {
   if (!canvasOption) return null;
   if (typeof canvasOption === "string") return document.querySelector(canvasOption);
@@ -1015,7 +1081,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -1494,21 +1560,29 @@ export class FeSurfaceElement extends HTMLElement {
 
   async _buildPassGraph(device, generation) {
     const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
-    const shaderSources = await Promise.all(
-      this._passShaderUrls.map(async (url) => (await fetchOrThrow(url, "WGSL pass shader")).text()),
-    );
+    const [shaderSources, resourceInitialBytes] = await Promise.all([
+      Promise.all(
+        this._passShaderUrls.map(async (url) => (await fetchOrThrow(url, "WGSL pass shader")).text()),
+      ),
+      Promise.all(
+        this._resources.map(async resource => [
+          resource.name,
+          await fetchVerifiedResourceArtifact(resource, this._manifestUrl),
+        ]),
+      ).then(entries => new Map(entries)),
+    ]);
     const resourceBuffers = new Map();
     for (const resource of this._resources) {
       if (resource.group !== 0) {
-        throw new Error("fe render runtime: v6 pass graphs currently require resource group 0");
+        throw new Error("fe render runtime: pass graphs currently require resource group 0");
       }
-      resourceBuffers.set(
-        resource.name,
-        device.createBuffer({
-          size: Math.max(4, resource.stride * resource.length),
-          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-        }),
-      );
+      const buffer = device.createBuffer({
+        size: Math.max(4, resource.stride * resource.length),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      resourceBuffers.set(resource.name, buffer);
+      const initialBytes = resourceInitialBytes.get(resource.name);
+      if (initialBytes) device.queue.writeBuffer(buffer, 0, initialBytes);
     }
 
     const passRecords = [];
@@ -1526,7 +1600,7 @@ export class FeSurfaceElement extends HTMLElement {
       const outputs = [];
       for (const binding of pass.layout.bindings) {
         if (binding.group !== 0) {
-          throw new Error("fe render runtime: v6 pass graphs currently require binding group 0");
+          throw new Error("fe render runtime: pass graphs currently require binding group 0");
         }
         if (binding.role === "resource") {
           const buffer = resourceBuffers.get(binding.name);

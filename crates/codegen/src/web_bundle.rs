@@ -64,13 +64,14 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 6;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 7;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
 const PASS_DIR: &str = "passes";
+const RESOURCE_DIR: &str = "resources";
 const MANIFEST_FILE: &str = "manifest.json";
 const INTERFACE_JS_FILE: &str = "interface.js";
 const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
@@ -391,6 +392,37 @@ pub struct WebBuildOptions {
     /// at once. This is a compiler placement policy only; it cannot affect the
     /// authored pass order or any emitted artifact identity.
     pub stage_compile_jobs: usize,
+    /// Content-addressed logical bytes available to this compilation. The
+    /// compiler selects only assets named by Fe resource types; unrelated
+    /// bytes never enter the bundle.
+    pub resource_assets: Vec<WebResourceAsset>,
+}
+
+/// Candidate immutable bytes supplied to bundle construction. Identity is
+/// always computed from content; callers cannot forge the digest carried by a
+/// Fe `ContentAddressed<...>` type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebResourceAsset {
+    sha256: String,
+    bytes: Arc<[u8]>,
+}
+
+impl WebResourceAsset {
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        let bytes: Arc<[u8]> = Arc::from(bytes.into());
+        Self {
+            sha256: hex::encode(Sha256::digest(bytes.as_ref())),
+            bytes,
+        }
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl WebBuildOptions {
@@ -403,6 +435,7 @@ impl WebBuildOptions {
             canonical_policy: WebCanonicalPolicy::Disabled,
             canonical_entries: Vec::new(),
             stage_compile_jobs: 2,
+            resource_assets: Vec::new(),
         }
     }
 
@@ -419,6 +452,7 @@ impl WebBuildOptions {
             canonical_policy: WebCanonicalPolicy::Disabled,
             canonical_entries: Vec::new(),
             stage_compile_jobs: 2,
+            resource_assets: Vec::new(),
         }
     }
 
@@ -440,6 +474,18 @@ impl WebBuildOptions {
     /// unbounded memory commitment; zero retains one serial worker.
     pub fn with_stage_compile_jobs(mut self, jobs: usize) -> Self {
         self.stage_compile_jobs = jobs.clamp(1, 4);
+        self
+    }
+
+    pub fn with_resource_asset(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        let asset = WebResourceAsset::from_bytes(bytes);
+        if !self
+            .resource_assets
+            .iter()
+            .any(|candidate| candidate.sha256 == asset.sha256)
+        {
+            self.resource_assets.push(asset);
+        }
         self
     }
 
@@ -4696,6 +4742,17 @@ pub struct WebResource {
     pub element: WebActorResourceElement,
     #[serde(default, skip_serializing_if = "is_default_resource_policy")]
     pub policy: WebResourcePolicy,
+    /// Exact immutable bundle artifact used to initialize this resource.
+    /// Absent for zeroed and GPU-derived storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<WebResourceArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebResourceArtifact {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4941,7 +4998,7 @@ pub struct WebCanonicalStatus {
     pub omission_reason: Option<String>,
 }
 
-// `WebBundle` embeds the v6 manifest (which carries f32 surface ranges), so it
+// `WebBundle` embeds the v7 manifest (which carries f32 surface ranges), so it
 // is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebBundle {
@@ -4957,6 +5014,9 @@ pub struct WebBundle {
     /// Separately compiled nominal child actors, selected from the typed
     /// mailbox and supervision operations in `scoped_tasks`.
     pub structured_children: Vec<StructuredChildActorArtifact>,
+    /// Exact immutable bytes selected by content identity for logical resource
+    /// initialization. Publication revalidates them against the manifest.
+    resource_assets: Vec<WebResourceAsset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4965,12 +5025,29 @@ pub struct WebPassShader {
     pub source: String,
 }
 
-fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResource {
+fn web_resource_manifest(
+    resource: &WebActorResource,
+    binding: u32,
+) -> Result<WebResource, WebBundleError> {
     let span = match &resource.element {
         WebActorResourceElement::U32 | WebActorResourceElement::F32 => 4,
         WebActorResourceElement::Record { span, .. } => *span,
     };
-    WebResource {
+    let bytes = span.checked_mul(resource.length).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{}` byte length overflows the portable u32 envelope",
+            resource.name
+        ))
+    })?;
+    let artifact = match &resource.policy.initialization {
+        WebResourceInitialization::ContentAddressed { sha256 } => Some(WebResourceArtifact {
+            path: format!("{RESOURCE_DIR}/sha256-{sha256}.bin"),
+            bytes: u64::from(bytes),
+            sha256: sha256.clone(),
+        }),
+        WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+    };
+    Ok(WebResource {
         group: 0,
         binding,
         name: resource.name.clone(),
@@ -4979,7 +5056,45 @@ fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResour
         span,
         element: resource.element.clone(),
         policy: resource.policy.clone(),
+        artifact,
+    })
+}
+
+fn select_resource_assets(
+    resources: &[WebResource],
+    candidates: &[WebResourceAsset],
+) -> Result<Vec<WebResourceAsset>, WebBundleError> {
+    let mut selected = Vec::new();
+    for resource in resources {
+        let Some(artifact) = &resource.artifact else {
+            continue;
+        };
+        let asset = candidates
+            .iter()
+            .find(|candidate| candidate.sha256 == artifact.sha256)
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "resource `{}` requires content-addressed asset {}",
+                    resource.name, artifact.sha256
+                ))
+            })?;
+        if asset.bytes.len() as u64 != artifact.bytes {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{}` expects {} bytes from {}, but the supplied asset contains {}",
+                resource.name,
+                artifact.bytes,
+                artifact.sha256,
+                asset.bytes.len()
+            )));
+        }
+        if !selected
+            .iter()
+            .any(|candidate: &WebResourceAsset| candidate.sha256 == asset.sha256)
+        {
+            selected.push(asset.clone());
+        }
     }
+    Ok(selected)
 }
 
 fn stage_external_resources(
@@ -5463,7 +5578,8 @@ impl WebBundle {
             .iter()
             .enumerate()
             .map(|(binding, resource)| web_resource_manifest(resource, binding as u32))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
+        let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
         let resource_field_indices = program
             .resources
             .iter()
@@ -5849,6 +5965,7 @@ impl WebBundle {
             interface_d_ts: None,
             scoped_tasks: Vec::new(),
             structured_children: Vec::new(),
+            resource_assets,
         })
     }
 
@@ -6222,6 +6339,7 @@ impl WebBundle {
             interface_d_ts,
             scoped_tasks,
             structured_children,
+            resource_assets: Vec::new(),
         })
     }
 
@@ -6251,7 +6369,8 @@ impl WebBundle {
         let mut files = Vec::with_capacity(
             3 + self.manifest.artifacts.canonical_adapters.len()
                 + runtime_artifact_count
-                + scoped_task_file_count,
+                + scoped_task_file_count
+                + self.resource_assets.len(),
         );
         let mut paths = std::collections::BTreeSet::new();
         let mut push = |path: &str, bytes: Arc<[u8]>| -> Result<(), WebBundleError> {
@@ -6404,6 +6523,63 @@ impl WebBundle {
                     Arc::from(file.bytes.into_boxed_slice()),
                 )?;
             }
+        }
+        let mut materialized_resource_hashes = std::collections::BTreeSet::new();
+        for resource in &self.manifest.resources {
+            let content_digest = match &resource.policy.initialization {
+                WebResourceInitialization::ContentAddressed { sha256 } => Some(sha256),
+                WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+            };
+            match (content_digest, resource.artifact.as_ref()) {
+                (None, None) => continue,
+                (None, Some(_)) => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` declares an artifact without content-addressed initialization",
+                        resource.name
+                    )));
+                }
+                (Some(_), None) => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` has content-addressed initialization without an artifact",
+                        resource.name
+                    )));
+                }
+                (Some(digest), Some(artifact)) if digest != &artifact.sha256 => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` initialization and artifact digests disagree",
+                        resource.name
+                    )));
+                }
+                (Some(_), Some(artifact)) => {
+                    let asset = self
+                        .resource_assets
+                        .iter()
+                        .find(|asset| asset.sha256 == artifact.sha256)
+                        .ok_or_else(|| {
+                            WebBundleError::Materialization(format!(
+                                "resource `{}` artifact bytes are absent",
+                                resource.name
+                            ))
+                        })?;
+                    if asset.bytes.len() as u64 != artifact.bytes
+                        || hex::encode(Sha256::digest(asset.bytes.as_ref())) != artifact.sha256
+                    {
+                        return Err(WebBundleError::Materialization(format!(
+                            "resource `{}` artifact does not match its manifest metadata",
+                            resource.name
+                        )));
+                    }
+                    if materialized_resource_hashes.insert(artifact.sha256.clone()) {
+                        push(&artifact.path, Arc::clone(&asset.bytes))?;
+                    }
+                }
+            }
+        }
+        if materialized_resource_hashes.len() != self.resource_assets.len() {
+            return Err(WebBundleError::Materialization(
+                "bundle contains immutable resource bytes not referenced by its manifest"
+                    .to_owned(),
+            ));
         }
         push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
         // Render bundles ship a compiler-emitted host page so the directory is

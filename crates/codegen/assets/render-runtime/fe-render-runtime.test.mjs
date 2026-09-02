@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import test from "node:test";
 
 // The module defines a custom element at load time. These minimal standards
@@ -7,8 +8,71 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fitBackingExtent, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("immutable resource artifacts are authenticated on every realization", async () => {
+  const expected = new TextEncoder().encode("0123456789abcde\n");
+  const sha256 = "dc08b6f2c7aaeca6d88cd9c82797b328160ccb3b1a84243b8eadb296744426c4";
+  const resource = {
+    name: "palette",
+    stride: 4,
+    length: 4,
+    policy: { initialization: { kind: "content_addressed", sha256 } },
+    artifact: {
+      path: `resources/sha256-${sha256}.bin`,
+      bytes: expected.byteLength,
+      sha256,
+    },
+  };
+  const urls = [];
+  const fetchImpl = async url => {
+    urls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      async arrayBuffer() {
+        return expected.slice().buffer;
+      },
+    };
+  };
+  const options = { fetchImpl, cryptoImpl: webcrypto };
+  assert.deepEqual(
+    await fetchVerifiedResourceArtifact(resource, new URL("https://example.test/demo/manifest.json"), options),
+    expected,
+  );
+  assert.deepEqual(
+    await fetchVerifiedResourceArtifact(resource, new URL("https://example.test/demo/manifest.json"), options),
+    expected,
+  );
+  assert.deepEqual(urls, [
+    `https://example.test/demo/resources/sha256-${sha256}.bin`,
+    `https://example.test/demo/resources/sha256-${sha256}.bin`,
+  ], "device reconstruction must re-fetch and re-authenticate logical bytes");
+
+  const corrupted = expected.slice();
+  corrupted[0] ^= 0xff;
+  await assert.rejects(
+    fetchVerifiedResourceArtifact(resource, new URL("https://example.test/demo/manifest.json"), {
+      cryptoImpl: webcrypto,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        async arrayBuffer() { return corrupted.buffer; },
+      }),
+    }),
+    /failed SHA-256 verification/,
+  );
+
+  const zeroed = { name: "scratch", stride: 4, length: 4 };
+  assert.equal(
+    await fetchVerifiedResourceArtifact(zeroed, new URL("https://example.test/manifest.json"), {
+      fetchImpl: () => assert.fail("zeroed storage must not fetch"),
+      cryptoImpl: webcrypto,
+    }),
+    null,
+  );
+});
 
 test("shared GPU lifecycle channel replays ordered typed facts and reports bounded gaps", async () => {
   const channel = createGpuDeviceLifecycleChannel(2);

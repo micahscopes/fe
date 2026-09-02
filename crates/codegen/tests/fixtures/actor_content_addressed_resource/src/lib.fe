@@ -1,0 +1,26 @@
+use std::webgpu::{
+    ContentAddressed,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    ImmutableStorageBuffer,
+    WebGpuBackend,
+}
+
+pub type FixtureBytes = ContentAddressed<
+    0xdc08b6f2,
+    0xc7aaeca6,
+    0xd88cd9c8,
+    0x2797b328,
+    0x160ccb3b,
+    0x1a84243b,
+    0x8eadb296,
+    0x744426c4,
+>
+
+actor ContentAddressedPalette uses (Program<WebGpuBackend>) {
+    palette: ImmutableStorageBuffer<FixtureBytes, 4, u32>,
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.palette.load(index: 0).downcast_truncate()
+    }
+}
