@@ -364,6 +364,167 @@ fn equilateral_distance_squared_oracle(left: [u32; 3], right: [u32; 3]) -> u32 {
     u32::try_from(3 * (delta_b * delta_b + delta_c * delta_c + delta_b * delta_c)).unwrap()
 }
 
+#[derive(Clone, Copy)]
+struct ScalarCandidate {
+    point: [u32; 3],
+    radius_squared: u32,
+    priority: u32,
+    state: u32,
+}
+
+#[derive(Debug)]
+pub(super) struct ScalarSamplingOracle {
+    pub points: Vec<[u32; 3]>,
+    pub candidate_slots: u32,
+    pub accepted_candidates: u32,
+    pub boundary_points: u32,
+}
+
+pub(super) fn scalar_sampling_oracle() -> ScalarSamplingOracle {
+    const SCALE: u32 = 16_384;
+    const SEED: u32 = 0x51c3_2a97;
+    const PENDING: u32 = 0;
+    const ACCEPTED: u32 = 1;
+    const REJECTED: u32 = 2;
+    const ROUNDS: usize = 64;
+    let key = [1, 2, 3];
+    let keys = canonical_lod_keys();
+    let patch =
+        u32::try_from(keys.iter().position(|candidate| *candidate == key).unwrap()).unwrap();
+    let (mut store, instance) = instantiate();
+    let slots = call_u32(&mut store, &instance, "atlas_candidate_slot_count", patch);
+    let boundary = boundary_points_oracle(key);
+    let mut candidates = Vec::with_capacity(usize::try_from(slots).unwrap());
+
+    for slot in 0..slots {
+        let compact = [patch, SEED, slot];
+        let cell = [
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_cell_b",
+                [patch, slot],
+            ),
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_cell_c",
+                [patch, slot],
+            ),
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_cell_trial",
+                [patch, slot],
+            ),
+        ];
+        let direct = [patch, SEED, cell[0], cell[1], cell[2]];
+        let b = call3_u32(&mut store, &instance, "atlas_candidate_at_slot_b", compact);
+        let c = call3_u32(&mut store, &instance, "atlas_candidate_at_slot_c", compact);
+        let point = [SCALE - b - c, b, c];
+        let radius_squared = call5_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_radius_squared",
+            direct,
+        );
+        let priority = call5_u32(&mut store, &instance, "atlas_candidate_priority", direct);
+        let valid = call5_u32(&mut store, &instance, "atlas_candidate_valid", direct) != 0;
+        let boundary_conflict = valid
+            && boundary.iter().copied().any(|boundary_point| {
+                let boundary_radius =
+                    radius_squared_oracle(density_exponent_q8_oracle(key, boundary_point));
+                equilateral_distance_squared_oracle(point, boundary_point)
+                    < radius_squared.max(boundary_radius)
+            });
+        candidates.push(ScalarCandidate {
+            point,
+            radius_squared,
+            priority,
+            state: if !valid {
+                3
+            } else if boundary_conflict {
+                REJECTED
+            } else {
+                PENDING
+            },
+        });
+    }
+
+    for _ in 0..ROUNDS {
+        if candidates
+            .iter()
+            .all(|candidate| candidate.state != PENDING)
+        {
+            break;
+        }
+        let winners = candidates
+            .iter()
+            .enumerate()
+            .map(|(slot, candidate)| {
+                candidate.state == PENDING
+                    && !candidates.iter().enumerate().any(|(other_slot, other)| {
+                        if slot == other_slot || (other.state != ACCEPTED && other.state != PENDING)
+                        {
+                            return false;
+                        }
+                        let conflict =
+                            equilateral_distance_squared_oracle(candidate.point, other.point)
+                                < candidate.radius_squared.max(other.radius_squared);
+                        conflict
+                            && (other.state == ACCEPTED
+                                || (other.priority, other_slot) < (candidate.priority, slot))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let previous = candidates.clone();
+        for (slot, candidate) in candidates.iter_mut().enumerate() {
+            if candidate.state != PENDING {
+                continue;
+            }
+            let accepted_conflict = previous.iter().enumerate().any(|(other_slot, other)| {
+                slot != other_slot
+                    && other.state == ACCEPTED
+                    && equilateral_distance_squared_oracle(candidate.point, other.point)
+                        < candidate.radius_squared.max(other.radius_squared)
+            });
+            let winner_conflict = previous.iter().enumerate().any(|(other_slot, other)| {
+                slot != other_slot
+                    && winners[other_slot]
+                    && equilateral_distance_squared_oracle(candidate.point, other.point)
+                        < candidate.radius_squared.max(other.radius_squared)
+            });
+            candidate.state = if accepted_conflict {
+                REJECTED
+            } else if winners[slot] {
+                ACCEPTED
+            } else if winner_conflict {
+                REJECTED
+            } else {
+                PENDING
+            };
+        }
+    }
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate.state != PENDING));
+
+    let mut points = boundary;
+    points.extend(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.state == ACCEPTED)
+            .map(|candidate| candidate.point),
+    );
+    let boundary_points = (1_u32 << key[0]) + (1_u32 << key[1]) + (1_u32 << key[2]);
+    ScalarSamplingOracle {
+        accepted_candidates: u32::try_from(points.len()).unwrap() - boundary_points,
+        points,
+        candidate_slots: slots,
+        boundary_points,
+    }
+}
+
 #[test]
 fn quilting_atlas_ctfe_plan_matches_an_independent_rust_schedule() {
     let (mut store, instance) = instantiate();
