@@ -30,6 +30,19 @@ use quilting_atlas::{
     canonical_key_at,
     canonicalize,
 }
+use quilting_atlas::sampling::{
+    FixedBarycentric,
+    boundary_seed,
+    candidate_cell_count,
+    candidate_grid_side,
+    candidate_slot_count,
+    density_exponent_q8,
+    equilateral_distance_squared,
+    interior_candidate,
+    mix32,
+    poisson_conflict,
+    poisson_radius_squared,
+}
 
 pub fn atlas_key_a(_ ordinal: u32) -> u32 {
     canonical_key_at(ordinal as usize).a
@@ -81,6 +94,230 @@ pub fn atlas_schedule_lane_load(_ lane: u32) -> u32 {
 
 pub fn atlas_schedule_maximum_lane_load() -> u32 {
     DIRECT_16_LANE_SCHEDULE.maximum_lane_load
+}
+
+fn fixed_barycentric(_ a: u32, _ b: u32, _ c: u32) -> FixedBarycentric {
+    FixedBarycentric { a: a, b: b, c: c }
+}
+
+pub fn atlas_boundary_a(_ patch: u32, _ boundary: u32) -> u32 {
+    boundary_seed(canonical_key_at(patch as usize), boundary).point.a
+}
+
+pub fn atlas_boundary_b(_ patch: u32, _ boundary: u32) -> u32 {
+    boundary_seed(canonical_key_at(patch as usize), boundary).point.b
+}
+
+pub fn atlas_boundary_c(_ patch: u32, _ boundary: u32) -> u32 {
+    boundary_seed(canonical_key_at(patch as usize), boundary).point.c
+}
+
+pub fn atlas_boundary_edge(_ patch: u32, _ boundary: u32) -> u32 {
+    boundary_seed(canonical_key_at(patch as usize), boundary).edge
+}
+
+pub fn atlas_boundary_step(_ patch: u32, _ boundary: u32) -> u32 {
+    boundary_seed(canonical_key_at(patch as usize), boundary).step
+}
+
+pub fn atlas_boundary_valid(_ patch: u32, _ boundary: u32) -> u32 {
+    if boundary_seed(canonical_key_at(patch as usize), boundary).valid {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn atlas_density_exponent_q8(_ patch: u32, _ a: u32, _ b: u32, _ c: u32) -> u32 {
+    density_exponent_q8(
+        canonical_key_at(patch as usize),
+        fixed_barycentric(a, b, c),
+    )
+}
+
+pub fn atlas_poisson_radius_squared(_ patch: u32, _ a: u32, _ b: u32, _ c: u32) -> u32 {
+    poisson_radius_squared(
+        canonical_key_at(patch as usize),
+        fixed_barycentric(a, b, c),
+    )
+}
+
+pub fn atlas_equilateral_distance_squared(
+    _ left_a: u32,
+    _ left_b: u32,
+    _ left_c: u32,
+    _ right_a: u32,
+    _ right_b: u32,
+    _ right_c: u32,
+) -> u32 {
+    equilateral_distance_squared(
+        fixed_barycentric(left_a, left_b, left_c),
+        fixed_barycentric(right_a, right_b, right_c),
+    )
+}
+
+pub fn atlas_poisson_conflict(
+    _ left_a: u32,
+    _ left_b: u32,
+    _ left_c: u32,
+    _ left_radius_squared: u32,
+    _ right_a: u32,
+    _ right_b: u32,
+    _ right_c: u32,
+    _ right_radius_squared: u32,
+) -> u32 {
+    if poisson_conflict(
+        fixed_barycentric(left_a, left_b, left_c),
+        left_radius_squared,
+        fixed_barycentric(right_a, right_b, right_c),
+        right_radius_squared,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn atlas_mix32(_ value: u32) -> u32 {
+    mix32(value)
+}
+
+pub fn atlas_candidate_grid_side(_ patch: u32) -> u32 {
+    candidate_grid_side(canonical_key_at(patch as usize))
+}
+
+pub fn atlas_candidate_cell_count(_ patch: u32) -> u32 {
+    candidate_cell_count(canonical_key_at(patch as usize))
+}
+
+pub fn atlas_candidate_slot_count(_ patch: u32) -> u32 {
+    candidate_slot_count(canonical_key_at(patch as usize))
+}
+
+pub fn atlas_candidate_a(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    ).point.a
+}
+
+pub fn atlas_candidate_b(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    ).point.b
+}
+
+pub fn atlas_candidate_c(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    ).point.c
+}
+
+pub fn atlas_candidate_radius_squared(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    )
+        .radius_squared
+}
+
+pub fn atlas_candidate_priority(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    )
+        .priority
+}
+
+pub fn atlas_candidate_slot(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    ).slot
+}
+
+pub fn atlas_candidate_valid(
+    _ patch: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> u32 {
+    if interior_candidate(
+        canonical_key_at(patch as usize),
+        patch,
+        seed,
+        cell_b,
+        cell_c,
+        trial,
+    )
+        .valid {
+        1
+    } else {
+        0
+    }
 }
 
 fn permutation_code(_ permutation: EdgePermutation) -> u32 {
