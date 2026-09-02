@@ -531,6 +531,7 @@ pub struct WebActorResource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebActorResourceElement {
     U32,
+    F32,
     Record {
         fields: Vec<WebActorResourceField>,
         span: u32,
@@ -541,6 +542,16 @@ pub enum WebActorResourceElement {
 pub struct WebActorResourceField {
     pub name: String,
     pub offset: u32,
+    #[serde(default = "web_scalar_u32", skip_serializing_if = "is_web_scalar_u32")]
+    pub scalar: WebScalarKind,
+}
+
+fn web_scalar_u32() -> WebScalarKind {
+    WebScalarKind::U32
+}
+
+fn is_web_scalar_u32(value: &WebScalarKind) -> bool {
+    *value == WebScalarKind::U32
 }
 
 fn actor_is_gpu_program(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
@@ -1174,20 +1185,28 @@ fn resource_element(
     path: &str,
 ) -> Result<WebActorResourceElement, WebBundleError> {
     let ty = ty.as_view(db).unwrap_or(ty);
-    if matches!(
-        ty.base_ty(db).data(db),
-        TyData::TyBase(TyBase::Prim(PrimTy::U32))
-    ) {
-        return Ok(WebActorResourceElement::U32);
+    let scalar_kind = |ty: TyId<'_>| match ty.base_ty(db).data(db) {
+        TyData::TyBase(TyBase::Prim(PrimTy::U32)) => Some(WebScalarKind::U32),
+        TyData::TyBase(TyBase::Prim(PrimTy::F32)) => Some(WebScalarKind::F32),
+        _ => None,
+    };
+    if let Some(scalar) = scalar_kind(ty) {
+        return Ok(match scalar {
+            WebScalarKind::U32 => WebActorResourceElement::U32,
+            WebScalarKind::F32 => WebActorResourceElement::F32,
+            WebScalarKind::I1 | WebScalarKind::I32 | WebScalarKind::I64 => {
+                unreachable!("filtered resource scalar")
+            }
+        });
     }
     let adt = ty.adt_def(db).ok_or_else(|| {
         WebBundleError::EntryDerivation(format!(
-            "resource `{path}` element must be `u32` or a POD record"
+            "resource `{path}` element must be `u32`, `f32`, or a POD record"
         ))
     })?;
     let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` element must be `u32` or a POD record"
+            "resource `{path}` element must be `u32`, `f32`, or a POD record"
         )));
     };
     let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
@@ -1199,15 +1218,12 @@ fn resource_element(
     }
     let mut fields = Vec::with_capacity(field_views.len());
     for (index, (field, field_ty)) in field_views.into_iter().zip(field_tys).enumerate() {
-        if !matches!(
-            field_ty.base_ty(db).data(db),
-            TyData::TyBase(TyBase::Prim(PrimTy::U32))
-        ) {
+        let Some(scalar) = scalar_kind(field_ty) else {
             return Err(WebBundleError::EntryDerivation(format!(
-                "resource `{path}` POD field {} must be exactly `u32`",
+                "resource `{path}` POD field {} must be `u32` or `f32`; signed `i32` storage requires explicit carrier bitcasts",
                 index
             )));
-        }
+        };
         let name = field
             .name(db)
             .map(|name| name.data(db).to_string())
@@ -1219,6 +1235,7 @@ fn resource_element(
         fields.push(WebActorResourceField {
             name,
             offset: u32::try_from(index).unwrap() * 4,
+            scalar,
         });
     }
     let span = u32::try_from(fields.len()).unwrap() * 4;
@@ -4713,7 +4730,8 @@ pub struct WebPassShader {
 
 fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResource {
     let span = match &resource.element {
-        WebActorResourceElement::U32 => 4,
+        WebActorResourceElement::U32
+        | WebActorResourceElement::F32 => 4,
         WebActorResourceElement::Record { span, .. } => *span,
     };
     WebResource {
@@ -4782,12 +4800,13 @@ fn stage_external_resources(
             access,
             element: match &resource.element {
                 WebActorResourceElement::U32 => SpirvResourceElement::Scalar(SpirvScalarKind::U32),
+                WebActorResourceElement::F32 => SpirvResourceElement::Scalar(SpirvScalarKind::F32),
                 WebActorResourceElement::Record { fields, span } => SpirvResourceElement::Record {
                     fields: fields
                         .iter()
                         .map(|field| SpirvResourceField {
                             name: field.name.clone(),
-                            scalar: SpirvScalarKind::U32,
+                            scalar: spirv_scalar_kind(field.scalar),
                             offset: field.offset,
                         })
                         .collect(),
@@ -6567,6 +6586,16 @@ fn scalar_kind(kind: SpirvScalarKind) -> WebScalarKind {
         SpirvScalarKind::U32 => WebScalarKind::U32,
         SpirvScalarKind::I64 => WebScalarKind::I64,
         SpirvScalarKind::F32 => WebScalarKind::F32,
+    }
+}
+
+fn spirv_scalar_kind(kind: WebScalarKind) -> SpirvScalarKind {
+    match kind {
+        WebScalarKind::I1 => SpirvScalarKind::I1,
+        WebScalarKind::I32 => SpirvScalarKind::I32,
+        WebScalarKind::U32 => SpirvScalarKind::U32,
+        WebScalarKind::I64 => SpirvScalarKind::I64,
+        WebScalarKind::F32 => SpirvScalarKind::F32,
     }
 }
 

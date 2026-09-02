@@ -3872,17 +3872,16 @@ struct ArenaPointerFieldKey<'db> {
     fields: Box<[u16]>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum GpuResourceElementType {
-    U32,
-    Record { ty: Type, fields: usize },
+    Scalar(Type),
+    Record { ty: Type, fields: Box<[Type]> },
 }
 
 impl GpuResourceElementType {
-    fn ty(self) -> Type {
+    fn ty(&self) -> Type {
         match self {
-            Self::U32 => Type::I32,
-            Self::Record { ty, .. } => ty,
+            Self::Scalar(ty) | Self::Record { ty, .. } => *ty,
         }
     }
 }
@@ -4428,38 +4427,41 @@ where
             ));
         };
         let element_ty = element_ty.as_view(self.db).unwrap_or(*element_ty);
-        if let Some(element) = self.resource_element_cache.get(&element_ty).copied() {
+        if let Some(element) = self.resource_element_cache.get(&element_ty).cloned() {
             return Ok(element);
         }
-        let element = if matches!(
-            element_ty.base_ty(self.db).data(self.db),
-            TyData::TyBase(TyBase::Prim(PrimTy::U32))
-        ) {
-            GpuResourceElementType::U32
+        let scalar_type = |ty: TyId<'db>| match ty.base_ty(self.db).data(self.db) {
+            TyData::TyBase(TyBase::Prim(PrimTy::U32 | PrimTy::I32)) => Some(Type::I32),
+            TyData::TyBase(TyBase::Prim(PrimTy::F32)) => Some(Type::F32),
+            _ => None,
+        };
+        let element = if let Some(ty) = scalar_type(element_ty) {
+            GpuResourceElementType::Scalar(ty)
         } else {
             let adt = element_ty.adt_def(self.db).ok_or_else(|| {
                 LowerError::Unsupported(
-                    "GPU storage elements must be u32 or POD records of u32 fields".to_owned(),
+                    "GPU storage elements must be u32/i32/f32 or POD records of those fields"
+                        .to_owned(),
                 )
             })?;
             let AdtRef::Struct(struct_) = adt.adt_ref(self.db) else {
                 return Err(LowerError::Unsupported(
-                    "GPU storage elements must be u32 or POD records of u32 fields".to_owned(),
+                    "GPU storage elements must be u32/i32/f32 or POD records of those fields"
+                        .to_owned(),
                 ));
             };
             let fields = element_ty.field_types(self.db);
-            if fields.is_empty()
-                || fields.iter().any(|field| {
-                    !matches!(
-                        field.base_ty(self.db).data(self.db),
-                        TyData::TyBase(TyBase::Prim(PrimTy::U32))
-                    )
-                })
-            {
+            let field_tys = fields
+                .iter()
+                .copied()
+                .map(scalar_type)
+                .collect::<Option<Vec<_>>>();
+            let Some(field_tys) = field_tys.filter(|fields| !fields.is_empty()) else {
                 return Err(LowerError::Unsupported(
-                    "GPU storage POD records must contain one or more u32 fields".to_owned(),
+                    "GPU storage POD records must contain one or more u32/i32/f32 fields"
+                        .to_owned(),
                 ));
-            }
+            };
             let name = struct_
                 .name(self.db)
                 .to_opt()
@@ -4467,14 +4469,14 @@ where
                 .unwrap_or_else(|| {
                     format!("gpu_resource_record_{}", self.resource_element_cache.len())
                 });
-            let field_tys = vec![Type::I32; fields.len()];
             let ty = self.builder.declare_struct_type(&name, &field_tys, false);
             GpuResourceElementType::Record {
                 ty,
-                fields: fields.len(),
+                fields: field_tys.into_boxed_slice(),
             }
         };
-        self.resource_element_cache.insert(element_ty, element);
+        self.resource_element_cache
+            .insert(element_ty, element.clone());
         Ok(element)
     }
 
@@ -9625,9 +9627,9 @@ where
     fn lower_gpu_storage_load_scalar(&mut self, args: &[RLocalId]) -> Result<ValueId, LowerError> {
         let (object, element) = self.gpu_resource_element_object(args)?;
         match element {
-            GpuResourceElementType::U32 => Ok(self
+            GpuResourceElementType::Scalar(ty) => Ok(self
                 .fb
-                .insert_inst(ObjLoad::new(self.inst_set(), object), Type::I32)),
+                .insert_inst(ObjLoad::new(self.inst_set(), object), ty)),
             GpuResourceElementType::Record { .. } => Err(LowerError::Internal(
                 "GPU storage record load reached scalar expression lowering".to_owned(),
             )),
@@ -9648,14 +9650,15 @@ where
         let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
             LowerError::Internal("GPU storage record destination is not flattened".to_owned())
         })?;
-        if dst_vars.len() != fields {
+        if dst_vars.len() != fields.len() {
             return Err(LowerError::Internal(format!(
-                "GPU storage record has {fields} fields but its destination has {} leaves",
+                "GPU storage record has {} fields but its destination has {} leaves",
+                fields.len(),
                 dst_vars.len()
             )));
         }
-        let field_ref_ty = self.module.builder.objref_type(Type::I32);
-        for (index, var) in dst_vars.into_iter().enumerate() {
+        for (index, (var, field_ty)) in dst_vars.into_iter().zip(fields).enumerate() {
+            let field_ref_ty = self.module.builder.objref_type(field_ty);
             let index = self.fb.make_imm_value(Immediate::I32(index as i32));
             let field = self.fb.insert_inst(
                 ObjProj::new(self.inst_set(), smallvec1::smallvec![object, index]),
@@ -9663,7 +9666,7 @@ where
             );
             let value = self
                 .fb
-                .insert_inst(ObjLoad::new(self.inst_set(), field), Type::I32);
+                .insert_inst(ObjLoad::new(self.inst_set(), field), field_ty);
             self.fb.def_var(var, value);
         }
         Ok(())
@@ -9678,24 +9681,25 @@ where
         let (object, element) = self.gpu_resource_element_object(args)?;
         let values = self.local_flat_values(*value)?;
         match element {
-            GpuResourceElementType::U32 => {
+            GpuResourceElementType::Scalar(_) => {
                 let [value] = values.as_slice() else {
                     return Err(LowerError::Internal(
-                        "GPU u32 storage store value is not scalar".to_owned(),
+                        "GPU storage store value is not scalar".to_owned(),
                     ));
                 };
                 self.fb
                     .insert_inst_no_result(ObjStore::new(self.inst_set(), object, *value));
             }
             GpuResourceElementType::Record { fields, .. } => {
-                if values.len() != fields {
+                if values.len() != fields.len() {
                     return Err(LowerError::Internal(format!(
-                        "GPU storage record has {fields} fields but its stored value has {} leaves",
+                        "GPU storage record has {} fields but its stored value has {} leaves",
+                        fields.len(),
                         values.len()
                     )));
                 }
-                let field_ref_ty = self.module.builder.objref_type(Type::I32);
-                for (index, value) in values.into_iter().enumerate() {
+                for (index, (value, field_ty)) in values.into_iter().zip(fields).enumerate() {
+                    let field_ref_ty = self.module.builder.objref_type(field_ty);
                     let index = self.fb.make_imm_value(Immediate::I32(index as i32));
                     let field = self.fb.insert_inst(
                         ObjProj::new(self.inst_set(), smallvec1::smallvec![object, index]),

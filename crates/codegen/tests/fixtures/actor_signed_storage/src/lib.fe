@@ -1,0 +1,26 @@
+use std::webgpu::{
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+pub struct SignedSample {
+    pub value: i32,
+}
+
+actor SignedStorage uses (Program<WebGpuBackend>) {
+    samples: Shared<SignedSample, 1>,
+
+    fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        self.samples.store(index: 0, value: SignedSample { value: -7 })
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let sample: SignedSample = self.samples.load(index: 0)
+        sample.value
+    }
+}

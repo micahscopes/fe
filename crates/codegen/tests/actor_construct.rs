@@ -426,10 +426,12 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
                 fe_codegen::WebActorResourceField {
                     name: "re_bits".to_owned(),
                     offset: 0,
+                    scalar: fe_codegen::WebScalarKind::U32,
                 },
                 fe_codegen::WebActorResourceField {
                     name: "im_bits".to_owned(),
                     offset: 4,
+                    scalar: fe_codegen::WebScalarKind::U32,
                 },
             ],
             span: 8,
@@ -504,6 +506,107 @@ fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
     assert!(fragment_wgsl.contains("var<storage> orbit"));
     assert!(fragment_wgsl.contains("].re_bits"));
     assert!(fragment_wgsl.contains("].im_bits"));
+}
+
+#[test]
+fn mixed_scalar_storage_layout_reconciles_fco_manifest_and_wgsl() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_mixed_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "mixed storage fixture diagnostics:\n{diagnostics}"
+    );
+
+    let layout_wasm = build_entry_wasm(&db, top_mod, "layout_receipt");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, layout_wasm).expect("layout receipt module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("layout receipt instance");
+    let layout = instance
+        .get_typed_func::<(), (u32, u32, u32, u32)>(&mut store, "layout_receipt")
+        .expect("layout receipt export")
+        .call(&mut store, ())
+        .expect("layout receipt execution");
+    assert_eq!(layout, (12, 4, 12, 3));
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("mixed-storage.fe".to_owned())),
+    )
+    .expect("mixed scalar storage bundle");
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("mixed actor must derive exactly one resource")
+    };
+    assert_eq!((resource.stride, resource.span), (layout.2, layout.0));
+    assert_eq!(
+        resource.element,
+        WebActorResourceElement::Record {
+            fields: vec![
+                fe_codegen::WebActorResourceField {
+                    name: "x".to_owned(),
+                    offset: 0,
+                    scalar: fe_codegen::WebScalarKind::F32,
+                },
+                fe_codegen::WebActorResourceField {
+                    name: "material".to_owned(),
+                    offset: 4,
+                    scalar: fe_codegen::WebScalarKind::U32,
+                },
+                fe_codegen::WebActorResourceField {
+                    name: "y".to_owned(),
+                    offset: 8,
+                    scalar: fe_codegen::WebScalarKind::F32,
+                },
+            ],
+            span: layout.0,
+        }
+    );
+    let manifest_json = serde_json::to_value(&bundle.manifest).unwrap();
+    let fields = manifest_json["resources"][0]["element"]["Record"]["fields"]
+        .as_array()
+        .expect("record fields JSON");
+    assert_eq!(fields[0]["scalar"], "f32");
+    assert!(
+        fields[1].get("scalar").is_none(),
+        "legacy u32 fields must retain their compact manifest spelling"
+    );
+    assert_eq!(fields[2]["scalar"], "f32");
+
+    let compute_wgsl = &bundle.pass_wgsl[0].source;
+    let fragment_wgsl = &bundle.pass_wgsl[1].source;
+    assert!(compute_wgsl.contains("x: f32"));
+    assert!(compute_wgsl.contains("material: u32"));
+    assert!(compute_wgsl.contains("y: f32"));
+    assert!(fragment_wgsl.contains("material: u32"));
+}
+
+#[test]
+fn signed_storage_fails_closed_until_carrier_bitcasts_are_explicit() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_signed_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "signed storage fixture diagnostics:\n{diagnostics}");
+
+    let error = match WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("signed-storage.fe".to_owned())),
+    ) {
+        Ok(_) => panic!("signed storage must not inherit the unsigned browser carrier silently"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("signed `i32` storage requires explicit carrier bitcasts"),
+        "expected the signed-carrier boundary error, got: {message}"
+    );
 }
 
 #[test]
