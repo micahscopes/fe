@@ -30,6 +30,7 @@ static COMPILED_TOPOLOGY: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_SAMPLING: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_DELAUNAY: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_PARALLEL_CONSTRUCTION: OnceLock<WebBundle> = OnceLock::new();
+static COMPILED_GENERATED_PATCH: OnceLock<WebBundle> = OnceLock::new();
 
 fn compile_compute_oracle(relative_path: &str, entry: &str, label: &str) -> WebBundle {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
@@ -53,6 +54,32 @@ fn compile_compute_oracle(relative_path: &str, entry: &str, label: &str) -> WebB
         &db,
         top_mod,
         WebBuildOptions::compute(entry, Some(label.to_owned())),
+    )
+    .unwrap_or_else(|error| panic!("compile {label} WebGPU bundle: {error}"))
+}
+
+fn compile_render_oracle(relative_path: &str, entry: &str, label: &str) -> WebBundle {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "{label} ingot initialization diagnostics"
+    );
+    let top_mod = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .unwrap_or_else(|| panic!("{label} ingot"))
+        .root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected {label} diagnostics:\n{diagnostics}"
+    );
+    WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some(label.to_owned())),
     )
     .unwrap_or_else(|error| panic!("compile {label} WebGPU bundle: {error}"))
 }
@@ -142,6 +169,85 @@ fn compiled_parallel_construction() -> &'static WebBundle {
             "classic-quilting-parallel-construction",
         )
     })
+}
+
+fn compiled_generated_patch() -> &'static WebBundle {
+    COMPILED_GENERATED_PATCH.get_or_init(|| {
+        compile_render_oracle(
+            "../../demos/sketches/classic_quilting_generated",
+            "mesh_fragment",
+            "classic-quilting-generated-patch",
+        )
+    })
+}
+
+#[test]
+fn generated_patch_is_one_portable_gpu_resident_graph() {
+    let bundle = compiled_generated_patch();
+    let total_wgsl_bytes = bundle
+        .pass_wgsl
+        .iter()
+        .map(|shader| shader.source.len())
+        .sum::<usize>();
+    let largest_wgsl_bytes = bundle
+        .pass_wgsl
+        .iter()
+        .map(|shader| shader.source.len())
+        .max()
+        .expect("generated patch has shader passes");
+    eprintln!(
+        "  generated patch WGSL: {} passes, {total_wgsl_bytes} bytes total, {largest_wgsl_bytes} bytes largest pass",
+        bundle.pass_wgsl.len(),
+    );
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "sample_initialize",
+            "sample_propose",
+            "sample_retire",
+            "sample_advance",
+            "sample_compact",
+            "topology_initialize",
+            "topology_locate",
+            "topology_arbitrate",
+            "topology_plan",
+            "topology_scan",
+            "topology_rebuild",
+            "topology_retire",
+            "topology_advance",
+            "topology_seal",
+            "background",
+            "mesh_fragment",
+        ]
+    );
+    assert!(bundle.manifest.resources.len() <= 8);
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([5, 1, 1]));
+    assert_eq!(bundle.manifest.passes[4].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[5].dispatch, Some([5, 1, 1]));
+    assert_eq!(bundle.manifest.passes[13].dispatch, Some([1, 1, 1]));
+    assert_eq!(
+        bundle.manifest.passes[15].layout.vertex_entry.as_deref(),
+        Some("mesh_vertices")
+    );
+    assert_eq!(
+        bundle.manifest.passes[15].layout.fragment_entry.as_deref(),
+        Some("mesh_fragment")
+    );
+    for shader in &bundle.pass_wgsl {
+        let module =
+            naga::front::wgsl::parse_str(&shader.source).expect("generated patch WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .expect("generated patch WGSL validates with browser capabilities");
+    }
 }
 
 #[test]
