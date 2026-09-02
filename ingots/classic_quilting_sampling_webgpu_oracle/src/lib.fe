@@ -20,7 +20,7 @@ use std::webgpu::{
 }
 
 const CANDIDATES: usize = 272
-const CANDIDATE_WORDS: usize = CANDIDATES * 5
+const WORKSPACE_WORDS: usize = CANDIDATES * 8 + 1
 const POINTS: usize = 286
 const POINT_WORDS: usize = POINTS * 3
 const THREADS: usize = 128
@@ -39,11 +39,7 @@ fn flag(_ value: bool) -> u32 {
 }
 
 actor ClassicQuiltingSamplingOracle uses (Program<WebGpuBackend>) {
-    candidates: Shared<u32, CANDIDATE_WORDS>,
-    states_a: Shared<u32, CANDIDATES>,
-    states_b: Shared<u32, CANDIDATES>,
-    winners: Shared<u32, CANDIDATES>,
-    progress: Shared<u32, 1>,
+    workspace: Shared<u32, WORKSPACE_WORDS>,
     points: Shared<u32, POINT_WORDS>,
     receipt: Shared<u32, 7>,
 
@@ -51,15 +47,11 @@ actor ClassicQuiltingSamplingOracle uses (Program<WebGpuBackend>) {
         uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
     {
         let atlas_key = key()
-        initialize_candidate_lane<CANDIDATES, CANDIDATE_WORDS>(
+        initialize_candidate_lane<CANDIDATES, WORKSPACE_WORDS>(
             atlas_key,
             canonical_key_ordinal(atlas_key),
             SEED,
-            self.candidates,
-            self.states_a,
-            self.states_b,
-            self.winners,
-            self.progress,
+            self.workspace,
             invocation,
         )
     }
@@ -72,13 +64,9 @@ actor ClassicQuiltingSamplingOracle uses (Program<WebGpuBackend>) {
             >
         )
     {
-        propose_candidate_lane<CANDIDATES, CANDIDATE_WORDS>(
+        propose_candidate_lane<CANDIDATES, WORKSPACE_WORDS>(
             key(),
-            self.candidates,
-            self.states_a,
-            self.states_b,
-            self.winners,
-            self.progress,
+            self.workspace,
             invocation,
         )
     }
@@ -91,13 +79,9 @@ actor ClassicQuiltingSamplingOracle uses (Program<WebGpuBackend>) {
             >
         )
     {
-        retire_candidate_lane<CANDIDATES, CANDIDATE_WORDS>(
+        retire_candidate_lane<CANDIDATES, WORKSPACE_WORDS>(
             key(),
-            self.candidates,
-            self.states_a,
-            self.states_b,
-            self.winners,
-            self.progress,
+            self.workspace,
             invocation,
         )
     }
@@ -110,20 +94,20 @@ actor ClassicQuiltingSamplingOracle uses (Program<WebGpuBackend>) {
             >
         )
     {
-        advance_candidate_generation(self.progress, invocation)
+        advance_candidate_generation<CANDIDATES, WORKSPACE_WORDS>(
+            self.workspace,
+            invocation,
+        )
     }
 
     fn compact(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
         let compacted = compact_candidate_points<
             CANDIDATES,
-            CANDIDATE_WORDS,
+            WORKSPACE_WORDS,
             POINT_WORDS,
         >(
             key(),
-            self.candidates,
-            self.states_a,
-            self.states_b,
-            self.progress,
+            self.workspace,
             self.points,
         )
         self.receipt.store(index: 0, value: flag(compacted.valid))

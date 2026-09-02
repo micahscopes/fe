@@ -49,6 +49,8 @@ use quilting_atlas::topology::{
 use std::webgpu::{ComputeInvocation, StorageBuffer}
 
 pub const CANDIDATE_WORDS: usize = 5
+pub const SAMPLING_WORDS_PER_CANDIDATE: usize = 8
+pub const SAMPLING_PROGRESS_WORDS: usize = 1
 pub const POINT_WORDS: usize = 3
 pub const TRIANGLE_WORDS: usize = 4
 pub const TOPOLOGY_PROPOSAL_WORDS: usize = 4
@@ -103,63 +105,83 @@ fn candidate_offset(_ slot: u32) -> u32 {
     slot * CANDIDATE_WORDS.downcast_truncate()
 }
 
+fn candidate_state_a_offset<const CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * CANDIDATE_WORDS.downcast_truncate() + slot
+}
+
+fn candidate_state_b_offset<const CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * (CANDIDATE_WORDS + 1).downcast_truncate() + slot
+}
+
+fn candidate_winner_offset<const CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * (CANDIDATE_WORDS + 2).downcast_truncate() + slot
+}
+
+fn candidate_progress_offset<const CAPACITY: usize>() -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * SAMPLING_WORDS_PER_CANDIDATE.downcast_truncate()
+}
+
 fn store_candidate<const WORDS: usize>(
-    _ candidates: StorageBuffer<u32, WORDS>,
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ candidate: InteriorCandidate,
     _ slot: u32,
 ) {
     let offset = candidate_offset(slot)
-    candidates.store(index: offset, value: candidate.point.a)
-    candidates.store(index: offset + 1, value: candidate.point.b)
-    candidates.store(index: offset + 2, value: candidate.point.c)
-    candidates.store(index: offset + 3, value: candidate.radius_squared)
-    candidates.store(index: offset + 4, value: candidate.priority)
+    workspace.store(index: offset, value: candidate.point.a)
+    workspace.store(index: offset + 1, value: candidate.point.b)
+    workspace.store(index: offset + 2, value: candidate.point.c)
+    workspace.store(index: offset + 3, value: candidate.radius_squared)
+    workspace.store(index: offset + 4, value: candidate.priority)
 }
 
 fn load_candidate<const WORDS: usize>(
-    _ candidates: StorageBuffer<u32, WORDS>,
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ slot: u32,
 ) -> InteriorCandidate {
     let offset = candidate_offset(slot)
     let point = FixedBarycentric {
-        a: candidates.load(index: offset),
-        b: candidates.load(index: offset + 1),
-        c: candidates.load(index: offset + 2),
+        a: workspace.load(index: offset),
+        b: workspace.load(index: offset + 1),
+        c: workspace.load(index: offset + 2),
     }
     InteriorCandidate {
         point: point,
-        radius_squared: candidates.load(index: offset + 3),
-        priority: candidates.load(index: offset + 4),
+        radius_squared: workspace.load(index: offset + 3),
+        priority: workspace.load(index: offset + 4),
         slot: slot,
         valid: true,
     }
 }
 
-fn load_generation_state<const CAPACITY: usize>(
-    _ states_a: StorageBuffer<u32, CAPACITY>,
-    _ states_b: StorageBuffer<u32, CAPACITY>,
+fn load_generation_state<const CAPACITY: usize, const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ parity: u32,
     _ slot: u32,
 ) -> u32 {
-    if parity == 0 {
-        states_a.load(index: slot)
+    let offset = if parity == 0 {
+        candidate_state_a_offset<CAPACITY>(slot)
     } else {
-        states_b.load(index: slot)
+        candidate_state_b_offset<CAPACITY>(slot)
     }
+    workspace.load(index: offset)
 }
 
-fn store_next_generation_state<const CAPACITY: usize>(
-    _ states_a: StorageBuffer<u32, CAPACITY>,
-    _ states_b: StorageBuffer<u32, CAPACITY>,
+fn store_next_generation_state<const CAPACITY: usize, const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ parity: u32,
     _ slot: u32,
     _ state: u32,
 ) {
-    if parity == 0 {
-        states_b.store(index: slot, value: state)
+    let offset = if parity == 0 {
+        candidate_state_b_offset<CAPACITY>(slot)
     } else {
-        states_a.store(index: slot, value: state)
+        candidate_state_a_offset<CAPACITY>(slot)
     }
+    workspace.store(index: offset, value: state)
 }
 
 fn point_store<const WORDS: usize>(
@@ -1414,28 +1436,24 @@ pub fn initialize_candidate_lane<
     _ key: AtlasKey,
     _ patch_ordinal: u32,
     _ seed: u32,
-    _ candidates: StorageBuffer<u32, WORDS>,
-    _ states_a: StorageBuffer<u32, CAPACITY>,
-    _ states_b: StorageBuffer<u32, CAPACITY>,
-    _ winners: StorageBuffer<u32, CAPACITY>,
-    _ progress: StorageBuffer<u32, 1>,
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
 ) where
-    { WORDS == CAPACITY * CANDIDATE_WORDS },
+    { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS },
 {
     let slot = invocation.global.x
     if slot >= CAPACITY.downcast_truncate() { return }
     let candidate = interior_candidate_at_slot(key, patch_ordinal, seed, slot)
-    store_candidate<WORDS>(candidates, candidate, slot)
+    store_candidate<WORDS>(workspace, candidate, slot)
     let state = initial_candidate_state(
         candidate.valid,
         candidate_conflicts_boundary(key, candidate),
     )
-    states_a.store(index: slot, value: state)
-    states_b.store(index: slot, value: state)
-    winners.store(index: slot, value: 0)
+    workspace.store(index: candidate_state_a_offset<CAPACITY>(slot), value: state)
+    workspace.store(index: candidate_state_b_offset<CAPACITY>(slot), value: state)
+    workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
     if slot == 0 {
-        progress.store(index: GENERATION_PARITY, value: 0)
+        workspace.store(index: candidate_progress_offset<CAPACITY>(), value: 0)
     }
 }
 
@@ -1445,42 +1463,35 @@ pub fn propose_candidate_lane<
     const WORDS: usize,
 >(
     _ key: AtlasKey,
-    _ candidates: StorageBuffer<u32, WORDS>,
-    _ states_a: StorageBuffer<u32, CAPACITY>,
-    _ states_b: StorageBuffer<u32, CAPACITY>,
-    _ winners: StorageBuffer<u32, CAPACITY>,
-    _ progress: StorageBuffer<u32, 1>,
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
 ) where
-    { WORDS == CAPACITY * CANDIDATE_WORDS },
+    { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS },
 {
     let slot = invocation.global.x
     if slot >= CAPACITY.downcast_truncate() { return }
     let count = resident_candidate_slots<CAPACITY>(key)
     if slot >= count {
-        winners.store(index: slot, value: 0)
+        workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
         return
     }
-    let parity = progress.load(index: GENERATION_PARITY)
-    let state = load_generation_state<CAPACITY>(states_a, states_b, parity, slot)
+    let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
+    let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
     if state != CANDIDATE_PENDING {
-        winners.store(index: slot, value: 0)
+        workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
         return
     }
-    let candidate = load_candidate<WORDS>(candidates, slot)
+    let candidate = load_candidate<WORDS>(workspace, slot)
     let mut accepted_conflict = false
     let mut preceding_pending_conflict = false
     let mut other_slot: u32 = 0
     while other_slot < count {
         if other_slot != slot {
-            let other_state = load_generation_state<CAPACITY>(
-                states_a,
-                states_b,
-                parity,
-                other_slot,
+            let other_state = load_generation_state<CAPACITY, WORDS>(
+                workspace, parity, other_slot,
             )
             if other_state == CANDIDATE_ACCEPTED || other_state == CANDIDATE_PENDING {
-                let other = load_candidate<WORDS>(candidates, other_slot)
+                let other = load_candidate<WORDS>(workspace, other_slot)
                 if poisson_conflict(
                     candidate.point,
                     candidate.radius_squared,
@@ -1502,8 +1513,8 @@ pub fn propose_candidate_lane<
         }
         other_slot = other_slot + 1
     }
-    winners.store(
-        index: slot,
+    workspace.store(
+        index: candidate_winner_offset<CAPACITY>(slot),
         value: if candidate_is_round_winner(
             state,
             accepted_conflict,
@@ -1518,39 +1529,35 @@ pub fn retire_candidate_lane<
     const WORDS: usize,
 >(
     _ key: AtlasKey,
-    _ candidates: StorageBuffer<u32, WORDS>,
-    _ states_a: StorageBuffer<u32, CAPACITY>,
-    _ states_b: StorageBuffer<u32, CAPACITY>,
-    _ winners: StorageBuffer<u32, CAPACITY>,
-    _ progress: StorageBuffer<u32, 1>,
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
 ) where
-    { WORDS == CAPACITY * CANDIDATE_WORDS },
+    { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS },
 {
     let slot = invocation.global.x
     if slot >= CAPACITY.downcast_truncate() { return }
     let count = resident_candidate_slots<CAPACITY>(key)
-    let parity = progress.load(index: GENERATION_PARITY)
-    let state = load_generation_state<CAPACITY>(states_a, states_b, parity, slot)
+    let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
+    let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
     if slot >= count || state != CANDIDATE_PENDING {
-        store_next_generation_state<CAPACITY>(states_a, states_b, parity, slot, state)
+        store_next_generation_state<CAPACITY, WORDS>(workspace, parity, slot, state)
         return
     }
-    let candidate = load_candidate<WORDS>(candidates, slot)
-    let winner = winners.load(index: slot) != 0
+    let candidate = load_candidate<WORDS>(workspace, slot)
+    let winner = workspace.load(index: candidate_winner_offset<CAPACITY>(slot)) != 0
     let mut accepted_conflict = false
     let mut winner_conflict = false
     let mut other_slot: u32 = 0
     while other_slot < count {
         if other_slot != slot {
-            let other_state = load_generation_state<CAPACITY>(
-                states_a,
-                states_b,
-                parity,
-                other_slot,
+            let other_state = load_generation_state<CAPACITY, WORDS>(
+                workspace, parity, other_slot,
             )
-            if other_state == CANDIDATE_ACCEPTED || winners.load(index: other_slot) != 0 {
-                let other = load_candidate<WORDS>(candidates, other_slot)
+            let other_winner = workspace.load(
+                index: candidate_winner_offset<CAPACITY>(other_slot),
+            ) != 0
+            if other_state == CANDIDATE_ACCEPTED || other_winner {
+                let other = load_candidate<WORDS>(workspace, other_slot)
                 if poisson_conflict(
                     candidate.point,
                     candidate.radius_squared,
@@ -1560,7 +1567,7 @@ pub fn retire_candidate_lane<
                     if other_state == CANDIDATE_ACCEPTED {
                         accepted_conflict = true
                     }
-                    if winners.load(index: other_slot) != 0 {
+                    if other_winner {
                         winner_conflict = true
                     }
                 }
@@ -1568,10 +1575,8 @@ pub fn retire_candidate_lane<
         }
         other_slot = other_slot + 1
     }
-    store_next_generation_state<CAPACITY>(
-        states_a,
-        states_b,
-        parity,
+    store_next_generation_state<CAPACITY, WORDS>(
+        workspace, parity,
         slot,
         candidate_state_after_round(
             state,
@@ -1583,13 +1588,16 @@ pub fn retire_candidate_lane<
 }
 
 /// Advance the immutable generation after the ordered retire dispatch.
-pub fn advance_candidate_generation(
-    _ progress: StorageBuffer<u32, 1>,
+pub fn advance_candidate_generation<const CAPACITY: usize, const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
-) {
+) where
+    { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS },
+{
     if invocation.global.x == 0 {
-        let parity = progress.load(index: GENERATION_PARITY)
-        progress.store(index: GENERATION_PARITY, value: if parity == 0 { 1 } else { 0 })
+        let progress = candidate_progress_offset<CAPACITY>()
+        let parity = workspace.load(index: progress)
+        workspace.store(index: progress, value: if parity == 0 { 1 } else { 0 })
     }
 }
 
@@ -1604,13 +1612,10 @@ pub fn compact_candidate_points<
     const POINT_STORAGE_WORDS: usize,
 >(
     _ key: AtlasKey,
-    _ candidates: StorageBuffer<u32, WORDS>,
-    _ states_a: StorageBuffer<u32, CAPACITY>,
-    _ states_b: StorageBuffer<u32, CAPACITY>,
-    _ progress: StorageBuffer<u32, 1>,
+    _ workspace: StorageBuffer<u32, WORDS>,
     _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
 ) -> CandidateCompaction where
-    { WORDS == CAPACITY * CANDIDATE_WORDS },
+    { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS },
     { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
 {
     let requested_slots = candidate_slot_count(key)
@@ -1634,14 +1639,14 @@ pub fn compact_candidate_points<
         boundary_ordinal = boundary_ordinal + 1
     }
 
-    let parity = progress.load(index: GENERATION_PARITY)
+    let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
     let mut accepted: u32 = 0
     let mut pending: u32 = 0
     let mut slot: u32 = 0
     while slot < slots {
-        let state = load_generation_state<CAPACITY>(states_a, states_b, parity, slot)
+        let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
         if state == CANDIDATE_ACCEPTED {
-            let candidate = load_candidate<WORDS>(candidates, slot)
+            let candidate = load_candidate<WORDS>(workspace, slot)
             if resident < point_capacity {
                 point_store<POINT_STORAGE_WORDS>(points, resident, candidate.point)
             } else {
