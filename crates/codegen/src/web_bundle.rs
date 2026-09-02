@@ -7189,6 +7189,16 @@ pub fn shade(x: u32, y: u32) -> u32 {
 }
 "#;
 
+    #[test]
+    fn render_surface_presentation_is_viewport_responsive() {
+        let runtime = render_runtime_js();
+        assert!(runtime.contains("--fe-surface-max-size, 768px"));
+        assert!(runtime.contains("100vw - var(--fe-surface-window-inline-margin, 32px)"));
+        assert!(runtime.contains("100vh - var(--fe-surface-window-block-margin, 112px)"));
+        assert!(runtime.contains("max-width: 100%"));
+        assert!(runtime.contains("new ResizeObserver"));
+    }
+
     fn wasm_exports(wasm: &[u8]) -> Vec<String> {
         let mut exports = Vec::new();
         for payload in wasmparser::Parser::new(0).parse_all(wasm) {
