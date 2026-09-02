@@ -560,22 +560,20 @@ fn with_standalone_file<R>(
     body(&db, top_mod)
 }
 
-/// Compile an ingot directory whose render/grid entry is DERIVED from its
+/// Compile an ingot directory whose render/compute entry is DERIVED from its
 /// `actor ... uses (GpuProgram<WebGpuBackend>)` declaration, exactly as
 /// `fe web build` does with `--entry`/`--mode` omitted.
 fn compile_actor_ingot(rel_dir: &str) -> WebBundle {
     with_ingot(rel_dir, |db, top_mod| {
         let (entry, mode) = resolve_web_entry(db, top_mod, None, None).unwrap_or_else(|e| {
-            panic!("{rel_dir}: could not derive a render entry from the actor declaration: {e}")
+            panic!("{rel_dir}: could not derive a web entry from the actor declaration: {e}")
         });
         let options = match mode {
             WebBundleMode::Render => WebBuildOptions::render(entry, Some(rel_dir.to_string())),
             WebBundleMode::Grid => panic!(
                 "{rel_dir}: derived grid mode; no curated sketch is expected to be grid-shaped"
             ),
-            WebBundleMode::Compute => {
-                panic!("{rel_dir}: a compute stage must be part of an actor pass graph")
-            }
+            WebBundleMode::Compute => WebBuildOptions::compute(entry, Some(rel_dir.to_string())),
         };
         WebBundle::compile(db, top_mod, options)
             .unwrap_or_else(|e| panic!("{rel_dir}: WebBundle::compile failed: {e}"))

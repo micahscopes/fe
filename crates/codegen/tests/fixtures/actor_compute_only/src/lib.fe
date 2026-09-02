@@ -1,0 +1,20 @@
+use std::webgpu::{
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+actor ComputeOnlyReceipt uses (Program<WebGpuBackend>) {
+    receipt: Shared<u32, 1>,
+
+    fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        self.receipt.store(index: 0, value: 7)
+    }
+
+    fn write_receipt(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        self.receipt.store(index: 0, value: 42)
+    }
+}

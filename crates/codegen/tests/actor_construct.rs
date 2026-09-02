@@ -862,6 +862,47 @@ fn attributed_actor_builds_a_materialized_v7_pass_graph() {
 }
 
 #[test]
+fn compute_only_actor_derives_and_materializes_without_a_fake_fragment() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_compute_only");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected compute-only actor diagnostics:\n{diagnostics}"
+    );
+
+    let derived = resolve_web_entry(&db, top_mod, None, None).expect("compute derivation");
+    assert_eq!(
+        derived,
+        ("write_receipt".to_owned(), WebBundleMode::Compute)
+    );
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::compute(derived.0, Some("compute-only.fe".to_owned())),
+    )
+    .expect("compute-only actor graph");
+
+    assert!(bundle.wasm.is_empty());
+    assert_eq!(bundle.manifest.surface, None);
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "seed");
+    assert_eq!(bundle.manifest.passes[1].source_entry, "write_receipt");
+    for pass in &bundle.manifest.passes {
+        assert_eq!(pass.dispatch, Some([1, 1, 1]));
+        assert_eq!(pass.layout.mode, WebBundleMode::Compute);
+    }
+    assert_eq!(
+        bundle.manifest.artifacts.wgsl,
+        bundle.manifest.passes[1].shader
+    );
+    assert!(bundle.wgsl.contains("@compute"));
+    assert!(!bundle.wgsl.contains("@fragment"));
+}
+
+#[test]
 fn serial_and_parallel_actor_stage_demands_materialize_identically() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");

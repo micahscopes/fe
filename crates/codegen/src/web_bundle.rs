@@ -456,6 +456,24 @@ impl WebBuildOptions {
         }
     }
 
+    /// Build an attributed GPU actor whose authored pass graph is compute-only.
+    ///
+    /// Workgroup and dispatch geometry remain properties of each Fe behavior;
+    /// unlike [`Self::grid`], this constructor does not accept host-supplied
+    /// launch dimensions.
+    pub fn compute(source_entry: impl Into<String>, source_id: Option<String>) -> Self {
+        Self {
+            source_entry: source_entry.into(),
+            mode: WebBundleMode::Compute,
+            workgroup_size: [0, 0, 0],
+            provenance: WebProvenance::new(source_id),
+            canonical_policy: WebCanonicalPolicy::Disabled,
+            canonical_entries: Vec::new(),
+            stage_compile_jobs: 2,
+            resource_assets: Vec::new(),
+        }
+    }
+
     pub fn with_canonical_policy(mut self, policy: WebCanonicalPolicy) -> Self {
         self.canonical_policy = policy;
         self
@@ -1960,7 +1978,7 @@ fn render_actor_scoped_task_entries(
     Ok(entries)
 }
 
-/// The render entry and mode derived from a module's unique GPU-program actor,
+/// The terminal entry and mode derived from a module's unique GPU-program actor,
 /// or `None` when the module declares no such actor (the pre-actor flag path).
 ///
 /// This resolves the actor's placement and behavior role types, then consumes
@@ -2018,7 +2036,7 @@ pub fn actor_web_entry(
             )
         })
         .collect();
-    let entry = match fullscreen_behaviors.as_slice() {
+    let render_entry = match fullscreen_behaviors.as_slice() {
         [behavior] => Some(*behavior),
         [] => match raster_fragment_behaviors.as_slice() {
             [behavior] => Some(*behavior),
@@ -2038,8 +2056,8 @@ pub fn actor_web_entry(
         },
         _ => unreachable!("multiple fullscreen behaviors rejected above"),
     };
-    match entry {
-        Some(behavior) => Ok(Some((
+    if let Some(behavior) = render_entry {
+        return Ok(Some((
             behavior
                 .name(db)
                 .to_opt()
@@ -2050,9 +2068,33 @@ pub fn actor_web_entry(
                     )
                 })?,
             WebBundleMode::Render,
+        )));
+    }
+
+    // A compute-only graph has no page-facing fragment. Its final authored
+    // compute behavior is the terminal entry and the top-level compatibility
+    // shader; all preceding compute stages remain ordered manifest passes.
+    let compute_entry = actor
+        .behaviors
+        .iter()
+        .rev()
+        .copied()
+        .find(|behavior| matches!(behavior_stage(db, *behavior), Some(GpuStage::Compute)));
+    match compute_entry {
+        Some(behavior) => Ok(Some((
+            behavior
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_string())
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(
+                        "attributed compute behavior has no resolvable name".to_owned(),
+                    )
+                })?,
+            WebBundleMode::Compute,
         ))),
         None => Err(WebBundleError::EntryDerivation(format!(
-            "GPU-program actor `{}` has no behavior carrying `#[gpu_stage(fragment)]` or `#[gpu_stage(raster_fragment)]`",
+            "GPU-program actor `{}` has no behavior carrying a GPU stage attribute",
             actor
                 .state
                 .name(db)
@@ -2063,7 +2105,7 @@ pub fn actor_web_entry(
     }
 }
 
-/// Resolves the render entry and mode, reconciling any explicit `--entry`/
+/// Resolves the terminal actor entry and mode, reconciling any explicit `--entry`/
 /// `--mode` with the module's `actor` declaration.
 ///
 /// - With an actor present, absent flags are DERIVED, and present flags must
@@ -2081,7 +2123,7 @@ pub fn resolve_web_entry(
                 && entry != &derived_entry
             {
                 return Err(WebBundleError::EntryDerivation(format!(
-                    "explicit --entry `{entry}` contradicts the render entry `{derived_entry}` derived from the actor declaration"
+                    "explicit --entry `{entry}` contradicts the terminal entry `{derived_entry}` derived from the actor declaration"
                 )));
             }
             if let Some(mode) = explicit_mode
@@ -5539,11 +5581,6 @@ impl WebBundle {
         options: WebBuildOptions,
         program: WebActorProgram,
     ) -> Result<Self, WebBundleError> {
-        if options.mode != WebBundleMode::Render {
-            return Err(WebBundleError::EntryDerivation(
-                "a GPU actor pass graph must terminate in a fragment stage".to_owned(),
-            ));
-        }
         if options.canonical_policy != WebCanonicalPolicy::Disabled
             || !options.canonical_entries.is_empty()
         {
@@ -5554,27 +5591,56 @@ impl WebBundle {
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
         let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
         let recovery_policy = resolve_surface_recovery_policy(db, top_mod, &options.source_entry)?;
-        let fragment_entries = program
-            .stages
-            .iter()
-            .filter(|stage| {
-                matches!(
-                    stage.kind,
-                    WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. }
-                )
-            })
-            .map(|stage| stage.source_entry.as_str())
-            .collect::<Vec<_>>();
-        if !fragment_entries.contains(&options.source_entry.as_str())
-            || !matches!(
-                program.stages.last().map(|stage| &stage.kind),
-                Some(WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. })
-            )
-        {
-            return Err(WebBundleError::EntryDerivation(format!(
-                "GPU actor pass graph must contain its derived fragment entry `{}` and end in a render stage",
-                options.source_entry
-            )));
+        match options.mode {
+            WebBundleMode::Render => {
+                let fragment_entries = program
+                    .stages
+                    .iter()
+                    .filter(|stage| {
+                        matches!(
+                            stage.kind,
+                            WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. }
+                        )
+                    })
+                    .map(|stage| stage.source_entry.as_str())
+                    .collect::<Vec<_>>();
+                if !fragment_entries.contains(&options.source_entry.as_str())
+                    || !matches!(
+                        program.stages.last().map(|stage| &stage.kind),
+                        Some(WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. })
+                    )
+                {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "GPU actor pass graph must contain its derived fragment entry `{}` and end in a render stage",
+                        options.source_entry
+                    )));
+                }
+            }
+            WebBundleMode::Compute => {
+                let terminal = program.stages.last();
+                if program
+                    .stages
+                    .iter()
+                    .any(|stage| !matches!(stage.kind, WebActorStageKind::Compute { .. }))
+                    || !matches!(
+                        terminal.map(|stage| &stage.kind),
+                        Some(WebActorStageKind::Compute { .. })
+                    )
+                    || terminal.map(|stage| stage.source_entry.as_str())
+                        != Some(options.source_entry.as_str())
+                {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "compute-only GPU actor pass graph must end in its derived compute entry `{}`",
+                        options.source_entry
+                    )));
+                }
+            }
+            WebBundleMode::Grid => {
+                return Err(WebBundleError::EntryDerivation(
+                    "attributed GPU actor pass graphs derive render or compute mode, never host-sized grid mode"
+                        .to_owned(),
+                ));
+            }
         }
         let resources = program
             .resources
@@ -5599,9 +5665,9 @@ impl WebBundle {
         let mut passes = Vec::with_capacity(program.stages.len());
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
         // The top-level compatibility artifact/layout follows the derived
-        // page-facing fragment entry. Ordered pass execution uses `passes`;
-        // a later overlay must not silently replace the inspected primary
-        // shader merely because it is last in source order.
+        // terminal entry. Ordered pass execution uses `passes`; a later
+        // overlay must not silently replace the inspected primary shader
+        // merely because it is last in source order.
         let mut primary_shader = None;
         let mut primary_layout = None;
         let mut cycle_groups = Vec::<String>::new();
@@ -5739,8 +5805,12 @@ impl WebBundle {
                 path: path.clone(),
                 source: shader.clone(),
             });
-            if matches!(stage.kind, WebActorStageKind::Fragment)
-                && stage.source_entry == options.source_entry
+            if stage.source_entry == options.source_entry
+                && matches!(
+                    (&stage.kind, options.mode),
+                    (WebActorStageKind::Fragment, WebBundleMode::Render)
+                        | (WebActorStageKind::Compute { .. }, WebBundleMode::Compute)
+                )
             {
                 primary_shader = Some((path, shader));
                 primary_layout = Some(layout);
@@ -5749,10 +5819,10 @@ impl WebBundle {
         }
         let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
-                "GPU actor pass graph has no shader for its derived fragment entry".to_owned(),
+                "GPU actor pass graph has no shader for its derived terminal entry".to_owned(),
             )
         })?;
-        let layout = primary_layout.expect("primary fragment shader and layout are paired");
+        let layout = primary_layout.expect("primary shader and layout are paired");
         let initializer = surface_initializer_contract(
             db,
             top_mod,
