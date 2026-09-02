@@ -276,6 +276,14 @@ pub struct SurfaceQuality<P> {}
 #[gpu_control(surface_recovery)]
 pub struct SurfaceRecovery<P> {}
 
+/// Request raw uncaptured primary-pointer motion for this GPU actor while
+/// retaining the standard captured primary drag lifecycle. Without this
+/// capability, surfaces receive pointer down, captured move, and pointer up
+/// only. The fixed browser host reports coordinates and button state; all
+/// hover interpretation, coalescing, and application state remain in Fe.
+#[gpu_control(surface_pointer_motion)]
+pub struct SurfacePointerMotion {}
+
 /// Deliver one completed GPU message `M` into the owning actor. The compiler
 /// matches `M` against exactly one `ReadbackWords<M, N>` resource, derives its
 /// canonical Wasm value layout, and invokes the authored behavior over the

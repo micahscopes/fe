@@ -2647,8 +2647,10 @@ export class FeSurfaceElement extends HTMLElement {
   // manifest control block, argument-name switch, or result-name mapping. The
   // older manifest lane remains below only for explicitly legacy bundles.
 
-  /** Attach drag/wheel listeners on the current live/adopted canvas, once per
-   * canvas identity (idempotent across suspend/resume within one boot). */
+  /** Attach pointer/wheel listeners on the current live/adopted canvas, once
+   * per canvas identity (idempotent across suspend/resume within one boot).
+   * Captured drag is the compatibility default. A compiler-projected Fe actor
+   * capability may additionally request raw uncaptured primary hover motion. */
   _wireGestures() {
     if (!this._surfaceTransitionKernel && (!this._control || !this._controlKernel)) return;
     const canvas = this._adoptedCanvas || (this._mode === "webgpu" ? this._liveCanvas : this._posterCanvas);
@@ -2660,6 +2662,8 @@ export class FeSurfaceElement extends HTMLElement {
     let dragging = false;
     let dragPointerId = null;
     let lastDragPoint = null;
+    const hoverMotion =
+      this._surface?.pointer_motion === "hover_and_captured_drag";
 
     const backingPoint = (event) => {
       const rect = canvas.getBoundingClientRect();
@@ -2689,8 +2693,23 @@ export class FeSurfaceElement extends HTMLElement {
       event.preventDefault();
     };
     const onPointerMove = (event) => {
-      if (!dragging || event.pointerId !== dragPointerId) return;
       const { mx, my } = backingPoint(event);
+      if (!dragging) {
+        if (!hoverMotion || event.isPrimary === false) return;
+        this._applyGesture({
+          dx: 0,
+          dy: 0,
+          wheelDelta: 0,
+          wheelMode: 0,
+          mx,
+          my,
+          buttons: event.buttons,
+          timestamp: event.timeStamp,
+          eventKind: SurfaceEventKind.PointerMove,
+        });
+        return;
+      }
+      if (event.pointerId !== dragPointerId) return;
       const previous = lastDragPoint;
       lastDragPoint = { mx, my };
       if (!previous) return;

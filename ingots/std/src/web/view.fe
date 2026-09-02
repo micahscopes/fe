@@ -37,8 +37,10 @@ pub enum SurfaceEventKind {
     /// Primary pointer contact began. The browser host supplies capture, raw
     /// coordinates, and buttons; selection policy remains in Fe.
     PointerDown,
-    /// Captured primary-pointer motion. Homogeneous bursts may be accumulated
-    /// by the generated Wasm wrapper, but never by application JavaScript.
+    /// Primary-pointer motion. By default this is captured drag motion;
+    /// `SurfacePointerMotion` additionally admits uncaptured hover motion with
+    /// zero deltas. Homogeneous bursts may be accumulated by the generated
+    /// Wasm wrapper, but never by application JavaScript.
     PointerMove,
     /// Primary pointer contact ended or was cancelled.
     PointerUp,

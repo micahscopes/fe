@@ -3,8 +3,8 @@
 use core::actor::InitialState
 use core::marker::Copy
 use std::webgpu::{
-    FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling, SurfaceTransition,
-    WebGpuBackend,
+    FragmentSurface, GpuProgram, LatestPerFrame, SurfacePointerMotion,
+    SurfaceScheduling, SurfaceTransition, WebGpuBackend,
 }
 use std::web::view::{
     Extent, Param, Surface, SurfaceEvent, SurfaceEventKind,
@@ -24,7 +24,9 @@ struct EventKindState {
 enum PickState { None, Active }
 impl Copy for PickState {}
 
-actor SurfaceEventKindProbe uses (GpuProgram<WebGpuBackend>) {
+actor SurfaceEventKindProbe uses (
+    GpuProgram<WebGpuBackend>, SurfacePointerMotion,
+) {
     receipt: f32,
     res: f32,
     picked: PickState,

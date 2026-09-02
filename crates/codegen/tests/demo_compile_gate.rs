@@ -868,6 +868,11 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
     let bundle = compile_actor_ingot("crates/codegen/tests/fixtures/surface_event_kinds_actor");
     assert_browser_wgsl(&bundle.wgsl);
     assert_scheduled_typed_surface(&bundle);
+    assert_eq!(
+        bundle.manifest.surface.as_ref().unwrap().pointer_motion,
+        fe_codegen::WebSurfacePointerMotion::HoverAndCapturedDrag,
+        "the Fe actor capability must project the opt-in hover transport policy",
+    );
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("event-kind Wasm module");

@@ -557,6 +557,11 @@ test("mobile pointer capture is single-owner and restores native touch scrolling
   surface._wireGestures();
   assert.equal(canvas.style.touchAction, "none");
   assert.equal(listeners.has("lostpointercapture"), true);
+  listeners.get("pointermove")({
+    pointerId: 7, isPrimary: true, clientX: 5, clientY: 6, buttons: 0, timeStamp: 0,
+    preventDefault() { throw new Error("default hover must not be consumed"); },
+  });
+  assert.deepEqual(delivered, [], "captured drag remains the default input policy");
   listeners.get("pointerdown")({
     button: 0, pointerId: 7, clientX: 10, clientY: 20, buttons: 1,
     timeStamp: 1, preventDefault() {},
@@ -583,6 +588,69 @@ test("mobile pointer capture is single-owner and restores native touch scrolling
   surface._unwireGestures();
   assert.equal(canvas.style.touchAction, "pan-y");
   assert.equal(listeners.size, 0);
+});
+
+test("Fe-selected surface pointer motion delivers hover without weakening captured drag", () => {
+  const listeners = new Map();
+  const captures = [];
+  const canvas = {
+    style: { touchAction: "" },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    removeEventListener(name) { listeners.delete(name); },
+    getBoundingClientRect() { return { left: 10, top: 20, width: 100, height: 50 }; },
+    setPointerCapture(pointer) { captures.push(["set", pointer]); },
+    releasePointerCapture(pointer) { captures.push(["release", pointer]); },
+  };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceTransitionKernel = () => {};
+  surface._control = null;
+  surface._controlKernel = null;
+  surface._surface = { pointer_motion: "hover_and_captured_drag" };
+  surface._adoptedCanvas = null;
+  surface._mode = "webgpu";
+  surface._liveCanvas = canvas;
+  surface._posterCanvas = null;
+  surface._gestureListeners = null;
+  surface._backingWidth = 200;
+  surface._backingHeight = 200;
+  const delivered = [];
+  surface._applyGesture = event => delivered.push(event);
+
+  surface._wireGestures();
+  let hoverPrevented = false;
+  listeners.get("pointermove")({
+    pointerId: 4, isPrimary: true, clientX: 35, clientY: 30, buttons: 0, timeStamp: 1,
+    preventDefault() { hoverPrevented = true; },
+  });
+  assert.equal(hoverPrevented, false, "raw hover must preserve native pointer behavior");
+  assert.deepEqual(delivered[0], {
+    dx: 0, dy: 0, wheelDelta: 0, wheelMode: 0,
+    mx: 50, my: 40, buttons: 0, timestamp: 1,
+    eventKind: SurfaceEventKind.PointerMove,
+  });
+  assert.deepEqual(captures, [], "hover must not manufacture pointer capture");
+
+  listeners.get("pointerdown")({
+    button: 0, pointerId: 4, isPrimary: true, clientX: 35, clientY: 30,
+    buttons: 1, timeStamp: 2, preventDefault() {},
+  });
+  listeners.get("pointermove")({
+    pointerId: 4, isPrimary: true, clientX: 45, clientY: 35,
+    buttons: 1, timeStamp: 3, preventDefault() {},
+  });
+  listeners.get("pointerup")({
+    pointerId: 4, isPrimary: true, clientX: 45, clientY: 35,
+    buttons: 0, timeStamp: 4,
+  });
+  assert.deepEqual(captures, [["set", 4], ["release", 4]]);
+  assert.deepEqual(
+    delivered.slice(1).map(event => [event.eventKind, event.dx, event.dy]),
+    [
+      [SurfaceEventKind.PointerDown, 0, 0],
+      [SurfaceEventKind.PointerMove, 20, 20],
+      [SurfaceEventKind.PointerUp, 0, 0],
+    ],
+  );
 });
 
 test("fixed host consumes the Fe-derived authored-raster draw count", () => {

@@ -1537,6 +1537,18 @@ fn actor_surface_recovery_policy_tys<'db>(
         .collect()
 }
 
+fn actor_has_surface_pointer_motion(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
+    actor
+        .state
+        .actor_placement(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, actor.state.scope()))
+        .filter_map(|ty| nominal_attrs(db, ty))
+        .any(|attrs| attrs.gpu_control(db) == Some(GpuControl::SurfacePointerMotion))
+}
+
 fn gpu_actor_name_for_entry(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
@@ -4111,6 +4123,16 @@ fn project_surface(
     let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
         return Ok(None);
     };
+    let pointer_motion = semantic_actors(db, top_mod)
+        .into_iter()
+        .find(|candidate| {
+            candidate
+                .state
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db).as_str() == actor_name.as_str())
+        })
+        .is_some_and(|candidate| actor_has_surface_pointer_motion(db, &candidate));
     let Some(actor) = decls.iter().find(|actor| actor.name == actor_name) else {
         return Ok(None);
     };
@@ -4221,6 +4243,11 @@ fn project_surface(
         params,
         state: WebSurfaceState {
             kind: "params".to_string(),
+        },
+        pointer_motion: if pointer_motion {
+            WebSurfacePointerMotion::HoverAndCapturedDrag
+        } else {
+            WebSurfacePointerMotion::CapturedDrag
         },
         activate: "pointer".to_string(),
     }))
@@ -4511,9 +4538,22 @@ pub struct WebSurface {
     pub pipeline: WebPipeline,
     pub params: Vec<WebSurfaceParam>,
     pub state: WebSurfaceState,
+    /// Which primary-pointer motion facts cross the fixed browser boundary.
+    /// Captured drag is the compatibility default; hover remains an explicit
+    /// Fe actor capability.
+    #[serde(default)]
+    pub pointer_motion: WebSurfacePointerMotion,
     /// When the surface goes live: `"pointer"` (on hover/focus/tap). The
     /// lifecycle vocabulary opens in R2.
     pub activate: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSurfacePointerMotion {
+    #[default]
+    CapturedDrag,
+    HoverAndCapturedDrag,
 }
 
 /// The dispatch/canvas extent in pixels, plus the presentation policy. Replaces

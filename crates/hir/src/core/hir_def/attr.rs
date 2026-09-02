@@ -62,6 +62,9 @@ pub enum GpuControl {
     SurfaceSchedule,
     SurfaceQuality,
     SurfaceRecovery,
+    /// Opt a surface into uncaptured primary-pointer motion in addition to
+    /// the default captured-drag lifecycle.
+    SurfacePointerMotion,
     /// A typed GPU result delivered into the same resident actor state as the
     /// surface transition. The browser adapter only transports opaque bytes.
     Readback,
@@ -530,6 +533,7 @@ impl<'db> AttrListId<'db> {
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             "surface_quality" => Some(GpuControl::SurfaceQuality),
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
+            "surface_pointer_motion" => Some(GpuControl::SurfacePointerMotion),
             "readback" => Some(GpuControl::Readback),
             _ => None,
         }

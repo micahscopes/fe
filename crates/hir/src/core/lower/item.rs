@@ -255,7 +255,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
-                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, or `#[gpu_control(surface_recovery)]`",
+                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, `#[gpu_control(surface_recovery)]`, or `#[gpu_control(surface_pointer_motion)]`",
             ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported(
