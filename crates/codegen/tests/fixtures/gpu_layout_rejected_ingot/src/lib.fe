@@ -1,0 +1,14 @@
+use std::webgpu::{
+    GpuLayout,
+    StorageLayout,
+    StorageLayoutProvider,
+}
+
+// WebGPU host-shareable storage records cannot contain bool fields. The
+// provider must reject this nominal record instead of inventing a byte layout.
+struct InvalidStorageRecord {
+    visible: bool,
+    material: u32,
+}
+
+derive GpuLayout<StorageLayout> for InvalidStorageRecord using StorageLayoutProvider

@@ -17,6 +17,14 @@ use super::web::{
 }
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
+pub use layout::{
+    GpuLayout,
+    StorageLayout,
+    StorageLayoutProvider,
+    UniformLayout,
+    VertexLayout,
+}
+
 // mb2 CE-3: the completion-cell control-effects vocabulary now lives
 // backend-generic in `core::pending`. Re-export it here for source
 // compatibility (the keystone fixtures and WebGPU code keep naming
