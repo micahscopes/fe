@@ -395,6 +395,15 @@ fn call_four_state_batch(
 }
 
 fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &[f32]) -> Vec<f32> {
+    call_state_batch_with_resources(bundle, events, state, &[])
+}
+
+fn call_state_batch_with_resources(
+    bundle: &WebBundle,
+    events: &[SurfaceEventFixture],
+    state: &[f32],
+    resource_slots: &[i64],
+) -> Vec<f32> {
     assert!(
         !events.is_empty(),
         "surface frame fixture requires an event"
@@ -419,10 +428,11 @@ fn call_state_batch(bundle: &WebBundle, events: &[SurfaceEventFixture], state: &
         .call(&mut store, ((events.len() * 52) as i32, 4))
         .expect("allocate raw SurfaceEvent batch") as usize;
     write_surface_event_batch(&memory, &mut store, event_pointer, events);
-    let values = [
+    let mut values = vec![
         wasmtime::Val::I32(event_pointer as i32),
         wasmtime::Val::I32(events.len() as i32),
     ];
+    values.extend(resource_slots.iter().copied().map(wasmtime::Val::I64));
     let mut uninitialized_results = vec![wasmtime::Val::F32(0); state.len()];
     assert!(
         transition
@@ -569,6 +579,27 @@ fn compile_actor_ingot(rel_dir: &str) -> WebBundle {
         };
         WebBundle::compile(db, top_mod, options)
             .unwrap_or_else(|e| panic!("{rel_dir}: WebBundle::compile failed: {e}"))
+    })
+}
+
+/// Compile one actor with the exact checked-in content-addressed payload that
+/// its immutable GPU resource declares. The compiler still verifies identity
+/// and byte length; this helper merely supplies the artifact bytes that the
+/// command-line bundler discovers beside the ingot.
+fn compile_actor_ingot_with_asset(rel_dir: &str, asset: &str) -> WebBundle {
+    let bytes = std::fs::read(repo_root().join(rel_dir).join(asset))
+        .unwrap_or_else(|error| panic!("{rel_dir}: failed to read {asset}: {error}"));
+    with_ingot(rel_dir, |db, top_mod| {
+        let (entry, mode) = resolve_web_entry(db, top_mod, None, None).unwrap_or_else(|error| {
+            panic!("{rel_dir}: could not derive a render entry from the actor declaration: {error}")
+        });
+        assert_eq!(mode, WebBundleMode::Render, "{rel_dir}: render actor");
+        WebBundle::compile(
+            db,
+            top_mod,
+            WebBuildOptions::render(entry, Some(rel_dir.to_owned())).with_resource_asset(bytes),
+        )
+        .unwrap_or_else(|error| panic!("{rel_dir}: WebBundle::compile failed: {error}"))
     })
 }
 
@@ -2950,6 +2981,104 @@ fn gradient_sketch_compiles() {
             512.0,
         ],
         "gradient mouse bindings must be authored and executed in Fe"
+    );
+}
+
+#[test]
+fn classic_quilting_lod_is_fe_reactive_and_uses_the_checked_atlas() {
+    const SHA256: &str = "9c23cbefd561abea57cb9f29f79a40d66761f0aeb1c89876b9aed5031750d5f1";
+    let bundle = compile_actor_ingot_with_asset(
+        "demos/sketches/classic_quilting_lod",
+        &format!("assets/sha256/{SHA256}.bin"),
+    );
+    for pass in &bundle.pass_wgsl {
+        assert_browser_wgsl(&pass.source);
+    }
+    wasmparser::validate(&bundle.wasm).expect("quilting LoD control Wasm should be valid");
+    assert_responsive_scheduled_surface(&bundle);
+    assert_eq!(
+        bundle.manifest.surface.as_ref().unwrap().pointer_motion,
+        fe_codegen::WebSurfacePointerMotion::HoverAndCapturedDrag,
+        "the Fe actor explicitly requests uncaptured pointer focus facts",
+    );
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| (pass.source_entry.as_str(), pass.draw_vertices))
+            .collect::<Vec<_>>(),
+        [
+            ("background", None),
+            ("patch_fragment", Some(78)),
+            ("focus_fragment", Some(6)),
+        ],
+        "the Fe actor owns one fullscreen field plus its actual topology and focus marker",
+    );
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("the LoD actor must materialize the matrix atlas exactly once")
+    };
+    assert_eq!(resource.length, 324);
+    assert_eq!(resource.artifact.as_ref().unwrap().bytes, 1296);
+    assert_eq!(resource.artifact.as_ref().unwrap().sha256, SHA256);
+    assert_eq!(
+        resource.policy.initialization,
+        fe_codegen::WebResourceInitialization::ContentAddressed {
+            sha256: SHA256.to_owned(),
+        },
+    );
+
+    let center: [f32; 4] = call_state_batch_with_resources(
+        &bundle,
+        &[SurfaceEventFixture {
+            pointer_x: 384.0,
+            pointer_y: 384.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            wheel_delta: 0.0,
+            wheel_mode: 0,
+            buttons: 0,
+            timestamp: 1.0,
+            width: 768.0,
+            height: 768.0,
+            event_kind: 9,
+            param_index: 0,
+            param_value: 0.0,
+        }],
+        &[0.0, 0.0, 3.0, 768.0],
+        &[0],
+    )
+    .try_into()
+    .expect("quilting LoD has four scalar state fields");
+    assert_eq!(center, [0.0, 0.0, 0.0, 768.0]);
+
+    let near_vertex: [f32; 4] = call_state_batch_with_resources(
+        &bundle,
+        &[SurfaceEventFixture {
+            pointer_x: 384.0,
+            pointer_y: 100.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            wheel_delta: 0.0,
+            wheel_mode: 0,
+            buttons: 0,
+            timestamp: 2.0,
+            width: 768.0,
+            height: 768.0,
+            event_kind: 9,
+            param_index: 0,
+            param_value: 0.0,
+        }],
+        &center,
+        &[0],
+    )
+    .try_into()
+    .expect("quilting LoD has four scalar state fields");
+    assert_eq!(near_vertex[0], 0.0);
+    assert!(near_vertex[1] > 0.7);
+    assert_eq!(
+        near_vertex[2], 3.0,
+        "vertex focus must select the densest slice"
     );
 }
 
