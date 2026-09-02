@@ -73,6 +73,213 @@ fn call2(store: &mut Store<()>, instance: &Instance, name: &str, a: f32, b: f32)
         .unwrap()
 }
 
+fn call_u32(store: &mut Store<()>, instance: &Instance, name: &str, value: u32) -> u32 {
+    function::<u32, u32>(store, instance, name)
+        .call(store, value)
+        .unwrap()
+}
+
+fn canonical_lod_keys() -> Vec<[u32; 3]> {
+    let mut keys = Vec::new();
+    for a in 0..=8 {
+        for b in a..=8 {
+            for c in b..=8 {
+                keys.push([a, b, c]);
+            }
+        }
+    }
+    keys
+}
+
+#[test]
+fn quilting_atlas_ctfe_plan_matches_an_independent_rust_schedule() {
+    let (mut store, instance) = instantiate();
+    let keys = canonical_lod_keys();
+    assert_eq!(keys.len(), 165);
+
+    let mut estimated = Vec::with_capacity(keys.len());
+    for (ordinal, [a, b, c]) in keys.iter().copied().enumerate() {
+        let ordinal = u32::try_from(ordinal).unwrap();
+        assert_eq!(call_u32(&mut store, &instance, "atlas_key_a", ordinal), a);
+        assert_eq!(call_u32(&mut store, &instance, "atlas_key_b", ordinal), b);
+        assert_eq!(call_u32(&mut store, &instance, "atlas_key_c", ordinal), c);
+
+        let resolutions = [1_u32 << a, 1_u32 << b, 1_u32 << c];
+        let boundary = resolutions.iter().sum::<u32>();
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_boundary_vertices", ordinal),
+            boundary
+        );
+
+        let vertex_capacity =
+            (1654 * resolutions[2] * resolutions[2] + 3308 * resolutions[2] + 999) / 1000 + 1;
+        let triangle_capacity = (2 * vertex_capacity).saturating_sub(boundary + 2);
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_vertex_capacity", ordinal),
+            vertex_capacity
+        );
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_triangle_capacity", ordinal,),
+            triangle_capacity
+        );
+
+        let work = resolutions[0] * resolutions[1]
+            + resolutions[1] * resolutions[2]
+            + resolutions[2] * resolutions[0];
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_estimated_work", ordinal),
+            work
+        );
+        estimated.push(work);
+
+        let root = [0, b - a, c - a];
+        let root_ordinal =
+            u32::try_from(keys.iter().position(|key| *key == root).unwrap()).unwrap();
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_root_ordinal", ordinal),
+            root_ordinal
+        );
+        let expected_parent = if a == 0 {
+            u32::MAX
+        } else {
+            let parent = [a - 1, b - 1, c - 1];
+            u32::try_from(keys.iter().position(|key| *key == parent).unwrap()).unwrap()
+        };
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_parent_ordinal", ordinal),
+            expected_parent
+        );
+    }
+
+    let expected_order: Vec<usize> = (0..keys.len()).rev().collect();
+    let mut expected_lane_for_job = vec![0_u32; keys.len()];
+    let mut expected_loads = [0_u32; 16];
+    for (rank, &ordinal) in expected_order.iter().enumerate() {
+        assert_eq!(
+            call_u32(
+                &mut store,
+                &instance,
+                "atlas_schedule_order",
+                u32::try_from(rank).unwrap(),
+            ),
+            u32::try_from(ordinal).unwrap()
+        );
+        let lane = expected_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|&(lane, load)| (*load, lane))
+            .map(|(lane, _)| lane)
+            .unwrap();
+        expected_lane_for_job[ordinal] = u32::try_from(lane).unwrap();
+        expected_loads[lane] += estimated[ordinal];
+    }
+    for (ordinal, expected_lane) in expected_lane_for_job.into_iter().enumerate() {
+        assert_eq!(
+            call_u32(
+                &mut store,
+                &instance,
+                "atlas_schedule_lane",
+                u32::try_from(ordinal).unwrap(),
+            ),
+            expected_lane
+        );
+    }
+    for (lane, expected_load) in expected_loads.into_iter().enumerate() {
+        assert_eq!(
+            call_u32(
+                &mut store,
+                &instance,
+                "atlas_schedule_lane_load",
+                u32::try_from(lane).unwrap(),
+            ),
+            expected_load
+        );
+    }
+    assert_eq!(
+        function::<(), u32>(&mut store, &instance, "atlas_schedule_maximum_lane_load")
+            .call(&mut store, ())
+            .unwrap(),
+        expected_loads.into_iter().max().unwrap()
+    );
+
+    let resolution_keys: Vec<crate::AtlasKey> = keys
+        .iter()
+        .map(|[a, b, c]| crate::AtlasKey::new(1_u32 << a, 1_u32 << b, 1_u32 << c))
+        .collect();
+    let direct = crate::quilting_export::build_direct_fixture_artifact(&resolution_keys, 16)
+        .expect("exhaustive direct Rust atlas");
+    let actual: Vec<u64> = direct
+        .patches
+        .iter()
+        .map(|patch| u64::from(patch.vertex_count) + u64::from(patch.triangle_count))
+        .collect();
+    let mut scheduled_actual_loads = [0_u64; 16];
+    let mut round_robin_loads = [0_u64; 16];
+    for (ordinal, work) in actual.iter().copied().enumerate() {
+        let lane = call_u32(
+            &mut store,
+            &instance,
+            "atlas_schedule_lane",
+            u32::try_from(ordinal).unwrap(),
+        );
+        scheduled_actual_loads[usize::try_from(lane).unwrap()] += work;
+        round_robin_loads[ordinal % 16] += work;
+    }
+    let mut actual_order: Vec<usize> = (0..actual.len()).collect();
+    actual_order.sort_by_key(|&ordinal| (std::cmp::Reverse(actual[ordinal]), ordinal));
+    let mut oracle_actual_loads = [0_u64; 16];
+    for ordinal in actual_order {
+        let lane = oracle_actual_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|&(lane, load)| (*load, lane))
+            .map(|(lane, _)| lane)
+            .unwrap();
+        oracle_actual_loads[lane] += actual[ordinal];
+    }
+    let scheduled_maximum = scheduled_actual_loads.into_iter().max().unwrap();
+    let round_robin_maximum = round_robin_loads.into_iter().max().unwrap();
+    let oracle_maximum = oracle_actual_loads.into_iter().max().unwrap();
+    assert_eq!(scheduled_maximum, oracle_maximum);
+    assert!(scheduled_maximum < round_robin_maximum);
+
+    for ([a, b, c], expected_permutation) in [
+        ([0_u32, 1, 2], 0_u32),
+        ([0, 2, 1], 1),
+        ([1, 0, 2], 2),
+        ([2, 0, 1], 3),
+        ([1, 2, 0], 4),
+        ([2, 1, 0], 5),
+    ] {
+        let mut expected = [a, b, c];
+        expected.sort_unstable();
+        assert_eq!(
+            function::<(u32, u32, u32), u32>(&mut store, &instance, "atlas_canonical_a")
+                .call(&mut store, (a, b, c))
+                .unwrap(),
+            expected[0]
+        );
+        assert_eq!(
+            function::<(u32, u32, u32), u32>(&mut store, &instance, "atlas_canonical_b")
+                .call(&mut store, (a, b, c))
+                .unwrap(),
+            expected[1]
+        );
+        assert_eq!(
+            function::<(u32, u32, u32), u32>(&mut store, &instance, "atlas_canonical_c")
+                .call(&mut store, (a, b, c))
+                .unwrap(),
+            expected[2]
+        );
+        assert_eq!(
+            function::<(u32, u32, u32), u32>(&mut store, &instance, "atlas_permutation")
+                .call(&mut store, (a, b, c))
+                .unwrap(),
+            expected_permutation
+        );
+    }
+}
+
 fn call3(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 3]) -> f32 {
     let [a, b, c] = values;
     function::<(f32, f32, f32), f32>(store, instance, name)
