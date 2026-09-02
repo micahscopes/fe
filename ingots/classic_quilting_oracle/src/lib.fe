@@ -34,11 +34,17 @@ use quilting_atlas::sampling::{
     FixedBarycentric,
     boundary_seed,
     candidate_cell_count,
+    candidate_conflict_cell_span,
+    candidate_density_bucket,
     candidate_grid_side,
+    candidate_is_round_winner,
+    candidate_precedes,
     candidate_slot_count,
+    candidate_state_after_round,
     density_exponent_q8,
     equilateral_distance_squared,
     interior_candidate,
+    initial_candidate_state,
     mix32,
     poisson_conflict,
     poisson_radius_squared,
@@ -318,6 +324,72 @@ pub fn atlas_candidate_valid(
     } else {
         0
     }
+}
+
+pub fn atlas_initial_candidate_state(_ valid: u32, _ boundary_conflict: u32) -> u32 {
+    initial_candidate_state(valid != 0, boundary_conflict != 0)
+}
+
+pub fn atlas_candidate_precedes(
+    _ left_priority: u32,
+    _ left_slot: u32,
+    _ right_priority: u32,
+    _ right_slot: u32,
+) -> u32 {
+    if candidate_precedes(left_priority, left_slot, right_priority, right_slot) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn atlas_candidate_is_round_winner(
+    _ state: u32,
+    _ accepted_conflict: u32,
+    _ preceding_pending_conflict: u32,
+) -> u32 {
+    if candidate_is_round_winner(
+        state,
+        accepted_conflict != 0,
+        preceding_pending_conflict != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn atlas_candidate_state_after_round(
+    _ state: u32,
+    _ accepted_conflict: u32,
+    _ winner: u32,
+    _ winner_conflict: u32,
+) -> u32 {
+    candidate_state_after_round(
+        state,
+        accepted_conflict != 0,
+        winner != 0,
+        winner_conflict != 0,
+    )
+}
+
+pub fn atlas_candidate_density_bucket(_ patch: u32, _ a: u32, _ b: u32, _ c: u32) -> u32 {
+    candidate_density_bucket(
+        canonical_key_at(patch as usize),
+        fixed_barycentric(a, b, c),
+    )
+}
+
+pub fn atlas_candidate_conflict_cell_span(
+    _ patch: u32,
+    _ left_bucket: u32,
+    _ right_bucket: u32,
+) -> u32 {
+    candidate_conflict_cell_span(
+        canonical_key_at(patch as usize),
+        left_bucket,
+        right_bucket,
+    )
 }
 
 fn permutation_code(_ permutation: EdgePermutation) -> u32 {
