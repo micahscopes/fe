@@ -118,10 +118,41 @@ fn call6_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u3
 }
 
 #[allow(clippy::many_single_char_names)]
+fn call6_i32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 6]) -> i32 {
+    let [a, b, c, d, e, f] = values;
+    function::<(u32, u32, u32, u32, u32, u32), i32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
 fn call8_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 8]) -> u32 {
     let [a, b, c, d, e, f, g, h] = values;
     function::<(u32, u32, u32, u32, u32, u32, u32, u32), u32>(store, instance, name)
         .call(store, (a, b, c, d, e, f, g, h))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call8_i32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 8]) -> i32 {
+    let [a, b, c, d, e, f, g, h] = values;
+    function::<(u32, u32, u32, u32, u32, u32, u32, u32), i32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g, h))
+        .unwrap()
+}
+
+fn call_flip(
+    store: &mut Store<()>,
+    instance: &Instance,
+    current: [u32; 2],
+    proposed: [u32; 2],
+    sign: i32,
+) -> u32 {
+    function::<(u32, u32, u32, u32, i32), u32>(store, instance, "atlas_should_flip_edge")
+        .call(
+            store,
+            (current[0], current[1], proposed[0], proposed[1], sign),
+        )
         .unwrap()
 }
 
@@ -195,6 +226,47 @@ fn continuous_density_exponent(key: [u32; 3], point: [u32; 3]) -> f64 {
         .map(|(weight, lod)| weight * lod)
         .sum::<f64>()
         / sum
+}
+
+fn orientation_oracle(first: [u32; 2], second: [u32; 2], third: [u32; 2]) -> i128 {
+    let ab_b = i128::from(second[0]) - i128::from(first[0]);
+    let ab_c = i128::from(second[1]) - i128::from(first[1]);
+    let ac_b = i128::from(third[0]) - i128::from(first[0]);
+    let ac_c = i128::from(third[1]) - i128::from(first[1]);
+    ab_b * ac_c - ab_c * ac_b
+}
+
+fn equilateral_lift_oracle(delta_b: i128, delta_c: i128) -> i128 {
+    delta_b * delta_b + delta_c * delta_c + delta_b * delta_c
+}
+
+fn incircle_sign_oracle(
+    first: [u32; 2],
+    second: [u32; 2],
+    third: [u32; 2],
+    query: [u32; 2],
+) -> i32 {
+    let delta = |point: [u32; 2]| {
+        [
+            i128::from(point[0]) - i128::from(query[0]),
+            i128::from(point[1]) - i128::from(query[1]),
+        ]
+    };
+    let [first_b, first_c] = delta(first);
+    let [second_b, second_c] = delta(second);
+    let [third_b, third_c] = delta(third);
+    let first_second = first_b * second_c - second_b * first_c;
+    let second_third = second_b * third_c - third_b * second_c;
+    let third_first = third_b * first_c - first_b * third_c;
+    let determinant = equilateral_lift_oracle(first_b, first_c) * second_third
+        + equilateral_lift_oracle(second_b, second_c) * third_first
+        + equilateral_lift_oracle(third_b, third_c) * first_second;
+    let winding = orientation_oracle(first, second, third);
+    if winding == 0 {
+        0
+    } else {
+        i32::try_from(determinant.signum() * winding.signum()).unwrap()
+    }
 }
 
 #[test]
@@ -888,6 +960,96 @@ fn quilting_atlas_parallel_acceptance_is_deterministic_independent_and_maximal()
             0
         );
     }
+}
+
+#[test]
+fn quilting_atlas_exact_delaunay_predicates_match_i128_and_stable_ties() {
+    const SCALE: u32 = 16_384;
+    let (mut store, instance) = instantiate();
+    let points = [
+        [0, 0],
+        [SCALE, 0],
+        [0, SCALE],
+        [SCALE / 2, 0],
+        [0, SCALE / 2],
+        [SCALE / 2, SCALE / 2],
+        [5_461, 5_461],
+        [SCALE / 4, SCALE / 4],
+        [9_216, 4_096],
+        [8_192, 5_120],
+        [7_168, 5_120],
+        [7_168, 4_096],
+        [8_192, 3_072],
+        [9_216, 3_072],
+    ];
+
+    for first in 0..points.len() {
+        for second in 0..points.len() {
+            for third in 0..points.len() {
+                if first == second || first == third || second == third {
+                    continue;
+                }
+                let a = points[first];
+                let b = points[second];
+                let c = points[third];
+                let expected = i32::try_from(orientation_oracle(a, b, c)).unwrap();
+                assert_eq!(
+                    call6_i32(
+                        &mut store,
+                        &instance,
+                        "atlas_orientation",
+                        [a[0], a[1], b[0], b[1], c[0], c[1]],
+                    ),
+                    expected,
+                    "orientation points {first}/{second}/{third}"
+                );
+
+                for query in 0..points.len() {
+                    if query == first || query == second || query == third {
+                        continue;
+                    }
+                    let d = points[query];
+                    let expected = incircle_sign_oracle(a, b, c, d);
+                    assert_eq!(
+                        call8_i32(
+                            &mut store,
+                            &instance,
+                            "atlas_incircle_sign",
+                            [a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]],
+                        ),
+                        expected,
+                        "incircle points {first}/{second}/{third}/{query}"
+                    );
+                }
+            }
+        }
+    }
+
+    // The final six points are an exact integer hexagon in the equilateral
+    // metric, so every four-point subset is cocircular without tolerance.
+    for first in 8..14 {
+        for second in first + 1..14 {
+            for third in second + 1..14 {
+                for query in third + 1..14 {
+                    assert_eq!(
+                        incircle_sign_oracle(
+                            points[first],
+                            points[second],
+                            points[third],
+                            points[query],
+                        ),
+                        0
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(call_flip(&mut store, &instance, [90, 91], [1, 2], 1), 1);
+    assert_eq!(call_flip(&mut store, &instance, [1, 2], [90, 91], -1), 0);
+    assert_eq!(call_flip(&mut store, &instance, [10, 20], [5, 30], 0), 1);
+    assert_eq!(call_flip(&mut store, &instance, [5, 30], [10, 20], 0), 0);
+    assert_eq!(call_flip(&mut store, &instance, [10, 20], [20, 10], 0), 0);
 }
 
 fn call3(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 3]) -> f32 {

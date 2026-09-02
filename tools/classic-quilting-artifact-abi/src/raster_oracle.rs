@@ -23,6 +23,57 @@ struct CompiledRaster {
 }
 
 static COMPILED: OnceLock<CompiledRaster> = OnceLock::new();
+static COMPILED_PREDICATES: OnceLock<WebBundle> = OnceLock::new();
+
+fn compiled_predicates() -> &'static WebBundle {
+    COMPILED_PREDICATES.get_or_init(|| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ingots/classic_quilting_predicate_webgpu_oracle");
+        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+        let mut db = DriverDataBase::default();
+        assert!(
+            !driver::init_ingot(&mut db, &url),
+            "predicate oracle ingot initialization diagnostics"
+        );
+        let top_mod = db
+            .workspace()
+            .containing_ingot(&db, url)
+            .expect("predicate oracle ingot")
+            .root_mod(&db);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected predicate oracle diagnostics:\n{diagnostics}"
+        );
+        WebBundle::compile(
+            &db,
+            top_mod,
+            WebBuildOptions::compute(
+                "classify",
+                Some("classic-quilting-exact-predicate".to_owned()),
+            ),
+        )
+        .expect("compile exact predicate WebGPU bundle")
+    })
+}
+
+#[test]
+fn exact_predicates_compile_to_browser_profile_wgsl() {
+    let bundle = compiled_predicates();
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "classify");
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([1, 1, 1]));
+    let module = naga::front::wgsl::parse_str(&bundle.wgsl).expect("predicate WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .expect("predicate WGSL validates with browser capabilities");
+    assert!(bundle.wgsl.contains("@compute"));
+    assert!(!bundle.wgsl.contains("f32"));
+    assert!(!bundle.wgsl.contains("f64"));
+}
 
 fn compiled_raster() -> &'static CompiledRaster {
     COMPILED.get_or_init(|| {
@@ -295,6 +346,180 @@ fn readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
     let bytes = slice.get_mapped_range().to_vec();
     buffer.unmap();
     bytes
+}
+
+fn predicate_orientation(first: [u32; 2], second: [u32; 2], third: [u32; 2]) -> i32 {
+    let ab_b = i128::from(second[0]) - i128::from(first[0]);
+    let ab_c = i128::from(second[1]) - i128::from(first[1]);
+    let ac_b = i128::from(third[0]) - i128::from(first[0]);
+    let ac_c = i128::from(third[1]) - i128::from(first[1]);
+    i32::try_from(ab_b * ac_c - ab_c * ac_b).unwrap()
+}
+
+fn predicate_lift(delta_b: i128, delta_c: i128) -> i128 {
+    delta_b * delta_b + delta_c * delta_c + delta_b * delta_c
+}
+
+fn predicate_incircle(first: [u32; 2], second: [u32; 2], third: [u32; 2], query: [u32; 2]) -> i32 {
+    let delta = |point: [u32; 2]| {
+        [
+            i128::from(point[0]) - i128::from(query[0]),
+            i128::from(point[1]) - i128::from(query[1]),
+        ]
+    };
+    let [first_b, first_c] = delta(first);
+    let [second_b, second_c] = delta(second);
+    let [third_b, third_c] = delta(third);
+    let first_second = first_b * second_c - second_b * first_c;
+    let second_third = second_b * third_c - third_b * second_c;
+    let third_first = third_b * first_c - first_b * third_c;
+    let determinant = predicate_lift(first_b, first_c) * second_third
+        + predicate_lift(second_b, second_c) * third_first
+        + predicate_lift(third_b, third_c) * first_second;
+    let winding = i128::from(predicate_orientation(first, second, third));
+    i32::try_from(determinant.signum() * winding.signum()).unwrap()
+}
+
+fn u32_bytes(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
+#[test]
+fn exact_predicate_wgsl_matches_independent_i128_oracle_on_gpu() {
+    const SCALE: u32 = 16_384;
+    let Some((adapter, device, queue)) = device() else {
+        return;
+    };
+    eprintln!("exact predicate WGSL adapter: {}", adapter.get_info().name);
+    let bundle = compiled_predicates();
+    let pass = &bundle.manifest.passes[0];
+    let dispatch = pass.dispatch.expect("compute dispatch");
+    assert_eq!(pass.layout.bindings.len(), 2);
+    assert_eq!(pass.layout.bindings[0].name, "points");
+    assert_eq!(pass.layout.bindings[1].name, "verdict");
+
+    let point_bytes = u64::try_from(8 * size_of::<u32>()).unwrap();
+    let verdict_bytes = u64::try_from(3 * size_of::<u32>()).unwrap();
+    let points = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("exact predicate points"),
+        size: point_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let verdict = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("exact predicate verdict"),
+        size: verdict_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("exact predicate readback"),
+        size: verdict_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("exact predicate layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("exact predicate resources"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: points.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: verdict.as_entire_binding(),
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("exact predicate pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Fe exact Quilting predicates"),
+        source: wgpu::ShaderSource::Wgsl(bundle.wgsl.clone().into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Fe exact Quilting predicates"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&pass.layout.entry_point),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let cases = [
+        [[0, 0], [SCALE, 0], [0, SCALE], [5_461, 5_461]],
+        [[0, SCALE], [SCALE, 0], [0, 0], [8_192, 4_096]],
+        [
+            [9_216, 4_096],
+            [8_192, 5_120],
+            [7_168, 5_120],
+            [7_168, 4_096],
+        ],
+        [[4_096, 4_096], [8_192, 4_096], [4_096, 8_192], [0, 0]],
+        [[0, 0], [4_096, 4_096], [8_192, 8_192], [2_048, 6_144]],
+    ];
+    for (case_index, [first, second, third, query]) in cases.into_iter().enumerate() {
+        let input = [
+            first[0], first[1], second[0], second[1], third[0], third[1], query[0], query[1],
+        ];
+        queue.write_buffer(&points, 0, &u32_bytes(&input));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("exact predicate dispatch"),
+        });
+        {
+            let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("exact predicate dispatch"),
+                timestamp_writes: None,
+            });
+            compute.set_pipeline(&pipeline);
+            compute.set_bind_group(0, &group, &[]);
+            compute.dispatch_workgroups(dispatch[0], dispatch[1], dispatch[2]);
+        }
+        encoder.copy_buffer_to_buffer(&verdict, 0, &staging, 0, verdict_bytes);
+        queue.submit(Some(encoder.finish()));
+        let bytes = readback(&device, &staging);
+        let actual = bytes
+            .chunks_exact(size_of::<u32>())
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let orientation = predicate_orientation(first, second, third);
+        let circle = predicate_incircle(first, second, third, query);
+        let expected = [
+            u32::from_ne_bytes(orientation.to_ne_bytes()),
+            u32::from_ne_bytes(circle.to_ne_bytes()),
+            u32::from(circle >= 0),
+        ];
+        assert_eq!(actual, expected, "predicate case {case_index}");
+    }
 }
 
 #[test]

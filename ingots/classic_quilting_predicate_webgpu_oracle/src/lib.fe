@@ -1,0 +1,45 @@
+//! Browser-profile compilation oracle for exact Quilting predicates.
+
+use quilting_atlas::sampling::{BARYCENTRIC_SCALE, FixedBarycentric}
+use quilting_atlas::triangulation::{incircle_sign, orientation, should_flip_edge}
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+fn point(_ source: Shared<u32, 8>, _ ordinal: u32) -> FixedBarycentric {
+    let offset = ordinal + ordinal
+    let b = source.load(index: offset)
+    let c = source.load(index: offset + 1)
+    FixedBarycentric { a: BARYCENTRIC_SCALE - b - c, b: b, c: c }
+}
+
+actor ExactPredicateOracle uses (Program<WebGpuBackend>) {
+    points: Shared<u32, 8>,
+    verdict: Shared<u32, 3>,
+
+    fn classify(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 {
+            return
+        }
+        let first = point(self.points, 0)
+        let second = point(self.points, 1)
+        let third = point(self.points, 2)
+        let query = point(self.points, 3)
+        let winding = orientation(first, second, third)
+        let circle = incircle_sign(first, second, third, query)
+        self.verdict.store(index: 0, value: winding.downcast_truncate())
+        self.verdict.store(index: 1, value: circle.downcast_truncate())
+        self.verdict.store(
+            index: 2,
+            value: if should_flip_edge(10, 20, 5, 30, circle) { 1 } else { 0 },
+        )
+    }
+}
