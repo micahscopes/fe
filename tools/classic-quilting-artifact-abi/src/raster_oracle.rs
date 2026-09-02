@@ -29,6 +29,7 @@ static COMPILED_PREDICATES: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_TOPOLOGY: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_SAMPLING: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_DELAUNAY: OnceLock<WebBundle> = OnceLock::new();
+static COMPILED_PARALLEL_CONSTRUCTION: OnceLock<WebBundle> = OnceLock::new();
 
 fn compile_compute_oracle(relative_path: &str, entry: &str, label: &str) -> WebBundle {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
@@ -131,6 +132,48 @@ fn compiled_delaunay() -> &'static WebBundle {
             "classic-quilting-constrained-delaunay",
         )
     })
+}
+
+fn compiled_parallel_construction() -> &'static WebBundle {
+    COMPILED_PARALLEL_CONSTRUCTION.get_or_init(|| {
+        compile_compute_oracle(
+            "../../ingots/classic_quilting_parallel_construction_webgpu_oracle",
+            "seal",
+            "classic-quilting-parallel-construction",
+        )
+    })
+}
+
+#[test]
+fn parallel_hull_fan_compiles_as_a_portable_integer_graph() {
+    let bundle = compiled_parallel_construction();
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        ["initialize", "seal"]
+    );
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([5, 1, 1]));
+    assert_eq!(bundle.manifest.passes[1].dispatch, Some([1, 1, 1]));
+    assert!(bundle.manifest.resources.len() <= 8);
+    for shader in &bundle.pass_wgsl {
+        let module =
+            naga::front::wgsl::parse_str(&shader.source).expect("parallel hull WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .expect("parallel hull WGSL validates with browser capabilities");
+        assert!(shader.source.contains("@compute"));
+        assert!(!shader.source.contains("@fragment"));
+        assert!(!shader.source.contains("f32"));
+        assert!(!shader.source.contains("f64"));
+    }
 }
 
 #[test]
