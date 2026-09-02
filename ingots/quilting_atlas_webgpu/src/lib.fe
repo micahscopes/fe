@@ -22,17 +22,25 @@ use quilting_atlas::sampling::{
     interior_candidate_at_slot,
     poisson_conflict,
 }
+use quilting_atlas::triangulation::orientation
 use quilting_atlas::topology::{
     INVALID_VERTEX,
     POINT_ON_EDGE,
     POINT_ON_VERTEX,
     POINT_STRICTLY_INSIDE,
+    DirectedEdge,
+    FlipProposal,
     Triangle,
     TrianglePair,
     classify_point_in_triangle,
+    directed_edges_form_interior_pair,
+    flip_proposal_precedes,
     normalized_triangle,
+    flipped_triangle_pair,
+    interior_edge_flip_decision,
     split_triangle_edge,
     split_triangle_interior,
+    triangle_directed_edge,
     triangle_edge_first,
     triangle_edge_opposite,
     triangle_edge_second,
@@ -67,6 +75,17 @@ pub struct TopologyConstruction {
     pub invariant_failures: u32,
 }
 impl core::marker::Copy for TopologyConstruction {}
+
+pub struct DelaunayRestoration {
+    pub valid: bool,
+    pub converged: bool,
+    pub resident_points: u32,
+    pub resident_triangles: u32,
+    pub flips: u32,
+    pub remaining_violations: u32,
+    pub invariant_failures: u32,
+}
+impl core::marker::Copy for DelaunayRestoration {}
 
 fn candidate_offset(_ slot: u32) -> u32 {
     slot * CANDIDATE_WORDS.downcast_truncate()
@@ -172,6 +191,16 @@ const fn invalid_triangle_pair() -> TrianglePair {
         first: invalid_triangle(),
         second: invalid_triangle(),
         valid: false,
+    }
+}
+
+const fn invalid_flip_proposal() -> FlipProposal {
+    FlipProposal {
+        first_triangle: INVALID_VERTEX,
+        second_triangle: INVALID_VERTEX,
+        edge_low: INVALID_VERTEX,
+        edge_high: INVALID_VERTEX,
+        active: false,
     }
 }
 
@@ -820,6 +849,269 @@ pub fn construct_constrained_triangles<
         resident_triangles: triangle_count,
         expected_triangles: expected,
         location_failures: location_failures,
+        invariant_failures: invariant_failures,
+    }
+}
+
+fn flippable_pair<
+    const POINT_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ first_triangle: Triangle,
+    _ first_face: u32,
+    _ first_edge: u32,
+    _ second_triangle: Triangle,
+    _ second_face: u32,
+    _ second_edge: u32,
+) -> TrianglePair {
+    let first = triangle_directed_edge(key, first_triangle, first_face, first_edge)
+    let second = triangle_directed_edge(key, second_triangle, second_face, second_edge)
+    if !directed_edges_form_interior_pair(first, second) {
+        return invalid_triangle_pair()
+    }
+    let first_opposite_id = triangle_edge_opposite(first_triangle, first_edge)
+    let second_opposite_id = triangle_edge_opposite(second_triangle, second_edge)
+    let u = point_load<POINT_STORAGE_WORDS>(points, first.first)
+    let v = point_load<POINT_STORAGE_WORDS>(points, first.second)
+    let first_opposite = point_load<POINT_STORAGE_WORDS>(points, first_opposite_id)
+    let second_opposite = point_load<POINT_STORAGE_WORDS>(points, second_opposite_id)
+    let decision = interior_edge_flip_decision(
+        first.first,
+        u,
+        first.second,
+        v,
+        first_opposite_id,
+        first_opposite,
+        second_opposite_id,
+        second_opposite,
+    )
+    flipped_triangle_pair(
+        decision,
+        first.first,
+        u,
+        first.second,
+        v,
+        first_opposite_id,
+        first_opposite,
+        second_opposite_id,
+        second_opposite,
+    )
+}
+
+fn flip_proposal_for_edges(_ first: DirectedEdge, _ second: DirectedEdge) -> FlipProposal {
+    let first_face = if first.triangle < second.triangle {
+        first.triangle
+    } else {
+        second.triangle
+    }
+    let second_face = if first.triangle < second.triangle {
+        second.triangle
+    } else {
+        first.triangle
+    }
+    let low = if first.first < first.second { first.first } else { first.second }
+    let high = if first.first > first.second { first.first } else { first.second }
+    FlipProposal {
+        first_triangle: first_face,
+        second_triangle: second_face,
+        edge_low: low,
+        edge_high: high,
+        active: true,
+    }
+}
+
+/// Restore constrained Delaunay topology without reading the atlas back.
+///
+/// This deterministic scalar placement always flips the lexicographically
+/// first illegal unlocked edge. Exact incircle signs and the canonical
+/// cocircular tie rule come from `quilting_atlas::topology`. The bounded flip
+/// budget is explicit: exhaustion reports nonconvergence instead of silently
+/// publishing a partially restored atlas.
+pub fn restore_constrained_delaunay<
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const FLIP_LIMIT: usize,
+>(
+    _ key: AtlasKey,
+    _ source_valid: bool,
+    _ resident_points: u32,
+    _ resident_triangles: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+) -> DelaunayRestoration where
+    { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+{
+    let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    let triangle_capacity: u32 =
+        (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
+    let flip_limit: u32 = FLIP_LIMIT.downcast_truncate()
+    let mut invariant_failures: u32 = 0
+    if !source_valid
+        || resident_points > point_capacity
+        || resident_triangles > triangle_capacity
+    {
+        invariant_failures = invariant_failures + 1
+    }
+    let mut face: u32 = 0
+    while face < resident_triangles {
+        let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+        if !triangle.valid
+            || triangle.first >= resident_points
+            || triangle.second >= resident_points
+            || triangle.third >= resident_points
+            || triangle.first == triangle.second
+            || triangle.first == triangle.third
+            || triangle.second == triangle.third
+        {
+            invariant_failures = invariant_failures + 1
+        } else if orientation(
+            point_load<POINT_STORAGE_WORDS>(points, triangle.first),
+            point_load<POINT_STORAGE_WORDS>(points, triangle.second),
+            point_load<POINT_STORAGE_WORDS>(points, triangle.third),
+        ) <= 0 {
+            invariant_failures = invariant_failures + 1
+        }
+        face = face + 1
+    }
+
+    let mut flips: u32 = 0
+    let mut searching = invariant_failures == 0
+    let mut converged = false
+    while searching && flips < flip_limit {
+        let mut found = false
+        let mut best = invalid_flip_proposal()
+        let mut best_first_face: u32 = 0
+        let mut best_second_face: u32 = 0
+        let mut best_pair = invalid_triangle_pair()
+        let mut first_face: u32 = 0
+        while first_face < resident_triangles {
+            let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                triangles,
+                first_face,
+            )
+            let mut second_face = first_face + 1
+            while second_face < resident_triangles {
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    second_face,
+                )
+                let mut first_edge: u32 = 0
+                while first_edge < 3 {
+                    let directed_first = triangle_directed_edge(
+                        key,
+                        first_triangle,
+                        first_face,
+                        first_edge,
+                    )
+                    let mut second_edge: u32 = 0
+                    while second_edge < 3 {
+                        let directed_second = triangle_directed_edge(
+                            key,
+                            second_triangle,
+                            second_face,
+                            second_edge,
+                        )
+                        if directed_edges_form_interior_pair(
+                            directed_first,
+                            directed_second,
+                        ) {
+                            let pair = flippable_pair<POINT_STORAGE_WORDS>(
+                                key,
+                                points,
+                                first_triangle,
+                                first_face,
+                                first_edge,
+                                second_triangle,
+                                second_face,
+                                second_edge,
+                            )
+                            if pair.valid {
+                                let proposal = flip_proposal_for_edges(
+                                    directed_first,
+                                    directed_second,
+                                )
+                                if !found || flip_proposal_precedes(proposal, best) {
+                                    found = true
+                                    best = proposal
+                                    best_first_face = first_face
+                                    best_second_face = second_face
+                                    best_pair = pair
+                                }
+                            }
+                        }
+                        second_edge = second_edge + 1
+                    }
+                    first_edge = first_edge + 1
+                }
+                second_face = second_face + 1
+            }
+            first_face = first_face + 1
+        }
+        if found {
+            triangle_store<TRIANGLE_STORAGE_WORDS>(
+                triangles,
+                best_first_face,
+                best_pair.first,
+            )
+            triangle_store<TRIANGLE_STORAGE_WORDS>(
+                triangles,
+                best_second_face,
+                best_pair.second,
+            )
+            flips = flips + 1
+        } else {
+            converged = true
+            searching = false
+        }
+    }
+
+    let mut remaining: u32 = 0
+    if invariant_failures == 0 {
+        let mut first_face: u32 = 0
+        while first_face < resident_triangles {
+            let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face)
+            let mut second_face = first_face + 1
+            while second_face < resident_triangles {
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    second_face,
+                )
+                let mut first_edge: u32 = 0
+                while first_edge < 3 {
+                    let mut second_edge: u32 = 0
+                    while second_edge < 3 {
+                        let pair = flippable_pair<POINT_STORAGE_WORDS>(
+                            key,
+                            points,
+                            first_triangle,
+                            first_face,
+                            first_edge,
+                            second_triangle,
+                            second_face,
+                            second_edge,
+                        )
+                        if pair.valid { remaining = remaining + 1 }
+                        second_edge = second_edge + 1
+                    }
+                    first_edge = first_edge + 1
+                }
+                second_face = second_face + 1
+            }
+            first_face = first_face + 1
+        }
+    }
+    if remaining == 0 && invariant_failures == 0 {
+        converged = true
+    }
+    DelaunayRestoration {
+        valid: source_valid && converged && remaining == 0 && invariant_failures == 0,
+        converged: converged,
+        resident_points: resident_points,
+        resident_triangles: resident_triangles,
+        flips: flips,
+        remaining_violations: remaining,
         invariant_failures: invariant_failures,
     }
 }
