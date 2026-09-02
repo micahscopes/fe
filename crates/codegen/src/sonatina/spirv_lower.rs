@@ -27,6 +27,13 @@ use sonatina_codegen::optim::{
     inliner::{Inliner, InlinerConfig},
     run_function_passes_on,
 };
+use sonatina_ir::ir_writer::ModuleWriter;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+static SPIRV_INLINE_SNAPSHOT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 /// Lower a MIR runtime package to naga-validated SPIR-V by reusing the wasm-path
 /// Sonatina `Module`.
@@ -348,6 +355,12 @@ fn inline_spirv_calls_from_roots(
     roots: &[sonatina_ir::module::FuncRef],
 ) {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
+    let snapshot = std::env::var_os("FE_SPIRV_INLINE_SNAPSHOT_DIR").map(|directory| {
+        (
+            directory,
+            SPIRV_INLINE_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        )
+    });
     // The SPIR-V translator currently consumes only the first (entry) function
     // and deliberately rejects calls. Flatten outward from only the selected
     // shader roots. Expanding every helper bottom-up first retains many enormous
@@ -374,6 +387,9 @@ fn inline_spirv_calls_from_roots(
     const MAX_FRONTIERS: usize = 64;
     const MAX_ROOT_GROWTH: usize = 10_000_000;
     let initial_root_insts = spirv_root_instruction_count(module, roots);
+    if let Some((directory, sequence)) = &snapshot {
+        write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "pre");
+    }
     if trace {
         eprintln!(
             "fe spirv inliner: strategy=rooted, functions={}, roots={}, initial_insts={initial_root_insts}",
@@ -426,6 +442,63 @@ fn inline_spirv_calls_from_roots(
             break;
         }
     }
+    if let Some((directory, sequence)) = &snapshot {
+        write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "post");
+    }
+}
+
+fn write_spirv_inline_snapshot(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+    directory: &Path,
+    sequence: usize,
+    phase: &str,
+) {
+    let root_names = roots
+        .iter()
+        .map(|root| {
+            module
+                .ctx
+                .get_sig(*root)
+                .map(|signature| sanitize_snapshot_name(signature.name()))
+                .unwrap_or_else(|| sanitize_snapshot_name(&format!("function_{root:?}")))
+        })
+        .collect::<Vec<_>>()
+        .join("+");
+    let root_names = if root_names.is_empty() {
+        "no_roots".to_owned()
+    } else {
+        root_names
+    };
+    let path = directory.join(format!("{sequence:04}-{root_names}-{phase}.sona"));
+    if let Err(error) = std::fs::create_dir_all(directory).and_then(|()| {
+        let mut writer = ModuleWriter::new(module);
+        std::fs::write(&path, writer.dump_string())
+    }) {
+        eprintln!(
+            "fe spirv inliner: could not write {} snapshot `{}`: {error}",
+            phase,
+            path.display()
+        );
+    } else {
+        eprintln!(
+            "fe spirv inliner: wrote {} snapshot `{}`",
+            phase,
+            path.display()
+        );
+    }
+}
+
+fn sanitize_snapshot_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn spirv_inliner_config() -> InlinerConfig {
