@@ -603,6 +603,35 @@ device recovery, contains no authored binding or format table.
 Gate: the browser moves continuously between LODs without generated Fe lookup
 code, JavaScript LOD logic, per-permutation mesh allocations, or stale frames.
 
+## Compiler observability with Riffcat
+
+The WebGPU compiler path keeps Riffcat observational and out of the semantic
+dependency graph. Fe commit `61ef6bc14` exposes the opt-in
+`FE_SPIRV_INLINE_SNAPSHOT_DIR` boundary and writes matched `pre`/`post`
+Sonatina modules around rooted shader inlining. Riffcat branch
+`sonatina-structure-ingest` at `93477d4` consumes those `.sona` files through
+its versioned `sonatina-ir/1` adapter. Sonatina and Fe therefore remain the
+authorities for legality and transformation; Riffcat supplies content-addressed
+phase evidence without becoming a second optimizer or a build requirement.
+
+A representative release workflow is:
+
+```console
+$ FE_SPIRV_INLINE_SNAPSHOT_DIR="$snapshot_dir" cargo test --release <focused WebGPU gate>
+$ riffcat --corpus "$corpus_dir" ingest "$snapshot_dir"/*.sona --label <source-revision-and-gate>
+$ riffcat --corpus "$corpus_dir" bucket --unit sona-module --mode shape \
+    --facet structure+types+constants --min-size 1
+$ riffcat --corpus "$corpus_dir" root --unit sona-module --mode shape
+```
+
+The 2026-09-02 mb2 inliner corpus was re-run through that release-built adapter:
+343 functions / 1,222 blocks / 5,862 instructions before inlining became 343 /
+3,409 / 39,866 after it, while distinct structural shapes increased only from
+285 to 369. This is strong duplication evidence, not semantic-equivalence
+evidence. For the typed resource work, record at least the
+`structure+types+constants` address before and after lowering; add a
+resource-effect view before using any digest as a reusable compiler cache key.
+
 ## Required evidence
 
 Every capability must carry evidence at all relevant layers:
@@ -613,6 +642,8 @@ Every capability must carry evidence at all relevant layers:
 - independent Rust layout oracle, not generated output as its own oracle;
 - SPIR-V/WGSL structural assertions plus Naga validation;
 - deterministic manifest/artifact digest test;
+- Riffcat pre/post Sonatina phase evidence for compiler-growth-sensitive
+  changes, kept as an optional analysis corpus rather than runtime input;
 - fixed-runtime unit test for allocation/upload/release and stale generations;
 - Chromium execution gate on a production bundle;
 - device-loss/recreation gate where the browser permits deterministic
