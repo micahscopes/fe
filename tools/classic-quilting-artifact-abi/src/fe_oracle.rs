@@ -87,6 +87,13 @@ fn call2_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u3
         .unwrap()
 }
 
+fn call3_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 3]) -> u32 {
+    let [a, b, c] = values;
+    function::<(u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c))
+        .unwrap()
+}
+
 fn call4_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 4]) -> u32 {
     let [a, b, c, d] = values;
     function::<(u32, u32, u32, u32), u32>(store, instance, name)
@@ -632,6 +639,253 @@ fn quilting_atlas_fe_sampler_matches_independent_integer_oracles() {
             ),
             1,
             "the symmetric larger-disk rule rejects an overlap"
+        );
+    }
+}
+
+#[test]
+fn quilting_atlas_parallel_acceptance_is_deterministic_independent_and_maximal() {
+    const PENDING: u32 = 0;
+    const ACCEPTED: u32 = 1;
+    const REJECTED: u32 = 2;
+    const INVALID: u32 = 3;
+
+    let (mut store, instance) = instantiate();
+    for (valid, boundary_conflict, expected) in [
+        (0, 0, INVALID),
+        (0, 1, INVALID),
+        (1, 1, REJECTED),
+        (1, 0, PENDING),
+    ] {
+        assert_eq!(
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_initial_candidate_state",
+                [valid, boundary_conflict],
+            ),
+            expected
+        );
+    }
+
+    for (left_priority, left_slot, right_priority, right_slot, expected) in [
+        (3, 9, 4, 0, 1),
+        (4, 0, 3, 9, 0),
+        (7, 2, 7, 3, 1),
+        (7, 3, 7, 2, 0),
+        (7, 3, 7, 3, 0),
+    ] {
+        assert_eq!(
+            call4_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_precedes",
+                [left_priority, left_slot, right_priority, right_slot],
+            ),
+            expected
+        );
+    }
+
+    for state in [ACCEPTED, REJECTED, INVALID] {
+        for accepted_conflict in 0..=1 {
+            for preceding_conflict in 0..=1 {
+                assert_eq!(
+                    call3_u32(
+                        &mut store,
+                        &instance,
+                        "atlas_candidate_is_round_winner",
+                        [state, accepted_conflict, preceding_conflict],
+                    ),
+                    0
+                );
+            }
+        }
+        assert_eq!(
+            call4_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_state_after_round",
+                [state, 1, 1, 1],
+            ),
+            state
+        );
+    }
+    assert_eq!(
+        call3_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_is_round_winner",
+            [PENDING, 0, 0],
+        ),
+        1
+    );
+    assert_eq!(
+        call3_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_is_round_winner",
+            [PENDING, 1, 0],
+        ),
+        0
+    );
+    assert_eq!(
+        call4_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_state_after_round",
+            [PENDING, 1, 1, 0],
+        ),
+        REJECTED
+    );
+    assert_eq!(
+        call4_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_state_after_round",
+            [PENDING, 0, 1, 0],
+        ),
+        ACCEPTED
+    );
+    assert_eq!(
+        call4_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_state_after_round",
+            [PENDING, 0, 0, 1],
+        ),
+        REJECTED
+    );
+    assert_eq!(
+        call4_u32(
+            &mut store,
+            &instance,
+            "atlas_candidate_state_after_round",
+            [PENDING, 0, 0, 0],
+        ),
+        PENDING
+    );
+
+    let edges = [
+        (0_usize, 1_usize),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 0),
+        (2, 6),
+        (6, 7),
+        (7, 4),
+    ];
+    let priorities = [9_u32, 3, 7, 3, 5, 1, 1, 8];
+    let mut states = vec![PENDING; priorities.len()];
+    let neighbors = |vertex: usize| {
+        edges.into_iter().filter_map(move |(left, right)| {
+            if left == vertex {
+                Some(right)
+            } else if right == vertex {
+                Some(left)
+            } else {
+                None
+            }
+        })
+    };
+
+    let mut rounds = 0;
+    while states.contains(&PENDING) && rounds < 64 {
+        let mut winners = vec![false; states.len()];
+        for vertex in 0..states.len() {
+            let accepted_conflict = neighbors(vertex).any(|other| states[other] == ACCEPTED);
+            let preceding_pending_conflict = neighbors(vertex).any(|other| {
+                states[other] == PENDING
+                    && call4_u32(
+                        &mut store,
+                        &instance,
+                        "atlas_candidate_precedes",
+                        [
+                            priorities[other],
+                            u32::try_from(other).unwrap(),
+                            priorities[vertex],
+                            u32::try_from(vertex).unwrap(),
+                        ],
+                    ) == 1
+            });
+            winners[vertex] = call3_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_is_round_winner",
+                [
+                    states[vertex],
+                    u32::from(accepted_conflict),
+                    u32::from(preceding_pending_conflict),
+                ],
+            ) == 1;
+        }
+        states = (0..states.len())
+            .map(|vertex| {
+                let accepted_conflict = neighbors(vertex).any(|other| states[other] == ACCEPTED);
+                let winner_conflict = neighbors(vertex).any(|other| winners[other]);
+                call4_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_candidate_state_after_round",
+                    [
+                        states[vertex],
+                        u32::from(accepted_conflict),
+                        u32::from(winners[vertex]),
+                        u32::from(winner_conflict),
+                    ],
+                )
+            })
+            .collect();
+        rounds += 1;
+    }
+    assert!(!states.contains(&PENDING));
+    assert!(rounds < 64);
+    for &(left, right) in &edges {
+        assert_ne!((states[left], states[right]), (ACCEPTED, ACCEPTED));
+    }
+    for vertex in 0..states.len() {
+        if states[vertex] == REJECTED {
+            assert!(neighbors(vertex).any(|other| states[other] == ACCEPTED));
+        }
+    }
+
+    for (patch, key) in canonical_lod_keys().into_iter().enumerate() {
+        let patch = u32::try_from(patch).unwrap();
+        let point = [5_462, 5_461, 5_461];
+        let expected_bucket = density_exponent_q8_oracle(key, point) / 256;
+        assert_eq!(
+            call4_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_density_bucket",
+                [patch, point[0], point[1], point[2]],
+            ),
+            expected_bucket
+        );
+        for left_bucket in 0..=key[2] {
+            for right_bucket in 0..=key[2] {
+                let coarse = left_bucket.min(right_bucket);
+                let expected_span = 2 * (1_u32 << (key[2] - coarse)) + 1;
+                assert_eq!(
+                    call3_u32(
+                        &mut store,
+                        &instance,
+                        "atlas_candidate_conflict_cell_span",
+                        [patch, left_bucket, right_bucket],
+                    ),
+                    expected_span
+                );
+            }
+        }
+        assert_eq!(
+            call3_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_conflict_cell_span",
+                [patch, key[2] + 1, key[2] + 1],
+            ),
+            0
         );
     }
 }

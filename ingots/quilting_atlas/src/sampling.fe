@@ -13,6 +13,13 @@ use core::marker::Copy
 pub const BARYCENTRIC_SCALE: u32 = 16384
 pub const CANDIDATE_GRID_MULTIPLIER: u32 = 2
 pub const CANDIDATE_TRIALS_PER_CELL: u32 = 2
+pub const ACCEPTANCE_ROUND_LIMIT: u32 = 64
+
+/// Stable candidate states stored identically by scalar and GPU providers.
+pub const CANDIDATE_PENDING: u32 = 0
+pub const CANDIDATE_ACCEPTED: u32 = 1
+pub const CANDIDATE_REJECTED: u32 = 2
+pub const CANDIDATE_INVALID: u32 = 3
 
 pub struct FixedBarycentric { pub a: u32, pub b: u32, pub c: u32 }
 impl Copy for FixedBarycentric {}
@@ -299,4 +306,87 @@ pub const fn interior_candidate(
         slot: slot,
         valid: valid,
     }
+}
+
+/// Initial state after materialization and boundary-seed exclusion.
+pub const fn initial_candidate_state(_ valid: bool, _ boundary_conflict: bool) -> u32 {
+    if !valid {
+        CANDIDATE_INVALID
+    } else if boundary_conflict {
+        CANDIDATE_REJECTED
+    } else {
+        CANDIDATE_PENDING
+    }
+}
+
+/// Stable total order for parallel maximal-independent-set rounds.
+/// Lower hash wins; the compact candidate slot breaks the vanishingly rare
+/// hash tie without relying on invocation or atomic-append order.
+pub const fn candidate_precedes(
+    _ left_priority: u32,
+    _ left_slot: u32,
+    _ right_priority: u32,
+    _ right_slot: u32,
+) -> bool {
+    left_priority < right_priority || (left_priority == right_priority && left_slot < right_slot)
+}
+
+/// Decide the provisional-winner mask from one immutable state generation.
+/// Providers may calculate the two conflict summaries in any order.
+pub const fn candidate_is_round_winner(
+    _ state: u32,
+    _ has_accepted_conflict: bool,
+    _ has_preceding_pending_conflict: bool,
+) -> bool {
+    state == CANDIDATE_PENDING && !has_accepted_conflict && !has_preceding_pending_conflict
+}
+
+/// Retire one candidate using a winner mask derived from the same immutable
+/// state generation. Winner computation and retirement are separate passes,
+/// preventing dispatch order from changing topology.
+pub const fn candidate_state_after_round(
+    _ state: u32,
+    _ has_accepted_conflict: bool,
+    _ is_winner: bool,
+    _ has_winner_conflict: bool,
+) -> u32 {
+    if state != CANDIDATE_PENDING {
+        state
+    } else if has_accepted_conflict {
+        CANDIDATE_REJECTED
+    } else if is_winner {
+        CANDIDATE_ACCEPTED
+    } else if has_winner_conflict {
+        CANDIDATE_REJECTED
+    } else {
+        CANDIDATE_PENDING
+    }
+}
+
+/// Dyadic density bucket used by a provider's multilevel candidate index.
+pub const fn candidate_density_bucket(_ key: AtlasKey, _ point: FixedBarycentric) -> u32 {
+    density_exponent_q8(key, point) / 256
+}
+
+/// Conservative cell-coordinate span for checking two density buckets.
+///
+/// A candidate cell is half one finest-edge interval wide. In the equilateral
+/// metric, either barycentric coordinate can change by at most `2r/3` across a
+/// radius `r`. Two finest/coarsest cells per dyadic ratio plus one halo are
+/// therefore conservative for the symmetric bigger-disk rule. Providers query
+/// each populated density bucket separately rather than searching every fine
+/// cell when one endpoint has a coarse radius.
+pub const fn candidate_conflict_cell_span(
+    _ key: AtlasKey,
+    _ left_bucket: u32,
+    _ right_bucket: u32,
+) -> u32 {
+    let coarse = if left_bucket < right_bucket {
+        left_bucket
+    } else {
+        right_bucket
+    }
+    if coarse > key.c { return 0 }
+    let ratio = edge_resolution(key.c) / edge_resolution(coarse)
+    ratio + ratio + 1
 }
