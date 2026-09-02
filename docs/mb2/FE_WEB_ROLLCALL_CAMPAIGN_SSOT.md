@@ -3511,18 +3511,30 @@ browser proof flow merely to complete this list.
    a parallel language backend. The first external review sharpens the next
    slice: instrument rooted inlining by source helper and report call
    multiplicity plus cloned-instruction survival after every cleanup pass.
-   Only then decide whether backend-only balanced arena admission has enough
-   leverage. If it does not, add a bounded GPU materialization mode on the
-   existing RMIR-to-Sonatina path so statically sized private locals remain
-   typed aggregates and Naga locals, while only genuinely dynamic allocation
-   uses the byte arena. Do not begin with broad control-provenance plumbing.
+   Sonatina commit `516d2461` adds that observation-only census, disabled by
+   default. On the production round kernel, 13,029 cloned instructions across
+   663 call sites become 7,260 survivors after final cleanup. The four
+   non-scalar balanced candidates account for only 1,749 survivors in total:
+   `sparse_range_roles_from_node` has 840 survivors across six call sites,
+   `sparse_control_row_from_task` has 618 across two, and the two single-call
+   candidates have 291 together. Even deleting all 1,749 at zero replacement
+   cost cannot supply the approximately 2,730-instruction reduction needed to
+   cross the one-megabyte gate. Backend-only balanced arena admission is
+   therefore falsified as the primary unblocker. Add a bounded GPU
+   materialization mode on the existing RMIR-to-Sonatina path so statically
+   sized private locals remain typed aggregates and Naga locals, while only
+   genuinely dynamic allocation uses the byte arena. Do not begin with broad
+   control-provenance plumbing. The complete census is
+   `/workspace/scratch/mb2-round-interaction-inline-census-2026-09-02.log`.
    A focused physical-browser site materialized the exact 1,600,494-byte
    compute file, whose root private arena is 717 u32 words, without changing
    either shader digest. External Chrome then lost its WebGPU instance during
    poster readback and the same process subsequently returned no adapter for
-   a one-word control. Restart Chrome, run the control first, then run the
-   immutable production artifact before attributing the loss to shader size
-   or private-memory pressure.
+   a one-word control. Host logs confirm three GPU-process exits and also say
+   that Wayland Ozone is incompatible with the selected Vulkan path. Relaunch
+   Chrome with a compatible Ozone/Vulkan combination, run the control first,
+   then run the immutable production artifact before attributing the loss to
+   shader size or private-memory pressure.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
