@@ -28,8 +28,9 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource, GpuStage,
-    HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
+    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource,
+    GpuResourceAccess, GpuResourceInit, GpuResourceKind, GpuResourceRecovery, GpuResourceResidency,
+    GpuResourceVisibility, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,7 +40,10 @@ use sonatina_codegen::isa::spirv::{
     WordKind,
 };
 
-use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
+use crate::actor_semantics::{
+    SemanticActor, SemanticGpuResourceFamily, nominal_attrs, resolve_metadata_ty, semantic_actors,
+    semantic_gpu_resource,
+};
 use crate::browser_actor_runtime::{
     BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
 };
@@ -60,13 +64,14 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 6;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 7;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
 const PASS_DIR: &str = "passes";
+const RESOURCE_DIR: &str = "resources";
 const MANIFEST_FILE: &str = "manifest.json";
 const INTERFACE_JS_FILE: &str = "interface.js";
 const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
@@ -387,6 +392,37 @@ pub struct WebBuildOptions {
     /// at once. This is a compiler placement policy only; it cannot affect the
     /// authored pass order or any emitted artifact identity.
     pub stage_compile_jobs: usize,
+    /// Content-addressed logical bytes available to this compilation. The
+    /// compiler selects only assets named by Fe resource types; unrelated
+    /// bytes never enter the bundle.
+    pub resource_assets: Vec<WebResourceAsset>,
+}
+
+/// Candidate immutable bytes supplied to bundle construction. Identity is
+/// always computed from content; callers cannot forge the digest carried by a
+/// Fe `ContentAddressed<...>` type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebResourceAsset {
+    sha256: String,
+    bytes: Arc<[u8]>,
+}
+
+impl WebResourceAsset {
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        let bytes: Arc<[u8]> = Arc::from(bytes.into());
+        Self {
+            sha256: hex::encode(Sha256::digest(bytes.as_ref())),
+            bytes,
+        }
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl WebBuildOptions {
@@ -399,6 +435,7 @@ impl WebBuildOptions {
             canonical_policy: WebCanonicalPolicy::Disabled,
             canonical_entries: Vec::new(),
             stage_compile_jobs: 2,
+            resource_assets: Vec::new(),
         }
     }
 
@@ -415,6 +452,7 @@ impl WebBuildOptions {
             canonical_policy: WebCanonicalPolicy::Disabled,
             canonical_entries: Vec::new(),
             stage_compile_jobs: 2,
+            resource_assets: Vec::new(),
         }
     }
 
@@ -436,6 +474,18 @@ impl WebBuildOptions {
     /// unbounded memory commitment; zero retains one serial worker.
     pub fn with_stage_compile_jobs(mut self, jobs: usize) -> Self {
         self.stage_compile_jobs = jobs.clamp(1, 4);
+        self
+    }
+
+    pub fn with_resource_asset(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        let asset = WebResourceAsset::from_bytes(bytes);
+        if !self
+            .resource_assets
+            .iter()
+            .any(|candidate| candidate.sha256 == asset.sha256)
+        {
+            self.resource_assets.push(asset);
+        }
         self
     }
 
@@ -526,11 +576,91 @@ pub struct WebActorResource {
     /// to expose only physical binding data, so adding a readback capability
     /// does not grow a JSON application protocol.
     pub kind: GpuResource,
+    /// Type-derived logical policy. The fixed host may narrow physical access
+    /// for a stage, but it may never grant more than this declaration.
+    pub policy: WebResourcePolicy,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceKind {
+    #[default]
+    Storage,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceAccess {
+    ReadOnly,
+    WriteOnly,
+    #[default]
+    ReadWrite,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceResidency {
+    Immutable,
+    #[default]
+    ActorResident,
+    FrameTransient,
+    Imported,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebResourceInitialization {
+    #[default]
+    Zeroed,
+    ContentAddressed {
+        sha256: String,
+    },
+    Derived,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceRecovery {
+    #[default]
+    ReplayRecipe,
+    RestoreCheckpoint,
+    Regenerate,
+    NonRecoverable,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceVisibility {
+    Compute,
+    Vertex,
+    Fragment,
+    #[default]
+    ComputeFragment,
+    VertexFragment,
+    All,
+}
+
+/// Orthogonal logical resource policy derived exclusively from Fe marker
+/// types. Its default is the historical mutable actor storage contract, so
+/// legacy manifests retain their compact spelling.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebResourcePolicy {
+    pub kind: WebResourceKind,
+    pub access: WebResourceAccess,
+    pub residency: WebResourceResidency,
+    pub initialization: WebResourceInitialization,
+    pub recovery: WebResourceRecovery,
+    pub visibility: WebResourceVisibility,
+}
+
+fn is_default_resource_policy(policy: &WebResourcePolicy) -> bool {
+    *policy == WebResourcePolicy::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebActorResourceElement {
     U32,
+    F32,
     Record {
         fields: Vec<WebActorResourceField>,
         span: u32,
@@ -541,6 +671,16 @@ pub enum WebActorResourceElement {
 pub struct WebActorResourceField {
     pub name: String,
     pub offset: u32,
+    #[serde(default = "web_scalar_u32", skip_serializing_if = "is_web_scalar_u32")]
+    pub scalar: WebScalarKind,
+}
+
+fn web_scalar_u32() -> WebScalarKind {
+    WebScalarKind::U32
+}
+
+fn is_web_scalar_u32(value: &WebScalarKind) -> bool {
+    *value == WebScalarKind::U32
 }
 
 fn actor_is_gpu_program(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
@@ -1174,20 +1314,28 @@ fn resource_element(
     path: &str,
 ) -> Result<WebActorResourceElement, WebBundleError> {
     let ty = ty.as_view(db).unwrap_or(ty);
-    if matches!(
-        ty.base_ty(db).data(db),
-        TyData::TyBase(TyBase::Prim(PrimTy::U32))
-    ) {
-        return Ok(WebActorResourceElement::U32);
+    let scalar_kind = |ty: TyId<'_>| match ty.base_ty(db).data(db) {
+        TyData::TyBase(TyBase::Prim(PrimTy::U32)) => Some(WebScalarKind::U32),
+        TyData::TyBase(TyBase::Prim(PrimTy::F32)) => Some(WebScalarKind::F32),
+        _ => None,
+    };
+    if let Some(scalar) = scalar_kind(ty) {
+        return Ok(match scalar {
+            WebScalarKind::U32 => WebActorResourceElement::U32,
+            WebScalarKind::F32 => WebActorResourceElement::F32,
+            WebScalarKind::I1 | WebScalarKind::I32 | WebScalarKind::I64 => {
+                unreachable!("filtered resource scalar")
+            }
+        });
     }
     let adt = ty.adt_def(db).ok_or_else(|| {
         WebBundleError::EntryDerivation(format!(
-            "resource `{path}` element must be `u32` or a POD record"
+            "resource `{path}` element must be `u32`, `f32`, or a POD record"
         ))
     })?;
     let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` element must be `u32` or a POD record"
+            "resource `{path}` element must be `u32`, `f32`, or a POD record"
         )));
     };
     let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
@@ -1199,15 +1347,12 @@ fn resource_element(
     }
     let mut fields = Vec::with_capacity(field_views.len());
     for (index, (field, field_ty)) in field_views.into_iter().zip(field_tys).enumerate() {
-        if !matches!(
-            field_ty.base_ty(db).data(db),
-            TyData::TyBase(TyBase::Prim(PrimTy::U32))
-        ) {
+        let Some(scalar) = scalar_kind(field_ty) else {
             return Err(WebBundleError::EntryDerivation(format!(
-                "resource `{path}` POD field {} must be exactly `u32`",
+                "resource `{path}` POD field {} must be `u32` or `f32`; signed `i32` storage requires explicit carrier bitcasts",
                 index
             )));
-        }
+        };
         let name = field
             .name(db)
             .map(|name| name.data(db).to_string())
@@ -1219,10 +1364,162 @@ fn resource_element(
         fields.push(WebActorResourceField {
             name,
             offset: u32::try_from(index).unwrap() * 4,
+            scalar,
         });
     }
     let span = u32::try_from(fields.len()).unwrap() * 4;
     Ok(WebActorResourceElement::Record { fields, span })
+}
+
+fn content_addressed_digest(
+    db: &DriverDataBase,
+    init_ty: TyId<'_>,
+    path: &str,
+) -> Result<String, WebBundleError> {
+    let init_ty = init_ty.as_view(db).unwrap_or(init_ty);
+    let [h0, h1, h2, h3, h4, h5, h6, h7] = init_ty.generic_args(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires exactly eight SHA-256 words"
+        )));
+    };
+    [h0, h1, h2, h3, h4, h5, h6, h7]
+        .into_iter()
+        .map(|word| {
+            semantic_const_u32(db, *word)
+                .map(|word| format!("{word:08x}"))
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(format!(
+                        "resource `{path}` SHA-256 words must be concrete u32 integers"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|words| words.concat())
+}
+
+fn typed_resource_policy(
+    db: &DriverDataBase,
+    family: SemanticGpuResourceFamily<'_>,
+    path: &str,
+) -> Result<WebResourcePolicy, WebBundleError> {
+    let kind = nominal_attrs(db, family.kind_ty)
+        .and_then(|attrs| attrs.gpu_resource_kind(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` kind argument lacks #[gpu_resource_kind(...)] evidence"
+            ))
+        })?;
+    let access = nominal_attrs(db, family.access_ty)
+        .and_then(|attrs| attrs.gpu_resource_access(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` access argument lacks #[gpu_resource_access(...)] evidence"
+            ))
+        })?;
+    let residency = nominal_attrs(db, family.residency_ty)
+        .and_then(|attrs| attrs.gpu_resource_residency(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` residency argument lacks #[gpu_resource_residency(...)] evidence"
+            ))
+        })?;
+    let initialization = nominal_attrs(db, family.init_ty)
+        .and_then(|attrs| attrs.gpu_resource_init(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` initialization argument lacks #[gpu_resource_init(...)] evidence"
+            ))
+        })?;
+    let recovery = nominal_attrs(db, family.recovery_ty)
+        .and_then(|attrs| attrs.gpu_resource_recovery(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` recovery argument lacks #[gpu_resource_recovery(...)] evidence"
+            ))
+        })?;
+    let visibility = nominal_attrs(db, family.visibility_ty)
+        .and_then(|attrs| attrs.gpu_resource_visibility(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` visibility argument lacks #[gpu_resource_visibility(...)] evidence"
+            ))
+        })?;
+
+    let policy = WebResourcePolicy {
+        kind: match kind {
+            GpuResourceKind::Storage => WebResourceKind::Storage,
+        },
+        access: match access {
+            GpuResourceAccess::ReadOnly => WebResourceAccess::ReadOnly,
+            GpuResourceAccess::WriteOnly => WebResourceAccess::WriteOnly,
+            GpuResourceAccess::ReadWrite => WebResourceAccess::ReadWrite,
+        },
+        residency: match residency {
+            GpuResourceResidency::Immutable => WebResourceResidency::Immutable,
+            GpuResourceResidency::ActorResident => WebResourceResidency::ActorResident,
+            GpuResourceResidency::FrameTransient => WebResourceResidency::FrameTransient,
+            GpuResourceResidency::Imported => WebResourceResidency::Imported,
+        },
+        initialization: match initialization {
+            GpuResourceInit::Zeroed => WebResourceInitialization::Zeroed,
+            GpuResourceInit::ContentAddressed => WebResourceInitialization::ContentAddressed {
+                sha256: content_addressed_digest(db, family.init_ty, path)?,
+            },
+            GpuResourceInit::Derived => WebResourceInitialization::Derived,
+        },
+        recovery: match recovery {
+            GpuResourceRecovery::ReplayRecipe => WebResourceRecovery::ReplayRecipe,
+            GpuResourceRecovery::RestoreCheckpoint => WebResourceRecovery::RestoreCheckpoint,
+            GpuResourceRecovery::Regenerate => WebResourceRecovery::Regenerate,
+            GpuResourceRecovery::NonRecoverable => WebResourceRecovery::NonRecoverable,
+        },
+        visibility: match visibility {
+            GpuResourceVisibility::Compute => WebResourceVisibility::Compute,
+            GpuResourceVisibility::Vertex => WebResourceVisibility::Vertex,
+            GpuResourceVisibility::Fragment => WebResourceVisibility::Fragment,
+            GpuResourceVisibility::ComputeFragment => WebResourceVisibility::ComputeFragment,
+            GpuResourceVisibility::VertexFragment => WebResourceVisibility::VertexFragment,
+            GpuResourceVisibility::All => WebResourceVisibility::All,
+        },
+    };
+
+    if policy.residency == WebResourceResidency::Immutable
+        && policy.access != WebResourceAccess::ReadOnly
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` immutable residency requires read-only access"
+        )));
+    }
+    if matches!(
+        policy.initialization,
+        WebResourceInitialization::ContentAddressed { .. }
+    ) && (policy.residency != WebResourceResidency::Immutable
+        || policy.access != WebResourceAccess::ReadOnly
+        || policy.recovery != WebResourceRecovery::ReplayRecipe)
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires immutable, read-only, replayable policy"
+        )));
+    }
+    if policy.initialization == WebResourceInitialization::Derived
+        && policy.access == WebResourceAccess::ReadOnly
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` derived initialization requires writable access"
+        )));
+    }
+    if policy.residency == WebResourceResidency::Imported {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` imported residency has no authorized browser realization yet"
+        )));
+    }
+    if policy.recovery != WebResourceRecovery::ReplayRecipe {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` requests {:?} recovery, which the fixed browser host does not realize yet",
+            policy.recovery
+        )));
+    }
+    Ok(policy)
 }
 
 fn actor_resources(
@@ -1236,16 +1533,11 @@ fn actor_resources(
             continue;
         };
         let ty = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
-        let Some(attrs) = nominal_attrs(db, ty) else {
+        let Some(resource) = semantic_gpu_resource(db, ty).map_err(|message| {
+            WebBundleError::EntryDerivation(format!("actor resource field is malformed: {message}"))
+        })?
+        else {
             continue;
-        };
-        let Some(kind) = attrs.gpu_resource(db) else {
-            continue;
-        };
-        let [element_ty, length_ty, ..] = ty.generic_args(db) else {
-            return Err(WebBundleError::EntryDerivation(
-                "storage resource type requires element and length arguments".to_owned(),
-            ));
         };
         let name = field
             .name
@@ -1256,7 +1548,12 @@ fn actor_resources(
                     "actor storage resource fields must be named".to_owned(),
                 )
             })?;
-        let length = semantic_const_u32(db, *length_ty).ok_or_else(|| {
+        let policy = resource
+            .family
+            .map(|family| typed_resource_policy(db, family, &name))
+            .transpose()?
+            .unwrap_or_default();
+        let length = semantic_const_u32(db, resource.length_ty).ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
                 "storage resource `{name}` length must be a concrete u32-sized integer"
             ))
@@ -1268,10 +1565,11 @@ fn actor_resources(
         }
         resources.push(WebActorResource {
             field_index: u32::try_from(field_index).unwrap(),
-            element: resource_element(db, *element_ty, &name)?,
+            element: resource_element(db, resource.element_ty, &name)?,
             name,
             length,
-            kind,
+            kind: resource.kind,
+            policy,
         });
     }
     Ok(resources)
@@ -4442,6 +4740,19 @@ pub struct WebResource {
     pub stride: u32,
     pub span: u32,
     pub element: WebActorResourceElement,
+    #[serde(default, skip_serializing_if = "is_default_resource_policy")]
+    pub policy: WebResourcePolicy,
+    /// Exact immutable bundle artifact used to initialize this resource.
+    /// Absent for zeroed and GPU-derived storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<WebResourceArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebResourceArtifact {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4687,7 +4998,7 @@ pub struct WebCanonicalStatus {
     pub omission_reason: Option<String>,
 }
 
-// `WebBundle` embeds the v6 manifest (which carries f32 surface ranges), so it
+// `WebBundle` embeds the v7 manifest (which carries f32 surface ranges), so it
 // is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebBundle {
@@ -4703,6 +5014,9 @@ pub struct WebBundle {
     /// Separately compiled nominal child actors, selected from the typed
     /// mailbox and supervision operations in `scoped_tasks`.
     pub structured_children: Vec<StructuredChildActorArtifact>,
+    /// Exact immutable bytes selected by content identity for logical resource
+    /// initialization. Publication revalidates them against the manifest.
+    resource_assets: Vec<WebResourceAsset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4711,12 +5025,29 @@ pub struct WebPassShader {
     pub source: String,
 }
 
-fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResource {
+fn web_resource_manifest(
+    resource: &WebActorResource,
+    binding: u32,
+) -> Result<WebResource, WebBundleError> {
     let span = match &resource.element {
-        WebActorResourceElement::U32 => 4,
+        WebActorResourceElement::U32 | WebActorResourceElement::F32 => 4,
         WebActorResourceElement::Record { span, .. } => *span,
     };
-    WebResource {
+    let bytes = span.checked_mul(resource.length).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{}` byte length overflows the portable u32 envelope",
+            resource.name
+        ))
+    })?;
+    let artifact = match &resource.policy.initialization {
+        WebResourceInitialization::ContentAddressed { sha256 } => Some(WebResourceArtifact {
+            path: format!("{RESOURCE_DIR}/sha256-{sha256}.bin"),
+            bytes: u64::from(bytes),
+            sha256: sha256.clone(),
+        }),
+        WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+    };
+    Ok(WebResource {
         group: 0,
         binding,
         name: resource.name.clone(),
@@ -4724,7 +5055,46 @@ fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResour
         stride: span,
         span,
         element: resource.element.clone(),
+        policy: resource.policy.clone(),
+        artifact,
+    })
+}
+
+fn select_resource_assets(
+    resources: &[WebResource],
+    candidates: &[WebResourceAsset],
+) -> Result<Vec<WebResourceAsset>, WebBundleError> {
+    let mut selected = Vec::new();
+    for resource in resources {
+        let Some(artifact) = &resource.artifact else {
+            continue;
+        };
+        let asset = candidates
+            .iter()
+            .find(|candidate| candidate.sha256 == artifact.sha256)
+            .ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "resource `{}` requires content-addressed asset {}",
+                    resource.name, artifact.sha256
+                ))
+            })?;
+        if asset.bytes.len() as u64 != artifact.bytes {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{}` expects {} bytes from {}, but the supplied asset contains {}",
+                resource.name,
+                artifact.bytes,
+                artifact.sha256,
+                asset.bytes.len()
+            )));
+        }
+        if !selected
+            .iter()
+            .any(|candidate: &WebResourceAsset| candidate.sha256 == asset.sha256)
+        {
+            selected.push(asset.clone());
+        }
     }
+    Ok(selected)
 }
 
 fn stage_external_resources(
@@ -4779,15 +5149,23 @@ fn stage_external_resources(
             group: resource.group,
             binding: resource.binding,
             name: resource.name.clone(),
-            access,
+            access: match resource.policy.access {
+                WebResourceAccess::ReadOnly => Access::Read,
+                // WGSL/Naga have no write-only storage declaration. Fe's
+                // missing GpuReadable evidence still rejects authored loads;
+                // the physical carrier therefore uses read_write.
+                WebResourceAccess::WriteOnly => Access::ReadWrite,
+                WebResourceAccess::ReadWrite => access,
+            },
             element: match &resource.element {
                 WebActorResourceElement::U32 => SpirvResourceElement::Scalar(SpirvScalarKind::U32),
+                WebActorResourceElement::F32 => SpirvResourceElement::Scalar(SpirvScalarKind::F32),
                 WebActorResourceElement::Record { fields, span } => SpirvResourceElement::Record {
                     fields: fields
                         .iter()
                         .map(|field| SpirvResourceField {
                             name: field.name.clone(),
-                            scalar: SpirvScalarKind::U32,
+                            scalar: spirv_scalar_kind(field.scalar),
                             offset: field.offset,
                         })
                         .collect(),
@@ -5200,7 +5578,8 @@ impl WebBundle {
             .iter()
             .enumerate()
             .map(|(binding, resource)| web_resource_manifest(resource, binding as u32))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
+        let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
         let resource_field_indices = program
             .resources
             .iter()
@@ -5586,6 +5965,7 @@ impl WebBundle {
             interface_d_ts: None,
             scoped_tasks: Vec::new(),
             structured_children: Vec::new(),
+            resource_assets,
         })
     }
 
@@ -5959,6 +6339,7 @@ impl WebBundle {
             interface_d_ts,
             scoped_tasks,
             structured_children,
+            resource_assets: Vec::new(),
         })
     }
 
@@ -5988,7 +6369,8 @@ impl WebBundle {
         let mut files = Vec::with_capacity(
             3 + self.manifest.artifacts.canonical_adapters.len()
                 + runtime_artifact_count
-                + scoped_task_file_count,
+                + scoped_task_file_count
+                + self.resource_assets.len(),
         );
         let mut paths = std::collections::BTreeSet::new();
         let mut push = |path: &str, bytes: Arc<[u8]>| -> Result<(), WebBundleError> {
@@ -6141,6 +6523,63 @@ impl WebBundle {
                     Arc::from(file.bytes.into_boxed_slice()),
                 )?;
             }
+        }
+        let mut materialized_resource_hashes = std::collections::BTreeSet::new();
+        for resource in &self.manifest.resources {
+            let content_digest = match &resource.policy.initialization {
+                WebResourceInitialization::ContentAddressed { sha256 } => Some(sha256),
+                WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+            };
+            match (content_digest, resource.artifact.as_ref()) {
+                (None, None) => continue,
+                (None, Some(_)) => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` declares an artifact without content-addressed initialization",
+                        resource.name
+                    )));
+                }
+                (Some(_), None) => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` has content-addressed initialization without an artifact",
+                        resource.name
+                    )));
+                }
+                (Some(digest), Some(artifact)) if digest != &artifact.sha256 => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` initialization and artifact digests disagree",
+                        resource.name
+                    )));
+                }
+                (Some(_), Some(artifact)) => {
+                    let asset = self
+                        .resource_assets
+                        .iter()
+                        .find(|asset| asset.sha256 == artifact.sha256)
+                        .ok_or_else(|| {
+                            WebBundleError::Materialization(format!(
+                                "resource `{}` artifact bytes are absent",
+                                resource.name
+                            ))
+                        })?;
+                    if asset.bytes.len() as u64 != artifact.bytes
+                        || hex::encode(Sha256::digest(asset.bytes.as_ref())) != artifact.sha256
+                    {
+                        return Err(WebBundleError::Materialization(format!(
+                            "resource `{}` artifact does not match its manifest metadata",
+                            resource.name
+                        )));
+                    }
+                    if materialized_resource_hashes.insert(artifact.sha256.clone()) {
+                        push(&artifact.path, Arc::clone(&asset.bytes))?;
+                    }
+                }
+            }
+        }
+        if materialized_resource_hashes.len() != self.resource_assets.len() {
+            return Err(WebBundleError::Materialization(
+                "bundle contains immutable resource bytes not referenced by its manifest"
+                    .to_owned(),
+            ));
         }
         push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
         // Render bundles ship a compiler-emitted host page so the directory is
@@ -6567,6 +7006,16 @@ fn scalar_kind(kind: SpirvScalarKind) -> WebScalarKind {
         SpirvScalarKind::U32 => WebScalarKind::U32,
         SpirvScalarKind::I64 => WebScalarKind::I64,
         SpirvScalarKind::F32 => WebScalarKind::F32,
+    }
+}
+
+fn spirv_scalar_kind(kind: WebScalarKind) -> SpirvScalarKind {
+    match kind {
+        WebScalarKind::I1 => SpirvScalarKind::I1,
+        WebScalarKind::I32 => SpirvScalarKind::I32,
+        WebScalarKind::U32 => SpirvScalarKind::U32,
+        WebScalarKind::I64 => SpirvScalarKind::I64,
+        WebScalarKind::F32 => SpirvScalarKind::F32,
     }
 }
 

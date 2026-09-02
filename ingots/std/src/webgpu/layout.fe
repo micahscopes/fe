@@ -1,0 +1,155 @@
+//! Reflection-derived portable GPU data layouts.
+//!
+//! The layout is a property of a nominal Fe type in a particular physical
+//! layout space. Applications derive it once; shader lowering and browser
+//! bundle projection independently reconcile the same facts. No runtime value
+//! contains a field table or binding number.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+/// WGSL host-shareable storage-buffer layout rules.
+pub struct StorageLayout {}
+
+/// WGSL uniform-buffer layout rules. Evidence is intentionally not provided
+/// yet: admitting a type here requires the uniform-specific aggregate rules,
+/// not a reuse of storage layout by spelling.
+pub struct UniformLayout {}
+
+/// WebGPU vertex-buffer layout rules. Vertex formats are a separate physical
+/// contract from WGSL storage records and will receive their own evidence.
+pub struct VertexLayout {}
+
+/// Portable physical layout of `Self` in layout space `Space`.
+///
+/// `SIZE` excludes trailing array stride padding; `STRIDE` includes it.
+/// `Fields` is an FCO-derived declaration-order tuple of
+/// `(offset, size, alignment)` triples used by independent layout gates and
+/// downstream providers. It is compile-time evidence, not a field table stored
+/// in each runtime value. Scalar and array values use `()`.
+pub trait GpuLayout<Space> {
+    type Fields
+    const SIZE: u32
+    const ALIGN: u32
+    const STRIDE: u32
+    const FIELD_COUNT: u32
+
+    const fn fields() -> Self::Fields
+}
+
+/// Derivable storage-layout evidence.
+///
+/// Fe's derive provider protocol accepts a unary constraint constructor. A
+/// layout-space-specialized trait keeps that contract honest while the blanket
+/// implementation below preserves the public `GpuLayout<StorageLayout>` view.
+/// This is compile-time evidence only; it adds no runtime wrapper or table.
+pub trait StorageGpuLayout {
+    type Fields
+    const SIZE: u32
+    const ALIGN: u32
+    const STRIDE: u32
+    const FIELD_COUNT: u32
+
+    const fn fields() -> Self::Fields
+}
+
+impl<T: StorageGpuLayout> GpuLayout<StorageLayout> for T {
+    type Fields = <T as StorageGpuLayout>::Fields
+    const SIZE: u32 = <T as StorageGpuLayout>::SIZE
+    const ALIGN: u32 = <T as StorageGpuLayout>::ALIGN
+    const STRIDE: u32 = <T as StorageGpuLayout>::STRIDE
+    const FIELD_COUNT: u32 = <T as StorageGpuLayout>::FIELD_COUNT
+    const fn fields() -> Self::Fields {
+        <T as StorageGpuLayout>::fields()
+    }
+}
+
+impl StorageGpuLayout for u32 {
+    type Fields = ()
+    const SIZE: u32 = 4
+    const ALIGN: u32 = 4
+    const STRIDE: u32 = 4
+    const FIELD_COUNT: u32 = 0
+    const fn fields() -> Self::Fields {
+        ()
+    }
+}
+
+impl StorageGpuLayout for i32 {
+    type Fields = ()
+    const SIZE: u32 = 4
+    const ALIGN: u32 = 4
+    const STRIDE: u32 = 4
+    const FIELD_COUNT: u32 = 0
+    const fn fields() -> Self::Fields {
+        ()
+    }
+}
+
+impl StorageGpuLayout for f32 {
+    type Fields = ()
+    const SIZE: u32 = 4
+    const ALIGN: u32 = 4
+    const STRIDE: u32 = 4
+    const FIELD_COUNT: u32 = 0
+    const fn fields() -> Self::Fields {
+        ()
+    }
+}
+
+impl<T: StorageGpuLayout, const N: usize> StorageGpuLayout for [T; N] {
+    type Fields = ()
+    const SIZE: u32 = T::STRIDE * N.downcast_truncate()
+    const ALIGN: u32 = T::ALIGN
+    const STRIDE: u32 = Self::SIZE
+    const FIELD_COUNT: u32 = 0
+    const fn fields() -> Self::Fields {
+        ()
+    }
+}
+
+/// Derive storage layout for an ordinary nominal record.
+///
+/// This first executable provider deliberately admits only recursively
+/// word-aligned storage layouts: the primitive leaves above and arrays/records
+/// composed from them. Reflection preserves declaration order and emits exact
+/// offsets into one ordinary checked implementation. Wider-aligned vectors and
+/// matrices remain rejected until provider expressions can derive their full
+/// alignment fold without depending on caller imports.
+pub struct StorageLayoutProvider {}
+
+impl Derive<StorageGpuLayout> for StorageLayoutProvider {
+    const fn derive<T>(ev: own Evidence<StorageGpuLayout<T>>) -> Evidence<StorageGpuLayout<T>>
+    uses (reflect: Reflect<T>, builder: mut ImplBuilder<StorageGpuLayout<T>>)
+    {
+        let mut offset = builder.int(0)
+        let mut fields_ty = builder.tuple_ty()
+        let mut fields = builder.tuple_expr()
+        let mut index: u32 = 0
+        for field in reflect.fields() {
+            builder.require<StorageGpuLayout>(field.ty())
+            let align = builder.trait_const(field.ty(), "ALIGN")
+            let size = builder.trait_const(field.ty(), "SIZE")
+            let aligned = offset
+            let mut field_ty = builder.tuple_ty()
+            field_ty = builder.with_elem_ty(field_ty, builder.ty<u32>())
+            field_ty = builder.with_elem_ty(field_ty, builder.ty<u32>())
+            field_ty = builder.with_elem_ty(field_ty, builder.ty<u32>())
+            fields_ty = builder.with_elem_ty(fields_ty, field_ty)
+            let mut field_layout = builder.tuple_expr()
+            field_layout = builder.with_elem(field_layout, aligned)
+            field_layout = builder.with_elem(field_layout, size)
+            field_layout = builder.with_elem(field_layout, align)
+            fields = builder.with_elem(fields, field_layout)
+            offset = builder.add(aligned, size)
+            index = index + 1
+        }
+        builder.emit_assoc_ty("Fields", fields_ty)
+        builder.emit_const("SIZE", builder.ty<u32>(), offset)
+        builder.emit_const("ALIGN", builder.ty<u32>(), builder.int(4))
+        builder.emit_const("STRIDE", builder.ty<u32>(), offset)
+        builder.emit_const("FIELD_COUNT", builder.ty<u32>(), builder.int(index))
+        builder.emit_method("fields", fields)
+        builder.finish()
+        ev
+    }
+}

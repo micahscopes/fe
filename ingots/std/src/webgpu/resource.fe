@@ -1,0 +1,212 @@
+//! Typed logical WebGPU buffer families.
+//!
+//! A value of `GpuBuffer<...>` is a stage-local capability for one logical
+//! actor resource. Its policy axes are type data; the browser handle remains
+//! opaque and replaceable across device generations. `T` is deliberately the
+//! final parameter so a partially applied family can be rebound without
+//! pretending that changing element type executes a pure GPU map.
+
+/// Storage-buffer physical role. Vertex, index, uniform, indirect, and staging
+/// roles join this family in their own implementation slices.
+#[gpu_resource_kind(storage)]
+pub struct StorageKind {}
+
+/// Shader reads are admitted and stores are rejected by missing evidence.
+#[gpu_resource_access(read_only)]
+pub struct ReadOnly {}
+
+/// Shader stores are admitted and loads are rejected by missing evidence.
+#[gpu_resource_access(write_only)]
+pub struct WriteOnly {}
+
+/// Both shader loads and stores are admitted.
+#[gpu_resource_access(read_write)]
+pub struct ReadWrite {}
+
+pub trait GpuReadable {}
+pub trait GpuWritable {}
+
+impl GpuReadable for ReadOnly {}
+impl GpuReadable for ReadWrite {}
+impl GpuWritable for WriteOnly {}
+impl GpuWritable for ReadWrite {}
+
+/// Immutable logical bytes may share one physical realization per device.
+#[gpu_resource_residency(immutable)]
+pub struct Immutable {}
+
+/// Mutable logical state retained for the lifetime of its owning actor.
+#[gpu_resource_residency(actor_resident)]
+pub struct ActorResident {}
+
+/// Pass-graph-local storage whose lifetime can be derived from graph use.
+#[gpu_resource_residency(frame_transient)]
+pub struct FrameTransient {}
+
+/// A resource imported from an explicitly authorized external owner.
+#[gpu_resource_residency(imported)]
+pub struct Imported {}
+
+/// Deterministic all-zero initialization.
+#[gpu_resource_init(zeroed)]
+pub struct Zeroed {}
+
+/// Exact immutable bytes addressed by their SHA-256 digest.
+///
+/// Digest words are written in display order (big-endian within each word), so
+/// the eight constants concatenate to the ordinary 64-character SHA-256 hex
+/// identity. The artifact byte length is independently derived from `N` and
+/// `GpuLayout<StorageLayout, T>`.
+#[gpu_resource_init(content_addressed)]
+pub struct ContentAddressed<
+    const H0: u32,
+    const H1: u32,
+    const H2: u32,
+    const H3: u32,
+    const H4: u32,
+    const H5: u32,
+    const H6: u32,
+    const H7: u32,
+> {}
+
+/// Contents are produced by an authored GPU pass rather than host bytes.
+#[gpu_resource_init(derived)]
+pub struct Derived {}
+
+/// Recreate the physical resource by replaying its deterministic recipe.
+#[gpu_resource_recovery(replay_recipe)]
+pub struct ReplayRecipe {}
+
+/// Restore the newest explicit actor checkpoint after device replacement.
+#[gpu_resource_recovery(restore_checkpoint)]
+pub struct RestoreCheckpoint {}
+
+/// Ask an authored producer to regenerate contents after device replacement.
+#[gpu_resource_recovery(regenerate)]
+pub struct Regenerate {}
+
+/// Device loss terminates this logical resource instead of manufacturing data.
+#[gpu_resource_recovery(nonrecoverable)]
+pub struct NonRecoverable {}
+
+#[gpu_resource_visibility(compute)]
+pub struct ComputeOnly {}
+
+#[gpu_resource_visibility(vertex)]
+pub struct VertexOnly {}
+
+#[gpu_resource_visibility(fragment)]
+pub struct FragmentOnly {}
+
+#[gpu_resource_visibility(compute_fragment)]
+pub struct ComputeFragment {}
+
+#[gpu_resource_visibility(vertex_fragment)]
+pub struct VertexFragment {}
+
+#[gpu_resource_visibility(all)]
+pub struct AllShaderStages {}
+
+/// Element-rebinding evidence for a logical GPU resource family.
+///
+/// Unlike `Functor`, this trait has no executable `map`: a physical transform
+/// is a typed compute pass plus queue effects, not a pure container operation.
+pub trait GpuResourceFamily<X> {
+    type Rebind<Y>
+}
+
+/// One actor-owned logical buffer and one stage-local binding capability.
+///
+/// The compiler validates the marker evidence and projects the physical recipe
+/// into the bundle. The sole word is an inert lowering carrier, never an
+/// application-visible WebGPU binding number.
+#[gpu_resource(storage_family)]
+pub struct GpuBuffer<
+    Kind,
+    Access,
+    Residency,
+    Init,
+    Recovery,
+    Visibility,
+    const N: usize,
+    T,
+> {
+    binding: u32,
+}
+
+impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
+    core::marker::Copy for
+    GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, T>
+{}
+
+impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, X>
+    GpuResourceFamily<X> for
+    GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, X>
+{
+    type Rebind<Y> =
+        GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, Y>
+}
+
+impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
+    GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, T>
+    where Access: GpuReadable
+{
+    #[gpu_intrinsic(storage_load)]
+    pub fn load(self, index: u32) -> T {
+        core::panic()
+    }
+}
+
+impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
+    GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, T>
+    where Access: GpuWritable
+{
+    #[gpu_intrinsic(storage_store)]
+    pub fn store(self, index: u32, value: T) {
+        core::panic()
+    }
+}
+
+/// Source-compatible mutable storage with deterministic zero initialization.
+pub type StorageBuffer<T, const N: usize> = GpuBuffer<
+    StorageKind,
+    ReadWrite,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    ComputeFragment,
+    N,
+    T,
+>
+
+/// Immutable storage initialized from one verified bundle artifact.
+pub type ImmutableStorageBuffer<Init, const N: usize, T> = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    Immutable,
+    Init,
+    ReplayRecipe,
+    AllShaderStages,
+    N,
+    T,
+>
+
+/// Actor-resident storage with explicit access, initialization, recovery, and
+/// stage visibility policies.
+pub type DynamicStorageBuffer<
+    Access,
+    Init,
+    Recovery,
+    Visibility,
+    const N: usize,
+    T,
+> = GpuBuffer<
+    StorageKind,
+    Access,
+    ActorResident,
+    Init,
+    Recovery,
+    Visibility,
+    N,
+    T,
+>

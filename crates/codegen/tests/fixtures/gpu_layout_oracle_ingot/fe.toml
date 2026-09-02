@@ -1,0 +1,7 @@
+[ingot]
+name = "gpu_layout_oracle_ingot"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+std = "../../../../../ingots/std"

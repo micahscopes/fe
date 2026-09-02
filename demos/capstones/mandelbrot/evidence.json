@@ -60,8 +60,8 @@
       "artifact": {
         "kind": "wasm-module",
         "path": "demos/webgpu-mandelbrot/gen/kernel.wasm",
-        "bytes": 367,
-        "sha256": "338b888205fbd446d8613f18cd90169b4ce304df01acc3ef9383951d0e31c70e"
+        "bytes": 365,
+        "sha256": "b865f29d258ee53ffa386cc3a252ae2d364b650142ea4c3a2ce22eead8a9910d"
       },
       "verification": {
         "status": "verified",
@@ -86,8 +86,8 @@
       "artifact": {
         "kind": "wgsl-shader",
         "path": "demos/webgpu-mandelbrot/gen/kernel.wgsl",
-        "bytes": 2222,
-        "sha256": "30f5abcfcc0820726125fda76820d7dc43374664370113c3aa508f695858d296"
+        "bytes": 1960,
+        "sha256": "1409802167ae3fa57b9df60d99742cd3f865266028235be70ed43321f38a3b0d"
       },
       "verification": {
         "status": "validated",

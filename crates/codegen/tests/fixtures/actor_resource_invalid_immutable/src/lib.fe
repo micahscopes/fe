@@ -1,0 +1,31 @@
+use std::webgpu::{
+    AllShaderStages,
+    FragmentSurface as Pixel,
+    GpuBuffer,
+    GpuProgram as Program,
+    Immutable,
+    ReadWrite,
+    ReplayRecipe,
+    StorageKind,
+    WebGpuBackend,
+    Zeroed,
+}
+
+pub type InvalidImmutable = GpuBuffer<
+    StorageKind,
+    ReadWrite,
+    Immutable,
+    Zeroed,
+    ReplayRecipe,
+    AllShaderStages,
+    4,
+    u32,
+>
+
+actor InvalidPolicy uses (Program<WebGpuBackend>) {
+    words: InvalidImmutable,
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.words.load(index: 0).downcast_truncate()
+    }
+}

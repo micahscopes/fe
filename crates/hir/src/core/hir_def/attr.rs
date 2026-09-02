@@ -42,9 +42,56 @@ pub enum GpuStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuResource {
     Storage,
+    /// Orthogonal kind/access/residency/init/recovery/visibility policy family.
+    StorageFamily,
     /// Storage-written bytes returned through one compiler-derived typed
     /// message transition after GPU completion.
     Readback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResourceKind {
+    Storage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResourceAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResourceResidency {
+    Immutable,
+    ActorResident,
+    FrameTransient,
+    Imported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResourceInit {
+    Zeroed,
+    ContentAddressed,
+    Derived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResourceRecovery {
+    ReplayRecipe,
+    RestoreCheckpoint,
+    Regenerate,
+    NonRecoverable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuResourceVisibility {
+    Compute,
+    Vertex,
+    Fragment,
+    ComputeFragment,
+    VertexFragment,
+    All,
 }
 
 /// GPU operation implemented directly by the compiler backend.
@@ -513,7 +560,71 @@ impl<'db> AttrListId<'db> {
     pub fn gpu_resource(self, db: &'db dyn HirDb) -> Option<GpuResource> {
         match self.single_ident_arg(db, "gpu_resource")?.as_str() {
             "storage" => Some(GpuResource::Storage),
+            "storage_family" => Some(GpuResource::StorageFamily),
             "readback" => Some(GpuResource::Readback),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource_kind(self, db: &'db dyn HirDb) -> Option<GpuResourceKind> {
+        match self.single_ident_arg(db, "gpu_resource_kind")?.as_str() {
+            "storage" => Some(GpuResourceKind::Storage),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource_access(self, db: &'db dyn HirDb) -> Option<GpuResourceAccess> {
+        match self.single_ident_arg(db, "gpu_resource_access")?.as_str() {
+            "read_only" => Some(GpuResourceAccess::ReadOnly),
+            "write_only" => Some(GpuResourceAccess::WriteOnly),
+            "read_write" => Some(GpuResourceAccess::ReadWrite),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource_residency(self, db: &'db dyn HirDb) -> Option<GpuResourceResidency> {
+        match self
+            .single_ident_arg(db, "gpu_resource_residency")?
+            .as_str()
+        {
+            "immutable" => Some(GpuResourceResidency::Immutable),
+            "actor_resident" => Some(GpuResourceResidency::ActorResident),
+            "frame_transient" => Some(GpuResourceResidency::FrameTransient),
+            "imported" => Some(GpuResourceResidency::Imported),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource_init(self, db: &'db dyn HirDb) -> Option<GpuResourceInit> {
+        match self.single_ident_arg(db, "gpu_resource_init")?.as_str() {
+            "zeroed" => Some(GpuResourceInit::Zeroed),
+            "content_addressed" => Some(GpuResourceInit::ContentAddressed),
+            "derived" => Some(GpuResourceInit::Derived),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource_recovery(self, db: &'db dyn HirDb) -> Option<GpuResourceRecovery> {
+        match self.single_ident_arg(db, "gpu_resource_recovery")?.as_str() {
+            "replay_recipe" => Some(GpuResourceRecovery::ReplayRecipe),
+            "restore_checkpoint" => Some(GpuResourceRecovery::RestoreCheckpoint),
+            "regenerate" => Some(GpuResourceRecovery::Regenerate),
+            "nonrecoverable" => Some(GpuResourceRecovery::NonRecoverable),
+            _ => None,
+        }
+    }
+
+    pub fn gpu_resource_visibility(self, db: &'db dyn HirDb) -> Option<GpuResourceVisibility> {
+        match self
+            .single_ident_arg(db, "gpu_resource_visibility")?
+            .as_str()
+        {
+            "compute" => Some(GpuResourceVisibility::Compute),
+            "vertex" => Some(GpuResourceVisibility::Vertex),
+            "fragment" => Some(GpuResourceVisibility::Fragment),
+            "compute_fragment" => Some(GpuResourceVisibility::ComputeFragment),
+            "vertex_fragment" => Some(GpuResourceVisibility::VertexFragment),
+            "all" => Some(GpuResourceVisibility::All),
             _ => None,
         }
     }
