@@ -50,6 +50,19 @@ use quilting_atlas::sampling::{
     poisson_radius_squared,
 }
 use quilting_atlas::triangulation::{incircle_sign, orientation, should_flip_edge}
+use quilting_atlas::topology::{
+    FlipProposal,
+    Triangle,
+    classify_point_in_triangle,
+    flip_proposal_is_round_winner,
+    flip_proposal_precedes,
+    flip_proposals_conflict,
+    flipped_triangle_pair,
+    interior_edge_flip_decision,
+    is_constrained_boundary_edge,
+    split_triangle_edge,
+    split_triangle_interior,
+}
 
 pub fn atlas_key_a(_ ordinal: u32) -> u32 {
     canonical_key_at(ordinal as usize).a
@@ -444,6 +457,276 @@ pub fn atlas_should_flip_edge(
         proposed_second,
         normalized_incircle_sign,
     ) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn atlas_is_constrained_boundary_edge(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ first: u32,
+    _ second: u32,
+) -> u32 {
+    if is_constrained_boundary_edge(AtlasKey { a: a, b: b, c: c }, first, second) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn atlas_point_triangle_relation(
+    _ first_b: u32,
+    _ first_c: u32,
+    _ second_b: u32,
+    _ second_c: u32,
+    _ third_b: u32,
+    _ third_c: u32,
+    _ query_b: u32,
+    _ query_c: u32,
+) -> u32 {
+    classify_point_in_triangle(
+        fixed_plane_point(first_b, first_c),
+        fixed_plane_point(second_b, second_c),
+        fixed_plane_point(third_b, third_c),
+        fixed_plane_point(query_b, query_c),
+    )
+}
+
+fn topology_triangle() -> Triangle {
+    Triangle { first: 10, second: 20, third: 30, valid: true }
+}
+
+pub fn atlas_interior_split_vertex(
+    _ first_b: u32,
+    _ first_c: u32,
+    _ second_b: u32,
+    _ second_c: u32,
+    _ third_b: u32,
+    _ third_c: u32,
+    _ point_b: u32,
+    _ point_c: u32,
+    _ lane: u32,
+) -> u32 {
+    let split = split_triangle_interior(
+        topology_triangle(),
+        fixed_plane_point(first_b, first_c),
+        fixed_plane_point(second_b, second_c),
+        fixed_plane_point(third_b, third_c),
+        40,
+        fixed_plane_point(point_b, point_c),
+    )
+    if !split.valid { return 0xffffffff }
+    if lane == 0 { split.first.first }
+    else if lane == 1 { split.first.second }
+    else if lane == 2 { split.first.third }
+    else if lane == 3 { split.second.first }
+    else if lane == 4 { split.second.second }
+    else if lane == 5 { split.second.third }
+    else if lane == 6 { split.third.first }
+    else if lane == 7 { split.third.second }
+    else if lane == 8 { split.third.third }
+    else { 0xffffffff }
+}
+
+pub fn atlas_edge_split_vertex(
+    _ edge: u32,
+    _ first_b: u32,
+    _ first_c: u32,
+    _ second_b: u32,
+    _ second_c: u32,
+    _ opposite_b: u32,
+    _ opposite_c: u32,
+    _ point_b: u32,
+    _ point_c: u32,
+    _ lane: u32,
+) -> u32 {
+    let split = split_triangle_edge(
+        topology_triangle(),
+        edge,
+        fixed_plane_point(first_b, first_c),
+        fixed_plane_point(second_b, second_c),
+        fixed_plane_point(opposite_b, opposite_c),
+        40,
+        fixed_plane_point(point_b, point_c),
+    )
+    if !split.valid { return 0xffffffff }
+    if lane == 0 { split.first.first }
+    else if lane == 1 { split.first.second }
+    else if lane == 2 { split.first.third }
+    else if lane == 3 { split.second.first }
+    else if lane == 4 { split.second.second }
+    else if lane == 5 { split.second.third }
+    else { 0xffffffff }
+}
+
+fn atlas_flip_decision(
+    _ u_b: u32,
+    _ u_c: u32,
+    _ v_b: u32,
+    _ v_c: u32,
+    _ first_opposite_b: u32,
+    _ first_opposite_c: u32,
+    _ second_opposite_b: u32,
+    _ second_opposite_c: u32,
+) -> quilting_atlas::topology::FlipDecision {
+    interior_edge_flip_decision(
+        10,
+        fixed_plane_point(u_b, u_c),
+        20,
+        fixed_plane_point(v_b, v_c),
+        5,
+        fixed_plane_point(first_opposite_b, first_opposite_c),
+        30,
+        fixed_plane_point(second_opposite_b, second_opposite_c),
+    )
+}
+
+pub fn atlas_topology_flip_flags(
+    _ u_b: u32,
+    _ u_c: u32,
+    _ v_b: u32,
+    _ v_c: u32,
+    _ first_opposite_b: u32,
+    _ first_opposite_c: u32,
+    _ second_opposite_b: u32,
+    _ second_opposite_c: u32,
+) -> u32 {
+    let decision = atlas_flip_decision(
+        u_b,
+        u_c,
+        v_b,
+        v_c,
+        first_opposite_b,
+        first_opposite_c,
+        second_opposite_b,
+        second_opposite_c,
+    )
+    (if decision.convex { 1 } else { 0 }) + (if decision.flip { 2 } else { 0 })
+}
+
+pub fn atlas_flipped_vertex(
+    _ u_b: u32,
+    _ u_c: u32,
+    _ v_b: u32,
+    _ v_c: u32,
+    _ first_opposite_b: u32,
+    _ first_opposite_c: u32,
+    _ second_opposite_b: u32,
+    _ second_opposite_c: u32,
+    _ lane: u32,
+) -> u32 {
+    let decision = atlas_flip_decision(
+        u_b,
+        u_c,
+        v_b,
+        v_c,
+        first_opposite_b,
+        first_opposite_c,
+        second_opposite_b,
+        second_opposite_c,
+    )
+    let flipped = flipped_triangle_pair(
+        decision,
+        10,
+        fixed_plane_point(u_b, u_c),
+        20,
+        fixed_plane_point(v_b, v_c),
+        5,
+        fixed_plane_point(first_opposite_b, first_opposite_c),
+        30,
+        fixed_plane_point(second_opposite_b, second_opposite_c),
+    )
+    if !flipped.valid { return 0xffffffff }
+    if lane == 0 { flipped.first.first }
+    else if lane == 1 { flipped.first.second }
+    else if lane == 2 { flipped.first.third }
+    else if lane == 3 { flipped.second.first }
+    else if lane == 4 { flipped.second.second }
+    else if lane == 5 { flipped.second.third }
+    else { 0xffffffff }
+}
+
+fn flip_proposal(
+    _ first_triangle: u32,
+    _ second_triangle: u32,
+    _ edge_low: u32,
+    _ edge_high: u32,
+    _ active: u32,
+) -> FlipProposal {
+    FlipProposal {
+        first_triangle: first_triangle,
+        second_triangle: second_triangle,
+        edge_low: edge_low,
+        edge_high: edge_high,
+        active: active != 0,
+    }
+}
+
+pub fn atlas_flip_proposals_conflict(
+    _ left_first_triangle: u32,
+    _ left_second_triangle: u32,
+    _ left_edge_low: u32,
+    _ left_edge_high: u32,
+    _ left_active: u32,
+    _ right_first_triangle: u32,
+    _ right_second_triangle: u32,
+    _ right_edge_low: u32,
+    _ right_edge_high: u32,
+    _ right_active: u32,
+) -> u32 {
+    let left = flip_proposal(
+        left_first_triangle,
+        left_second_triangle,
+        left_edge_low,
+        left_edge_high,
+        left_active,
+    )
+    let right = flip_proposal(
+        right_first_triangle,
+        right_second_triangle,
+        right_edge_low,
+        right_edge_high,
+        right_active,
+    )
+    if flip_proposals_conflict(left, right) { 1 } else { 0 }
+}
+
+pub fn atlas_flip_proposal_precedes(
+    _ left_first_triangle: u32,
+    _ left_second_triangle: u32,
+    _ left_edge_low: u32,
+    _ left_edge_high: u32,
+    _ right_first_triangle: u32,
+    _ right_second_triangle: u32,
+    _ right_edge_low: u32,
+    _ right_edge_high: u32,
+) -> u32 {
+    let left = flip_proposal(
+        left_first_triangle,
+        left_second_triangle,
+        left_edge_low,
+        left_edge_high,
+        1,
+    )
+    let right = flip_proposal(
+        right_first_triangle,
+        right_second_triangle,
+        right_edge_low,
+        right_edge_high,
+        1,
+    )
+    if flip_proposal_precedes(left, right) { 1 } else { 0 }
+}
+
+pub fn atlas_flip_proposal_is_round_winner(
+    _ active: u32,
+    _ has_preceding_face_conflict: u32,
+) -> u32 {
+    let proposal = flip_proposal(0, 1, 2, 3, active)
+    if flip_proposal_is_round_winner(proposal, has_preceding_face_conflict != 0) {
         1
     } else {
         0

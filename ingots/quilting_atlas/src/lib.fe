@@ -17,6 +17,7 @@ use core::marker::Copy
 use core::pending::Pending
 
 pub use sampling
+pub use topology
 pub use triangulation
 
 pub const MIN_LOD: u32 = 0
