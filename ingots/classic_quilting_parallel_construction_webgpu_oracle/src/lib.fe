@@ -2,12 +2,20 @@
 
 use quilting_atlas::{AtlasKey, boundary_vertices}
 use quilting_atlas_webgpu::{
+    advance_parallel_topology_generation,
+    arbitrate_parallel_topology_point_lane,
     initialize_parallel_topology_lane,
+    locate_parallel_topology_point_lane,
     parallel_topology_progress,
+    plan_parallel_topology_face_lane,
+    rebuild_parallel_topology_face_lane,
+    retire_parallel_topology_point_lane,
+    scan_parallel_topology_face_plan,
 }
 use std::webgpu::{
     ComputeInvocation,
     ComputeSurface as Kernel,
+    CycledDispatch as Cycle,
     FixedDispatch as Once,
     GpuProgram as Program,
     StorageBuffer as Shared,
@@ -22,6 +30,9 @@ const TRIANGLE_WORDS: usize = TRIANGLES * 4
 const WORKSPACE_WORDS: usize = POINTS * 7 + TRIANGLES * 3 + 8
 const THREADS: usize = 128
 const WORKGROUPS: usize = 5
+const INSERTION_ROUNDS: usize = 64
+
+pub struct InsertionRound {}
 
 fn key() -> AtlasKey {
     AtlasKey { a: 1, b: 2, c: 3 }
@@ -56,6 +67,131 @@ actor ClassicQuiltingParallelConstructionOracle uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn locate(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        locate_parallel_topology_point_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            WORKSPACE_WORDS,
+        >(
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.workspace,
+            invocation,
+        )
+    }
+
+    fn arbitrate(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        arbitrate_parallel_topology_point_lane<POINTS, TRIANGLES, WORKSPACE_WORDS>(
+            self.workspace,
+            invocation,
+        )
+    }
+
+    fn plan(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        plan_parallel_topology_face_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            WORKSPACE_WORDS,
+        >(
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.workspace,
+            invocation,
+        )
+    }
+
+    fn scan(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        scan_parallel_topology_face_plan<POINTS, TRIANGLES, WORKSPACE_WORDS>(
+            self.workspace,
+            invocation,
+        )
+    }
+
+    fn rebuild(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        rebuild_parallel_topology_face_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            WORKSPACE_WORDS,
+        >(
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.workspace,
+            invocation,
+        )
+    }
+
+    fn retire(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        retire_parallel_topology_point_lane<POINTS, TRIANGLES, WORKSPACE_WORDS>(
+            self.workspace,
+            invocation,
+        )
+    }
+
+    fn advance(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        advance_parallel_topology_generation<POINTS, TRIANGLES, WORKSPACE_WORDS>(
+            self.workspace,
+            invocation,
+        )
+    }
+
     fn seal(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
         let source_valid = self.source.load(index: 0) != 0
         let resident = self.source.load(index: 1)
@@ -78,10 +214,15 @@ actor ClassicQuiltingParallelConstructionOracle uses (Program<WebGpuBackend>) {
             TRIANGLES,
             WORKSPACE_WORDS,
         >(self.workspace, 7)
+        let expected_triangles = if resident + resident > boundary + 2 {
+            resident + resident - boundary - 2
+        } else {
+            0
+        }
         let valid = source_valid
             && resident >= boundary
-            && triangle_count == boundary - 2
-            && pending == resident - boundary
+            && triangle_count == expected_triangles
+            && pending == 0
             && location_failures == 0
             && invariant_failures == 0
         self.receipt.store(index: 0, value: if valid { 1 } else { 0 })
@@ -91,6 +232,12 @@ actor ClassicQuiltingParallelConstructionOracle uses (Program<WebGpuBackend>) {
         self.receipt.store(index: 4, value: pending)
         self.receipt.store(index: 5, value: location_failures)
         self.receipt.store(index: 6, value: invariant_failures)
-        self.receipt.store(index: 7, value: WORKSPACE_WORDS.downcast_truncate())
+        self.receipt.store(
+            index: 7,
+            value: parallel_topology_progress<POINTS, TRIANGLES, WORKSPACE_WORDS>(
+                self.workspace,
+                0,
+            ),
+        )
     }
 }
