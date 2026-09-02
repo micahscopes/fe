@@ -118,7 +118,7 @@ pub fn commit_recursive_boundary<const L: usize>(
     }
 }
 
-/// Commit the public carrier for one proof-backed recurrence step. This checks
+/// Commit the public carrier for one proof-backed recurrence chunk. This checks
 /// canonical public shape and escape flags but deliberately does not replay the
 /// transition: the sparse AIR receipt is responsible for that relation.
 pub fn commit_recursive_leaf_statement<const L: usize>(
@@ -132,7 +132,7 @@ pub fn commit_recursive_leaf_statement<const L: usize>(
         || !boundary_is_valid(interval.claim, interval.end)
         || interval.start.escaped
         || interval.start.iteration >= interval.end.iteration
-        || interval.end.iteration - interval.start.iteration != 1
+        || interval.end.iteration <= interval.start.iteration
     {
         return invalid_recursive_committed_interval<L>()
     }
