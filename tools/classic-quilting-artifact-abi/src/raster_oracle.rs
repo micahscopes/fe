@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -28,6 +28,7 @@ static COMPILED: OnceLock<CompiledRaster> = OnceLock::new();
 static COMPILED_PREDICATES: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_TOPOLOGY: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_SAMPLING: OnceLock<WebBundle> = OnceLock::new();
+static COMPILED_CONSTRUCTION: OnceLock<WebBundle> = OnceLock::new();
 
 fn compile_compute_oracle(relative_path: &str, entry: &str, label: &str) -> WebBundle {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
@@ -120,6 +121,288 @@ fn compiled_sampling() -> &'static WebBundle {
             "classic-quilting-gpu-sampling",
         )
     })
+}
+
+fn compiled_construction() -> &'static WebBundle {
+    COMPILED_CONSTRUCTION.get_or_init(|| {
+        compile_compute_oracle(
+            "../../ingots/classic_quilting_construction_webgpu_oracle",
+            "construct",
+            "classic-quilting-constrained-construction",
+        )
+    })
+}
+
+#[test]
+fn constrained_construction_compiles_to_browser_profile_wgsl() {
+    let bundle = compiled_construction();
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "construct");
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[0].repeat, 1);
+    let module = naga::front::wgsl::parse_str(&bundle.wgsl).expect("construction WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .expect("construction WGSL validates with browser capabilities");
+    assert!(bundle.wgsl.contains("@compute"));
+    assert!(!bundle.wgsl.contains("@fragment"));
+    assert!(!bundle.wgsl.contains("f32"));
+    assert!(!bundle.wgsl.contains("f64"));
+}
+
+fn point_strictly_between(first: [u32; 3], second: [u32; 3], point: [u32; 3]) -> bool {
+    point != first
+        && point != second
+        && (0..3).all(|lane| {
+            point[lane] >= first[lane].min(second[lane])
+                && point[lane] <= first[lane].max(second[lane])
+        })
+}
+
+fn exact_boundary_edges(points: &[[u32; 3]], boundary: usize) -> BTreeSet<(u32, u32)> {
+    let mut edges = BTreeSet::new();
+    for first in 0..boundary {
+        for second in first + 1..boundary {
+            let same_hull_side =
+                (0..3).any(|lane| points[first][lane] == 0 && points[second][lane] == 0);
+            if !same_hull_side {
+                continue;
+            }
+            let has_intermediate = (0..boundary).any(|point| {
+                point != first
+                    && point != second
+                    && predicate_orientation(
+                        [points[first][1], points[first][2]],
+                        [points[second][1], points[second][2]],
+                        [points[point][1], points[point][2]],
+                    ) == 0
+                    && point_strictly_between(points[first], points[second], points[point])
+            });
+            if !has_intermediate {
+                edges.insert((
+                    u32::try_from(first).unwrap(),
+                    u32::try_from(second).unwrap(),
+                ));
+            }
+        }
+    }
+    edges
+}
+
+#[test]
+fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
+    let Some((adapter, device, queue)) = device() else {
+        return;
+    };
+    eprintln!("GPU construction adapter: {}", adapter.get_info().name);
+    let bundle = compiled_construction();
+    let expected = super::fe_oracle::scalar_sampling_oracle();
+    let buffers = bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| {
+            let size = u64::from(resource.length) * u64::from(resource.stride);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&resource.name),
+                size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (resource.name.clone(), buffer)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let point_words = expected
+        .points
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    queue.write_buffer(&buffers["points"], 0, &u32_bytes(&point_words));
+    queue.write_buffer(
+        &buffers["source"],
+        0,
+        &u32_bytes(&[1, u32::try_from(expected.points.len()).unwrap()]),
+    );
+
+    let layout_entries = bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| wgpu::BindGroupLayoutEntry {
+            binding: resource.binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage {
+                    read_only: resource.policy.access == WebResourceAccess::ReadOnly,
+                },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        })
+        .collect::<Vec<_>>();
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Fe classic Quilting construction layout"),
+        entries: &layout_entries,
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Fe classic Quilting construction pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let entries = bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| wgpu::BindGroupEntry {
+            binding: resource.binding,
+            resource: buffers[&resource.name].as_entire_binding(),
+        })
+        .collect::<Vec<_>>();
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Fe classic Quilting construction resources"),
+        layout: &layout,
+        entries: &entries,
+    });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Fe classic Quilting construction WGSL"),
+        source: wgpu::ShaderSource::Wgsl(bundle.pass_wgsl[0].source.as_str().into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Fe classic Quilting construction stage"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Fe classic Quilting construction graph"),
+    });
+    let pass = &bundle.manifest.passes[0];
+    dispatch_compute_pass(
+        &mut encoder,
+        &pipeline,
+        &group,
+        pass.dispatch.expect("construction dispatch"),
+        pass.repeat,
+    );
+    let receipt_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test-only construction receipt readback"),
+        size: 9 * size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let triangle_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test-only construction triangle readback"),
+        size: buffers["triangles"].size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(
+        &buffers["receipt"],
+        0,
+        &receipt_staging,
+        0,
+        receipt_staging.size(),
+    );
+    encoder.copy_buffer_to_buffer(
+        &buffers["triangles"],
+        0,
+        &triangle_staging,
+        0,
+        triangle_staging.size(),
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let receipt = readback(&device, &receipt_staging)
+        .chunks_exact(size_of::<u32>())
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    let vertices = u32::try_from(expected.points.len()).unwrap();
+    let triangle_count = vertices * 2 - expected.boundary_points - 2;
+    assert_eq!(
+        receipt,
+        [
+            1,
+            0,
+            vertices,
+            expected.boundary_points,
+            vertices,
+            triangle_count,
+            triangle_count,
+            0,
+            0,
+        ]
+    );
+    let triangle_words = readback(&device, &triangle_staging);
+    let triangles = triangle_words
+        .chunks_exact(4 * size_of::<u32>())
+        .take(usize::try_from(triangle_count).unwrap())
+        .map(|bytes| {
+            let words = bytes
+                .chunks_exact(size_of::<u32>())
+                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(words[3], 1);
+            [words[0], words[1], words[2]]
+        })
+        .collect::<Vec<_>>();
+    let mut used_vertices = BTreeSet::<u32>::new();
+    let mut edge_uses = BTreeMap::<(u32, u32), Vec<(u32, u32)>>::new();
+    for triangle in &triangles {
+        assert!(triangle.iter().all(|vertex| *vertex < vertices));
+        assert_eq!(triangle.iter().copied().collect::<BTreeSet<_>>().len(), 3);
+        assert!(
+            predicate_orientation(
+                [
+                    expected.points[triangle[0] as usize][1],
+                    expected.points[triangle[0] as usize][2]
+                ],
+                [
+                    expected.points[triangle[1] as usize][1],
+                    expected.points[triangle[1] as usize][2]
+                ],
+                [
+                    expected.points[triangle[2] as usize][1],
+                    expected.points[triangle[2] as usize][2]
+                ],
+            ) > 0
+        );
+        used_vertices.extend(triangle.iter().copied());
+        for edge in [
+            (triangle[0], triangle[1]),
+            (triangle[1], triangle[2]),
+            (triangle[2], triangle[0]),
+        ] {
+            edge_uses
+                .entry((edge.0.min(edge.1), edge.0.max(edge.1)))
+                .or_default()
+                .push(edge);
+        }
+    }
+    assert_eq!(used_vertices.len(), expected.points.len());
+    let expected_boundary = exact_boundary_edges(
+        &expected.points,
+        usize::try_from(expected.boundary_points).unwrap(),
+    );
+    let actual_boundary = edge_uses
+        .iter()
+        .filter_map(|(edge, uses)| (uses.len() == 1).then_some(*edge))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_boundary, expected_boundary);
+    for uses in edge_uses.values() {
+        assert!(uses.len() == 1 || uses.len() == 2);
+        if uses.len() == 2 {
+            assert_eq!(uses[0], (uses[1].1, uses[1].0));
+        }
+    }
 }
 
 #[test]

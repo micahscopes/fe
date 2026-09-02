@@ -5,7 +5,7 @@
 //! remain in `quilting_atlas::sampling`, shared with Wasm-worker and future
 //! native providers.
 
-use quilting_atlas::{AtlasKey, boundary_vertices}
+use quilting_atlas::{AtlasKey, MAX_LOD, boundary_vertices, edge_resolution}
 use quilting_atlas::sampling::{
     CANDIDATE_ACCEPTED,
     CANDIDATE_INVALID,
@@ -22,10 +22,26 @@ use quilting_atlas::sampling::{
     interior_candidate_at_slot,
     poisson_conflict,
 }
+use quilting_atlas::topology::{
+    INVALID_VERTEX,
+    POINT_ON_EDGE,
+    POINT_ON_VERTEX,
+    POINT_STRICTLY_INSIDE,
+    Triangle,
+    TrianglePair,
+    classify_point_in_triangle,
+    normalized_triangle,
+    split_triangle_edge,
+    split_triangle_interior,
+    triangle_edge_first,
+    triangle_edge_opposite,
+    triangle_edge_second,
+}
 use std::webgpu::{ComputeInvocation, StorageBuffer}
 
 pub const CANDIDATE_WORDS: usize = 5
 pub const POINT_WORDS: usize = 3
+pub const TRIANGLE_WORDS: usize = 4
 pub const GENERATION_PARITY: u32 = 0
 
 pub struct CandidateCompaction {
@@ -38,6 +54,19 @@ pub struct CandidateCompaction {
     pub resident_points: u32,
 }
 impl core::marker::Copy for CandidateCompaction {}
+
+pub struct TopologyConstruction {
+    pub valid: bool,
+    pub overflowed: bool,
+    pub resident_points: u32,
+    pub boundary_points: u32,
+    pub inserted_points: u32,
+    pub resident_triangles: u32,
+    pub expected_triangles: u32,
+    pub location_failures: u32,
+    pub invariant_failures: u32,
+}
+impl core::marker::Copy for TopologyConstruction {}
 
 fn candidate_offset(_ slot: u32) -> u32 {
     slot * CANDIDATE_WORDS.downcast_truncate()
@@ -111,6 +140,118 @@ fn point_store<const WORDS: usize>(
     points.store(index: offset, value: point.a)
     points.store(index: offset + 1, value: point.b)
     points.store(index: offset + 2, value: point.c)
+}
+
+fn point_load<const WORDS: usize>(
+    _ points: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+) -> FixedBarycentric {
+    let offset = ordinal * POINT_WORDS.downcast_truncate()
+    FixedBarycentric {
+        a: points.load(index: offset),
+        b: points.load(index: offset + 1),
+        c: points.load(index: offset + 2),
+    }
+}
+
+fn triangle_offset(_ ordinal: u32) -> u32 {
+    ordinal * TRIANGLE_WORDS.downcast_truncate()
+}
+
+const fn invalid_triangle() -> Triangle {
+    Triangle {
+        first: INVALID_VERTEX,
+        second: INVALID_VERTEX,
+        third: INVALID_VERTEX,
+        valid: false,
+    }
+}
+
+const fn invalid_triangle_pair() -> TrianglePair {
+    TrianglePair {
+        first: invalid_triangle(),
+        second: invalid_triangle(),
+        valid: false,
+    }
+}
+
+fn triangle_store<const WORDS: usize>(
+    _ triangles: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+    _ triangle: Triangle,
+) {
+    let offset = triangle_offset(ordinal)
+    triangles.store(index: offset, value: triangle.first)
+    triangles.store(index: offset + 1, value: triangle.second)
+    triangles.store(index: offset + 2, value: triangle.third)
+    triangles.store(index: offset + 3, value: if triangle.valid { 1 } else { 0 })
+}
+
+fn triangle_load<const WORDS: usize>(
+    _ triangles: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+) -> Triangle {
+    let offset = triangle_offset(ordinal)
+    Triangle {
+        first: triangles.load(index: offset),
+        second: triangles.load(index: offset + 1),
+        third: triangles.load(index: offset + 2),
+        valid: triangles.load(index: offset + 3) != 0,
+    }
+}
+
+fn triangle_point<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangle: Triangle,
+    _ lane: u32,
+) -> FixedBarycentric {
+    let vertex = if lane == 0 {
+        triangle.first
+    } else if lane == 1 {
+        triangle.second
+    } else {
+        triangle.third
+    }
+    point_load<POINT_STORAGE_WORDS>(points, vertex)
+}
+
+fn classify_resident_point<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangle: Triangle,
+    _ point: FixedBarycentric,
+) -> u32 {
+    classify_point_in_triangle(
+        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
+        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
+        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+        point,
+    )
+}
+
+fn split_resident_triangle_edge<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangle: Triangle,
+    _ point_id: u32,
+    _ point: FixedBarycentric,
+) -> TrianglePair {
+    let mut edge: u32 = 0
+    while edge < 3 {
+        let first_id = triangle_edge_first(triangle, edge)
+        let second_id = triangle_edge_second(triangle, edge)
+        let opposite_id = triangle_edge_opposite(triangle, edge)
+        let split = split_triangle_edge(
+            triangle,
+            edge,
+            point_load<POINT_STORAGE_WORDS>(points, first_id),
+            point_load<POINT_STORAGE_WORDS>(points, second_id),
+            point_load<POINT_STORAGE_WORDS>(points, opposite_id),
+            point_id,
+            point,
+        )
+        if split.valid { return split }
+        edge = edge + 1
+    }
+    invalid_triangle_pair()
 }
 
 fn resident_candidate_slots<const CAPACITY: usize>(_ key: AtlasKey) -> u32 {
@@ -375,5 +516,310 @@ pub fn compact_candidate_points<
         accepted_candidates: accepted,
         boundary_points: boundary,
         resident_points: resident,
+    }
+}
+
+/// Deterministic constrained triangle construction over the resident points.
+///
+/// This is the scalar reference *placement* of the portable topology rules. It
+/// runs in a single compute invocation and never leaves GPU storage. A later
+/// parallel insertion provider must preserve its point order, locked boundary
+/// chain, receipt, and canonical triangle bytes.
+pub fn construct_constrained_triangles<
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ source_valid: bool,
+    _ requested_points: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+) -> TopologyConstruction where
+    { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+{
+    let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    let triangle_capacity: u32 =
+        (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
+    let boundary = boundary_vertices(key)
+    let mut overflowed = requested_points > point_capacity
+    let resident_points = if requested_points < point_capacity {
+        requested_points
+    } else {
+        point_capacity
+    }
+
+    let mut clear: u32 = 0
+    while clear < triangle_capacity {
+        triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, clear, invalid_triangle())
+        clear = clear + 1
+    }
+
+    let canonical_key = key.a <= key.b && key.b <= key.c && key.c <= MAX_LOD
+    if !source_valid
+        || !canonical_key
+        || boundary < 3
+        || resident_points < boundary
+        || triangle_capacity == 0
+    {
+        return TopologyConstruction {
+            valid: false,
+            overflowed: overflowed,
+            resident_points: resident_points,
+            boundary_points: boundary,
+            inserted_points: 0,
+            resident_triangles: 0,
+            expected_triangles: 0,
+            location_failures: 1,
+            invariant_failures: 1,
+        }
+    }
+
+    let corner_a: u32 = 0
+    let corner_b = edge_resolution(key.c)
+    let corner_c = corner_b + edge_resolution(key.b)
+    let seed = normalized_triangle(
+        corner_a,
+        point_load<POINT_STORAGE_WORDS>(points, corner_a),
+        corner_b,
+        point_load<POINT_STORAGE_WORDS>(points, corner_b),
+        corner_c,
+        point_load<POINT_STORAGE_WORDS>(points, corner_c),
+    )
+    if !seed.valid {
+        return TopologyConstruction {
+            valid: false,
+            overflowed: overflowed,
+            resident_points: resident_points,
+            boundary_points: boundary,
+            inserted_points: 0,
+            resident_triangles: 0,
+            expected_triangles: 0,
+            location_failures: 1,
+            invariant_failures: 1,
+        }
+    }
+    triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, 0, seed)
+    let mut triangle_count: u32 = 1
+    let mut inserted: u32 = 3
+    let mut location_failures: u32 = 0
+    let mut invariant_failures: u32 = 0
+
+    // Insert each non-corner boundary seed into its unique current hull edge.
+    let mut point_id: u32 = 0
+    while point_id < boundary && location_failures == 0 && invariant_failures == 0 {
+        if point_id != corner_a && point_id != corner_b && point_id != corner_c {
+            let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+            let mut found: u32 = 0
+            let mut found_face: u32 = 0
+            let mut found_split = invalid_triangle_pair()
+            let mut face: u32 = 0
+            while face < triangle_count {
+                let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+                if triangle.valid
+                    && classify_resident_point<POINT_STORAGE_WORDS>(points, triangle, point)
+                        == POINT_ON_EDGE
+                {
+                    let split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                        points,
+                        triangle,
+                        point_id,
+                        point,
+                    )
+                    if split.valid {
+                        found = found + 1
+                        found_face = face
+                        found_split = split
+                    }
+                }
+                face = face + 1
+            }
+            if found != 1 {
+                location_failures = location_failures + 1
+            } else if triangle_count >= triangle_capacity {
+                overflowed = true
+            } else {
+                triangle_store<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    found_face,
+                    found_split.first,
+                )
+                triangle_store<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    triangle_count,
+                    found_split.second,
+                )
+                triangle_count = triangle_count + 1
+                inserted = inserted + 1
+            }
+        }
+        point_id = point_id + 1
+    }
+
+    // Insert stable-prefix interior points. A strict face hit becomes three
+    // faces; an exact interior-edge hit splits both adjacent faces into four.
+    point_id = boundary
+    while point_id < resident_points
+        && !overflowed
+        && location_failures == 0
+        && invariant_failures == 0
+    {
+        let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+        let mut strict_hits: u32 = 0
+        let mut strict_face: u32 = 0
+        let mut edge_hits: u32 = 0
+        let mut first_edge_face: u32 = 0
+        let mut second_edge_face: u32 = 0
+        let mut vertex_hits: u32 = 0
+        let mut face: u32 = 0
+        while face < triangle_count {
+            let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+            if triangle.valid {
+                let classification = classify_resident_point<POINT_STORAGE_WORDS>(
+                    points,
+                    triangle,
+                    point,
+                )
+                if classification == POINT_STRICTLY_INSIDE {
+                    strict_hits = strict_hits + 1
+                    strict_face = face
+                } else if classification == POINT_ON_EDGE {
+                    if edge_hits == 0 {
+                        first_edge_face = face
+                    } else if edge_hits == 1 {
+                        second_edge_face = face
+                    }
+                    edge_hits = edge_hits + 1
+                } else if classification == POINT_ON_VERTEX {
+                    vertex_hits = vertex_hits + 1
+                }
+            }
+            face = face + 1
+        }
+
+        if vertex_hits != 0
+            || (strict_hits == 1 && edge_hits != 0)
+            || strict_hits > 1
+            || edge_hits > 2
+        {
+            invariant_failures = invariant_failures + 1
+        } else if strict_hits == 1 {
+            if triangle_count + 2 > triangle_capacity {
+                overflowed = true
+            } else {
+                let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, strict_face)
+                let split = split_triangle_interior(
+                    triangle,
+                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
+                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
+                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+                    point_id,
+                    point,
+                )
+                if !split.valid {
+                    invariant_failures = invariant_failures + 1
+                } else {
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        strict_face,
+                        split.first,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count,
+                        split.second,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count + 1,
+                        split.third,
+                    )
+                    triangle_count = triangle_count + 2
+                    inserted = inserted + 1
+                }
+            }
+        } else if edge_hits == 2 {
+            if triangle_count + 2 > triangle_capacity {
+                overflowed = true
+            } else {
+                let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    first_edge_face,
+                )
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    second_edge_face,
+                )
+                let first_split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                    points,
+                    first_triangle,
+                    point_id,
+                    point,
+                )
+                let second_split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                    points,
+                    second_triangle,
+                    point_id,
+                    point,
+                )
+                if !first_split.valid || !second_split.valid {
+                    invariant_failures = invariant_failures + 1
+                } else {
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        first_edge_face,
+                        first_split.first,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        second_edge_face,
+                        second_split.first,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count,
+                        first_split.second,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count + 1,
+                        second_split.second,
+                    )
+                    triangle_count = triangle_count + 2
+                    inserted = inserted + 1
+                }
+            }
+        } else {
+            location_failures = location_failures + 1
+        }
+        point_id = point_id + 1
+    }
+
+    let expected = if resident_points + resident_points > boundary + 2 {
+        resident_points + resident_points - boundary - 2
+    } else {
+        0
+    }
+    if !overflowed
+        && location_failures == 0
+        && invariant_failures == 0
+        && triangle_count != expected
+    {
+        invariant_failures = invariant_failures + 1
+    }
+    TopologyConstruction {
+        valid: !overflowed
+            && location_failures == 0
+            && invariant_failures == 0
+            && inserted == resident_points
+            && triangle_count == expected,
+        overflowed: overflowed,
+        resident_points: resident_points,
+        boundary_points: boundary,
+        inserted_points: inserted,
+        resident_triangles: triangle_count,
+        expected_triangles: expected,
+        location_failures: location_failures,
+        invariant_failures: invariant_failures,
     }
 }

@@ -1,0 +1,54 @@
+//! Executable actor shape for constrained classic Quilting construction.
+
+use quilting_atlas::AtlasKey
+use quilting_atlas_webgpu::construct_constrained_triangles
+use std::webgpu::{
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+const POINTS: usize = 286
+const POINT_WORDS: usize = POINTS * 3
+const TRIANGLES: usize = 556
+const TRIANGLE_WORDS: usize = TRIANGLES * 4
+
+fn key() -> AtlasKey {
+    AtlasKey { a: 1, b: 2, c: 3 }
+}
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+actor ClassicQuiltingConstructionOracle uses (Program<WebGpuBackend>) {
+    points: Shared<u32, POINT_WORDS>,
+    source: Shared<u32, 2>,
+    triangles: Shared<u32, TRIANGLE_WORDS>,
+    receipt: Shared<u32, 9>,
+
+    fn construct(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let construction = construct_constrained_triangles<
+            POINT_WORDS,
+            TRIANGLE_WORDS,
+        >(
+            key(),
+            self.source.load(index: 0) != 0,
+            self.source.load(index: 1),
+            self.points,
+            self.triangles,
+        )
+        self.receipt.store(index: 0, value: flag(construction.valid))
+        self.receipt.store(index: 1, value: flag(construction.overflowed))
+        self.receipt.store(index: 2, value: construction.resident_points)
+        self.receipt.store(index: 3, value: construction.boundary_points)
+        self.receipt.store(index: 4, value: construction.inserted_points)
+        self.receipt.store(index: 5, value: construction.resident_triangles)
+        self.receipt.store(index: 6, value: construction.expected_triangles)
+        self.receipt.store(index: 7, value: construction.location_failures)
+        self.receipt.store(index: 8, value: construction.invariant_failures)
+    }
+}
