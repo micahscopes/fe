@@ -1,0 +1,33 @@
+use std::webgpu::{
+    ActorResident,
+    ComputeOnly,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    GpuBuffer,
+    GpuProgram as Program,
+    ReadOnly,
+    ReplayRecipe,
+    StorageKind,
+    WebGpuBackend,
+    Workgroup as Threads,
+    Zeroed,
+}
+
+pub type ReadOnlyWords = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    ComputeOnly,
+    4,
+    u32,
+>
+
+actor InvalidWriter uses (Program<WebGpuBackend>) {
+    words: ReadOnlyWords,
+
+    fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        self.words.store(index: 0, value: 7)
+    }
+}

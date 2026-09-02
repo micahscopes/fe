@@ -1,0 +1,26 @@
+use std::webgpu::{
+    ContentAddressed,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    ImmutableStorageBuffer,
+    WebGpuBackend,
+}
+
+pub type ShortBytes = ContentAddressed<
+    0x027687e8,
+    0x7ab072c7,
+    0x78c8f2e6,
+    0x6177fb78,
+    0xc6aa1995,
+    0x2987b97b,
+    0x3140b68e,
+    0xbd5f90ea,
+>
+
+actor WrongLengthPalette uses (Program<WebGpuBackend>) {
+    palette: ImmutableStorageBuffer<ShortBytes, 4, u32>,
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.palette.load(index: 0).downcast_truncate()
+    }
+}

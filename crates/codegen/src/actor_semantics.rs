@@ -13,13 +13,114 @@ use hir::analysis::{
         adt_def::AdtRef, trait_def::TraitInstId, trait_resolution::PredicateListId, ty_def::TyId,
     },
 };
-use hir::hir_def::{AttrListId, ItemKind, PathId, Struct, TopLevelMod};
+use hir::hir_def::{AttrListId, GpuResource, ItemKind, PathId, Struct, TopLevelMod};
 use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
 
 #[derive(Debug)]
 pub(crate) struct SemanticActor<'db> {
     pub(crate) state: Struct<'db>,
     pub(crate) behaviors: Vec<hir::hir_def::Func<'db>>,
+}
+
+/// Compiler-owned projection of one nominal GPU resource type.
+///
+/// Keep positional generic knowledge here rather than teaching every backend
+/// that legacy storage is `<T, N>`, readback is `<T, N, M>`, and the typed
+/// policy family is `<Kind, Access, Residency, Init, Recovery, Visibility, N,
+/// T>`. Backends consume the semantic element/length pair; bundle construction
+/// may additionally inspect the policy marker types.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SemanticGpuResource<'db> {
+    pub(crate) kind: GpuResource,
+    pub(crate) element_ty: TyId<'db>,
+    pub(crate) length_ty: TyId<'db>,
+    pub(crate) family: Option<SemanticGpuResourceFamily<'db>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SemanticGpuResourceFamily<'db> {
+    pub(crate) kind_ty: TyId<'db>,
+    pub(crate) access_ty: TyId<'db>,
+    pub(crate) residency_ty: TyId<'db>,
+    pub(crate) init_ty: TyId<'db>,
+    pub(crate) recovery_ty: TyId<'db>,
+    pub(crate) visibility_ty: TyId<'db>,
+}
+
+/// Recover one GPU resource's semantic shape after aliases and views have been
+/// normalized. `Ok(None)` means the type is not a GPU resource; malformed
+/// attributed resources fail closed with a stable compiler-owned explanation.
+pub(crate) fn semantic_gpu_resource<'db>(
+    db: &'db dyn hir::analysis::HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Result<Option<SemanticGpuResource<'db>>, &'static str> {
+    let ty = ty.as_view(db).unwrap_or(ty);
+    let Some(attrs) = nominal_attrs(db, ty) else {
+        return Ok(None);
+    };
+    let Some(kind) = attrs.gpu_resource(db) else {
+        return Ok(None);
+    };
+    let args = ty.generic_args(db);
+    let resource = match kind {
+        GpuResource::Storage => {
+            let [element_ty, length_ty] = args else {
+                return Err(
+                    "GPU storage resource type requires exactly element and length arguments",
+                );
+            };
+            SemanticGpuResource {
+                kind,
+                element_ty: *element_ty,
+                length_ty: *length_ty,
+                family: None,
+            }
+        }
+        GpuResource::Readback => {
+            let [element_ty, length_ty, _message_ty] = args else {
+                return Err(
+                    "GPU readback resource type requires exactly element, length, and message arguments",
+                );
+            };
+            SemanticGpuResource {
+                kind,
+                element_ty: *element_ty,
+                length_ty: *length_ty,
+                family: None,
+            }
+        }
+        GpuResource::StorageFamily => {
+            let [
+                kind_ty,
+                access_ty,
+                residency_ty,
+                init_ty,
+                recovery_ty,
+                visibility_ty,
+                length_ty,
+                element_ty,
+            ] = args
+            else {
+                return Err(
+                    "GPU storage family requires kind, access, residency, initialization, recovery, visibility, length, and element arguments",
+                );
+            };
+            SemanticGpuResource {
+                kind,
+                element_ty: *element_ty,
+                length_ty: *length_ty,
+                family: Some(SemanticGpuResourceFamily {
+                    kind_ty: *kind_ty,
+                    access_ty: *access_ty,
+                    residency_ty: *residency_ty,
+                    init_ty: *init_ty,
+                    recovery_ty: *recovery_ty,
+                    visibility_ty: *visibility_ty,
+                }),
+            }
+        }
+    };
+    Ok(Some(resource))
 }
 
 pub(crate) fn semantic_actors<'db>(

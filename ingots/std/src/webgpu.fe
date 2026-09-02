@@ -17,6 +17,44 @@ use super::web::{
 }
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
+pub use layout::{
+    GpuLayout,
+    StorageLayout,
+    StorageLayoutProvider,
+    UniformLayout,
+    VertexLayout,
+}
+pub use resource::{
+    ActorResident,
+    AllShaderStages,
+    ComputeFragment,
+    ComputeOnly,
+    ContentAddressed,
+    Derived,
+    DynamicStorageBuffer,
+    FragmentOnly,
+    FrameTransient,
+    GpuBuffer,
+    GpuReadable,
+    GpuResourceFamily,
+    GpuWritable,
+    Immutable,
+    ImmutableStorageBuffer,
+    Imported,
+    NonRecoverable,
+    ReadOnly,
+    ReadWrite,
+    Regenerate,
+    ReplayRecipe,
+    RestoreCheckpoint,
+    StorageBuffer,
+    StorageKind,
+    VertexFragment,
+    VertexOnly,
+    WriteOnly,
+    Zeroed,
+}
+
 // mb2 CE-3: the completion-cell control-effects vocabulary now lives
 // backend-generic in `core::pending`. Re-export it here for source
 // compatibility (the keystone fixtures and WebGPU code keep naming
@@ -648,33 +686,6 @@ impl DropWhilePresenting {
             }
         }
         step.with_queue(queue: queue)
-    }
-}
-
-/// An externally allocated storage resource shared by GPU stages.
-///
-/// The private word keeps the nominal value live through ordinary Fe lowering;
-/// it is never a runtime binding number. The compiler roots the whole value as
-/// the attributed external resource before emitting WGSL.
-#[gpu_resource(storage)]
-pub struct StorageBuffer<T, const N: usize> { binding: u32 }
-
-// A storage resource is an externally owned, aliasable WebGPU binding. Copying
-// this nominal handle neither copies its buffer nor changes ownership of the
-// underlying resource; it preserves the same typed binding capability.
-impl<T, const N: usize> core::marker::Copy for StorageBuffer<T, N> {}
-
-impl<T, const N: usize> StorageBuffer<T, N> {
-    /// Loads element `index` from this shared resource.
-    #[gpu_intrinsic(storage_load)]
-    pub fn load(self, index: u32) -> T {
-        core::panic()
-    }
-
-    /// Stores `value` at element `index` in this shared resource.
-    #[gpu_intrinsic(storage_store)]
-    pub fn store(self, index: u32, value: T) {
-        core::panic()
     }
 }
 

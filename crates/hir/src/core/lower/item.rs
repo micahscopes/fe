@@ -251,7 +251,41 @@ fn validate_struct_attrs<'db>(
                 BARE_FORM,
                 "`#[gpu_compute_invocation]`",
             ),
-            AttrRule::supported("gpu_resource", GPU_IDENT_FORM, "`#[gpu_resource(storage)]`"),
+            AttrRule::supported(
+                "gpu_resource",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource(storage)]`, `#[gpu_resource(storage_family)]`, or `#[gpu_resource(readback)]`",
+            ),
+            AttrRule::supported(
+                "gpu_resource_kind",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource_kind(storage)]`",
+            ),
+            AttrRule::supported(
+                "gpu_resource_access",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource_access(read_only)]`, `#[gpu_resource_access(write_only)]`, or `#[gpu_resource_access(read_write)]`",
+            ),
+            AttrRule::supported(
+                "gpu_resource_residency",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource_residency(immutable)]`, `#[gpu_resource_residency(actor_resident)]`, `#[gpu_resource_residency(frame_transient)]`, or `#[gpu_resource_residency(imported)]`",
+            ),
+            AttrRule::supported(
+                "gpu_resource_init",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource_init(zeroed)]`, `#[gpu_resource_init(content_addressed)]`, or `#[gpu_resource_init(derived)]`",
+            ),
+            AttrRule::supported(
+                "gpu_resource_recovery",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource_recovery(replay_recipe)]`, `#[gpu_resource_recovery(restore_checkpoint)]`, `#[gpu_resource_recovery(regenerate)]`, or `#[gpu_resource_recovery(nonrecoverable)]`",
+            ),
+            AttrRule::supported(
+                "gpu_resource_visibility",
+                GPU_IDENT_FORM,
+                "`#[gpu_resource_visibility(compute)]`, `#[gpu_resource_visibility(vertex)]`, `#[gpu_resource_visibility(fragment)]`, `#[gpu_resource_visibility(compute_fragment)]`, `#[gpu_resource_visibility(vertex_fragment)]`, or `#[gpu_resource_visibility(all)]`",
+            ),
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,

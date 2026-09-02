@@ -22,7 +22,9 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
     WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
-    actor_gpu_program, actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
+    WebResourceAccess, WebResourceInitialization, WebResourceKind, WebResourcePolicy,
+    WebResourceRecovery, WebResourceResidency, WebResourceVisibility, actor_gpu_program,
+    actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
@@ -426,10 +428,12 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
                 fe_codegen::WebActorResourceField {
                     name: "re_bits".to_owned(),
                     offset: 0,
+                    scalar: fe_codegen::WebScalarKind::U32,
                 },
                 fe_codegen::WebActorResourceField {
                     name: "im_bits".to_owned(),
                     offset: 4,
+                    scalar: fe_codegen::WebScalarKind::U32,
                 },
             ],
             span: 8,
@@ -507,7 +511,280 @@ fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
 }
 
 #[test]
-fn attributed_actor_builds_a_materialized_v6_pass_graph() {
+fn mixed_scalar_storage_layout_reconciles_fco_manifest_and_wgsl() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_mixed_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "mixed storage fixture diagnostics:\n{diagnostics}"
+    );
+
+    let layout_wasm = build_entry_wasm(&db, top_mod, "layout_receipt");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, layout_wasm).expect("layout receipt module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("layout receipt instance");
+    let layout = instance
+        .get_typed_func::<(), (u32, u32, u32, u32)>(&mut store, "layout_receipt")
+        .expect("layout receipt export")
+        .call(&mut store, ())
+        .expect("layout receipt execution");
+    assert_eq!(layout, (12, 4, 12, 3));
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("mixed-storage.fe".to_owned())),
+    )
+    .expect("mixed scalar storage bundle");
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("mixed actor must derive exactly one resource")
+    };
+    assert_eq!((resource.stride, resource.span), (layout.2, layout.0));
+    assert_eq!(
+        resource.element,
+        WebActorResourceElement::Record {
+            fields: vec![
+                fe_codegen::WebActorResourceField {
+                    name: "x".to_owned(),
+                    offset: 0,
+                    scalar: fe_codegen::WebScalarKind::F32,
+                },
+                fe_codegen::WebActorResourceField {
+                    name: "material".to_owned(),
+                    offset: 4,
+                    scalar: fe_codegen::WebScalarKind::U32,
+                },
+                fe_codegen::WebActorResourceField {
+                    name: "y".to_owned(),
+                    offset: 8,
+                    scalar: fe_codegen::WebScalarKind::F32,
+                },
+            ],
+            span: layout.0,
+        }
+    );
+    let manifest_json = serde_json::to_value(&bundle.manifest).unwrap();
+    let fields = manifest_json["resources"][0]["element"]["Record"]["fields"]
+        .as_array()
+        .expect("record fields JSON");
+    assert_eq!(fields[0]["scalar"], "f32");
+    assert!(
+        fields[1].get("scalar").is_none(),
+        "legacy u32 fields must retain their compact manifest spelling"
+    );
+    assert_eq!(fields[2]["scalar"], "f32");
+
+    let compute_wgsl = &bundle.pass_wgsl[0].source;
+    let fragment_wgsl = &bundle.pass_wgsl[1].source;
+    assert!(compute_wgsl.contains("x: f32"));
+    assert!(compute_wgsl.contains("material: u32"));
+    assert!(compute_wgsl.contains("y: f32"));
+    assert!(fragment_wgsl.contains("material: u32"));
+}
+
+#[test]
+fn signed_storage_fails_closed_until_carrier_bitcasts_are_explicit() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_signed_storage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "signed storage fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = match WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("signed-storage.fe".to_owned())),
+    ) {
+        Ok(_) => panic!("signed storage must not inherit the unsigned browser carrier silently"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("signed `i32` storage requires explicit carrier bitcasts"),
+        "expected the signed-carrier boundary error, got: {message}"
+    );
+}
+
+#[test]
+fn typed_resource_policy_projects_to_manifest_and_narrows_physical_access() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_typed_resource_policy");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "typed resource policy diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("typed-resource-policy.fe".to_owned())),
+    )
+    .expect("typed resource policy bundle");
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("typed policy actor must derive exactly one resource")
+    };
+    assert_eq!(
+        resource.policy,
+        WebResourcePolicy {
+            kind: WebResourceKind::Storage,
+            access: WebResourceAccess::ReadOnly,
+            residency: WebResourceResidency::ActorResident,
+            initialization: WebResourceInitialization::Zeroed,
+            recovery: WebResourceRecovery::ReplayRecipe,
+            visibility: WebResourceVisibility::Fragment,
+        }
+    );
+    let policy_json = &serde_json::to_value(&bundle.manifest).unwrap()["resources"][0]["policy"];
+    assert_eq!(policy_json["access"], "read_only");
+    assert_eq!(policy_json["visibility"], "fragment");
+    assert!(bundle.pass_wgsl[0].source.contains("var<storage> palette"));
+    assert!(
+        !bundle.pass_wgsl[0]
+            .source
+            .contains("var<storage, read_write> palette")
+    );
+}
+
+#[test]
+fn readonly_resource_store_is_rejected_by_missing_type_evidence() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_readonly_store_rejected");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.contains("store")
+            && (diagnostics.contains("trait bound is not satisfied")
+                || diagnostics.contains("not found")
+                || diagnostics.contains("doesn't implement")),
+        "read-only storage must reject stores through missing GpuWritable evidence:\n{diagnostics}"
+    );
+}
+
+#[test]
+fn invalid_immutable_policy_fails_closed_before_shader_lowering() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_invalid_immutable");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "invalid policy fixture should reach bundle validation:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("invalid-immutable.fe".to_owned())),
+    )
+    .expect_err("immutable writable storage must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("immutable residency requires read-only access"),
+        "unexpected invalid immutable policy error: {error}"
+    );
+}
+
+#[test]
+fn content_addressed_resource_is_verified_selected_and_materialized() {
+    const BYTES: &[u8] = b"0123456789abcde\n";
+    const SHA256: &str = "dc08b6f2c7aaeca6d88cd9c82797b328160ccb3b1a84243b8eadb296744426c4";
+
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_content_addressed_resource");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "content asset diagnostics:\n{diagnostics}"
+    );
+
+    let missing = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("content-addressed.fe".to_owned())),
+    )
+    .expect_err("content-addressed resource without bytes must fail closed");
+    assert!(
+        missing.to_string().contains(SHA256),
+        "missing asset error must name its exact identity: {missing}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("content-addressed.fe".to_owned()))
+            .with_resource_asset(BYTES.to_vec()),
+    )
+    .expect("verified content-addressed bundle");
+    assert_eq!(bundle.manifest.protocol_version, 7);
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("content actor must derive exactly one resource")
+    };
+    assert_eq!(
+        resource.policy.initialization,
+        WebResourceInitialization::ContentAddressed {
+            sha256: SHA256.to_owned(),
+        }
+    );
+    let artifact = resource.artifact.as_ref().expect("resource artifact");
+    assert_eq!(artifact.path, format!("resources/sha256-{SHA256}.bin"));
+    assert_eq!(artifact.bytes, BYTES.len() as u64);
+    assert_eq!(artifact.sha256, SHA256);
+
+    let materialized = bundle
+        .materialized_files()
+        .expect("content materialization");
+    let asset = materialized
+        .iter()
+        .find(|file| file.path() == artifact.path)
+        .expect("materialized content-addressed artifact");
+    assert_eq!(asset.bytes(), BYTES);
+}
+
+#[test]
+fn content_addressed_resource_length_is_checked_against_layout() {
+    const SHORT_BYTES: &[u8] = b"0123456789abcde";
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_content_addressed_wrong_length");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "short content diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("short-content.fe".to_owned()))
+            .with_resource_asset(SHORT_BYTES.to_vec()),
+    )
+    .expect_err("15 content bytes cannot initialize four u32 lanes");
+    assert!(
+        error.to_string().contains("expects 16 bytes") && error.to_string().contains("contains 15"),
+        "unexpected content length error: {error}"
+    );
+}
+
+#[test]
+fn attributed_actor_builds_a_materialized_v7_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");
     assert!(!driver::init_ingot(&mut db, &url));
@@ -517,9 +794,9 @@ fn attributed_actor_builds_a_materialized_v6_pass_graph() {
         top_mod,
         WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
     )
-    .expect("v6 actor pass graph");
+    .expect("v7 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 6);
+    assert_eq!(bundle.manifest.protocol_version, 7);
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);

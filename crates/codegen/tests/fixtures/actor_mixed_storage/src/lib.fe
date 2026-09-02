@@ -1,0 +1,45 @@
+use std::webgpu::{
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuLayout,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    StorageLayout,
+    StorageLayoutProvider,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+pub struct MixedSample {
+    pub x: f32,
+    pub material: u32,
+    pub y: f32,
+}
+
+derive GpuLayout<StorageLayout> for MixedSample using StorageLayoutProvider
+
+actor MixedStorage uses (Program<WebGpuBackend>) {
+    samples: Shared<MixedSample, 1>,
+
+    fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        self.samples.store(
+            index: 0,
+            value: MixedSample { x: 1.25, material: 7, y: -2.5 },
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let sample: MixedSample = self.samples.load(index: 0)
+        sample.material.downcast_truncate()
+    }
+}
+
+pub fn layout_receipt() -> (u32, u32, u32, u32) {
+    (
+        <MixedSample as GpuLayout<StorageLayout>>::SIZE,
+        <MixedSample as GpuLayout<StorageLayout>>::ALIGN,
+        <MixedSample as GpuLayout<StorageLayout>>::STRIDE,
+        <MixedSample as GpuLayout<StorageLayout>>::FIELD_COUNT,
+    )
+}

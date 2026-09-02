@@ -1,0 +1,36 @@
+use std::webgpu::{
+    GpuLayout,
+    StorageLayout,
+    StorageLayoutProvider,
+}
+
+struct MixedVertex {
+    x: f32,
+    material: u32,
+    y: f32,
+}
+
+derive GpuLayout<StorageLayout> for MixedVertex using StorageLayoutProvider
+
+pub fn layout_receipt()
+    -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32)
+{
+    let fields = <MixedVertex as GpuLayout<StorageLayout>>::fields()
+    let x = fields.0
+    let material = fields.1
+    let y = fields.2
+    (
+        <MixedVertex as GpuLayout<StorageLayout>>::SIZE,
+        <MixedVertex as GpuLayout<StorageLayout>>::ALIGN,
+        <MixedVertex as GpuLayout<StorageLayout>>::STRIDE,
+        <MixedVertex as GpuLayout<StorageLayout>>::FIELD_COUNT,
+        1,
+        x.0,
+        x.1,
+        1,
+        material.0,
+        material.1,
+        y.0,
+        y.1,
+    )
+}

@@ -90,6 +90,10 @@ pub struct RenderBundleArtifact {
     /// ...); publication keeps that directory topology intact so generated
     /// ES-module imports remain valid. Empty for a render-only surface.
     pub support_files: Vec<RenderSupportArtifact>,
+    /// Compiler-verified immutable GPU resource artifacts. These are
+    /// published by their own SHA-256 identity and remain distinct from fixed
+    /// browser-runtime support modules.
+    pub resource_files: Vec<RenderSupportArtifact>,
     /// Compiler-materialized actor-scoped task package, independent of the
     /// render manifest. Paths are relative to the package root (`tasks.js`,
     /// `child.wasm`, `runtime/actor-client.js`, ...), and publication writes
@@ -1098,7 +1102,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=6).contains(&version) {
+    if !(4..=7).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),
@@ -1193,6 +1197,110 @@ fn verify_render_deployment(
             verify_addressed_file(&shader, &pass_context)?;
             verify_byte_length(&shader, pass["shader_bytes"].as_u64(), &pass_context)?;
             verified.insert(shader);
+        }
+    }
+
+    if version >= 7 && value.get("resources").is_none() {
+        return Err(VerificationError {
+            context: format!("{context} manifest resources"),
+            detail: "protocol v7 requires an explicit resources array".to_owned(),
+        });
+    }
+    if let Some(resources) = value.get("resources") {
+        let resources = resources.as_array().ok_or_else(|| VerificationError {
+            context: format!("{context} manifest resources"),
+            detail: "resources is not an array".to_owned(),
+        })?;
+        for (index, resource) in resources.iter().enumerate() {
+            let resource_context = format!("{context} resource #{}", index + 1);
+            let initialization = resource
+                .get("policy")
+                .and_then(|policy| policy.get("initialization"));
+            let content_digest = initialization
+                .filter(|initialization| initialization["kind"] == "content_addressed")
+                .and_then(|initialization| initialization["sha256"].as_str());
+            let artifact = resource
+                .get("artifact")
+                .filter(|artifact| !artifact.is_null());
+            match (content_digest, artifact) {
+                (None, None) => {}
+                (None, Some(_)) => {
+                    return Err(VerificationError {
+                        context: resource_context,
+                        detail: "artifact is not backed by content-addressed initialization"
+                            .to_owned(),
+                    });
+                }
+                (Some(_), None) => {
+                    return Err(VerificationError {
+                        context: resource_context,
+                        detail: "content-addressed initialization has no artifact".to_owned(),
+                    });
+                }
+                (Some(content_digest), Some(artifact)) => {
+                    let artifact_digest =
+                        artifact["sha256"]
+                            .as_str()
+                            .ok_or_else(|| VerificationError {
+                                context: resource_context.clone(),
+                                detail: "artifact has no sha256".to_owned(),
+                            })?;
+                    if artifact_digest != content_digest {
+                        return Err(VerificationError {
+                            context: resource_context.clone(),
+                            detail: "initialization and artifact SHA-256 identities disagree"
+                                .to_owned(),
+                        });
+                    }
+                    let length = resource["length"]
+                        .as_u64()
+                        .ok_or_else(|| VerificationError {
+                            context: resource_context.clone(),
+                            detail: "resource has no length".to_owned(),
+                        })?;
+                    let stride = resource["stride"]
+                        .as_u64()
+                        .ok_or_else(|| VerificationError {
+                            context: resource_context.clone(),
+                            detail: "resource has no stride".to_owned(),
+                        })?;
+                    let expected_bytes =
+                        length
+                            .checked_mul(stride)
+                            .ok_or_else(|| VerificationError {
+                                context: resource_context.clone(),
+                                detail: "resource byte length overflows".to_owned(),
+                            })?;
+                    if artifact["bytes"].as_u64() != Some(expected_bytes) {
+                        return Err(VerificationError {
+                            context: resource_context.clone(),
+                            detail: format!(
+                                "artifact byte length does not equal length × stride ({expected_bytes})"
+                            ),
+                        });
+                    }
+                    let artifact_ref =
+                        artifact["path"].as_str().ok_or_else(|| VerificationError {
+                            context: resource_context.clone(),
+                            detail: "artifact has no path".to_owned(),
+                        })?;
+                    let artifact_path =
+                        deployment_file(manifest_root, artifact_ref, &resource_context)?;
+                    let expected_name = format!("fe-resource-{artifact_digest}.bin");
+                    if artifact_path.file_name().and_then(|name| name.to_str())
+                        != Some(expected_name.as_str())
+                    {
+                        return Err(VerificationError {
+                            context: resource_context.clone(),
+                            detail: format!(
+                                "resource artifact is not published as {expected_name}"
+                            ),
+                        });
+                    }
+                    verify_generated_browser_artifact(&artifact_path, artifact, &resource_context)?;
+                    verified.insert(artifact_path);
+                }
+            }
         }
     }
 
@@ -2697,6 +2805,7 @@ fn publish_render_artifacts(
         wgsl,
         pass_wgsl,
         support_files,
+        resource_files,
         scoped_task_files,
         manifest_json,
         source_dependencies: _,
@@ -2707,6 +2816,7 @@ fn publish_render_artifacts(
         })?;
     pin_published_attribution(&mut manifest, runtime, document_source)?;
     let scoped_task_ref = publish_materialized_scoped_task_package(&scoped_task_files, assets)?;
+    publish_render_resource_files(&mut manifest, &resource_files, assets)?;
     if !support_files.is_empty() {
         let mut package_identity = Vec::new();
         let mut support_paths = BTreeSet::new();
@@ -2939,6 +3049,85 @@ fn verify_support_metadata(
     if bytes != Some(support.bytes.len() as u64) || sha256 != Some(actual_sha256.as_str()) {
         return Err(PrecompileError::Serialize(format!(
             "generated browser artifact `{path}` does not match its manifest metadata"
+        )));
+    }
+    Ok(())
+}
+
+fn publish_render_resource_files(
+    manifest: &mut serde_json::Value,
+    resource_files: &[RenderSupportArtifact],
+    assets: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PrecompileError> {
+    let mut supplied = BTreeMap::new();
+    for resource in resource_files {
+        validate_materialized_support_path(&resource.path)?;
+        if supplied.insert(resource.path.as_str(), resource).is_some() {
+            return Err(PrecompileError::Serialize(format!(
+                "render resource path `{}` is duplicated",
+                resource.path
+            )));
+        }
+    }
+    let resources = match manifest
+        .get_mut("resources")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        Some(resources) => resources,
+        None if resource_files.is_empty() => return Ok(()),
+        None => {
+            return Err(PrecompileError::Serialize(
+                "render bundle manifest has no `resources` array".to_owned(),
+            ));
+        }
+    };
+    let mut declared = BTreeSet::new();
+    for resource in resources {
+        let Some(artifact) = resource
+            .get_mut("artifact")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        let path = artifact
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                PrecompileError::Serialize("render resource artifact has no string path".to_owned())
+            })?
+            .to_owned();
+        let support = supplied.get(path.as_str()).ok_or_else(|| {
+            PrecompileError::Serialize(format!(
+                "render resource artifact `{path}` is absent from compiler materialization"
+            ))
+        })?;
+        verify_support_metadata(&serde_json::Value::Object(artifact.clone()), support, &path)?;
+        if !declared.insert(path.clone()) {
+            return Err(PrecompileError::Serialize(format!(
+                "render resource artifact `{path}` is declared more than once"
+            )));
+        }
+        let sha256 = artifact
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .expect("verified resource metadata has SHA-256")
+            .to_owned();
+        let published_path = format!("assets/fe-resource-{sha256}.bin");
+        insert_identical(assets, published_path.clone(), support.bytes.clone())?;
+        artifact.insert(
+            "path".to_owned(),
+            serde_json::Value::String(basename(&published_path).to_owned()),
+        );
+    }
+    let supplied_paths = supplied.keys().copied().collect::<BTreeSet<_>>();
+    let declared_paths = declared.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if supplied_paths != declared_paths {
+        let extras = supplied_paths
+            .difference(&declared_paths)
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(PrecompileError::Serialize(format!(
+            "render resource files are not exactly declared by the generated manifest: extra {extras:?}"
         )));
     }
     Ok(())
@@ -3791,6 +3980,7 @@ mod tests {
             wgsl: b"wgsl-source".to_vec(),
             pass_wgsl: Vec::new(),
             support_files: Vec::new(),
+            resource_files: Vec::new(),
             scoped_task_files: Vec::new(),
             manifest_json: br#"{
                 "artifacts": {
@@ -3875,6 +4065,7 @@ mod tests {
                 },
             ],
             support_files: Vec::new(),
+            resource_files: Vec::new(),
             scoped_task_files: Vec::new(),
             manifest_json: serde_json::to_vec(&serde_json::json!({
                 "protocol": "fe-web-bundle",
@@ -3927,6 +4118,7 @@ mod tests {
                     bytes: bytes.to_vec(),
                 })
                 .collect(),
+            resource_files: Vec::new(),
             scoped_task_files: Vec::new(),
             manifest_json: serde_json::to_vec(&serde_json::json!({
                 "protocol": "fe-web-bundle",
@@ -3948,6 +4140,44 @@ mod tests {
             .unwrap(),
             source_dependencies: None,
         }
+    }
+
+    fn fake_render_resource_bundle() -> RenderBundleArtifact {
+        let bytes = b"0123456789abcde\n".to_vec();
+        let sha256 = sha256_hex(&bytes);
+        let path = format!("resources/sha256-{sha256}.bin");
+        let mut bundle = fake_render_graph_bundle();
+        bundle.resource_files = vec![RenderSupportArtifact {
+            path: path.clone(),
+            bytes: bytes.clone(),
+        }];
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(7);
+        manifest["resources"] = serde_json::json!([{
+            "group": 0,
+            "binding": 0,
+            "name": "palette",
+            "length": 4,
+            "stride": 4,
+            "span": 4,
+            "element": "U32",
+            "policy": {
+                "kind": "storage",
+                "access": "read_only",
+                "residency": "immutable",
+                "initialization": { "kind": "content_addressed", "sha256": sha256 },
+                "recovery": "replay_recipe",
+                "visibility": "all"
+            },
+            "artifact": {
+                "path": path,
+                "bytes": bytes.len(),
+                "sha256": sha256
+            }
+        }]);
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        bundle
     }
 
     #[test]
@@ -4295,6 +4525,53 @@ mod tests {
         let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
         assert_eq!(report.modules, 1);
         assert_eq!(report.files, output.assets.len());
+    }
+
+    #[test]
+    fn typed_resource_artifact_is_verified_and_rewritten_with_the_manifest() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/resource" data-fe-render></script>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(fake_render_resource_bundle())),
+        )
+        .unwrap();
+        let manifest = output
+            .assets
+            .iter()
+            .filter(|(path, _)| path.ends_with(".json"))
+            .find_map(|(_, bytes)| {
+                let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+                (value["protocol"] == "fe-web-bundle").then_some(value)
+            })
+            .unwrap();
+        let artifact = &manifest["resources"][0]["artifact"];
+        let published = artifact["path"].as_str().unwrap();
+        assert!(published.starts_with("fe-resource-"));
+        assert!(!published.contains('/'));
+        let bytes = &output.assets[&format!("assets/{published}")];
+        assert_eq!(bytes, b"0123456789abcde\n");
+        assert_eq!(artifact["sha256"], sha256_hex(bytes));
+        assert_eq!(artifact["bytes"], bytes.len() as u64);
+
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+
+        std::fs::write(
+            deployment.path().join("assets").join(published),
+            b"corrupted immutable resource",
+        )
+        .unwrap();
+        let error = verify_precompiled_site(&deployment.path().join("index.html")).unwrap_err();
+        assert!(
+            error
+                .detail
+                .contains("failed generated-browser-artifact verification"),
+            "unexpected immutable resource verification error: {error}"
+        );
     }
 
     #[test]

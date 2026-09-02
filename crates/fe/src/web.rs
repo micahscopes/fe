@@ -87,6 +87,74 @@ pub fn build(request: &CompileRequest, out: &Utf8PathBuf) -> Result<(), String> 
     Ok(())
 }
 
+fn load_resource_assets(root: &Utf8Path) -> Result<Vec<Vec<u8>>, String> {
+    let directory = root.join("assets/sha256");
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    if !directory.is_dir() {
+        return Err(format!(
+            "content-addressed resource path `{directory}` is not a directory"
+        ));
+    }
+    let mut entries = std::fs::read_dir(directory.as_std_path())
+        .map_err(|error| format!("failed to read resource assets `{directory}`: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate resource assets `{directory}`: {error}"))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut assets = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?
+            .is_file()
+        {
+            return Err(format!(
+                "resource asset directory contains non-file `{}`",
+                path.display()
+            ));
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return Err(format!(
+                "resource asset path is not valid UTF-8: `{}`",
+                path.display()
+            ));
+        };
+        let Some(digest) = name.strip_suffix(".bin") else {
+            return Err(format!(
+                "resource asset `{}` must be named <sha256>.bin",
+                path.display()
+            ));
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!(
+                "resource asset `{}` does not carry a lowercase SHA-256 filename",
+                path.display()
+            ));
+        }
+        let bytes = std::fs::read(&path).map_err(|error| {
+            format!(
+                "failed to read resource asset `{}`: {error}",
+                path.display()
+            )
+        })?;
+        let actual = sha256_hex(&bytes);
+        if actual != digest {
+            return Err(format!(
+                "resource asset `{}` hashes to {actual}, not its filename {digest}",
+                path.display()
+            ));
+        }
+        assets.push(bytes);
+    }
+    Ok(assets)
+}
+
 pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     let compile_started = Instant::now();
     let CompileRequest {
@@ -129,7 +197,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     let mut db = DriverDataBase::default();
     let phase_started = Instant::now();
     let target = resolve_cli_target(&mut db, path, false)?;
-    let (top_mod, ingot_target) = match target {
+    let (top_mod, ingot_target, resource_root) = match target {
         CliTarget::StandaloneFile(file_path) => {
             let canonical = file_path
                 .canonicalize_utf8()
@@ -143,7 +211,11 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
                 .workspace()
                 .get(&db, &url)
                 .ok_or_else(|| format!("failed to load `{file_path}`"))?;
-            (db.top_mod(file), None)
+            let resource_root = canonical
+                .parent()
+                .map(Utf8Path::to_owned)
+                .ok_or_else(|| format!("source path `{canonical}` has no parent directory"))?;
+            (db.top_mod(file), None, resource_root)
         }
         CliTarget::Directory(dir_path) => {
             let canonical = dir_path
@@ -162,7 +234,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
                         "`{dir_path}` did not resolve to one ingot; target an ingot directory explicitly"
                     )
                 })?;
-            (ingot.root_mod(&db), Some((url, ingot)))
+            (ingot.root_mod(&db), Some((url, ingot)), canonical)
         }
     };
     tracing::info!(
@@ -250,6 +322,9 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
     });
     options = options.with_canonical_entries(canonical_entries.iter().cloned());
+    for asset in load_resource_assets(&resource_root)? {
+        options = options.with_resource_asset(asset);
+    }
     tracing::info!(
         target: "fe_web",
         phase = "entry",
@@ -276,7 +351,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     Ok(bundle)
 }
 
-const RENDER_CACHE_FORMAT: u16 = 3;
+const RENDER_CACHE_FORMAT: u16 = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RenderCacheMetadata {
@@ -285,6 +360,7 @@ struct RenderCacheMetadata {
     has_wasm: bool,
     pass_shaders: Vec<CachedRenderShader>,
     support_files: Vec<CachedRenderSupport>,
+    resource_files: Vec<CachedRenderSupport>,
     scoped_task_files: Vec<CachedRenderSupport>,
 }
 
@@ -399,6 +475,16 @@ fn load_render_cache(
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    let resource_files = metadata
+        .resource_files
+        .into_iter()
+        .map(|support| {
+            Some(RenderSupportArtifact {
+                path: support.path,
+                bytes: std::fs::read(directory.join(support.file)).ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     let scoped_task_files = metadata
         .scoped_task_files
         .into_iter()
@@ -414,6 +500,7 @@ fn load_render_cache(
         wgsl: std::fs::read(directory.join("shader.wgsl")).ok()?,
         pass_wgsl,
         support_files,
+        resource_files,
         scoped_task_files,
         manifest_json: std::fs::read(directory.join("manifest.json")).ok()?,
         source_dependencies: Some(metadata.source_dependencies),
@@ -463,6 +550,16 @@ fn store_render_cache(
             file,
         });
     }
+    let mut resource_files = Vec::with_capacity(artifact.resource_files.len());
+    for (index, support) in artifact.resource_files.iter().enumerate() {
+        let file = format!("resource-{index}");
+        std::fs::write(directory.join(&file), &support.bytes)
+            .map_err(|error| format!("failed to cache {file}: {error}"))?;
+        resource_files.push(CachedRenderSupport {
+            path: support.path.clone(),
+            file,
+        });
+    }
     let mut scoped_task_files = Vec::with_capacity(artifact.scoped_task_files.len());
     for (index, support) in artifact.scoped_task_files.iter().enumerate() {
         let file = format!("task-support-{index}");
@@ -479,6 +576,7 @@ fn store_render_cache(
         has_wasm: artifact.wasm.is_some(),
         pass_shaders,
         support_files,
+        resource_files,
         scoped_task_files,
     })
     .map_err(|error| format!("failed to serialize render cache metadata: {error}"))?;
@@ -524,6 +622,14 @@ fn compile_render_bundle_with_dependencies(
             bytes: file.bytes().to_vec(),
         })
         .collect::<Vec<_>>();
+    let resource_files = materialized_files
+        .iter()
+        .filter(|file| file.path().starts_with("resources/"))
+        .map(|file| RenderSupportArtifact {
+            path: file.path().to_owned(),
+            bytes: file.bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
     let scoped_task_files = materialized_files
         .iter()
         .filter_map(|file| {
@@ -549,6 +655,7 @@ fn compile_render_bundle_with_dependencies(
         wgsl: bundle.wgsl.into_bytes(),
         pass_wgsl,
         support_files,
+        resource_files,
         scoped_task_files,
         manifest_json,
         source_dependencies: dependencies,
@@ -930,7 +1037,7 @@ fn authored_source_kind(path: &Utf8PathBuf) -> WebAuthoredSourceKind {
         "wgsl" => WebAuthoredSourceKind::Wgsl,
         "wasm" => WebAuthoredSourceKind::Wasm,
         "json" => WebAuthoredSourceKind::Json,
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "ico" => {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "ico" | "bin" => {
             WebAuthoredSourceKind::Asset
         }
         _ => WebAuthoredSourceKind::Other,
@@ -962,6 +1069,7 @@ mod tests {
                 bytes: b"@compute @workgroup_size(1) fn main() {}".to_vec(),
             }],
             support_files: Vec::new(),
+            resource_files: Vec::new(),
             scoped_task_files: vec![RenderSupportArtifact {
                 path: "tasks.js".to_owned(),
                 bytes: b"export const task = true;\n".to_vec(),
@@ -1044,6 +1152,54 @@ mod tests {
     }
 
     #[test]
+    fn web_compile_discovers_and_publishes_verified_resource_assets() {
+        let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codegen/tests/fixtures/actor_content_addressed_resource")
+            .canonicalize_utf8()
+            .unwrap();
+        let bundle = compile(&request(
+            fixture.as_str(),
+            "paint",
+            WebMode::Render,
+            [None, None, None],
+            WebCanonicalPolicy::Disabled,
+            &[],
+        ))
+        .expect("content-addressed CLI bundle");
+        let artifact = bundle.manifest.resources[0]
+            .artifact
+            .as_ref()
+            .expect("resource artifact");
+        let materialized = bundle.materialized_files().unwrap();
+        assert_eq!(
+            materialized
+                .iter()
+                .find(|file| file.path() == artifact.path)
+                .expect("published resource bytes")
+                .bytes(),
+            b"0123456789abcde\n"
+        );
+    }
+
+    #[test]
+    fn resource_asset_filename_cannot_forge_content_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+        let directory = root.join("assets/sha256");
+        std::fs::create_dir_all(directory.as_std_path()).unwrap();
+        std::fs::write(
+            directory.join(format!("{}.bin", "0".repeat(64))),
+            b"different bytes",
+        )
+        .unwrap();
+        let error = load_resource_assets(root).unwrap_err();
+        assert!(
+            error.contains("hashes to") && error.contains("not its filename"),
+            "unexpected resource identity error: {error}"
+        );
+    }
+
+    #[test]
     fn render_cache_key_covers_sources_and_entry() {
         let first = cache_dependencies("pub fn first() {}");
         let second = cache_dependencies("pub fn second() {}");
@@ -1098,8 +1254,18 @@ mod tests {
         std::fs::write(app.join("fe.toml"), "[ingot]\nname = \"demo\"\n").unwrap();
         std::fs::write(app.join("src/lib.fe"), "pub fn shade() -> u32 { 0 }\n").unwrap();
         std::fs::write(app.join("host.js"), "export const hiddenPolicy = true;\n").unwrap();
+        let assets = app.join("assets/sha256");
+        std::fs::create_dir_all(&assets).unwrap();
+        let resource_bytes = b"immutable resource";
+        let resource_digest = sha256_hex(resource_bytes);
+        std::fs::write(
+            assets.join(format!("{resource_digest}.bin")),
+            resource_bytes,
+        )
+        .unwrap();
 
-        let audit = ingot_source_audit(&Utf8PathBuf::from_path_buf(app).unwrap()).unwrap();
+        let app = Utf8PathBuf::from_path_buf(app).unwrap();
+        let audit = ingot_source_audit(&app).unwrap();
         assert!(audit.authored_sources.iter().any(
             |source| source.id == "demo/src/lib.fe" && source.kind == WebAuthoredSourceKind::Fe
         ));
@@ -1113,6 +1279,33 @@ mod tests {
             host.sha256,
             sha256_hex(b"export const hiddenPolicy = true;\n")
         );
+        let resource = audit
+            .non_fe_authored_sources
+            .iter()
+            .find(|source| source.id.ends_with(&format!("{resource_digest}.bin")))
+            .unwrap();
+        assert_eq!(resource.kind, WebAuthoredSourceKind::Asset);
+        assert_eq!(resource.sha256, resource_digest);
+
+        let first_cache_key = render_cache_key(
+            &audit.dependencies,
+            &audit.non_fe_authored_sources,
+            Some("shade"),
+        )
+        .unwrap();
+        std::fs::write(
+            app.join(format!("assets/sha256/{resource_digest}.bin")),
+            b"changed resource",
+        )
+        .unwrap();
+        let changed = ingot_source_audit(&app).unwrap();
+        let changed_cache_key = render_cache_key(
+            &changed.dependencies,
+            &changed.non_fe_authored_sources,
+            Some("shade"),
+        )
+        .unwrap();
+        assert_ne!(first_cache_key, changed_cache_key);
     }
 
     #[test]
