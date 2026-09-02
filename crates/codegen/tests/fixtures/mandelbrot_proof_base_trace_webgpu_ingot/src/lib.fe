@@ -29,7 +29,11 @@ use mandelbrot_proof_production_profile_baby_bear::{
     PRODUCTION_LIMBS,
     PRODUCTION_TRACE_LENGTH,
 }
-use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
+use mandelbrot_proof_baby_bear_domains::{
+    MandelbrotSparseBaseLdeLeafBabyBearV1,
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+    sparse_lde_interaction_challenge_domain_tag,
+}
 use mandelbrot_proof_recursive::ComplexFixed
 use mandelbrot_proof_fixed_air_core::{
     sparse_boundary_task_count,
@@ -51,14 +55,23 @@ use parallel_ntt_webgpu::{
 }
 use parallel_structure::FactorTree
 use poseidon_baby_bear_webgpu::{
+    DIGEST_SQUEEZE_STEPS,
+    POSEIDON2_LANES,
+    advance_digest_squeeze_batch_lane,
     advance_column_major_field_row_commitments,
     column_major_field_row_commitment_steps,
     column_major_field_row_commitment_workspace_words,
+    digest_squeeze_batch_output_words,
+    digest_squeeze_batch_workgroups,
+    digest_squeeze_batch_workspace_words,
+    finish_digest_squeeze_batch,
+    prepare_digest_squeeze_batch,
     prepare_column_major_field_row_commitments,
 }
 use poseidon_merkle_webgpu::{
     advance_ordered_binary_tree,
     finish_ordered_binary_tree,
+    load_poseidon2_digest,
     ordered_binary_tree_digest_words,
     ordered_binary_tree_levels,
     ordered_binary_tree_nodes,
@@ -110,6 +123,16 @@ const BASE_COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
 )
 const BASE_COMMITMENT_WORKSPACE_WORDS: usize =
     column_major_field_row_commitment_workspace_words(BASE_LDE_LENGTH)
+const CHALLENGE_GROUPS: usize = digest_squeeze_batch_workgroups(
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+    THREADS,
+)
+const CHALLENGE_WORKSPACE_WORDS: usize = digest_squeeze_batch_workspace_words(
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+)
+const CHALLENGE_OUTPUT_WORDS: usize = digest_squeeze_batch_output_words(
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+)
 type BaseLdeInputPlan = RBin<Pair, 12>
 type BaseLdeOutputPlan = RBin<Pair, 13>
 const LDE_INPUT_STAGES: usize = <BaseLdeInputPlan as FactorTree>::FACTORS
@@ -137,10 +160,18 @@ static_assert(BASE_TREE_LEAF_GROUPS == 128)
 static_assert(BASE_TREE_PARENT_GROUPS == 64)
 static_assert(BASE_COMMITMENT_STEPS == 34)
 static_assert(BASE_COMMITMENT_WORKSPACE_WORDS == 147456)
+static_assert(SPARSE_LDE_INTERACTION_CHALLENGE_COUNT == 8)
+static_assert(POSEIDON2_LANES == 16)
+static_assert(DIGEST_SQUEEZE_STEPS == 89)
+static_assert(CHALLENGE_GROUPS == 2)
+static_assert(CHALLENGE_WORKSPACE_WORDS == 408)
+static_assert(CHALLENGE_OUTPUT_WORDS == 40)
 static_assert(BASE_TREE_WORDS <= BASE_TRACE_WORDS)
 static_assert(BASE_TREE_NODES <= BASE_TRACE_WORDS)
 static_assert(BASE_TREE_PARENT_TASKS <= PRODUCTION_TRACE_LENGTH)
 static_assert(BASE_COMMITMENT_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
+static_assert(CHALLENGE_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
+static_assert(CHALLENGE_OUTPUT_WORDS <= TRANSITION_WORKSPACE_WORDS)
 static_assert(<BaseLdeInputPlan as FactorTree>::POINTS == PRODUCTION_TRACE_LENGTH)
 static_assert(<BaseLdeOutputPlan as FactorTree>::POINTS == BASE_LDE_LENGTH)
 static_assert(LDE_INPUT_STAGES == 12)
@@ -183,7 +214,6 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     transition_workspace: Shared<u32, TRANSITION_WORKSPACE_WORDS>,
     base_trace: Shared<u32, BASE_TRACE_WORDS>,
     validity: Shared<u32, PRODUCTION_TRACE_LENGTH>,
-    status: Shared<u32, 1>,
     lde_inverse_values: Shared<u32, BASE_TRACE_WORDS>,
     lde_inverse_progress: Shared<u32, LDE_INPUT_GRID_LANES>,
     lde_values: Shared<u32, BASE_LDE_WORDS>,
@@ -466,7 +496,10 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             valid = valid && self.validity.load(index: row) == 1
             row = row + 1
         }
-        self.status.store(index: 0, value: if valid { 1 } else { 0 })
+        self.transition_workspace.store(
+            index: 0,
+            value: if valid { 1 } else { 0 },
+        )
     }
 
     fn prepare_lde_inverse(self, invocation: ComputeInvocation)
@@ -601,12 +634,15 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     {
         if invocation.global.x != 0 { return }
         let mut column: u32 = 0
-        let mut valid = self.status.load(index: 0) == 1
+        let mut valid = self.transition_workspace.load(index: 0) == 1
         while column < SPARSE_BASE_AIR_FIELDS.downcast_truncate() {
             valid = valid && self.validity.load(index: column) == 1
             column = column + 1
         }
-        self.status.store(index: 0, value: if valid { 1 } else { 0 })
+        self.transition_workspace.store(
+            index: 0,
+            value: if valid { 1 } else { 0 },
+        )
     }
 
     /// The completed LDE retires the base trace, inverse values, and row
@@ -669,7 +705,9 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
                 self.base_trace,
                 self.lde_inverse_values,
                 step.row,
-                step.commitment.require(self.status.load(index: 0) == 1),
+                step.commitment.require(
+                    self.transition_workspace.load(index: 0) == 1,
+                ),
             )
         }
     }
@@ -726,11 +764,85 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
         >(self.base_trace, self.lde_inverse_values, self.validity)
-        self.status.store(index: 0, value: if root.valid { 1 } else { 0 })
+        self.lde_inverse_values.store(
+            index: (BASE_TREE_NODES - 1).downcast_truncate(),
+            value: if root.valid { 1 } else { 0 },
+        )
+    }
+
+    fn prepare_base_lde_challenges(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<CHALLENGE_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_digest_squeeze_batch<
+            SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+            LDE_INPUT_GRID_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+        >(
+            self.lde_inverse_progress,
+            self.transition_workspace,
+            invocation,
+        )
+    }
+
+    fn advance_base_lde_challenges(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    CHALLENGE_GROUPS,
+                    1,
+                    1,
+                    DIGEST_SQUEEZE_STEPS,
+                >,
+            >
+        )
+    {
+        let state = invocation.global.x
+            / POSEIDON2_LANES.downcast_truncate()
+        if state >= SPARSE_LDE_INTERACTION_CHALLENGE_COUNT.downcast_truncate() {
+            return
+        }
+        let root: u32 = (BASE_TREE_NODES - 1).downcast_truncate()
+        advance_digest_squeeze_batch_lane<
+            SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+            LDE_INPUT_GRID_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+        >(
+            self.lde_inverse_progress,
+            self.transition_workspace,
+            invocation,
+            sparse_lde_interaction_challenge_domain_tag(state),
+            load_poseidon2_digest(self.base_trace, root),
+            self.lde_inverse_values.load(index: root) == 1,
+        )
+    }
+
+    fn finish_base_lde_challenges(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let root: u32 = (BASE_TREE_NODES - 1).downcast_truncate()
+        let valid = self.lde_inverse_values.load(index: root) == 1
+            && finish_digest_squeeze_batch<
+                SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+                LDE_INPUT_GRID_LANES,
+                TRANSITION_WORKSPACE_WORDS,
+            >(self.lde_inverse_progress, self.transition_workspace)
+        self.lde_inverse_values.store(
+            index: root,
+            value: if valid { 1 } else { 0 },
+        )
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        let color: u32 = if self.status.load(index: 0) == 1 {
+        let color: u32 = if self.lde_inverse_values.load(
+            index: (BASE_TREE_NODES - 1).downcast_truncate(),
+        ) == 1 {
             4278255360
         } else {
             4294901760

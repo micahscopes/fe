@@ -56,8 +56,8 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 33);
-    assert_eq!(bundle.manifest.resources.len(), 8);
+    assert_eq!(bundle.manifest.passes.len(), 36);
+    assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
         "derive_primary_linears",
@@ -185,7 +185,27 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[30].repeat, 13);
     assert_eq!(bundle.manifest.passes[31].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[31].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[32].source_entry, "paint");
+    let challenge_names = [
+        "prepare_base_lde_challenges",
+        "advance_base_lde_challenges",
+        "finish_base_lde_challenges",
+    ];
+    assert_eq!(
+        bundle.manifest.passes[32..35]
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        challenge_names,
+    );
+    assert_eq!(bundle.manifest.passes[32].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[32].dispatch, Some([2, 1, 1]));
+    assert_eq!(bundle.manifest.passes[32].repeat, 1);
+    assert_eq!(bundle.manifest.passes[33].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[33].dispatch, Some([2, 1, 1]));
+    assert_eq!(bundle.manifest.passes[33].repeat, 89);
+    assert_eq!(bundle.manifest.passes[34].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[34].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[35].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle
@@ -198,7 +218,6 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(resource_length("transition_workspace"), Some(217));
     assert_eq!(resource_length("base_trace"), Some(BASE_TRACE_WORDS));
     assert_eq!(resource_length("validity"), Some(TRACE_ROWS));
-    assert_eq!(resource_length("status"), Some(1));
     assert_eq!(
         resource_length("lde_inverse_values"),
         Some(BASE_TRACE_WORDS)
@@ -216,9 +235,17 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
                 .iter()
                 .filter(|binding| binding.role == WebBindingRole::Resource)
                 .count()
-                <= 8
+                <= 7
         }),
-        "every sparse AIR pass must fit the portable storage-buffer-per-stage minimum",
+        "every sparse AIR pass must leave one portable storage binding for compiler state",
+    );
+    assert!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .all(|pass| pass.layout.bindings.len() <= 8),
+        "actor resources and compiler state must fit the browser storage-buffer limit",
     );
     for (pass, shader) in bundle.manifest.passes.iter().zip(&bundle.pass_wgsl) {
         let module = naga::front::wgsl::parse_str(&shader.source)

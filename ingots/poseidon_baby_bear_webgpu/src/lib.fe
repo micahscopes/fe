@@ -31,6 +31,44 @@ pub const INDEXED_DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
 pub const DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
 pub const DIGEST_BINDING_STEPS: usize = 1 + 3 * POSEIDON2_STAGE_STEPS
 
+pub const fn digest_squeeze_batch_state_words(_ states: usize) -> usize {
+    states * 2 * POSEIDON2_LANES
+}
+
+pub const fn digest_squeeze_batch_tail_start(_ states: usize) -> usize {
+    digest_squeeze_batch_state_words(states)
+}
+
+pub const fn digest_squeeze_batch_valid_start(_ states: usize) -> usize {
+    digest_squeeze_batch_tail_start(states) + states * 2
+}
+
+pub const fn digest_squeeze_batch_progress_start(_ states: usize) -> usize {
+    digest_squeeze_batch_valid_start(states) + states
+}
+
+pub const fn digest_squeeze_batch_workspace_words(_ states: usize) -> usize {
+    digest_squeeze_batch_progress_start(states)
+        + states * POSEIDON2_LANES
+}
+
+pub const fn digest_squeeze_batch_output_valid_start(_ states: usize) -> usize {
+    states * 4
+}
+
+pub const fn digest_squeeze_batch_output_words(_ states: usize) -> usize {
+    digest_squeeze_batch_output_valid_start(states) + states
+}
+
+pub const fn digest_squeeze_batch_workgroups(
+    _ states: usize,
+    _ lanes_per_workgroup: usize,
+) -> usize {
+    if lanes_per_workgroup == 0 { return 0 }
+    let work_items = states * POSEIDON2_LANES
+    (work_items + lanes_per_workgroup - 1) / lanes_per_workgroup
+}
+
 pub const fn column_major_field_row_commitment_steps(
     _ prefix_fields: usize,
     _ fields: usize,
@@ -646,6 +684,185 @@ pub fn advance_digest_squeeze_storage_lane<
             )
         }
     }
+}
+
+/// Reset every private field-lane cursor and public challenge-validity word
+/// before a batch of independent typed digest squeezes.
+pub fn prepare_digest_squeeze_batch<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    STATES > 0,
+    { WORKSPACE_WORDS >= digest_squeeze_batch_workspace_words(STATES) },
+    { OUTPUT_WORDS >= digest_squeeze_batch_output_words(STATES) },
+{
+    let global_lane = invocation.global.x
+    let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
+    if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
+        return
+    }
+    let state = global_lane / lanes
+    let progress_start: u32 =
+        digest_squeeze_batch_progress_start(STATES).downcast_truncate()
+    workspace.store(index: progress_start + global_lane, value: 0)
+    if global_lane % lanes == 0 {
+        let valid_start: u32 =
+            digest_squeeze_batch_output_valid_start(STATES).downcast_truncate()
+        output.store(index: valid_start + state, value: 0)
+    }
+}
+
+/// Advance one field lane of one independent digest squeeze.
+///
+/// The caller supplies the nominal domain tag for the selected logical state.
+/// Repeating this function `DIGEST_SQUEEZE_STEPS` times materializes four
+/// canonical challenge coefficients plus one fail-closed validity word.
+pub fn advance_digest_squeeze_batch_lane<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+    _ tag: u32,
+    _ digest: Poseidon2Digest,
+    _ input_valid: bool,
+)
+where
+    STATES > 0,
+    { WORKSPACE_WORDS >= digest_squeeze_batch_workspace_words(STATES) },
+    { OUTPUT_WORDS >= digest_squeeze_batch_output_words(STATES) },
+{
+    let global_lane = invocation.global.x
+    let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
+    if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
+        return
+    }
+    let state = global_lane / lanes
+    let field_lane = global_lane % lanes
+    let state_start: u32 = 0
+    let tail_start: u32 =
+        digest_squeeze_batch_tail_start(STATES).downcast_truncate()
+    let valid_start: u32 =
+        digest_squeeze_batch_valid_start(STATES).downcast_truncate()
+    let progress_start: u32 =
+        digest_squeeze_batch_progress_start(STATES).downcast_truncate()
+    let progress = progress_start + global_lane
+    let step = workspace.load(index: progress)
+    let output_valid_start: u32 =
+        digest_squeeze_batch_output_valid_start(STATES).downcast_truncate()
+    advance_digest_squeeze_storage_lane(
+        workspace,
+        state_start,
+        valid_start,
+        tail_start,
+        output,
+        state * 4,
+        output_valid_start + state,
+        state,
+        field_lane,
+        step,
+        tag,
+        digest,
+        input_valid,
+    )
+    workspace.store(index: progress, value: step + 1)
+}
+
+pub struct DigestSqueezeBatchValue {
+    pub valid: bool,
+    pub value: BabyBearExt4,
+}
+impl core::marker::Copy for DigestSqueezeBatchValue {}
+
+/// Read one completed batch output without accepting noncanonical field words.
+pub fn load_digest_squeeze_batch_value<
+    const STATES: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ state: u32,
+) -> DigestSqueezeBatchValue
+where
+    STATES > 0,
+    { OUTPUT_WORDS >= digest_squeeze_batch_output_words(STATES) },
+{
+    if state >= STATES.downcast_truncate() {
+        return DigestSqueezeBatchValue {
+            valid: false,
+            value: BabyBearExt4::zero(),
+        }
+    }
+    let start = state * 4
+    let words = [
+        output.load(index: start),
+        output.load(index: start + 1),
+        output.load(index: start + 2),
+        output.load(index: start + 3),
+    ]
+    let mut canonical = true
+    let mut coefficient: usize = 0
+    while coefficient < 4 {
+        if words[coefficient] >= BABY_BEAR_MODULUS { canonical = false }
+        coefficient = coefficient + 1
+    }
+    let output_valid_start: u32 =
+        digest_squeeze_batch_output_valid_start(STATES).downcast_truncate()
+    DigestSqueezeBatchValue {
+        valid: canonical
+            && output.load(index: output_valid_start + state) == 1,
+        value: if canonical {
+            BabyBearExt4::from_coefficients([
+                BabyBear::from_u32(words[0]),
+                BabyBear::from_u32(words[1]),
+                BabyBear::from_u32(words[2]),
+                BabyBear::from_u32(words[3]),
+            ])
+        } else {
+            BabyBearExt4::zero()
+        },
+    }
+}
+
+/// Validate exact completion of every private field-lane cursor and output.
+pub fn finish_digest_squeeze_batch<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+) -> bool
+where
+    STATES > 0,
+    { WORKSPACE_WORDS >= digest_squeeze_batch_workspace_words(STATES) },
+    { OUTPUT_WORDS >= digest_squeeze_batch_output_words(STATES) },
+{
+    let progress_start: u32 =
+        digest_squeeze_batch_progress_start(STATES).downcast_truncate()
+    let mut valid = true
+    let mut lane: u32 = 0
+    while lane < (STATES * POSEIDON2_LANES).downcast_truncate() {
+        valid = valid && workspace.load(index: progress_start + lane)
+            == DIGEST_SQUEEZE_STEPS.downcast_truncate()
+        lane = lane + 1
+    }
+    let mut state: u32 = 0
+    while state < STATES.downcast_truncate() {
+        valid = valid && load_digest_squeeze_batch_value<STATES, OUTPUT_WORDS>(
+            output,
+            state,
+        ).valid
+        state = state + 1
+    }
+    valid
 }
 
 /// Advance one ordered digest binding without owning its progress cursor.

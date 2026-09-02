@@ -1,18 +1,30 @@
-//! Executed oracle fixture for canonical row commitments and ordered Merkle
-//! placement. The dimensions are small, but the domain and field order match
-//! the production sparse base-LDE commitment.
+//! Executed oracle fixture for canonical row commitments, ordered Merkle
+//! placement, and root-derived interaction challenges. The dimensions are
+//! small, but the domains and field order match the production sparse proof.
 
-use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
-use poseidon_baby_bear::DIGEST_FIELDS
+use mandelbrot_proof_baby_bear_domains::{
+    MandelbrotSparseBaseLdeLeafBabyBearV1,
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+    sparse_lde_interaction_challenge_domain_tag,
+}
 use poseidon_baby_bear_webgpu::{
+    DIGEST_SQUEEZE_STEPS,
+    POSEIDON2_LANES,
+    advance_digest_squeeze_batch_lane,
     advance_column_major_field_row_commitments,
     column_major_field_row_commitment_steps,
     column_major_field_row_commitment_workspace_words,
+    digest_squeeze_batch_output_words,
+    digest_squeeze_batch_workgroups,
+    digest_squeeze_batch_workspace_words,
+    finish_digest_squeeze_batch,
+    prepare_digest_squeeze_batch,
     prepare_column_major_field_row_commitments,
 }
 use poseidon_merkle_webgpu::{
     advance_ordered_binary_tree,
     finish_ordered_binary_tree,
+    load_poseidon2_digest,
     ordered_binary_tree_digest_words,
     ordered_binary_tree_levels,
     ordered_binary_tree_nodes,
@@ -50,7 +62,17 @@ const LEVELS: usize = ordered_binary_tree_levels(LEAVES)
 const THREADS: usize = 4
 const LEAF_GROUPS: usize = (LEAVES + THREADS - 1) / THREADS
 const PARENT_GROUPS: usize = (PARENT_TASKS + THREADS - 1) / THREADS
-const RESULT_WORDS: usize = 1 + DIGEST_FIELDS
+const CHALLENGE_THREADS: usize = POSEIDON2_LANES
+const CHALLENGE_GROUPS: usize = digest_squeeze_batch_workgroups(
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+    CHALLENGE_THREADS,
+)
+const CHALLENGE_WORKSPACE_WORDS: usize = digest_squeeze_batch_workspace_words(
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+)
+const CHALLENGE_OUTPUT_WORDS: usize = digest_squeeze_batch_output_words(
+    SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+)
 
 static_assert(TREE_NODES == 15)
 static_assert(COMMITMENT_STEPS == 2)
@@ -60,6 +82,11 @@ static_assert(PARENT_TASKS == 4)
 static_assert(LEVELS == 3)
 static_assert(LEAF_GROUPS == 2)
 static_assert(PARENT_GROUPS == 1)
+static_assert(SPARSE_LDE_INTERACTION_CHALLENGE_COUNT == 8)
+static_assert(CHALLENGE_THREADS == 16)
+static_assert(CHALLENGE_GROUPS == 8)
+static_assert(CHALLENGE_WORKSPACE_WORDS == 408)
+static_assert(CHALLENGE_OUTPUT_WORDS == 40)
 
 actor PortablePoseidonMerkle uses (Program<WebGpuBackend>) {
     values: Shared<u32, VALUE_WORDS>,
@@ -67,7 +94,8 @@ actor PortablePoseidonMerkle uses (Program<WebGpuBackend>) {
     tree: Shared<u32, TREE_WORDS>,
     node_valid: Shared<u32, TREE_NODES>,
     progress: Shared<u32, PARENT_TASKS>,
-    result: Shared<u32, RESULT_WORDS>,
+    challenge_workspace: Shared<u32, CHALLENGE_WORKSPACE_WORDS>,
+    challenge_output: Shared<u32, CHALLENGE_OUTPUT_WORDS>,
 
     fn prepare_commitments(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<THREADS, 1, 1>, Grid<LEAF_GROUPS, 1, 1>>)
@@ -158,18 +186,73 @@ actor PortablePoseidonMerkle uses (Program<WebGpuBackend>) {
             TREE_NODES,
             PARENT_TASKS,
         >(self.tree, self.node_valid, self.progress)
-        self.result.store(index: 0, value: if root.valid { 1 } else { 0 })
-        let mut field: u32 = 0
-        while field < DIGEST_FIELDS.downcast_truncate() {
-            self.result.store(
-                index: field + 1,
-                value: root.value.field(field).to_u32(),
-            )
-            field = field + 1
+        self.node_valid.store(
+            index: (TREE_NODES - 1).downcast_truncate(),
+            value: if root.valid { 1 } else { 0 },
+        )
+    }
+
+    fn prepare_challenges(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<CHALLENGE_THREADS, 1, 1>,
+                Grid<CHALLENGE_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_digest_squeeze_batch<
+            SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+            CHALLENGE_WORKSPACE_WORDS,
+            CHALLENGE_OUTPUT_WORDS,
+        >(self.challenge_workspace, self.challenge_output, invocation)
+    }
+
+    fn advance_challenges(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<CHALLENGE_THREADS, 1, 1>,
+                Repeat<CHALLENGE_GROUPS, 1, 1, DIGEST_SQUEEZE_STEPS>,
+            >
+        )
+    {
+        let state = invocation.global.x
+            / POSEIDON2_LANES.downcast_truncate()
+        if state >= SPARSE_LDE_INTERACTION_CHALLENGE_COUNT.downcast_truncate() {
+            return
         }
+        advance_digest_squeeze_batch_lane<
+            SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+            CHALLENGE_WORKSPACE_WORDS,
+            CHALLENGE_OUTPUT_WORDS,
+        >(
+            self.challenge_workspace,
+            self.challenge_output,
+            invocation,
+            sparse_lde_interaction_challenge_domain_tag(state),
+            load_poseidon2_digest(self.tree, (TREE_NODES - 1).downcast_truncate()),
+            self.node_valid.load(
+                index: (TREE_NODES - 1).downcast_truncate(),
+            ) == 1,
+        )
+    }
+
+    fn finish_challenges(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let root: u32 = (TREE_NODES - 1).downcast_truncate()
+        let valid = self.node_valid.load(index: root) == 1
+            && finish_digest_squeeze_batch<
+                SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
+                CHALLENGE_WORKSPACE_WORDS,
+                CHALLENGE_OUTPUT_WORDS,
+            >(self.challenge_workspace, self.challenge_output)
+        self.node_valid.store(index: root, value: if valid { 1 } else { 0 })
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        self.result.load(index: 0).downcast_truncate()
+        self.node_valid.load(
+            index: (TREE_NODES - 1).downcast_truncate(),
+        ).downcast_truncate()
     }
 }

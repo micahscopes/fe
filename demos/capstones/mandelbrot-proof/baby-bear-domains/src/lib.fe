@@ -24,6 +24,17 @@ pub struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
 pub struct MandelbrotMainLdeTranscriptBabyBearV1 {}
 pub struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
 pub struct MandelbrotSparseBaseLdeLeafBabyBearV1 {}
+pub struct MandelbrotSparseLdeProductBetaBabyBearV1 {}
+pub struct MandelbrotSparseLdeProductGammaBabyBearV1 {}
+pub struct MandelbrotSparseLdeRoundBetaBabyBearV1 {}
+pub struct MandelbrotSparseLdeRoundGammaBabyBearV1 {}
+pub struct MandelbrotSparseLdeLinearBetaBabyBearV1 {}
+pub struct MandelbrotSparseLdeLinearGammaBabyBearV1 {}
+pub struct MandelbrotSparseLdeBoundaryBetaBabyBearV1 {}
+pub struct MandelbrotSparseLdeBoundaryGammaBabyBearV1 {}
+
+pub const SPARSE_LDE_INTERACTION_CHALLENGE_COUNT: usize = 8
+const INVALID_PROTOCOL_TAG: u32 = 4294967295
 
 impl Poseidon2Domain for MandelbrotRowBabyBearV1 {
     const TAG: u32 = protocol_tag("BR01")
@@ -66,6 +77,61 @@ impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
 /// protocol identity without copying its numeric tag.
 impl Poseidon2FieldDomain for MandelbrotSparseBaseLdeLeafBabyBearV1 {
     const TAG: u32 = protocol_tag("LD01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeProductBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("PB02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeProductGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("PG02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeRoundBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("RB02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeRoundGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("RG02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeLinearBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("LB02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeLinearGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("LG02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeBoundaryBetaBabyBearV1 {
+    const TAG: u32 = protocol_tag("BB02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotSparseLdeBoundaryGammaBabyBearV1 {
+    const TAG: u32 = protocol_tag("BG02")
+}
+
+const SPARSE_LDE_INTERACTION_CHALLENGE_TAGS: [u32; SPARSE_LDE_INTERACTION_CHALLENGE_COUNT] = [
+    <MandelbrotSparseLdeProductBetaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeProductGammaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeRoundBetaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeRoundGammaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeLinearBetaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeLinearGammaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeBoundaryBetaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+    <MandelbrotSparseLdeBoundaryGammaBabyBearV1 as Poseidon2FieldDomain>::TAG,
+]
+
+/// Domain selected by one lane of the fixed production interaction challenge
+/// schedule. The position is physical placement only; every returned tag is
+/// derived from its nominal protocol type above.
+pub const fn sparse_lde_interaction_challenge_domain_tag(
+    _ position: u32,
+) -> u32 {
+    if position >= SPARSE_LDE_INTERACTION_CHALLENGE_COUNT.downcast_truncate() {
+        return INVALID_PROTOCOL_TAG
+    }
+    SPARSE_LDE_INTERACTION_CHALLENGE_TAGS[position as usize]
 }
 
 pub const fn row_domain_tag() -> u32 {

@@ -1757,8 +1757,9 @@ All four are focused ingots and may remain so permanently.
   160 KiB browser-risk cap. Closure still requires carrying the same authority
   through the complete query, transcript, remaining FRI layers, and recursive
   receipt layout, with an independent decoder for that complete receipt.
-  The production base-LDE commitment and ordered tree are now wired into the
-  same eight-resource graph. A nominal
+  The production base-LDE commitment, ordered tree, and eight interaction
+  challenges are now wired into the same seven-resource graph. The compiler's
+  private state occupies the eighth and final portable storage binding. A nominal
   `MandelbrotSparseBaseLdeLeafBabyBearV1` domain is shared by scalar, Wasm, and
   WebGPU interpreters, so no numeric tag is copied into a shader fixture. The
   staged `advance_column_major_field_row_commitments` interpreter streams each
@@ -1776,12 +1777,20 @@ All four are focused ingots and may remain so permanently.
   438,201-byte parent shaders. Its production specialization was stopped after
   44:09 of sustained compilation because it did not satisfy the compile-scale
   design gate. The staged exactness gate completed in 57.06 seconds and emits
-  660,606-byte leaf and 438,282-byte parent shaders. The complete 33-pass
-  production graph then passed release lowering in 1,285.74 seconds with all
-  browser WGSL validated and every pass within the eight-storage-buffer limit.
-  The production-sized commitment and tree have not yet executed numerically
-  on WebGPU or in Chrome. Deriving interaction challenges from the root and
-  carrying those challenges through the interaction trace remain open.
+  660,606-byte leaf and 438,282-byte parent shaders. The extended gate derives
+  all eight quartic `*02` interaction challenges from that root through one
+  generic Fe batch-squeeze schedule. It compares every coefficient with
+  independent Plonky3 semantics and rejects one incomplete private lane cursor
+  and one noncanonical output coefficient. The final type-derived tag schedule
+  passed on llvmpipe in 39.04 seconds; the challenge shader is 500,379 bytes.
+  The complete 36-pass
+  production graph then passed release lowering in 1,479.80 seconds with all
+  browser WGSL validated and every actor resource plus compiler state within
+  the eight-storage-buffer limit. The standalone status resource is gone;
+  phase validity travels through retired Fe-owned storage and the ordered root
+  node. The production-sized graph has not yet executed numerically on WebGPU
+  or in Chrome. Loading the challenge carrier into the generated interaction
+  trace, its LDE, and its ordered commitment remain open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
   Fiat-Shamir sampling, and canonical encoding exist. The four-query regression

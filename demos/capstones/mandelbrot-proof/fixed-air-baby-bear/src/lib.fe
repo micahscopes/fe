@@ -113,7 +113,17 @@ use mandelbrot_proof_recursive_baby_bear::{
     RecursiveCommittedInterval,
     commit_recursive_leaf_statement,
 }
-use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
+use mandelbrot_proof_baby_bear_domains::{
+    MandelbrotSparseBaseLdeLeafBabyBearV1,
+    MandelbrotSparseLdeBoundaryBetaBabyBearV1,
+    MandelbrotSparseLdeBoundaryGammaBabyBearV1,
+    MandelbrotSparseLdeLinearBetaBabyBearV1,
+    MandelbrotSparseLdeLinearGammaBabyBearV1,
+    MandelbrotSparseLdeProductBetaBabyBearV1,
+    MandelbrotSparseLdeProductGammaBabyBearV1,
+    MandelbrotSparseLdeRoundBetaBabyBearV1,
+    MandelbrotSparseLdeRoundGammaBabyBearV1,
+}
 use merkle_core::{
     MerkleMultiPath,
     MerkleRoot,
@@ -242,39 +252,6 @@ struct MandelbrotSparsePublicMixBabyBearV1 {}
 impl Poseidon2FieldDomain for MandelbrotSparsePublicMixBabyBearV1 {
     const TAG: u32 = protocol_tag("PM01")
 }
-struct MandelbrotSparseLdeProductBetaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeProductBetaBabyBearV1 {
-    const TAG: u32 = protocol_tag("PB02")
-}
-struct MandelbrotSparseLdeProductGammaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeProductGammaBabyBearV1 {
-    const TAG: u32 = protocol_tag("PG02")
-}
-struct MandelbrotSparseLdeRoundBetaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeRoundBetaBabyBearV1 {
-    const TAG: u32 = protocol_tag("RB02")
-}
-struct MandelbrotSparseLdeRoundGammaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeRoundGammaBabyBearV1 {
-    const TAG: u32 = protocol_tag("RG02")
-}
-struct MandelbrotSparseLdeLinearBetaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeLinearBetaBabyBearV1 {
-    const TAG: u32 = protocol_tag("LB02")
-}
-struct MandelbrotSparseLdeLinearGammaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeLinearGammaBabyBearV1 {
-    const TAG: u32 = protocol_tag("LG02")
-}
-struct MandelbrotSparseLdeBoundaryBetaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeBoundaryBetaBabyBearV1 {
-    const TAG: u32 = protocol_tag("BB02")
-}
-struct MandelbrotSparseLdeBoundaryGammaBabyBearV1 {}
-impl Poseidon2FieldDomain for MandelbrotSparseLdeBoundaryGammaBabyBearV1 {
-    const TAG: u32 = protocol_tag("BG02")
-}
-
 /// The authenticated trace reuses the exact generic records consumed by the
 /// AIR. These aliases keep the public commitment vocabulary readable without
 /// introducing a second set of field declarations or conversion code.

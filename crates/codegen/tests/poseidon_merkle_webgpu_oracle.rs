@@ -1,5 +1,5 @@
-//! Executed exactness gate for canonical BabyBear row commitments and the
-//! ordered Poseidon2 Merkle placement.
+//! Executed exactness gate for canonical BabyBear row commitments, ordered
+//! Poseidon2 Merkle placement, and root-derived interaction challenges.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,8 +27,15 @@ const TREE_NODES: usize = LEAVES * 2 - 1;
 const TREE_WORDS: usize = TREE_NODES * DIGEST_FIELDS;
 const PARENT_TASKS: usize = LEAVES / 2;
 const LEVELS: u32 = 3;
-const RESULT_WORDS: usize = 1 + DIGEST_FIELDS;
-const COMPUTE_PASSES: usize = 5;
+const CHALLENGE_COUNT: usize = 8;
+const CHALLENGE_WORKSPACE_WORDS: usize = 408;
+const CHALLENGE_PROGRESS_START: usize = 280;
+const CHALLENGE_OUTPUT_WORDS: usize = 40;
+const CHALLENGE_STEPS: u32 = 89;
+const COMPUTE_PASSES: usize = 8;
+const CHALLENGE_TAGS: [[u8; 4]; CHALLENGE_COUNT] = [
+    *b"PB02", *b"PG02", *b"RB02", *b"RG02", *b"LB02", *b"LG02", *b"BB02", *b"BG02",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -159,6 +166,17 @@ fn reference_tree(values: &[u32]) -> Vec<[u32; DIGEST_FIELDS]> {
     tree
 }
 
+fn reference_challenges(root: [u32; DIGEST_FIELDS]) -> Vec<u32> {
+    CHALLENGE_TAGS
+        .iter()
+        .flat_map(|tag| {
+            let mut message = vec![u32::from_be_bytes(*tag), DIGEST_FIELDS as u32];
+            message.extend(root);
+            reference_sponge(&message)[..4].to_vec()
+        })
+        .collect()
+}
+
 fn input_values() -> Vec<u32> {
     (0..FIELDS)
         .flat_map(|field| {
@@ -245,7 +263,7 @@ fn submit_passes(
 }
 
 #[test]
-fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
+fn canonical_rows_ordered_tree_and_challenges_match_plonky3_on_webgpu() {
     let bundle = compile_oracle();
     assert_eq!(bundle.manifest.passes.len(), COMPUTE_PASSES + 1);
     let expected_passes = [
@@ -259,6 +277,9 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         ("prepare_tree", [4, 1, 1], [1, 1, 1], 1),
         ("advance_tree", [4, 1, 1], [1, 1, 1], LEVELS),
         ("finish_tree", [1, 1, 1], [1, 1, 1], 1),
+        ("prepare_challenges", [16, 1, 1], [8, 1, 1], 1),
+        ("advance_challenges", [16, 1, 1], [8, 1, 1], CHALLENGE_STEPS),
+        ("finish_challenges", [1, 1, 1], [1, 1, 1], 1),
     ];
     for ((pass, shader), (name, workgroup, dispatch, repeat)) in bundle.manifest.passes
         [..COMPUTE_PASSES]
@@ -288,9 +309,10 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         adapter.get_info().name,
     );
     eprintln!(
-        "  Poseidon Merkle WGSL bytes: leaves={}, parents={}",
+        "  Poseidon Merkle WGSL bytes: leaves={}, parents={}, challenges={}",
         bundle.pass_wgsl[1].source.len(),
         bundle.pass_wgsl[3].source.len(),
+        bundle.pass_wgsl[6].source.len(),
     );
 
     let shapes = bundle
@@ -307,8 +329,15 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     assert_eq!(shapes["tree"], (TREE_WORDS as u32, 4));
     assert_eq!(shapes["node_valid"], (TREE_NODES as u32, 4));
     assert_eq!(shapes["progress"], (PARENT_TASKS as u32, 4));
-    assert_eq!(shapes["result"], (RESULT_WORDS as u32, 4));
-    assert_eq!(shapes.len(), 6);
+    assert_eq!(
+        shapes["challenge_workspace"],
+        (CHALLENGE_WORKSPACE_WORDS as u32, 4),
+    );
+    assert_eq!(
+        shapes["challenge_output"],
+        (CHALLENGE_OUTPUT_WORDS as u32, 4),
+    );
+    assert_eq!(shapes.len(), 7);
 
     let resources = bundle
         .manifest
@@ -431,11 +460,18 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         .flat_map(|digest| digest.iter().copied())
         .collect::<Vec<_>>();
     let expected_progress = vec![3, 2, 1, 1];
+    let expected_challenges = reference_challenges(*expected_tree.last().expect("root"));
+    let expected_challenge_output = expected_challenges
+        .iter()
+        .copied()
+        .chain(std::iter::repeat_n(1, CHALLENGE_COUNT))
+        .collect::<Vec<_>>();
     let zero_tree = vec![0u32; TREE_WORDS];
     let zero_commitment_workspace = vec![0u32; COMMITMENT_WORKSPACE_WORDS];
     let zero_valid = vec![0u32; TREE_NODES];
     let zero_progress = vec![0u32; PARENT_TASKS];
-    let zero_result = vec![0u32; RESULT_WORDS];
+    let zero_challenge_workspace = vec![0u32; CHALLENGE_WORKSPACE_WORDS];
+    let zero_challenge_output = vec![0u32; CHALLENGE_OUTPUT_WORDS];
 
     queue.write_buffer(&resources["values"], 0, &bytes(&values));
     queue.write_buffer(
@@ -446,7 +482,16 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     queue.write_buffer(&resources["tree"], 0, &bytes(&zero_tree));
     queue.write_buffer(&resources["node_valid"], 0, &bytes(&zero_valid));
     queue.write_buffer(&resources["progress"], 0, &bytes(&zero_progress));
-    queue.write_buffer(&resources["result"], 0, &bytes(&zero_result));
+    queue.write_buffer(
+        &resources["challenge_workspace"],
+        0,
+        &bytes(&zero_challenge_workspace),
+    );
+    queue.write_buffer(
+        &resources["challenge_output"],
+        0,
+        &bytes(&zero_challenge_output),
+    );
     submit_passes(
         &device,
         &queue,
@@ -467,16 +512,71 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         expected_progress,
     );
     assert_eq!(
-        read_words(&device, &queue, &resources["result"], RESULT_WORDS),
-        std::iter::once(1)
-            .chain(expected_tree.last().expect("root").iter().copied())
-            .collect::<Vec<_>>(),
+        read_words(
+            &device,
+            &queue,
+            &resources["challenge_output"],
+            CHALLENGE_OUTPUT_WORDS,
+        ),
+        expected_challenge_output,
+        "all eight GPU interaction challenges must match Plonky3",
+    );
+
+    let incomplete_challenge = CHALLENGE_STEPS - 1;
+    queue.write_buffer(
+        &resources["challenge_workspace"],
+        (CHALLENGE_PROGRESS_START * 4) as u64,
+        &bytes(&[incomplete_challenge]),
+    );
+    submit_passes(
+        &device,
+        &queue,
+        &executable[7..8],
+        "reject incomplete interaction challenge",
+    );
+    assert_eq!(
+        read_words(&device, &queue, &resources["node_valid"], TREE_NODES)[TREE_NODES - 1..],
+        vec![0],
+        "one incomplete private challenge cursor must invalidate the batch",
+    );
+
+    queue.write_buffer(
+        &resources["node_valid"],
+        ((TREE_NODES - 1) * 4) as u64,
+        &bytes(&[1]),
+    );
+    queue.write_buffer(
+        &resources["challenge_workspace"],
+        (CHALLENGE_PROGRESS_START * 4) as u64,
+        &bytes(&[CHALLENGE_STEPS]),
+    );
+    queue.write_buffer(&resources["challenge_output"], 0, &bytes(&[MODULUS]));
+    submit_passes(
+        &device,
+        &queue,
+        &executable[7..8],
+        "reject noncanonical interaction challenge",
+    );
+    assert_eq!(
+        read_words(&device, &queue, &resources["node_valid"], TREE_NODES)[TREE_NODES - 1..],
+        vec![0],
+        "one noncanonical challenge coefficient must invalidate the batch",
     );
 
     let mut incomplete = expected_progress.clone();
     incomplete[0] -= 1;
     queue.write_buffer(&resources["progress"], 0, &bytes(&incomplete));
-    queue.write_buffer(&resources["result"], 0, &bytes(&zero_result));
+    queue.write_buffer(&resources["node_valid"], 0, &bytes(&vec![1; TREE_NODES]));
+    queue.write_buffer(
+        &resources["challenge_workspace"],
+        0,
+        &bytes(&zero_challenge_workspace),
+    );
+    queue.write_buffer(
+        &resources["challenge_output"],
+        0,
+        &bytes(&zero_challenge_output),
+    );
     submit_passes(
         &device,
         &queue,
@@ -484,8 +584,8 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         "reject incomplete ordered tree",
     );
     assert_eq!(
-        read_words(&device, &queue, &resources["result"], RESULT_WORDS),
-        zero_result,
+        read_words(&device, &queue, &resources["node_valid"], TREE_NODES)[TREE_NODES - 1..],
+        vec![0],
         "one incomplete private cursor must invalidate the root",
     );
 
@@ -502,9 +602,14 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     queue.write_buffer(&resources["node_valid"], 0, &bytes(&zero_valid));
     queue.write_buffer(&resources["progress"], 0, &bytes(&zero_progress));
     queue.write_buffer(
-        &resources["result"],
+        &resources["challenge_workspace"],
         0,
-        &bytes(&vec![u32::MAX; RESULT_WORDS]),
+        &bytes(&zero_challenge_workspace),
+    );
+    queue.write_buffer(
+        &resources["challenge_output"],
+        0,
+        &bytes(&zero_challenge_output),
     );
     submit_passes(
         &device,
@@ -515,11 +620,6 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     let invalid_words = read_words(&device, &queue, &resources["node_valid"], TREE_NODES);
     assert_eq!(invalid_words[invalid_row], 0);
     assert_eq!(invalid_words[TREE_NODES - 1], 0);
-    assert_eq!(
-        read_words(&device, &queue, &resources["result"], RESULT_WORDS),
-        zero_result,
-        "a noncanonical source field must fail closed through the root",
-    );
 
     for ((pass_index, binding), buffer) in &extras {
         let pass = &bundle.manifest.passes[*pass_index];
