@@ -1,0 +1,8 @@
+[ingot]
+name = "quilting_atlas_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+std = { path = "../std" }
+quilting_atlas = { path = "../quilting_atlas" }

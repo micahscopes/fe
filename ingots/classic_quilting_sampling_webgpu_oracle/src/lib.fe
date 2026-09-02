@@ -1,0 +1,137 @@
+//! Executable actor shape for GPU-resident classic Quilting sampling.
+
+use quilting_atlas::{AtlasKey, canonical_key_ordinal}
+use quilting_atlas_webgpu::{
+    advance_candidate_generation,
+    compact_candidate_points,
+    initialize_candidate_lane,
+    propose_candidate_lane,
+    retire_candidate_lane,
+}
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    CycledDispatch as Cycle,
+    FixedDispatch as Once,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+const CANDIDATES: usize = 272
+const CANDIDATE_WORDS: usize = CANDIDATES * 5
+const POINTS: usize = 286
+const POINT_WORDS: usize = POINTS * 3
+const THREADS: usize = 128
+const WORKGROUPS: usize = 3
+const ACCEPTANCE_ROUNDS: usize = 64
+const SEED: u32 = 0x51c32a97
+
+pub struct SamplingRound {}
+
+fn key() -> AtlasKey {
+    AtlasKey { a: 1, b: 2, c: 3 }
+}
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+actor ClassicQuiltingSamplingOracle uses (Program<WebGpuBackend>) {
+    candidates: Shared<u32, CANDIDATE_WORDS>,
+    states_a: Shared<u32, CANDIDATES>,
+    states_b: Shared<u32, CANDIDATES>,
+    winners: Shared<u32, CANDIDATES>,
+    progress: Shared<u32, 1>,
+    points: Shared<u32, POINT_WORDS>,
+    receipt: Shared<u32, 7>,
+
+    fn initialize(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        let atlas_key = key()
+        initialize_candidate_lane<CANDIDATES, CANDIDATE_WORDS>(
+            atlas_key,
+            canonical_key_ordinal(atlas_key),
+            SEED,
+            self.candidates,
+            self.states_a,
+            self.states_b,
+            self.winners,
+            self.progress,
+            invocation,
+        )
+    }
+
+    fn propose(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<SamplingRound, Once<WORKGROUPS, 1, 1>, ACCEPTANCE_ROUNDS>,
+            >
+        )
+    {
+        propose_candidate_lane<CANDIDATES, CANDIDATE_WORDS>(
+            key(),
+            self.candidates,
+            self.states_a,
+            self.states_b,
+            self.winners,
+            self.progress,
+            invocation,
+        )
+    }
+
+    fn retire(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<SamplingRound, Once<WORKGROUPS, 1, 1>, ACCEPTANCE_ROUNDS>,
+            >
+        )
+    {
+        retire_candidate_lane<CANDIDATES, CANDIDATE_WORDS>(
+            key(),
+            self.candidates,
+            self.states_a,
+            self.states_b,
+            self.winners,
+            self.progress,
+            invocation,
+        )
+    }
+
+    fn advance(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<SamplingRound, Once<WORKGROUPS, 1, 1>, ACCEPTANCE_ROUNDS>,
+            >
+        )
+    {
+        advance_candidate_generation(self.progress, invocation)
+    }
+
+    fn compact(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let compacted = compact_candidate_points<
+            CANDIDATES,
+            CANDIDATE_WORDS,
+            POINT_WORDS,
+        >(
+            key(),
+            self.candidates,
+            self.states_a,
+            self.states_b,
+            self.progress,
+            self.points,
+        )
+        self.receipt.store(index: 0, value: flag(compacted.valid))
+        self.receipt.store(index: 1, value: flag(compacted.converged))
+        self.receipt.store(index: 2, value: flag(compacted.overflowed))
+        self.receipt.store(index: 3, value: compacted.candidate_slots)
+        self.receipt.store(index: 4, value: compacted.accepted_candidates)
+        self.receipt.store(index: 5, value: compacted.boundary_points)
+        self.receipt.store(index: 6, value: compacted.resident_points)
+    }
+}

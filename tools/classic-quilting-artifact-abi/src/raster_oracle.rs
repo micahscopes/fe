@@ -25,36 +25,41 @@ struct CompiledRaster {
 static COMPILED: OnceLock<CompiledRaster> = OnceLock::new();
 static COMPILED_PREDICATES: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_TOPOLOGY: OnceLock<WebBundle> = OnceLock::new();
+static COMPILED_SAMPLING: OnceLock<WebBundle> = OnceLock::new();
+
+fn compile_compute_oracle(relative_path: &str, entry: &str, label: &str) -> WebBundle {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "{label} ingot initialization diagnostics"
+    );
+    let top_mod = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .unwrap_or_else(|| panic!("{label} ingot"))
+        .root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected {label} diagnostics:\n{diagnostics}"
+    );
+    WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::compute(entry, Some(label.to_owned())),
+    )
+    .unwrap_or_else(|error| panic!("compile {label} WebGPU bundle: {error}"))
+}
 
 fn compiled_predicates() -> &'static WebBundle {
     COMPILED_PREDICATES.get_or_init(|| {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../ingots/classic_quilting_predicate_webgpu_oracle");
-        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
-        let mut db = DriverDataBase::default();
-        assert!(
-            !driver::init_ingot(&mut db, &url),
-            "predicate oracle ingot initialization diagnostics"
-        );
-        let top_mod = db
-            .workspace()
-            .containing_ingot(&db, url)
-            .expect("predicate oracle ingot")
-            .root_mod(&db);
-        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-        assert!(
-            diagnostics.is_empty(),
-            "unexpected predicate oracle diagnostics:\n{diagnostics}"
-        );
-        WebBundle::compile(
-            &db,
-            top_mod,
-            WebBuildOptions::compute(
-                "classify",
-                Some("classic-quilting-exact-predicate".to_owned()),
-            ),
+        compile_compute_oracle(
+            "../../ingots/classic_quilting_predicate_webgpu_oracle",
+            "classify",
+            "classic-quilting-exact-predicate",
         )
-        .expect("compile exact predicate WebGPU bundle")
     })
 }
 
@@ -78,33 +83,11 @@ fn exact_predicates_compile_to_browser_profile_wgsl() {
 
 fn compiled_topology() -> &'static WebBundle {
     COMPILED_TOPOLOGY.get_or_init(|| {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../ingots/classic_quilting_topology_webgpu_oracle");
-        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
-        let mut db = DriverDataBase::default();
-        assert!(
-            !driver::init_ingot(&mut db, &url),
-            "topology oracle ingot initialization diagnostics"
-        );
-        let top_mod = db
-            .workspace()
-            .containing_ingot(&db, url)
-            .expect("topology oracle ingot")
-            .root_mod(&db);
-        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-        assert!(
-            diagnostics.is_empty(),
-            "unexpected topology oracle diagnostics:\n{diagnostics}"
-        );
-        WebBundle::compile(
-            &db,
-            top_mod,
-            WebBuildOptions::compute(
-                "exercise",
-                Some("classic-quilting-exact-topology".to_owned()),
-            ),
+        compile_compute_oracle(
+            "../../ingots/classic_quilting_topology_webgpu_oracle",
+            "exercise",
+            "classic-quilting-exact-topology",
         )
-        .expect("compile exact topology WebGPU bundle")
     })
 }
 
@@ -121,6 +104,52 @@ fn exact_topology_compiles_to_browser_profile_wgsl() {
     )
     .validate(&module)
     .expect("topology WGSL validates with browser capabilities");
+    assert!(bundle.wgsl.contains("@compute"));
+    assert!(!bundle.wgsl.contains("@fragment"));
+    assert!(!bundle.wgsl.contains("f32"));
+    assert!(!bundle.wgsl.contains("f64"));
+}
+
+fn compiled_sampling() -> &'static WebBundle {
+    COMPILED_SAMPLING.get_or_init(|| {
+        compile_compute_oracle(
+            "../../ingots/classic_quilting_sampling_webgpu_oracle",
+            "compact",
+            "classic-quilting-gpu-sampling",
+        )
+    })
+}
+
+#[test]
+fn gpu_sampling_preserves_the_immutable_generation_cycle() {
+    let bundle = compiled_sampling();
+    assert_eq!(bundle.manifest.passes.len(), 5);
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        ["initialize", "propose", "retire", "advance", "compact"]
+    );
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([3, 1, 1]));
+    assert_eq!(bundle.manifest.passes[4].dispatch, Some([1, 1, 1]));
+    let cycle = bundle.manifest.passes[1]
+        .cycle
+        .expect("proposal starts the immutable generation cycle");
+    assert_eq!(cycle.repeat, 64);
+    assert_eq!(bundle.manifest.passes[2].cycle, Some(cycle));
+    assert_eq!(bundle.manifest.passes[3].cycle, Some(cycle));
+    assert_eq!(bundle.manifest.passes[4].cycle, None);
+
+    let module = naga::front::wgsl::parse_str(&bundle.wgsl).expect("sampling WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .expect("sampling WGSL validates with browser capabilities");
     assert!(bundle.wgsl.contains("@compute"));
     assert!(!bundle.wgsl.contains("@fragment"));
     assert!(!bundle.wgsl.contains("f32"));
