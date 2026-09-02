@@ -32,9 +32,10 @@ pub use runtime::{
     build_wasm_runtime_package_for_entries_with_internal_funcs,
     build_wasm_runtime_package_for_entry, derive_runtime_resumable_plans,
     derive_runtime_suspension_points, enum_tag_size_bytes, enum_variant_field_offset_bytes,
-    format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
-    format_runtime_verify_failure, layout_size_bytes, materialize_runtime_resumable_machine,
-    runtime_arg_shape_key, runtime_instance_stable_key, runtime_instance_symbol_key,
+    format_runtime_body, format_runtime_body_excerpt, format_runtime_body_observation,
+    format_runtime_package, format_runtime_package_observation, format_runtime_verify_failure,
+    layout_size_bytes, materialize_runtime_resumable_machine, runtime_arg_shape_key,
+    runtime_instance_stable_key, runtime_instance_symbol_key,
     runtime_package_instance_key_for_func, runtime_package_symbol_for_func,
     serialize_const_region_bytes, specialize_pure_inline_stmts, struct_field_offset_bytes,
 };

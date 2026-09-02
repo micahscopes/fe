@@ -21,8 +21,8 @@ pub use package::{
     runtime_package_instance_key_for_func, runtime_package_symbol_for_func,
 };
 pub use pretty::{
-    format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
-    format_runtime_verify_failure,
+    format_runtime_body, format_runtime_body_excerpt, format_runtime_body_observation,
+    format_runtime_package, format_runtime_package_observation, format_runtime_verify_failure,
 };
 pub use suspend::{
     RuntimeContinuationFrameSlot, RuntimeContinuationSegment, RuntimeResumableBodyPlan,

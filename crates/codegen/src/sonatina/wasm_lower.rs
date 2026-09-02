@@ -32,6 +32,7 @@
 //! layout-derived cases continue to fail closed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use compiler_db::DriverDataBase;
@@ -55,6 +56,7 @@ use mir::{
     RuntimePlace, ScalarClass, ScalarRepr, ScalarRole, VariantId,
 };
 use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 #[cfg(feature = "sonatina-indirect-calls")]
 use sonatina_ir::inst::{control_flow::CallIndirect, data::GetFunctionPtr};
 use sonatina_ir::{
@@ -103,6 +105,51 @@ fn wasm_lower_trace_detail(message: impl FnOnce() -> String) {
     if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some() {
         eprintln!("[fe wasm lowering] {}", message());
     }
+}
+
+/// Emit one content-addressed, human-readable Fe runtime-IR package only when
+/// explicitly requested. The compiler remains the semantic authority: this is
+/// an observation boundary for external tools, never an input to lowering,
+/// legality, optimization, or cache identity.
+fn observe_runtime_package(db: &DriverDataBase, package: &RuntimePackage<'_>) {
+    let Some(directory) = std::env::var_os("FE_RUNTIME_IR_SNAPSHOT_DIR") else {
+        return;
+    };
+    let text = mir::format_runtime_package_observation(db, package);
+    match write_runtime_package_snapshot(Path::new(&directory), &text) {
+        Ok(path) => eprintln!(
+            "[fe runtime ir] wrote content-addressed snapshot `{}`",
+            path.display(),
+        ),
+        Err(error) => eprintln!(
+            "[fe runtime ir] could not write snapshot under `{}`: {error}",
+            Path::new(&directory).display(),
+        ),
+    }
+}
+
+fn write_runtime_package_snapshot(directory: &Path, text: &str) -> std::io::Result<PathBuf> {
+    let digest = Sha256::digest(text.as_bytes());
+    let digest = format!("{digest:x}");
+    let path = directory.join(format!("{digest}.rmir"));
+    let payload =
+        format!("# fe-rmir-observation/1\n# phase: runtime-package\n# sha256: {digest}\n{text}\n");
+    std::fs::create_dir_all(directory)?;
+    if path.exists() {
+        let existing = std::fs::read(&path)?;
+        if existing == payload.as_bytes() {
+            return Ok(path);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "content-addressed path `{}` contains different bytes",
+                path.display(),
+            ),
+        ));
+    }
+    std::fs::write(&path, payload)?;
+    Ok(path)
 }
 
 /// Return pages belonging to prepared MIR bodies that have already been
@@ -298,6 +345,7 @@ fn compile_runtime_package_wasm_inner(
             package.functions(db).len(),
         )
     });
+    observe_runtime_package(db, package);
     // Reject unsupported indirect host results before constructing any
     // Sonatina signatures. A local wrapper may itself return the authored enum
     // and appear before the import in package order, so gating inside
@@ -13478,6 +13526,30 @@ mod tests {
 
     fn runtime_local(index: u32) -> RLocalId {
         RLocalId::from_u32(index)
+    }
+
+    #[test]
+    fn runtime_ir_observation_is_content_addressed_and_idempotent() {
+        let directory = tempfile::tempdir().expect("snapshot directory");
+        let text = "package \"tiny\" {\n}";
+        let first = write_runtime_package_snapshot(directory.path(), text)
+            .expect("first runtime IR observation");
+        let second = write_runtime_package_snapshot(directory.path(), text)
+            .expect("repeated runtime IR observation");
+        assert_eq!(first, second);
+        assert_eq!(
+            first.extension().and_then(|value| value.to_str()),
+            Some("rmir")
+        );
+        let payload = std::fs::read_to_string(&first).expect("runtime IR snapshot bytes");
+        assert!(payload.starts_with("# fe-rmir-observation/1\n# phase: runtime-package\n"));
+        assert!(payload.ends_with("package \"tiny\" {\n}\n"));
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("snapshot directory entries")
+                .count(),
+            1,
+        );
     }
 
     #[test]

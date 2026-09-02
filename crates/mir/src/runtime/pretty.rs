@@ -34,8 +34,24 @@ pub fn format_runtime_verify_failure<'db>(
 }
 
 pub fn format_runtime_body<'db>(db: &'db dyn MirDb, body: &RuntimeBody<'db>) -> String {
+    format_runtime_body_with_style(db, body, InstanceStyle::Diagnostic)
+}
+
+pub fn format_runtime_body_observation<'db>(db: &'db dyn MirDb, body: &RuntimeBody<'db>) -> String {
+    format_runtime_body_with_style(db, body, InstanceStyle::Stable)
+}
+
+fn format_runtime_body_with_style<'db>(
+    db: &'db dyn MirDb,
+    body: &RuntimeBody<'db>,
+    style: InstanceStyle,
+) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "fn {}(", format_runtime_instance(db, body.owner));
+    let _ = writeln!(
+        out,
+        "fn {}(",
+        format_runtime_instance_with_style(db, body.owner, style)
+    );
     for (idx, param) in body.signature.params.iter().enumerate() {
         let suffix = if idx + 1 == body.signature.params.len() {
             ""
@@ -86,9 +102,18 @@ pub fn format_runtime_body<'db>(db: &'db dyn MirDb, body: &RuntimeBody<'db>) -> 
         let block_id = RBlockId::from_u32(block_idx as u32);
         let _ = writeln!(out, "  bb{}:", block_idx);
         for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
-            let _ = writeln!(out, "    [{}] {};", stmt_idx, format_stmt(db, stmt));
+            let _ = writeln!(
+                out,
+                "    [{}] {};",
+                stmt_idx,
+                format_stmt_with_style(db, stmt, style)
+            );
         }
-        let _ = writeln!(out, "    -> {}", format_terminator(db, &block.terminator));
+        let _ = writeln!(
+            out,
+            "    -> {}",
+            format_terminator_with_style(db, &block.terminator, style)
+        );
         if block_id.index() + 1 != body.blocks.len() {
             let _ = writeln!(out);
         }
@@ -191,6 +216,39 @@ pub fn format_runtime_package<'db>(db: &'db dyn MirDb, package: &RuntimePackage<
     out
 }
 
+/// Stable runtime-IR package view for external observation and phase deltas.
+/// Arena identities and debug-only Salsa keys are deliberately absent. This
+/// format describes compilation, but never participates in it.
+pub fn format_runtime_package_observation<'db>(
+    db: &'db dyn MirDb,
+    package: &RuntimePackage<'db>,
+) -> String {
+    let mut out = String::new();
+    let package_name = package.top_mod(db).name(db).data(db);
+    let _ = writeln!(out, "package {package_name} {{");
+    if let Some(primary) = package.primary_object(db) {
+        let _ = writeln!(out, "  primary_object: {}", primary.name(db));
+    }
+    if !package.root_objects(db).is_empty() {
+        let names = package
+            .root_objects(db)
+            .iter()
+            .map(|object| object.name(db).clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "  root_objects: [{names}]");
+    }
+    let _ = writeln!(out, "  const_regions: {}", package.const_regions(db).len());
+    if !package.functions(db).is_empty() {
+        let _ = writeln!(out, "  functions:");
+        for function in package.functions(db) {
+            write_function_observation(db, &mut out, function);
+        }
+    }
+    out.push('}');
+    out
+}
+
 fn write_object_summary<'db>(db: &'db dyn MirDb, out: &mut String, object: RuntimeObject<'db>) {
     let _ = writeln!(out, "    object {}:", object.name(db));
     for section in object.sections(db) {
@@ -246,6 +304,30 @@ fn write_function_summary<'db>(
     }
     let body = function.instance(db).body(db);
     for line in format_runtime_body(db, &body).lines() {
+        let _ = writeln!(out, "      {line}");
+    }
+}
+
+fn write_function_observation<'db>(
+    db: &'db dyn MirDb,
+    out: &mut String,
+    function: RuntimeFunction<'db>,
+) {
+    let linkage = match function.linkage(db) {
+        RuntimeLinkage::Private => "private",
+        RuntimeLinkage::Internal => "internal",
+        RuntimeLinkage::External => "external",
+    };
+    let instance = function.instance(db);
+    let _ = writeln!(
+        out,
+        "    {} ({linkage}, inline={:?}, instance={})",
+        function.symbol(db),
+        function.inline_hint(db),
+        crate::runtime::runtime_instance_stable_key(db, instance),
+    );
+    let body = instance.body(db);
+    for line in format_runtime_body_observation(db, &body).lines() {
         let _ = writeln!(out, "      {line}");
     }
 }
@@ -379,9 +461,21 @@ fn format_code_region<'db>(db: &'db dyn MirDb, region: RuntimeCodeRegion<'db>) -
 }
 
 fn format_stmt<'db>(db: &'db dyn MirDb, stmt: &RStmt<'db>) -> String {
+    format_stmt_with_style(db, stmt, InstanceStyle::Diagnostic)
+}
+
+fn format_stmt_with_style<'db>(
+    db: &'db dyn MirDb,
+    stmt: &RStmt<'db>,
+    style: InstanceStyle,
+) -> String {
     match stmt {
         RStmt::Assign { dst, expr } => {
-            format!("{} = {}", format_local_id(*dst), format_expr(db, expr))
+            format!(
+                "{} = {}",
+                format_local_id(*dst),
+                format_expr_with_style(db, expr, style)
+            )
         }
         RStmt::EnumAssertVariant { value, variant } => format!(
             "enum_assert_variant {} := {}",
@@ -424,7 +518,11 @@ fn format_stmt<'db>(db: &'db dyn MirDb, stmt: &RStmt<'db>) -> String {
     }
 }
 
-fn format_expr<'db>(db: &'db dyn MirDb, expr: &RExpr<'db>) -> String {
+fn format_expr_with_style<'db>(
+    db: &'db dyn MirDb,
+    expr: &RExpr<'db>,
+    style: InstanceStyle,
+) -> String {
     match expr {
         RExpr::Use(value) => format!("use {}", format_local_id(*value)),
         RExpr::ConstScalar(value) => format_const_scalar(value),
@@ -452,9 +550,12 @@ fn format_expr<'db>(db: &'db dyn MirDb, expr: &RExpr<'db>) -> String {
                 format_scalar_class(db, to)
             )
         }
-        RExpr::ConstRef { region, layout } => {
-            format!("const_ref @{:?}:{}", region, format_layout(db, *layout))
-        }
+        RExpr::ConstRef { region, layout } => match style {
+            InstanceStyle::Diagnostic => {
+                format!("const_ref @{:?}:{}", region, format_layout(db, *layout))
+            }
+            InstanceStyle::Stable => format!("const_ref {}", format_layout(db, *layout)),
+        },
         RExpr::AllocObject { layout } => format!("alloc {}", format_layout(db, *layout)),
         RExpr::MaterializeToObject { src } => {
             format!("materialize_to_object {}", format_local_id(*src))
@@ -510,7 +611,10 @@ fn format_expr<'db>(db: &'db dyn MirDb, expr: &RExpr<'db>) -> String {
                 .map(|value| format_local_id(*value))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("call {}({args})", format_runtime_instance(db, *callee))
+            format!(
+                "call {}({args})",
+                format_runtime_instance_with_style(db, *callee, style)
+            )
         }
         RExpr::EnumMake {
             layout,
@@ -556,6 +660,14 @@ fn format_expr<'db>(db: &'db dyn MirDb, expr: &RExpr<'db>) -> String {
 }
 
 fn format_terminator<'db>(db: &'db dyn MirDb, term: &RTerminator<'db>) -> String {
+    format_terminator_with_style(db, term, InstanceStyle::Diagnostic)
+}
+
+fn format_terminator_with_style<'db>(
+    db: &'db dyn MirDb,
+    term: &RTerminator<'db>,
+    style: InstanceStyle,
+) -> String {
     match term {
         RTerminator::Goto(block) => format!("goto bb{}", block.index()),
         RTerminator::Branch {
@@ -619,7 +731,7 @@ fn format_terminator<'db>(db: &'db dyn MirDb, term: &RTerminator<'db>) -> String
                 .join(", ");
             format!(
                 "terminal_call {}({args})",
-                format_runtime_instance(db, *callee)
+                format_runtime_instance_with_style(db, *callee, style)
             )
         }
         RTerminator::ReturnData { offset, len } => format!(
@@ -1103,7 +1215,24 @@ fn format_const_scalar(value: &ConstScalar) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+enum InstanceStyle {
+    Diagnostic,
+    Stable,
+}
+
 fn format_runtime_instance<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> String {
+    format_runtime_instance_with_style(db, instance, InstanceStyle::Diagnostic)
+}
+
+fn format_runtime_instance_with_style<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+    style: InstanceStyle,
+) -> String {
+    if matches!(style, InstanceStyle::Stable) {
+        return crate::runtime::runtime_instance_stable_key(db, instance);
+    }
     let key = instance.key(db);
     match key.source(db) {
         crate::instance::RuntimeInstanceSource::Semantic(semantic) => {
