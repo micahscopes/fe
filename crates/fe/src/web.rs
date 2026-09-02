@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::OnceLock,
     time::{Instant, UNIX_EPOCH},
@@ -680,6 +680,24 @@ pub fn render_compile(
     url: &Url,
     entry: Option<&str>,
 ) -> Result<Option<RenderBundleArtifact>, String> {
+    render_compile_with_cache_root_and_compiler(
+        url,
+        entry,
+        render_cache_root(),
+        compile_render_bundle_with_dependencies,
+    )
+}
+
+fn render_compile_with_cache_root_and_compiler(
+    url: &Url,
+    entry: Option<&str>,
+    cache_root: Option<PathBuf>,
+    compile_bundle: impl FnOnce(
+        &Utf8PathBuf,
+        Option<&str>,
+        Option<IngotSourceAudit>,
+    ) -> Result<RenderBundleArtifact, String>,
+) -> Result<Option<RenderBundleArtifact>, String> {
     let Ok(path) = url.to_file_path() else {
         return Ok(None);
     };
@@ -695,7 +713,7 @@ pub fn render_compile(
         .as_ref()
         .map(|audit| audit.non_fe_authored_sources.as_slice())
         .unwrap_or_default();
-    let cache = render_cache_root().and_then(|root| {
+    let cache = cache_root.and_then(|root| {
         dependencies
             .and_then(|dependencies| render_cache_key(dependencies, non_fe_authored_sources, entry))
             .map(|key| (root, key))
@@ -723,7 +741,7 @@ pub fn render_compile(
         entry = entry.unwrap_or("<derived>"),
         "compiling render bundle"
     );
-    let artifact = compile_render_bundle_with_dependencies(&path, entry, source_audit)?;
+    let artifact = compile_bundle(&path, entry, source_audit)?;
     let emitted_bytes = artifact.wgsl.len()
         + artifact.manifest_json.len()
         + artifact.wasm.as_ref().map_or(0, Vec::len)
@@ -874,16 +892,22 @@ struct IngotSourceAudit {
 
 /// The structural dependency inventory used for rebuilds plus the ownership
 /// ledger published in a render manifest. Unlike the watch graph, the ledger
-/// also records non-Fe files under the root ingot and its local dependencies so
-/// the canonical-gallery policy can reject application JS/Rust/WGSL/Wasm
-/// without relying on a filename search outside the build.
+/// also records non-Fe files under the root ingot and its resolved file-backed
+/// dependencies so the canonical-gallery policy can reject application
+/// JS/Rust/WGSL/Wasm without relying on a filename search outside the build.
 fn ingot_source_audit(ingot_dir: &Utf8PathBuf) -> Option<IngotSourceAudit> {
     let root_dir = ingot_dir.canonicalize_utf8().ok()?;
-    let mut visited = BTreeSet::new();
+    let root_url = Url::from_directory_path(root_dir.as_std_path()).ok()?;
+    let mut db = DriverDataBase::default();
+    if driver::init_ingot(&mut db, &root_url) {
+        return None;
+    }
     let mut sources = BTreeMap::new();
     let mut non_fe_sources = BTreeMap::new();
-    collect_ingot_sources(&root_dir, &mut visited, &mut sources, &mut non_fe_sources);
-    let root = sources.keys().next()?.clone();
+    collect_resolved_ingot_sources(&db, &root_url, &mut sources, &mut non_fe_sources);
+    let root = Url::from_file_path(root_dir.join("fe.toml").as_std_path())
+        .ok()?
+        .to_string();
     let inventory = SourceDependencyInventory {
         version: SOURCE_DEPENDENCY_INVENTORY_VERSION,
         root,
@@ -936,19 +960,42 @@ fn provenance_logical_base(root_dir: &Utf8Path, sources: &[SourceDependency]) ->
     base
 }
 
-fn collect_ingot_sources(
-    dir: &Utf8PathBuf,
-    visited: &mut BTreeSet<Utf8PathBuf>,
+/// Traverse the same dependency edges the compiler initialized. In particular,
+/// workspace-current dependencies have no path in an ingot's parsed manifest;
+/// their concrete member URLs exist only in the resolved dependency graph.
+fn collect_resolved_ingot_sources(
+    db: &DriverDataBase,
+    root_url: &Url,
     sources: &mut BTreeMap<String, String>,
     non_fe_sources: &mut BTreeMap<String, String>,
 ) {
-    let Ok(canonical) = dir.canonicalize_utf8() else {
-        return;
-    };
-    if !visited.insert(canonical.clone()) {
-        return;
+    let graph = db.dependency_graph();
+    let mut ingot_urls = vec![root_url.clone()];
+    ingot_urls.extend(graph.dependency_urls(db, root_url));
+    for ingot_url in ingot_urls {
+        if let Some(workspace_root) = graph.workspace_root_for_member(db, &ingot_url)
+            && let Ok(manifest_url) = workspace_root.join("fe.toml")
+            && let Some(workspace_manifest) = db.workspace().get(db, &manifest_url)
+        {
+            sources.insert(
+                manifest_url.to_string(),
+                sha256_hex(workspace_manifest.text(db).as_bytes()),
+            );
+        }
+        if let Ok(path) = ingot_url.to_file_path()
+            && let Ok(path) = Utf8PathBuf::from_path_buf(path)
+        {
+            collect_ingot_directory_sources(&path, sources, non_fe_sources);
+        }
     }
-    for entry in walkdir::WalkDir::new(canonical.as_std_path())
+}
+
+fn collect_ingot_directory_sources(
+    dir: &Utf8Path,
+    sources: &mut BTreeMap<String, String>,
+    non_fe_sources: &mut BTreeMap<String, String>,
+) {
+    for entry in walkdir::WalkDir::new(dir.as_std_path())
         .into_iter()
         .filter_entry(|entry| {
             entry.depth() == 0
@@ -980,26 +1027,6 @@ fn collect_ingot_sources(
                 &mut *non_fe_sources
             };
             target.insert(url.to_string(), sha256_hex(&bytes));
-        }
-    }
-
-    let Ok(content) = std::fs::read_to_string(canonical.join("fe.toml")) else {
-        return;
-    };
-    let Ok(common::config::Config::Ingot(ingot_config)) = common::config::Config::parse(&content)
-    else {
-        return;
-    };
-    let Ok(base_url) = Url::from_directory_path(canonical.as_str()) else {
-        return;
-    };
-    let (dependencies, _diagnostics) = ingot_config.dependencies(&base_url);
-    for dependency in dependencies {
-        if let common::dependencies::DependencyLocation::Local(local) = &dependency.location
-            && let Ok(dependency_path) = local.url.to_file_path()
-            && let Ok(dependency_path) = Utf8PathBuf::from_path_buf(dependency_path)
-        {
-            collect_ingot_sources(&dependency_path, visited, sources, non_fe_sources);
         }
     }
 }
@@ -1396,6 +1423,141 @@ mod tests {
                 &cache_dependencies("pub fn changed() {}")
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn workspace_transitive_source_change_misses_render_cache_and_rebuilds() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        let app = workspace.join("app");
+        let middle = workspace.join("middle");
+        let leaf = workspace.join("leaf");
+        for ingot in [&app, &middle, &leaf] {
+            std::fs::create_dir_all(ingot.join("src")).unwrap();
+        }
+        std::fs::write(
+            workspace.join("fe.toml"),
+            r#"[workspace]
+name = "render_cache_workspace"
+version = "0.1.0"
+members = [
+  { path = "app", name = "app" },
+  { path = "middle", name = "middle" },
+  { path = "leaf", name = "leaf" },
+]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("fe.toml"),
+            r#"[ingot]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+middle = true
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("src/lib.fe"),
+            "use middle::tone\n\npub fn paint(x: i32, y: i32) -> i32 { tone(x, y) }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            middle.join("fe.toml"),
+            r#"[ingot]
+name = "middle"
+version = "0.1.0"
+
+[dependencies]
+leaf = true
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            middle.join("src/lib.fe"),
+            "use leaf::leaf_value\n\npub fn tone(x: i32, y: i32) -> i32 { x + y + leaf_value() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            leaf.join("fe.toml"),
+            "[ingot]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            leaf.join("src/lib.fe"),
+            "pub fn leaf_value() -> i32 { 7 }\n",
+        )
+        .unwrap();
+
+        let app = Utf8PathBuf::from_path_buf(app).unwrap();
+        let app_url = Url::from_directory_path(app.as_std_path()).unwrap();
+        let cache_root = temp.path().join("render-cache");
+        let builds = std::cell::Cell::new(0);
+        let compile_bundle =
+            |_: &Utf8PathBuf, _: Option<&str>, source_audit: Option<IngotSourceAudit>| {
+                let build = builds.get() + 1;
+                builds.set(build);
+                let mut artifact = cache_artifact(source_audit.unwrap().dependencies);
+                artifact.wgsl = format!("// compiled render bundle {build}\n").into_bytes();
+                Ok(artifact)
+            };
+        let first = render_compile_with_cache_root_and_compiler(
+            &app_url,
+            None,
+            Some(cache_root.clone()),
+            compile_bundle,
+        )
+        .expect("initial render build")
+        .expect("directory render artifact");
+        let leaf_url = Url::from_file_path(leaf.join("src/lib.fe"))
+            .unwrap()
+            .to_string();
+        assert!(
+            first
+                .source_dependencies
+                .as_ref()
+                .unwrap()
+                .sources
+                .iter()
+                .any(|source| source.url == leaf_url),
+            "the cache/watch inventory must include compiler-resolved transitive workspace ingots"
+        );
+        let cached = render_compile_with_cache_root_and_compiler(
+            &app_url,
+            None,
+            Some(cache_root.clone()),
+            compile_bundle,
+        )
+        .expect("unchanged cached render build")
+        .expect("directory render artifact");
+        assert_eq!(cached.wgsl, first.wgsl);
+        assert_eq!(builds.get(), 1, "an unchanged graph should hit the cache");
+
+        std::fs::write(
+            leaf.join("src/lib.fe"),
+            "pub fn leaf_value() -> i32 { 9 }\n",
+        )
+        .unwrap();
+        let second = render_compile_with_cache_root_and_compiler(
+            &app_url,
+            None,
+            Some(cache_root.clone()),
+            compile_bundle,
+        )
+        .expect("render rebuild after transitive mutation")
+        .expect("directory render artifact");
+        assert_ne!(
+            first.wgsl, second.wgsl,
+            "a transitive workspace source mutation must not reuse stale WGSL"
+        );
+        assert_eq!(builds.get(), 2, "the changed graph must rebuild the bundle");
+        assert_eq!(
+            std::fs::read_dir(cache_root).unwrap().count(),
+            2,
+            "the changed dependency closure must populate a distinct cache entry"
         );
     }
 
