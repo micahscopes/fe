@@ -22,7 +22,9 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
     WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
-    actor_gpu_program, actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
+    WebResourceAccess, WebResourceInitialization, WebResourceKind, WebResourcePolicy,
+    WebResourceRecovery, WebResourceResidency, WebResourceVisibility, actor_gpu_program,
+    actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
@@ -592,7 +594,10 @@ fn signed_storage_fails_closed_until_carrier_bitcasts_are_explicit() {
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-    assert!(diagnostics.is_empty(), "signed storage fixture diagnostics:\n{diagnostics}");
+    assert!(
+        diagnostics.is_empty(),
+        "signed storage fixture diagnostics:\n{diagnostics}"
+    );
 
     let error = match WebBundle::compile(
         &db,
@@ -606,6 +611,91 @@ fn signed_storage_fails_closed_until_carrier_bitcasts_are_explicit() {
     assert!(
         message.contains("signed `i32` storage requires explicit carrier bitcasts"),
         "expected the signed-carrier boundary error, got: {message}"
+    );
+}
+
+#[test]
+fn typed_resource_policy_projects_to_manifest_and_narrows_physical_access() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_typed_resource_policy");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "typed resource policy diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("typed-resource-policy.fe".to_owned())),
+    )
+    .expect("typed resource policy bundle");
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("typed policy actor must derive exactly one resource")
+    };
+    assert_eq!(
+        resource.policy,
+        WebResourcePolicy {
+            kind: WebResourceKind::Storage,
+            access: WebResourceAccess::ReadOnly,
+            residency: WebResourceResidency::ActorResident,
+            initialization: WebResourceInitialization::Zeroed,
+            recovery: WebResourceRecovery::ReplayRecipe,
+            visibility: WebResourceVisibility::Fragment,
+        }
+    );
+    let policy_json = &serde_json::to_value(&bundle.manifest).unwrap()["resources"][0]["policy"];
+    assert_eq!(policy_json["access"], "read_only");
+    assert_eq!(policy_json["visibility"], "fragment");
+    assert!(bundle.pass_wgsl[0].source.contains("var<storage> palette"));
+    assert!(
+        !bundle.pass_wgsl[0]
+            .source
+            .contains("var<storage, read_write> palette")
+    );
+}
+
+#[test]
+fn readonly_resource_store_is_rejected_by_missing_type_evidence() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_readonly_store_rejected");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.contains("store")
+            && (diagnostics.contains("trait bound is not satisfied")
+                || diagnostics.contains("not found")
+                || diagnostics.contains("doesn't implement")),
+        "read-only storage must reject stores through missing GpuWritable evidence:\n{diagnostics}"
+    );
+}
+
+#[test]
+fn invalid_immutable_policy_fails_closed_before_shader_lowering() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_invalid_immutable");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "invalid policy fixture should reach bundle validation:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("invalid-immutable.fe".to_owned())),
+    )
+    .expect_err("immutable writable storage must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("immutable residency requires read-only access"),
+        "unexpected invalid immutable policy error: {error}"
     );
 }
 

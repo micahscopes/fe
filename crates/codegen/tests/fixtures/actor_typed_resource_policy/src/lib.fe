@@ -1,0 +1,31 @@
+use std::webgpu::{
+    ActorResident,
+    FragmentOnly,
+    FragmentSurface as Pixel,
+    GpuBuffer,
+    GpuProgram as Program,
+    ReadOnly,
+    ReplayRecipe,
+    StorageKind,
+    WebGpuBackend,
+    Zeroed,
+}
+
+pub type Palette = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    FragmentOnly,
+    4,
+    u32,
+>
+
+actor TypedPolicy uses (Program<WebGpuBackend>) {
+    palette: Palette,
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.palette.load(index: 0).downcast_truncate()
+    }
+}

@@ -84,8 +84,8 @@ use sonatina_ir::{
 use sonatina_triple::{Architecture, OperatingSystem, TargetTriple, Vendor};
 
 use crate::{
-    CanonicalType, canonical_interface::semantic_type_retains_borrowed_host_storage,
-    canonical_type_from_semantic,
+    CanonicalType, actor_semantics::semantic_gpu_resource as semantic_gpu_resource_shape,
+    canonical_interface::semantic_type_retains_borrowed_host_storage, canonical_type_from_semantic,
 };
 
 use super::LowerError;
@@ -155,17 +155,7 @@ fn gpu_intrinsic(db: &DriverDataBase, instance: RuntimeInstance<'_>) -> Option<G
 }
 
 fn semantic_gpu_resource(db: &DriverDataBase, ty: TyId<'_>) -> bool {
-    let ty = ty.as_view(db).unwrap_or(ty);
-    let Some(adt) = ty.adt_def(db) else {
-        return false;
-    };
-    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
-        return false;
-    };
-    struct_
-        .scope()
-        .attrs(db)
-        .is_some_and(|attrs| attrs.gpu_resource(db).is_some())
+    !matches!(semantic_gpu_resource_shape(db, ty), Ok(None))
 }
 
 fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
@@ -4421,12 +4411,17 @@ where
         resource_ty: TyId<'db>,
     ) -> Result<GpuResourceElementType, LowerError> {
         let resource_ty = resource_ty.as_view(self.db).unwrap_or(resource_ty);
-        let [element_ty, _, ..] = resource_ty.generic_args(self.db) else {
-            return Err(LowerError::Unsupported(
-                "GPU storage resource type requires element and length arguments".to_owned(),
-            ));
-        };
-        let element_ty = element_ty.as_view(self.db).unwrap_or(*element_ty);
+        let resource = semantic_gpu_resource_shape(self.db, resource_ty)
+            .map_err(|message| LowerError::Unsupported(message.to_owned()))?
+            .ok_or_else(|| {
+                LowerError::Internal(
+                    "non-resource semantic type reached GPU resource element lowering".to_owned(),
+                )
+            })?;
+        let element_ty = resource
+            .element_ty
+            .as_view(self.db)
+            .unwrap_or(resource.element_ty);
         if let Some(element) = self.resource_element_cache.get(&element_ty).cloned() {
             return Ok(element);
         }
@@ -4485,17 +4480,14 @@ where
         if let Some(ty) = self.resource_type_cache.get(&resource_ty).copied() {
             return Ok(ty);
         }
-        if !semantic_gpu_resource(self.db, resource_ty) {
-            return Err(LowerError::Internal(
-                "non-resource semantic type reached GPU resource lowering".to_owned(),
-            ));
-        }
-        let [_, length_ty, ..] = resource_ty.generic_args(self.db) else {
-            return Err(LowerError::Unsupported(
-                "GPU storage resource type requires element and length arguments".to_owned(),
-            ));
-        };
-        let length = semantic_const_u32(self.db, *length_ty)
+        let resource = semantic_gpu_resource_shape(self.db, resource_ty)
+            .map_err(|message| LowerError::Unsupported(message.to_owned()))?
+            .ok_or_else(|| {
+                LowerError::Internal(
+                    "non-resource semantic type reached GPU resource lowering".to_owned(),
+                )
+            })?;
+        let length = semantic_const_u32(self.db, resource.length_ty)
             .and_then(|length| usize::try_from(length).ok())
             .filter(|length| *length != 0)
             .ok_or_else(|| {

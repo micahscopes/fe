@@ -28,8 +28,9 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource, GpuStage,
-    HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
+    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource,
+    GpuResourceAccess, GpuResourceInit, GpuResourceKind, GpuResourceRecovery, GpuResourceResidency,
+    GpuResourceVisibility, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,7 +40,10 @@ use sonatina_codegen::isa::spirv::{
     WordKind,
 };
 
-use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
+use crate::actor_semantics::{
+    SemanticActor, SemanticGpuResourceFamily, nominal_attrs, resolve_metadata_ty, semantic_actors,
+    semantic_gpu_resource,
+};
 use crate::browser_actor_runtime::{
     BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
 };
@@ -526,6 +530,85 @@ pub struct WebActorResource {
     /// to expose only physical binding data, so adding a readback capability
     /// does not grow a JSON application protocol.
     pub kind: GpuResource,
+    /// Type-derived logical policy. The fixed host may narrow physical access
+    /// for a stage, but it may never grant more than this declaration.
+    pub policy: WebResourcePolicy,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceKind {
+    #[default]
+    Storage,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceAccess {
+    ReadOnly,
+    WriteOnly,
+    #[default]
+    ReadWrite,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceResidency {
+    Immutable,
+    #[default]
+    ActorResident,
+    FrameTransient,
+    Imported,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebResourceInitialization {
+    #[default]
+    Zeroed,
+    ContentAddressed {
+        sha256: String,
+    },
+    Derived,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceRecovery {
+    #[default]
+    ReplayRecipe,
+    RestoreCheckpoint,
+    Regenerate,
+    NonRecoverable,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebResourceVisibility {
+    Compute,
+    Vertex,
+    Fragment,
+    #[default]
+    ComputeFragment,
+    VertexFragment,
+    All,
+}
+
+/// Orthogonal logical resource policy derived exclusively from Fe marker
+/// types. Its default is the historical mutable actor storage contract, so
+/// legacy manifests retain their compact spelling.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebResourcePolicy {
+    pub kind: WebResourceKind,
+    pub access: WebResourceAccess,
+    pub residency: WebResourceResidency,
+    pub initialization: WebResourceInitialization,
+    pub recovery: WebResourceRecovery,
+    pub visibility: WebResourceVisibility,
+}
+
+fn is_default_resource_policy(policy: &WebResourcePolicy) -> bool {
+    *policy == WebResourcePolicy::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1242,6 +1325,157 @@ fn resource_element(
     Ok(WebActorResourceElement::Record { fields, span })
 }
 
+fn content_addressed_digest(
+    db: &DriverDataBase,
+    init_ty: TyId<'_>,
+    path: &str,
+) -> Result<String, WebBundleError> {
+    let init_ty = init_ty.as_view(db).unwrap_or(init_ty);
+    let [h0, h1, h2, h3, h4, h5, h6, h7] = init_ty.generic_args(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires exactly eight SHA-256 words"
+        )));
+    };
+    [h0, h1, h2, h3, h4, h5, h6, h7]
+        .into_iter()
+        .map(|word| {
+            semantic_const_u32(db, *word)
+                .map(|word| format!("{word:08x}"))
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(format!(
+                        "resource `{path}` SHA-256 words must be concrete u32 integers"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|words| words.concat())
+}
+
+fn typed_resource_policy(
+    db: &DriverDataBase,
+    family: SemanticGpuResourceFamily<'_>,
+    path: &str,
+) -> Result<WebResourcePolicy, WebBundleError> {
+    let kind = nominal_attrs(db, family.kind_ty)
+        .and_then(|attrs| attrs.gpu_resource_kind(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` kind argument lacks #[gpu_resource_kind(...)] evidence"
+            ))
+        })?;
+    let access = nominal_attrs(db, family.access_ty)
+        .and_then(|attrs| attrs.gpu_resource_access(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` access argument lacks #[gpu_resource_access(...)] evidence"
+            ))
+        })?;
+    let residency = nominal_attrs(db, family.residency_ty)
+        .and_then(|attrs| attrs.gpu_resource_residency(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` residency argument lacks #[gpu_resource_residency(...)] evidence"
+            ))
+        })?;
+    let initialization = nominal_attrs(db, family.init_ty)
+        .and_then(|attrs| attrs.gpu_resource_init(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` initialization argument lacks #[gpu_resource_init(...)] evidence"
+            ))
+        })?;
+    let recovery = nominal_attrs(db, family.recovery_ty)
+        .and_then(|attrs| attrs.gpu_resource_recovery(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` recovery argument lacks #[gpu_resource_recovery(...)] evidence"
+            ))
+        })?;
+    let visibility = nominal_attrs(db, family.visibility_ty)
+        .and_then(|attrs| attrs.gpu_resource_visibility(db))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` visibility argument lacks #[gpu_resource_visibility(...)] evidence"
+            ))
+        })?;
+
+    let policy = WebResourcePolicy {
+        kind: match kind {
+            GpuResourceKind::Storage => WebResourceKind::Storage,
+        },
+        access: match access {
+            GpuResourceAccess::ReadOnly => WebResourceAccess::ReadOnly,
+            GpuResourceAccess::WriteOnly => WebResourceAccess::WriteOnly,
+            GpuResourceAccess::ReadWrite => WebResourceAccess::ReadWrite,
+        },
+        residency: match residency {
+            GpuResourceResidency::Immutable => WebResourceResidency::Immutable,
+            GpuResourceResidency::ActorResident => WebResourceResidency::ActorResident,
+            GpuResourceResidency::FrameTransient => WebResourceResidency::FrameTransient,
+            GpuResourceResidency::Imported => WebResourceResidency::Imported,
+        },
+        initialization: match initialization {
+            GpuResourceInit::Zeroed => WebResourceInitialization::Zeroed,
+            GpuResourceInit::ContentAddressed => WebResourceInitialization::ContentAddressed {
+                sha256: content_addressed_digest(db, family.init_ty, path)?,
+            },
+            GpuResourceInit::Derived => WebResourceInitialization::Derived,
+        },
+        recovery: match recovery {
+            GpuResourceRecovery::ReplayRecipe => WebResourceRecovery::ReplayRecipe,
+            GpuResourceRecovery::RestoreCheckpoint => WebResourceRecovery::RestoreCheckpoint,
+            GpuResourceRecovery::Regenerate => WebResourceRecovery::Regenerate,
+            GpuResourceRecovery::NonRecoverable => WebResourceRecovery::NonRecoverable,
+        },
+        visibility: match visibility {
+            GpuResourceVisibility::Compute => WebResourceVisibility::Compute,
+            GpuResourceVisibility::Vertex => WebResourceVisibility::Vertex,
+            GpuResourceVisibility::Fragment => WebResourceVisibility::Fragment,
+            GpuResourceVisibility::ComputeFragment => WebResourceVisibility::ComputeFragment,
+            GpuResourceVisibility::VertexFragment => WebResourceVisibility::VertexFragment,
+            GpuResourceVisibility::All => WebResourceVisibility::All,
+        },
+    };
+
+    if policy.residency == WebResourceResidency::Immutable
+        && policy.access != WebResourceAccess::ReadOnly
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` immutable residency requires read-only access"
+        )));
+    }
+    if matches!(
+        policy.initialization,
+        WebResourceInitialization::ContentAddressed { .. }
+    ) && (policy.residency != WebResourceResidency::Immutable
+        || policy.access != WebResourceAccess::ReadOnly
+        || policy.recovery != WebResourceRecovery::ReplayRecipe)
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires immutable, read-only, replayable policy"
+        )));
+    }
+    if policy.initialization == WebResourceInitialization::Derived
+        && policy.access == WebResourceAccess::ReadOnly
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` derived initialization requires writable access"
+        )));
+    }
+    if policy.residency == WebResourceResidency::Imported {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` imported residency has no authorized browser realization yet"
+        )));
+    }
+    if policy.recovery != WebResourceRecovery::ReplayRecipe {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` requests {:?} recovery, which the fixed browser host does not realize yet",
+            policy.recovery
+        )));
+    }
+    Ok(policy)
+}
+
 fn actor_resources(
     db: &DriverDataBase,
     actor: &SemanticActor<'_>,
@@ -1253,16 +1487,11 @@ fn actor_resources(
             continue;
         };
         let ty = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
-        let Some(attrs) = nominal_attrs(db, ty) else {
+        let Some(resource) = semantic_gpu_resource(db, ty).map_err(|message| {
+            WebBundleError::EntryDerivation(format!("actor resource field is malformed: {message}"))
+        })?
+        else {
             continue;
-        };
-        let Some(kind) = attrs.gpu_resource(db) else {
-            continue;
-        };
-        let [element_ty, length_ty, ..] = ty.generic_args(db) else {
-            return Err(WebBundleError::EntryDerivation(
-                "storage resource type requires element and length arguments".to_owned(),
-            ));
         };
         let name = field
             .name
@@ -1273,7 +1502,12 @@ fn actor_resources(
                     "actor storage resource fields must be named".to_owned(),
                 )
             })?;
-        let length = semantic_const_u32(db, *length_ty).ok_or_else(|| {
+        let policy = resource
+            .family
+            .map(|family| typed_resource_policy(db, family, &name))
+            .transpose()?
+            .unwrap_or_default();
+        let length = semantic_const_u32(db, resource.length_ty).ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
                 "storage resource `{name}` length must be a concrete u32-sized integer"
             ))
@@ -1285,10 +1519,11 @@ fn actor_resources(
         }
         resources.push(WebActorResource {
             field_index: u32::try_from(field_index).unwrap(),
-            element: resource_element(db, *element_ty, &name)?,
+            element: resource_element(db, resource.element_ty, &name)?,
             name,
             length,
-            kind,
+            kind: resource.kind,
+            policy,
         });
     }
     Ok(resources)
@@ -4459,6 +4694,8 @@ pub struct WebResource {
     pub stride: u32,
     pub span: u32,
     pub element: WebActorResourceElement,
+    #[serde(default, skip_serializing_if = "is_default_resource_policy")]
+    pub policy: WebResourcePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4730,8 +4967,7 @@ pub struct WebPassShader {
 
 fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResource {
     let span = match &resource.element {
-        WebActorResourceElement::U32
-        | WebActorResourceElement::F32 => 4,
+        WebActorResourceElement::U32 | WebActorResourceElement::F32 => 4,
         WebActorResourceElement::Record { span, .. } => *span,
     };
     WebResource {
@@ -4742,6 +4978,7 @@ fn web_resource_manifest(resource: &WebActorResource, binding: u32) -> WebResour
         stride: span,
         span,
         element: resource.element.clone(),
+        policy: resource.policy.clone(),
     }
 }
 
@@ -4797,7 +5034,14 @@ fn stage_external_resources(
             group: resource.group,
             binding: resource.binding,
             name: resource.name.clone(),
-            access,
+            access: match resource.policy.access {
+                WebResourceAccess::ReadOnly => Access::Read,
+                // WGSL/Naga have no write-only storage declaration. Fe's
+                // missing GpuReadable evidence still rejects authored loads;
+                // the physical carrier therefore uses read_write.
+                WebResourceAccess::WriteOnly => Access::ReadWrite,
+                WebResourceAccess::ReadWrite => access,
+            },
             element: match &resource.element {
                 WebActorResourceElement::U32 => SpirvResourceElement::Scalar(SpirvScalarKind::U32),
                 WebActorResourceElement::F32 => SpirvResourceElement::Scalar(SpirvScalarKind::F32),
