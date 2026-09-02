@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-08-31
+Updated: 2026-09-02
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -11,6 +11,13 @@ This is the single current status ledger for the campaign. The larger
 Definition of done. Do not reconstruct another master checklist from the
 session history. Add scope here only when it changes the goal or a named exit
 gate.
+
+The current proof architecture and hindsight review is
+[`RECURSIVE_MANDELBROT_ZK_HINDSIGHT_AUDIT.md`](RECURSIVE_MANDELBROT_ZK_HINDSIGHT_AUDIT.md).
+It audits the implemented Fe proof stack, the exact boundary between recursive
+relations and recursive cryptography, the current compiler and WebGPU costs,
+and the recommended consolidation order. It is supporting analysis for this
+burn-down, not a second checklist.
 
 Legend:
 
@@ -475,6 +482,17 @@ existing Definition of done, not a second campaign checklist:
   `FriChallengeRegions` schema, and proves its total width at compile time.
   The full security receipt still needs migration plus an independent
   receipt-wide decoder before this gate can close.
+
+  The parallel `quilting-webgpu-api` worktree provides a relevant upstream
+  capability track, but is not yet MB2 evidence. Commits `f9abe8d8d` and
+  `1b24aeb37` establish its capability architecture and Fe-derived portable
+  storage layouts. Its mixed `f32 / u32 / f32` layout derives offsets
+  `0 / 4 / 8`, rejects unsupported layouts, and has reached release compiler,
+  browser-manifest, Sonatina, WGSL, and Naga validation. Actual adapter-backed
+  execution remains open, as does the active mixed-storage compiler slice.
+  MB2 should integrate the resulting typed resource and layout machinery in
+  narrow, exactness-gated slices after that work lands, while composing it
+  with `RegionSchema` rather than replacing either abstraction wholesale.
 - [x] **G-RECEIPT:** the complete nonrecursive BabyBear receipt accepts cleanly
   and rejects claim, domain, transcript, query, path, and encoding mutations.
   The first four-query process-isolated exact gate compiled a 23,636,877-byte
