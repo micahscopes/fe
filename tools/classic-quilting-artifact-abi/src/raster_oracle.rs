@@ -28,7 +28,7 @@ static COMPILED: OnceLock<CompiledRaster> = OnceLock::new();
 static COMPILED_PREDICATES: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_TOPOLOGY: OnceLock<WebBundle> = OnceLock::new();
 static COMPILED_SAMPLING: OnceLock<WebBundle> = OnceLock::new();
-static COMPILED_CONSTRUCTION: OnceLock<WebBundle> = OnceLock::new();
+static COMPILED_DELAUNAY: OnceLock<WebBundle> = OnceLock::new();
 
 fn compile_compute_oracle(relative_path: &str, entry: &str, label: &str) -> WebBundle {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
@@ -123,34 +123,47 @@ fn compiled_sampling() -> &'static WebBundle {
     })
 }
 
-fn compiled_construction() -> &'static WebBundle {
-    COMPILED_CONSTRUCTION.get_or_init(|| {
+fn compiled_delaunay() -> &'static WebBundle {
+    COMPILED_DELAUNAY.get_or_init(|| {
         compile_compute_oracle(
             "../../ingots/classic_quilting_construction_webgpu_oracle",
-            "construct",
-            "classic-quilting-constrained-construction",
+            "restore",
+            "classic-quilting-constrained-delaunay",
         )
     })
 }
 
 #[test]
-fn constrained_construction_compiles_to_browser_profile_wgsl() {
-    let bundle = compiled_construction();
-    assert_eq!(bundle.manifest.passes.len(), 1);
-    assert_eq!(bundle.manifest.passes[0].source_entry, "construct");
-    assert_eq!(bundle.manifest.passes[0].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[0].repeat, 1);
-    let module = naga::front::wgsl::parse_str(&bundle.wgsl).expect("construction WGSL parses");
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::default(),
-    )
-    .validate(&module)
-    .expect("construction WGSL validates with browser capabilities");
-    assert!(bundle.wgsl.contains("@compute"));
-    assert!(!bundle.wgsl.contains("@fragment"));
-    assert!(!bundle.wgsl.contains("f32"));
-    assert!(!bundle.wgsl.contains("f64"));
+fn constrained_delaunay_compiles_as_an_ordered_browser_profile_graph() {
+    let bundle = compiled_delaunay();
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        ["construct", "restore"]
+    );
+    assert!(bundle
+        .manifest
+        .passes
+        .iter()
+        .all(|pass| pass.dispatch == Some([1, 1, 1]) && pass.repeat == 1));
+    for shader in &bundle.pass_wgsl {
+        let module = naga::front::wgsl::parse_str(&shader.source).expect("Delaunay WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .expect("Delaunay WGSL validates with browser capabilities");
+        assert!(shader.source.contains("@compute"));
+        assert!(!shader.source.contains("@fragment"));
+        assert!(!shader.source.contains("f32"));
+        assert!(!shader.source.contains("f64"));
+    }
 }
 
 fn point_strictly_between(first: [u32; 3], second: [u32; 3], point: [u32; 3]) -> bool {
@@ -193,12 +206,15 @@ fn exact_boundary_edges(points: &[[u32; 3]], boundary: usize) -> BTreeSet<(u32, 
 }
 
 #[test]
-fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
+fn gpu_constrained_delaunay_satisfies_exact_planar_invariants() {
     let Some((adapter, device, queue)) = device() else {
         return;
     };
-    eprintln!("GPU construction adapter: {}", adapter.get_info().name);
-    let bundle = compiled_construction();
+    eprintln!(
+        "GPU constrained Delaunay adapter: {}",
+        adapter.get_info().name
+    );
+    let bundle = compiled_delaunay();
     let expected = super::fe_oracle::scalar_sampling_oracle();
     let buffers = bundle
         .manifest
@@ -270,29 +286,36 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
         layout: &layout,
         entries: &entries,
     });
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Fe classic Quilting construction WGSL"),
-        source: wgpu::ShaderSource::Wgsl(bundle.pass_wgsl[0].source.as_str().into()),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Fe classic Quilting construction stage"),
-        layout: Some(&pipeline_layout),
-        module: &module,
-        entry_point: Some("main"),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-        cache: None,
-    });
+    let pipelines = bundle
+        .pass_wgsl
+        .iter()
+        .map(|shader| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Fe classic Quilting constrained Delaunay WGSL"),
+                source: wgpu::ShaderSource::Wgsl(shader.source.as_str().into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Fe classic Quilting constrained Delaunay stage"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Fe classic Quilting construction graph"),
     });
-    let pass = &bundle.manifest.passes[0];
-    dispatch_compute_pass(
-        &mut encoder,
-        &pipeline,
-        &group,
-        pass.dispatch.expect("construction dispatch"),
-        pass.repeat,
-    );
+    for (pass, pipeline) in bundle.manifest.passes.iter().zip(&pipelines) {
+        dispatch_compute_pass(
+            &mut encoder,
+            pipeline,
+            &group,
+            pass.dispatch.expect("constrained Delaunay dispatch"),
+            pass.repeat,
+        );
+    }
     let receipt_staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("test-only construction receipt readback"),
         size: 9 * size_of::<u32>() as u64,
@@ -302,6 +325,12 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
     let triangle_staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("test-only construction triangle readback"),
         size: buffers["triangles"].size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let delaunay_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test-only Delaunay receipt readback"),
+        size: 7 * size_of::<u32>() as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -318,6 +347,13 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
         &triangle_staging,
         0,
         triangle_staging.size(),
+    );
+    encoder.copy_buffer_to_buffer(
+        &buffers["delaunay_receipt"],
+        0,
+        &delaunay_staging,
+        0,
+        delaunay_staging.size(),
     );
     queue.submit(Some(encoder.finish()));
 
@@ -341,6 +377,16 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
             0,
         ]
     );
+    let delaunay_receipt = readback(&device, &delaunay_staging)
+        .chunks_exact(size_of::<u32>())
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(delaunay_receipt[0], 1);
+    assert_eq!(delaunay_receipt[1], 1);
+    assert_eq!(delaunay_receipt[2], vertices);
+    assert_eq!(delaunay_receipt[3], triangle_count);
+    assert_eq!(delaunay_receipt[5], 0);
+    assert_eq!(delaunay_receipt[6], 0);
     let triangle_words = readback(&device, &triangle_staging);
     let triangles = triangle_words
         .chunks_exact(4 * size_of::<u32>())
@@ -355,8 +401,8 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
         })
         .collect::<Vec<_>>();
     let mut used_vertices = BTreeSet::<u32>::new();
-    let mut edge_uses = BTreeMap::<(u32, u32), Vec<(u32, u32)>>::new();
-    for triangle in &triangles {
+    let mut edge_uses = BTreeMap::<(u32, u32), Vec<(usize, u32, u32)>>::new();
+    for (triangle_ordinal, triangle) in triangles.iter().enumerate() {
         assert!(triangle.iter().all(|vertex| *vertex < vertices));
         assert_eq!(triangle.iter().copied().collect::<BTreeSet<_>>().len(), 3);
         assert!(
@@ -384,7 +430,7 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
             edge_uses
                 .entry((edge.0.min(edge.1), edge.0.max(edge.1)))
                 .or_default()
-                .push(edge);
+                .push((triangle_ordinal, edge.0, edge.1));
         }
     }
     assert_eq!(used_vertices.len(), expected.points.len());
@@ -400,7 +446,45 @@ fn gpu_constrained_construction_satisfies_exact_planar_invariants() {
     for uses in edge_uses.values() {
         assert!(uses.len() == 1 || uses.len() == 2);
         if uses.len() == 2 {
-            assert_eq!(uses[0], (uses[1].1, uses[1].0));
+            assert_eq!((uses[0].1, uses[0].2), (uses[1].2, uses[1].1));
+            let first_triangle = triangles[uses[0].0];
+            let second_triangle = triangles[uses[1].0];
+            let u = uses[0].1;
+            let v = uses[0].2;
+            let first_opposite = *first_triangle
+                .iter()
+                .find(|vertex| **vertex != u && **vertex != v)
+                .unwrap();
+            let second_opposite = *second_triangle
+                .iter()
+                .find(|vertex| **vertex != u && **vertex != v)
+                .unwrap();
+            let point2 = |vertex: u32| {
+                let point = expected.points[usize::try_from(vertex).unwrap()];
+                [point[1], point[2]]
+            };
+            let convex =
+                predicate_orientation(point2(first_opposite), point2(u), point2(second_opposite))
+                    > 0
+                    && predicate_orientation(
+                        point2(second_opposite),
+                        point2(v),
+                        point2(first_opposite),
+                    ) > 0;
+            if convex {
+                let incircle = predicate_incircle(
+                    point2(u),
+                    point2(v),
+                    point2(first_opposite),
+                    point2(second_opposite),
+                );
+                let current = (u.min(v), u.max(v));
+                let proposed = (
+                    first_opposite.min(second_opposite),
+                    first_opposite.max(second_opposite),
+                );
+                assert!(incircle < 0 || (incircle == 0 && current <= proposed));
+            }
         }
     }
 }
