@@ -85,8 +85,8 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
     // (compute shaders have no wasm-style imports), so it is discarded here.
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_calls(&mut module);
-    ensure_spirv_entry_call_free(&module)?;
+    let preserved_helpers = inline_spirv_calls(&mut module);
+    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -133,8 +133,8 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     builtin_arguments: &[SpirvBuiltinArgument],
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_calls(&mut module);
-    ensure_spirv_entry_call_free(&module)?;
+    let preserved_helpers = inline_spirv_calls(&mut module);
+    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
 
     let mut backend = SpirvBackend::new()
         .with_compute()
@@ -188,8 +188,8 @@ pub fn compile_runtime_package_spirv_grid(
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_calls(&mut module);
-    ensure_spirv_entry_call_free(&module)?;
+    let preserved_helpers = inline_spirv_calls(&mut module);
+    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -244,8 +244,8 @@ pub fn compile_runtime_package_spirv_render(
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_calls(&mut module);
-    ensure_spirv_entry_call_free(&module)?;
+    let preserved_helpers = inline_spirv_calls(&mut module);
+    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
 
     SpirvBackend::new()
         .with_render()
@@ -269,8 +269,8 @@ pub fn compile_runtime_package_spirv_render_with_resources(
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_calls(&mut module);
-    ensure_spirv_entry_call_free(&module)?;
+    let preserved_helpers = inline_spirv_calls(&mut module);
+    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
 
     let mut backend = SpirvBackend::new().with_render();
     for resource in resources {
@@ -332,9 +332,11 @@ pub fn compile_render_wgsl<'db>(
     compile_runtime_package_spirv_render(db, &package)
 }
 
-fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
+fn inline_spirv_calls(
+    module: &mut sonatina_ir::Module,
+) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
     let roots = module.funcs().into_iter().take(1).collect::<Vec<_>>();
-    inline_spirv_calls_from_roots(module, &roots);
+    inline_spirv_calls_from_roots(module, &roots, true)
 }
 
 fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&str]) {
@@ -347,13 +349,15 @@ fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&st
             })
         })
         .collect::<Vec<_>>();
-    inline_spirv_calls_from_roots(module, &roots);
+    let preserved = inline_spirv_calls_from_roots(module, &roots, false);
+    debug_assert!(preserved.is_empty());
 }
 
 fn inline_spirv_calls_from_roots(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
-) {
+    preserve_scalar_helpers: bool,
+) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
     let snapshot = std::env::var_os("FE_SPIRV_INLINE_SNAPSHOT_DIR").map(|directory| {
         (
@@ -361,15 +365,14 @@ fn inline_spirv_calls_from_roots(
             SPIRV_INLINE_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         )
     });
-    // The SPIR-V translator currently consumes only the first (entry) function
-    // and deliberately rejects calls. Flatten outward from only the selected
-    // shader roots. Expanding every helper bottom-up first retains many enormous
-    // intermediate copies for generated proof graphs, even though the backend
-    // will never translate those helper bodies. Function count is not a useful
-    // proxy for that expansion: a proof kernel with only a few dozen helpers can
-    // contain a dense generated graph. Rooted inlining therefore applies to
-    // every shader module and treats helpers as immutable sources, materializing
-    // only the call-free entries.
+    // The SPIR-V translator admits ordinary scalar helper call graphs but keeps
+    // aggregate, object, arena, and resource-crossing helper ABIs closed.
+    // Flatten only those helpers that cross the closed boundary. Expanding every
+    // helper bottom-up retains enormous intermediate copies for generated proof
+    // graphs. Function count is not a useful proxy for that expansion: a proof
+    // kernel with only a few dozen helpers can contain a dense generated graph.
+    // Rooted inlining therefore treats helper bodies as immutable sources and
+    // materializes only the portions that the backend cannot represent directly.
     // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
     let mut inliner_config = spirv_inliner_config();
@@ -390,11 +393,26 @@ fn inline_spirv_calls_from_roots(
     if let Some((directory, sequence)) = &snapshot {
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "pre");
     }
+    let preserved_helpers = if preserve_scalar_helpers {
+        spirv_scalar_helper_candidates(module, roots)
+    } else {
+        std::collections::HashSet::new()
+    };
+    let original_hints = preserved_helpers
+        .iter()
+        .map(|&function| (function, module.ctx.inline_hint(function)))
+        .collect::<Vec<_>>();
+    for &function in &preserved_helpers {
+        module
+            .ctx
+            .set_inline_hint(function, sonatina_ir::InlineHint::Never);
+    }
     if trace {
         eprintln!(
-            "fe spirv inliner: strategy=rooted, functions={}, roots={}, initial_insts={initial_root_insts}",
+            "fe spirv inliner: strategy=rooted, functions={}, roots={}, preserved_scalar_helpers={}, initial_insts={initial_root_insts}",
             module.funcs().len(),
-            roots.len()
+            roots.len(),
+            preserved_helpers.len()
         );
     }
     for frontier in 0..MAX_FRONTIERS {
@@ -442,9 +460,170 @@ fn inline_spirv_calls_from_roots(
             break;
         }
     }
+    let final_cleanup = spirv_post_inline_cleanup_passes();
+    if trace {
+        for pass in final_cleanup {
+            eprintln!(
+                "fe spirv post-inline cleanup: pass={}, before_insts={}",
+                pass.as_str(),
+                spirv_root_instruction_count(module, roots)
+            );
+            run_function_passes_on(module, roots, &[pass]);
+            eprintln!(
+                "fe spirv post-inline cleanup: pass={}, after_insts={}",
+                pass.as_str(),
+                spirv_root_instruction_count(module, roots)
+            );
+        }
+    } else {
+        run_function_passes_on(module, roots, &final_cleanup);
+    }
     if let Some((directory, sequence)) = &snapshot {
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "post");
     }
+    for (function, hint) in original_hints {
+        module.ctx.set_inline_hint(function, hint);
+    }
+    preserved_helpers
+}
+
+fn spirv_scalar_helper_candidates(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
+    use sonatina_ir::{Type, inst::control_flow};
+
+    fn scalar_type(ty: Type) -> bool {
+        matches!(ty, Type::I1 | Type::I32 | Type::F32)
+    }
+
+    fn classify(
+        module: &sonatina_ir::Module,
+        roots: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
+        function_ref: sonatina_ir::module::FuncRef,
+        states: &mut std::collections::HashMap<sonatina_ir::module::FuncRef, u8>,
+        accepted: &mut std::collections::HashSet<sonatina_ir::module::FuncRef>,
+    ) -> bool {
+        if roots.contains(&function_ref) {
+            return false;
+        }
+        match states.get(&function_ref).copied() {
+            Some(1) => return false,
+            Some(2) => return accepted.contains(&function_ref),
+            _ => {}
+        }
+        states.insert(function_ref, 1);
+
+        let Some(signature) = module.ctx.get_sig(function_ref) else {
+            states.insert(function_ref, 2);
+            return false;
+        };
+        let result_arity = signature.ret_tys().len();
+        let signature_ok = signature.args().iter().copied().all(scalar_type)
+            && signature.ret_tys().iter().copied().all(scalar_type);
+        let Some((body_ok, callees)) = module.func_store.try_view(function_ref, |function| {
+            let inst_set = function.inst_set();
+            let mut body_ok = signature_ok;
+            let mut callees = Vec::new();
+            let mut return_sites = 0usize;
+            for block in function.layout.iter_block() {
+                for instruction in function.layout.iter_inst(block) {
+                    let data = function.dfg.inst(instruction);
+                    let direct_call = function.dfg.call_info(instruction);
+                    if let Some(call) = direct_call {
+                        callees.push(call.callee());
+                    } else if data.declared_effect_hint().has_memory_effect() {
+                        body_ok = false;
+                    }
+                    if <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
+                        inst_set, data,
+                    )
+                    .is_some()
+                        || <&control_flow::Unreachable as sonatina_ir::InstDowncast>::downcast(
+                            inst_set, data,
+                        )
+                        .is_some()
+                    {
+                        body_ok = false;
+                    }
+                    if <&control_flow::Return as sonatina_ir::InstDowncast>::downcast(
+                        inst_set, data,
+                    )
+                    .is_some()
+                    {
+                        return_sites += 1;
+                    }
+                    if function
+                        .dfg
+                        .inst_results(instruction)
+                        .iter()
+                        .copied()
+                        .any(|value| !scalar_type(function.dfg.value_ty(value)))
+                        || data
+                            .collect_values()
+                            .into_iter()
+                            .any(|value| !scalar_type(function.dfg.value_ty(value)))
+                    {
+                        body_ok = false;
+                    }
+                }
+            }
+            // WGSL represents several scalar results with one logical result
+            // struct. The backend currently admits one canonical tuple-return
+            // site and fails closed on structured multi-site transport.
+            if result_arity > 1 && return_sites != 1 {
+                body_ok = false;
+            }
+            (body_ok, callees)
+        }) else {
+            states.insert(function_ref, 2);
+            return false;
+        };
+        // Visit every reachable child even after one child proves this parent
+        // ineligible. Aggregate resource wrappers often appear above otherwise
+        // self-contained scalar arithmetic islands. Short-circuiting here would
+        // hide those islands from the helper ABI merely because their parent
+        // must still be inlined.
+        let mut callees_ok = true;
+        for callee in callees {
+            if !classify(module, roots, callee, states, accepted) {
+                callees_ok = false;
+            }
+        }
+        if body_ok && callees_ok {
+            accepted.insert(function_ref);
+        }
+        states.insert(function_ref, 2);
+        accepted.contains(&function_ref)
+    }
+
+    let roots = roots
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let root_callees = roots
+        .iter()
+        .flat_map(|&root| {
+            module
+                .func_store
+                .try_view(root, |function| {
+                    function
+                        .layout
+                        .iter_block()
+                        .flat_map(|block| function.layout.iter_inst(block))
+                        .filter_map(|instruction| function.dfg.call_info(instruction))
+                        .map(|call| call.callee())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let mut states = std::collections::HashMap::new();
+    let mut accepted = std::collections::HashSet::new();
+    for callee in root_callees {
+        classify(module, &roots, callee, &mut states, &mut accepted);
+    }
+    accepted
 }
 
 fn write_spirv_inline_snapshot(
@@ -504,17 +683,15 @@ fn sanitize_snapshot_name(name: &str) -> String {
 fn spirv_inliner_config() -> InlinerConfig {
     InlinerConfig {
         enable_full_inliner: true,
-        // In the SPIR-V lane the inliner is a LEGALITY pass, not an optimization:
-        // `ensure_spirv_entry_call_free` below makes any residual call in the entry
-        // a hard error, because the SPIR-V translator consumes only the entry
-        // function. So inline UNCONDITIONALLY. The per-inlinee size caps and depth
-        // are 0 ("no cap": `exceeds_cap`/depth gate on `> 0`) and the thresholds are
-        // maxed so the cost model never declines a call. The only remaining
-        // decliners are the genuinely-irreducible cases (`#[inline(never)]`, a
-        // missing body, and the recursive-SCC guard), for which
-        // `ensure_spirv_entry_call_free` is the fail-closed backstop with a
-        // callee-named error. Ordinary loop-carrying `pub fn`s (dec's operators and
-        // their helpers) flatten into the fragment entry with no annotation.
+        // In the SPIR-V lane this inliner remains a legality pass for helpers
+        // outside the scalar call ABI. The automatic classifier temporarily
+        // marks backend-lowerable scalar helpers `Never`; every other reachable
+        // helper is inlined unconditionally. The per-inlinee size caps and depth
+        // are 0 ("no cap": `exceeds_cap`/depth gate on `> 0`) and the thresholds
+        // are maxed so the cost model never declines an eligible call. Missing
+        // bodies, recursion, authored `#[inline(never)]` on a non-lowerable
+        // helper, and residual unsupported calls still fail closed with the
+        // callee named.
         max_inlinee_blocks: 0,
         max_inlinee_insts: 0,
         max_growth_per_caller: 0,
@@ -522,7 +699,7 @@ fn spirv_inliner_config() -> InlinerConfig {
         inline_threshold: i32::MAX,
         inline_threshold_cold: i32::MAX,
         // The one finite bound: a coarse OOM fuse that converts a pathological
-        // inlining blowup into the same `not call-free` diagnostic instead of an
+        // inlining blowup into a named residual-call diagnostic instead of an
         // OOM-killed process. NOTE it does NOT bound `#[inline(always)]` (ALWAYS
         // short-circuits before the growth check in sonatina's `decide_inline`), so
         // it protects the ordinary / `#[inline]` paths only. Deliberately
@@ -537,6 +714,17 @@ fn spirv_rooted_inline_cleanup_passes() -> [Pass; 5] {
     [
         Pass::CfgCleanup,
         Pass::BranchCanonicalize,
+        Pass::Sccp,
+        Pass::ScalarCanonicalize,
+        Pass::CfgCleanup,
+    ]
+}
+
+fn spirv_post_inline_cleanup_passes() -> [Pass; 6] {
+    [
+        Pass::KnownBitsSimplify,
+        Pass::CheckedArithElim,
+        Pass::RangeBranchSimplify,
         Pass::Sccp,
         Pass::ScalarCanonicalize,
         Pass::CfgCleanup,
@@ -561,7 +749,10 @@ fn spirv_root_instruction_count(
         .sum()
 }
 
-fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), LowerError> {
+fn ensure_spirv_entry_calls_lowerable(
+    module: &sonatina_ir::Module,
+    preserved_helpers: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
+) -> Result<(), LowerError> {
     let Some(&entry) = module.funcs().first() else {
         return Err(LowerError::Spirv(
             "SPIR-V module has no entry function".to_string(),
@@ -577,6 +768,9 @@ fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), Lowe
             function.layout.iter_inst(block).find_map(|inst| {
                 let call = function.dfg.call_info(inst)?;
                 let callee = call.callee();
+                if preserved_helpers.contains(&callee) {
+                    return None;
+                }
                 let callee_name = module
                     .ctx
                     .get_sig(callee)
@@ -592,7 +786,7 @@ fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), Lowe
     });
     match residual {
         Some(callee) => Err(LowerError::Spirv(format!(
-            "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
+            "SPIR-V entry `{entry_name}` retains a call outside the automatically lowerable scalar helper graph after bounded inlining: {callee}"
         ))),
         None => Ok(()),
     }

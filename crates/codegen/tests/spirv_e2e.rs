@@ -2516,6 +2516,33 @@ const CGA_SANDWICH_SUPPORT_CL41_SOURCE: &str =
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 const MVT5_F32_NESTED_HELPER_SOURCE: &str =
     include_str!("fixtures/spirv/mvt5_f32_nested_helper_render.fe");
+const SCALAR_HELPER_CALL_RENDER_SOURCE: &str =
+    include_str!("fixtures/spirv/scalar_helper_call_render.fe");
+
+#[test]
+fn authored_scalar_helper_survives_as_browser_wgsl_function() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///scalar_helper_call_render.fe").expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(SCALAR_HELPER_CALL_RENDER_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("authored scalar helper should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("authored scalar helper should compile as Render SPIR-V");
+    let wgsl = artifact
+        .wgsl
+        .as_deref()
+        .expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("fn mix_words") && wgsl.matches("mix_words").count() >= 2,
+        "the ordinary Fe helper must remain one shared WGSL function and one call:\n{wgsl}",
+    );
+}
 
 #[test]
 fn authored_nested_mvt5_helper_emits_bounded_browser_wgsl() {

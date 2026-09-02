@@ -1,0 +1,14 @@
+// Ordinary scalar Fe helpers stay as real WGSL functions. No source-level
+// inlining annotation is required.
+
+extern {
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+fn mix_words(_ left: u32, _ right: u32) -> u32 {
+    left * 3 + right
+}
+
+pub fn scalar_helper_call_render(px: i32, py: i32) -> u32 {
+    mix_words(__bitcast(px), __bitcast(py))
+}
