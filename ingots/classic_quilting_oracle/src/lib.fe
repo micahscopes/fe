@@ -34,6 +34,8 @@ use quilting_atlas::sampling::{
     FixedBarycentric,
     boundary_seed,
     candidate_cell_count,
+    candidate_cell_at_slot,
+    candidate_conflicts_boundary,
     candidate_conflict_cell_span,
     candidate_density_bucket,
     candidate_grid_side,
@@ -44,6 +46,7 @@ use quilting_atlas::sampling::{
     density_exponent_q8,
     equilateral_distance_squared,
     interior_candidate,
+    interior_candidate_at_slot,
     initial_candidate_state,
     mix32,
     poisson_conflict,
@@ -216,6 +219,48 @@ pub fn atlas_candidate_cell_count(_ patch: u32) -> u32 {
 
 pub fn atlas_candidate_slot_count(_ patch: u32) -> u32 {
     candidate_slot_count(canonical_key_at(patch as usize))
+}
+
+pub fn atlas_candidate_cell_b(_ patch: u32, _ slot: u32) -> u32 {
+    candidate_cell_at_slot(canonical_key_at(patch as usize), slot).cell_b
+}
+
+pub fn atlas_candidate_cell_c(_ patch: u32, _ slot: u32) -> u32 {
+    candidate_cell_at_slot(canonical_key_at(patch as usize), slot).cell_c
+}
+
+pub fn atlas_candidate_cell_trial(_ patch: u32, _ slot: u32) -> u32 {
+    candidate_cell_at_slot(canonical_key_at(patch as usize), slot).trial
+}
+
+pub fn atlas_candidate_cell_valid(_ patch: u32, _ slot: u32) -> u32 {
+    if candidate_cell_at_slot(canonical_key_at(patch as usize), slot).valid { 1 } else { 0 }
+}
+
+pub fn atlas_candidate_at_slot_b(
+    _ patch: u32,
+    _ seed: u32,
+    _ slot: u32,
+) -> u32 {
+    interior_candidate_at_slot(canonical_key_at(patch as usize), patch, seed, slot).point.b
+}
+
+pub fn atlas_candidate_at_slot_c(
+    _ patch: u32,
+    _ seed: u32,
+    _ slot: u32,
+) -> u32 {
+    interior_candidate_at_slot(canonical_key_at(patch as usize), patch, seed, slot).point.c
+}
+
+pub fn atlas_candidate_at_slot_boundary_conflict(
+    _ patch: u32,
+    _ seed: u32,
+    _ slot: u32,
+) -> u32 {
+    let key = canonical_key_at(patch as usize)
+    let candidate = interior_candidate_at_slot(key, patch, seed, slot)
+    if candidate_conflicts_boundary(key, candidate) { 1 } else { 0 }
 }
 
 pub fn atlas_candidate_a(
