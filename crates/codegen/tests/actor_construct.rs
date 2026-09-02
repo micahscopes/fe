@@ -241,6 +241,49 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
 }
 
 #[test]
+fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
+    const BYTES: &[u8] = b"0123456789abcde\n";
+    const SHA256: &str = "dc08b6f2c7aaeca6d88cd9c82797b328160ccb3b1a84243b8eadb296744426c4";
+
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_content_addressed");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "raster resource diagnostics:\n{diagnostics}");
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("shade", Some("raster-resource.fe".to_owned()))
+            .with_resource_asset(BYTES.to_vec()),
+    )
+    .expect("content-addressed authored raster bundle");
+    let [pass] = bundle.manifest.passes.as_slice() else {
+        panic!("one authored pair must produce one raster pass")
+    };
+    let [binding] = pass.layout.bindings.as_slice() else {
+        panic!("one actor resource must produce one shared binding")
+    };
+    assert_eq!(binding.role, fe_codegen::WebBindingRole::Resource);
+    assert_eq!(binding.name, "fixture");
+    assert_eq!(binding.binding, 0);
+    assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
+    assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
+    assert!(bundle.wgsl.contains("var<storage> fixture"), "{}", bundle.wgsl);
+
+    let [resource] = bundle.manifest.resources.as_slice() else {
+        panic!("one content-addressed actor resource must be materialized once")
+    };
+    assert_eq!(
+        resource.policy.initialization,
+        WebResourceInitialization::ContentAddressed {
+            sha256: SHA256.to_owned(),
+        }
+    );
+}
+
+#[test]
 fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_layered_raster");

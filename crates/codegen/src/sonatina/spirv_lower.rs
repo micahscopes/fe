@@ -296,13 +296,35 @@ pub fn compile_runtime_package_spirv_authored_raster(
     vertex_entry: &str,
     fragment_entry: &str,
 ) -> Result<SpirvArtifact, LowerError> {
+    compile_runtime_package_spirv_authored_raster_with_resources(
+        db,
+        package,
+        vertex_entry,
+        fragment_entry,
+        &[],
+    )
+}
+
+/// Lower an authored vertex/fragment pair whose shared actor-state suffix
+/// contains compiler-described storage resources. Resource argument indices
+/// refer to the vertex entry; Sonatina projects them onto the corresponding
+/// fragment-state slots and emits one shared bind-group interface.
+pub fn compile_runtime_package_spirv_authored_raster_with_resources(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    resources: &[SpirvExternalResource],
+) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
     ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
 
-    SpirvBackend::new()
-        .with_authored_raster(vertex_entry, fragment_entry)
-        .compile_module(&module)
+    let mut backend = SpirvBackend::new().with_authored_raster(vertex_entry, fragment_entry);
+    for resource in resources {
+        backend = backend.with_external_resource(resource.clone());
+    }
+    backend.compile_module(&module)
         .map_err(|errors| {
             LowerError::Spirv(
                 errors

@@ -51,7 +51,7 @@ use crate::resident_actor::{
     StructuredChildActorArtifact, behavior_is_scoped_task, compile_scoped_task_support,
 };
 use crate::sonatina::{
-    WasmCompileOptions, compile_runtime_package_spirv_authored_raster,
+    WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_resources,
     compile_runtime_package_spirv_compute_with_interface, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
     compile_runtime_package_wasm_with_options,
@@ -5291,7 +5291,6 @@ impl ActorShaderCompileKind {
 
 fn plan_actor_shader_compile_units(
     program: &WebActorProgram,
-    resources: &[WebResource],
 ) -> Result<Vec<ActorShaderCompileUnit>, WebBundleError> {
     let mut units = Vec::with_capacity(program.stages.len());
     let mut index = 0;
@@ -5309,11 +5308,6 @@ fn plan_actor_shader_compile_units(
                             .to_owned(),
                     ));
                 };
-                if !resources.is_empty() {
-                    return Err(WebBundleError::Lower(
-                        "authored raster resources are not wired into both stages yet".to_owned(),
-                    ));
-                }
                 units.push(ActorShaderCompileUnit {
                     stage_index: index,
                     source_entry: fragment_entry.clone(),
@@ -5418,11 +5412,20 @@ fn compile_actor_shader_unit(
                 &[vertex_entry.clone(), unit.source_entry.clone()],
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-            compile_runtime_package_spirv_authored_raster(
+            let external = stage_external_resources(
+                db,
+                &package,
+                vertex_entry,
+                resources,
+                Access::Read,
+                None,
+            )?;
+            compile_runtime_package_spirv_authored_raster_with_resources(
                 db,
                 &package,
                 vertex_entry,
                 &unit.source_entry,
+                &external,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))
         }
@@ -5444,7 +5447,7 @@ fn compile_actor_shader_artifacts(
     resources: &[WebResource],
     requested_jobs: usize,
 ) -> Result<Vec<Option<SpirvArtifact>>, WebBundleError> {
-    let units = plan_actor_shader_compile_units(program, resources)?;
+    let units = plan_actor_shader_compile_units(program)?;
     let jobs = requested_jobs.clamp(1, 4);
     let trace = std::env::var_os("FE_WEB_STAGE_TRACE").is_some()
         || std::env::var_os("FE_WASM_LOWER_TRACE").is_some();

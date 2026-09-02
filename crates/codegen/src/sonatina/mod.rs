@@ -51,6 +51,7 @@ pub use native::{
 pub use spirv_lower::{
     compile_render_wgsl, compile_runtime_package_spirv,
     compile_runtime_package_spirv_authored_raster,
+    compile_runtime_package_spirv_authored_raster_with_resources,
     compile_runtime_package_spirv_compute_with_interface,
     compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
