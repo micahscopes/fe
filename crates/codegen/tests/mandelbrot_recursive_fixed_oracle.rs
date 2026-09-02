@@ -3761,6 +3761,51 @@ fn production_boundary_plan_matches_independent_nodes_and_rejects_mutations() {
 }
 
 #[test]
+fn recursive_committed_chunk_preserves_certified_boundaries() {
+    let entry = "recursive_committed_leaf4_encoded";
+    let bytes = compile_fixture_entry(entry);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes)
+        .expect("focused recursive committed-chunk Wasm module should load");
+    assert_eq!(
+        module.imports().count(),
+        0,
+        "focused recursive committed-chunk fixture must remain zero-import",
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("focused recursive committed-chunk fixture should instantiate");
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("focused recursive committed-chunk fixture should export linear memory");
+
+    let claim = Claim {
+        point: ComplexFx {
+            real: zero(),
+            imaginary: zero(),
+        },
+        bound: 32,
+    };
+    let steps = 9;
+    let end = evaluate(&claim, steps);
+    let start = Boundary {
+        iteration: 0,
+        z: ComplexFx {
+            real: zero(),
+            imaginary: zero(),
+        },
+        escaped: false,
+    };
+    let mut arguments = claim_args(&claim);
+    arguments.push(steps);
+    let (_, _, committed) = encoded(&mut store, &instance, memory, entry, &arguments);
+    assert_eq!(
+        committed,
+        expected_committed_words(&claim, &start, &end, 1),
+        "one recursive leaf must commit the complete certified chunk",
+    );
+}
+
 fn recursive_fixed_chunks_match_bigint_and_reject_mutated_boundaries() {
     let bytes = compile_fixture();
     let engine = wasmtime::Engine::default();
