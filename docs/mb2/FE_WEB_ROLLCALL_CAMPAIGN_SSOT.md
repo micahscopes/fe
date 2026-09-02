@@ -3494,20 +3494,35 @@ browser proof flow merely to complete this list.
    addressing audit is
    `/workspace/scratch/riffcat-semantic-addressing-report-2026-09-02.md`; the
    evidence-complete review bundle is
-   `/workspace/scratch/mb2-sonatina-vsdg-pro-consultation-2026-09-02.tar.gz`.
+   `/workspace/scratch/mb2-gpu-backend-boundary-pro-consultation-2026-09-02.tar.gz`.
    Exact merging contracts the production round from 6,934 to 3,179 Sonatina
    instructions. Preserving every lowerable resource helper then expands it to
    8,913 root instructions, 63,288 Naga expressions, and 2,063,940 WGSL bytes.
    Retaining only helpers that perform real resource access recovers the full
    regression at 7,276 instructions, 51,198 expressions, and 1,600,494 bytes,
    with a focused callable-accessor versus inlined-cursor regression. Compare
-   three boundaries before deepening the arena ABI: Sonatina v1 hardening,
-   native typed Fe-to-Naga lowering, and a shared VSDG plus separation-logic
-   graph owned by future Sonatina v2. The decision experiment must use the
-   same resource fixture, one balanced arena helper, Naga validation, browser
-   execution, independent value oracles, size, compile-time, and peak-memory
-   measurements. An interim Fe-side graph must carry an explicit transplant
-   and deletion gate so it cannot ossify into a parallel language backend.
+   three boundaries before deepening the arena ABI: current Sonatina
+   hardening, native typed Fe-to-Naga lowering, and a minimal target-neutral
+   typed layer using only checked-out public code. The decision experiment
+   must use the same resource fixture, one balanced arena helper, Naga
+   validation, browser execution, independent value oracles, size,
+   compile-time, and peak-memory measurements. An interim Fe-side graph must
+   carry an explicit consolidation and deletion gate so it cannot ossify into
+   a parallel language backend. The first external review sharpens the next
+   slice: instrument rooted inlining by source helper and report call
+   multiplicity plus cloned-instruction survival after every cleanup pass.
+   Only then decide whether backend-only balanced arena admission has enough
+   leverage. If it does not, add a bounded GPU materialization mode on the
+   existing RMIR-to-Sonatina path so statically sized private locals remain
+   typed aggregates and Naga locals, while only genuinely dynamic allocation
+   uses the byte arena. Do not begin with broad control-provenance plumbing.
+   A focused physical-browser site materialized the exact 1,600,494-byte
+   compute file, whose root private arena is 717 u32 words, without changing
+   either shader digest. External Chrome then lost its WebGPU instance during
+   poster readback and the same process subsequently returned no adapter for
+   a one-word control. Restart Chrome, run the control first, then run the
+   immutable production artifact before attributing the loss to shader size
+   or private-memory pressure.
 
 The Definition of done is not yet met. In particular, the real-GPU gate,
 manifest deletion, Worker/DEC general messaging, complete legacy disposition,
