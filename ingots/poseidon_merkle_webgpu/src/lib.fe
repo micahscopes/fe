@@ -1,0 +1,260 @@
+//! Ordered BabyBear Poseidon2 Merkle placement for WebGPU storage.
+//!
+//! The semantic tree fixes leaf order, left and right child order, and every
+//! parent digest. This interpreter only chooses physical placement: one GPU
+//! invocation owns one parent position, and dispatch boundaries order levels.
+
+use poseidon_baby_bear::{
+    DIGEST_FIELDS,
+    PackedCommitment,
+    Poseidon2Digest,
+    compress,
+}
+use precision::baby_bear::BABY_BEAR_MODULUS
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+
+pub const fn ordered_binary_tree_nodes(_ leaves: usize) -> usize {
+    if leaves == 0 { 0 } else { leaves * 2 - 1 }
+}
+
+pub const fn ordered_binary_tree_digest_words(_ leaves: usize) -> usize {
+    ordered_binary_tree_nodes(leaves) * DIGEST_FIELDS
+}
+
+pub const fn ordered_binary_tree_parent_tasks(_ leaves: usize) -> usize {
+    leaves / 2
+}
+
+pub const fn ordered_binary_tree_levels(_ leaves: usize) -> usize {
+    let mut levels: usize = 0
+    let mut width = leaves
+    while width > 1 {
+        width = width / 2
+        levels = levels + 1
+    }
+    levels
+}
+
+pub const fn ordered_binary_tree_level_offset(
+    _ leaves: usize,
+    _ level: usize,
+) -> usize {
+    let mut offset: usize = 0
+    let mut width = leaves
+    let mut cursor: usize = 0
+    while cursor < level {
+        offset = offset + width
+        width = width / 2
+        cursor = cursor + 1
+    }
+    offset
+}
+
+pub struct OrderedMerkleRoot {
+    pub valid: bool,
+    pub value: Poseidon2Digest,
+}
+impl core::marker::Copy for OrderedMerkleRoot {}
+
+#[inline(always)]
+pub fn store_poseidon2_digest<const TREE_WORDS: usize>(
+    _ tree: StorageBuffer<u32, TREE_WORDS>,
+    _ node: u32,
+    _ digest: Poseidon2Digest,
+) {
+    let base = node * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        tree.store(index: base + field, value: digest.field(field).to_u32())
+        field = field + 1
+    }
+}
+
+#[inline(always)]
+pub fn load_poseidon2_digest<const TREE_WORDS: usize>(
+    _ tree: StorageBuffer<u32, TREE_WORDS>,
+    _ node: u32,
+) -> Poseidon2Digest {
+    let base = node * DIGEST_FIELDS.downcast_truncate()
+    Poseidon2Digest::from_u32s([
+        tree.load(index: base),
+        tree.load(index: base + 1),
+        tree.load(index: base + 2),
+        tree.load(index: base + 3),
+        tree.load(index: base + 4),
+        tree.load(index: base + 5),
+        tree.load(index: base + 6),
+        tree.load(index: base + 7),
+    ])
+}
+
+#[inline(always)]
+fn stored_digest_is_canonical<const TREE_WORDS: usize>(
+    _ tree: StorageBuffer<u32, TREE_WORDS>,
+    _ node: u32,
+) -> bool {
+    let base = node * DIGEST_FIELDS.downcast_truncate()
+    let mut field: u32 = 0
+    while field < DIGEST_FIELDS.downcast_truncate() {
+        if tree.load(index: base + field) >= BABY_BEAR_MODULUS {
+            return false
+        }
+        field = field + 1
+    }
+    true
+}
+
+/// Materialize one already-domain-separated leaf commitment at its ordered
+/// tree position. Invalid commitments are represented by a zero digest and a
+/// separate false validity word.
+pub fn write_ordered_binary_tree_leaf<
+    const LEAVES: usize,
+    const TREE_WORDS: usize,
+    const VALID_WORDS: usize,
+>(
+    _ tree: StorageBuffer<u32, TREE_WORDS>,
+    _ node_valid: StorageBuffer<u32, VALID_WORDS>,
+    _ leaf: u32,
+    _ commitment: PackedCommitment,
+) {
+    if leaf >= LEAVES.downcast_truncate()
+        || TREE_WORDS < ordered_binary_tree_digest_words(LEAVES)
+        || VALID_WORDS < ordered_binary_tree_nodes(LEAVES)
+    {
+        return
+    }
+    let valid = commitment.is_valid()
+    store_poseidon2_digest(
+        tree,
+        leaf,
+        if valid { commitment.digest() } else { Poseidon2Digest::zero() },
+    )
+    node_valid.store(index: leaf, value: if valid { 1 } else { 0 })
+}
+
+/// Reset the private level cursor for every potential parent task.
+pub fn prepare_ordered_binary_tree<
+    const LEAVES: usize,
+    const PROGRESS_WORDS: usize,
+>(
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let task = invocation.global.x
+    if task < ordered_binary_tree_parent_tasks(LEAVES).downcast_truncate()
+        && task < PROGRESS_WORDS.downcast_truncate()
+    {
+        progress.store(index: task, value: 0)
+    }
+}
+
+/// Advance one parent task by one level. Independent parents at the same
+/// level execute together, while exact left and right order remains fixed.
+pub fn advance_ordered_binary_tree<
+    const LEAVES: usize,
+    const LEVELS: usize,
+    const TREE_WORDS: usize,
+    const VALID_WORDS: usize,
+    const PROGRESS_WORDS: usize,
+>(
+    _ tree: StorageBuffer<u32, TREE_WORDS>,
+    _ node_valid: StorageBuffer<u32, VALID_WORDS>,
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let task = invocation.global.x
+    let tasks: u32 = ordered_binary_tree_parent_tasks(LEAVES).downcast_truncate()
+    if task >= tasks
+        || task >= PROGRESS_WORDS.downcast_truncate()
+        || TREE_WORDS < ordered_binary_tree_digest_words(LEAVES)
+        || VALID_WORDS < ordered_binary_tree_nodes(LEAVES)
+        || LEVELS != ordered_binary_tree_levels(LEAVES)
+    {
+        return
+    }
+    let level = progress.load(index: task)
+    if level >= LEVELS.downcast_truncate() { return }
+    let leaves: u32 = LEAVES.downcast_truncate()
+    let child_width: u32 = leaves >> level
+    let parent_width: u32 = child_width / 2
+    if task >= parent_width { return }
+    let child_offset: u32 = ordered_binary_tree_level_offset(
+        LEAVES,
+        level as usize,
+    ).downcast_truncate()
+    let parent_offset: u32 = child_offset + child_width
+    let left: u32 = child_offset + task + task
+    let right: u32 = left + 1
+    let parent: u32 = parent_offset + task
+    let valid = node_valid.load(index: left) == 1
+        && node_valid.load(index: right) == 1
+        && stored_digest_is_canonical(tree, left)
+        && stored_digest_is_canonical(tree, right)
+    let digest = if valid {
+        compress(
+            load_poseidon2_digest(tree, left),
+            load_poseidon2_digest(tree, right),
+        )
+    } else {
+        Poseidon2Digest::zero()
+    }
+    store_poseidon2_digest(tree, parent, digest)
+    node_valid.store(index: parent, value: if valid { 1 } else { 0 })
+    progress.store(index: task, value: level + 1)
+}
+
+fn expected_parent_progress(_ leaves: u32, _ task: u32) -> u32 {
+    let mut expected: u32 = 0
+    let mut parent_width = leaves / 2
+    while task < parent_width {
+        expected = expected + 1
+        parent_width = parent_width / 2
+    }
+    expected
+}
+
+/// Read the root only after every parent task completed all levels in which it
+/// participates. A stale cursor, invalid node, or noncanonical field rejects.
+pub fn finish_ordered_binary_tree<
+    const LEAVES: usize,
+    const LEVELS: usize,
+    const TREE_WORDS: usize,
+    const VALID_WORDS: usize,
+    const PROGRESS_WORDS: usize,
+>(
+    _ tree: StorageBuffer<u32, TREE_WORDS>,
+    _ node_valid: StorageBuffer<u32, VALID_WORDS>,
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+) -> OrderedMerkleRoot {
+    let nodes = ordered_binary_tree_nodes(LEAVES)
+    let tasks = ordered_binary_tree_parent_tasks(LEAVES)
+    let mut valid = LEAVES > 1
+        && (LEAVES & (LEAVES - 1)) == 0
+        && LEVELS == ordered_binary_tree_levels(LEAVES)
+        && TREE_WORDS >= ordered_binary_tree_digest_words(LEAVES)
+        && VALID_WORDS >= nodes
+        && PROGRESS_WORDS >= tasks
+    let mut task: u32 = 0
+    while task < tasks.downcast_truncate() {
+        valid = valid && progress.load(index: task)
+            == expected_parent_progress(LEAVES.downcast_truncate(), task)
+        task = task + 1
+    }
+    let node_count: u32 = nodes.downcast_truncate()
+    let root: u32 = if nodes > 0 {
+        node_count - 1
+    } else {
+        0
+    }
+    valid = valid
+        && node_valid.load(index: root) == 1
+        && stored_digest_is_canonical(tree, root)
+    OrderedMerkleRoot {
+        valid: valid,
+        value: if valid {
+            load_poseidon2_digest(tree, root)
+        } else {
+            Poseidon2Digest::zero()
+        },
+    }
+}

@@ -1,0 +1,9 @@
+[ingot]
+name = "poseidon_merkle_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"
+poseidon_baby_bear = "../poseidon_baby_bear"
+precision = "../../demos/sketches/precision"
+std = "../std"

@@ -6,7 +6,9 @@
 //! host unaware of cryptographic phase or round policy.
 
 use poseidon_baby_bear::{
+    PackedCommitment,
     Poseidon2Digest,
+    Poseidon2FieldDomain,
     Poseidon2FieldPermutation,
     Poseidon2FieldSponge,
     Poseidon2WorkgroupPlan,
@@ -27,6 +29,51 @@ pub const POSEIDON2_STAGE_STEPS: usize =
 pub const INDEXED_DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
 pub const DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
 pub const DIGEST_BINDING_STEPS: usize = 1 + 3 * POSEIDON2_STAGE_STEPS
+
+/// Commit one logical row from a column-major field matrix.
+///
+/// The caller supplies the schema prefix as fields, while `D` supplies the
+/// nominal protocol domain. One invocation owns the complete row sponge. This
+/// is the portable row-parallel placement for long canonical records: it
+/// preserves exact field order without materializing a row-sized local array.
+pub fn commit_column_major_field_row<
+    D: Poseidon2FieldDomain,
+    const ROWS: usize,
+    const FIELDS: usize,
+    const VALUE_WORDS: usize,
+    const PREFIX_FIELDS: usize,
+>(
+    _ values: StorageBuffer<u32, VALUE_WORDS>,
+    _ row: u32,
+    _ prefix: ref [BabyBear; PREFIX_FIELDS],
+) -> PackedCommitment {
+    let expected: u32 = (PREFIX_FIELDS + FIELDS).downcast_truncate()
+    let mut sponge = Poseidon2FieldSponge::begin<D>(expected)
+    if row >= ROWS.downcast_truncate()
+        || VALUE_WORDS < ROWS * FIELDS
+    {
+        return sponge.finish().require(false)
+    }
+    let mut canonical = true
+    let mut prefix_field: usize = 0
+    let mut one = [BabyBear::zero(); 1]
+    while prefix_field < PREFIX_FIELDS {
+        one[0] = prefix[prefix_field]
+        sponge.absorb<1>(ref one)
+        prefix_field = prefix_field + 1
+    }
+    let mut field: u32 = 0
+    while field < FIELDS.downcast_truncate() {
+        let word = values.load(
+            index: field * ROWS.downcast_truncate() + row,
+        )
+        if word >= BABY_BEAR_MODULUS { canonical = false }
+        one[0] = BabyBear::from_u32(word)
+        sponge.absorb<1>(ref one)
+        field = field + 1
+    }
+    sponge.finish().require(canonical)
+}
 
 pub const fn indexed_digest_squeeze_state_words(_ states: usize) -> usize {
     states * 2 * POSEIDON2_LANES

@@ -1,0 +1,134 @@
+//! Executed oracle fixture for canonical row commitments and ordered Merkle
+//! placement. The dimensions are small, but the domain and field order match
+//! the production sparse base-LDE commitment.
+
+use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
+use poseidon_baby_bear::DIGEST_FIELDS
+use poseidon_baby_bear_webgpu::commit_column_major_field_row
+use poseidon_merkle_webgpu::{
+    advance_ordered_binary_tree,
+    finish_ordered_binary_tree,
+    ordered_binary_tree_digest_words,
+    ordered_binary_tree_levels,
+    ordered_binary_tree_nodes,
+    ordered_binary_tree_parent_tasks,
+    prepare_ordered_binary_tree,
+    write_ordered_binary_tree_leaf,
+}
+use precision::baby_bear::BabyBear
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Grid,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    RepeatedDispatch as Repeat,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+const LEAVES: usize = 8
+const FIELDS: usize = 5
+const VALUE_WORDS: usize = LEAVES * FIELDS
+const PREFIX_FIELDS: usize = 4
+const TREE_NODES: usize = ordered_binary_tree_nodes(LEAVES)
+const TREE_WORDS: usize = ordered_binary_tree_digest_words(LEAVES)
+const PARENT_TASKS: usize = ordered_binary_tree_parent_tasks(LEAVES)
+const LEVELS: usize = ordered_binary_tree_levels(LEAVES)
+const THREADS: usize = 4
+const LEAF_GROUPS: usize = (LEAVES + THREADS - 1) / THREADS
+const PARENT_GROUPS: usize = (PARENT_TASKS + THREADS - 1) / THREADS
+const RESULT_WORDS: usize = 1 + DIGEST_FIELDS
+
+static_assert(TREE_NODES == 15)
+static_assert(TREE_WORDS == 120)
+static_assert(PARENT_TASKS == 4)
+static_assert(LEVELS == 3)
+static_assert(LEAF_GROUPS == 2)
+static_assert(PARENT_GROUPS == 1)
+
+actor PortablePoseidonMerkle uses (Program<WebGpuBackend>) {
+    values: Shared<u32, VALUE_WORDS>,
+    tree: Shared<u32, TREE_WORDS>,
+    node_valid: Shared<u32, TREE_NODES>,
+    progress: Shared<u32, PARENT_TASKS>,
+    result: Shared<u32, RESULT_WORDS>,
+
+    fn commit_leaves(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<LEAF_GROUPS, 1, 1>>)
+    {
+        let row = invocation.global.x
+        if row >= LEAVES.downcast_truncate() { return }
+        let prefix = [
+            BabyBear::from_u32(4),
+            BabyBear::from_u32(4),
+            BabyBear::from_u32(LEAVES.downcast_truncate()),
+            BabyBear::from_u32(row),
+        ]
+        let commitment = commit_column_major_field_row<
+            MandelbrotSparseBaseLdeLeafBabyBearV1,
+            LEAVES,
+            FIELDS,
+            VALUE_WORDS,
+            PREFIX_FIELDS,
+        >(self.values, row, ref prefix)
+        write_ordered_binary_tree_leaf<
+            LEAVES,
+            TREE_WORDS,
+            TREE_NODES,
+        >(self.tree, self.node_valid, row, commitment)
+    }
+
+    fn prepare_tree(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<PARENT_GROUPS, 1, 1>>)
+    {
+        prepare_ordered_binary_tree<LEAVES, PARENT_TASKS>(
+            self.progress,
+            invocation,
+        )
+    }
+
+    fn advance_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<PARENT_GROUPS, 1, 1, LEVELS>,
+            >
+        )
+    {
+        advance_ordered_binary_tree<
+            LEAVES,
+            LEVELS,
+            TREE_WORDS,
+            TREE_NODES,
+            PARENT_TASKS,
+        >(self.tree, self.node_valid, self.progress, invocation)
+    }
+
+    fn finish_tree(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let root = finish_ordered_binary_tree<
+            LEAVES,
+            LEVELS,
+            TREE_WORDS,
+            TREE_NODES,
+            PARENT_TASKS,
+        >(self.tree, self.node_valid, self.progress)
+        self.result.store(index: 0, value: if root.valid { 1 } else { 0 })
+        let mut field: u32 = 0
+        while field < DIGEST_FIELDS.downcast_truncate() {
+            self.result.store(
+                index: field + 1,
+                value: root.value.field(field).to_u32(),
+            )
+            field = field + 1
+        }
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.result.load(index: 0).downcast_truncate()
+    }
+}
