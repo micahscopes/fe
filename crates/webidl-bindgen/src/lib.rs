@@ -92,6 +92,7 @@ pub struct NamespaceDef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NamespaceMember {
+    Const(ConstDef),
     Attribute(AttributeDef),
     Operation(OperationDef),
 }
@@ -1932,6 +1933,16 @@ fn normalize_namespace_members(
     members
         .into_iter()
         .map(|member| match member {
+            WeedleNamespaceMember::Const(constant) => {
+                let name = constant.identifier.0.to_owned();
+                let context = format!("namespace `{namespace}` const `{name}`");
+                Ok(NamespaceMember::Const(ConstDef {
+                    name,
+                    type_: normalize_const_type(constant.const_type, &context)?,
+                    value: normalize_const_value(constant.const_value),
+                    attributes: normalize_extended_attributes(constant.attributes, &context)?,
+                }))
+            }
             WeedleNamespaceMember::Attribute(attribute) => {
                 Ok(NamespaceMember::Attribute(AttributeDef {
                     name: attribute.identifier.0.to_owned(),
@@ -2085,19 +2096,31 @@ fn assign_namespace_overload_indexes(
 ) -> Result<(), BindgenError> {
     for namespace in namespaces.values_mut() {
         let mut attributes = BTreeSet::new();
+        let mut constants = BTreeSet::new();
         let mut signatures = BTreeSet::new();
         let mut counts = BTreeMap::<String, usize>::new();
         for member in &namespace.members {
-            if let NamespaceMember::Attribute(attribute) = member
-                && !attributes.insert(attribute.name.clone())
-            {
-                return Err(BindgenError::new(
-                    format!(
-                        "namespace `{}` attribute `{}`",
-                        namespace.name, attribute.name
-                    ),
-                    "duplicate readonly attribute, possibly introduced by a partial namespace",
-                ));
+            match member {
+                NamespaceMember::Const(constant) if !constants.insert(constant.name.clone()) => {
+                    return Err(BindgenError::new(
+                        format!("namespace `{}` const `{}`", namespace.name, constant.name),
+                        "duplicate constant, possibly introduced by a partial namespace",
+                    ));
+                }
+                NamespaceMember::Attribute(attribute)
+                    if !attributes.insert(attribute.name.clone()) =>
+                {
+                    return Err(BindgenError::new(
+                        format!(
+                            "namespace `{}` attribute `{}`",
+                            namespace.name, attribute.name
+                        ),
+                        "duplicate readonly attribute, possibly introduced by a partial namespace",
+                    ));
+                }
+                NamespaceMember::Const(_)
+                | NamespaceMember::Attribute(_)
+                | NamespaceMember::Operation(_) => {}
             }
         }
         for member in &mut namespace.members {
@@ -2366,6 +2389,28 @@ fn emit_fe_import_layer(
             output.push('\n');
         }
     }
+    for namespace in world.namespaces.values() {
+        for member in &namespace.members {
+            let NamespaceMember::Const(constant) = member else {
+                continue;
+            };
+            let context = format!("namespace `{}` const `{}`", namespace.name, constant.name);
+            let type_ = fe_import_type(world, &constant.type_, &context, rich_flat_values)?;
+            let value = fe_const_literal(&constant.value, &context)?;
+            output.push_str(&format!(
+                "pub const {}_{}: {type_} = {value}\n",
+                screaming_snake_case(&namespace.name),
+                screaming_snake_case(&constant.name),
+            ));
+        }
+        if namespace
+            .members
+            .iter()
+            .any(|member| matches!(member, NamespaceMember::Const(_)))
+        {
+            output.push('\n');
+        }
+    }
     for interface in world.interfaces.values() {
         let Some(parent) = &interface.inherits else {
             continue;
@@ -2581,6 +2626,7 @@ fn emit_fe_import_layer(
     for namespace in world.namespaces.values() {
         for member in &namespace.members {
             match member {
+                NamespaceMember::Const(_) => {}
                 NamespaceMember::Attribute(attribute) => {
                     let function = format!(
                         "{}_get_{}",
@@ -2856,6 +2902,7 @@ pub fn emit_js_adapter(world: &World, module: &str) -> Result<String, BindgenErr
     for namespace in world.namespaces.values() {
         for member in &namespace.members {
             match member {
+                NamespaceMember::Const(_) => {}
                 NamespaceMember::Attribute(attribute) => {
                     let function = format!(
                         "{}_get_{}",
@@ -3422,7 +3469,7 @@ mod tests {
         let source = include_str!("../tests/fixtures/console-namespace.webidl");
         let world = parse(source).unwrap();
         let namespace = &world.namespaces["console"];
-        assert_eq!(namespace.members.len(), 4);
+        assert_eq!(namespace.members.len(), 5);
         assert_eq!(
             namespace.attributes.exposed,
             Some(vec!["Window".to_owned(), "Worker".to_owned()])
@@ -3434,12 +3481,15 @@ mod tests {
                 NamespaceMember::Operation(operation) if operation.name == "log" => {
                     Some((operation.overload, operation.attributes.secure_context))
                 }
-                NamespaceMember::Attribute(_) | NamespaceMember::Operation(_) => None,
+                NamespaceMember::Const(_)
+                | NamespaceMember::Attribute(_)
+                | NamespaceMember::Operation(_) => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(log_overloads, [(0, false), (1, true)]);
 
         let fe = emit_fe_flat_host_imports(&world, "fe:web").unwrap();
+        assert!(fe.contains("pub const CONSOLE_INFO: u32 = 0x0004"), "{fe}");
         for declaration in [
             "console_get_level() -> u32",
             "console_log(message: own BrowserUtf16String)",
@@ -3472,6 +3522,14 @@ mod tests {
         assert!(lowering.exposures.iter().any(|binding| {
             binding.definition == "namespace/console/log-1" && binding.attributes.secure_context
         }));
+        assert!(
+            lowering
+                .world
+                .imports
+                .iter()
+                .all(|function| function.name != "INFO"),
+            "namespace constants must not become host calls"
+        );
 
         let plan = build_adapter_plan(&world, "web-test", "fe:web").unwrap();
         assert!(plan.resources.is_empty());
@@ -3512,6 +3570,13 @@ mod tests {
             error.detail.contains("duplicate overload signature"),
             "{error}"
         );
+
+        let error = parse(
+            "namespace console { const unsigned long INFO = 1; }; partial namespace console { const unsigned long INFO = 2; };",
+        )
+        .unwrap_err();
+        assert_eq!(error.context, "namespace `console` const `INFO`");
+        assert!(error.detail.contains("duplicate constant"), "{error}");
     }
 
     #[test]

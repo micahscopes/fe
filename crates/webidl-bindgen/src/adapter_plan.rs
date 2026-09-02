@@ -305,6 +305,7 @@ fn plan_namespace(namespace: &NamespaceDef) -> AdapterNamespace {
     let mut functions = Vec::new();
     for member in &namespace.members {
         match member {
+            NamespaceMember::Const(_) => {}
             NamespaceMember::Attribute(attribute) => {
                 functions.push(AdapterFunction {
                     import_name: format!(
@@ -1634,6 +1635,7 @@ fn visit_world_types<'a>(world: &'a World, visitor: &mut impl FnMut(&'a TypeRef)
     for namespace in world.namespaces.values() {
         for member in &namespace.members {
             match member {
+                NamespaceMember::Const(_) => {}
                 NamespaceMember::Attribute(attribute) => visit_type(&attribute.type_, visitor),
                 NamespaceMember::Operation(operation) => {
                     for argument in &operation.arguments {
