@@ -526,6 +526,42 @@ pub(super) fn scalar_sampling_oracle() -> ScalarSamplingOracle {
 }
 
 #[test]
+fn quilting_atlas_boundary_ring_is_an_exact_permutation_for_every_key() {
+    let (mut store, instance) = instantiate();
+    for (patch, key) in canonical_lod_keys().into_iter().enumerate() {
+        let patch = u32::try_from(patch).unwrap();
+        let boundary = call_u32(&mut store, &instance, "atlas_boundary_vertices", patch);
+        let ring = (0..boundary)
+            .map(|ordinal| {
+                call2_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_boundary_ring_vertex",
+                    [patch, ordinal],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ring.iter().copied().collect::<BTreeSet<_>>(),
+            (0..boundary).collect::<BTreeSet<_>>(),
+            "boundary ring is not a permutation for {key:?}"
+        );
+        let actual_edges = ring
+            .iter()
+            .copied()
+            .zip(ring.iter().copied().cycle().skip(1))
+            .take(ring.len())
+            .map(|(first, second)| (first.min(second), first.max(second)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual_edges,
+            constrained_boundary_edges_oracle(key),
+            "boundary ring has the wrong locked edge set for {key:?}"
+        );
+    }
+}
+
+#[test]
 fn quilting_atlas_ctfe_plan_matches_an_independent_rust_schedule() {
     let (mut store, instance) = instantiate();
     let keys = canonical_lod_keys();
