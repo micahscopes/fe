@@ -333,6 +333,37 @@ fn point_triangle_relation_oracle(triangle: [[u32; 2]; 3], query: [u32; 2]) -> u
     }
 }
 
+fn boundary_points_oracle(key: [u32; 3]) -> Vec<[u32; 3]> {
+    const SCALE: u32 = 16_384;
+    let [resolution_a, resolution_b, resolution_c] = key.map(|lod| 1_u32 << lod);
+    let count = resolution_a + resolution_b + resolution_c;
+    (0..count)
+        .map(|ordinal| {
+            if ordinal <= resolution_c {
+                let distance = ordinal * (SCALE / resolution_c);
+                [SCALE - distance, distance, 0]
+            } else {
+                let after_ab = ordinal - resolution_c - 1;
+                if after_ab < resolution_b {
+                    let step = after_ab + 1;
+                    let distance = step * (SCALE / resolution_b);
+                    [SCALE - distance, 0, distance]
+                } else {
+                    let step = after_ab - resolution_b + 1;
+                    let distance = step * (SCALE / resolution_a);
+                    [0, SCALE - distance, distance]
+                }
+            }
+        })
+        .collect()
+}
+
+fn equilateral_distance_squared_oracle(left: [u32; 3], right: [u32; 3]) -> u32 {
+    let delta_b = i64::from(left[1]) - i64::from(right[1]);
+    let delta_c = i64::from(left[2]) - i64::from(right[2]);
+    u32::try_from(3 * (delta_b * delta_b + delta_c * delta_c + delta_b * delta_c)).unwrap()
+}
+
 #[test]
 fn quilting_atlas_ctfe_plan_matches_an_independent_rust_schedule() {
     let (mut store, instance) = instantiate();
@@ -775,6 +806,126 @@ fn quilting_atlas_fe_sampler_matches_independent_integer_oracles() {
             ),
             1,
             "the symmetric larger-disk rule rejects an overlap"
+        );
+    }
+}
+
+#[test]
+fn quilting_atlas_compact_candidate_work_indices_are_exact() {
+    const SCALE: u32 = 16_384;
+    const SEED: u32 = 0x51c3_2a97;
+    let (mut store, instance) = instantiate();
+
+    for (patch, key) in canonical_lod_keys().into_iter().enumerate() {
+        let patch = u32::try_from(patch).unwrap();
+        let side = (1_u32 << key[2]) * 2;
+        let slots = side * (side + 1);
+        let mut selected = BTreeSet::from([0, 1, slots / 3, slots / 2, slots - 2, slots - 1]);
+        for cell_b in [0, side / 2, side - 1] {
+            let row_start = cell_b * (side + side - cell_b + 1) / 2;
+            selected.insert(row_start * 2);
+            selected.insert(row_start * 2 + 1);
+        }
+
+        for slot in selected {
+            let cell = slot / 2;
+            let mut expected_b = 0;
+            let mut remaining = cell;
+            while remaining >= side - expected_b {
+                remaining -= side - expected_b;
+                expected_b += 1;
+            }
+            let expected_c = remaining;
+            let expected_trial = slot % 2;
+            assert_eq!(
+                call2_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_candidate_cell_valid",
+                    [patch, slot],
+                ),
+                1
+            );
+            assert_eq!(
+                call2_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_candidate_cell_b",
+                    [patch, slot],
+                ),
+                expected_b
+            );
+            assert_eq!(
+                call2_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_candidate_cell_c",
+                    [patch, slot],
+                ),
+                expected_c
+            );
+            assert_eq!(
+                call2_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_candidate_cell_trial",
+                    [patch, slot],
+                ),
+                expected_trial
+            );
+
+            let direct = [patch, SEED, expected_b, expected_c, expected_trial];
+            let compact = [patch, SEED, slot];
+            let point = [
+                SCALE
+                    - call3_u32(&mut store, &instance, "atlas_candidate_at_slot_b", compact)
+                    - call3_u32(&mut store, &instance, "atlas_candidate_at_slot_c", compact),
+                call3_u32(&mut store, &instance, "atlas_candidate_at_slot_b", compact),
+                call3_u32(&mut store, &instance, "atlas_candidate_at_slot_c", compact),
+            ];
+            assert_eq!(
+                point[1],
+                call5_u32(&mut store, &instance, "atlas_candidate_b", direct)
+            );
+            assert_eq!(
+                point[2],
+                call5_u32(&mut store, &instance, "atlas_candidate_c", direct)
+            );
+
+            let valid = call5_u32(&mut store, &instance, "atlas_candidate_valid", direct) != 0;
+            let candidate_radius = call5_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_radius_squared",
+                direct,
+            );
+            let expected_conflict = valid
+                && boundary_points_oracle(key).into_iter().any(|boundary| {
+                    let boundary_radius =
+                        radius_squared_oracle(density_exponent_q8_oracle(key, boundary));
+                    equilateral_distance_squared_oracle(point, boundary)
+                        < candidate_radius.max(boundary_radius)
+                });
+            assert_eq!(
+                call3_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_candidate_at_slot_boundary_conflict",
+                    compact,
+                ),
+                u32::from(expected_conflict),
+                "key={key:?} slot={slot} point={point:?}"
+            );
+        }
+
+        assert_eq!(
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_cell_valid",
+                [patch, slots],
+            ),
+            0
         );
     }
 }

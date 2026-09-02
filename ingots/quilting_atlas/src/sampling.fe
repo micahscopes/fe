@@ -41,12 +41,24 @@ pub struct InteriorCandidate {
 }
 impl Copy for InteriorCandidate {}
 
+pub struct CandidateCell {
+    pub cell_b: u32,
+    pub cell_c: u32,
+    pub trial: u32,
+    pub valid: bool,
+}
+impl Copy for CandidateCell {}
+
 const fn invalid_point() -> FixedBarycentric {
     FixedBarycentric { a: 0, b: 0, c: 0 }
 }
 
 const fn invalid_boundary_seed() -> BoundarySeed {
     BoundarySeed { point: invalid_point(), edge: 0xffffffff, step: 0, valid: false }
+}
+
+const fn invalid_candidate_cell() -> CandidateCell {
+    CandidateCell { cell_b: 0, cell_c: 0, trial: 0, valid: false }
 }
 
 pub const fn fixed_barycentric_valid(_ point: FixedBarycentric) -> bool {
@@ -259,6 +271,35 @@ pub const fn candidate_slot_count(_ key: AtlasKey) -> u32 {
     candidate_cell_count(key) * CANDIDATE_TRIALS_PER_CELL
 }
 
+/// Invert the compact triangular row-major candidate index without a lookup
+/// table or floating-point square root. The bounded binary search takes at
+/// most nine iterations through LoD 8 on every placement.
+pub const fn candidate_cell_at_slot(_ key: AtlasKey, _ slot: u32) -> CandidateCell {
+    if slot >= candidate_slot_count(key) {
+        return invalid_candidate_cell()
+    }
+    let side = candidate_grid_side(key)
+    let cell = slot / CANDIDATE_TRIALS_PER_CELL
+    let mut low: u32 = 0
+    let mut high = side
+    while low + 1 < high {
+        let middle = (low + high) / 2
+        let row_start = middle * (side + side - middle + 1) / 2
+        if row_start <= cell {
+            low = middle
+        } else {
+            high = middle
+        }
+    }
+    let row_start = low * (side + side - low + 1) / 2
+    CandidateCell {
+        cell_b: low,
+        cell_c: cell - row_start,
+        trial: slot % CANDIDATE_TRIALS_PER_CELL,
+        valid: true,
+    }
+}
+
 /// Materialize one deterministic jittered candidate for a triangular grid
 /// cell. The caller's work decomposition supplies `(cell_b, cell_c, trial)`;
 /// worker lanes and GPU invocations therefore invoke the same function without
@@ -306,6 +347,58 @@ pub const fn interior_candidate(
         slot: slot,
         valid: valid,
     }
+}
+
+/// Materialize one candidate directly from its compact provider work index.
+pub const fn interior_candidate_at_slot(
+    _ key: AtlasKey,
+    _ patch_ordinal: u32,
+    _ seed: u32,
+    _ slot: u32,
+) -> InteriorCandidate {
+    let cell = candidate_cell_at_slot(key, slot)
+    if !cell.valid {
+        return InteriorCandidate {
+            point: invalid_point(),
+            radius_squared: 0,
+            priority: 0,
+            slot: 0,
+            valid: false,
+        }
+    }
+    interior_candidate(
+        key,
+        patch_ordinal,
+        seed,
+        cell.cell_b,
+        cell.cell_c,
+        cell.trial,
+    )
+}
+
+/// Exact exclusion of an interior candidate by the locked boundary ring.
+/// Providers may replace the linear scan with an indexed query, but the
+/// admitted/rejected result must match this reference relation exactly.
+pub fn candidate_conflicts_boundary(
+    _ key: AtlasKey,
+    _ candidate: InteriorCandidate,
+) -> bool {
+    if !candidate.valid { return false }
+    let mut ordinal: u32 = 0
+    let count = boundary_vertices(key)
+    while ordinal < count {
+        let boundary = boundary_seed(key, ordinal)
+        if poisson_conflict(
+            candidate.point,
+            candidate.radius_squared,
+            boundary.point,
+            poisson_radius_squared(key, boundary.point),
+        ) {
+            return true
+        }
+        ordinal = ordinal + 1
+    }
+    false
 }
 
 /// Initial state after materialization and boundary-seed exclusion.
