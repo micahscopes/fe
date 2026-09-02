@@ -2,6 +2,10 @@
 
 Date: 2026-09-01
 
+> Historical construction record. The mutable-worktree caveat below is
+> superseded by `mb2-classic-quilting-portable-integration.md`, which records a
+> fresh-checkout release gate against exact public Quilting and Sonatina pins.
+
 This is the second bounded M1 slice from
 `mb2-classic-quilting-demo-ingots-spec.md`. It completes implementation step 8:
 the smallest checked atlas fixture is expanded into generated, non-indexed Fe

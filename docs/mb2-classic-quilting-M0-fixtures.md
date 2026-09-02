@@ -1,5 +1,9 @@
 # Classic Quilting M0 fixture/export evidence
 
+> Historical construction record. The original path dependency described
+> below has been replaced by the exact public Git pin and repository-relative
+> Fe dependencies recorded in `mb2-classic-quilting-portable-integration.md`.
+
 Status: direct seed-42 fixture matrix and typed adversarial rejection frozen,
 2026-09-01.
 

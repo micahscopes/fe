@@ -3,4 +3,4 @@ name = "quilting_domain"
 version = "0.1.0"
 
 [dependencies]
-core = { path = "../../../fe-worktrees/mb2/ingots/core" }
+core = { path = "../core" }
