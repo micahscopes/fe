@@ -1328,6 +1328,13 @@ existing Definition of done, not a second campaign checklist:
   plus measured release median/p95 and peak RSS. The full evidence and five
   landable slices are in
   `/workspace/scratch/mb2-fe-compile-parallelism-audit-2026-08-24.md`.
+- [ ] Add an opt-in riff-cat observation bridge at the Sonatina module boundary.
+  Until upstream Fe phase instrumentation lands, this must consume only an
+  explicitly requested snapshot or in-memory census. It may report structure,
+  types, constants, calls, effects, phase deltas, timing, and memory, but it
+  must not participate in Fe name resolution, legality, optimization, or cache
+  identity. Keep reports under `/workspace/scratch`; preserve the compiler as
+  the semantic authority.
 
   Immediate actor-stage pilot, refined by the production proof-graph trace on
   2026-09-01:
