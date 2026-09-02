@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -6,6 +7,7 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     compile_runtime_package_wasm_with_options, WasmCompileOptions, WebBuildOptions, WebBundle,
+    WebResourceAccess,
 };
 use hir::hir_def::HirIngot;
 use quilting_core::patch::QBTriPatch;
@@ -154,6 +156,199 @@ fn gpu_sampling_preserves_the_immutable_generation_cycle() {
     assert!(!bundle.wgsl.contains("@fragment"));
     assert!(!bundle.wgsl.contains("f32"));
     assert!(!bundle.wgsl.contains("f64"));
+}
+
+fn dispatch_compute_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    resources: &wgpu::BindGroup,
+    dispatch: [u32; 3],
+    repeat: u32,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("Fe classic Quilting provider stage"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, resources, &[]);
+    for _ in 0..repeat {
+        pass.dispatch_workgroups(dispatch[0], dispatch[1], dispatch[2]);
+    }
+}
+
+#[test]
+fn gpu_sampling_matches_the_scalar_placement_byte_for_byte() {
+    let Some((adapter, device, queue)) = device() else {
+        return;
+    };
+    eprintln!("GPU sampling adapter: {}", adapter.get_info().name);
+    let bundle = compiled_sampling();
+    let expected = super::fe_oracle::scalar_sampling_oracle();
+    assert!(bundle
+        .manifest
+        .resources
+        .iter()
+        .all(|resource| resource.group == 0));
+
+    let buffers = bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| {
+            let size = u64::from(resource.length) * u64::from(resource.stride);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&resource.name),
+                size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (resource.name.clone(), buffer)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let layout_entries = bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| wgpu::BindGroupLayoutEntry {
+            binding: resource.binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage {
+                    read_only: resource.policy.access == WebResourceAccess::ReadOnly,
+                },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        })
+        .collect::<Vec<_>>();
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Fe classic Quilting sampling layout"),
+        entries: &layout_entries,
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Fe classic Quilting sampling pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let entries = bundle
+        .manifest
+        .resources
+        .iter()
+        .map(|resource| wgpu::BindGroupEntry {
+            binding: resource.binding,
+            resource: buffers[&resource.name].as_entire_binding(),
+        })
+        .collect::<Vec<_>>();
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Fe classic Quilting sampling resources"),
+        layout: &layout,
+        entries: &entries,
+    });
+    let pipelines = bundle
+        .pass_wgsl
+        .iter()
+        .map(|shader| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Fe classic Quilting sampling WGSL"),
+                source: wgpu::ShaderSource::Wgsl(shader.source.as_str().into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Fe classic Quilting sampling stage"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Fe classic Quilting sampling graph"),
+    });
+    let initialize = &bundle.manifest.passes[0];
+    dispatch_compute_pass(
+        &mut encoder,
+        &pipelines[0],
+        &group,
+        initialize.dispatch.expect("initialization dispatch"),
+        initialize.repeat,
+    );
+    let cycle = bundle.manifest.passes[1].cycle.expect("sampling cycle");
+    for _ in 0..cycle.repeat {
+        for index in 1..=3 {
+            let stage = &bundle.manifest.passes[index];
+            dispatch_compute_pass(
+                &mut encoder,
+                &pipelines[index],
+                &group,
+                stage.dispatch.expect("cycle dispatch"),
+                stage.repeat,
+            );
+        }
+    }
+    let compact = &bundle.manifest.passes[4];
+    dispatch_compute_pass(
+        &mut encoder,
+        &pipelines[4],
+        &group,
+        compact.dispatch.expect("compaction dispatch"),
+        compact.repeat,
+    );
+
+    let receipt_bytes = 7 * size_of::<u32>();
+    let point_bytes = buffers["points"].size();
+    let receipt_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test-only sampling receipt readback"),
+        size: u64::try_from(receipt_bytes).unwrap(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let point_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test-only sampling point readback"),
+        size: point_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(
+        &buffers["receipt"],
+        0,
+        &receipt_staging,
+        0,
+        u64::try_from(receipt_bytes).unwrap(),
+    );
+    encoder.copy_buffer_to_buffer(&buffers["points"], 0, &point_staging, 0, point_bytes);
+    queue.submit(Some(encoder.finish()));
+
+    let receipt = readback(&device, &receipt_staging)
+        .chunks_exact(size_of::<u32>())
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receipt,
+        [
+            1,
+            1,
+            0,
+            expected.candidate_slots,
+            expected.accepted_candidates,
+            expected.boundary_points,
+            u32::try_from(expected.points.len()).unwrap(),
+        ]
+    );
+    let words = readback(&device, &point_staging)
+        .chunks_exact(size_of::<u32>())
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    let actual = words
+        .chunks_exact(3)
+        .take(expected.points.len())
+        .map(|point| <[u32; 3]>::try_from(point).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected.points);
 }
 
 fn compiled_raster() -> &'static CompiledRaster {
@@ -395,16 +590,16 @@ fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     })) {
         Ok(adapter) => adapter,
         Err(error) if allow_skip => {
-            eprintln!("fixed raster WGSL execution skipped (MB2_ALLOW_GPU_SKIP): {error:?}");
+            eprintln!("WebGPU execution skipped (MB2_ALLOW_GPU_SKIP): {error:?}");
             return None;
         }
-        Err(error) => panic!("fixed raster WGSL execution has no adapter: {error:?}"),
+        Err(error) => panic!("WebGPU execution has no adapter: {error:?}"),
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: wgpu::Features::empty(),
         ..Default::default()
     }))
-    .expect("request fixed raster WGSL device");
+    .expect("request WebGPU device");
     Some((adapter, device, queue))
 }
 
