@@ -4,7 +4,12 @@
 
 use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
 use poseidon_baby_bear::DIGEST_FIELDS
-use poseidon_baby_bear_webgpu::commit_column_major_field_row
+use poseidon_baby_bear_webgpu::{
+    advance_column_major_field_row_commitments,
+    column_major_field_row_commitment_steps,
+    column_major_field_row_commitment_workspace_words,
+    prepare_column_major_field_row_commitments,
+}
 use poseidon_merkle_webgpu::{
     advance_ordered_binary_tree,
     finish_ordered_binary_tree,
@@ -32,6 +37,12 @@ const LEAVES: usize = 8
 const FIELDS: usize = 5
 const VALUE_WORDS: usize = LEAVES * FIELDS
 const PREFIX_FIELDS: usize = 4
+const COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
+    PREFIX_FIELDS,
+    FIELDS,
+)
+const COMMITMENT_WORKSPACE_WORDS: usize =
+    column_major_field_row_commitment_workspace_words(LEAVES)
 const TREE_NODES: usize = ordered_binary_tree_nodes(LEAVES)
 const TREE_WORDS: usize = ordered_binary_tree_digest_words(LEAVES)
 const PARENT_TASKS: usize = ordered_binary_tree_parent_tasks(LEAVES)
@@ -42,6 +53,8 @@ const PARENT_GROUPS: usize = (PARENT_TASKS + THREADS - 1) / THREADS
 const RESULT_WORDS: usize = 1 + DIGEST_FIELDS
 
 static_assert(TREE_NODES == 15)
+static_assert(COMMITMENT_STEPS == 2)
+static_assert(COMMITMENT_WORKSPACE_WORDS == 144)
 static_assert(TREE_WORDS == 120)
 static_assert(PARENT_TASKS == 4)
 static_assert(LEVELS == 3)
@@ -50,13 +63,28 @@ static_assert(PARENT_GROUPS == 1)
 
 actor PortablePoseidonMerkle uses (Program<WebGpuBackend>) {
     values: Shared<u32, VALUE_WORDS>,
+    commitment_workspace: Shared<u32, COMMITMENT_WORKSPACE_WORDS>,
     tree: Shared<u32, TREE_WORDS>,
     node_valid: Shared<u32, TREE_NODES>,
     progress: Shared<u32, PARENT_TASKS>,
     result: Shared<u32, RESULT_WORDS>,
 
-    fn commit_leaves(self, invocation: ComputeInvocation)
+    fn prepare_commitments(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<THREADS, 1, 1>, Grid<LEAF_GROUPS, 1, 1>>)
+    {
+        prepare_column_major_field_row_commitments<
+            LEAVES,
+            COMMITMENT_WORKSPACE_WORDS,
+        >(self.commitment_workspace, invocation)
+    }
+
+    fn advance_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<LEAF_GROUPS, 1, 1, COMMITMENT_STEPS>,
+            >
+        )
     {
         let row = invocation.global.x
         if row >= LEAVES.downcast_truncate() { return }
@@ -66,18 +94,31 @@ actor PortablePoseidonMerkle uses (Program<WebGpuBackend>) {
             BabyBear::from_u32(LEAVES.downcast_truncate()),
             BabyBear::from_u32(row),
         ]
-        let commitment = commit_column_major_field_row<
+        let step = advance_column_major_field_row_commitments<
             MandelbrotSparseBaseLdeLeafBabyBearV1,
             LEAVES,
             FIELDS,
             VALUE_WORDS,
             PREFIX_FIELDS,
-        >(self.values, row, ref prefix)
-        write_ordered_binary_tree_leaf<
-            LEAVES,
-            TREE_WORDS,
-            TREE_NODES,
-        >(self.tree, self.node_valid, row, commitment)
+            COMMITMENT_WORKSPACE_WORDS,
+        >(
+            self.values,
+            self.commitment_workspace,
+            ref prefix,
+            invocation,
+        )
+        if step.complete {
+            write_ordered_binary_tree_leaf<
+                LEAVES,
+                TREE_WORDS,
+                TREE_NODES,
+            >(
+                self.tree,
+                self.node_valid,
+                step.row,
+                step.commitment,
+            )
+        }
     }
 
     fn prepare_tree(self, invocation: ComputeInvocation)

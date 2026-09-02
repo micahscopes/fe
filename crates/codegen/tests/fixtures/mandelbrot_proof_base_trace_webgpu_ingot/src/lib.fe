@@ -29,6 +29,7 @@ use mandelbrot_proof_production_profile_baby_bear::{
     PRODUCTION_LIMBS,
     PRODUCTION_TRACE_LENGTH,
 }
+use mandelbrot_proof_baby_bear_domains::MandelbrotSparseBaseLdeLeafBabyBearV1
 use mandelbrot_proof_recursive::ComplexFixed
 use mandelbrot_proof_fixed_air_core::{
     sparse_boundary_task_count,
@@ -49,6 +50,22 @@ use parallel_ntt_webgpu::{
     validate_batched_stage_grid,
 }
 use parallel_structure::FactorTree
+use poseidon_baby_bear_webgpu::{
+    advance_column_major_field_row_commitments,
+    column_major_field_row_commitment_steps,
+    column_major_field_row_commitment_workspace_words,
+    prepare_column_major_field_row_commitments,
+}
+use poseidon_merkle_webgpu::{
+    advance_ordered_binary_tree,
+    finish_ordered_binary_tree,
+    ordered_binary_tree_digest_words,
+    ordered_binary_tree_levels,
+    ordered_binary_tree_nodes,
+    ordered_binary_tree_parent_tasks,
+    prepare_ordered_binary_tree,
+    write_ordered_binary_tree_leaf,
+}
 use std::conal::{Pair, RBin}
 use std::webgpu::{
     ComputeInvocation,
@@ -79,6 +96,20 @@ const LDE_OUTPUT_GROUPS: usize =
     (LDE_OUTPUT_GRID_LANES + THREADS - 1) / THREADS
 const LDE_VALIDATION_GROUPS: usize =
     (SPARSE_BASE_AIR_FIELDS + THREADS - 1) / THREADS
+const BASE_TREE_NODES: usize = ordered_binary_tree_nodes(BASE_LDE_LENGTH)
+const BASE_TREE_WORDS: usize = ordered_binary_tree_digest_words(BASE_LDE_LENGTH)
+const BASE_TREE_PARENT_TASKS: usize = ordered_binary_tree_parent_tasks(BASE_LDE_LENGTH)
+const BASE_TREE_LEVELS: usize = ordered_binary_tree_levels(BASE_LDE_LENGTH)
+const BASE_TREE_LEAF_GROUPS: usize =
+    (BASE_LDE_LENGTH + THREADS - 1) / THREADS
+const BASE_TREE_PARENT_GROUPS: usize =
+    (BASE_TREE_PARENT_TASKS + THREADS - 1) / THREADS
+const BASE_COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
+    4,
+    SPARSE_BASE_AIR_FIELDS,
+)
+const BASE_COMMITMENT_WORKSPACE_WORDS: usize =
+    column_major_field_row_commitment_workspace_words(BASE_LDE_LENGTH)
 type BaseLdeInputPlan = RBin<Pair, 12>
 type BaseLdeOutputPlan = RBin<Pair, 13>
 const LDE_INPUT_STAGES: usize = <BaseLdeInputPlan as FactorTree>::FACTORS
@@ -98,6 +129,18 @@ static_assert(LDE_OUTPUT_GRID_LANES == 1064960)
 static_assert(LDE_INPUT_GROUPS == 8320)
 static_assert(LDE_OUTPUT_GROUPS == 16640)
 static_assert(LDE_VALIDATION_GROUPS == 5)
+static_assert(BASE_TREE_NODES == 16383)
+static_assert(BASE_TREE_WORDS == 131064)
+static_assert(BASE_TREE_PARENT_TASKS == 4096)
+static_assert(BASE_TREE_LEVELS == 13)
+static_assert(BASE_TREE_LEAF_GROUPS == 128)
+static_assert(BASE_TREE_PARENT_GROUPS == 64)
+static_assert(BASE_COMMITMENT_STEPS == 34)
+static_assert(BASE_COMMITMENT_WORKSPACE_WORDS == 147456)
+static_assert(BASE_TREE_WORDS <= BASE_TRACE_WORDS)
+static_assert(BASE_TREE_NODES <= BASE_TRACE_WORDS)
+static_assert(BASE_TREE_PARENT_TASKS <= PRODUCTION_TRACE_LENGTH)
+static_assert(BASE_COMMITMENT_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(<BaseLdeInputPlan as FactorTree>::POINTS == PRODUCTION_TRACE_LENGTH)
 static_assert(<BaseLdeOutputPlan as FactorTree>::POINTS == BASE_LDE_LENGTH)
 static_assert(LDE_INPUT_STAGES == 12)
@@ -564,6 +607,126 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             column = column + 1
         }
         self.status.store(index: 0, value: if valid { 1 } else { 0 })
+    }
+
+    /// The completed LDE retires the base trace, inverse values, and row
+    /// validity buffers. Reuse those phase-local allocations as the ordered
+    /// tree digest arena, node validity, and private parent cursors.
+    fn prepare_base_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_LEAF_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_column_major_field_row_commitments<
+            BASE_LDE_LENGTH,
+            LDE_INPUT_GRID_LANES,
+        >(self.lde_inverse_progress, invocation)
+    }
+
+    fn advance_base_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    BASE_TREE_LEAF_GROUPS,
+                    1,
+                    1,
+                    BASE_COMMITMENT_STEPS,
+                >,
+            >
+        )
+    {
+        let row = invocation.global.x
+        if row >= BASE_LDE_LENGTH.downcast_truncate() { return }
+        let prefix = [
+            BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
+            BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
+            BabyBear::from_u32(BASE_LDE_LENGTH.downcast_truncate()),
+            BabyBear::from_u32(row),
+        ]
+        let step = advance_column_major_field_row_commitments<
+            MandelbrotSparseBaseLdeLeafBabyBearV1,
+            BASE_LDE_LENGTH,
+            SPARSE_BASE_AIR_FIELDS,
+            BASE_LDE_WORDS,
+            4,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.lde_values,
+            self.lde_inverse_progress,
+            ref prefix,
+            invocation,
+        )
+        if step.complete {
+            write_ordered_binary_tree_leaf<
+                BASE_LDE_LENGTH,
+                BASE_TRACE_WORDS,
+                BASE_TRACE_WORDS,
+            >(
+                self.base_trace,
+                self.lde_inverse_values,
+                step.row,
+                step.commitment.require(self.status.load(index: 0) == 1),
+            )
+        }
+    }
+
+    fn prepare_base_lde_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_PARENT_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            PRODUCTION_TRACE_LENGTH,
+        >(self.validity, invocation)
+    }
+
+    fn advance_base_lde_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    BASE_TREE_PARENT_GROUPS,
+                    1,
+                    1,
+                    BASE_TREE_LEVELS,
+                >,
+            >
+        )
+    {
+        advance_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            BASE_TREE_LEVELS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.base_trace,
+            self.lde_inverse_values,
+            self.validity,
+            invocation,
+        )
+    }
+
+    fn finish_base_lde_tree(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let root = finish_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            BASE_TREE_LEVELS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(self.base_trace, self.lde_inverse_values, self.validity)
+        self.status.store(index: 0, value: if root.valid { 1 } else { 0 })
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {

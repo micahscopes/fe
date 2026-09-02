@@ -1677,6 +1677,86 @@ impl Poseidon2FieldSponge {
         self.rate = rate.downcast_truncate()
         self.written = self.written + count
     }
+
+    /// Absorb exactly one scheduled rate block and execute its permutation.
+    ///
+    /// `count` selects the meaningful prefix of the fixed eight-field input.
+    /// A non-final block must fill the current rate block. A final block must
+    /// complete the declared message and may be partial. This gives repeated
+    /// GPU dispatches one compact permutation kernel without changing the
+    /// fixed-length sponge denotation.
+    #[inline(always)]
+    pub fn absorb_scheduled_block(
+        mut self,
+        _ fields: ref [BabyBear; SPONGE_RATE],
+        _ count: u32,
+        _ final_block: bool,
+    ) {
+        let rate_bound: u32 = SPONGE_RATE.downcast_truncate()
+        let count_bound = count <= rate_bound
+        let written_bound = self.written <= self.expected
+        let remaining: u32 = if written_bound {
+            self.expected - self.written
+        } else {
+            0
+        }
+        let payload_bound = count <= remaining
+        let rate_valid = self.rate < rate_bound
+        let rate_room = self.rate + count <= rate_bound
+        let complete = self.written + count == self.expected
+        let fills_rate = self.rate + count == rate_bound
+        let schedule_valid = complete == final_block
+            && (fills_rate || final_block)
+        let valid = self.valid == VALID_WORD
+            && count_bound
+            && written_bound
+            && payload_bound
+            && rate_valid
+            && rate_room
+            && schedule_valid
+        let bounded_count = if count_bound { count } else { rate_bound }
+        let parameters = PARAMETERS
+        let mut state = Poseidon2State { lanes: self.lanes }
+        let mut index: u32 = 0
+        while index < bounded_count {
+            state.set_field(
+                (self.rate + index) as usize,
+                fields[index as usize],
+            )
+            index = index + 1
+        }
+        state.permute(ref parameters)
+        self.lanes = state.lanes
+        self.rate = 0
+        self.written = self.written + count
+        self.valid = if valid { VALID_WORD } else { INVALID_WORD }
+    }
+
+    /// Complete a staged message whose final permutation already ran.
+    #[inline(always)]
+    pub fn finish_scheduled(self) -> PackedCommitment {
+        if self.valid != VALID_WORD
+            || self.written != self.expected
+            || self.rate != 0
+        {
+            return PackedCommitment {
+                valid: INVALID_WORD,
+                value: Poseidon2Digest::zero(),
+            }
+        }
+        let state = Poseidon2State { lanes: self.lanes }
+        let mut values = [BabyBear::zero(); DIGEST_FIELDS]
+        let mut index: usize = 0
+        while index < DIGEST_FIELDS {
+            values[index] = state.field(index)
+            index = index + 1
+        }
+        PackedCommitment {
+            valid: VALID_WORD,
+            value: Poseidon2Digest { values: values },
+        }
+    }
+
     #[inline(always)]
     pub fn finish(self) -> PackedCommitment {
         if self.valid != VALID_WORD {

@@ -21,12 +21,14 @@ const DIGEST_FIELDS: usize = 8;
 const LEAVES: usize = 8;
 const FIELDS: usize = 5;
 const VALUE_WORDS: usize = LEAVES * FIELDS;
+const COMMITMENT_WORKSPACE_WORDS: usize = LEAVES * (WIDTH + 2);
+const COMMITMENT_STEPS: u32 = 2;
 const TREE_NODES: usize = LEAVES * 2 - 1;
 const TREE_WORDS: usize = TREE_NODES * DIGEST_FIELDS;
 const PARENT_TASKS: usize = LEAVES / 2;
 const LEVELS: u32 = 3;
 const RESULT_WORDS: usize = 1 + DIGEST_FIELDS;
-const COMPUTE_PASSES: usize = 4;
+const COMPUTE_PASSES: usize = 5;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -247,7 +249,13 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     let bundle = compile_oracle();
     assert_eq!(bundle.manifest.passes.len(), COMPUTE_PASSES + 1);
     let expected_passes = [
-        ("commit_leaves", [4, 1, 1], [2, 1, 1], 1),
+        ("prepare_commitments", [4, 1, 1], [2, 1, 1], 1),
+        (
+            "advance_commitments",
+            [4, 1, 1],
+            [2, 1, 1],
+            COMMITMENT_STEPS,
+        ),
         ("prepare_tree", [4, 1, 1], [1, 1, 1], 1),
         ("advance_tree", [4, 1, 1], [1, 1, 1], LEVELS),
         ("finish_tree", [1, 1, 1], [1, 1, 1], 1),
@@ -281,8 +289,8 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     );
     eprintln!(
         "  Poseidon Merkle WGSL bytes: leaves={}, parents={}",
-        bundle.pass_wgsl[0].source.len(),
-        bundle.pass_wgsl[2].source.len(),
+        bundle.pass_wgsl[1].source.len(),
+        bundle.pass_wgsl[3].source.len(),
     );
 
     let shapes = bundle
@@ -292,11 +300,15 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         .map(|resource| (resource.name.as_str(), (resource.length, resource.stride)))
         .collect::<HashMap<_, _>>();
     assert_eq!(shapes["values"], (VALUE_WORDS as u32, 4));
+    assert_eq!(
+        shapes["commitment_workspace"],
+        (COMMITMENT_WORKSPACE_WORDS as u32, 4),
+    );
     assert_eq!(shapes["tree"], (TREE_WORDS as u32, 4));
     assert_eq!(shapes["node_valid"], (TREE_NODES as u32, 4));
     assert_eq!(shapes["progress"], (PARENT_TASKS as u32, 4));
     assert_eq!(shapes["result"], (RESULT_WORDS as u32, 4));
-    assert_eq!(shapes.len(), 5);
+    assert_eq!(shapes.len(), 6);
 
     let resources = bundle
         .manifest
@@ -420,11 +432,17 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
         .collect::<Vec<_>>();
     let expected_progress = vec![3, 2, 1, 1];
     let zero_tree = vec![0u32; TREE_WORDS];
+    let zero_commitment_workspace = vec![0u32; COMMITMENT_WORKSPACE_WORDS];
     let zero_valid = vec![0u32; TREE_NODES];
     let zero_progress = vec![0u32; PARENT_TASKS];
     let zero_result = vec![0u32; RESULT_WORDS];
 
     queue.write_buffer(&resources["values"], 0, &bytes(&values));
+    queue.write_buffer(
+        &resources["commitment_workspace"],
+        0,
+        &bytes(&zero_commitment_workspace),
+    );
     queue.write_buffer(&resources["tree"], 0, &bytes(&zero_tree));
     queue.write_buffer(&resources["node_valid"], 0, &bytes(&zero_valid));
     queue.write_buffer(&resources["progress"], 0, &bytes(&zero_progress));
@@ -462,7 +480,7 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     submit_passes(
         &device,
         &queue,
-        &executable[3..],
+        &executable[4..],
         "reject incomplete ordered tree",
     );
     assert_eq!(
@@ -475,6 +493,11 @@ fn canonical_rows_and_ordered_tree_match_plonky3_on_webgpu() {
     let invalid_row = 3;
     noncanonical[2 * LEAVES + invalid_row] = MODULUS;
     queue.write_buffer(&resources["values"], 0, &bytes(&noncanonical));
+    queue.write_buffer(
+        &resources["commitment_workspace"],
+        0,
+        &bytes(&zero_commitment_workspace),
+    );
     queue.write_buffer(&resources["tree"], 0, &bytes(&zero_tree));
     queue.write_buffer(&resources["node_valid"], 0, &bytes(&zero_valid));
     queue.write_buffer(&resources["progress"], 0, &bytes(&zero_progress));

@@ -4,6 +4,7 @@ version = "0.1.0"
 
 [dependencies]
 core = "../../../../../ingots/core"
+mandelbrot_proof_baby_bear_domains = "../../../../../demos/capstones/mandelbrot-proof/baby-bear-domains"
 mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"
 mandelbrot_proof_fixed_air_core = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-core"
 mandelbrot_proof_fixed_air_webgpu = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-webgpu"
@@ -11,4 +12,6 @@ mandelbrot_proof_production_profile_baby_bear = "../../../../../demos/capstones/
 mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/recursive"
 parallel_ntt_webgpu = "../../../../../ingots/parallel_ntt_webgpu"
 parallel_structure = "../../../../../ingots/parallel_structure"
+poseidon_baby_bear_webgpu = "../../../../../ingots/poseidon_baby_bear_webgpu"
+poseidon_merkle_webgpu = "../../../../../ingots/poseidon_merkle_webgpu"
 precision = "../../../../../demos/sketches/precision"

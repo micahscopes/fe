@@ -16,6 +16,7 @@ use poseidon_baby_bear::{
     begin_binding_placement_tag,
     begin_digest_squeeze_placement_tag,
     begin_indexed_digest_squeeze_placement_tag,
+    fixed_length_sponge_permutations,
     poseidon2_workgroup_destination,
     poseidon2_workgroup_lane,
 }
@@ -30,49 +31,222 @@ pub const INDEXED_DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
 pub const DIGEST_SQUEEZE_STEPS: usize = 1 + 2 * POSEIDON2_STAGE_STEPS
 pub const DIGEST_BINDING_STEPS: usize = 1 + 3 * POSEIDON2_STAGE_STEPS
 
-/// Commit one logical row from a column-major field matrix.
+pub const fn column_major_field_row_commitment_steps(
+    _ prefix_fields: usize,
+    _ fields: usize,
+) -> usize {
+    fixed_length_sponge_permutations(prefix_fields + fields)
+}
+
+pub const fn column_major_field_row_commitment_state_words(
+    _ rows: usize,
+) -> usize {
+    rows * POSEIDON2_LANES
+}
+
+pub const fn column_major_field_row_commitment_valid_start(
+    _ rows: usize,
+) -> usize {
+    column_major_field_row_commitment_state_words(rows)
+}
+
+pub const fn column_major_field_row_commitment_progress_start(
+    _ rows: usize,
+) -> usize {
+    column_major_field_row_commitment_valid_start(rows) + rows
+}
+
+pub const fn column_major_field_row_commitment_workspace_words(
+    _ rows: usize,
+) -> usize {
+    column_major_field_row_commitment_progress_start(rows) + rows
+}
+
+pub struct ColumnMajorFieldRowCommitmentStep {
+    pub active: bool,
+    pub complete: bool,
+    pub valid: bool,
+    pub row: u32,
+    pub commitment: PackedCommitment,
+}
+impl core::marker::Copy for ColumnMajorFieldRowCommitmentStep {}
+
+fn invalid_packed_commitment() -> PackedCommitment {
+    Poseidon2FieldSponge::begin_tag(BABY_BEAR_MODULUS, 0)
+        .finish_scheduled()
+}
+
+fn inactive_row_commitment_step() -> ColumnMajorFieldRowCommitmentStep {
+    ColumnMajorFieldRowCommitmentStep {
+        active: false,
+        complete: false,
+        valid: false,
+        row: 0,
+        commitment: invalid_packed_commitment(),
+    }
+}
+
+/// Reset one private row cursor before a staged canonical commitment.
+pub fn prepare_column_major_field_row_commitments<
+    const ROWS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ invocation: ComputeInvocation,
+) {
+    let row = invocation.global.x
+    if row >= ROWS.downcast_truncate()
+        || (WORKSPACE_WORDS
+            < column_major_field_row_commitment_workspace_words(ROWS))
+    {
+        return
+    }
+    let valid_start: u32 =
+        column_major_field_row_commitment_valid_start(ROWS).downcast_truncate()
+    let progress_start: u32 =
+        column_major_field_row_commitment_progress_start(ROWS).downcast_truncate()
+    workspace.store(index: valid_start + row, value: 0)
+    workspace.store(index: progress_start + row, value: 0)
+}
+
+#[inline(always)]
+fn load_column_major_commitment_state<const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ row: u32,
+) -> [u32; POSEIDON2_LANES] {
+    let start = row * POSEIDON2_LANES.downcast_truncate()
+    let mut lanes = [0; POSEIDON2_LANES]
+    let mut lane: u32 = 0
+    while lane < POSEIDON2_LANES.downcast_truncate() {
+        lanes[lane as usize] = workspace.load(index: start + lane)
+        lane = lane + 1
+    }
+    lanes
+}
+
+#[inline(always)]
+fn store_column_major_commitment_state<const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ row: u32,
+    _ sponge: ref Poseidon2FieldSponge,
+) {
+    let start = row * POSEIDON2_LANES.downcast_truncate()
+    let mut lane: u32 = 0
+    while lane < POSEIDON2_LANES.downcast_truncate() {
+        workspace.store(
+            index: start + lane,
+            value: sponge.lane_word(lane),
+        )
+        lane = lane + 1
+    }
+}
+
+/// Execute one exact sponge permutation for every logical matrix row.
 ///
-/// The caller supplies the schema prefix as fields, while `D` supplies the
-/// nominal protocol domain. One invocation owns the complete row sponge. This
-/// is the portable row-parallel placement for long canonical records: it
-/// preserves exact field order without materializing a row-sized local array.
-pub fn commit_column_major_field_row<
+/// Repeating this entry by `column_major_field_row_commitment_steps` commits a
+/// long canonical row without specializing one permutation per source field.
+/// The first step absorbs six payload fields after the domain prefix, middle
+/// steps absorb eight, and the last step performs the exact final permutation.
+pub fn advance_column_major_field_row_commitments<
     D: Poseidon2FieldDomain,
     const ROWS: usize,
     const FIELDS: usize,
     const VALUE_WORDS: usize,
     const PREFIX_FIELDS: usize,
+    const WORKSPACE_WORDS: usize,
 >(
     _ values: StorageBuffer<u32, VALUE_WORDS>,
-    _ row: u32,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ prefix: ref [BabyBear; PREFIX_FIELDS],
-) -> PackedCommitment {
-    let expected: u32 = (PREFIX_FIELDS + FIELDS).downcast_truncate()
-    let mut sponge = Poseidon2FieldSponge::begin<D>(expected)
+    _ invocation: ComputeInvocation,
+) -> ColumnMajorFieldRowCommitmentStep {
+    let row = invocation.global.x
     if row >= ROWS.downcast_truncate()
         || VALUE_WORDS < ROWS * FIELDS
+        || (WORKSPACE_WORDS
+            < column_major_field_row_commitment_workspace_words(ROWS))
     {
-        return sponge.finish().require(false)
+        return inactive_row_commitment_step()
     }
-    let mut canonical = true
-    let mut prefix_field: usize = 0
-    let mut one = [BabyBear::zero(); 1]
-    while prefix_field < PREFIX_FIELDS {
-        one[0] = prefix[prefix_field]
-        sponge.absorb<1>(ref one)
-        prefix_field = prefix_field + 1
+    let payload: u32 = (PREFIX_FIELDS + FIELDS).downcast_truncate()
+    let steps: u32 = column_major_field_row_commitment_steps(
+        PREFIX_FIELDS,
+        FIELDS,
+    ).downcast_truncate()
+    let valid_start: u32 =
+        column_major_field_row_commitment_valid_start(ROWS).downcast_truncate()
+    let progress_start: u32 =
+        column_major_field_row_commitment_progress_start(ROWS).downcast_truncate()
+    let progress_index = progress_start + row
+    let step = workspace.load(index: progress_index)
+    if step >= steps {
+        return ColumnMajorFieldRowCommitmentStep {
+            active: true,
+            complete: false,
+            valid: false,
+            row: row,
+            commitment: invalid_packed_commitment(),
+        }
     }
-    let mut field: u32 = 0
-    while field < FIELDS.downcast_truncate() {
-        let word = values.load(
-            index: field * ROWS.downcast_truncate() + row,
+
+    let first_capacity: u32 = 6
+    let start: u32 = if step == 0 {
+        0
+    } else {
+        first_capacity + (step - 1) * 8
+    }
+    let capacity: u32 = if step == 0 { first_capacity } else { 8 }
+    let remaining = payload - start
+    let count = if remaining < capacity { remaining } else { capacity }
+    let final_block = step + 1 == steps
+    let mut sponge = if step == 0 {
+        Poseidon2FieldSponge::begin<D>(payload)
+    } else {
+        Poseidon2FieldSponge::restore(
+            load_column_major_commitment_state(workspace, row),
+            0,
+            payload,
+            start,
         )
-        if word >= BABY_BEAR_MODULUS { canonical = false }
-        one[0] = BabyBear::from_u32(word)
-        sponge.absorb<1>(ref one)
-        field = field + 1
     }
-    sponge.finish().require(canonical)
+    let mut input_valid = step == 0
+        || workspace.load(index: valid_start + row) == 1
+    let mut block = [BabyBear::zero(); 8]
+    let mut index: u32 = 0
+    while index < count {
+        let position = start + index
+        if position < PREFIX_FIELDS.downcast_truncate() {
+            block[index as usize] = prefix[position as usize]
+        } else {
+            let column = position - PREFIX_FIELDS.downcast_truncate()
+            let word = values.load(
+                index: column * ROWS.downcast_truncate() + row,
+            )
+            if word >= BABY_BEAR_MODULUS { input_valid = false }
+            block[index as usize] = BabyBear::from_u32(word)
+        }
+        index = index + 1
+    }
+    sponge.absorb_scheduled_block(ref block, count, final_block)
+    input_valid = input_valid && sponge.is_valid()
+    store_column_major_commitment_state(workspace, row, ref sponge)
+    workspace.store(
+        index: valid_start + row,
+        value: if input_valid { 1 } else { 0 },
+    )
+    workspace.store(index: progress_index, value: step + 1)
+    let commitment = if final_block {
+        sponge.finish_scheduled().require(input_valid)
+    } else {
+        invalid_packed_commitment()
+    }
+    ColumnMajorFieldRowCommitmentStep {
+        active: true,
+        complete: final_block,
+        valid: input_valid,
+        row: row,
+        commitment: commitment,
+    }
 }
 
 pub const fn indexed_digest_squeeze_state_words(_ states: usize) -> usize {

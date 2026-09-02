@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{WebBindingRole, WebBuildOptions, WebBundleMode, resolve_web_entry};
+use fe_codegen::{resolve_web_entry, WebBindingRole, WebBuildOptions, WebBundleMode};
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -56,7 +56,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 28);
+    assert_eq!(bundle.manifest.passes.len(), 33);
     assert_eq!(bundle.manifest.resources.len(), 8);
     let producer_names = [
         "derive_products",
@@ -158,7 +158,34 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[25].dispatch, Some([5, 1, 1]));
     assert_eq!(bundle.manifest.passes[26].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[26].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[27].source_entry, "paint");
+    let commitment_names = [
+        "prepare_base_lde_commitments",
+        "advance_base_lde_commitments",
+        "prepare_base_lde_tree",
+        "advance_base_lde_tree",
+        "finish_base_lde_tree",
+    ];
+    assert_eq!(
+        bundle.manifest.passes[27..32]
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        commitment_names,
+    );
+    assert_eq!(bundle.manifest.passes[27].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[27].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[27].repeat, 1);
+    assert_eq!(bundle.manifest.passes[28].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[28].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[28].repeat, 34);
+    assert_eq!(bundle.manifest.passes[29].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[29].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[30].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[30].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[30].repeat, 13);
+    assert_eq!(bundle.manifest.passes[31].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[31].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[32].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle

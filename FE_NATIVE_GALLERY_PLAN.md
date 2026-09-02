@@ -1757,23 +1757,31 @@ All four are focused ingots and may remain so permanently.
   160 KiB browser-risk cap. Closure still requires carrying the same authority
   through the complete query, transcript, remaining FRI layers, and recursive
   receipt layout, with an independent decoder for that complete receipt.
-  The production base-LDE commitment now has a reusable exact placement
-  foundation. A nominal `MandelbrotSparseBaseLdeLeafBabyBearV1` domain is
-  shared by scalar, Wasm, and WebGPU interpreters, so no numeric tag is copied
-  into a shader fixture. `commit_column_major_field_row` streams a logical row
-  from column-major storage through the canonical Poseidon2 field sponge
-  without a row-sized local aggregate. `poseidon_merkle_webgpu` separately
-  places the fixed ordered binary tree, one independent parent task per GPU
-  invocation and one dispatch boundary per level, while preserving exact left
-  and right order. A focused eight-leaf llvmpipe gate compares every leaf,
-  internal node, and root with independent Plonky3 semantics. It also proves
-  that one incomplete private level cursor and one noncanonical source field
-  both reject through a zero root. The release gate completed in 233.04
-  seconds; its first portable leaf and parent shaders are 1,594,826 and
-  438,201 bytes. Exactness is established, but those sizes remain optimization
-  evidence rather than a performance claim. Wiring the 8,192 by 260 production
-  base LDE into this tree, deriving interaction challenges from its root, and
-  executing that production graph in Chrome remain open.
+  The production base-LDE commitment and ordered tree are now wired into the
+  same eight-resource graph. A nominal
+  `MandelbrotSparseBaseLdeLeafBabyBearV1` domain is shared by scalar, Wasm, and
+  WebGPU interpreters, so no numeric tag is copied into a shader fixture. The
+  staged `advance_column_major_field_row_commitments` interpreter streams each
+  logical row from column-major storage through the canonical Poseidon2 field
+  sponge. Every repeated dispatch performs exactly one permutation per active
+  row, avoiding both a row-sized local aggregate and specialization of the
+  entire 264-field message into one shader. `poseidon_merkle_webgpu`
+  separately places the fixed ordered binary tree, one independent parent task
+  per GPU invocation and one dispatch boundary per level, while preserving
+  exact left and right order. A focused eight-leaf llvmpipe gate compares every
+  leaf, internal node, and root with independent Plonky3 semantics. It also
+  proves that one incomplete private level cursor and one noncanonical source
+  field both reject through a zero root. The original one-invocation exactness
+  gate completed in 233.04 seconds and emitted 1,594,826-byte leaf and
+  438,201-byte parent shaders. Its production specialization was stopped after
+  44:09 of sustained compilation because it did not satisfy the compile-scale
+  design gate. The staged exactness gate completed in 57.06 seconds and emits
+  660,606-byte leaf and 438,282-byte parent shaders. The complete 33-pass
+  production graph then passed release lowering in 1,285.74 seconds with all
+  browser WGSL validated and every pass within the eight-storage-buffer limit.
+  The production-sized commitment and tree have not yet executed numerically
+  on WebGPU or in Chrome. Deriving interaction challenges from the root and
+  carrying those challenges through the interaction trace remain open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
   Fiat-Shamir sampling, and canonical encoding exist. The four-query regression
