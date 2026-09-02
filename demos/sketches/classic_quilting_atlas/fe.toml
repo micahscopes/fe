@@ -1,0 +1,10 @@
+[ingot]
+name = "classic_quilting_atlas"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../ingots/core" }
+std = { path = "../../../ingots/std" }
+quilting_domain = "../../../ingots/quilting_domain"
+quilting_quaternion = "../../../ingots/quilting_quaternion"
+quilting_qb = "../../../ingots/quilting_qb"

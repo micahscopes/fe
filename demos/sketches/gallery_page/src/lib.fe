@@ -184,6 +184,12 @@ actor GalleryPage {
                 source: t("sketches/gradient/src/lib.fe"),
                 program: t("sketches/gradient"),
             )
+            .render_tile(
+                title: t("classic quilting"),
+                description: t("atlas: samples → CDT → QB"),
+                source: t2("sketches/classic_quilting_", "atlas/src/lib.fe"),
+                program: t2("sketches/", "classic_quilting_atlas"),
+            )
             .todo_mount()
             .event_studio_mount()
             .render_tile(
