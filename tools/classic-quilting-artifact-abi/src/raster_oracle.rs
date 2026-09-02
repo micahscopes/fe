@@ -812,6 +812,15 @@ fn gpu_constrained_delaunay_satisfies_exact_planar_invariants() {
 #[test]
 fn gpu_sampling_preserves_the_immutable_generation_cycle() {
     let bundle = compiled_sampling();
+    assert_eq!(
+        bundle
+            .manifest
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
+        ["workspace", "points", "receipt"],
+    );
     assert_eq!(bundle.manifest.passes.len(), 5);
     assert_eq!(
         bundle
