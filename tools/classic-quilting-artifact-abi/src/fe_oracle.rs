@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -79,6 +80,44 @@ fn call_u32(store: &mut Store<()>, instance: &Instance, name: &str, value: u32) 
         .unwrap()
 }
 
+fn call2_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 2]) -> u32 {
+    let [a, b] = values;
+    function::<(u32, u32), u32>(store, instance, name)
+        .call(store, (a, b))
+        .unwrap()
+}
+
+fn call4_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 4]) -> u32 {
+    let [a, b, c, d] = values;
+    function::<(u32, u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c, d))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call5_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 5]) -> u32 {
+    let [a, b, c, d, e] = values;
+    function::<(u32, u32, u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c, d, e))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call6_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 6]) -> u32 {
+    let [a, b, c, d, e, f] = values;
+    function::<(u32, u32, u32, u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call8_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 8]) -> u32 {
+    let [a, b, c, d, e, f, g, h] = values;
+    function::<(u32, u32, u32, u32, u32, u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g, h))
+        .unwrap()
+}
+
 fn canonical_lod_keys() -> Vec<[u32; 3]> {
     let mut keys = Vec::new();
     for a in 0..=8 {
@@ -89,6 +128,66 @@ fn canonical_lod_keys() -> Vec<[u32; 3]> {
         }
     }
     keys
+}
+
+fn mix32_oracle(mut value: u32) -> u32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^ (value >> 16)
+}
+
+fn radius_squared_oracle(density_exponent_q8: u32) -> u32 {
+    let doubled_exponent = density_exponent_q8 * 2;
+    let integer_shift = doubled_exponent / 256;
+    let fraction = doubled_exponent % 256;
+    let mut value = 65_536_u32;
+    for (bit, factor) in [
+        (1, 65_359),
+        (2, 65_182),
+        (4, 64_830),
+        (8, 64_132),
+        (16, 62_757),
+        (32, 60_097),
+        (64, 55_109),
+        (128, 46_341),
+    ] {
+        if fraction & bit != 0 {
+            value = (value * factor + 32_768) >> 16;
+        }
+    }
+    (value << 12) >> integer_shift
+}
+
+fn density_exponent_q8_oracle(key: [u32; 3], point: [u32; 3]) -> u32 {
+    let [a, b, c] = point.map(u64::from);
+    let weights = [b * c, a * c, a * b];
+    let sum = weights.iter().sum::<u64>();
+    if sum == 0 {
+        return key[2] * 256;
+    }
+    let weighted = weights
+        .into_iter()
+        .zip(key.map(u64::from))
+        .map(|(weight, lod)| weight * lod)
+        .sum::<u64>();
+    u32::try_from(weighted * 256 / sum).unwrap()
+}
+
+fn continuous_density_exponent(key: [u32; 3], point: [u32; 3]) -> f64 {
+    let [a, b, c] = point.map(f64::from);
+    let weights = [b * c, a * c, a * b];
+    let sum = weights.iter().sum::<f64>();
+    if sum == 0.0 {
+        return f64::from(key[2]);
+    }
+    weights
+        .into_iter()
+        .zip(key.map(f64::from))
+        .map(|(weight, lod)| weight * lod)
+        .sum::<f64>()
+        / sum
 }
 
 #[test]
@@ -276,6 +375,263 @@ fn quilting_atlas_ctfe_plan_matches_an_independent_rust_schedule() {
                 .call(&mut store, (a, b, c))
                 .unwrap(),
             expected_permutation
+        );
+    }
+}
+
+#[test]
+fn quilting_atlas_fe_sampler_matches_independent_integer_oracles() {
+    const SCALE: u32 = 16_384;
+    const SEED: u32 = 0x51c3_2a97;
+
+    let (mut store, instance) = instantiate();
+    let keys = canonical_lod_keys();
+
+    for value in [0, 1, 42, u32::MAX, 0x8000_0000, 0xdead_beef] {
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_mix32", value),
+            mix32_oracle(value)
+        );
+    }
+
+    for (patch, key) in keys.iter().copied().enumerate() {
+        let patch = u32::try_from(patch).unwrap();
+        let resolutions = key.map(|lod| 1_u32 << lod);
+        let boundary_count = resolutions.iter().sum::<u32>();
+        let mut unique_boundary = BTreeSet::new();
+
+        for boundary in 0..boundary_count {
+            let values = [patch, boundary];
+            let actual = [
+                call2_u32(&mut store, &instance, "atlas_boundary_a", values),
+                call2_u32(&mut store, &instance, "atlas_boundary_b", values),
+                call2_u32(&mut store, &instance, "atlas_boundary_c", values),
+            ];
+            let (expected, edge, step) = if boundary <= resolutions[2] {
+                let step = boundary;
+                let distance = step * (SCALE / resolutions[2]);
+                ([SCALE - distance, distance, 0], 2, step)
+            } else {
+                let after_ab = boundary - resolutions[2] - 1;
+                if after_ab < resolutions[1] {
+                    let step = after_ab + 1;
+                    let distance = step * (SCALE / resolutions[1]);
+                    ([SCALE - distance, 0, distance], 1, step)
+                } else {
+                    let step = after_ab - resolutions[1] + 1;
+                    let distance = step * (SCALE / resolutions[0]);
+                    ([0, SCALE - distance, distance], 0, step)
+                }
+            };
+            assert_eq!(actual, expected, "patch={patch} boundary={boundary}");
+            assert_eq!(
+                call2_u32(&mut store, &instance, "atlas_boundary_edge", values),
+                edge
+            );
+            assert_eq!(
+                call2_u32(&mut store, &instance, "atlas_boundary_step", values),
+                step
+            );
+            assert_eq!(
+                call2_u32(&mut store, &instance, "atlas_boundary_valid", values),
+                1
+            );
+            assert!(
+                unique_boundary.insert(actual),
+                "duplicate patch={patch} boundary={boundary} point={actual:?}"
+            );
+        }
+        assert_eq!(
+            unique_boundary.len(),
+            usize::try_from(boundary_count).unwrap()
+        );
+        assert_eq!(
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_boundary_valid",
+                [patch, boundary_count],
+            ),
+            0
+        );
+
+        let density_points = [
+            [SCALE, 0, 0],
+            [0, SCALE, 0],
+            [0, 0, SCALE],
+            [SCALE / 2, SCALE / 4, SCALE / 4],
+            [5_462, 5_461, 5_461],
+            [1, SCALE / 2 - 1, SCALE / 2],
+        ];
+        for point in density_points {
+            let arguments = [patch, point[0], point[1], point[2]];
+            let expected_exponent = density_exponent_q8_oracle(key, point);
+            let actual_exponent = call4_u32(
+                &mut store,
+                &instance,
+                "atlas_density_exponent_q8",
+                arguments,
+            );
+            assert_eq!(actual_exponent, expected_exponent);
+
+            let actual_radius = call4_u32(
+                &mut store,
+                &instance,
+                "atlas_poisson_radius_squared",
+                arguments,
+            );
+            assert_eq!(actual_radius, radius_squared_oracle(expected_exponent));
+
+            let continuous_exponent = continuous_density_exponent(key, point);
+            let continuous_radius =
+                f64::from(SCALE).powi(2) * 2.0_f64.powf(-2.0 * continuous_exponent);
+            let relative_error =
+                (f64::from(actual_radius) - continuous_radius).abs() / continuous_radius;
+            assert!(
+                relative_error < 0.006,
+                "patch={patch} point={point:?} radius={actual_radius} expected={continuous_radius} relative_error={relative_error}"
+            );
+        }
+
+        let side = resolutions[2] * 2;
+        let cell_count = side * (side + 1) / 2;
+        let slot_count = cell_count * 2;
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_candidate_grid_side", patch),
+            side
+        );
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_candidate_cell_count", patch),
+            cell_count
+        );
+        assert_eq!(
+            call_u32(&mut store, &instance, "atlas_candidate_slot_count", patch),
+            slot_count
+        );
+
+        for cell_b in [0, side / 2, side - 1] {
+            let row_cells = side - cell_b;
+            for cell_c in [0, row_cells / 2, row_cells - 1] {
+                for trial in 0..2 {
+                    let arguments = [patch, SEED, cell_b, cell_c, trial];
+                    let cell = cell_b * (side + side - cell_b + 1) / 2 + cell_c;
+                    let slot = cell * 2 + trial;
+                    let priority = mix32_oracle(
+                        SEED ^ patch.wrapping_mul(0x9e37_79b9) ^ slot.wrapping_mul(0x85eb_ca6b),
+                    );
+                    let second_hash = mix32_oracle(priority ^ 0xa511_e9b3);
+                    let cell_width = SCALE / side;
+                    let mut jitter_b = priority % cell_width;
+                    let mut jitter_c = second_hash % cell_width;
+                    if jitter_b + jitter_c >= cell_width {
+                        jitter_b = cell_width - 1 - jitter_b;
+                        jitter_c = cell_width - 1 - jitter_c;
+                    }
+                    let b = cell_b * cell_width + jitter_b;
+                    let c = cell_c * cell_width + jitter_c;
+                    let expected_point = [SCALE - b - c, b, c];
+                    let actual_point = [
+                        call5_u32(&mut store, &instance, "atlas_candidate_a", arguments),
+                        call5_u32(&mut store, &instance, "atlas_candidate_b", arguments),
+                        call5_u32(&mut store, &instance, "atlas_candidate_c", arguments),
+                    ];
+                    assert_eq!(actual_point, expected_point);
+                    assert_eq!(
+                        call5_u32(&mut store, &instance, "atlas_candidate_slot", arguments),
+                        slot
+                    );
+                    assert!(slot < slot_count);
+                    assert_eq!(
+                        call5_u32(&mut store, &instance, "atlas_candidate_priority", arguments),
+                        priority
+                    );
+                    let exponent = density_exponent_q8_oracle(key, expected_point);
+                    assert_eq!(
+                        call5_u32(
+                            &mut store,
+                            &instance,
+                            "atlas_candidate_radius_squared",
+                            arguments,
+                        ),
+                        radius_squared_oracle(exponent)
+                    );
+                    let expected_valid = u32::from(expected_point.into_iter().all(|lane| lane > 0));
+                    assert_eq!(
+                        call5_u32(&mut store, &instance, "atlas_candidate_valid", arguments),
+                        expected_valid
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            call5_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_slot",
+                [patch, SEED, side - 1, 0, 1],
+            ),
+            slot_count - 1
+        );
+        assert_eq!(
+            call5_u32(
+                &mut store,
+                &instance,
+                "atlas_candidate_valid",
+                [patch, SEED, side, 0, 0],
+            ),
+            0
+        );
+    }
+
+    let points = [
+        ([SCALE, 0, 0], [0, SCALE, 0]),
+        ([0, SCALE, 0], [0, 0, SCALE]),
+        (
+            [SCALE / 2, SCALE / 4, SCALE / 4],
+            [SCALE / 4, SCALE / 2, SCALE / 4],
+        ),
+    ];
+    for (left, right) in points {
+        let db = i64::from(left[1]) - i64::from(right[1]);
+        let dc = i64::from(left[2]) - i64::from(right[2]);
+        let distance = u32::try_from(3 * (db * db + dc * dc + db * dc)).unwrap();
+        assert_eq!(
+            call6_u32(
+                &mut store,
+                &instance,
+                "atlas_equilateral_distance_squared",
+                [left[0], left[1], left[2], right[0], right[1], right[2]],
+            ),
+            distance
+        );
+        assert_eq!(
+            call8_u32(
+                &mut store,
+                &instance,
+                "atlas_poisson_conflict",
+                [left[0], left[1], left[2], distance, right[0], right[1], right[2], distance,],
+            ),
+            0,
+            "contact at exactly the larger disk radius is admitted"
+        );
+        assert_eq!(
+            call8_u32(
+                &mut store,
+                &instance,
+                "atlas_poisson_conflict",
+                [
+                    right[0],
+                    right[1],
+                    right[2],
+                    1,
+                    left[0],
+                    left[1],
+                    left[2],
+                    distance + 1,
+                ],
+            ),
+            1,
+            "the symmetric larger-disk rule rejects an overlap"
         );
     }
 }

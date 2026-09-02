@@ -16,6 +16,8 @@ use core::execution::Compute
 use core::marker::Copy
 use core::pending::Pending
 
+pub use sampling
+
 pub const MIN_LOD: u32 = 0
 pub const MAX_LOD: u32 = 8
 pub const LOD_LEVELS: usize = 9
