@@ -19,6 +19,7 @@ use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait 
 
 pub use layout::{
     GpuLayout,
+    StorageGpuLayout,
     StorageLayout,
     StorageLayoutProvider,
     UniformLayout,

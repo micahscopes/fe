@@ -36,40 +36,75 @@ pub trait GpuLayout<Space> {
     const fn fields() -> Self::Fields
 }
 
-impl GpuLayout<StorageLayout> for u32 {
+/// Derivable storage-layout evidence.
+///
+/// Fe's derive provider protocol accepts a unary constraint constructor. A
+/// layout-space-specialized trait keeps that contract honest while the blanket
+/// implementation below preserves the public `GpuLayout<StorageLayout>` view.
+/// This is compile-time evidence only; it adds no runtime wrapper or table.
+pub trait StorageGpuLayout {
+    type Fields
+    const SIZE: u32
+    const ALIGN: u32
+    const STRIDE: u32
+    const FIELD_COUNT: u32
+
+    const fn fields() -> Self::Fields
+}
+
+impl<T: StorageGpuLayout> GpuLayout<StorageLayout> for T {
+    type Fields = <T as StorageGpuLayout>::Fields
+    const SIZE: u32 = <T as StorageGpuLayout>::SIZE
+    const ALIGN: u32 = <T as StorageGpuLayout>::ALIGN
+    const STRIDE: u32 = <T as StorageGpuLayout>::STRIDE
+    const FIELD_COUNT: u32 = <T as StorageGpuLayout>::FIELD_COUNT
+    const fn fields() -> Self::Fields {
+        <T as StorageGpuLayout>::fields()
+    }
+}
+
+impl StorageGpuLayout for u32 {
     type Fields = ()
     const SIZE: u32 = 4
     const ALIGN: u32 = 4
     const STRIDE: u32 = 4
     const FIELD_COUNT: u32 = 0
-    const fn fields() -> Self::Fields { () }
+    const fn fields() -> Self::Fields {
+        ()
+    }
 }
 
-impl GpuLayout<StorageLayout> for i32 {
+impl StorageGpuLayout for i32 {
     type Fields = ()
     const SIZE: u32 = 4
     const ALIGN: u32 = 4
     const STRIDE: u32 = 4
     const FIELD_COUNT: u32 = 0
-    const fn fields() -> Self::Fields { () }
+    const fn fields() -> Self::Fields {
+        ()
+    }
 }
 
-impl GpuLayout<StorageLayout> for f32 {
+impl StorageGpuLayout for f32 {
     type Fields = ()
     const SIZE: u32 = 4
     const ALIGN: u32 = 4
     const STRIDE: u32 = 4
     const FIELD_COUNT: u32 = 0
-    const fn fields() -> Self::Fields { () }
+    const fn fields() -> Self::Fields {
+        ()
+    }
 }
 
-impl<T: GpuLayout<StorageLayout>, const N: usize> GpuLayout<StorageLayout> for [T; N] {
+impl<T: StorageGpuLayout, const N: usize> StorageGpuLayout for [T; N] {
     type Fields = ()
     const SIZE: u32 = T::STRIDE * N.downcast_truncate()
     const ALIGN: u32 = T::ALIGN
     const STRIDE: u32 = Self::SIZE
     const FIELD_COUNT: u32 = 0
-    const fn fields() -> Self::Fields { () }
+    const fn fields() -> Self::Fields {
+        ()
+    }
 }
 
 /// Derive storage layout for an ordinary nominal record.
@@ -82,20 +117,16 @@ impl<T: GpuLayout<StorageLayout>, const N: usize> GpuLayout<StorageLayout> for [
 /// alignment fold without depending on caller imports.
 pub struct StorageLayoutProvider {}
 
-impl Derive<GpuLayout<StorageLayout>> for StorageLayoutProvider {
-    const fn derive<T>(ev: own Evidence<GpuLayout<StorageLayout, T>>)
-        -> Evidence<GpuLayout<StorageLayout, T>>
-        uses (
-            reflect: Reflect<T>,
-            builder: mut ImplBuilder<GpuLayout<StorageLayout, T>>,
-        )
+impl Derive<StorageGpuLayout> for StorageLayoutProvider {
+    const fn derive<T>(ev: own Evidence<StorageGpuLayout<T>>) -> Evidence<StorageGpuLayout<T>>
+    uses (reflect: Reflect<T>, builder: mut ImplBuilder<StorageGpuLayout<T>>)
     {
         let mut offset = builder.int(0)
         let mut fields_ty = builder.tuple_ty()
         let mut fields = builder.tuple_expr()
         let mut index: u32 = 0
         for field in reflect.fields() {
-            builder.require<GpuLayout<StorageLayout>>(field.ty())
+            builder.require<StorageGpuLayout>(field.ty())
             let align = builder.trait_const(field.ty(), "ALIGN")
             let size = builder.trait_const(field.ty(), "SIZE")
             let aligned = offset
@@ -108,10 +139,7 @@ impl Derive<GpuLayout<StorageLayout>> for StorageLayoutProvider {
             field_layout = builder.with_elem(field_layout, aligned)
             field_layout = builder.with_elem(field_layout, size)
             field_layout = builder.with_elem(field_layout, align)
-            fields = builder.with_elem(
-                fields,
-                field_layout,
-            )
+            fields = builder.with_elem(fields, field_layout)
             offset = builder.add(aligned, size)
             index = index + 1
         }

@@ -7,6 +7,7 @@ use std::webgpu::{
     StorageBuffer as Shared,
     StorageLayout,
     StorageLayoutProvider,
+    StorageGpuLayout,
     WebGpuBackend,
     Workgroup as Threads,
 }
@@ -17,7 +18,7 @@ pub struct MixedSample {
     pub y: f32,
 }
 
-derive GpuLayout<StorageLayout> for MixedSample using StorageLayoutProvider
+derive StorageGpuLayout for MixedSample using StorageLayoutProvider
 
 actor MixedStorage uses (Program<WebGpuBackend>) {
     samples: Shared<MixedSample, 1>,

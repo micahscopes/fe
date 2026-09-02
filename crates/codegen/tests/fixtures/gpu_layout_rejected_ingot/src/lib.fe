@@ -1,5 +1,6 @@
 use std::webgpu::{
     GpuLayout,
+    StorageGpuLayout,
     StorageLayout,
     StorageLayoutProvider,
 }
@@ -11,4 +12,4 @@ struct InvalidStorageRecord {
     material: u32,
 }
 
-derive GpuLayout<StorageLayout> for InvalidStorageRecord using StorageLayoutProvider
+derive StorageGpuLayout for InvalidStorageRecord using StorageLayoutProvider

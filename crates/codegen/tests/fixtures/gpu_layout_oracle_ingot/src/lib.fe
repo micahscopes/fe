@@ -1,5 +1,6 @@
 use std::webgpu::{
     GpuLayout,
+    StorageGpuLayout,
     StorageLayout,
     StorageLayoutProvider,
 }
@@ -10,7 +11,7 @@ struct MixedVertex {
     y: f32,
 }
 
-derive GpuLayout<StorageLayout> for MixedVertex using StorageLayoutProvider
+derive StorageGpuLayout for MixedVertex using StorageLayoutProvider
 
 pub fn layout_receipt()
     -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32)
