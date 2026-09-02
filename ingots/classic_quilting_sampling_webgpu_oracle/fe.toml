@@ -1,0 +1,9 @@
+[ingot]
+name = "classic_quilting_sampling_webgpu_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+std = { path = "../std" }
+quilting_atlas = { path = "../quilting_atlas" }
+quilting_atlas_webgpu = { path = "../quilting_atlas_webgpu" }
