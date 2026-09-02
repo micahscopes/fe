@@ -61,6 +61,7 @@ pub enum TestEmit {
 pub enum WebMode {
     Render,
     Grid,
+    Compute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

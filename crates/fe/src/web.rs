@@ -29,8 +29,8 @@ use crate::{WebCanonicalPolicy, WebMode, dependency_diagnostics::DependencyIssue
 #[derive(Debug, Clone)]
 pub struct CompileRequest {
     pub path: Utf8PathBuf,
-    /// Explicit render entry, or `None` to derive it from the module's `actor`
-    /// declaration (its single `FragmentSurface` behavior).
+    /// Explicit terminal entry, or `None` to derive it from the module's
+    /// `actor` declaration (its render surface or final compute behavior).
     pub entry: Option<String>,
     /// Explicit mode, or `None` to derive it from the `actor` declaration.
     pub mode: Option<WebMode>,
@@ -44,6 +44,7 @@ fn to_bundle_mode(mode: WebMode) -> WebBundleMode {
     match mode {
         WebMode::Render => WebBundleMode::Render,
         WebMode::Grid => WebBundleMode::Grid,
+        WebMode::Compute => WebBundleMode::Compute,
     }
 }
 
@@ -51,9 +52,7 @@ fn from_bundle_mode(mode: WebBundleMode) -> WebMode {
     match mode {
         WebBundleMode::Render => WebMode::Render,
         WebBundleMode::Grid => WebMode::Grid,
-        WebBundleMode::Compute => {
-            panic!("compute stages are internal to a render pass graph")
-        }
+        WebBundleMode::Compute => WebMode::Compute,
     }
 }
 
@@ -68,6 +67,11 @@ fn validate_workgroup(
         (WebMode::Render, _) => {
             Err("workgroup flags are only valid with `--mode grid`".to_string())
         }
+        (WebMode::Compute, [None, None, None]) => Ok(None),
+        (WebMode::Compute, _) => Err(
+            "compute actor workgroup and dispatch geometry are authored in Fe; command-line workgroup flags are not accepted"
+                .to_string(),
+        ),
         (WebMode::Grid, [Some(x), Some(y), Some(z)]) if x > 0 && y > 0 && z > 0 => {
             Ok(Some([x, y, z]))
         }
@@ -302,7 +306,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             "dependency diagnostics clean"
         );
     }
-    // Derive the render entry and mode from the module's `actor` declaration when
+    // Derive the terminal entry and mode from the module's `actor` declaration when
     // not given explicitly; when supplied, they are reconciled against the
     // declaration (a mismatch errors, naming both sources).
     let phase_started = Instant::now();
@@ -315,6 +319,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     let mut options = match mode {
         WebMode::Render => WebBuildOptions::render(&entry, source_id.clone()),
         WebMode::Grid => WebBuildOptions::grid(&entry, workgroup.unwrap(), source_id.clone()),
+        WebMode::Compute => WebBuildOptions::compute(&entry, source_id.clone()),
     }
     .with_canonical_policy(match canonical {
         WebCanonicalPolicy::Disabled => codegen::WebCanonicalPolicy::Disabled,
@@ -1149,6 +1154,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(render.contains("only valid"), "{render}");
+
+        let compute = build(
+            &request(
+                "missing.fe",
+                "classify",
+                WebMode::Compute,
+                [Some(1), Some(1), Some(1)],
+                WebCanonicalPolicy::Disabled,
+                &[],
+            ),
+            &"out".into(),
+        )
+        .unwrap_err();
+        assert!(compute.contains("authored in Fe"), "{compute}");
+    }
+
+    #[test]
+    fn compute_only_actor_is_derived_by_the_public_web_build_path() {
+        let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codegen/tests/fixtures/actor_compute_only")
+            .canonicalize_utf8()
+            .unwrap();
+        let bundle = compile(&CompileRequest {
+            path: fixture,
+            entry: None,
+            mode: None,
+            workgroup: [None, None, None],
+            source_id: None,
+            canonical: WebCanonicalPolicy::Disabled,
+            canonical_entries: Vec::new(),
+        })
+        .expect("derive compute-only actor through fe web build");
+
+        assert_eq!(bundle.manifest.layout.mode, WebBundleMode::Compute);
+        assert_eq!(bundle.manifest.source_entry, "write_receipt");
+        assert_eq!(bundle.manifest.passes.len(), 2);
+        assert_eq!(bundle.manifest.passes[0].source_entry, "seed");
+        assert_eq!(bundle.manifest.passes[1].source_entry, "write_receipt");
+        assert!(
+            bundle
+                .manifest
+                .passes
+                .iter()
+                .all(|pass| pass.dispatch == Some([1, 1, 1]))
+        );
+        assert_eq!(bundle.manifest.surface, None);
     }
 
     #[test]
