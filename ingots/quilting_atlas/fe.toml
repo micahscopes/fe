@@ -1,0 +1,7 @@
+[ingot]
+name = "quilting_atlas"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+

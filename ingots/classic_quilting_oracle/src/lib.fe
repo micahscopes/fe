@@ -22,6 +22,93 @@ use quilting_qb::{
     permutation_parity,
     remap_barycentric,
 }
+use quilting_atlas::{
+    AtlasKey,
+    EdgePermutation,
+    DIRECT_16_LANE_SCHEDULE,
+    atlas_job,
+    canonical_key_at,
+    canonicalize,
+}
+
+pub fn atlas_key_a(_ ordinal: u32) -> u32 {
+    canonical_key_at(ordinal as usize).a
+}
+
+pub fn atlas_key_b(_ ordinal: u32) -> u32 {
+    canonical_key_at(ordinal as usize).b
+}
+
+pub fn atlas_key_c(_ ordinal: u32) -> u32 {
+    canonical_key_at(ordinal as usize).c
+}
+
+pub fn atlas_root_ordinal(_ ordinal: u32) -> u32 {
+    atlas_job(ordinal as usize).root_ordinal
+}
+
+pub fn atlas_parent_ordinal(_ ordinal: u32) -> u32 {
+    atlas_job(ordinal as usize).parent_ordinal
+}
+
+pub fn atlas_boundary_vertices(_ ordinal: u32) -> u32 {
+    atlas_job(ordinal as usize).boundary_vertices
+}
+
+pub fn atlas_vertex_capacity(_ ordinal: u32) -> u32 {
+    atlas_job(ordinal as usize).vertex_capacity
+}
+
+pub fn atlas_triangle_capacity(_ ordinal: u32) -> u32 {
+    atlas_job(ordinal as usize).triangle_capacity
+}
+
+pub fn atlas_estimated_work(_ ordinal: u32) -> u32 {
+    atlas_job(ordinal as usize).estimated_work
+}
+
+pub fn atlas_schedule_order(_ rank: u32) -> u32 {
+    DIRECT_16_LANE_SCHEDULE.execution_order[rank as usize]
+}
+
+pub fn atlas_schedule_lane(_ ordinal: u32) -> u32 {
+    DIRECT_16_LANE_SCHEDULE.lane_for_job[ordinal as usize]
+}
+
+pub fn atlas_schedule_lane_load(_ lane: u32) -> u32 {
+    DIRECT_16_LANE_SCHEDULE.lane_loads[lane as usize]
+}
+
+pub fn atlas_schedule_maximum_lane_load() -> u32 {
+    DIRECT_16_LANE_SCHEDULE.maximum_lane_load
+}
+
+fn permutation_code(_ permutation: EdgePermutation) -> u32 {
+    match permutation {
+        EdgePermutation::ABC => 0,
+        EdgePermutation::ACB => 1,
+        EdgePermutation::BAC => 2,
+        EdgePermutation::BCA => 3,
+        EdgePermutation::CAB => 4,
+        EdgePermutation::CBA => 5,
+    }
+}
+
+pub fn atlas_canonical_a(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    canonicalize(AtlasKey { a: a, b: b, c: c }).key.a
+}
+
+pub fn atlas_canonical_b(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    canonicalize(AtlasKey { a: a, b: b, c: c }).key.b
+}
+
+pub fn atlas_canonical_c(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    canonicalize(AtlasKey { a: a, b: b, c: c }).key.c
+}
+
+pub fn atlas_permutation(_ a: u32, _ b: u32, _ c: u32) -> u32 {
+    permutation_code(canonicalize(AtlasKey { a: a, b: b, c: c }).permutation)
+}
 
 fn input_bary(_ a: f32, _ b: f32, _ c: f32) -> Bary3F {
     bary3f(a, b, c)

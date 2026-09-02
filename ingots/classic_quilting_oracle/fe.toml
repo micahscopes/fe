@@ -7,3 +7,4 @@ core = { path = "../core" }
 quilting_domain = { path = "../quilting_domain" }
 quilting_quaternion = { path = "../quilting_quaternion" }
 quilting_qb = { path = "../quilting_qb" }
+quilting_atlas = { path = "../quilting_atlas" }
