@@ -190,6 +190,12 @@ actor GalleryPage {
                 source: t2("sketches/classic_quilting_", "atlas/src/lib.fe"),
                 program: t2("sketches/", "classic_quilting_atlas"),
             )
+            .render_tile(
+                title: t("quilting LoD"),
+                description: t("barycentric focus → atlas permutation"),
+                source: t2("sketches/classic_quilting_", "lod/src/lib.fe"),
+                program: t2("sketches/", "classic_quilting_lod"),
+            )
             .todo_mount()
             .event_studio_mount()
             .render_tile(
