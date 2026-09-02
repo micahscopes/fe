@@ -811,7 +811,12 @@ function deepFreeze(value) {
 // ---------------------------------------------------------------------------
 
 const SHADOW_CSS = `
-:host { display: block; max-width: 420px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+:host { display: block;
+        width: min(var(--fe-surface-max-size, 768px),
+                   calc(100vw - var(--fe-surface-window-inline-margin, 32px)),
+                   calc(100vh - var(--fe-surface-window-block-margin, 112px)));
+        max-width: 100%; margin-inline: auto;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
         color: #cfd6e4; }
 .root { display: flex; flex-direction: column; gap: 10px; }
 .stage { position: relative; width: 100%; background: #000; border-radius: 10px; overflow: hidden;
