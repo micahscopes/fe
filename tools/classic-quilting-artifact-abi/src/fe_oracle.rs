@@ -134,6 +134,22 @@ fn call8_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u3
 }
 
 #[allow(clippy::many_single_char_names)]
+fn call9_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 9]) -> u32 {
+    let [a, b, c, d, e, f, g, h, i] = values;
+    function::<(u32, u32, u32, u32, u32, u32, u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g, h, i))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call10_u32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 10]) -> u32 {
+    let [a, b, c, d, e, f, g, h, i, j] = values;
+    function::<(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32), u32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g, h, i, j))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
 fn call8_i32(store: &mut Store<()>, instance: &Instance, name: &str, values: [u32; 8]) -> i32 {
     let [a, b, c, d, e, f, g, h] = values;
     function::<(u32, u32, u32, u32, u32, u32, u32, u32), i32>(store, instance, name)
@@ -266,6 +282,54 @@ fn incircle_sign_oracle(
         0
     } else {
         i32::try_from(determinant.signum() * winding.signum()).unwrap()
+    }
+}
+
+fn constrained_boundary_edges_oracle(key: [u32; 3]) -> BTreeSet<(u32, u32)> {
+    let [resolution_a, resolution_b, resolution_c] = key.map(|lod| 1_u32 << lod);
+    let vertex_a = 0;
+    let vertex_b = resolution_c;
+    let vertex_c = resolution_c + resolution_b;
+    let mut edges = BTreeSet::new();
+    let mut admit = |first: u32, second: u32| {
+        edges.insert((first.min(second), first.max(second)));
+    };
+
+    for first in vertex_a..vertex_b {
+        admit(first, first + 1);
+    }
+    admit(vertex_a, vertex_b + 1);
+    for first in vertex_b + 1..vertex_c {
+        admit(first, first + 1);
+    }
+    if resolution_a == 1 {
+        admit(vertex_b, vertex_c);
+    } else {
+        let bc_first = vertex_c + 1;
+        let bc_last = vertex_c + resolution_a - 1;
+        admit(vertex_b, bc_first);
+        for first in bc_first..bc_last {
+            admit(first, first + 1);
+        }
+        admit(bc_last, vertex_c);
+    }
+    edges
+}
+
+fn point_triangle_relation_oracle(triangle: [[u32; 2]; 3], query: [u32; 2]) -> u32 {
+    assert!(orientation_oracle(triangle[0], triangle[1], triangle[2]) > 0);
+    let edges = [
+        orientation_oracle(triangle[0], triangle[1], query),
+        orientation_oracle(triangle[1], triangle[2], query),
+        orientation_oracle(triangle[2], triangle[0], query),
+    ];
+    if edges.into_iter().any(|edge| edge < 0) {
+        return 0;
+    }
+    match edges.into_iter().filter(|edge| *edge == 0).count() {
+        0 => 1,
+        1 => 2,
+        _ => 3,
     }
 }
 
@@ -1050,6 +1114,255 @@ fn quilting_atlas_exact_delaunay_predicates_match_i128_and_stable_ties() {
     assert_eq!(call_flip(&mut store, &instance, [10, 20], [5, 30], 0), 1);
     assert_eq!(call_flip(&mut store, &instance, [5, 30], [10, 20], 0), 0);
     assert_eq!(call_flip(&mut store, &instance, [10, 20], [20, 10], 0), 0);
+}
+
+#[test]
+fn quilting_atlas_topology_transitions_match_independent_oracles() {
+    const SCALE: u32 = 16_384;
+    const INVALID: u32 = u32::MAX;
+    let (mut store, instance) = instantiate();
+
+    // Exhaust every possible boundary-ID pair for every canonical atlas key.
+    // This proves that the locked constraint ring contains exactly h edges,
+    // including the three non-contiguous corner joins in the seed layout.
+    for key in canonical_lod_keys() {
+        let expected = constrained_boundary_edges_oracle(key);
+        let boundary_count = key.map(|lod| 1_u32 << lod).into_iter().sum::<u32>();
+        assert_eq!(expected.len(), usize::try_from(boundary_count).unwrap());
+        for first in 0..boundary_count {
+            for second in first + 1..boundary_count {
+                let actual = call5_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_is_constrained_boundary_edge",
+                    [key[0], key[1], key[2], first, second],
+                );
+                let reverse = call5_u32(
+                    &mut store,
+                    &instance,
+                    "atlas_is_constrained_boundary_edge",
+                    [key[0], key[1], key[2], second, first],
+                );
+                let oracle = u32::from(expected.contains(&(first, second)));
+                assert_eq!(actual, oracle, "key={key:?} edge={first}-{second}");
+                assert_eq!(reverse, oracle, "key={key:?} edge={second}-{first}");
+            }
+        }
+    }
+    for invalid in [[2, 1, 3, 0, 1], [0, 1, 9, 0, 1], [0, 0, 0, 0, 3]] {
+        assert_eq!(
+            call5_u32(
+                &mut store,
+                &instance,
+                "atlas_is_constrained_boundary_edge",
+                invalid,
+            ),
+            0
+        );
+    }
+
+    let classifications = [
+        ([[0, 0], [SCALE, 0], [0, SCALE]], [4_096, 4_096]),
+        ([[0, 0], [SCALE, 0], [0, SCALE]], [8_192, 0]),
+        ([[0, 0], [SCALE, 0], [0, SCALE]], [0, 0]),
+        ([[0, 0], [8_192, 0], [0, 8_192]], [9_000, 1_000]),
+        (
+            [[1_024, 2_048], [12_288, 2_048], [3_072, 11_264]],
+            [3_072, 2_048],
+        ),
+    ];
+    for (triangle, query) in classifications {
+        let values = [
+            triangle[0][0],
+            triangle[0][1],
+            triangle[1][0],
+            triangle[1][1],
+            triangle[2][0],
+            triangle[2][1],
+            query[0],
+            query[1],
+        ];
+        assert_eq!(
+            call8_u32(
+                &mut store,
+                &instance,
+                "atlas_point_triangle_relation",
+                values,
+            ),
+            point_triangle_relation_oracle(triangle, query),
+            "triangle={triangle:?} query={query:?}"
+        );
+    }
+
+    let triangle = [[0, 0], [SCALE, 0], [0, SCALE]];
+    let interior = [4_096, 4_096];
+    let interior_prefix = [
+        triangle[0][0],
+        triangle[0][1],
+        triangle[1][0],
+        triangle[1][1],
+        triangle[2][0],
+        triangle[2][1],
+        interior[0],
+        interior[1],
+    ];
+    let expected_interior_split = [10, 20, 40, 20, 30, 40, 30, 10, 40];
+    for (lane, expected) in expected_interior_split.into_iter().enumerate() {
+        let mut values = [0_u32; 9];
+        values[..8].copy_from_slice(&interior_prefix);
+        values[8] = u32::try_from(lane).unwrap();
+        assert_eq!(
+            call9_u32(&mut store, &instance, "atlas_interior_split_vertex", values,),
+            expected
+        );
+    }
+    let mut on_edge = interior_prefix;
+    on_edge[6] = 8_192;
+    on_edge[7] = 0;
+    let mut invalid_split = [0_u32; 9];
+    invalid_split[..8].copy_from_slice(&on_edge);
+    assert_eq!(
+        call9_u32(
+            &mut store,
+            &instance,
+            "atlas_interior_split_vertex",
+            invalid_split,
+        ),
+        INVALID
+    );
+
+    let edge_split_prefix = [0, 0, SCALE, 0, 0, SCALE, SCALE / 2, 0];
+    let expected_edge_split = [10, 40, 30, 40, 20, 30];
+    for (lane, expected) in expected_edge_split.into_iter().enumerate() {
+        let mut values = [0_u32; 10];
+        values[0] = 0;
+        values[1..9].copy_from_slice(&edge_split_prefix);
+        values[9] = u32::try_from(lane).unwrap();
+        assert_eq!(
+            call10_u32(&mut store, &instance, "atlas_edge_split_vertex", values,),
+            expected
+        );
+    }
+    for (edge, point) in [(3, [SCALE / 2, 0]), (0, [0, 0]), (0, [4_096, 1])] {
+        let mut values = [0_u32; 10];
+        values[0] = edge;
+        values[1..7].copy_from_slice(&edge_split_prefix[..6]);
+        values[7] = point[0];
+        values[8] = point[1];
+        assert_eq!(
+            call10_u32(&mut store, &instance, "atlas_edge_split_vertex", values,),
+            INVALID
+        );
+    }
+
+    // Four vertices of the exact equilateral-metric hexagon form a convex,
+    // cocircular quadrilateral. The lexicographically smaller replacement
+    // diagonal (5, 30) must win over (10, 20) and both outputs remain CCW.
+    let u = [9_216, 4_096];
+    let v = [7_168, 4_096];
+    let first_opposite = [8_192, 3_072];
+    let second_opposite = [8_192, 5_120];
+    let flip_values = [
+        u[0],
+        u[1],
+        v[0],
+        v[1],
+        first_opposite[0],
+        first_opposite[1],
+        second_opposite[0],
+        second_opposite[1],
+    ];
+    assert_eq!(
+        incircle_sign_oracle(u, v, first_opposite, second_opposite),
+        0
+    );
+    assert_eq!(
+        call8_u32(
+            &mut store,
+            &instance,
+            "atlas_topology_flip_flags",
+            flip_values,
+        ),
+        3
+    );
+    let expected_flipped = [5, 10, 30, 30, 20, 5];
+    for (lane, expected) in expected_flipped.into_iter().enumerate() {
+        let mut values = [0_u32; 9];
+        values[..8].copy_from_slice(&flip_values);
+        values[8] = u32::try_from(lane).unwrap();
+        assert_eq!(
+            call9_u32(&mut store, &instance, "atlas_flipped_vertex", values,),
+            expected
+        );
+    }
+    let nonconvex = [
+        u[0],
+        u[1],
+        v[0],
+        v[1],
+        first_opposite[0],
+        first_opposite[1],
+        9_216,
+        3_072,
+    ];
+    assert_eq!(
+        call8_u32(
+            &mut store,
+            &instance,
+            "atlas_topology_flip_flags",
+            nonconvex,
+        ),
+        0
+    );
+
+    assert_eq!(
+        call10_u32(
+            &mut store,
+            &instance,
+            "atlas_flip_proposals_conflict",
+            [3, 8, 10, 20, 1, 8, 9, 5, 30, 1],
+        ),
+        1
+    );
+    assert_eq!(
+        call10_u32(
+            &mut store,
+            &instance,
+            "atlas_flip_proposals_conflict",
+            [3, 8, 10, 20, 0, 8, 9, 5, 30, 1],
+        ),
+        0,
+        "inactive proposals cannot suppress an active winner"
+    );
+    assert_eq!(
+        call8_u32(
+            &mut store,
+            &instance,
+            "atlas_flip_proposal_precedes",
+            [3, 8, 10, 20, 8, 9, 5, 30],
+        ),
+        0
+    );
+    assert_eq!(
+        call8_u32(
+            &mut store,
+            &instance,
+            "atlas_flip_proposal_precedes",
+            [8, 9, 5, 30, 3, 8, 10, 20],
+        ),
+        1
+    );
+    for (active, conflict, expected) in [(0, 0, 0), (1, 1, 0), (1, 0, 1)] {
+        assert_eq!(
+            call2_u32(
+                &mut store,
+                &instance,
+                "atlas_flip_proposal_is_round_winner",
+                [active, conflict],
+            ),
+            expected
+        );
+    }
 }
 
 fn call3(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 3]) -> f32 {
