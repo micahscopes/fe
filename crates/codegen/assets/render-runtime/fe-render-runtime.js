@@ -1406,6 +1406,13 @@ export class FeSurfaceElement extends HTMLElement {
     const declaredHeight = this._surface?.extent?.height ?? declaredWidth;
     const dpr = Number(globalThis.devicePixelRatio ?? 0);
     const probe = this._adoptedCanvas || this._stage || this;
+    // A fresh canvas has a 300:150 intrinsic aspect ratio. Establish the
+    // Fe-declared presentation ratio before measuring CSS bounds, otherwise
+    // the first backing decision can accidentally preserve that browser
+    // default (for example, a square 768 surface becoming 420x210).
+    if (!this._adoptedCanvas && this._stage) {
+      this._stage.style.aspectRatio = `${declaredWidth} / ${declaredHeight}`;
+    }
     const rect = probe.getBoundingClientRect();
     const cssWidth = Number(rect.width);
     const cssHeight = Number(rect.height);
