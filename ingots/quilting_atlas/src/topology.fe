@@ -241,6 +241,44 @@ fn unordered_pair_is(_ first: u32, _ second: u32, _ expected_first: u32, _ expec
         || (first == expected_second && second == expected_first)
 }
 
+/// Map a CCW hull-ring ordinal to the compact boundary-seed vertex ID.
+///
+/// Sampling stores AB from A to B, then AC from A to C without A, then BC
+/// interiors from B to C. Topology wants A→B→C→A. This mapping performs that
+/// change of view arithmetically, without a generated permutation table.
+pub const fn boundary_ring_vertex(_ key: AtlasKey, _ ring_ordinal: u32) -> u32 {
+    if key.a > key.b
+        || key.b > key.c
+        || key.c > MAX_LOD
+        || ring_ordinal >= boundary_vertices(key)
+    {
+        return INVALID_VERTEX
+    }
+    let resolution_a = edge_resolution(key.a)
+    let resolution_b = edge_resolution(key.b)
+    let resolution_c = edge_resolution(key.c)
+    let vertex_b = resolution_c
+    let vertex_c = resolution_c + resolution_b
+
+    // A through B, including both corners.
+    if ring_ordinal <= vertex_b {
+        return ring_ordinal
+    }
+    let after_ab = ring_ordinal - vertex_b - 1
+
+    // BC interiors, followed by C.
+    if after_ab < resolution_a - 1 {
+        return vertex_c + 1 + after_ab
+    }
+    if after_ab == resolution_a - 1 {
+        return vertex_c
+    }
+
+    // AC interiors in reverse, from the neighbour of C back toward A.
+    let reverse_interior = after_ab - resolution_a
+    vertex_c - 1 - reverse_interior
+}
+
 /// Whether two boundary-seed IDs are one locked segment in the reference
 /// triangle's three ordered chains.
 pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32) -> bool {
