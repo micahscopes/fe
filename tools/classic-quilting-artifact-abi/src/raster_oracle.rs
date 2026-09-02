@@ -24,6 +24,7 @@ struct CompiledRaster {
 
 static COMPILED: OnceLock<CompiledRaster> = OnceLock::new();
 static COMPILED_PREDICATES: OnceLock<WebBundle> = OnceLock::new();
+static COMPILED_TOPOLOGY: OnceLock<WebBundle> = OnceLock::new();
 
 fn compiled_predicates() -> &'static WebBundle {
     COMPILED_PREDICATES.get_or_init(|| {
@@ -71,6 +72,57 @@ fn exact_predicates_compile_to_browser_profile_wgsl() {
     .validate(&module)
     .expect("predicate WGSL validates with browser capabilities");
     assert!(bundle.wgsl.contains("@compute"));
+    assert!(!bundle.wgsl.contains("f32"));
+    assert!(!bundle.wgsl.contains("f64"));
+}
+
+fn compiled_topology() -> &'static WebBundle {
+    COMPILED_TOPOLOGY.get_or_init(|| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ingots/classic_quilting_topology_webgpu_oracle");
+        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+        let mut db = DriverDataBase::default();
+        assert!(
+            !driver::init_ingot(&mut db, &url),
+            "topology oracle ingot initialization diagnostics"
+        );
+        let top_mod = db
+            .workspace()
+            .containing_ingot(&db, url)
+            .expect("topology oracle ingot")
+            .root_mod(&db);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected topology oracle diagnostics:\n{diagnostics}"
+        );
+        WebBundle::compile(
+            &db,
+            top_mod,
+            WebBuildOptions::compute(
+                "exercise",
+                Some("classic-quilting-exact-topology".to_owned()),
+            ),
+        )
+        .expect("compile exact topology WebGPU bundle")
+    })
+}
+
+#[test]
+fn exact_topology_compiles_to_browser_profile_wgsl() {
+    let bundle = compiled_topology();
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "exercise");
+    assert_eq!(bundle.manifest.passes[0].dispatch, Some([1, 1, 1]));
+    let module = naga::front::wgsl::parse_str(&bundle.wgsl).expect("topology WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .expect("topology WGSL validates with browser capabilities");
+    assert!(bundle.wgsl.contains("@compute"));
+    assert!(!bundle.wgsl.contains("@fragment"));
     assert!(!bundle.wgsl.contains("f32"));
     assert!(!bundle.wgsl.contains("f64"));
 }

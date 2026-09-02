@@ -1,0 +1,112 @@
+//! Browser-profile compilation oracle for deterministic Quilting topology.
+
+use quilting_atlas::{AtlasKey}
+use quilting_atlas::sampling::{BARYCENTRIC_SCALE, FixedBarycentric}
+use quilting_atlas::topology::{
+    Triangle,
+    classify_point_in_triangle,
+    flipped_triangle_pair,
+    interior_edge_flip_decision,
+    is_constrained_boundary_edge,
+    split_triangle_edge,
+    split_triangle_interior,
+}
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+fn point(_ source: Shared<u32, 8>, _ ordinal: u32) -> FixedBarycentric {
+    let offset = ordinal + ordinal
+    let b = source.load(index: offset)
+    let c = source.load(index: offset + 1)
+    FixedBarycentric { a: BARYCENTRIC_SCALE - b - c, b: b, c: c }
+}
+
+fn bit(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+actor ExactTopologyOracle uses (Program<WebGpuBackend>) {
+    points: Shared<u32, 8>,
+    verdict: Shared<u32, 16>,
+
+    fn exercise(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 {
+            return
+        }
+        let first = point(self.points, 0)
+        let second = point(self.points, 1)
+        let third = point(self.points, 2)
+        let query = point(self.points, 3)
+        let triangle = Triangle { first: 10, second: 20, third: 30, valid: true }
+        let interior = split_triangle_interior(
+            triangle,
+            first,
+            second,
+            third,
+            40,
+            query,
+        )
+        let edge = split_triangle_edge(
+            triangle,
+            0,
+            first,
+            second,
+            third,
+            40,
+            query,
+        )
+        let decision = interior_edge_flip_decision(
+            10,
+            first,
+            20,
+            second,
+            5,
+            third,
+            30,
+            query,
+        )
+        let flipped = flipped_triangle_pair(
+            decision,
+            10,
+            first,
+            20,
+            second,
+            5,
+            third,
+            30,
+            query,
+        )
+
+        self.verdict.store(
+            index: 0,
+            value: bit(is_constrained_boundary_edge(AtlasKey { a: 0, b: 1, c: 2 }, 0, 1)),
+        )
+        self.verdict.store(
+            index: 1,
+            value: classify_point_in_triangle(first, second, third, query),
+        )
+        self.verdict.store(index: 2, value: bit(interior.valid))
+        self.verdict.store(index: 3, value: interior.first.first)
+        self.verdict.store(index: 4, value: interior.first.second)
+        self.verdict.store(index: 5, value: interior.first.third)
+        self.verdict.store(index: 6, value: bit(edge.valid))
+        self.verdict.store(index: 7, value: edge.first.first)
+        self.verdict.store(index: 8, value: edge.first.second)
+        self.verdict.store(index: 9, value: edge.first.third)
+        self.verdict.store(index: 10, value: bit(decision.convex))
+        self.verdict.store(index: 11, value: bit(decision.flip))
+        self.verdict.store(index: 12, value: flipped.first.first)
+        self.verdict.store(index: 13, value: flipped.first.second)
+        self.verdict.store(index: 14, value: flipped.first.third)
+        self.verdict.store(index: 15, value: bit(flipped.valid))
+    }
+}
