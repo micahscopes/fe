@@ -1,0 +1,12 @@
+[ingot]
+name = "classic_quilting_generated"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../ingots/core" }
+std = { path = "../../../ingots/std" }
+quilting_atlas = "../../../ingots/quilting_atlas"
+quilting_atlas_webgpu = "../../../ingots/quilting_atlas_webgpu"
+quilting_domain = "../../../ingots/quilting_domain"
+quilting_quaternion = "../../../ingots/quilting_quaternion"
+quilting_qb = "../../../ingots/quilting_qb"
