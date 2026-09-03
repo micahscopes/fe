@@ -6589,7 +6589,7 @@ fn production_sparse_lde_browser_roots_match_independent_reference() {
         });
     let transition = read_u32le_file(&receipt_dir.join("transition_workspace.u32le"));
     let interaction_tree = read_u32le_file(&receipt_dir.join("base_trace.u32le"));
-    let base_tree_and_interaction_validity =
+    let interaction_validity =
         read_u32le_file(&receipt_dir.join("lde_inverse_values.u32le"));
 
     assert_eq!(
@@ -6599,7 +6599,7 @@ fn production_sparse_lde_browser_roots_match_independent_reference() {
     );
     assert_eq!(transition[217], 1, "all commitment phases must be valid");
     assert!(interaction_tree.len() >= ROOT_WORD + 8);
-    assert!(base_tree_and_interaction_validity.len() >= ROOT_WORD + 8);
+    assert!(interaction_validity.len() >= ROOT_NODE + 1);
 
     let point = ComplexFx {
         real: fixed(true, 3, 4),
@@ -6624,12 +6624,12 @@ fn production_sparse_lde_browser_roots_match_independent_reference() {
         expected_sparse_production_interaction_lde_root(&interaction_lde, base_root);
 
     assert_eq!(
-        &base_tree_and_interaction_validity[ROOT_WORD..ROOT_WORD + 8],
+        &transition[..8],
         &base_root,
         "retained browser LD01 root must match the independent reference",
     );
     assert_eq!(
-        base_tree_and_interaction_validity[ROOT_NODE], 1,
+        interaction_validity[ROOT_NODE], 1,
         "browser LD02 root node must be valid",
     );
     assert_eq!(

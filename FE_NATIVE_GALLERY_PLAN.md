@@ -1809,8 +1809,13 @@ All four are focused ingots and may remain so permanently.
   uncaptured, or device-loss errors. Its 2,129,920 base-LDE words and 1,245,184
   interaction-LDE words all match an independent Plonky3 model; that model
   reconstructs the four quartic accumulators independently and requires each
-  terminal sum to be zero. Interaction-trace commitment and complete proof
-  continuation remain open.
+  terminal sum to be zero. The next five Fe passes now stream each 152-field
+  interaction row through the same domain-branded Poseidon2 commitment
+  interpreter, build the exact ordered LD02 tree, and retain both LD01 and LD02
+  roots without adding an actor resource. A physical 56-pass Chrome receipt
+  matches independent Plonky3 codewords plus independent LD01 and LD02
+  Poseidon/Merkle roots. Composition commitment and complete proof continuation
+  remain open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
   Fiat-Shamir sampling, and canonical encoding exist. The four-query regression
@@ -1868,9 +1873,20 @@ All four are focused ingots and may remain so permanently.
   Fe surface then emits a typed browser receipt whose 3,375,104 codeword words
   match Plonky3 exactly. The generic CDP observer now transports mapped
   resources in bounded 512 KiB chunks, avoiding the single 8.5 MiB DevTools
-  payload that previously timed out without changing proof semantics.
-  Interactive point and disk selection, interaction commitment, complete proof
-  receipt encoding, Wasm verification, and revm-Wasm verification remain.
+  payload that previously timed out without changing proof semantics. The
+  56-pass continuation physically executes in Chrome and returns five typed
+  resource tapes totaling about 22 MiB without a shader error, device loss, or
+  tab crash. Its independent oracle first caught an invalid lifetime assumption:
+  LD01 was consumed correctly, then overwritten by interaction-LDE storage
+  before LD02 leaf hashing tried to bind it. The corrected Fe placement retains
+  LD01 in the retired transition-witness prefix. Every base and interaction LDE
+  word, both roots, both ordered-tree validity facts, and the final phase receipt
+  now match independent references. The corrected 56-pass artifact contains
+  2,274,793 WGSL bytes. Its cold production precompile took 1,513.6 seconds,
+  exposing whole-actor invalidation as a compiler caching target rather than a
+  browser-prover runtime cost. Interactive point and disk selection, composition
+  commitment, complete proof receipt encoding, Wasm verification, and revm-Wasm
+  verification remain.
 - **G-BROWSER shader materialization boundary, active.** The detailed boundary
   audit is recorded at
   `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.
