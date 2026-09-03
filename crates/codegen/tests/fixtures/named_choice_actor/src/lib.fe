@@ -1,0 +1,51 @@
+//! A named choice remains Fe-authored presentation data while its resident
+//! transition and GPU uniform use one scalar ordinal.
+
+use std::webgpu::{
+    FragmentSurface, GpuProgram, LatestPerFrame, StandardSurfaceRecovery, SurfaceRecovery,
+    SurfaceScheduling, SurfaceTransition, WebGpuBackend,
+}
+use std::web::view::{
+    ApplyParamBindings, ChoiceOptions, Extent, Param, ParamBindingsProvider, Surface,
+    SurfaceEvent, SurfaceState,
+}
+
+struct ChoiceParams { mode: Param }
+struct ChoiceState { mode: f32 }
+
+impl SurfaceState for ChoiceState { type Params = ChoiceParams }
+derive ApplyParamBindings for ChoiceState using ParamBindingsProvider
+
+const fn choice_params() -> ChoiceParams {
+    ChoiceParams {
+        mode: Param::choice(
+            options: ChoiceOptions::three(
+                first: "regular grid",
+                second: "atlas charts",
+                third: "blue noise",
+            ),
+            init: 1.0,
+        ),
+    }
+}
+
+actor NamedChoiceProbe uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    mode: f32,
+
+    const fn view() -> Surface<ChoiceParams> {
+        Surface { extent: Extent::square(64), params: choice_params() }
+    }
+
+    fn choose(self, event: own SurfaceEvent) -> ChoiceState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        ChoiceState { mode: self.mode }.apply_param_bindings(choice_params(), event)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        if self.mode > 0.5 { px ^ py } else { px + py }
+    }
+}

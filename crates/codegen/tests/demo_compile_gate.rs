@@ -55,6 +55,7 @@ use fe_codegen::{
     WebCanonicalPolicy, WebFeResponsibility, WebHostResponsibility, actor_gpu_program,
     resolve_web_entry,
 };
+use hir::analysis::semantic::project_view_surface;
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -790,7 +791,50 @@ fn compile_standalone_grid(rel_path: &str, entry: &str, workgroup: [u32; 3]) -> 
 fn view_vocabulary_const_constructs_a_surface() {
     with_standalone_file(
         "crates/codegen/tests/fixtures/view/view_surface_smoke.fe",
-        |_db, _top_mod| {},
+        |db, top_mod| {
+            let view = top_mod
+                .all_funcs(db)
+                .iter()
+                .copied()
+                .find(|func| {
+                    func.name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == "smoke_view")
+                })
+                .expect("smoke_view function");
+            let surface = project_view_surface(db, view).expect("project smoke view");
+            assert_eq!(
+                surface.params[4].presentation.options,
+                ["grid", "atlas", "fan", "blue noise"],
+                "named choices must remain Fe-authored const data",
+            );
+        },
+    );
+}
+
+#[test]
+fn named_choice_is_metadata_while_wasm_state_stays_scalar() {
+    let bundle = compile_actor_ingot("crates/codegen/tests/fixtures/named_choice_actor");
+    wasmparser::validate(&bundle.wasm).expect("named-choice transition should emit valid Wasm");
+    let surface = bundle
+        .manifest
+        .surface
+        .as_ref()
+        .expect("named-choice surface");
+    let mode = surface
+        .params
+        .iter()
+        .find(|param| param.name == "mode")
+        .expect("mode param");
+    assert_eq!(mode.min, Some(0.0));
+    assert_eq!(mode.max, Some(2.0));
+    assert_eq!(mode.init, Some(1.0));
+    assert_eq!(
+        mode.presentation
+            .as_ref()
+            .expect("mode presentation")
+            .options,
+        ["regular grid", "atlas charts", "blue noise"],
     );
 }
 

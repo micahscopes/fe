@@ -1,0 +1,7 @@
+[ingot]
+name = "named_choice_actor"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+std = "../../../../../ingots/std"
