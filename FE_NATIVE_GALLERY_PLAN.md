@@ -1846,10 +1846,14 @@ All four are focused ingots and may remain so permanently.
     falls from 70,419 to 15,599 WGSL characters, a 77.8 percent reduction.
   - [x] Recover SCCP's exact all-zero aggregate projection in the SPIR-V/Naga
     backend without admitting general pointer reinterpretation.
-  - [ ] Emit a per-allocation rejection census for production proof kernels.
-    The current sparse round-interaction kernel selects zero typed allocations,
-    so its remaining arena use must still be selected from measured rejection
-    causes rather than widened speculatively.
+  - [x] Emit a per-allocation rejection census for production proof kernels.
+    The final sparse round-interaction trace records every candidate, selected
+    root, layout, byte count, and rejection reason. Its four remaining local
+    rejections are all exact `uncertified-call-borrow` cases of 24, 96, 132,
+    and 152 bytes, rather than inferred escape risk. The complete trace is
+    `/workspace/scratch/mb2-round-interaction-typed-borrow-final-2026-09-02.log`;
+    its compact allocation census is
+    `/workspace/scratch/mb2-typed-private-census-2026-09-02.txt`.
   - [x] Attribute rooted inliner replication to original helper call sites and
     record clone survival after every cleanup frontier. Classify the complete
     reachable helper graph by target legality before choosing outlining work.
@@ -1861,14 +1865,29 @@ All four are focused ingots and may remain so permanently.
     874,347 WGSL bytes, from 51,198 to 29,408 Naga expressions, and from 234,707
     to 136,267 SPIR-V words. The exact production gate parses, validates, and
     passes below its 1 MB limit.
-  - [ ] Preserve typed aggregate initialization, moves, and non-overlapping
-    copies when address identity and byte layout are unobserved.
+  - [x] Preserve typed aggregate initialization, first-binding moves, typed
+    projection loads/stores, and recursively flattened non-overlapping value
+    copies when address identity and byte layout are unobserved. Raw bytewise,
+    escaping, overlapping, enum, and unsupported aggregate operations remain
+    fail-closed on the canonical arena.
+  - [x] Preserve profitable ordinary Fe `ref` and `mut` aggregate helper inputs
+    as typed function-local pointers. One whole-program least fixed point proves
+    callee use closure, caller storage closure, and every transitive private
+    call before declaring a pointer ABI. The production gate selects 10 typed
+    inputs across six functions while rejecting 4 expression escapes, 5
+    uncertified callee edges, and 18 uncertified caller edges. WGSL falls from
+    874,347 to 639,232 bytes, Naga expressions from 29,408 to 17,487, SPIR-V
+    words from 136,267 to 91,217, and private heap demand from 2,865 to 1,147
+    bytes. Relative to the 1,600,494-byte baseline, WGSL is down 60.1 percent.
+    A focused ordinary-Fe borrow gate plus the production parse, validation,
+    and private-heap gates remain green.
   - [ ] Separate statically bounded scratch from genuinely dynamic arena
     allocation, then choose private, workgroup, or storage placement through
     explicit target capabilities and size limits.
-  - [ ] Replace flattened aggregate helper lanes where profitable with a
-    certified borrowed-input and caller-owned-output ABI. Keep scalar ABIs for
-    the first materialization experiments.
+  - [ ] Add caller-owned aggregate output slots where final-artifact attribution
+    proves them profitable. Borrowed aggregate inputs are complete; scalar and
+    tuple results remain the deliberate ABI until this next gate earns a
+    smaller artifact.
   - [ ] Remove remaining assumptions that portable shader values require Wasm
     byte layout, canonical-memory operations, and Wasm-oriented limits.
   - [x] Generalize Sonatina-to-Naga control lowering for multiple return
