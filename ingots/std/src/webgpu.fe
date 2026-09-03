@@ -56,6 +56,12 @@ pub use resource::{
     Zeroed,
 }
 pub use raster::{
+    AttachmentLoad,
+    AttachmentOps,
+    AttachmentStore,
+    ClearColor,
+    ClearThenLoadStore,
+    ColorAttachmentPlan,
     ColorOnly,
     CompareAlways,
     CompareGreater,
@@ -79,6 +85,9 @@ pub use raster::{
     EnabledDepthFormat,
     FaceCull,
     NoDepth,
+    OpaqueBlack,
+    RasterAttachmentPolicy,
+    RasterColorPolicy,
     RasterConfiguration,
     RasterDepthCompare,
     RasterDepthPolicy,
