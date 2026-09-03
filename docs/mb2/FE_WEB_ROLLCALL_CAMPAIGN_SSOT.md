@@ -985,6 +985,25 @@ existing Definition of done, not a second campaign checklist:
   raw pointer facts and realizes Fe-requested capture; the Fe actor owns the
   down/drag/up state machine, click-versus-drag threshold, center and radius
   calculation, preview, cancellation, predicate choice, and proof scheduling.
+
+  The 2026-09-03 production round-interaction compiler checkpoint now lowers
+  the exact Fe actor with no private byte heap. Typed shader locals, callable
+  helper control flow, projected borrows, structured merges and latches,
+  redundant phi and zero-initialization cleanup, native selector switches,
+  Fe-derived padding defaults, and unused private return-lane elimination
+  reduce its compute WGSL from the measured 1,600,494-byte baseline to 93,779
+  bytes while the independent production oracle remains green. The final
+  shader contains 1,827 Naga expressions and zero private heap bytes. One
+  preceding 96,999-byte checkpoint created a pipeline on the external Radeon
+  Chrome in about 46 seconds and completed the full surface dispatch/readback
+  path in about 1.2 seconds. This is feasibility evidence, not a stable browser
+  acceptance receipt. A later full-surface launch lost Chrome's WebGPU instance
+  before poster readback, and two subsequent one-word health probes lost their
+  page frames in the same browser process. The auto-running page is stopped.
+  After relaunching Chrome, the immutable focused probe must pass compile-only,
+  one-workgroup, full-grid, and readback gates separately before this actor is
+  counted browser-green. This stage is one production proof relation, not the
+  complete nonrecursive or recursive receipt.
 - [ ] **G-INSPECT:** the Fe SourceInspector presents authored, semantic,
   analysis, placement, ABI/layout, artifact, and evidence views from one
   content-addressed `SourceAtlas`, with no gallery `docs.json` or runtime render
