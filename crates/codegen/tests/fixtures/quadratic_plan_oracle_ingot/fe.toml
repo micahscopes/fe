@@ -3,6 +3,7 @@ name = "quadratic_plan_oracle_ingot"
 version = "0.1.0"
 
 [dependencies]
+canonical_words = "../../../../../ingots/canonical_words"
 core = "../../../../../ingots/core"
 precision = "../../../../../demos/sketches/precision"
 quadratic_plan = "../../../../../ingots/quadratic_plan"

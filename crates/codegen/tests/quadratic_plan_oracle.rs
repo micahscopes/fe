@@ -109,6 +109,15 @@ fn shared_plan_matches_independent_field_math_and_rejects_every_node_mutation() 
         );
         assert_eq!(clean, [1, 0, 0, 0, ab, bc, output, output]);
 
+        let word_clean = call_words(
+            &mut store,
+            &instance,
+            "quadratic_plan_word_audit",
+            &[a, b, c, 0],
+            2,
+        );
+        assert_eq!(word_clean, [1, output]);
+
         for mutation in 1..=3 {
             let mutated = call_words(
                 &mut store,
@@ -121,6 +130,17 @@ fn shared_plan_matches_independent_field_math_and_rejects_every_node_mutation() 
             assert!(
                 mutated[1..4].iter().any(|residual| *residual != 0),
                 "committed node mutation {mutation} must violate a quadratic residual",
+            );
+            let word_mutated = call_words(
+                &mut store,
+                &instance,
+                "quadratic_plan_word_audit",
+                &[a, b, c, mutation],
+                2,
+            );
+            assert_eq!(
+                word_mutated[0], 0,
+                "word-stream node mutation {mutation} must reject",
             );
         }
 

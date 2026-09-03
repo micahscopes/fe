@@ -13,7 +13,9 @@
 use canonical_words::{
     CanonicalWords,
     CanonicalWordsProvider,
+    WordSource,
     WordSink,
+    decode_canonical_words,
     encode_canonical_words,
 }
 use core::{BrowserPtr, alloc_browser_object}
@@ -100,6 +102,76 @@ impl<
                 writer: encode_canonical_words(ref value, self.writer),
                 cursor: self.cursor + 1,
                 valid: true,
+            },
+            value: value,
+        }
+    }
+}
+
+/// Result of checking a caller-owned word stream against one authored plan.
+/// The reader remains available so its concrete placement can independently
+/// verify exact width and bounds.
+pub struct QuadraticWordConstraintResult<R: WordSource> {
+    pub reader: R,
+    pub valid: bool,
+}
+impl<R: WordSource> core::marker::Copy for QuadraticWordConstraintResult<R> {}
+
+/// Storage-oriented constraint interpretation. Each multiplication reads one
+/// committed node, checks `node = left * right`, and immediately forgets the
+/// residual. This preserves the same authored dependency plan without either
+/// a private witness array or a private residual array.
+pub struct QuadraticWordConstraintInterpreter<
+    R: WordSource,
+    const N: usize,
+> {
+    reader: R,
+    cursor: u32,
+    valid: bool,
+}
+impl<R: WordSource, const N: usize> core::marker::Copy
+    for QuadraticWordConstraintInterpreter<R, N> {}
+
+impl<R: WordSource, const N: usize>
+    QuadraticWordConstraintInterpreter<R, N> {
+    pub fn new(_ reader: R) -> Self {
+        Self { reader: reader, cursor: 0, valid: true }
+    }
+
+    pub fn finish(self) -> QuadraticWordConstraintResult<R> {
+        QuadraticWordConstraintResult {
+            reader: self.reader,
+            valid: self.valid && self.cursor == N.downcast_truncate(),
+        }
+    }
+}
+
+impl<
+    F: Radix2Field + CanonicalWords,
+    R: WordSource,
+    const N: usize,
+> QuadraticPlanInterpreter<F>
+    for QuadraticWordConstraintInterpreter<R, N> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        if !self.valid || self.cursor >= N.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self {
+                    reader: self.reader.reject(),
+                    cursor: self.cursor,
+                    valid: false,
+                },
+                value: F::radix2_zero(),
+            }
+        }
+        let mut value = F::radix2_zero()
+        let reader = decode_canonical_words(mut value, self.reader)
+        QuadraticPlanStep {
+            interpreter: Self {
+                reader: reader,
+                cursor: self.cursor + 1,
+                valid: value
+                    .radix2_sub(left.radix2_mul(right))
+                    .radix2_is_zero(),
             },
             value: value,
         }

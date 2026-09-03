@@ -1,8 +1,10 @@
+use canonical_words::{WordRead, WordSource}
 use precision::baby_bear::BabyBear
 use precision::polynomial::Radix2Field
 use quadratic_plan::{
     QuadraticConstraintInterpreter,
     QuadraticPlanInterpreter,
+    QuadraticWordConstraintInterpreter,
     QuadraticRelationConstraintInterpreter,
     QuadraticRelationInterpreter,
     QuadraticRelationStreamConstraintInterpreter,
@@ -10,6 +12,44 @@ use quadratic_plan::{
     QuadraticRelationValueInterpreter,
     QuadraticRelationWitnessInterpreter,
     QuadraticWitnessInterpreter,
+}
+
+struct TinyWordSource {
+    words: [u32; 3],
+    cursor: u32,
+    valid: bool,
+}
+impl core::marker::Copy for TinyWordSource {}
+
+impl TinyWordSource {
+    fn new(_ words: [u32; 3]) -> Self {
+        Self { words: words, cursor: 0, valid: true }
+    }
+
+    fn finish(self) -> bool { self.valid && self.cursor == 3 }
+}
+
+impl WordSource for TinyWordSource {
+    fn read(self) -> WordRead<Self> {
+        if !self.valid || self.cursor >= 3 {
+            return WordRead {
+                source: Self { words: self.words, cursor: self.cursor, valid: false },
+                value: 0,
+            }
+        }
+        WordRead {
+            source: Self {
+                words: self.words,
+                cursor: self.cursor + 1,
+                valid: true,
+            },
+            value: self.words[self.cursor as usize],
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self { words: self.words, cursor: self.cursor, valid: false }
+    }
 }
 
 struct TinyPlan<I: QuadraticPlanInterpreter<BabyBear>> {
@@ -69,6 +109,48 @@ pub fn quadratic_plan_audit(
         witness.nodes[0].to_u32(),
         witness.nodes[1].to_u32(),
         witness.nodes[2].to_u32(),
+        constrained.output.to_u32(),
+    )
+}
+
+/// Reinterpret the same plan from a caller-owned word source. No witness or
+/// residual array exists inside the constraint interpreter.
+pub fn quadratic_plan_word_audit(
+    _ a: u32,
+    _ b: u32,
+    _ c: u32,
+    _ mutation: u32,
+) -> (u32, u32) {
+    let a = BabyBear::from_u32(a)
+    let b = BabyBear::from_u32(b)
+    let c = BabyBear::from_u32(c)
+    let witnessed = tiny_plan(
+        QuadraticWitnessInterpreter<BabyBear, 3>::new(),
+        a,
+        b,
+        c,
+    )
+    let witness = witnessed.interpreter.finish()
+    let mut words = [
+        witness.nodes[0].to_u32(),
+        witness.nodes[1].to_u32(),
+        witness.nodes[2].to_u32(),
+    ]
+    if mutation > 0 && mutation <= 3 {
+        let index = (mutation - 1) as usize
+        words[index] = BabyBear::from_u32(words[index]).radix2_add(BabyBear::one()).to_u32()
+    }
+    let constrained = tiny_plan(
+        QuadraticWordConstraintInterpreter<TinyWordSource, 3>::new(
+            TinyWordSource::new(words),
+        ),
+        a,
+        b,
+        c,
+    )
+    let checked = constrained.interpreter.finish()
+    (
+        if checked.valid && checked.reader.finish() { 1 } else { 0 },
         constrained.output.to_u32(),
     )
 }
