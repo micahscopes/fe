@@ -24,7 +24,8 @@ use sonatina_codegen::isa::spirv::{
 };
 use sonatina_codegen::optim::{
     Pass,
-    inliner::{Inliner, InlinerConfig},
+    exact_func_merge::run_exact_private_func_merge,
+    inliner::{FullInlineCloneRecord, Inliner, InlinerConfig},
     run_function_passes_on,
 };
 use sonatina_ir::ir_writer::ModuleWriter;
@@ -324,16 +325,15 @@ pub fn compile_runtime_package_spirv_authored_raster_with_resources(
     for resource in resources {
         backend = backend.with_external_resource(resource.clone());
     }
-    backend.compile_module(&module)
-        .map_err(|errors| {
-            LowerError::Spirv(
-                errors
-                    .iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })
+    backend.compile_module(&module).map_err(|errors| {
+        LowerError::Spirv(
+            errors
+                .iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })
 }
 
 /// Build the render-shaped MIR runtime package rooted at `entry` and lower it
@@ -378,17 +378,34 @@ fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&st
 fn inline_spirv_calls_from_roots(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
-    preserve_scalar_helpers: bool,
+    preserve_helpers: bool,
 ) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
+    let functions_before_merge = module.funcs().len();
+    let instructions_before_merge = spirv_module_instruction_count(module);
+    let merge_stats = run_exact_private_func_merge(module, roots);
+    if trace {
+        eprintln!(
+            "fe spirv exact function merge: candidates={}, merged={}, rewritten_refs={}, rounds={}, functions={}->{}, instructions={}->{}",
+            merge_stats.candidate_functions,
+            merge_stats.merged_functions,
+            merge_stats.rewritten_references,
+            merge_stats.refinement_rounds,
+            functions_before_merge,
+            module.funcs().len(),
+            instructions_before_merge,
+            spirv_module_instruction_count(module),
+        );
+    }
     let snapshot = std::env::var_os("FE_SPIRV_INLINE_SNAPSHOT_DIR").map(|directory| {
         (
             directory,
             SPIRV_INLINE_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         )
     });
-    // The SPIR-V translator admits ordinary scalar helper call graphs but keeps
-    // aggregate, object, arena, and resource-crossing helper ABIs closed.
+    // The SPIR-V translator admits ordinary scalar helpers plus helpers that
+    // borrow entry-rooted resource arrays. Other aggregates and object or arena
+    // lifetime changes remain closed.
     // Flatten only those helpers that cross the closed boundary. Expanding every
     // helper bottom-up retains enormous intermediate copies for generated proof
     // graphs. Function count is not a useful proxy for that expansion: a proof
@@ -398,6 +415,7 @@ fn inline_spirv_calls_from_roots(
     // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
     let mut inliner_config = spirv_inliner_config();
+    inliner_config.record_full_clone_ids = trace;
     // GVN's sparse predicated solver can require many GiB on one generated
     // proof entry after only a few frontiers. It is not a legality pass, and
     // the local CFG/SCCP sequence already removes the dead structure exposed
@@ -415,11 +433,15 @@ fn inline_spirv_calls_from_roots(
     if let Some((directory, sequence)) = &snapshot {
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "pre");
     }
-    let preserved_helpers = if preserve_scalar_helpers {
-        spirv_scalar_helper_candidates(module, roots)
+    let preserved_helpers = if preserve_helpers {
+        normalize_spirv_helper_graph(module);
+        spirv_helper_candidates(module, roots)
     } else {
         std::collections::HashSet::new()
     };
+    if trace {
+        trace_spirv_helper_classification(module, roots, &preserved_helpers);
+    }
     let original_hints = preserved_helpers
         .iter()
         .map(|&function| (function, module.ctx.inline_hint(function)))
@@ -431,12 +453,13 @@ fn inline_spirv_calls_from_roots(
     }
     if trace {
         eprintln!(
-            "fe spirv inliner: strategy=rooted, functions={}, roots={}, preserved_scalar_helpers={}, initial_insts={initial_root_insts}",
+            "fe spirv inliner: strategy=rooted, functions={}, roots={}, preserved_helpers={}, initial_insts={initial_root_insts}",
             module.funcs().len(),
             roots.len(),
             preserved_helpers.len()
         );
     }
+    let mut clone_records = Vec::new();
     for frontier in 0..MAX_FRONTIERS {
         let consumed_growth =
             spirv_root_instruction_count(module, roots).saturating_sub(initial_root_insts);
@@ -448,11 +471,19 @@ fn inline_spirv_calls_from_roots(
         }
         inliner_config.max_total_growth = remaining_growth;
         let stats = Inliner::new(inliner_config).run_one_frontier_from_roots(module, roots);
+        let changed = stats.changed;
+        clone_records.extend(stats.full_clone_records);
         if trace {
             eprintln!(
                 "fe spirv rooted inliner: frontier={frontier}, changed={}, after_inline_insts={}",
-                stats.changed,
+                changed,
                 spirv_root_instruction_count(module, roots)
+            );
+            trace_spirv_full_inline_clone_survival(
+                module,
+                &clone_records,
+                frontier,
+                "after_inline",
             );
         }
         if trace {
@@ -468,6 +499,12 @@ fn inline_spirv_calls_from_roots(
                     pass.as_str(),
                     spirv_root_instruction_count(module, roots)
                 );
+                trace_spirv_full_inline_clone_survival(
+                    module,
+                    &clone_records,
+                    frontier,
+                    pass.as_str(),
+                );
             }
         } else {
             run_function_passes_on(module, roots, &cleanup);
@@ -478,7 +515,7 @@ fn inline_spirv_calls_from_roots(
                 spirv_root_instruction_count(module, roots)
             );
         }
-        if !stats.changed {
+        if !changed {
             break;
         }
     }
@@ -496,6 +533,12 @@ fn inline_spirv_calls_from_roots(
                 pass.as_str(),
                 spirv_root_instruction_count(module, roots)
             );
+            trace_spirv_full_inline_clone_survival(
+                module,
+                &clone_records,
+                MAX_FRONTIERS,
+                pass.as_str(),
+            );
         }
     } else {
         run_function_passes_on(module, roots, &final_cleanup);
@@ -509,20 +552,178 @@ fn inline_spirv_calls_from_roots(
     preserved_helpers
 }
 
-fn spirv_scalar_helper_candidates(
+fn trace_spirv_full_inline_clone_survival(
+    module: &sonatina_ir::Module,
+    records: &[FullInlineCloneRecord],
+    frontier: usize,
+    stage: &str,
+) {
+    #[derive(Default)]
+    struct Census {
+        callsites: usize,
+        cloned_insts: usize,
+        surviving_insts: usize,
+    }
+
+    let mut by_callee = std::collections::BTreeMap::<String, Census>::new();
+    for record in records {
+        let name = module
+            .ctx
+            .func_sig(record.callee, |signature| signature.name().to_owned());
+        let surviving = module.func_store.view(record.caller, |function| {
+            record
+                .instructions
+                .iter()
+                .filter(|&&inst| function.layout.is_inst_inserted(inst))
+                .count()
+        });
+        let census = by_callee.entry(name).or_default();
+        census.callsites += 1;
+        census.cloned_insts += record.instructions.len();
+        census.surviving_insts += surviving;
+    }
+
+    for (callee, census) in by_callee {
+        eprintln!(
+            "fe spirv rooted helper clones: frontier={frontier}, stage={stage}, callee={callee}, callsites={}, cloned_insts={}, surviving_insts={}",
+            census.callsites, census.cloned_insts, census.surviving_insts,
+        );
+    }
+}
+
+fn spirv_helper_memory_effect_is_lowerable(
+    inst_set: &dyn sonatina_ir::InstSetBase,
+    instruction: &dyn sonatina_ir::Inst,
+) -> bool {
+    use sonatina_ir::{
+        InstDowncast,
+        inst::data::{Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
+    };
+
+    <&Mload as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&Mstore as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&ObjIndex as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&ObjLoad as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&ObjProj as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&ObjStore as InstDowncast>::downcast(inst_set, instruction).is_some()
+}
+
+fn spirv_helper_instruction_accesses_resource(
+    inst_set: &dyn sonatina_ir::InstSetBase,
+    instruction: &dyn sonatina_ir::Inst,
+) -> bool {
+    use sonatina_ir::{
+        InstDowncast,
+        inst::data::{ObjLoad, ObjStore},
+    };
+
+    <&ObjLoad as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&ObjStore as InstDowncast>::downcast(inst_set, instruction).is_some()
+}
+
+fn spirv_helper_scalar_type(ty: sonatina_ir::Type) -> bool {
+    matches!(
+        ty,
+        sonatina_ir::Type::I1 | sonatina_ir::Type::I32 | sonatina_ir::Type::F32
+    )
+}
+
+fn spirv_helper_resource_root_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
+    let Some(sonatina_ir::types::CompoundType::ObjRef(referent)) = ty.resolve_compound(&module.ctx)
+    else {
+        return false;
+    };
+    matches!(
+        referent.resolve_compound(&module.ctx),
+        Some(sonatina_ir::types::CompoundType::Array { .. })
+    )
+}
+
+fn spirv_helper_abi_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
+    spirv_helper_scalar_type(ty) || spirv_helper_resource_root_type(module, ty)
+}
+
+fn spirv_helper_body_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
+    spirv_helper_scalar_type(ty)
+        || matches!(
+            ty.resolve_compound(&module.ctx),
+            Some(sonatina_ir::types::CompoundType::ObjRef(_))
+        )
+}
+
+fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
+    // Helper eligibility should not depend on lowering artifacts such as an
+    // empty entry jump or a return-only cursor wrapper. Normalize every body,
+    // then erase only calls whose results are exact argument/immediate aliases.
+    // Full inlining and instruction splicing stay disabled here: this pass
+    // exposes the callable graph without duplicating any substantive work.
+    let functions = module.funcs();
+    run_function_passes_on(module, &functions, &[Pass::CfgCleanup]);
+    Inliner::new(InlinerConfig {
+        enable_single_block_splice: false,
+        enable_full_inliner: false,
+        ..InlinerConfig::default()
+    })
+    .run(module);
+    let functions = module.funcs();
+    run_function_passes_on(module, &functions, &[Pass::CfgCleanup]);
+}
+
+fn spirv_reachable_call_counts(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+) -> std::collections::HashMap<sonatina_ir::module::FuncRef, usize> {
+    let mut counts = std::collections::HashMap::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut pending = roots.to_vec();
+    while let Some(function_ref) = pending.pop() {
+        if !visited.insert(function_ref) {
+            continue;
+        }
+        if let Some(callees) = module.func_store.try_view(function_ref, |function| {
+            function
+                .layout
+                .iter_block()
+                .flat_map(|block| function.layout.iter_inst(block))
+                .filter_map(|instruction| function.dfg.call_info(instruction))
+                .map(|call| call.callee())
+                .collect::<Vec<_>>()
+        }) {
+            for callee in callees {
+                *counts.entry(callee).or_default() += 1;
+                pending.push(callee);
+            }
+        }
+    }
+    counts
+}
+
+fn spirv_resource_passthrough_outline_worthy(
+    static_call_count: usize,
+    instruction_count: usize,
+) -> bool {
+    // A tiny resource-cursor wrapper is normally more useful inlined because
+    // scalar cleanup can see through it. Once repeated source work crosses
+    // this conservative budget, retaining one proven passthrough helper is the
+    // smaller representation. This is a target cost policy, never a legality
+    // exception: resource identity is still independently proved downstream.
+    const MIN_AVOIDED_SOURCE_INSTRUCTIONS: usize = 128;
+    instruction_count
+        .saturating_mul(static_call_count.saturating_sub(1))
+        >= MIN_AVOIDED_SOURCE_INSTRUCTIONS
+}
+
+fn spirv_helper_candidates(
     module: &sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
 ) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
-    use sonatina_ir::{Type, inst::control_flow};
-
-    fn scalar_type(ty: Type) -> bool {
-        matches!(ty, Type::I1 | Type::I32 | Type::F32)
-    }
+    use sonatina_ir::inst::control_flow;
 
     fn classify(
         module: &sonatina_ir::Module,
         roots: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
         function_ref: sonatina_ir::module::FuncRef,
+        call_counts: &std::collections::HashMap<sonatina_ir::module::FuncRef, usize>,
         states: &mut std::collections::HashMap<sonatina_ir::module::FuncRef, u8>,
         accepted: &mut std::collections::HashSet<sonatina_ir::module::FuncRef>,
     ) -> bool {
@@ -540,64 +741,69 @@ fn spirv_scalar_helper_candidates(
             states.insert(function_ref, 2);
             return false;
         };
-        let result_arity = signature.ret_tys().len();
-        let signature_ok = signature.args().iter().copied().all(scalar_type)
-            && signature.ret_tys().iter().copied().all(scalar_type);
-        let Some((body_ok, callees)) = module.func_store.try_view(function_ref, |function| {
-            let inst_set = function.inst_set();
-            let mut body_ok = signature_ok;
-            let mut callees = Vec::new();
-            let mut return_sites = 0usize;
-            for block in function.layout.iter_block() {
-                for instruction in function.layout.iter_inst(block) {
-                    let data = function.dfg.inst(instruction);
-                    let direct_call = function.dfg.call_info(instruction);
-                    if let Some(call) = direct_call {
-                        callees.push(call.callee());
-                    } else if data.declared_effect_hint().has_memory_effect() {
-                        body_ok = false;
-                    }
-                    if <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
-                        inst_set, data,
-                    )
-                    .is_some()
-                        || <&control_flow::Unreachable as sonatina_ir::InstDowncast>::downcast(
+        let signature_carries_resource = signature
+            .args()
+            .iter()
+            .chain(signature.ret_tys())
+            .copied()
+            .any(|ty| spirv_helper_resource_root_type(module, ty));
+        let signature_ok = signature
+            .args()
+            .iter()
+            .copied()
+            .all(|ty| spirv_helper_abi_type(module, ty))
+            && signature
+                .ret_tys()
+                .iter()
+                .copied()
+                .all(|ty| spirv_helper_abi_type(module, ty));
+        let Some((body_ok, callees, accesses_resource, instruction_count)) =
+            module.func_store.try_view(function_ref, |function| {
+                let inst_set = function.inst_set();
+                let mut body_ok = signature_ok;
+                let mut callees = Vec::new();
+                let mut accesses_resource = false;
+                let mut instruction_count = 0usize;
+                for block in function.layout.iter_block() {
+                    for instruction in function.layout.iter_inst(block) {
+                        instruction_count += 1;
+                        let data = function.dfg.inst(instruction);
+                        accesses_resource |=
+                            spirv_helper_instruction_accesses_resource(inst_set, data);
+                        let direct_call = function.dfg.call_info(instruction);
+                        if let Some(call) = direct_call {
+                            callees.push(call.callee());
+                        } else if data.declared_effect_hint().has_memory_effect()
+                            && !spirv_helper_memory_effect_is_lowerable(inst_set, data)
+                        {
+                            body_ok = false;
+                        }
+                        if <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
                             inst_set, data,
                         )
                         .is_some()
-                    {
-                        body_ok = false;
-                    }
-                    if <&control_flow::Return as sonatina_ir::InstDowncast>::downcast(
-                        inst_set, data,
-                    )
-                    .is_some()
-                    {
-                        return_sites += 1;
-                    }
-                    if function
-                        .dfg
-                        .inst_results(instruction)
-                        .iter()
-                        .copied()
-                        .any(|value| !scalar_type(function.dfg.value_ty(value)))
-                        || data
-                            .collect_values()
-                            .into_iter()
-                            .any(|value| !scalar_type(function.dfg.value_ty(value)))
-                    {
-                        body_ok = false;
+                        {
+                            body_ok = false;
+                        }
+                        if function
+                            .dfg
+                            .inst_results(instruction)
+                            .iter()
+                            .copied()
+                            .any(|value| {
+                                !spirv_helper_body_type(module, function.dfg.value_ty(value))
+                            })
+                            || data.collect_values().into_iter().any(|value| {
+                                !spirv_helper_body_type(module, function.dfg.value_ty(value))
+                            })
+                        {
+                            body_ok = false;
+                        }
                     }
                 }
-            }
-            // WGSL represents several scalar results with one logical result
-            // struct. The backend currently admits one canonical tuple-return
-            // site and fails closed on structured multi-site transport.
-            if result_arity > 1 && return_sites != 1 {
-                body_ok = false;
-            }
-            (body_ok, callees)
-        }) else {
+                (body_ok, callees, accesses_resource, instruction_count)
+            })
+        else {
             states.insert(function_ref, 2);
             return false;
         };
@@ -608,11 +814,22 @@ fn spirv_scalar_helper_candidates(
         // must still be inlined.
         let mut callees_ok = true;
         for callee in callees {
-            if !classify(module, roots, callee, states, accepted) {
+            if !classify(module, roots, callee, call_counts, states, accepted) {
                 callees_ok = false;
             }
         }
-        if body_ok && callees_ok {
+        // A resource-only cursor or error-state wrapper blocks useful scalar
+        // simplification across the call while doing no resource work itself.
+        // Inline that wrapper. Preserve the richer capability boundary only
+        // where the helper actually loads from or stores to the resource.
+        let passthrough_outline_worthy = spirv_resource_passthrough_outline_worthy(
+            call_counts.get(&function_ref).copied().unwrap_or_default(),
+            instruction_count,
+        );
+        if body_ok
+            && callees_ok
+            && (!signature_carries_resource || accesses_resource || passthrough_outline_worthy)
+        {
             accepted.insert(function_ref);
         }
         states.insert(function_ref, 2);
@@ -623,6 +840,8 @@ fn spirv_scalar_helper_candidates(
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
+    let call_counts =
+        spirv_reachable_call_counts(module, &roots.iter().copied().collect::<Vec<_>>());
     let root_callees = roots
         .iter()
         .flat_map(|&root| {
@@ -643,9 +862,194 @@ fn spirv_scalar_helper_candidates(
     let mut states = std::collections::HashMap::new();
     let mut accepted = std::collections::HashSet::new();
     for callee in root_callees {
-        classify(module, &roots, callee, &mut states, &mut accepted);
+        classify(
+            module,
+            &roots,
+            callee,
+            &call_counts,
+            &mut states,
+            &mut accepted,
+        );
     }
     accepted
+}
+
+fn trace_spirv_helper_classification(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+    accepted: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
+) {
+    use sonatina_ir::inst::control_flow;
+
+    let call_counts = spirv_reachable_call_counts(module, roots);
+    let root_set = roots
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut reachable = std::collections::HashSet::new();
+    let mut worklist = roots.to_vec();
+    while let Some(function_ref) = worklist.pop() {
+        if !reachable.insert(function_ref) {
+            continue;
+        }
+        if let Some(callees) = module.func_store.try_view(function_ref, |function| {
+            function
+                .layout
+                .iter_block()
+                .flat_map(|block| function.layout.iter_inst(block))
+                .filter_map(|instruction| function.dfg.call_info(instruction))
+                .map(|call| call.callee())
+                .collect::<Vec<_>>()
+        }) {
+            worklist.extend(callees);
+        }
+    }
+
+    let mut accepted_instructions = 0usize;
+    let mut rejected = Vec::new();
+    for function_ref in reachable
+        .iter()
+        .copied()
+        .filter(|function| !root_set.contains(function))
+    {
+        let instruction_count = module
+            .func_store
+            .try_view(function_ref, |function| {
+                function
+                    .layout
+                    .iter_block()
+                    .map(|block| function.layout.iter_inst(block).count())
+                    .sum::<usize>()
+            })
+            .unwrap_or_default();
+        if accepted.contains(&function_ref) {
+            accepted_instructions += instruction_count;
+            continue;
+        }
+
+        let mut reasons = std::collections::BTreeSet::new();
+        let signature_carries_resource =
+            module.ctx.get_sig(function_ref).is_some_and(|signature| {
+                signature
+                    .args()
+                    .iter()
+                    .chain(signature.ret_tys())
+                    .copied()
+                    .any(|ty| spirv_helper_resource_root_type(module, ty))
+            });
+        module
+            .ctx
+            .get_sig(function_ref)
+            .map(|signature| {
+                if !signature
+                    .args()
+                    .iter()
+                    .copied()
+                    .all(|ty| spirv_helper_abi_type(module, ty))
+                {
+                    reasons.insert("signature_args");
+                }
+                if !signature
+                    .ret_tys()
+                    .iter()
+                    .copied()
+                    .all(|ty| spirv_helper_abi_type(module, ty))
+                {
+                    reasons.insert("signature_results");
+                }
+            })
+            .unwrap_or_else(|| {
+                reasons.insert("missing_signature");
+            });
+        module.func_store.try_view(function_ref, |function| {
+            let inst_set = function.inst_set();
+            let mut accesses_resource = false;
+            for block in function.layout.iter_block() {
+                for instruction in function.layout.iter_inst(block) {
+                    let data = function.dfg.inst(instruction);
+                    accesses_resource |= spirv_helper_instruction_accesses_resource(inst_set, data);
+                    if let Some(call) = function.dfg.call_info(instruction) {
+                        if !accepted.contains(&call.callee()) {
+                            reasons.insert("rejected_callee");
+                        }
+                    } else if data.declared_effect_hint().has_memory_effect()
+                        && !spirv_helper_memory_effect_is_lowerable(inst_set, data)
+                    {
+                        reasons.insert("memory_effect");
+                    }
+                    if <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
+                        inst_set, data,
+                    )
+                    .is_some()
+                    {
+                        reasons.insert("indirect_call");
+                    }
+                    if function
+                        .dfg
+                        .inst_results(instruction)
+                        .iter()
+                        .copied()
+                        .any(|value| !spirv_helper_body_type(module, function.dfg.value_ty(value)))
+                        || data.collect_values().into_iter().any(|value| {
+                            !spirv_helper_body_type(module, function.dfg.value_ty(value))
+                        })
+                    {
+                        reasons.insert("non_scalar_value");
+                    }
+                }
+            }
+            if signature_carries_resource
+                && !accesses_resource
+                && !spirv_resource_passthrough_outline_worthy(
+                    call_counts.get(&function_ref).copied().unwrap_or_default(),
+                    instruction_count,
+                )
+            {
+                reasons.insert("resource_passthrough_only");
+            }
+        });
+        if reasons.is_empty() {
+            reasons.insert("unclassified");
+        }
+        rejected.push((function_ref, instruction_count, reasons));
+    }
+
+    let mut by_reason = std::collections::BTreeMap::<&str, (usize, usize)>::new();
+    for (_, instructions, reasons) in &rejected {
+        for &reason in reasons {
+            let totals = by_reason.entry(reason).or_default();
+            totals.0 += 1;
+            totals.1 += instructions;
+        }
+    }
+    eprintln!(
+        "fe spirv helper classification: reachable={}, accepted={}, accepted_insts={}, rejected={}, rejected_insts={}",
+        reachable.len(),
+        accepted.len(),
+        accepted_instructions,
+        rejected.len(),
+        rejected
+            .iter()
+            .map(|(_, instructions, _)| instructions)
+            .sum::<usize>(),
+    );
+    for (reason, (functions, instructions)) in by_reason {
+        eprintln!(
+            "fe spirv helper rejection: reason={reason}, functions={functions}, instructions={instructions}"
+        );
+    }
+    rejected.sort_unstable_by_key(|(_, instructions, _)| std::cmp::Reverse(*instructions));
+    for (function_ref, instructions, reasons) in rejected.into_iter().take(12) {
+        let name = module
+            .ctx
+            .get_sig(function_ref)
+            .map(|signature| signature.name().to_string())
+            .unwrap_or_else(|| format!("{function_ref:?}"));
+        eprintln!(
+            "fe spirv rejected helper: function={name}, instructions={instructions}, reasons={}",
+            reasons.into_iter().collect::<Vec<_>>().join("+")
+        );
+    }
 }
 
 fn write_spirv_inline_snapshot(
@@ -707,7 +1111,7 @@ fn spirv_inliner_config() -> InlinerConfig {
         enable_full_inliner: true,
         // In the SPIR-V lane this inliner remains a legality pass for helpers
         // outside the scalar call ABI. The automatic classifier temporarily
-        // marks backend-lowerable scalar helpers `Never`; every other reachable
+        // marks backend-lowerable helpers `Never`; every other reachable
         // helper is inlined unconditionally. The per-inlinee size caps and depth
         // are 0 ("no cap": `exceeds_cap`/depth gate on `> 0`) and the thresholds
         // are maxed so the cost model never declines an eligible call. Missing
@@ -771,6 +1175,22 @@ fn spirv_root_instruction_count(
         .sum()
 }
 
+fn spirv_module_instruction_count(module: &sonatina_ir::Module) -> usize {
+    module
+        .funcs()
+        .into_iter()
+        .map(|function_ref| {
+            module.func_store.view(function_ref, |function| {
+                function
+                    .layout
+                    .iter_block()
+                    .map(|block| function.layout.iter_inst(block).count())
+                    .sum::<usize>()
+            })
+        })
+        .sum()
+}
+
 fn ensure_spirv_entry_calls_lowerable(
     module: &sonatina_ir::Module,
     preserved_helpers: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
@@ -808,7 +1228,7 @@ fn ensure_spirv_entry_calls_lowerable(
     });
     match residual {
         Some(callee) => Err(LowerError::Spirv(format!(
-            "SPIR-V entry `{entry_name}` retains a call outside the automatically lowerable scalar helper graph after bounded inlining: {callee}"
+            "SPIR-V entry `{entry_name}` retains a call outside the automatically lowerable helper graph after bounded inlining: {callee}"
         ))),
         None => Ok(()),
     }

@@ -74,8 +74,8 @@ use sonatina_ir::{
         cmp::{Eq as CmpEq, Feq, Fle, Flt, IsZero, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{
-            MemAllocDynamic, MemCheckpoint, MemRewind, Memcopy, Mload, Mstore, ObjIndex, ObjLoad,
-            ObjProj, ObjStore,
+            Alloca, Gep, MemAllocDynamic, MemCheckpoint, MemRewind, Memcopy, Mload, Mstore,
+            ObjIndex, ObjLoad, ObjProj, ObjStore,
         },
         logic::{And, Or, Xor},
         native::inst_set::NativeInstSet,
@@ -105,6 +105,16 @@ fn wasm_lower_trace_detail(message: impl FnOnce() -> String) {
     if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some() {
         eprintln!("[fe wasm lowering] {}", message());
     }
+}
+
+/// Select how function-private Fe places are realized before the portable
+/// Sonatina module reaches a target backend. Wasm keeps its canonical byte
+/// arena. Shader lowering may preserve a narrowly verified fixed aggregate as
+/// typed Sonatina storage, allowing Naga to retain its array or record shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivatePlaceMaterialization {
+    CanonicalArena,
+    ShaderTypedWhenLegal,
 }
 
 /// Emit one content-addressed, human-readable Fe runtime-IR package only when
@@ -263,6 +273,7 @@ pub(crate) fn compile_runtime_package_shader_ir(
         &[],
         false,
         true,
+        PrivatePlaceMaterialization::ShaderTypedWhenLegal,
     )
 }
 
@@ -277,8 +288,17 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer =
-        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true, true)?;
+    let mut lowerer = PortableModuleLowerer::new(
+        db,
+        builder,
+        &isa,
+        package,
+        HashSet::new(),
+        &[],
+        true,
+        true,
+        PrivatePlaceMaterialization::CanonicalArena,
+    )?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
@@ -311,6 +331,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         fixed_i32_exports,
         true,
         true,
+        PrivatePlaceMaterialization::CanonicalArena,
     )
 }
 
@@ -328,6 +349,7 @@ fn compile_runtime_package_wasm_inner(
     fixed_i32_exports: &[(String, i32)],
     validate_host_enum_params: bool,
     enable_scoped_arena: bool,
+    private_place_materialization: PrivatePlaceMaterialization,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     wasm_lower_trace(|| {
         format!(
@@ -422,6 +444,7 @@ fn compile_runtime_package_wasm_inner(
         export_aliases,
         validate_host_enum_params,
         enable_scoped_arena,
+        private_place_materialization,
     )?;
     wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
     lowerer.declare_functions()?;
@@ -926,8 +949,17 @@ pub(crate) fn compile_runtime_package_native(
         OperatingSystem::Native,
     ));
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer =
-        PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new(), &[], true, false)?;
+    let mut lowerer = PortableModuleLowerer::new(
+        db,
+        builder,
+        &isa,
+        package,
+        HashSet::new(),
+        &[],
+        true,
+        false,
+        PrivatePlaceMaterialization::CanonicalArena,
+    )?;
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     Ok(lowerer.finish())
@@ -3833,6 +3865,9 @@ where
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
     resource_element_cache: FxHashMap<TyId<'db>, GpuResourceElementType>,
     resource_type_cache: FxHashMap<TyId<'db>, Type>,
+    private_place_materialization: PrivatePlaceMaterialization,
+    typed_private_type_cache: FxHashMap<LayoutId<'db>, Type>,
+    typed_private_layout_names: FxHashMap<LayoutId<'db>, String>,
     /// By-value aggregate parameters selected for the private indirect ABI.
     /// Selection is derived from the complete flattened signature and the
     /// validated core-Wasm arity limit. The caller materializes a fresh arena
@@ -3916,6 +3951,19 @@ enum GpuResourceElementType {
     Record { ty: Type, fields: Box<[Type]> },
 }
 
+#[derive(Clone, Copy)]
+struct TypedPrivateLocal<'db> {
+    layout: LayoutId<'db>,
+    pointee_ty: Type,
+    pointer_ty: Type,
+}
+
+/// Leave room below the backend's independent 16 KiB fail-closed limit. This
+/// is a materialization policy, not a WebGPU device limit. Larger or dynamic
+/// objects continue to use the canonical arena until placement is device
+/// informed.
+const MAX_SHADER_TYPED_PRIVATE_BYTES_PER_FUNCTION: usize = 12 * 1024;
+
 impl GpuResourceElementType {
     fn ty(&self) -> Type {
         match self {
@@ -3937,6 +3985,7 @@ where
         export_aliases: &[(String, String)],
         validate_host_enum_params: bool,
         enable_scoped_arena: bool,
+        private_place_materialization: PrivatePlaceMaterialization,
     ) -> Result<Self, LowerError> {
         wasm_lower_trace(|| "prepare inline value bodies".to_owned());
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
@@ -4109,6 +4158,9 @@ where
             func_map: FxHashMap::default(),
             resource_element_cache: FxHashMap::default(),
             resource_type_cache: FxHashMap::default(),
+            private_place_materialization,
+            typed_private_type_cache: FxHashMap::default(),
+            typed_private_layout_names: FxHashMap::default(),
             indirect_aggregate_params: FxHashMap::default(),
             indirect_aggregate_returns: HashSet::new(),
             address_carried_aggregate_values: FxHashMap::default(),
@@ -4166,6 +4218,352 @@ where
 
     fn finish(self) -> Module {
         self.builder.build()
+    }
+
+    fn typed_private_class_size(&self, class: &RuntimeClass<'db>) -> Option<usize> {
+        match class {
+            RuntimeClass::Scalar(scalar) => match scalar_ty_r1(scalar).ok()? {
+                Type::I1 | Type::I32 | Type::F32 => Some(4),
+                _ => None,
+            },
+            RuntimeClass::AggregateValue { layout } => self.typed_private_layout_size(*layout),
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => None,
+        }
+    }
+
+    fn typed_private_layout_size(&self, layout: LayoutId<'db>) -> Option<usize> {
+        match layout.data(self.db) {
+            Layout::Struct(data) => data.fields.iter().try_fold(0usize, |size, field| {
+                size.checked_add(self.typed_private_class_size(field)?)
+            }),
+            Layout::Array(data) => {
+                let len = usize::try_from(data.len).ok()?;
+                if len == 0 {
+                    return None;
+                }
+                self.typed_private_class_size(&data.elem)?.checked_mul(len)
+            }
+            Layout::Enum(_) => None,
+        }
+    }
+
+    fn typed_private_type_for_class(
+        &mut self,
+        class: &RuntimeClass<'db>,
+    ) -> Result<Option<Type>, LowerError> {
+        match class {
+            RuntimeClass::Scalar(scalar) => Ok(match scalar_ty_r1(scalar) {
+                Ok(ty @ (Type::I1 | Type::I32 | Type::F32)) => Some(ty),
+                Ok(_) | Err(_) => None,
+            }),
+            RuntimeClass::AggregateValue { layout } => self.typed_private_type_for_layout(*layout),
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => Ok(None),
+        }
+    }
+
+    fn typed_private_type_for_layout(
+        &mut self,
+        layout: LayoutId<'db>,
+    ) -> Result<Option<Type>, LowerError> {
+        if self.private_place_materialization != PrivatePlaceMaterialization::ShaderTypedWhenLegal {
+            return Ok(None);
+        }
+        if let Some(&ty) = self.typed_private_type_cache.get(&layout) {
+            return Ok(Some(ty));
+        }
+        let ty = match layout.data(self.db) {
+            Layout::Struct(data) => {
+                let mut fields = Vec::with_capacity(data.fields.len());
+                for field in &data.fields {
+                    let Some(field) = self.typed_private_type_for_class(field)? else {
+                        return Ok(None);
+                    };
+                    fields.push(field);
+                }
+                let next_name = format!(
+                    "fe_shader_private_layout_{}",
+                    self.typed_private_layout_names.len()
+                );
+                let name = self
+                    .typed_private_layout_names
+                    .entry(layout)
+                    .or_insert(next_name)
+                    .clone();
+                self.builder.declare_struct_type(&name, &fields, false)
+            }
+            Layout::Array(data) => {
+                let Some(elem) = self.typed_private_type_for_class(&data.elem)? else {
+                    return Ok(None);
+                };
+                let len = usize::try_from(data.len).map_err(|_| {
+                    LowerError::Unsupported(format!(
+                        "shader typed-private array length {} exceeds usize",
+                        data.len
+                    ))
+                })?;
+                if len == 0 {
+                    return Ok(None);
+                }
+                self.builder.declare_array_type(elem, len)
+            }
+            Layout::Enum(_) => return Ok(None),
+        };
+        self.typed_private_type_cache.insert(layout, ty);
+        Ok(Some(ty))
+    }
+
+    /// Select only fresh, fixed, function-private object allocations whose
+    /// complete RMIR use closure remains typed. The first slice deliberately
+    /// admits one initialization move from the allocation temporary into its
+    /// authored local, then scalar field/index loads and stores only. Any copy,
+    /// call, return, raw address observation, bytewise operation, or ambiguous
+    /// alias leaves the complete allocation group on the canonical arena.
+    fn derive_typed_private_locals(
+        &mut self,
+        body: &RuntimeBody<'db>,
+    ) -> Result<FxHashMap<RLocalId, TypedPrivateLocal<'db>>, LowerError> {
+        if self.private_place_materialization != PrivatePlaceMaterialization::ShaderTypedWhenLegal {
+            return Ok(FxHashMap::default());
+        }
+
+        fn object_layout<'db>(body: &RuntimeBody<'db>, local: RLocalId) -> Option<LayoutId<'db>> {
+            match body.value_class(local)? {
+                RuntimeClass::Ref {
+                    pointee,
+                    kind: RefKind::Object,
+                    view: RefView::Whole,
+                } => pointee.aggregate_layout(),
+                _ => None,
+            }
+        }
+
+        let mut allocations = Vec::new();
+        let mut allocation_statements = 0usize;
+        let mut rejected = HashMap::<&'static str, usize>::new();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let RStmt::Assign {
+                    dst,
+                    expr: RExpr::AllocObject { layout },
+                } = stmt
+                {
+                    allocation_statements += 1;
+                    if object_layout(body, *dst) == Some(*layout) {
+                        allocations.push((*dst, *layout));
+                    } else {
+                        *rejected.entry("allocation-class-mismatch").or_default() += 1;
+                    }
+                }
+            }
+        }
+        allocations.sort_by_key(|(local, _)| local.as_u32());
+        let candidate_allocations = allocations.len();
+
+        let mut selected = FxHashMap::default();
+        let mut selected_allocations = HashSet::new();
+        let mut private_bytes = 0usize;
+        for (allocation, layout) in allocations {
+            if selected.contains_key(&allocation) {
+                *rejected.entry("already-selected").or_default() += 1;
+                continue;
+            }
+            let Some(layout_size) = self.typed_private_layout_size(layout) else {
+                *rejected.entry("unsupported-layout").or_default() += 1;
+                continue;
+            };
+            let Some(next_private_bytes) = private_bytes.checked_add(layout_size) else {
+                *rejected.entry("private-byte-overflow").or_default() += 1;
+                continue;
+            };
+            if next_private_bytes > MAX_SHADER_TYPED_PRIVATE_BYTES_PER_FUNCTION {
+                *rejected.entry("private-byte-budget").or_default() += 1;
+                continue;
+            }
+
+            let aliases = body
+                .blocks
+                .iter()
+                .flat_map(|block| block.stmts.iter())
+                .filter_map(|stmt| match stmt {
+                    RStmt::Assign {
+                        dst,
+                        expr: RExpr::Use(source),
+                    } if *source == allocation => Some(*dst),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if aliases.len() > 1 {
+                *rejected.entry("multiple-use-aliases").or_default() += 1;
+                continue;
+            }
+            let alias = aliases.first().copied();
+            if alias.is_some_and(|alias| object_layout(body, alias) != Some(layout)) {
+                *rejected.entry("alias-layout-mismatch").or_default() += 1;
+                continue;
+            }
+            let mut members = HashSet::from([allocation]);
+            if let Some(alias) = alias {
+                members.insert(alias);
+            }
+            if members.iter().any(|member| selected.contains_key(member)) {
+                *rejected.entry("overlapping-selection").or_default() += 1;
+                continue;
+            }
+            if body
+                .provider_bindings
+                .iter()
+                .any(|binding| members.contains(&binding.value))
+            {
+                *rejected.entry("provider-binding").or_default() += 1;
+                continue;
+            }
+
+            let typed_scalar_place = |place: &RuntimePlace<'db>| -> bool {
+                let mut place_uses = FxHashMap::default();
+                collect_place_uses(place, &mut place_uses);
+                if members.iter().any(|member| {
+                    place_uses.contains_key(member) && !place_is_rooted_at(place, *member)
+                }) {
+                    return false;
+                }
+                let program = self.db as &dyn mir::MirDb;
+                let Ok(resolved) = mir::resolve_runtime_place(self.db, &program, body, place)
+                else {
+                    return false;
+                };
+                match resolved.result_class {
+                    RuntimeClass::Scalar(ref scalar) => {
+                        matches!(scalar_ty_r1(scalar), Ok(Type::I1 | Type::I32 | Type::F32))
+                    }
+                    RuntimeClass::AggregateValue { layout } => {
+                        self.single_scalar_field(layout).is_some_and(|scalar| {
+                            matches!(scalar_ty_r1(&scalar), Ok(Type::I1 | Type::I32 | Type::F32))
+                        })
+                    }
+                    RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => false,
+                }
+            };
+
+            let mut reject_reason = None;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    match stmt {
+                        RStmt::Assign {
+                            dst,
+                            expr: RExpr::AllocObject { layout: actual },
+                        } if *dst == allocation && *actual == layout => {}
+                        RStmt::Assign {
+                            dst,
+                            expr: RExpr::Use(source),
+                        } if Some(*dst) == alias && *source == allocation => {}
+                        RStmt::Assign { dst, .. } if members.contains(dst) => {
+                            reject_reason.get_or_insert("member-reassignment");
+                        }
+                        RStmt::Assign {
+                            expr: RExpr::Load { place },
+                            ..
+                        } if members
+                            .iter()
+                            .any(|member| place_is_rooted_at(place, *member)) =>
+                        {
+                            if !typed_scalar_place(place) {
+                                reject_reason.get_or_insert("non-scalar-or-untyped-load");
+                            }
+                        }
+                        RStmt::Assign { expr, .. } => {
+                            let mut uses = FxHashMap::default();
+                            collect_expr_uses(expr, &mut uses);
+                            if members.iter().any(|member| uses.contains_key(member)) {
+                                reject_reason.get_or_insert("expression-escape");
+                            }
+                        }
+                        RStmt::Store { dst, src }
+                            if members
+                                .iter()
+                                .any(|member| place_is_rooted_at(dst, *member)) =>
+                        {
+                            if members.contains(src) {
+                                reject_reason.get_or_insert("aggregate-store-source");
+                            } else if !typed_scalar_place(dst) {
+                                reject_reason.get_or_insert("non-scalar-or-untyped-store");
+                            }
+                        }
+                        RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } => {
+                            let mut uses = FxHashMap::default();
+                            collect_place_uses(dst, &mut uses);
+                            uses.insert(*src, ());
+                            if members.iter().any(|member| uses.contains_key(member)) {
+                                reject_reason.get_or_insert("copy-or-external-store");
+                            }
+                        }
+                        RStmt::EnumAssertVariant { value, .. } => {
+                            if members.contains(value) {
+                                reject_reason.get_or_insert("enum-operation");
+                            }
+                        }
+                        RStmt::EnumSetTag { root, .. } => {
+                            if members.contains(root) {
+                                reject_reason.get_or_insert("enum-operation");
+                            }
+                        }
+                        RStmt::EnumWriteVariant { root, fields, .. } => {
+                            if members.contains(root)
+                                || fields.iter().any(|field| members.contains(field))
+                            {
+                                reject_reason.get_or_insert("enum-operation");
+                            }
+                        }
+                    }
+                    if reject_reason.is_some() {
+                        break;
+                    }
+                }
+                let mut terminator_uses = FxHashMap::default();
+                collect_terminator_uses(&block.terminator, &mut terminator_uses);
+                if members
+                    .iter()
+                    .any(|member| terminator_uses.contains_key(member))
+                {
+                    reject_reason.get_or_insert("terminator-escape");
+                }
+                if reject_reason.is_some() {
+                    break;
+                }
+            }
+            if let Some(reason) = reject_reason {
+                *rejected.entry(reason).or_default() += 1;
+                continue;
+            }
+
+            let Some(pointee_ty) = self.typed_private_type_for_layout(layout)? else {
+                *rejected.entry("type-realization").or_default() += 1;
+                continue;
+            };
+            let pointer_ty = self.builder.ptr_type(pointee_ty);
+            for member in members {
+                selected.insert(
+                    member,
+                    TypedPrivateLocal {
+                        layout,
+                        pointee_ty,
+                        pointer_ty,
+                    },
+                );
+            }
+            selected_allocations.insert(allocation);
+            private_bytes = next_private_bytes;
+        }
+        let mut rejection_summary = rejected.into_iter().collect::<Vec<_>>();
+        rejection_summary.sort_by_key(|(reason, _)| *reason);
+        wasm_lower_trace_detail(|| {
+            format!(
+                "selected shader typed-private storage, function={}, allocation_statements={allocation_statements}, candidates={candidate_allocations}, allocations={}, locals={}, bytes={private_bytes}, rejected={rejection_summary:?}",
+                self.function_symbol(body.owner),
+                selected_allocations.len(),
+                selected.len(),
+            )
+        });
+        Ok(selected)
     }
 
     /// SPIR-V derives its kernel ABI from the first declared function. Runtime
@@ -9090,6 +9488,10 @@ where
     /// (`aggregate_make`), passed as flattened params, and returned as flattened
     /// results.
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
+    /// Fixed function-private objects preserved as typed Sonatina pointers for
+    /// the shader path. Their scalar helper ABI is unchanged, and the backend
+    /// independently verifies that no pointer escapes its allocation function.
+    typed_private_locals: FxHashMap<RLocalId, TypedPrivateLocal<'db>>,
     /// Fixed-size product parameters that Fe models as by-value Slots. Their
     /// public/private Wasm ABI is flattened, then the prologue materializes an
     /// independent arena copy so dynamic indexing observes normal Fe value
@@ -9142,6 +9544,7 @@ where
             .get(&body.owner)
             .cloned()
             .unwrap_or_default();
+        let typed_private_locals = module.derive_typed_private_locals(&body)?;
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
@@ -9237,7 +9640,10 @@ where
                     // local's SSA value IS that pointer; element reads/writes go
                     // through i32 address arithmetic + typed Mload/Mstore. SSA/phi
                     // is free (only the pointer is carried, never the aggregate).
-                    vars.insert(local_id, fb.declare_var(Type::I32));
+                    let ty = typed_private_locals
+                        .get(&local_id)
+                        .map_or(Type::I32, |local| local.pointer_ty);
+                    vars.insert(local_id, fb.declare_var(ty));
                 } else {
                     let ty = module.ty_for_class(class).map_err(|error| match error {
                         LowerError::Unsupported(message) => LowerError::Unsupported(format!(
@@ -9260,6 +9666,7 @@ where
             block_map,
             vars,
             tuple_vars,
+            typed_private_locals,
             materialized_param_slots,
             indirect_aggregate_params,
             address_carried_aggregate_values,
@@ -11291,9 +11698,24 @@ where
                 }
                 self.lower_place_read(place)
             }
-            // Change 2: allocate a function-local aggregate in the wasm canonical
-            // arena. The value produced is the aligned i32 linear-memory pointer.
-            RExpr::AllocObject { layout } => self.lower_alloc_object(*layout),
+            // Preserve a narrowly verified fixed shader-local object as typed
+            // Sonatina storage. Every other target and every ineligible object
+            // retains the canonical-arena representation.
+            RExpr::AllocObject { layout } => {
+                if let Some(local) = self.typed_private_locals.get(&dst).copied() {
+                    if local.layout != *layout {
+                        return Err(LowerError::Internal(format!(
+                            "shader typed-private allocation {dst:?} changed layout"
+                        )));
+                    }
+                    Ok(self.fb.insert_inst(
+                        Alloca::new(self.inst_set(), local.pointee_ty),
+                        local.pointer_ty,
+                    ))
+                } else {
+                    self.lower_alloc_object(*layout)
+                }
+            }
             RExpr::MaterializeToObject { src } => self.lower_materialize_to_object(*src),
             RExpr::MaterializePlaceToObject { place } => {
                 self.lower_materialize_place_to_object(place, dst)
@@ -12107,6 +12529,138 @@ where
         Ok(Some((addr, resolved.result_class)))
     }
 
+    /// Resolve a scalar projection rooted in compiler-selected typed private
+    /// storage. The leading zero indexes the allocation itself, after which
+    /// struct fields and fixed-array indexes retain their source topology in a
+    /// Sonatina `Gep`. Dynamic indexes keep the same explicit bounds trap as
+    /// the arena path.
+    fn typed_private_scalar_place(
+        &mut self,
+        place: &RuntimePlace<'db>,
+    ) -> Result<Option<(ValueId, Type)>, LowerError> {
+        let program = self.module.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
+            .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
+        let (root, mut current_class) = match resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if self.typed_private_locals.contains_key(&value) =>
+            {
+                (value, class)
+            }
+            _ => return Ok(None),
+        };
+        let local = self
+            .typed_private_locals
+            .get(&root)
+            .copied()
+            .ok_or_else(|| {
+                LowerError::Internal("typed private root lost its materialization plan".to_owned())
+            })?;
+        if current_class.aggregate_layout() != Some(local.layout) {
+            return Err(LowerError::Internal(format!(
+                "typed private root {root:?} has a projected layout inconsistent with its allocation"
+            )));
+        }
+
+        let is = self.inst_set();
+        let base = self.local_value(root)?;
+        let zero = self.fb.make_imm_value(Immediate::I32(0));
+        let mut indices = smallvec1::smallvec![base, zero];
+        for elem in resolved.path {
+            match elem {
+                mir::ResolvedPlaceElem::Field { field, class } => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "typed private field base is not a struct".to_owned(),
+                        ));
+                    };
+                    if !matches!(layout.data(self.module.db), Layout::Struct(_)) {
+                        return Err(LowerError::Internal(
+                            "typed private field layout is not a struct".to_owned(),
+                        ));
+                    }
+                    let field = self.fb.make_imm_value(Immediate::I32(i32::from(field.0)));
+                    indices.push(field);
+                    current_class = class;
+                }
+                mir::ResolvedPlaceElem::Index { index, class } => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "typed private index base is not an array".to_owned(),
+                        ));
+                    };
+                    let Layout::Array(array) = layout.data(self.module.db) else {
+                        return Err(LowerError::Internal(
+                            "typed private index layout is not an array".to_owned(),
+                        ));
+                    };
+                    let index = match index {
+                        IndexSource::Constant(index) => {
+                            if (index as u64) >= array.len {
+                                return Err(LowerError::Unsupported(format!(
+                                    "shader typed-private array index {index} is out of bounds for length {}",
+                                    array.len
+                                )));
+                            }
+                            let index = i32::try_from(index).map_err(|_| {
+                                LowerError::Unsupported(
+                                    "shader typed-private constant index exceeds i32".to_owned(),
+                                )
+                            })?;
+                            self.fb.make_imm_value(Immediate::I32(index))
+                        }
+                        IndexSource::Dynamic(index) => {
+                            let index = self.local_read_value(index)?;
+                            let len = i32::try_from(array.len).map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "shader typed-private array length {} exceeds i32",
+                                    array.len
+                                ))
+                            })?;
+                            let len = self.fb.make_imm_value(Immediate::I32(len));
+                            let in_bounds = self.fb.insert_inst(Lt::new(is, index, len), Type::I1);
+                            let trap = self.trap_block();
+                            let ok = self.fb.append_block();
+                            self.fb
+                                .insert_inst_no_result(Br::new(is, in_bounds, ok, trap));
+                            self.fb.switch_to_block(ok);
+                            index
+                        }
+                    };
+                    indices.push(index);
+                    current_class = class;
+                }
+                mir::ResolvedPlaceElem::VariantField { .. }
+                | mir::ResolvedPlaceElem::Deref { .. } => {
+                    return Err(LowerError::Unsupported(
+                        "shader typed-private storage supports struct fields and fixed-array indexes only"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+
+        let scalar = match current_class {
+            RuntimeClass::Scalar(scalar) => scalar,
+            RuntimeClass::AggregateValue { layout } => {
+                let Some(scalar) = self.module.single_scalar_field(layout) else {
+                    return Ok(None);
+                };
+                let field = self.fb.make_imm_value(Immediate::I32(0));
+                indices.push(field);
+                scalar
+            }
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => return Ok(None),
+        };
+        let ty = scalar_ty_r1(&scalar)?;
+        if !matches!(ty, Type::I1 | Type::I32 | Type::F32) {
+            return Ok(None);
+        }
+        let pointer_ty = self.module.builder.ptr_type(ty);
+        let pointer = self.fb.insert_inst(Gep::new(is, indices), pointer_ty);
+        Ok(Some((pointer, ty)))
+    }
+
     /// Resolve a Wasm linear-memory scalar place behind a memory address: a
     /// memory `RawAddr` / memory-provider root or a function-local object-ref
     /// root. Addresses are i32 byte offsets on wasm32, not Sonatina compound
@@ -12119,6 +12673,9 @@ where
         &mut self,
         place: &RuntimePlace<'db>,
     ) -> Result<Option<(ValueId, Type)>, LowerError> {
+        if let Some(projected) = self.typed_private_scalar_place(place)? {
+            return Ok(Some(projected));
+        }
         let program = self.module.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
             .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
@@ -13413,6 +13970,9 @@ where
     }
 
     fn local_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
+        if let Some(local) = self.typed_private_locals.get(&local) {
+            return Ok(local.pointer_ty);
+        }
         if let Some(local_data) = self.body.local(local)
             && semantic_gpu_resource(self.module.db, local_data.semantic_ty)
         {
