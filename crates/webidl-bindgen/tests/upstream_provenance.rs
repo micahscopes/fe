@@ -2,8 +2,9 @@ use fe_compiler_protocol::{InterfaceFunction, InterfaceManifest};
 use fe_webidl_bindgen::{
     WEBGPU_BUFFER_CREATE_PROVENANCE, WEBGPU_BUFFER_CREATE_WEBIDL, WEBGPU_BUFFER_WRITE_PROVENANCE,
     WEBGPU_BUFFER_WRITE_WEBIDL, WEBGPU_QUEUE_IDLE_PROVENANCE, WEBGPU_QUEUE_IDLE_WEBIDL,
-    WEBGPU_WEBIDL_MODULE, adapter_operation_metadata, build_adapter_plan,
-    emit_fe_flat_host_imports, emit_js_canonical_adapter, parse, select_adapter_operations,
+    WEBGPU_RENDER_RUNTIME_PROVENANCE, WEBGPU_RENDER_RUNTIME_WEBIDL, WEBGPU_WEBIDL_MODULE,
+    adapter_operation_metadata, build_adapter_plan, emit_fe_flat_host_imports,
+    emit_js_canonical_adapter, parse, select_adapter_operations,
 };
 use sha2::{Digest, Sha256};
 
@@ -219,6 +220,39 @@ fn pinned_webgpu_buffer_write_selection_preserves_fe_argument_semantics() {
             ],
             results: Vec::new(),
         })
+    );
+}
+
+#[test]
+fn consolidated_render_runtime_profile_is_exactly_the_three_proven_operations() {
+    let provenance: serde_json::Value =
+        serde_json::from_str(WEBGPU_RENDER_RUNTIME_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(WEBGPU_RENDER_RUNTIME_WEBIDL.as_bytes())
+        )
+    );
+    let world = parse(WEBGPU_RENDER_RUNTIME_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-render-runtime", WEBGPU_WEBIDL_MODULE).unwrap();
+    let mut operations = plan
+        .resources
+        .iter()
+        .flat_map(|resource| &resource.functions)
+        .filter(|function| {
+            function.invocation != fe_webidl_bindgen::AdapterInvocation::ResourceDrop
+        })
+        .map(|function| function.import_name.as_str())
+        .collect::<Vec<_>>();
+    operations.sort_unstable();
+    assert_eq!(
+        operations,
+        [
+            "gpu_device_create_buffer",
+            "gpu_queue_on_submitted_work_done",
+            "gpu_queue_write_buffer",
+        ]
     );
 }
 
