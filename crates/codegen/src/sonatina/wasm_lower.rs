@@ -3959,6 +3959,7 @@ enum GpuResourceElementType {
 
 #[derive(Clone)]
 struct TypedPrivateLocal<'db> {
+    component_root: RLocalId,
     pointee: RuntimeClass<'db>,
     pointee_ty: Type,
     pointer_ty: Type,
@@ -5042,6 +5043,7 @@ where
                 selected.insert(
                     member,
                     TypedPrivateLocal {
+                        component_root: root,
                         pointee: member_pointee,
                         pointee_ty,
                         pointer_ty,
@@ -11847,6 +11849,25 @@ where
                 if self.materialized_scalar_slots.contains(src) {
                     return self.local_read_value(*src);
                 }
+                // The typed-private use-closure has already proved that every
+                // member of one component denotes the same non-escaping
+                // storage. Preserve that pointer identity across compiler-
+                // introduced borrow aliases. This is distinct from an authored
+                // Fe aggregate copy: a later copy is not admitted into the
+                // component and must still take the deep-copy path below.
+                if let Some(destination) = self.typed_private_locals.get(&dst).cloned()
+                    && let Some(source) = self.typed_private_locals.get(src).cloned()
+                {
+                    if source.component_root != destination.component_root
+                        || source.pointee != destination.pointee
+                        || source.pointer_ty != destination.pointer_ty
+                    {
+                        return Err(LowerError::Internal(format!(
+                            "typed-private alias {src:?} -> {dst:?} crosses incompatible storage components"
+                        )));
+                    }
+                    return self.local_value(*src);
+                }
                 // Item 2: a whole-aggregate local behind an object/memory-provider
                 // reference carries its arena POINTER as its SSA value, so a plain
                 // `Use` copies the pointer, not the bytes. This is SAFE when it
@@ -15076,6 +15097,66 @@ pub fn kernel(_ value: u32) -> u32 {
             [1, 1, 1],
         )
         .expect("typed aggregate borrows should lower through naga-validated SPIR-V");
+    }
+
+    #[test]
+    fn shader_ir_preserves_compiler_borrow_aliases_of_value_parameters() {
+        let source = r#"
+struct Words { limbs: [u32; 4] }
+
+fn sum_words(_ value: Words) -> u32 {
+    let mut total: u32 = 0
+    let mut index: usize = 0
+    while index < 4 {
+        total = total + value.limbs[index]
+        index = index + 1
+    }
+    total
+}
+
+pub fn kernel(_ seed: u32) -> u32 {
+    let value = Words { limbs: [seed, seed + 1, seed + 2, seed + 3] }
+    sum_words(value)
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///shader_typed_value_parameter_alias.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let (module, _) = compile_runtime_package_shader_ir(&db, &package)
+            .expect("a compiler-introduced alias of a typed borrowed value parameter should lower");
+
+        let typed_pointer_arguments = module
+            .funcs()
+            .into_iter()
+            .flat_map(|function| {
+                module
+                    .ctx
+                    .func_sig(function, |signature| signature.args().to_vec())
+            })
+            .filter(|ty| {
+                matches!(
+                    ty.resolve_compound(&module.ctx),
+                    Some(sonatina_ir::types::CompoundType::Ptr(_))
+                )
+            })
+            .count();
+        assert!(
+            typed_pointer_arguments >= 1,
+            "the private value helper should retain a typed pointer parameter"
+        );
+
+        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+            &db,
+            &package,
+            [1, 1, 1],
+        )
+        .expect("the typed value-parameter alias should reach validated SPIR-V");
     }
 
     #[test]
