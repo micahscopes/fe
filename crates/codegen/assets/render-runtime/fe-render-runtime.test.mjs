@@ -14,6 +14,8 @@ const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventK
 installGeneratedWebGpuOperations({
   queueIdle: queue => queue.onSubmittedWorkDone(),
   bufferCreate: (device, descriptor) => device.createBuffer(descriptor),
+  bufferWrite: (queue, buffer, offset, bytes) =>
+    queue.writeBuffer(buffer, offset, bytes),
 });
 
 test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {

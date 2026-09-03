@@ -516,7 +516,8 @@ let generatedWebGpuOperations;
 export function installGeneratedWebGpuOperations(operations) {
   if (!operations || typeof operations !== "object" ||
       typeof operations.queueIdle !== "function" ||
-      typeof operations.bufferCreate !== "function") {
+      typeof operations.bufferCreate !== "function" ||
+      typeof operations.bufferWrite !== "function") {
     throw new TypeError("fe render runtime: generated WebGPU operations are incomplete");
   }
   if (generatedWebGpuOperations !== undefined) {
@@ -538,6 +539,16 @@ function createGpuBuffer(device, descriptor) {
     throw new Error("fe render runtime: generated WebGPU operations are unavailable");
   }
   return generatedWebGpuOperations.bufferCreate(device, descriptor);
+}
+
+function writeGpuBuffer(queue, buffer, offset, bytes) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("fe render runtime: GPU buffer writes require a byte view");
+  }
+  generatedWebGpuOperations.bufferWrite(queue, buffer, offset, bytes);
 }
 
 function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
@@ -892,7 +903,7 @@ function writeUniformBuffer(device, uniformBuffer, span, members, uniforms) {
     else if (member.scalar === "u32") view.setUint32(member.offset, value >>> 0, true);
     else view.setInt32(member.offset, value | 0, true);
   });
-  device.queue.writeBuffer(uniformBuffer, 0, buffer);
+  writeGpuBuffer(device.queue, uniformBuffer, 0, new Uint8Array(buffer));
 }
 
 /** Validate and translate the compiler-derived Fe raster policy into the
@@ -1828,7 +1839,7 @@ export class FeSurfaceElement extends HTMLElement {
         ownedBuffers.add(buffer);
         resourceBuffers.set(resource.name, buffer);
         const initialBytes = resourceInitialBytes.get(resource.name);
-        if (initialBytes) device.queue.writeBuffer(buffer, 0, initialBytes);
+        if (initialBytes) writeGpuBuffer(device.queue, buffer, 0, initialBytes);
       }
 
       const raster = rasterPlan(this._surface);

@@ -136,12 +136,7 @@ const RENDER_SCOPED_TASK_OPTION_MARKER: &str = "/* FE_SCOPED_TASK_OPTION */";
 const RENDER_RUNTIME_JS_FILE: &str = "fe-render-runtime.js";
 const RENDER_RUNTIME_BASE_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
 static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
-    let web_idl = format!(
-        "{}\n{}",
-        fe_webidl_bindgen::WEBGPU_QUEUE_IDLE_WEBIDL,
-        fe_webidl_bindgen::WEBGPU_BUFFER_CREATE_WEBIDL,
-    );
-    let world = fe_webidl_bindgen::parse(&web_idl)
+    let world = fe_webidl_bindgen::parse(fe_webidl_bindgen::WEBGPU_RENDER_RUNTIME_WEBIDL)
         .expect("pinned WebGPU runtime Web IDL selections must compose and parse");
     let plan = fe_webidl_bindgen::build_adapter_plan(
         &world,
@@ -167,6 +162,7 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
     };
     let queue_idle = operation("GPUQueue", "onSubmittedWorkDone");
     let create_buffer = operation("GPUDevice", "createBuffer");
+    let write_buffer = operation("GPUQueue", "writeBuffer");
     let semantic = fe_webidl_bindgen::emit_js_canonical_adapter(&world, &plan)
         .expect("pinned WebGPU runtime semantic adapter must emit");
     format!(
@@ -182,7 +178,14 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
              feWebGpuWebIdlRuntime.resources.withBorrowed(device, handle => {{\n      \
                const bufferHandle = feWebGpuOperations[{create_buffer:?}](handle, descriptor);\n      \
                return feWebGpuWebIdlRuntime.resources.take(bufferHandle);\n    \
-             }}),\n\
+             }}),\n  \
+           bufferWrite: (queue, buffer, bufferOffset, data, dataOffset = 0, size = undefined) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(queue, queueHandle =>\n      \
+               feWebGpuWebIdlRuntime.resources.withBorrowed(buffer, bufferHandle =>\n        \
+                 feWebGpuOperations[{write_buffer:?}](\n          \
+                   queueHandle, bufferHandle, BigInt(bufferOffset), data, BigInt(dataOffset),\n          \
+                   size === undefined ? undefined : BigInt(size),\n        \
+                 ))),\n\
          }}));\n",
         fe_webidl_bindgen::HOST_RUNTIME_JS,
         semantic,
@@ -190,6 +193,7 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
         module = plan.module,
         queue_idle = queue_idle,
         create_buffer = create_buffer,
+        write_buffer = write_buffer,
     )
 });
 
@@ -7744,6 +7748,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains(fe_webidl_bindgen::HOST_RUNTIME_JS));
         assert!(runtime.contains("gpu_queue_on_submitted_work_done"));
         assert!(runtime.contains("gpu_device_create_buffer"));
+        assert!(runtime.contains("gpu_queue_write_buffer"));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.withBorrowed"));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.take(bufferHandle)"));
         assert_eq!(
@@ -7756,12 +7761,21 @@ pub fn shade(x: u32, y: u32) -> u32 {
             1,
             "the sole standards call must come from generated Web IDL"
         );
+        assert_eq!(
+            runtime.matches("[\"writeBuffer\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
         assert!(
             !RENDER_RUNTIME_BASE_JS.contains(".onSubmittedWorkDone("),
             "the handwritten fixed runtime must not retain a standards-call fallback"
         );
         assert!(
             !RENDER_RUNTIME_BASE_JS.contains(".createBuffer("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".writeBuffer("),
             "the handwritten fixed runtime must not retain a standards-call fallback"
         );
 

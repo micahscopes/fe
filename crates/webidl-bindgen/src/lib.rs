@@ -73,6 +73,17 @@ pub const WEBGPU_BUFFER_WRITE_WEBIDL: &str = include_str!("../assets/webgpu-buff
 pub const WEBGPU_BUFFER_WRITE_PROVENANCE: &str =
     include_str!("../assets/webgpu-buffer-write.provenance.json");
 
+/// Consolidated, provenance-pinned standards profile realized by the fixed Fe
+/// render host. This is the union of the independently executable operation
+/// slices above, not an application-specific browser API.
+pub const WEBGPU_RENDER_RUNTIME_WEBIDL: &str =
+    include_str!("../assets/webgpu-render-runtime.webidl");
+
+/// Auditable origins and exact source ranges for
+/// [`WEBGPU_RENDER_RUNTIME_WEBIDL`].
+pub const WEBGPU_RENDER_RUNTIME_PROVENANCE: &str =
+    include_str!("../assets/webgpu-render-runtime.provenance.json");
+
 /// Private module identity of the generated standards adapter. This is not a
 /// second application-facing WebGPU API.
 pub const WEBGPU_WEBIDL_MODULE: &str = "fe:webgpu-webidl";
