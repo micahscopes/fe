@@ -416,13 +416,19 @@ impl<T, const N: usize, M> ReadbackBuffer<T, N, M> {
 pub type ReadbackWords<M, const N: usize> = ReadbackBuffer<u32, N, M>
 
 /// Source-compatible mutable storage with deterministic zero initialization.
+///
+/// This logical family admits every shader stage. The compiler independently
+/// derives the exact stages that can reach each resource for every physical
+/// pass, so broad authoring compatibility does not broaden bind-group layouts.
+/// `DynamicStorageBuffer` remains available when an API boundary intentionally
+/// requires a narrower stage capability.
 pub type StorageBuffer<T, const N: usize> = GpuBuffer<
     StorageKind,
     ReadWrite,
     ActorResident,
     Zeroed,
     ReplayRecipe,
-    ComputeFragment,
+    AllShaderStages,
     N,
     T,
 >
