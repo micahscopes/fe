@@ -49,8 +49,10 @@ pub enum SurfaceEventKind {
 impl Copy for SurfaceEventKind {}
 
 impl SurfaceEventKind {
-    /// True only for facts that may mutate application state. Presentation
-    /// clock/lifecycle variants are consumed by the resident scheduler.
+    /// True only for raw browser facts admitted to the pending application
+    /// input queue. Presentation-clock and lifecycle facts reach the resident
+    /// scheduler directly; a permitted frame may additionally deliver its
+    /// typed clock fact to the surface transition.
     pub fn is_application_input(self) -> bool {
         match self {
             SurfaceEventKind::Gesture => true,

@@ -650,8 +650,8 @@ fn compile_surface_policy(policy: &str) -> WebBundle {
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let source = source.replacen(
-        "FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling",
-        &format!("FragmentSurface, GpuProgram, {policy}, SurfaceScheduling"),
+        "FragmentSurface, GpuProgram, LatestPerFrame, SurfacePointerMotion",
+        &format!("FragmentSurface, GpuProgram, LatestPerFrame, {policy}, SurfacePointerMotion"),
         1,
     );
     let source = source.replacen(
@@ -1285,6 +1285,19 @@ fn surface_scheduling_policy_family_is_fe_authored_and_structurally_selected() {
     // Retain=0, KeepLatest=1, Drop=2. Every tape executes the selected ordinary
     // Fe implementation through generated Wasm; policy names never reach the
     // fixed export or a manifest.
+    assert_surface_policy_tape(
+        "ContinuousFrames",
+        &[
+            (4, 0.0, 0, (0, 1, 0)),
+            (2, 16.0, 0, (1, 0, 0)),
+            (0, 17.0, 1, (0, 0, 0)),
+            (3, 18.0, 1, (0, 1, 0)),
+            (2, 32.0, 1, (1, 0, 0)),
+            (5, 33.0, 0, (0, 0, 0)),
+            (3, 34.0, 0, (0, 0, 0)),
+            (4, 40.0, 0, (0, 1, 0)),
+        ],
+    );
     assert_surface_policy_tape(
         "SampleLatest",
         &[
