@@ -296,7 +296,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 56);
+    assert_eq!(bundle.manifest.passes.len(), 60);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -530,7 +530,29 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[53].repeat, 13);
     assert_eq!(bundle.manifest.passes[54].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[54].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[55].source_entry, "paint");
+    assert_eq!(
+        bundle.manifest.passes[55].source_entry,
+        "bind_composition_context",
+    );
+    assert_eq!(bundle.manifest.passes[55].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[55].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[55].repeat, 1);
+    assert_eq!(
+        bundle.manifest.passes[56].source_entry,
+        "derive_composition_challenges",
+    );
+    assert_eq!(bundle.manifest.passes[56].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[56].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[56].repeat, 1);
+    assert_eq!(bundle.manifest.passes[57].source_entry, "write_composition");
+    assert_eq!(bundle.manifest.passes[57].layout.workgroup_size, [64, 1, 1]);
+    assert_eq!(bundle.manifest.passes[57].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[57].repeat, 1);
+    assert_eq!(bundle.manifest.passes[58].source_entry, "finish_composition");
+    assert_eq!(bundle.manifest.passes[58].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[58].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[58].repeat, 1);
+    assert_eq!(bundle.manifest.passes[59].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle

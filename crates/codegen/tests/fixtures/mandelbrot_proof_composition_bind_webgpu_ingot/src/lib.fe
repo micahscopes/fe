@@ -1,0 +1,107 @@
+//! Focused compile gate for composition transcript binding and challenge setup.
+
+use mandelbrot_proof_fixed_air_webgpu::{
+    bind_sparse_composition_phase_seed,
+    finish_sparse_composition_phase_context,
+    sparse_composition_phase_workspace_words,
+    stage_sparse_composition_phase_roots,
+}
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitBoundary,
+    OrbitInterval,
+}
+use poseidon_baby_bear::Poseidon2Digest
+use precision::fixed::Fixed
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+const LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
+const WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    LDE_LENGTH,
+>()
+
+fn directed_point() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: true, limbs: [0, 0, 6144, 0] },
+        imaginary: Fixed { negative: false, limbs: [0, 0, 1024, 0] },
+    }
+}
+
+fn directed_current() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: false, limbs: [0, 0, 2048, 1] },
+        imaginary: Fixed { negative: true, limbs: [0, 0, 3072, 0] },
+    }
+}
+
+fn directed_interval() -> OrbitInterval<4> {
+    OrbitInterval {
+        claim: HighPrecisionEscapeClaim { point: directed_point(), bound: 16 },
+        start: OrbitBoundary { iteration: 0, z: directed_current(), escaped: false },
+        end: OrbitBoundary {
+            iteration: 1,
+            z: ComplexFixed {
+                real: Fixed { negative: false, limbs: [0, 0, 5504, 0] },
+                imaginary: Fixed { negative: true, limbs: [0, 0, 6656, 0] },
+            },
+            escaped: false,
+        },
+    }
+}
+
+actor CompositionBindingProbe uses (Program<WebGpuBackend>) {
+    workspace: Shared<u32, WORKSPACE_WORDS>,
+
+    fn stage_roots(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        stage_sparse_composition_phase_roots<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(
+            Poseidon2Digest::from_u32s([1, 2, 3, 4, 5, 6, 7, 8]),
+            Poseidon2Digest::from_u32s([9, 10, 11, 12, 13, 14, 15, 16]),
+            true,
+            self.workspace,
+        )
+    }
+
+    fn bind_seed(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        bind_sparse_composition_phase_seed<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(directed_interval(), self.workspace)
+    }
+
+    fn derive_challenges(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        finish_sparse_composition_phase_context<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(self.workspace)
+    }
+}

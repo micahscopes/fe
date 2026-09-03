@@ -31,6 +31,19 @@ use mandelbrot_proof_baby_bear_transcript::{
 }
 use mandelbrot_proof_fixed_air_core::{
     FixedAirConstraintEvaluation,
+    SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS,
+    SPARSE_ARITHMETIC_MULTIPLICATIONS,
+    SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+    SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS,
+    SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS,
+    SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS,
+    SPARSE_CONTROL_MULTIPLICATIONS,
+    SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+    SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS,
+    SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS,
+    SPARSE_LINEAR_PORT_MULTIPLICATIONS,
+    SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+    SPARSE_ROUND_PORT_MULTIPLICATIONS,
     SparseBoundaryPlanWitness,
     SparseBoundaryInteractionRow,
     SparseArithmeticLinkPlanWitness,
@@ -166,7 +179,7 @@ use precision::polynomial::{
     radix2_log,
     write_radix2_coset_lde,
 }
-use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
+use quadratic_plan::{QuadraticPlanInterpreter, QuadraticPlanWitness, QuadraticValueInterpreter}
 use core::ops::Eq
 
 const SPARSE_TRACE_FRONTIER_LEVELS: usize = 23
@@ -560,6 +573,12 @@ impl<const L: usize, const TRACE: usize, const LDE: usize> SparseCompositionTran
     pub fn transcript(self) -> AirLdeTranscriptDigest {
         self.transcript
     }
+    pub fn base(self) -> SparseBaseLdeDigest<L, TRACE, LDE> {
+        self.air.base
+    }
+    pub fn interaction(self) -> SparseInteractionLdeDigest<L, TRACE, LDE> {
+        self.air.interaction
+    }
 }
 
 /// One full quartic composition codeword. The values use the same canonical
@@ -581,6 +600,77 @@ pub struct SparsePublicConstraintChallenges {
     pub mix: BabyBearExt4,
 }
 impl core::marker::Copy for SparsePublicConstraintChallenges {}
+derive CanonicalWords for SparsePublicConstraintChallenges using CanonicalWordsProvider
+
+/// All transcript-derived values needed to evaluate one production
+/// composition position. The authenticated transcript remains the sole
+/// constructor of a valid value; WebGPU placement may encode this carrier
+/// once and decode it independently in every evaluation lane.
+pub struct SparseCompositionEvaluationChallenges {
+    valid: bool,
+    composition: BabyBearExt4,
+    interaction: SparseInteractionChallenges,
+    public: SparsePublicConstraintChallenges,
+}
+impl core::marker::Copy for SparseCompositionEvaluationChallenges {}
+derive CanonicalWords for SparseCompositionEvaluationChallenges using CanonicalWordsProvider
+
+impl SparseCompositionEvaluationChallenges {
+    pub fn is_valid(self) -> bool {
+        self.valid && self.interaction.valid && self.public.valid
+    }
+}
+
+pub fn zero_sparse_composition_evaluation_challenges() -> SparseCompositionEvaluationChallenges {
+    SparseCompositionEvaluationChallenges {
+        valid: false,
+        composition: BabyBearExt4::zero(),
+        interaction: zero_sparse_interaction_challenges(),
+        public: SparsePublicConstraintChallenges {
+            valid: false,
+            fold: BabyBearExt4::zero(),
+            mix: BabyBearExt4::zero(),
+        },
+    }
+}
+
+/// Storage-sized authority produced after the statement and both AIR roots
+/// have been rebound. GPU placement may serialize this opaque carrier between
+/// protocol passes without re-running the transcript construction in every
+/// composition lane.
+pub struct SparseCompositionChallengeSeed<const L: usize, const TRACE: usize, const LDE: usize> {
+    valid: bool,
+    base: SparseBaseLdeDigest<L, TRACE, LDE>,
+    transcript: Poseidon2Digest,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseCompositionChallengeSeed<L, TRACE, LDE> {}
+derive CanonicalWords for SparseCompositionChallengeSeed<L, TRACE, LDE> using CanonicalWordsProvider
+
+impl<const L: usize, const TRACE: usize, const LDE: usize> SparseCompositionChallengeSeed<
+    L,
+    TRACE,
+    LDE,
+> {
+    pub fn is_valid(self) -> bool {
+        self.valid && self.base.valid
+    }
+}
+
+pub fn zero_sparse_composition_challenge_seed<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> SparseCompositionChallengeSeed<L, TRACE, LDE> {
+    SparseCompositionChallengeSeed {
+        valid: false,
+        base: SparseBaseLdeDigest { valid: false, value: Poseidon2Digest::zero() },
+        transcript: Poseidon2Digest::zero(),
+    }
+}
 
 /// A composition root branded by the exact statement and pair of sparse LDE
 /// roots from which its codeword was generated.
@@ -605,6 +695,140 @@ pub struct SparseOpenedAirRow {
     pub interaction: SparseInteractionTraceRow<BabyBearExt4>,
 }
 impl core::marker::Copy for SparseOpenedAirRow {}
+
+const ZERO_SPARSE_CONTROL_EXT4: SparseControlRow<BabyBearExt4> = SparseControlRow {
+    selectors: SparseControlSelectors {
+        radix_bit: BabyBearExt4::zero(),
+        radix_limb: BabyBearExt4::zero(),
+        radix_finish: BabyBearExt4::zero(),
+        carry_bit: BabyBearExt4::zero(),
+        carry_finish: BabyBearExt4::zero(),
+        product_term: BabyBearExt4::zero(),
+        product_coefficient: BabyBearExt4::zero(),
+        product_round: BabyBearExt4::zero(),
+        product_finish: BabyBearExt4::zero(),
+        linear_limb: BabyBearExt4::zero(),
+        linear_finish: BabyBearExt4::zero(),
+        boundary_sign: BabyBearExt4::zero(),
+        boundary_limb: BabyBearExt4::zero(),
+        transition_finish: BabyBearExt4::zero(),
+        padding: BabyBearExt4::zero(),
+    },
+    linear_roles: SparseLinearRoleSelectors {
+        sum: BabyBearExt4::zero(),
+        left_difference: BabyBearExt4::zero(),
+        right_difference: BabyBearExt4::zero(),
+        select: BabyBearExt4::zero(),
+    },
+    range_roles: SparseRangeRoleSelectors {
+        coordinate: BabyBearExt4::zero(),
+        point_coordinate: BabyBearExt4::zero(),
+        current_coordinate: BabyBearExt4::zero(),
+        next_coordinate: BabyBearExt4::zero(),
+        product_low: BabyBearExt4::zero(),
+        product_high: BabyBearExt4::zero(),
+        product_output: BabyBearExt4::zero(),
+        linear_sum: BabyBearExt4::zero(),
+        linear_left_difference: BabyBearExt4::zero(),
+        linear_right_difference: BabyBearExt4::zero(),
+        linear_output: BabyBearExt4::zero(),
+    },
+    limb_positions: SparseLimbPositionSelectors {
+        penultimate: BabyBearExt4::zero(),
+        last: BabyBearExt4::zero(),
+    },
+    major: BabyBearExt4::zero(),
+    minor: BabyBearExt4::zero(),
+    step: BabyBearExt4::zero(),
+    flag: BabyBearExt4::zero(),
+    width: BabyBearExt4::zero(),
+    weight: BabyBearExt4::zero(),
+}
+
+const ZERO_SPARSE_TASK_EXT4: SparseTaskRow<BabyBearExt4> = SparseTaskRow {
+    value: BabyBearExt4::zero(),
+    auxiliary: BabyBearExt4::zero(),
+    accumulator_before: BabyBearExt4::zero(),
+    accumulator_after: BabyBearExt4::zero(),
+    state_before: BabyBearExt4::zero(),
+    state_after: BabyBearExt4::zero(),
+}
+
+const ZERO_SPARSE_BASE_AIR_ROW_EXT4: SparseBaseAirRow<BabyBearExt4> = SparseBaseAirRow {
+    control: ZERO_SPARSE_CONTROL_EXT4,
+    control_plan: QuadraticPlanWitness {
+        nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_MULTIPLICATIONS],
+    },
+    control_link_plan: SparseControlLinkPlanWitness {
+        phase: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS],
+        },
+        boundary: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS],
+        },
+        range: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS],
+        },
+        carry: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS],
+        },
+        product: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS],
+        },
+        linear: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS],
+        },
+    },
+    witness: ZERO_SPARSE_TASK_EXT4,
+    arithmetic_plan: QuadraticPlanWitness {
+        nodes: [BabyBearExt4::zero(); SPARSE_ARITHMETIC_MULTIPLICATIONS],
+    },
+    arithmetic_link_plan: QuadraticPlanWitness {
+        nodes: [BabyBearExt4::zero(); SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS],
+    },
+    round_plan: QuadraticPlanWitness {
+        nodes: [BabyBearExt4::zero(); SPARSE_ROUND_PORT_MULTIPLICATIONS],
+    },
+    linear_plan: QuadraticPlanWitness {
+        nodes: [BabyBearExt4::zero(); SPARSE_LINEAR_PORT_MULTIPLICATIONS],
+    },
+    boundary_plan: QuadraticPlanWitness {
+        nodes: [BabyBearExt4::zero(); SPARSE_BOUNDARY_PORT_MULTIPLICATIONS],
+    },
+}
+
+const ZERO_SPARSE_INTERACTION_ROW_EXT4: SparseInteractionTraceRow<
+    BabyBearExt4,
+> = SparseInteractionTraceRow {
+    product: SparseProductInteractionRow {
+        accumulator: BabyBearExt4::zero(),
+        inverses: [BabyBearExt4::zero(); 2],
+        address_plan: QuadraticPlanWitness {
+            nodes: [BabyBearExt4::zero(); SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS],
+        },
+    },
+    round: SparseCopyInteractionRow {
+        accumulator: BabyBearExt4::zero(),
+        inverses: [BabyBearExt4::zero(); 5],
+    },
+    linear: SparseCopyInteractionRow {
+        accumulator: BabyBearExt4::zero(),
+        inverses: [BabyBearExt4::zero(); 8],
+    },
+    boundary: SparseCopyInteractionRow {
+        accumulator: BabyBearExt4::zero(),
+        inverses: [BabyBearExt4::zero(); 2],
+    },
+}
+
+/// Compile-time initializer for caller-owned authenticated LDE rows. Keeping
+/// this as data prevents the portable function ABI from returning thousands
+/// of scalar lanes merely to initialize storage that the decoder overwrites.
+pub const ZERO_SPARSE_OPENED_AIR_ROW: SparseOpenedAirRow = SparseOpenedAirRow {
+    valid: true,
+    base: ZERO_SPARSE_BASE_AIR_ROW_EXT4,
+    interaction: ZERO_SPARSE_INTERACTION_ROW_EXT4,
+}
 
 pub struct SparseBaseLdeTreeRole<const L: usize, const TRACE: usize, const LDE: usize> {}
 pub struct SparseInteractionLdeTreeRole<const L: usize, const TRACE: usize, const LDE: usize> {}
@@ -982,7 +1206,7 @@ impl<F: Radix2Field> SparseCompositionFold<F> {
         _ valid: bool,
         _ constraints: u32,
         _ value: F,
-    ) -> Self {
+    ) {
         self.valid = self.valid && valid
         let contribution = self.power.radix2_mul(value)
         match family {
@@ -1004,14 +1228,13 @@ impl<F: Radix2Field> SparseCompositionFold<F> {
             },
         }
         self.power = self.power.radix2_mul(self.challenge.radix2_pow(constraints))
-        self
     }
 
     fn absorb_fixed(
-        self,
+        mut self,
         _ family: SparseConstraintFamily,
         _ evaluation: FixedAirConstraintEvaluation<F>,
-    ) -> Self {
+    ) {
         self.absorb(
             family,
             evaluation.valid,
@@ -1062,16 +1285,14 @@ where L > 1
 {
     let mut fold = SparseCompositionFold<F>::new(challenge)
 
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::AllRows,
-            evaluate_sparse_control_row(challenge, control, control_plan),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::AllRows,
-            evaluate_sparse_arithmetic_row<F, L>(challenge, control, witness, arithmetic_plan),
-        )
+    fold.absorb_fixed(
+        SparseConstraintFamily::AllRows,
+        evaluate_sparse_control_row(challenge, control, control_plan),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::AllRows,
+        evaluate_sparse_arithmetic_row<F, L>(challenge, control, witness, arithmetic_plan),
+    )
     let product = evaluate_sparse_product_interaction_row<F, L>(
         challenge,
         product_challenges,
@@ -1079,13 +1300,12 @@ where L > 1
         witness,
         interaction.product,
     )
-    fold = fold
-        .absorb(
-            SparseConstraintFamily::AllRows,
-            product.valid,
-            product.constraints,
-            product.folded,
-        )
+    fold.absorb(
+        SparseConstraintFamily::AllRows,
+        product.valid,
+        product.constraints,
+        product.folded,
+    )
     let round = evaluate_sparse_round_interaction_row<F, L>(
         challenge,
         round_challenges,
@@ -1095,13 +1315,12 @@ where L > 1
         round_plan,
         interaction.round,
     )
-    fold = fold
-        .absorb(
-            SparseConstraintFamily::AllRows,
-            round.valid,
-            round.constraints,
-            round.folded,
-        )
+    fold.absorb(
+        SparseConstraintFamily::AllRows,
+        round.valid,
+        round.constraints,
+        round.folded,
+    )
     let linear = evaluate_sparse_linear_interaction_row<F, L>(
         challenge,
         linear_challenges,
@@ -1112,13 +1331,12 @@ where L > 1
         linear_plan,
         interaction.linear,
     )
-    fold = fold
-        .absorb(
-            SparseConstraintFamily::AllRows,
-            linear.valid,
-            linear.constraints,
-            linear.folded,
-        )
+    fold.absorb(
+        SparseConstraintFamily::AllRows,
+        linear.valid,
+        linear.constraints,
+        linear.folded,
+    )
     let boundary = evaluate_sparse_boundary_interaction_row<F, L>(
         challenge,
         boundary_challenges,
@@ -1127,164 +1345,146 @@ where L > 1
         boundary_plan,
         interaction.boundary,
     )
-    fold = fold
-        .absorb(
-            SparseConstraintFamily::AllRows,
-            boundary.valid,
-            boundary.constraints,
-            boundary.folded,
-        )
+    fold.absorb(
+        SparseConstraintFamily::AllRows,
+        boundary.valid,
+        boundary.constraints,
+        boundary.folded,
+    )
 
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::PairRows,
-            evaluate_sparse_control_link<F, L>(challenge, control, next_control, control_link_plan),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::PairRows,
-            evaluate_sparse_arithmetic_link(
-                challenge,
-                control,
-                witness,
-                next_control,
-                next_witness,
-                arithmetic_link_plan,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::PairRows,
-            evaluate_sparse_product_interaction_link<F, L>(
-                challenge,
-                control,
-                witness,
-                interaction.product,
-                next_interaction.product,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::PairRows,
-            evaluate_sparse_round_interaction_link<F, L>(
-                challenge,
-                control,
-                next_control,
-                witness,
-                round_plan,
-                interaction.round,
-                next_interaction.round,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::PairRows,
-            evaluate_sparse_linear_interaction_link<F, L>(
-                challenge,
-                control,
-                next_control,
-                witness,
-                arithmetic_plan,
-                linear_plan,
-                interaction.linear,
-                next_interaction.linear,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::PairRows,
-            evaluate_sparse_boundary_interaction_link<F, L>(
-                challenge,
-                control,
-                witness,
-                boundary_plan,
-                interaction.boundary,
-                next_interaction.boundary,
-            ),
-        )
+    fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_control_link<F, L>(challenge, control, next_control, control_link_plan),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_arithmetic_link(
+            challenge,
+            control,
+            witness,
+            next_control,
+            next_witness,
+            arithmetic_link_plan,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_product_interaction_link<F, L>(
+            challenge,
+            control,
+            witness,
+            interaction.product,
+            next_interaction.product,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_round_interaction_link<F, L>(
+            challenge,
+            control,
+            next_control,
+            witness,
+            round_plan,
+            interaction.round,
+            next_interaction.round,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_linear_interaction_link<F, L>(
+            challenge,
+            control,
+            next_control,
+            witness,
+            arithmetic_plan,
+            linear_plan,
+            interaction.linear,
+            next_interaction.linear,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::PairRows,
+        evaluate_sparse_boundary_interaction_link<F, L>(
+            challenge,
+            control,
+            witness,
+            boundary_plan,
+            interaction.boundary,
+            next_interaction.boundary,
+        ),
+    )
 
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::FirstRow,
-            evaluate_sparse_control_initial<F, L>(challenge, control),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::FirstRow,
-            evaluate_sparse_arithmetic_initial(challenge, witness),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::FirstRow,
-            evaluate_sparse_product_interaction_initial(challenge, interaction.product),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::FirstRow,
-            evaluate_sparse_round_interaction_initial(challenge, interaction.round),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::FirstRow,
-            evaluate_sparse_linear_interaction_initial(challenge, interaction.linear),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::FirstRow,
-            evaluate_sparse_boundary_interaction_initial(challenge, interaction.boundary),
-        )
+    fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_control_initial<F, L>(challenge, control),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_arithmetic_initial(challenge, witness),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_product_interaction_initial(challenge, interaction.product),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_round_interaction_initial(challenge, interaction.round),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_linear_interaction_initial(challenge, interaction.linear),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::FirstRow,
+        evaluate_sparse_boundary_interaction_initial(challenge, interaction.boundary),
+    )
 
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::LastRow,
-            evaluate_sparse_control_terminal(challenge, control),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::LastRow,
-            evaluate_sparse_product_interaction_terminal<F, L>(
-                challenge,
-                control,
-                witness,
-                interaction.product,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::LastRow,
-            evaluate_sparse_round_interaction_terminal<F, L>(
-                challenge,
-                control,
-                next_control,
-                witness,
-                round_plan,
-                interaction.round,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::LastRow,
-            evaluate_sparse_linear_interaction_terminal<F, L>(
-                challenge,
-                control,
-                next_control,
-                witness,
-                arithmetic_plan,
-                linear_plan,
-                interaction.linear,
-            ),
-        )
-    fold = fold
-        .absorb_fixed(
-            SparseConstraintFamily::LastRow,
-            evaluate_sparse_boundary_interaction_terminal<F, L>(
-                challenge,
-                control,
-                witness,
-                boundary_plan,
-                interaction.boundary,
-            ),
-        )
+    fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_control_terminal(challenge, control),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_product_interaction_terminal<F, L>(
+            challenge,
+            control,
+            witness,
+            interaction.product,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_round_interaction_terminal<F, L>(
+            challenge,
+            control,
+            next_control,
+            witness,
+            round_plan,
+            interaction.round,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_linear_interaction_terminal<F, L>(
+            challenge,
+            control,
+            next_control,
+            witness,
+            arithmetic_plan,
+            linear_plan,
+            interaction.linear,
+        ),
+    )
+    fold.absorb_fixed(
+        SparseConstraintFamily::LastRow,
+        evaluate_sparse_boundary_interaction_terminal<F, L>(
+            challenge,
+            control,
+            witness,
+            boundary_plan,
+            interaction.boundary,
+        ),
+    )
     fold
 }
 
@@ -2420,6 +2620,43 @@ pub fn sparse_composition_transcript<const L: usize, const TRACE: usize, const L
     SparseCompositionTranscriptDigest { valid: true, air: air, transcript: air.transcript }
 }
 
+/// Recover the nominal composition authority at the storage boundary where
+/// WebGPU returns two raw tree roots. The exact statement and the base-root
+/// dependency of the interaction tree are rebound here before either root may
+/// influence a composition challenge.
+pub fn sparse_composition_transcript_from_committed_roots<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ base_root: Poseidon2Digest,
+    _ interaction_root: Poseidon2Digest,
+    _ roots_valid: bool,
+) -> SparseCompositionTranscriptDigest<L, TRACE, LDE>
+where
+    L > 1,
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    let base = SparseBaseLdeDigest { valid: roots_valid, value: base_root }
+    let interaction = SparseInteractionLdeDigest {
+        valid: roots_valid,
+        base: base,
+        value: interaction_root,
+    }
+    let air = bind_sparse_air_lde_transcript(
+        commit_recursive_leaf_statement(interval),
+        base,
+        interaction,
+    )
+    if !air.valid {
+        return invalid_sparse_composition_transcript(air)
+    }
+    SparseCompositionTranscriptDigest { valid: true, air: air, transcript: air.transcript }
+}
+
 /// Extend a canonical AIR transcript with one valid typed commitment. The
 /// nominal field domain is selected by the protocol at compile time, and the
 /// base statement and roots remain attached for later composition checks.
@@ -2533,6 +2770,76 @@ pub fn sparse_public_constraint_challenges<const L: usize, const TRACE: usize, c
     sparse_public_constraint_challenges_from_transcript(air.transcript)
 }
 
+/// Derive the complete per-position composition context from the exact
+/// statement, AIR roots, and security-profile transcript. Placement backends
+/// call this once, then distribute its canonical value to independent lanes.
+pub fn sparse_bound_composition_evaluation_challenges<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+) -> SparseCompositionEvaluationChallenges
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    sparse_composition_evaluation_challenges_from_seed(
+        sparse_composition_challenge_seed(composition, interval),
+    )
+}
+
+/// Reduce an authenticated composition transcript to the exact data needed by
+/// the challenge-derivation pass. The private fields ensure ordinary Fe code
+/// cannot detach a transcript from the base root that selected its interaction
+/// columns.
+pub fn sparse_composition_challenge_seed<const L: usize, const TRACE: usize, const LDE: usize>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+) -> SparseCompositionChallengeSeed<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    SparseCompositionChallengeSeed {
+        valid: composition.is_valid() && sparse_public_inputs_match_air(composition.air, interval),
+        base: composition.air.base,
+        transcript: composition.transcript.value,
+    }
+}
+
+/// Derive all per-row challenge values from one previously bound seed. This
+/// pure step is deliberately separate from statement/root binding so GPU
+/// placement can give each operation an independent private-memory frame.
+pub fn sparse_composition_evaluation_challenges_from_seed<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(_ seed: SparseCompositionChallengeSeed<L, TRACE, LDE>) -> SparseCompositionEvaluationChallenges {
+    if !seed.is_valid() {
+        return zero_sparse_composition_evaluation_challenges()
+    }
+    let transcript = AirLdeTranscriptDigest { valid: seed.valid, value: seed.transcript }
+    let fold_challenge = composition_challenge(transcript)
+    let interaction = sparse_lde_interaction_challenges(seed.base).value
+    let public = sparse_public_constraint_challenges_from_transcript(transcript)
+    SparseCompositionEvaluationChallenges {
+        valid: fold_challenge.valid && interaction.valid && public.valid,
+        composition: fold_challenge.value,
+        interaction: interaction,
+        public: public,
+    }
+}
+
 fn sparse_public_inputs_match_air<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ interval: OrbitInterval<L>,
@@ -2628,6 +2935,48 @@ where
     AirCompositionValue {
         valid: absorbed == sparse_public_constraint_count<L>(),
         value: folded * challenges.mix,
+    }
+}
+
+/// Evaluate one full production composition position from a context already
+/// authenticated by `sparse_bound_composition_evaluation_challenges`. This is
+/// the shared scalar denotation consumed by both sequential and WebGPU
+/// placement interpreters.
+pub fn evaluate_sparse_bound_composition_challenge_values_opened<
+    const L: usize,
+    const TRACE: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ challenges: SparseCompositionEvaluationChallenges,
+    _ point: BabyBearExt4,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> AirCompositionValue<BabyBearExt4>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    }
+{
+    if !challenges.is_valid() {
+        return AirCompositionValue { valid: false, value: BabyBearExt4::zero() }
+    }
+    let internal = evaluate_sparse_composition_opened<L, TRACE>(
+        point,
+        challenges.composition,
+        challenges.interaction,
+        row,
+        next,
+    )
+    let public = sparse_public_composition_at<L, TRACE>(interval, challenges.public, point, row)
+    AirCompositionValue {
+        valid: internal.valid && public.valid,
+        value: internal.value + public.value,
     }
 }
 

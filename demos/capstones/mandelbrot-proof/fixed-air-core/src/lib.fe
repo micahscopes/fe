@@ -1925,11 +1925,10 @@ impl<F: Radix2Field> ConstraintFold<F> {
         Self { challenge: challenge, power: one<F>(), value: zero<F>(), constraints: 0 }
     }
 
-    fn absorb(mut self, _ residual: F) -> Self {
+    fn absorb(mut self, _ residual: F) {
         self.value = add(self.value, mul(self.power, residual))
         self.power = mul(self.power, self.challenge)
         self.constraints = self.constraints + 1
-        self
     }
 }
 
@@ -1938,25 +1937,23 @@ fn bit_residual<F: Radix2Field>(_ value: F) -> F {
 }
 
 fn absorb_sparse_radix_row<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     match task {
         SparseTransitionTask::RadixBit(_node, _limb, bit) => {
-            fold = fold.absorb(bit_residual(row.value))
-            fold = fold.absorb(bit_residual(row.state_after))
-            fold = fold
-                .absorb(
+            fold.absorb(bit_residual(row.value))
+            fold.absorb(bit_residual(row.state_after))
+            fold.absorb(
+                sub(
+                    row.state_after,
                     sub(
-                        row.state_after,
-                        sub(
-                            add(row.state_before, row.value),
-                            mul(row.state_before, row.value),
-                        ),
+                        add(row.state_before, row.value),
+                        mul(row.state_before, row.value),
                     ),
-                )
+                ),
+            )
             fold.absorb(
                 sub(
                     row.accumulator_after,
@@ -1968,18 +1965,18 @@ fn absorb_sparse_radix_row<F: Radix2Field>(
             )
         },
         SparseTransitionTask::RadixLimb(_node, _limb) => {
-            fold = fold.absorb(sub(row.value, row.accumulator_before))
-            fold = fold.absorb(row.accumulator_after)
+            fold.absorb(sub(row.value, row.accumulator_before))
+            fold.absorb(row.accumulator_after)
             fold.absorb(sub(row.state_after, row.state_before))
         },
         SparseTransitionTask::RadixFinish(node,) => {
-            fold = fold.absorb(bit_residual(row.value))
-            fold = fold.absorb(sub(row.value, row.state_before))
-            fold = fold.absorb(row.accumulator_before)
-            fold = fold.absorb(row.accumulator_after)
-            fold = fold.absorb(row.state_after)
+            fold.absorb(bit_residual(row.value))
+            fold.absorb(sub(row.value, row.state_before))
+            fold.absorb(row.accumulator_before)
+            fold.absorb(row.accumulator_after)
+            fold.absorb(row.state_after)
             if range_node_is_signed(node) {
-                fold = fold.absorb(bit_residual(row.auxiliary))
+                fold.absorb(bit_residual(row.auxiliary))
                 fold.absorb(mul(row.auxiliary, sub(one<F>(), row.value)))
             } else {
                 fold.absorb(row.auxiliary)
@@ -1997,7 +1994,8 @@ pub fn evaluate_sparse_radix_row<F: Radix2Field>(
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_radix_row(ConstraintFold<F>::new(challenge), task, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_radix_row(mut fold, task, row)
     FixedAirConstraintEvaluation {
         valid: match task {
             SparseTransitionTask::RadixBit(_, _, _) => true,
@@ -2027,37 +2025,34 @@ pub fn sparse_radix_link_residuals<F: Radix2Field>(
 }
 
 fn absorb_sparse_carry_row<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     match task {
         SparseTransitionTask::CarryBit(_node, _coefficient, _slack, bit) => {
-            fold = fold.absorb(bit_residual(row.value))
-            fold = fold
-                .absorb(
-                    sub(
-                        row.accumulator_after,
-                        add(
-                            row.accumulator_before,
-                            mul(row.value, natural<F>(1 << bit)),
-                        ),
+            fold.absorb(bit_residual(row.value))
+            fold.absorb(
+                sub(
+                    row.accumulator_after,
+                    add(
+                        row.accumulator_before,
+                        mul(row.value, natural<F>(1 << bit)),
                     ),
-                )
+                ),
+            )
             fold.absorb(sub(row.state_after, row.state_before))
         },
         SparseTransitionTask::CarryFinish(_node, _coefficient) => {
-            fold = fold.absorb(sub(row.value, row.state_before))
-            fold = fold
-                .absorb(
-                    sub(
-                        add(row.state_before, row.accumulator_before),
-                        natural<F>(product_carry_bound<L>()),
-                    ),
-                )
-            fold = fold.absorb(row.auxiliary)
-            fold = fold.absorb(row.accumulator_after)
+            fold.absorb(sub(row.value, row.state_before))
+            fold.absorb(
+                sub(
+                    add(row.state_before, row.accumulator_before),
+                    natural<F>(product_carry_bound<L>()),
+                ),
+            )
+            fold.absorb(row.auxiliary)
+            fold.absorb(row.accumulator_after)
             fold.absorb(row.state_after)
         },
         _ => fold.absorb(one<F>()),
@@ -2069,7 +2064,8 @@ pub fn evaluate_sparse_carry_row<F: Radix2Field, const L: usize>(
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_carry_row<F, L>(ConstraintFold<F>::new(challenge), task, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_carry_row<F, L>(mut fold, task, row)
     FixedAirConstraintEvaluation {
         valid: match task {
             SparseTransitionTask::CarryBit(_, _, _, _) => true,
@@ -2107,31 +2103,28 @@ pub fn sparse_carry_link_residuals<F: Radix2Field>(
 }
 
 fn absorb_sparse_product_row<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     match task {
         SparseTransitionTask::ProductTerm(_node, _coefficient, _term) => {
-            fold = fold
-                .absorb(
-                    sub(
-                        row.accumulator_after,
-                        add(row.accumulator_before, mul(row.value, row.auxiliary)),
-                    ),
-                )
+            fold.absorb(
+                sub(
+                    row.accumulator_after,
+                    add(row.accumulator_before, mul(row.value, row.auxiliary)),
+                ),
+            )
             fold.absorb(sub(row.state_after, row.state_before))
         },
         SparseTransitionTask::ProductCoefficient(_node, _coefficient) => {
-            fold = fold
-                .absorb(
-                    sub(
-                        sub(add(row.accumulator_before, row.state_before), row.value),
-                        mul(natural<F>(8192), row.auxiliary),
-                    ),
-                )
-            fold = fold.absorb(row.accumulator_after)
+            fold.absorb(
+                sub(
+                    sub(add(row.accumulator_before, row.state_before), row.value),
+                    mul(natural<F>(8192), row.auxiliary),
+                ),
+            )
+            fold.absorb(row.accumulator_after)
             fold.absorb(sub(row.state_after, row.auxiliary))
         },
         _ => fold.absorb(one<F>()),
@@ -2143,7 +2136,8 @@ pub fn evaluate_sparse_product_row<F: Radix2Field>(
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_product_row(ConstraintFold<F>::new(challenge), task, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_product_row(mut fold, task, row)
     FixedAirConstraintEvaluation {
         valid: match task {
             SparseTransitionTask::ProductTerm(_, _, _) => true,
@@ -2363,30 +2357,28 @@ pub fn sparse_product_copy_consumer<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_sparse_round_row<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     match task {
         SparseTransitionTask::ProductRound(_node, _output_index) => {
-            fold = fold.absorb(bit_residual(row.accumulator_after))
-            fold = fold
-                .absorb(
-                    sub(
-                        sub(add(row.value, row.accumulator_before), row.auxiliary),
-                        mul(natural<F>(8192), row.accumulator_after),
-                    ),
-                )
+            fold.absorb(bit_residual(row.accumulator_after))
+            fold.absorb(
+                sub(
+                    sub(add(row.value, row.accumulator_before), row.auxiliary),
+                    mul(natural<F>(8192), row.accumulator_after),
+                ),
+            )
             fold.absorb(sub(row.state_after, row.state_before))
         },
         SparseTransitionTask::ProductFinish(_node,) => {
-            fold = fold.absorb(bit_residual(row.value))
-            fold = fold.absorb(bit_residual(row.auxiliary))
-            fold = fold.absorb(bit_residual(row.accumulator_before))
-            fold = fold.absorb(bit_residual(row.accumulator_after))
-            fold = fold.absorb(bit_residual(row.state_before))
-            fold = fold.absorb(bit_residual(row.state_after))
+            fold.absorb(bit_residual(row.value))
+            fold.absorb(bit_residual(row.auxiliary))
+            fold.absorb(bit_residual(row.accumulator_before))
+            fold.absorb(bit_residual(row.accumulator_after))
+            fold.absorb(bit_residual(row.state_before))
+            fold.absorb(bit_residual(row.state_after))
             let sign_xor = sub(
                 add(row.accumulator_after, row.state_after),
                 mul(
@@ -2405,7 +2397,8 @@ pub fn evaluate_sparse_round_row<F: Radix2Field>(
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_round_row(ConstraintFold<F>::new(challenge), task, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_round_row(mut fold, task, row)
     FixedAirConstraintEvaluation {
         valid: match task {
             SparseTransitionTask::ProductRound(_, _) => true,
@@ -2631,62 +2624,58 @@ pub fn sparse_round_copy_consumer<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_sparse_linear_row<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     match task {
         SparseTransitionTask::LinearLimb(_node, role, _limb) => {
             match role {
                 LinearLimbRole::Sum => {
-                    fold = fold.absorb(bit_residual(row.accumulator_after))
-                    fold = fold
-                        .absorb(
+                    fold.absorb(bit_residual(row.accumulator_after))
+                    fold.absorb(
+                        sub(
                             sub(
-                                sub(
-                                    add(add(row.value, row.auxiliary), row.accumulator_before),
-                                    row.state_before,
-                                ),
-                                mul(natural<F>(8192), row.accumulator_after),
+                                add(add(row.value, row.auxiliary), row.accumulator_before),
+                                row.state_before,
                             ),
-                        )
+                            mul(natural<F>(8192), row.accumulator_after),
+                        ),
+                    )
                     fold.absorb(row.state_after)
                 },
                 LinearLimbRole::LeftDifference => {
-                    fold = fold.absorb(bit_residual(row.accumulator_after))
-                    fold = fold
-                        .absorb(
+                    fold.absorb(bit_residual(row.accumulator_after))
+                    fold.absorb(
+                        sub(
                             sub(
-                                sub(
-                                    add(row.value, mul(natural<F>(8192), row.accumulator_after)),
-                                    row.auxiliary,
-                                ),
-                                add(row.accumulator_before, row.state_before),
+                                add(row.value, mul(natural<F>(8192), row.accumulator_after)),
+                                row.auxiliary,
                             ),
-                        )
+                            add(row.accumulator_before, row.state_before),
+                        ),
+                    )
                     fold.absorb(row.state_after)
                 },
                 LinearLimbRole::RightDifference => {
-                    fold = fold.absorb(bit_residual(row.accumulator_after))
-                    fold = fold
-                        .absorb(
+                    fold.absorb(bit_residual(row.accumulator_after))
+                    fold.absorb(
+                        sub(
                             sub(
-                                sub(
-                                    add(
-                                        row.auxiliary,
-                                        mul(natural<F>(8192), row.accumulator_after),
-                                    ),
-                                    row.value,
+                                add(
+                                    row.auxiliary,
+                                    mul(natural<F>(8192), row.accumulator_after),
                                 ),
-                                add(row.accumulator_before, row.state_before),
+                                row.value,
                             ),
-                        )
+                            add(row.accumulator_before, row.state_before),
+                        ),
+                    )
                     fold.absorb(row.state_after)
                 },
                 LinearLimbRole::Select => {
-                    fold = fold.absorb(bit_residual(row.state_before))
-                    fold = fold.absorb(bit_residual(row.state_after))
+                    fold.absorb(bit_residual(row.state_before))
+                    fold.absorb(bit_residual(row.state_after))
                     let difference = add(
                         mul(sub(one<F>(), row.state_after), row.auxiliary),
                         mul(row.state_after, row.accumulator_before),
@@ -2701,12 +2690,12 @@ fn absorb_sparse_linear_row<F: Radix2Field>(
             }
         },
         SparseTransitionTask::LinearFinish(node,) => {
-            fold = fold.absorb(bit_residual(row.value))
-            fold = fold.absorb(bit_residual(row.auxiliary))
-            fold = fold.absorb(bit_residual(row.accumulator_before))
-            fold = fold.absorb(bit_residual(row.accumulator_after))
-            fold = fold.absorb(bit_residual(row.state_before))
-            fold = fold.absorb(bit_residual(row.state_after))
+            fold.absorb(bit_residual(row.value))
+            fold.absorb(bit_residual(row.auxiliary))
+            fold.absorb(bit_residual(row.accumulator_before))
+            fold.absorb(bit_residual(row.accumulator_after))
+            fold.absorb(bit_residual(row.state_before))
+            fold.absorb(bit_residual(row.state_after))
             let subtract = boolean<F>(linear_subtracts_right(node))
             let effective_right = sub(
                 add(row.auxiliary, subtract),
@@ -2718,13 +2707,12 @@ fn absorb_sparse_linear_row<F: Radix2Field>(
             )
             let same = sub(one<F>(), different)
             let select = row.accumulator_before
-            fold = fold
-                .absorb(
-                    add(
-                        mul(sub(one<F>(), select), row.accumulator_before),
-                        mul(select, row.accumulator_after),
-                    ),
-                )
+            fold.absorb(
+                add(
+                    mul(sub(one<F>(), select), row.accumulator_before),
+                    mul(select, row.accumulator_after),
+                ),
+            )
             let selected_difference_sign = add(
                 mul(sub(one<F>(), select), row.value),
                 mul(select, effective_right),
@@ -2744,7 +2732,8 @@ pub fn evaluate_sparse_linear_row<F: Radix2Field>(
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_linear_row(ConstraintFold<F>::new(challenge), task, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_linear_row(mut fold, task, row)
     FixedAirConstraintEvaluation {
         valid: match task {
             SparseTransitionTask::LinearLimb(_, _, _) => true,
@@ -3072,49 +3061,49 @@ fn sparse_selector_sum<F: Radix2Field>(_ selectors: SparseControlSelectors<F>) -
 }
 
 fn absorb_sparse_selector_bits<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ selectors: SparseControlSelectors<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold.absorb(bit_residual(selectors.radix_bit))
-    fold = fold.absorb(bit_residual(selectors.radix_limb))
-    fold = fold.absorb(bit_residual(selectors.radix_finish))
-    fold = fold.absorb(bit_residual(selectors.carry_bit))
-    fold = fold.absorb(bit_residual(selectors.carry_finish))
-    fold = fold.absorb(bit_residual(selectors.product_term))
-    fold = fold.absorb(bit_residual(selectors.product_coefficient))
-    fold = fold.absorb(bit_residual(selectors.product_round))
-    fold = fold.absorb(bit_residual(selectors.product_finish))
-    fold = fold.absorb(bit_residual(selectors.linear_limb))
-    fold = fold.absorb(bit_residual(selectors.linear_finish))
-    fold = fold.absorb(bit_residual(selectors.boundary_sign))
-    fold = fold.absorb(bit_residual(selectors.boundary_limb))
-    fold = fold.absorb(bit_residual(selectors.transition_finish))
+) {
+    fold.absorb(bit_residual(selectors.radix_bit))
+    fold.absorb(bit_residual(selectors.radix_limb))
+    fold.absorb(bit_residual(selectors.radix_finish))
+    fold.absorb(bit_residual(selectors.carry_bit))
+    fold.absorb(bit_residual(selectors.carry_finish))
+    fold.absorb(bit_residual(selectors.product_term))
+    fold.absorb(bit_residual(selectors.product_coefficient))
+    fold.absorb(bit_residual(selectors.product_round))
+    fold.absorb(bit_residual(selectors.product_finish))
+    fold.absorb(bit_residual(selectors.linear_limb))
+    fold.absorb(bit_residual(selectors.linear_finish))
+    fold.absorb(bit_residual(selectors.boundary_sign))
+    fold.absorb(bit_residual(selectors.boundary_limb))
+    fold.absorb(bit_residual(selectors.transition_finish))
     fold.absorb(bit_residual(selectors.padding))
 }
 
 fn absorb_sparse_control_local<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ row: SparseControlRow<F>,
     _ coordinate_domains: [F; SPARSE_CONTROL_MULTIPLICATIONS],
-) -> ConstraintFold<F> {
+) {
     let selectors = row.selectors
-    let mut fold = absorb_sparse_selector_bits(fold, selectors)
-    fold = fold.absorb(sub(sparse_selector_sum(selectors), one<F>()))
+    absorb_sparse_selector_bits(mut fold, selectors)
+    fold.absorb(sub(sparse_selector_sum(selectors), one<F>()))
     let roles = row.linear_roles
-    fold = fold.absorb(bit_residual(roles.sum))
-    fold = fold.absorb(bit_residual(roles.left_difference))
-    fold = fold.absorb(bit_residual(roles.right_difference))
-    fold = fold.absorb(bit_residual(roles.select))
+    fold.absorb(bit_residual(roles.sum))
+    fold.absorb(bit_residual(roles.left_difference))
+    fold.absorb(bit_residual(roles.right_difference))
+    fold.absorb(bit_residual(roles.select))
     let mut role_sum = roles.sum
     role_sum = add(role_sum, roles.left_difference)
     role_sum = add(role_sum, roles.right_difference)
     role_sum = add(role_sum, roles.select)
-    fold = fold.absorb(sub(role_sum, selectors.linear_limb))
+    fold.absorb(sub(role_sum, selectors.linear_limb))
     let range_roles = row.range_roles
-    fold = fold.absorb(bit_residual(range_roles.coordinate))
-    fold = fold.absorb(bit_residual(range_roles.point_coordinate))
-    fold = fold.absorb(bit_residual(range_roles.current_coordinate))
-    fold = fold.absorb(bit_residual(range_roles.next_coordinate))
+    fold.absorb(bit_residual(range_roles.coordinate))
+    fold.absorb(bit_residual(range_roles.point_coordinate))
+    fold.absorb(bit_residual(range_roles.current_coordinate))
+    fold.absorb(bit_residual(range_roles.next_coordinate))
     let coordinate_kind_sum = add(
         range_roles.point_coordinate,
         add(
@@ -3122,17 +3111,17 @@ fn absorb_sparse_control_local<F: Radix2Field>(
             range_roles.next_coordinate,
         ),
     )
-    fold = fold.absorb(sub(coordinate_kind_sum, range_roles.coordinate))
-    fold = fold.absorb(mul(range_roles.point_coordinate, coordinate_domains[0]))
-    fold = fold.absorb(mul(range_roles.current_coordinate, coordinate_domains[1]))
-    fold = fold.absorb(mul(range_roles.next_coordinate, coordinate_domains[2]))
-    fold = fold.absorb(bit_residual(range_roles.product_low))
-    fold = fold.absorb(bit_residual(range_roles.product_high))
-    fold = fold.absorb(bit_residual(range_roles.product_output))
-    fold = fold.absorb(bit_residual(range_roles.linear_sum))
-    fold = fold.absorb(bit_residual(range_roles.linear_left_difference))
-    fold = fold.absorb(bit_residual(range_roles.linear_right_difference))
-    fold = fold.absorb(bit_residual(range_roles.linear_output))
+    fold.absorb(sub(coordinate_kind_sum, range_roles.coordinate))
+    fold.absorb(mul(range_roles.point_coordinate, coordinate_domains[0]))
+    fold.absorb(mul(range_roles.current_coordinate, coordinate_domains[1]))
+    fold.absorb(mul(range_roles.next_coordinate, coordinate_domains[2]))
+    fold.absorb(bit_residual(range_roles.product_low))
+    fold.absorb(bit_residual(range_roles.product_high))
+    fold.absorb(bit_residual(range_roles.product_output))
+    fold.absorb(bit_residual(range_roles.linear_sum))
+    fold.absorb(bit_residual(range_roles.linear_left_difference))
+    fold.absorb(bit_residual(range_roles.linear_right_difference))
+    fold.absorb(bit_residual(range_roles.linear_output))
     let mut range_role_sum = range_roles.coordinate
     range_role_sum = add(range_role_sum, range_roles.product_low)
     range_role_sum = add(range_role_sum, range_roles.product_high)
@@ -3145,26 +3134,26 @@ fn absorb_sparse_control_local<F: Radix2Field>(
         selectors.radix_bit,
         add(selectors.radix_limb, selectors.radix_finish),
     )
-    fold = fold.absorb(sub(range_role_sum, radix_used))
+    fold.absorb(sub(range_role_sum, radix_used))
     let range_signed = add(
         range_roles.coordinate,
         add(range_roles.product_output, range_roles.linear_output),
     )
-    fold = fold.absorb(mul(radix_used, sub(row.flag, range_signed)))
-    fold = fold.absorb(bit_residual(row.flag))
+    fold.absorb(mul(radix_used, sub(row.flag, range_signed)))
+    fold.absorb(bit_residual(row.flag))
 
     let positions = row.limb_positions
-    fold = fold.absorb(bit_residual(positions.penultimate))
-    fold = fold.absorb(bit_residual(positions.last))
-    fold = fold.absorb(mul(positions.penultimate, positions.last))
+    fold.absorb(bit_residual(positions.penultimate))
+    fold.absorb(bit_residual(positions.last))
+    fold.absorb(mul(positions.penultimate, positions.last))
     let limb_position_used = add(selectors.radix_bit, selectors.radix_limb)
-    fold = fold.absorb(
-            mul(sub(one<F>(), limb_position_used), positions.penultimate),
-        )
-    fold = fold.absorb(mul(sub(one<F>(), limb_position_used), positions.last))
+    fold.absorb(
+        mul(sub(one<F>(), limb_position_used), positions.penultimate),
+    )
+    fold.absorb(mul(sub(one<F>(), limb_position_used), positions.last))
 
     let major_unused = add(selectors.transition_finish, selectors.padding)
-    fold = fold.absorb(mul(major_unused, row.major))
+    fold.absorb(mul(major_unused, row.major))
 
     let mut minor_used = selectors.radix_bit
     minor_used = add(minor_used, selectors.radix_limb)
@@ -3175,13 +3164,13 @@ fn absorb_sparse_control_local<F: Radix2Field>(
     minor_used = add(minor_used, selectors.product_round)
     minor_used = add(minor_used, selectors.linear_limb)
     minor_used = add(minor_used, selectors.boundary_limb)
-    fold = fold.absorb(mul(sub(one<F>(), minor_used), row.minor))
+    fold.absorb(mul(sub(one<F>(), minor_used), row.minor))
 
     let mut step_used = selectors.radix_bit
     step_used = add(step_used, selectors.carry_bit)
     step_used = add(step_used, selectors.product_term)
     step_used = add(step_used, selectors.linear_limb)
-    fold = fold.absorb(mul(sub(one<F>(), step_used), row.step))
+    fold.absorb(mul(sub(one<F>(), step_used), row.step))
 
     let flag_used = add(
         radix_used,
@@ -3196,10 +3185,10 @@ fn absorb_sparse_control_local<F: Radix2Field>(
             ),
         ),
     )
-    fold = fold.absorb(mul(sub(one<F>(), flag_used), row.flag))
+    fold.absorb(mul(sub(one<F>(), flag_used), row.flag))
 
     let width_used = add(selectors.product_term, selectors.product_coefficient)
-    fold = fold.absorb(mul(sub(one<F>(), width_used), row.width))
+    fold.absorb(mul(sub(one<F>(), width_used), row.width))
 
     let weight_used = add(selectors.radix_bit, selectors.carry_bit)
     fold.absorb(mul(sub(one<F>(), weight_used), row.weight))
@@ -3285,10 +3274,10 @@ pub fn evaluate_sparse_control_row<F: Radix2Field>(
     let mut fold = ConstraintFold<F>::new(challenge)
     let mut plan_index: usize = 0
     while plan_index < SPARSE_CONTROL_MULTIPLICATIONS {
-        fold = fold.absorb(planned.residuals.values[plan_index])
+        fold.absorb(planned.residuals.values[plan_index])
         plan_index = plan_index + 1
     }
-    fold = absorb_sparse_control_local(fold, row, planned.coordinate_domains)
+    absorb_sparse_control_local(mut fold, row, planned.coordinate_domains)
     FixedAirConstraintEvaluation {
         valid: planned.valid,
         constraints: fold.constraints,
@@ -3892,20 +3881,18 @@ fn sparse_control_constrained_link_plan<F: Radix2Field>(
 }
 
 fn absorb_sparse_plan_residuals<F: Radix2Field, const N: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ residuals: QuadraticPlanResiduals<F, N>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     let mut index: usize = 0
     while index < N {
-        fold = fold.absorb(residuals.values[index])
+        fold.absorb(residuals.values[index])
         index = index + 1
     }
-    fold
 }
 
 fn absorb_sparse_control_edge<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ gate: F,
     _ next: SparseControlRow<F>,
     _ major: F,
@@ -3914,17 +3901,17 @@ fn absorb_sparse_control_edge<F: Radix2Field>(
     _ flag: F,
     _ width: F,
     _ weight: F,
-) -> ConstraintFold<F> {
-    let mut fold = fold.absorb(mul(gate, sub(next.major, major)))
-    fold = fold.absorb(mul(gate, sub(next.minor, minor)))
-    fold = fold.absorb(mul(gate, sub(next.step, step)))
-    fold = fold.absorb(mul(gate, sub(next.flag, flag)))
-    fold = fold.absorb(mul(gate, sub(next.width, width)))
+) {
+    fold.absorb(mul(gate, sub(next.major, major)))
+    fold.absorb(mul(gate, sub(next.minor, minor)))
+    fold.absorb(mul(gate, sub(next.step, step)))
+    fold.absorb(mul(gate, sub(next.flag, flag)))
+    fold.absorb(mul(gate, sub(next.width, width)))
     fold.absorb(mul(gate, sub(next.weight, weight)))
 }
 
 fn absorb_sparse_control_link<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ current: SparseControlRow<F>,
     _ next: SparseControlRow<F>,
     _ phase: SparseControlPhaseLinks<F>,
@@ -3933,7 +3920,7 @@ fn absorb_sparse_control_link<F: Radix2Field, const L: usize>(
     _ carry: SparseControlCarryLinks<F>,
     _ product: SparseControlProductLinks<F>,
     _ linear: SparseControlLinearLinks<F>,
-) -> ConstraintFold<F>
+)
 where L > 1
 {
     let zero = zero<F>()
@@ -4002,10 +3989,10 @@ where L > 1
     allowed = add(allowed, boundary_limb_to_finish)
     allowed = add(allowed, finish_to_padding)
     allowed = add(allowed, padding_to_padding)
-    let mut fold = fold.absorb(sub(allowed, one))
+    fold.absorb(sub(allowed, one))
 
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         radix_bit_to_bit,
         next,
         current.major,
@@ -4015,8 +4002,8 @@ where L > 1
         zero,
         mul(two, current.weight),
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         radix_bit_to_limb,
         next,
         current.major,
@@ -4026,9 +4013,9 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(mul(radix_bit_to_limb, sub(current.step, natural<F>(12))))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(radix_bit_to_limb, sub(current.step, natural<F>(12))))
+    absorb_sparse_control_edge(
+        mut fold,
         radix_limb_to_bit,
         next,
         current.major,
@@ -4038,8 +4025,8 @@ where L > 1
         zero,
         one,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         radix_limb_to_finish,
         next,
         current.major,
@@ -4049,9 +4036,9 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(mul(radix_limb_to_finish, sub(current.minor, last_limb)))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(radix_limb_to_finish, sub(current.minor, last_limb)))
+    absorb_sparse_control_edge(
+        mut fold,
         radix_finish_to_bit,
         next,
         add(current.major, one),
@@ -4061,8 +4048,8 @@ where L > 1
         zero,
         one,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         radix_finish_to_carry,
         next,
         zero,
@@ -4072,9 +4059,9 @@ where L > 1
         zero,
         one,
     )
-    fold = fold.absorb(
-            mul(radix_finish_to_carry, sub(current.major, natural<F>(30))),
-        )
+    fold.absorb(
+        mul(radix_finish_to_carry, sub(current.major, natural<F>(30))),
+    )
 
     let current_range = current.range_roles
     let next_range = next.range_roles
@@ -4085,129 +4072,123 @@ where L > 1
             add(radix_limb_to_bit, radix_limb_to_finish),
         ),
     )
-    fold = fold.absorb(
-            mul(
-                same_range,
-                sub(next_range.coordinate, current_range.coordinate),
+    fold.absorb(
+        mul(
+            same_range,
+            sub(next_range.coordinate, current_range.coordinate),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(next_range.product_low, current_range.product_low),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(next_range.product_high, current_range.product_high),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(next_range.product_output, current_range.product_output),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(next_range.linear_sum, current_range.linear_sum),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(
+                next_range.linear_left_difference,
+                current_range.linear_left_difference,
             ),
-        )
-    fold = fold.absorb(
-            mul(
-                same_range,
-                sub(next_range.product_low, current_range.product_low),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(
+                next_range.linear_right_difference,
+                current_range.linear_right_difference,
             ),
-        )
-    fold = fold.absorb(
-            mul(
-                same_range,
-                sub(next_range.product_high, current_range.product_high),
-            ),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                same_range,
-                sub(next_range.product_output, current_range.product_output),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                same_range,
-                sub(next_range.linear_sum, current_range.linear_sum),
-            ),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                same_range,
-                sub(
-                    next_range.linear_left_difference,
-                    current_range.linear_left_difference,
-                ),
-            ),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                same_range,
-                sub(
-                    next_range.linear_right_difference,
-                    current_range.linear_right_difference,
-                ),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                same_range,
-                sub(next_range.linear_output, current_range.linear_output),
-            ),
-        )
-    fold = fold.absorb(mul(radix_finish_to_bit, sub(range.next_allowed, one)))
-    fold = fold.absorb(
-            mul(
-                range.coordinate_to_product_low,
-                sub(current.major, natural<F>(5)),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                range.product_output_to_linear_sum,
-                sub(current.major, natural<F>(14)),
-            ),
-        )
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_range,
+            sub(next_range.linear_output, current_range.linear_output),
+        ),
+    )
+    fold.absorb(mul(radix_finish_to_bit, sub(range.next_allowed, one)))
+    fold.absorb(
+        mul(
+            range.coordinate_to_product_low,
+            sub(current.major, natural<F>(5)),
+        ),
+    )
+    fold.absorb(
+        mul(
+            range.product_output_to_linear_sum,
+            sub(current.major, natural<F>(14)),
+        ),
+    )
 
     let current_positions = current.limb_positions
     let next_positions = next.limb_positions
     let penultimate_limb = sub(limbs, two)
-    fold = fold.absorb(
-            mul(
-                current_positions.penultimate,
-                sub(current.minor, penultimate_limb),
-            ),
-        )
-    fold = fold.absorb(mul(current_positions.last, sub(current.minor, last_limb)))
+    fold.absorb(
+        mul(
+            current_positions.penultimate,
+            sub(current.minor, penultimate_limb),
+        ),
+    )
+    fold.absorb(mul(current_positions.last, sub(current.minor, last_limb)))
     let same_limb_position = add(radix_bit_to_bit, radix_bit_to_limb)
-    fold = fold
-        .absorb(
-            mul(
-                same_limb_position,
-                sub(next_positions.penultimate, current_positions.penultimate),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                same_limb_position,
-                sub(next_positions.last, current_positions.last),
-            ),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                radix_limb_to_bit,
-                sub(next_positions.last, current_positions.penultimate),
-            ),
-        )
-    fold = fold.absorb(mul(radix_limb_to_bit, current_positions.last))
-    fold = fold.absorb(
-            mul(radix_limb_to_finish, sub(current_positions.last, one)),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                radix_finish_to_bit,
-                sub(next_positions.penultimate, boolean<F>(L == 2)),
-            ),
-        )
-    fold = fold.absorb(mul(radix_finish_to_bit, next_positions.last))
+    fold.absorb(
+        mul(
+            same_limb_position,
+            sub(next_positions.penultimate, current_positions.penultimate),
+        ),
+    )
+    fold.absorb(
+        mul(
+            same_limb_position,
+            sub(next_positions.last, current_positions.last),
+        ),
+    )
+    fold.absorb(
+        mul(
+            radix_limb_to_bit,
+            sub(next_positions.last, current_positions.penultimate),
+        ),
+    )
+    fold.absorb(mul(radix_limb_to_bit, current_positions.last))
+    fold.absorb(
+        mul(radix_limb_to_finish, sub(current_positions.last, one)),
+    )
+    fold.absorb(
+        mul(
+            radix_finish_to_bit,
+            sub(next_positions.penultimate, boolean<F>(L == 2)),
+        ),
+    )
+    fold.absorb(mul(radix_finish_to_bit, next_positions.last))
 
     let carry_reset = sub(next.flag, current.flag)
-    fold = fold.absorb(mul(carry_bit_to_bit, carry.reset_bit_residual))
-    fold = fold.absorb(mul(carry_bit_to_bit, carry.flag_descent))
-    fold = fold.absorb(
-            mul(carry.selected_reset, sub(current.step, natural<F>(17))),
-        )
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(carry_bit_to_bit, carry.reset_bit_residual))
+    fold.absorb(mul(carry_bit_to_bit, carry.flag_descent))
+    fold.absorb(
+        mul(carry.selected_reset, sub(current.step, natural<F>(17))),
+    )
+    absorb_sparse_control_edge(
+        mut fold,
         carry_bit_to_bit,
         next,
         current.major,
@@ -4217,8 +4198,8 @@ where L > 1
         zero,
         add(carry.retained_weight, carry_reset),
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         carry_bit_to_finish,
         next,
         current.major,
@@ -4228,15 +4209,15 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(mul(carry_bit_to_finish, sub(current.flag, one)))
-    fold = fold.absorb(
-            mul(carry_bit_to_finish, sub(current.step, natural<F>(17))),
-        )
+    fold.absorb(mul(carry_bit_to_finish, sub(current.flag, one)))
+    fold.absorb(
+        mul(carry_bit_to_finish, sub(current.step, natural<F>(17))),
+    )
 
     let carry_product_delta = sub(next.major, current.major)
-    fold = fold.absorb(mul(carry_finish_to_bit, carry.product_delta_bit_residual))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(carry_finish_to_bit, carry.product_delta_bit_residual))
+    absorb_sparse_control_edge(
+        mut fold,
         carry_finish_to_bit,
         next,
         add(current.major, carry_product_delta),
@@ -4246,14 +4227,14 @@ where L > 1
         zero,
         one,
     )
-    fold = fold.absorb(
-            mul(
-                carry.selected_product_delta,
-                sub(current.minor, last_coefficient),
-            ),
-        )
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(
+        mul(
+            carry.selected_product_delta,
+            sub(current.minor, last_coefficient),
+        ),
+    )
+    absorb_sparse_control_edge(
+        mut fold,
         carry_finish_to_product,
         next,
         zero,
@@ -4263,21 +4244,21 @@ where L > 1
         one,
         zero,
     )
-    fold = fold.absorb(
-            mul(
-                carry_finish_to_product,
-                sub(current.major, natural<F>(2)),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                carry_finish_to_product,
-                sub(current.minor, last_coefficient),
-            ),
-        )
+    fold.absorb(
+        mul(
+            carry_finish_to_product,
+            sub(current.major, natural<F>(2)),
+        ),
+    )
+    fold.absorb(
+        mul(
+            carry_finish_to_product,
+            sub(current.minor, last_coefficient),
+        ),
+    )
 
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_term_to_term,
         next,
         current.major,
@@ -4287,8 +4268,8 @@ where L > 1
         current.width,
         zero,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_term_to_coefficient,
         next,
         current.major,
@@ -4298,21 +4279,21 @@ where L > 1
         current.width,
         zero,
     )
-    fold = fold.absorb(
-            mul(
-                product_term_to_coefficient,
-                sub(add(current.step, one), current.width),
-            ),
-        )
+    fold.absorb(
+        mul(
+            product_term_to_coefficient,
+            sub(add(current.step, one), current.width),
+        ),
+    )
 
     let next_product_delta = sub(next.major, current.major)
-    fold = fold.absorb(
-            mul(product_coefficient_to_term, product.delta_bit_residual),
-        )
-    fold = fold.absorb(mul(product_coefficient_to_term, product.descending))
-    fold = fold.absorb(mul(product.selected_rise, sub(current.minor, last_limb)))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(
+        mul(product_coefficient_to_term, product.delta_bit_residual),
+    )
+    fold.absorb(mul(product_coefficient_to_term, product.descending))
+    fold.absorb(mul(product.selected_rise, sub(current.minor, last_limb)))
+    absorb_sparse_control_edge(
+        mut fold,
         product_coefficient_to_term,
         next,
         add(current.major, next_product_delta),
@@ -4322,16 +4303,16 @@ where L > 1
         add(product.retained_width, next_product_delta),
         zero,
     )
-    fold = fold.absorb(
-            mul(
-                product.selected_delta,
-                sub(current.minor, last_coefficient),
-            ),
-        )
-    fold = fold.absorb(mul(product.selected_delta, current.width))
+    fold.absorb(
+        mul(
+            product.selected_delta,
+            sub(current.minor, last_coefficient),
+        ),
+    )
+    fold.absorb(mul(product.selected_delta, current.width))
 
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_coefficient_to_coefficient,
         next,
         current.major,
@@ -4341,28 +4322,27 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold
-        .absorb(
-            mul(
-                product_coefficient_to_coefficient,
-                sub(current.minor, sub(last_coefficient, one)),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                product_coefficient_to_coefficient,
-                sub(current.flag, one),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                product_coefficient_to_coefficient,
-                sub(current.width, one),
-            ),
-        )
+    fold.absorb(
+        mul(
+            product_coefficient_to_coefficient,
+            sub(current.minor, sub(last_coefficient, one)),
+        ),
+    )
+    fold.absorb(
+        mul(
+            product_coefficient_to_coefficient,
+            sub(current.flag, one),
+        ),
+    )
+    fold.absorb(
+        mul(
+            product_coefficient_to_coefficient,
+            sub(current.width, one),
+        ),
+    )
 
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_coefficient_to_round,
         next,
         zero,
@@ -4372,23 +4352,23 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(
-            mul(
-                product_coefficient_to_round,
-                sub(current.major, natural<F>(2)),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                product_coefficient_to_round,
-                sub(current.minor, last_coefficient),
-            ),
-        )
-    fold = fold.absorb(mul(product_coefficient_to_round, sub(current.flag, one)))
-    fold = fold.absorb(mul(product_coefficient_to_round, current.width))
+    fold.absorb(
+        mul(
+            product_coefficient_to_round,
+            sub(current.major, natural<F>(2)),
+        ),
+    )
+    fold.absorb(
+        mul(
+            product_coefficient_to_round,
+            sub(current.minor, last_coefficient),
+        ),
+    )
+    fold.absorb(mul(product_coefficient_to_round, sub(current.flag, one)))
+    fold.absorb(mul(product_coefficient_to_round, current.width))
 
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_round_to_round,
         next,
         current.major,
@@ -4398,8 +4378,8 @@ where L > 1
         zero,
         zero,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_round_to_finish,
         next,
         current.major,
@@ -4409,11 +4389,11 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(
-            mul(product_round_to_finish, sub(current.minor, last_limb)),
-        )
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(
+        mul(product_round_to_finish, sub(current.minor, last_limb)),
+    )
+    absorb_sparse_control_edge(
+        mut fold,
         product_finish_to_round,
         next,
         add(current.major, one),
@@ -4423,8 +4403,8 @@ where L > 1
         zero,
         zero,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         product_finish_to_linear,
         next,
         zero,
@@ -4434,17 +4414,17 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(
-            mul(
-                product_finish_to_linear,
-                sub(current.major, natural<F>(2)),
-            ),
-        )
+    fold.absorb(
+        mul(
+            product_finish_to_linear,
+            sub(current.major, natural<F>(2)),
+        ),
+    )
 
     let linear_role_delta = sub(next.minor, current.minor)
-    fold = fold.absorb(mul(linear_limb_to_limb, linear.delta_bit_residual))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(linear_limb_to_limb, linear.delta_bit_residual))
+    absorb_sparse_control_edge(
+        mut fold,
         linear_limb_to_limb,
         next,
         current.major,
@@ -4454,9 +4434,9 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(mul(linear.selected_delta, sub(current.step, last_limb)))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(linear.selected_delta, sub(current.step, last_limb)))
+    absorb_sparse_control_edge(
+        mut fold,
         linear_limb_to_finish,
         next,
         current.major,
@@ -4466,12 +4446,12 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(
-            mul(linear_limb_to_finish, sub(current.minor, natural<F>(3))),
-        )
-    fold = fold.absorb(mul(linear_limb_to_finish, sub(current.step, last_limb)))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(
+        mul(linear_limb_to_finish, sub(current.minor, natural<F>(3))),
+    )
+    fold.absorb(mul(linear_limb_to_finish, sub(current.step, last_limb)))
+    absorb_sparse_control_edge(
+        mut fold,
         linear_finish_to_limb,
         next,
         add(current.major, one),
@@ -4481,8 +4461,8 @@ where L > 1
         zero,
         zero,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         linear_finish_to_boundary,
         next,
         zero,
@@ -4492,48 +4472,46 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(
-            mul(
-                linear_finish_to_boundary,
-                sub(current.major, natural<F>(3)),
-            ),
-        )
+    fold.absorb(
+        mul(
+            linear_finish_to_boundary,
+            sub(current.major, natural<F>(3)),
+        ),
+    )
 
     let next_roles = next.linear_roles
-    fold = fold.absorb(mul(product_finish_to_linear, sub(next_roles.sum, one)))
-    fold = fold.absorb(mul(product_finish_to_linear, next_roles.left_difference))
-    fold = fold.absorb(mul(product_finish_to_linear, next_roles.right_difference))
-    fold = fold.absorb(mul(product_finish_to_linear, next_roles.select))
-    fold = fold.absorb(
-            mul(linear_limb_to_limb, sub(next_roles.sum, linear.next_sum)),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                linear_limb_to_limb,
-                sub(next_roles.left_difference, linear.next_left_difference),
-            ),
-        )
-    fold = fold
-        .absorb(
-            mul(
-                linear_limb_to_limb,
-                sub(next_roles.right_difference, linear.next_right_difference),
-            ),
-        )
-    fold = fold.absorb(
-            mul(
-                linear_limb_to_limb,
-                sub(next_roles.select, linear.next_select),
-            ),
-        )
-    fold = fold.absorb(mul(linear_finish_to_limb, sub(next_roles.sum, one)))
-    fold = fold.absorb(mul(linear_finish_to_limb, next_roles.left_difference))
-    fold = fold.absorb(mul(linear_finish_to_limb, next_roles.right_difference))
-    fold = fold.absorb(mul(linear_finish_to_limb, next_roles.select))
+    fold.absorb(mul(product_finish_to_linear, sub(next_roles.sum, one)))
+    fold.absorb(mul(product_finish_to_linear, next_roles.left_difference))
+    fold.absorb(mul(product_finish_to_linear, next_roles.right_difference))
+    fold.absorb(mul(product_finish_to_linear, next_roles.select))
+    fold.absorb(
+        mul(linear_limb_to_limb, sub(next_roles.sum, linear.next_sum)),
+    )
+    fold.absorb(
+        mul(
+            linear_limb_to_limb,
+            sub(next_roles.left_difference, linear.next_left_difference),
+        ),
+    )
+    fold.absorb(
+        mul(
+            linear_limb_to_limb,
+            sub(next_roles.right_difference, linear.next_right_difference),
+        ),
+    )
+    fold.absorb(
+        mul(
+            linear_limb_to_limb,
+            sub(next_roles.select, linear.next_select),
+        ),
+    )
+    fold.absorb(mul(linear_finish_to_limb, sub(next_roles.sum, one)))
+    fold.absorb(mul(linear_finish_to_limb, next_roles.left_difference))
+    fold.absorb(mul(linear_finish_to_limb, next_roles.right_difference))
+    fold.absorb(mul(linear_finish_to_limb, next_roles.select))
 
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         boundary_sign_to_limb,
         next,
         current.major,
@@ -4543,8 +4521,8 @@ where L > 1
         zero,
         zero,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         boundary_limb_to_limb,
         next,
         current.major,
@@ -4554,8 +4532,8 @@ where L > 1
         zero,
         zero,
     )
-    fold = absorb_sparse_control_edge(
-        fold,
+    absorb_sparse_control_edge(
+        mut fold,
         boundary_limb_to_sign,
         next,
         add(current.major, one),
@@ -4565,9 +4543,9 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(mul(boundary_limb_to_sign, sub(current.minor, last_limb)))
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(boundary_limb_to_sign, sub(current.minor, last_limb)))
+    absorb_sparse_control_edge(
+        mut fold,
         boundary_limb_to_finish,
         next,
         zero,
@@ -4577,12 +4555,12 @@ where L > 1
         zero,
         zero,
     )
-    fold = fold.absorb(mul(boundary_limb_to_finish, sub(current.major, one)))
-    fold = fold.absorb(
-            mul(boundary_limb_to_finish, sub(current.minor, last_limb)),
-        )
-    fold = absorb_sparse_control_edge(
-        fold,
+    fold.absorb(mul(boundary_limb_to_finish, sub(current.major, one)))
+    fold.absorb(
+        mul(boundary_limb_to_finish, sub(current.minor, last_limb)),
+    )
+    absorb_sparse_control_edge(
+        mut fold,
         finish_to_padding,
         next,
         zero,
@@ -4593,7 +4571,7 @@ where L > 1
         zero,
     )
     absorb_sparse_control_edge(
-        fold,
+        mut fold,
         padding_to_padding,
         next,
         zero,
@@ -4618,14 +4596,14 @@ where L > 1
 {
     let planned = sparse_control_constrained_link_plan(current, next, plan)
     let mut fold = ConstraintFold<F>::new(challenge)
-    fold = absorb_sparse_plan_residuals(fold, planned.phase_residuals)
-    fold = absorb_sparse_plan_residuals(fold, planned.boundary_residuals)
-    fold = absorb_sparse_plan_residuals(fold, planned.range_residuals)
-    fold = absorb_sparse_plan_residuals(fold, planned.carry_residuals)
-    fold = absorb_sparse_plan_residuals(fold, planned.product_residuals)
-    fold = absorb_sparse_plan_residuals(fold, planned.linear_residuals)
-    let fold = absorb_sparse_control_link<F, L>(
-        fold,
+    absorb_sparse_plan_residuals(mut fold, planned.phase_residuals)
+    absorb_sparse_plan_residuals(mut fold, planned.boundary_residuals)
+    absorb_sparse_plan_residuals(mut fold, planned.range_residuals)
+    absorb_sparse_plan_residuals(mut fold, planned.carry_residuals)
+    absorb_sparse_plan_residuals(mut fold, planned.product_residuals)
+    absorb_sparse_plan_residuals(mut fold, planned.linear_residuals)
+    absorb_sparse_control_link<F, L>(
+        mut fold,
         current,
         next,
         planned.phase,
@@ -4649,16 +4627,16 @@ pub fn evaluate_sparse_control_initial<F: Radix2Field, const L: usize>(
 where L > 1
 {
     let mut fold = ConstraintFold<F>::new(challenge)
-    fold = fold.absorb(sub(row.selectors.radix_bit, one<F>()))
-    fold = fold.absorb(row.major)
-    fold = fold.absorb(row.minor)
-    fold = fold.absorb(row.step)
-    fold = fold.absorb(sub(row.flag, one<F>()))
-    fold = fold.absorb(row.width)
-    fold = fold.absorb(sub(row.weight, one<F>()))
-    fold = fold.absorb(sub(row.range_roles.coordinate, one<F>()))
-    fold = fold.absorb(sub(row.limb_positions.penultimate, boolean<F>(L == 2)))
-    fold = fold.absorb(row.limb_positions.last)
+    fold.absorb(sub(row.selectors.radix_bit, one<F>()))
+    fold.absorb(row.major)
+    fold.absorb(row.minor)
+    fold.absorb(row.step)
+    fold.absorb(sub(row.flag, one<F>()))
+    fold.absorb(row.width)
+    fold.absorb(sub(row.weight, one<F>()))
+    fold.absorb(sub(row.range_roles.coordinate, one<F>()))
+    fold.absorb(sub(row.limb_positions.penultimate, boolean<F>(L == 2)))
+    fold.absorb(row.limb_positions.last)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -4667,13 +4645,13 @@ pub fn evaluate_sparse_control_terminal<F: Radix2Field>(
     _ row: SparseControlRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
     let mut fold = ConstraintFold<F>::new(challenge)
-    fold = fold.absorb(sub(row.selectors.padding, one<F>()))
-    fold = fold.absorb(row.major)
-    fold = fold.absorb(row.minor)
-    fold = fold.absorb(row.step)
-    fold = fold.absorb(row.flag)
-    fold = fold.absorb(row.width)
-    fold = fold.absorb(row.weight)
+    fold.absorb(sub(row.selectors.padding, one<F>()))
+    fold.absorb(row.major)
+    fold.absorb(row.minor)
+    fold.absorb(row.step)
+    fold.absorb(row.flag)
+    fold.absorb(row.width)
+    fold.absorb(row.weight)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -5145,34 +5123,33 @@ pub fn sparse_linear_copy_consumer<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_sparse_boundary_row<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     match task {
         SparseTransitionTask::BoundarySign(_coordinate,) => {
-            fold = fold.absorb(bit_residual(row.value))
-            fold = fold.absorb(bit_residual(row.auxiliary))
-            fold = fold.absorb(sub(row.value, row.auxiliary))
-            fold = fold.absorb(row.accumulator_before)
-            fold = fold.absorb(row.accumulator_after)
-            fold = fold.absorb(row.state_before)
+            fold.absorb(bit_residual(row.value))
+            fold.absorb(bit_residual(row.auxiliary))
+            fold.absorb(sub(row.value, row.auxiliary))
+            fold.absorb(row.accumulator_before)
+            fold.absorb(row.accumulator_after)
+            fold.absorb(row.state_before)
             fold.absorb(row.state_after)
         },
         SparseTransitionTask::BoundaryLimb(_coordinate, _limb) => {
-            fold = fold.absorb(sub(row.value, row.auxiliary))
-            fold = fold.absorb(row.accumulator_before)
-            fold = fold.absorb(row.accumulator_after)
-            fold = fold.absorb(row.state_before)
+            fold.absorb(sub(row.value, row.auxiliary))
+            fold.absorb(row.accumulator_before)
+            fold.absorb(row.accumulator_after)
+            fold.absorb(row.state_before)
             fold.absorb(row.state_after)
         },
         SparseTransitionTask::TransitionFinish => {
-            fold = fold.absorb(sub(row.value, one<F>()))
-            fold = fold.absorb(row.auxiliary)
-            fold = fold.absorb(row.accumulator_before)
-            fold = fold.absorb(row.accumulator_after)
-            fold = fold.absorb(row.state_before)
+            fold.absorb(sub(row.value, one<F>()))
+            fold.absorb(row.auxiliary)
+            fold.absorb(row.accumulator_before)
+            fold.absorb(row.accumulator_after)
+            fold.absorb(row.state_before)
             fold.absorb(row.state_after)
         },
         _ => fold.absorb(one<F>()),
@@ -5184,7 +5161,8 @@ pub fn evaluate_sparse_boundary_row<F: Radix2Field>(
     _ task: SparseTransitionTask,
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = absorb_sparse_boundary_row(ConstraintFold<F>::new(challenge), task, row)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_boundary_row(mut fold, task, row)
     FixedAirConstraintEvaluation {
         valid: match task {
             SparseTransitionTask::BoundarySign(_,) => true,
@@ -5197,11 +5175,7 @@ pub fn evaluate_sparse_boundary_row<F: Radix2Field>(
     }
 }
 
-fn absorb_selected<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
-    _ selector: F,
-    _ residual: F,
-) -> ConstraintFold<F> {
+fn absorb_selected<F: Radix2Field>(_ fold: mut ConstraintFold<F>, _ selector: F, _ residual: F) {
     fold.absorb(mul(selector, residual))
 }
 
@@ -5416,22 +5390,22 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
     let planned = sparse_arithmetic_constrained_plan(control, row, arithmetic_plan)
     let mut plan_index: usize = 0
     while plan_index < SPARSE_ARITHMETIC_MULTIPLICATIONS {
-        fold = fold.absorb(planned.residuals.values[plan_index])
+        fold.absorb(planned.residuals.values[plan_index])
         plan_index = plan_index + 1
     }
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_bit,
         sub(planned.bit_products.value, row.value),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_bit,
         sub(planned.bit_products.state_after, row.state_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_bit,
         sub(
             row.state_after,
@@ -5441,185 +5415,189 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             ),
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_bit,
         sub(
             row.accumulator_after,
             add(row.accumulator_before, planned.radix_value_weight),
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_limb,
         sub(row.value, row.accumulator_before),
     )
-    fold = absorb_selected(fold, selectors.radix_limb, row.accumulator_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, selectors.radix_limb, row.accumulator_after)
+    absorb_selected(
+        mut fold,
         selectors.radix_limb,
         sub(row.state_after, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_finish,
         sub(planned.bit_products.value, row.value),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_finish,
         sub(row.value, row.state_before),
     )
-    fold = absorb_selected(fold, selectors.radix_finish, row.accumulator_before)
-    fold = absorb_selected(fold, selectors.radix_finish, row.accumulator_after)
-    fold = absorb_selected(fold, selectors.radix_finish, row.state_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, selectors.radix_finish, row.accumulator_before)
+    absorb_selected(mut fold, selectors.radix_finish, row.accumulator_after)
+    absorb_selected(mut fold, selectors.radix_finish, row.state_after)
+    absorb_selected(
+        mut fold,
         selectors.radix_finish,
         sub(planned.bit_products.auxiliary, row.auxiliary),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.radix_finish,
         planned.radix_finish_auxiliary,
     )
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.carry_bit,
         sub(planned.bit_products.value, row.value),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.carry_bit,
         sub(
             row.accumulator_after,
             add(row.accumulator_before, planned.radix_value_weight),
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.carry_bit,
         sub(row.state_after, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.carry_finish,
         sub(row.value, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.carry_finish,
         sub(
             add(row.state_before, row.accumulator_before),
             natural<F>(product_carry_bound<L>()),
         ),
     )
-    fold = absorb_selected(fold, selectors.carry_finish, row.auxiliary)
-    fold = absorb_selected(fold, selectors.carry_finish, row.accumulator_after)
-    fold = absorb_selected(fold, selectors.carry_finish, row.state_after)
+    absorb_selected(mut fold, selectors.carry_finish, row.auxiliary)
+    absorb_selected(mut fold, selectors.carry_finish, row.accumulator_after)
+    absorb_selected(mut fold, selectors.carry_finish, row.state_after)
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_term,
         sub(
             row.accumulator_after,
             add(row.accumulator_before, planned.product_value_auxiliary),
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_term,
         sub(row.state_after, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_coefficient,
         sub(
             sub(add(row.accumulator_before, row.state_before), row.value),
             mul(radix, row.auxiliary),
         ),
     )
-    fold = absorb_selected(fold, selectors.product_coefficient, row.accumulator_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
+        selectors.product_coefficient,
+        row.accumulator_after,
+    )
+    absorb_selected(
+        mut fold,
         selectors.product_coefficient,
         sub(row.state_after, row.auxiliary),
     )
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_round,
         sub(
             planned.bit_products.accumulator_after,
             row.accumulator_after,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_round,
         sub(
             sub(add(row.value, row.accumulator_before), row.auxiliary),
             mul(radix, row.accumulator_after),
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_round,
         sub(row.state_after, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(planned.bit_products.value, row.value),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(planned.bit_products.auxiliary, row.auxiliary),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(
             planned.bit_products.accumulator_before,
             row.accumulator_before,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(
             planned.bit_products.accumulator_after,
             row.accumulator_after,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(planned.bit_products.state_before, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(planned.bit_products.state_after, row.state_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.product_finish,
         sub(row.value, planned.product_finish_signed_output),
     )
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         roles.sum,
         sub(
             planned.bit_products.accumulator_after,
             row.accumulator_after,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         roles.sum,
         sub(
             sub(
@@ -5629,17 +5607,17 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             mul(radix, row.accumulator_after),
         ),
     )
-    fold = absorb_selected(fold, roles.sum, row.state_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, roles.sum, row.state_after)
+    absorb_selected(
+        mut fold,
         roles.left_difference,
         sub(
             planned.bit_products.accumulator_after,
             row.accumulator_after,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         roles.left_difference,
         sub(
             sub(
@@ -5649,17 +5627,17 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             add(row.accumulator_before, row.state_before),
         ),
     )
-    fold = absorb_selected(fold, roles.left_difference, row.state_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, roles.left_difference, row.state_after)
+    absorb_selected(
+        mut fold,
         roles.right_difference,
         sub(
             planned.bit_products.accumulator_after,
             row.accumulator_after,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         roles.right_difference,
         sub(
             sub(
@@ -5669,110 +5647,118 @@ pub fn evaluate_sparse_arithmetic_row<F: Radix2Field, const L: usize>(
             add(row.accumulator_before, row.state_before),
         ),
     )
-    fold = absorb_selected(fold, roles.right_difference, row.state_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, roles.right_difference, row.state_after)
+    absorb_selected(
+        mut fold,
         roles.select,
         sub(planned.bit_products.state_before, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         roles.select,
         sub(planned.bit_products.state_after, row.state_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         roles.select,
         sub(row.accumulator_after, planned.linear_selected_magnitude),
     )
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(planned.bit_products.value, row.value),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(planned.bit_products.auxiliary, row.auxiliary),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(
             planned.bit_products.accumulator_before,
             row.accumulator_before,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(
             planned.bit_products.accumulator_after,
             row.accumulator_after,
         ),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(planned.bit_products.state_before, row.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(planned.bit_products.state_after, row.state_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         planned.linear_finish_balance,
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.linear_finish,
         sub(row.state_after, planned.linear_finish_sign),
     )
 
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.boundary_sign,
         sub(planned.bit_products.value, row.value),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.boundary_sign,
         sub(planned.bit_products.auxiliary, row.auxiliary),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         selectors.boundary_sign,
         sub(row.value, row.auxiliary),
     )
-    fold = absorb_selected(fold, selectors.boundary_sign, row.accumulator_before)
-    fold = absorb_selected(fold, selectors.boundary_sign, row.accumulator_after)
-    fold = absorb_selected(fold, selectors.boundary_sign, row.state_before)
-    fold = absorb_selected(fold, selectors.boundary_sign, row.state_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, selectors.boundary_sign, row.accumulator_before)
+    absorb_selected(mut fold, selectors.boundary_sign, row.accumulator_after)
+    absorb_selected(mut fold, selectors.boundary_sign, row.state_before)
+    absorb_selected(mut fold, selectors.boundary_sign, row.state_after)
+    absorb_selected(
+        mut fold,
         selectors.boundary_limb,
         sub(row.value, row.auxiliary),
     )
-    fold = absorb_selected(fold, selectors.boundary_limb, row.accumulator_before)
-    fold = absorb_selected(fold, selectors.boundary_limb, row.accumulator_after)
-    fold = absorb_selected(fold, selectors.boundary_limb, row.state_before)
-    fold = absorb_selected(fold, selectors.boundary_limb, row.state_after)
-    fold = absorb_selected(fold, selectors.transition_finish, sub(row.value, one))
-    fold = absorb_selected(fold, selectors.transition_finish, row.auxiliary)
-    fold = absorb_selected(fold, selectors.transition_finish, row.accumulator_before)
-    fold = absorb_selected(fold, selectors.transition_finish, row.accumulator_after)
-    fold = absorb_selected(fold, selectors.transition_finish, row.state_before)
-    fold = absorb_selected(fold, selectors.transition_finish, row.state_after)
-    fold = absorb_selected(fold, selectors.padding, row.value)
-    fold = absorb_selected(fold, selectors.padding, row.auxiliary)
-    fold = absorb_selected(fold, selectors.padding, row.accumulator_before)
-    fold = absorb_selected(fold, selectors.padding, row.accumulator_after)
-    fold = absorb_selected(fold, selectors.padding, row.state_before)
-    fold = absorb_selected(fold, selectors.padding, row.state_after)
+    absorb_selected(mut fold, selectors.boundary_limb, row.accumulator_before)
+    absorb_selected(mut fold, selectors.boundary_limb, row.accumulator_after)
+    absorb_selected(mut fold, selectors.boundary_limb, row.state_before)
+    absorb_selected(mut fold, selectors.boundary_limb, row.state_after)
+    absorb_selected(mut fold, selectors.transition_finish, sub(row.value, one))
+    absorb_selected(mut fold, selectors.transition_finish, row.auxiliary)
+    absorb_selected(
+        mut fold,
+        selectors.transition_finish,
+        row.accumulator_before,
+    )
+    absorb_selected(
+        mut fold,
+        selectors.transition_finish,
+        row.accumulator_after,
+    )
+    absorb_selected(mut fold, selectors.transition_finish, row.state_before)
+    absorb_selected(mut fold, selectors.transition_finish, row.state_after)
+    absorb_selected(mut fold, selectors.padding, row.value)
+    absorb_selected(mut fold, selectors.padding, row.auxiliary)
+    absorb_selected(mut fold, selectors.padding, row.accumulator_before)
+    absorb_selected(mut fold, selectors.padding, row.accumulator_after)
+    absorb_selected(mut fold, selectors.padding, row.state_before)
+    absorb_selected(mut fold, selectors.padding, row.state_after)
 
     FixedAirConstraintEvaluation {
         valid: planned.valid,
@@ -6050,74 +6036,86 @@ pub fn evaluate_sparse_arithmetic_link<F: Radix2Field>(
     )
     let mut plan_index: usize = 0
     while plan_index < SPARSE_ARITHMETIC_LINK_MULTIPLICATIONS {
-        fold = fold.absorb(planned.residuals.values[plan_index])
+        fold.absorb(planned.residuals.values[plan_index])
         plan_index = plan_index + 1
     }
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.radix_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.radix_link,
         sub(next.state_before, current.state_after),
     )
-    fold = absorb_selected(fold, planned.carry_entry, next.accumulator_before)
-    fold = absorb_selected(fold, planned.carry_entry, next.state_before)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, planned.carry_entry, next.accumulator_before)
+    absorb_selected(mut fold, planned.carry_entry, next.state_before)
+    absorb_selected(
+        mut fold,
         planned.carry_link,
         sub(next.accumulator_before, planned.carry_next_accumulator),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.carry_link,
         sub(next.state_before, planned.carry_next_state),
     )
-    fold = absorb_selected(fold, planned.product_entry, next.accumulator_before)
-    fold = absorb_selected(fold, planned.product_entry, next.state_before)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, planned.product_entry, next.accumulator_before)
+    absorb_selected(mut fold, planned.product_entry, next.state_before)
+    absorb_selected(
+        mut fold,
         planned.product_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.product_link,
         sub(next.state_before, current.state_after),
     )
-    fold = absorb_selected(fold, planned.product_terminal, current.state_after)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(mut fold, planned.product_terminal, current.state_after)
+    absorb_selected(
+        mut fold,
         planned.round_start,
         sub(next.accumulator_before, next.state_before),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.round_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.round_link,
         sub(next.state_before, current.state_after),
     )
-    fold = absorb_selected(fold, planned.linear_sum_start, next.accumulator_before)
-    fold = absorb_selected(fold, planned.linear_left_start, next.accumulator_before)
-    fold = absorb_selected(fold, planned.linear_right_start, next.accumulator_before)
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
+        planned.linear_sum_start,
+        next.accumulator_before,
+    )
+    absorb_selected(
+        mut fold,
+        planned.linear_left_start,
+        next.accumulator_before,
+    )
+    absorb_selected(
+        mut fold,
+        planned.linear_right_start,
+        next.accumulator_before,
+    )
+    absorb_selected(
+        mut fold,
         planned.linear_sum_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.linear_left_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
-    fold = absorb_selected(
-        fold,
+    absorb_selected(
+        mut fold,
         planned.linear_right_link,
         sub(next.accumulator_before, current.accumulator_after),
     )
@@ -6134,8 +6132,8 @@ pub fn evaluate_sparse_arithmetic_initial<F: Radix2Field>(
     _ row: SparseTaskRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
     let mut fold = ConstraintFold<F>::new(challenge)
-    fold = fold.absorb(row.accumulator_before)
-    fold = fold.absorb(row.state_before)
+    fold.absorb(row.accumulator_before)
+    fold.absorb(row.state_before)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -6402,22 +6400,21 @@ fn sparse_copy_port_compressed<F: Radix2Field>(
 }
 
 fn absorb_sparse_copy_port<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ challenges: SparseCopyChallenges<F>,
     _ port: SparseCopyPort<F>,
     _ inverse: F,
-) -> ConstraintFold<F> {
+) {
     // `compressed * inverse = selector`, paired with the zeroing constraint
     // below, is equivalent to the former selector-gated inverse relation but
     // remains quadratic. Selected ports require the true inverse; unselected
     // ports require zero even if a challenge makes `compressed` vanish.
-    let fold = fold
-        .absorb(
-            sub(
-                mul(sparse_copy_port_compressed(challenges, port), inverse),
-                port.selector,
-            ),
-        )
+    fold.absorb(
+        sub(
+            mul(sparse_copy_port_compressed(challenges, port), inverse),
+            port.selector,
+        ),
+    )
     fold.absorb(mul(sub(one<F>(), port.selector), inverse))
 }
 
@@ -6508,18 +6505,16 @@ pub fn sparse_copy_interaction_delta<F: Radix2Field, const PORTS: usize>(
 }
 
 fn absorb_sparse_copy_interaction<F: Radix2Field, const PORTS: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ challenges: SparseCopyChallenges<F>,
     _ ports: [SparseCopyPort<F>; PORTS],
     _ inverses: [F; PORTS],
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     let mut index: usize = 0
     while index < PORTS {
-        fold = absorb_sparse_copy_port(fold, challenges, ports[index], inverses[index])
+        absorb_sparse_copy_port(mut fold, challenges, ports[index], inverses[index])
         index = index + 1
     }
-    fold
 }
 
 struct SparseProductConstrainedPorts<F: Radix2Field> {
@@ -6603,11 +6598,11 @@ pub fn evaluate_sparse_product_interaction_row<F: Radix2Field, const L: usize>(
     let mut fold = ConstraintFold<F>::new(challenge)
     let mut index: usize = 0
     while index < SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS {
-        fold = fold.absorb(constrained.residuals.values[index])
+        fold.absorb(constrained.residuals.values[index])
         index = index + 1
     }
-    let fold = absorb_sparse_copy_interaction<F, 2>(
-        fold,
+    absorb_sparse_copy_interaction<F, 2>(
+        mut fold,
         challenges,
         constrained.ports,
         interaction.inverses,
@@ -6624,7 +6619,8 @@ pub fn evaluate_sparse_product_interaction_initial<F: Radix2Field>(
     _ challenge: F,
     _ interaction: SparseProductInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(interaction.accumulator)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -6641,13 +6637,13 @@ pub fn evaluate_sparse_product_interaction_link<F: Radix2Field, const L: usize>(
         current_interaction.address_plan,
     )
     let delta = sparse_copy_interaction_delta<F, 2>(constrained.ports, current_interaction.inverses)
-    let fold = ConstraintFold<F>::new(challenge)
-        .absorb(
-            sub(
-                next_interaction.accumulator,
-                add(current_interaction.accumulator, delta),
-            ),
-        )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(
+        sub(
+            next_interaction.accumulator,
+            add(current_interaction.accumulator, delta),
+        ),
+    )
     FixedAirConstraintEvaluation {
         valid: constrained.valid,
         constraints: fold.constraints,
@@ -6665,7 +6661,8 @@ fn evaluate_sparse_copy_interaction_terminal<F: Radix2Field>(
     _ challenge: F,
     _ accumulator: F,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = ConstraintFold<F>::new(challenge).absorb(accumulator)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(accumulator)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -7066,11 +7063,11 @@ where L > 1
     let mut fold = ConstraintFold<F>::new(challenge)
     let mut index: usize = 0
     while index < SPARSE_ROUND_PORT_MULTIPLICATIONS {
-        fold = fold.absorb(constrained.residuals.values[index])
+        fold.absorb(constrained.residuals.values[index])
         index = index + 1
     }
-    let fold = absorb_sparse_copy_interaction<F, 5>(
-        fold,
+    absorb_sparse_copy_interaction<F, 5>(
+        mut fold,
         challenges,
         constrained.ports,
         interaction.inverses,
@@ -7087,7 +7084,8 @@ pub fn evaluate_sparse_round_interaction_initial<F: Radix2Field>(
     _ challenge: F,
     _ interaction: SparseRoundInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(interaction.accumulator)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -7109,13 +7107,13 @@ where L > 1
         plan,
     )
     let delta = sparse_copy_interaction_delta<F, 5>(constrained.ports, current_interaction.inverses)
-    let fold = ConstraintFold<F>::new(challenge)
-        .absorb(
-            sub(
-                next_interaction.accumulator,
-                add(current_interaction.accumulator, delta),
-            ),
-        )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(
+        sub(
+            next_interaction.accumulator,
+            add(current_interaction.accumulator, delta),
+        ),
+    )
     FixedAirConstraintEvaluation {
         valid: constrained.valid,
         constraints: fold.constraints,
@@ -7770,11 +7768,11 @@ where L > 1
     let mut fold = ConstraintFold<F>::new(challenge)
     let mut index: usize = 0
     while index < SPARSE_LINEAR_PORT_MULTIPLICATIONS {
-        fold = fold.absorb(constrained.residuals.values[index])
+        fold.absorb(constrained.residuals.values[index])
         index = index + 1
     }
-    let fold = absorb_sparse_copy_interaction<F, 8>(
-        fold,
+    absorb_sparse_copy_interaction<F, 8>(
+        mut fold,
         challenges,
         constrained.ports,
         interaction.inverses,
@@ -7791,7 +7789,8 @@ pub fn evaluate_sparse_linear_interaction_initial<F: Radix2Field>(
     _ challenge: F,
     _ interaction: SparseLinearInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(interaction.accumulator)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -7815,13 +7814,13 @@ where L > 1
         plan,
     )
     let delta = sparse_copy_interaction_delta<F, 8>(constrained.ports, current_interaction.inverses)
-    let fold = ConstraintFold<F>::new(challenge)
-        .absorb(
-            sub(
-                next_interaction.accumulator,
-                add(current_interaction.accumulator, delta),
-            ),
-        )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(
+        sub(
+            next_interaction.accumulator,
+            add(current_interaction.accumulator, delta),
+        ),
+    )
     FixedAirConstraintEvaluation {
         valid: constrained.valid,
         constraints: fold.constraints,
@@ -8063,11 +8062,11 @@ pub fn evaluate_sparse_boundary_interaction_row<F: Radix2Field, const L: usize>(
     let mut fold = ConstraintFold<F>::new(challenge)
     let mut index: usize = 0
     while index < SPARSE_BOUNDARY_PORT_MULTIPLICATIONS {
-        fold = fold.absorb(constrained.residuals.values[index])
+        fold.absorb(constrained.residuals.values[index])
         index = index + 1
     }
-    let fold = absorb_sparse_copy_interaction<F, 2>(
-        fold,
+    absorb_sparse_copy_interaction<F, 2>(
+        mut fold,
         challenges,
         constrained.ports,
         interaction.inverses,
@@ -8084,7 +8083,8 @@ pub fn evaluate_sparse_boundary_interaction_initial<F: Radix2Field>(
     _ challenge: F,
     _ interaction: SparseBoundaryInteractionRow<F>,
 ) -> FixedAirConstraintEvaluation<F> {
-    let fold = ConstraintFold<F>::new(challenge).absorb(interaction.accumulator)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(interaction.accumulator)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -8102,13 +8102,13 @@ pub fn evaluate_sparse_boundary_interaction_link<F: Radix2Field, const L: usize>
         current_plan,
     )
     let delta = sparse_copy_interaction_delta<F, 2>(constrained.ports, current_interaction.inverses)
-    let fold = ConstraintFold<F>::new(challenge)
-        .absorb(
-            sub(
-                next_interaction.accumulator,
-                add(current_interaction.accumulator, delta),
-            ),
-        )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(
+        sub(
+            next_interaction.accumulator,
+            add(current_interaction.accumulator, delta),
+        ),
+    )
     FixedAirConstraintEvaluation {
         valid: constrained.valid,
         constraints: fold.constraints,
@@ -8289,10 +8289,9 @@ pub fn sparse_boundary_copy_consumer<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_radix_range<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ value: AirRangedDigits<F, L>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     let mut previous = zero<F>()
     let mut limb_index: usize = 0
     while limb_index < L {
@@ -8302,27 +8301,27 @@ fn absorb_radix_range<F: Radix2Field, const L: usize>(
         while bit_index < 13 {
             let bit = value.range.limbs[limb_index].bits[bit_index]
             let prefix = value.range.limbs[limb_index].nonzero_prefix[bit_index]
-            fold = fold.absorb(bit_residual(bit))
-            fold = fold.absorb(bit_residual(prefix))
-            fold = fold.absorb(sub(prefix, sub(add(previous, bit), mul(previous, bit))))
+            fold.absorb(bit_residual(bit))
+            fold.absorb(bit_residual(prefix))
+            fold.absorb(sub(prefix, sub(add(previous, bit), mul(previous, bit))))
             reconstructed = add(reconstructed, mul(bit, place))
             place = add(place, place)
             previous = prefix
             bit_index = bit_index + 1
         }
-        fold = fold.absorb(sub(value.digits[limb_index], reconstructed))
+        fold.absorb(sub(value.digits[limb_index], reconstructed))
         limb_index = limb_index + 1
     }
-    fold = fold.absorb(bit_residual(value.range.nonzero))
+    fold.absorb(bit_residual(value.range.nonzero))
     fold.absorb(sub(value.range.nonzero, previous))
 }
 
 fn absorb_ranged_fixed<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ value: AirRangedFixed<F, L>,
-) -> ConstraintFold<F> {
-    let mut fold = fold.absorb(bit_residual(value.negative))
-    fold = absorb_radix_range<F, L>(fold, value.magnitude)
+) {
+    fold.absorb(bit_residual(value.negative))
+    absorb_radix_range<F, L>(mut fold, value.magnitude)
     fold.absorb(
         mul(
             value.negative,
@@ -8344,21 +8343,20 @@ fn bits18<F: Radix2Field>(_ bits: [F; 18]) -> F {
 }
 
 fn absorb_bounded_u18<F: Radix2Field>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ value: F,
     _ bound: F,
     _ witness: AirBoundedU18<F>,
-) -> ConstraintFold<F> {
-    let mut fold = fold
+) {
     let mut index: usize = 0
     while index < 18 {
-        fold = fold.absorb(bit_residual(witness.bits[index]))
-        fold = fold.absorb(bit_residual(witness.slack_bits[index]))
+        fold.absorb(bit_residual(witness.bits[index]))
+        fold.absorb(bit_residual(witness.slack_bits[index]))
         index = index + 1
     }
     let reconstructed = bits18(witness.bits)
     let slack = bits18(witness.slack_bits)
-    fold = fold.absorb(sub(value, reconstructed))
+    fold.absorb(sub(value, reconstructed))
     fold.absorb(sub(add(reconstructed, slack), bound))
 }
 
@@ -8410,15 +8408,15 @@ fn retained_product_digit<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_product<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ left: AirRangedFixed<F, L>,
     _ right: AirRangedFixed<F, L>,
     _ product: AirProduct<F, L>,
-) -> ConstraintFold<F> {
-    let mut fold = fold.absorb(sub(product.valid, one<F>()))
-    fold = absorb_radix_range<F, L>(fold, product.low)
-    fold = absorb_radix_range<F, L>(fold, product.high)
-    fold = absorb_ranged_fixed<F, L>(fold, product.output)
+) {
+    fold.absorb(sub(product.valid, one<F>()))
+    absorb_radix_range<F, L>(mut fold, product.low)
+    absorb_radix_range<F, L>(mut fold, product.high)
+    absorb_ranged_fixed<F, L>(mut fold, product.output)
     let limbs: u32 = L.downcast_truncate()
     let carry_bound = natural<F>(product_carry_bound<L>())
     let radix = natural<F>(8192)
@@ -8430,8 +8428,8 @@ fn absorb_product<F: Radix2Field, const L: usize>(
             product_carry(product, coefficient - 1)
         }
         let carry_out = product_carry(product, coefficient)
-        fold = absorb_bounded_u18(
-            fold,
+        absorb_bounded_u18(
+            mut fold,
             carry_out,
             carry_bound,
             product_carry_range(product, coefficient),
@@ -8451,20 +8449,19 @@ fn absorb_product<F: Radix2Field, const L: usize>(
             )
             term = term + 1
         }
-        fold = fold
-            .absorb(
-                sub(
-                    sub(sum, product_digit(product, coefficient)),
-                    mul(radix, carry_out),
-                ),
-            )
+        fold.absorb(
+            sub(
+                sub(sum, product_digit(product, coefficient)),
+                mul(radix, carry_out),
+            ),
+        )
         coefficient = coefficient + 1
     }
 
-    fold = fold.absorb(bit_residual(product.round_up))
-    fold = fold.absorb(
-            sub(product.round_up, product.low.range.limbs[L - 2].bits[12]),
-        )
+    fold.absorb(bit_residual(product.round_up))
+    fold.absorb(
+        sub(product.round_up, product.low.range.limbs[L - 2].bits[12]),
+    )
     let mut output_index: u32 = 0
     while output_index < limbs {
         let carry_in = if output_index == 0 {
@@ -8473,21 +8470,20 @@ fn absorb_product<F: Radix2Field, const L: usize>(
             product.round_carries[(output_index - 1) as usize]
         }
         let carry_out = product.round_carries[output_index as usize]
-        fold = fold.absorb(bit_residual(carry_out))
-        fold = fold
-            .absorb(
+        fold.absorb(bit_residual(carry_out))
+        fold.absorb(
+            sub(
                 sub(
-                    sub(
-                        add(retained_product_digit(product, output_index), carry_in),
-                        product.output.magnitude.digits[output_index as usize],
-                    ),
-                    mul(radix, carry_out),
+                    add(retained_product_digit(product, output_index), carry_in),
+                    product.output.magnitude.digits[output_index as usize],
                 ),
-            )
+                mul(radix, carry_out),
+            ),
+        )
         output_index = output_index + 1
     }
-    fold = fold.absorb(bit_residual(product.round_overflow))
-    fold = fold.absorb(sub(product.round_overflow, product.round_carries[L - 1]))
+    fold.absorb(bit_residual(product.round_overflow))
+    fold.absorb(sub(product.round_overflow, product.round_carries[L - 1]))
     let sign_xor = sub(
         add(left.negative, right.negative),
         mul(natural<F>(2), mul(left.negative, right.negative)),
@@ -8501,20 +8497,20 @@ fn absorb_product<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_linear<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ left: AirRangedFixed<F, L>,
     _ right: AirRangedFixed<F, L>,
     _ subtract_right: bool,
     _ linear: AirLinear<F, L>,
-) -> ConstraintFold<F> {
-    let mut fold = fold.absorb(sub(linear.valid, one<F>()))
-    fold = fold.absorb(bit_residual(linear.same_sign))
-    fold = fold.absorb(bit_residual(linear.select_right))
-    fold = fold.absorb(bit_residual(linear.output_nonzero))
-    fold = absorb_radix_range<F, L>(fold, linear.sum)
-    fold = absorb_radix_range<F, L>(fold, linear.left_difference)
-    fold = absorb_radix_range<F, L>(fold, linear.right_difference)
-    fold = absorb_ranged_fixed<F, L>(fold, linear.output)
+) {
+    fold.absorb(sub(linear.valid, one<F>()))
+    fold.absorb(bit_residual(linear.same_sign))
+    fold.absorb(bit_residual(linear.select_right))
+    fold.absorb(bit_residual(linear.output_nonzero))
+    absorb_radix_range<F, L>(mut fold, linear.sum)
+    absorb_radix_range<F, L>(mut fold, linear.left_difference)
+    absorb_radix_range<F, L>(mut fold, linear.right_difference)
+    absorb_ranged_fixed<F, L>(mut fold, linear.output)
     let radix = natural<F>(8192)
     let limbs: u32 = L.downcast_truncate()
     let mut index: u32 = 0
@@ -8537,57 +8533,54 @@ fn absorb_linear<F: Radix2Field, const L: usize>(
         let sum_carry_out = linear.sum_carries[index as usize]
         let left_borrow_out = linear.left_borrows[index as usize]
         let right_borrow_out = linear.right_borrows[index as usize]
-        fold = fold.absorb(bit_residual(sum_carry_out))
-        fold = fold.absorb(bit_residual(left_borrow_out))
-        fold = fold.absorb(bit_residual(right_borrow_out))
-        fold = fold
-            .absorb(
+        fold.absorb(bit_residual(sum_carry_out))
+        fold.absorb(bit_residual(left_borrow_out))
+        fold.absorb(bit_residual(right_borrow_out))
+        fold.absorb(
+            sub(
                 sub(
-                    sub(
-                        add(
-                            add(
-                                left.magnitude.digits[index as usize],
-                                right.magnitude.digits[index as usize],
-                            ),
-                            sum_carry_in,
-                        ),
-                        linear.sum.digits[index as usize],
-                    ),
-                    mul(radix, sum_carry_out),
-                ),
-            )
-        fold = fold
-            .absorb(
-                sub(
-                    sub(
+                    add(
                         add(
                             left.magnitude.digits[index as usize],
-                            mul(radix, left_borrow_out),
-                        ),
-                        right.magnitude.digits[index as usize],
-                    ),
-                    add(
-                        left_borrow_in,
-                        linear.left_difference.digits[index as usize],
-                    ),
-                ),
-            )
-        fold = fold
-            .absorb(
-                sub(
-                    sub(
-                        add(
                             right.magnitude.digits[index as usize],
-                            mul(radix, right_borrow_out),
                         ),
-                        left.magnitude.digits[index as usize],
+                        sum_carry_in,
                     ),
-                    add(
-                        right_borrow_in,
-                        linear.right_difference.digits[index as usize],
-                    ),
+                    linear.sum.digits[index as usize],
                 ),
-            )
+                mul(radix, sum_carry_out),
+            ),
+        )
+        fold.absorb(
+            sub(
+                sub(
+                    add(
+                        left.magnitude.digits[index as usize],
+                        mul(radix, left_borrow_out),
+                    ),
+                    right.magnitude.digits[index as usize],
+                ),
+                add(
+                    left_borrow_in,
+                    linear.left_difference.digits[index as usize],
+                ),
+            ),
+        )
+        fold.absorb(
+            sub(
+                sub(
+                    add(
+                        right.magnitude.digits[index as usize],
+                        mul(radix, right_borrow_out),
+                    ),
+                    left.magnitude.digits[index as usize],
+                ),
+                add(
+                    right_borrow_in,
+                    linear.right_difference.digits[index as usize],
+                ),
+            ),
+        )
         let selected_difference = add(
             mul(
                 sub(one<F>(), linear.select_right),
@@ -8602,9 +8595,9 @@ fn absorb_linear<F: Radix2Field, const L: usize>(
             mul(linear.same_sign, linear.sum.digits[index as usize]),
             mul(sub(one<F>(), linear.same_sign), selected_difference),
         )
-        fold = fold.absorb(
-                sub(linear.output.magnitude.digits[index as usize], selected),
-            )
+        fold.absorb(
+            sub(linear.output.magnitude.digits[index as usize], selected),
+        )
         index = index + 1
     }
 
@@ -8618,24 +8611,23 @@ fn absorb_linear<F: Radix2Field, const L: usize>(
         add(left.negative, effective_right_sign),
         mul(two, mul(left.negative, effective_right_sign)),
     )
-    fold = fold.absorb(sub(linear.same_sign, sub(one<F>(), different)))
-    fold = fold.absorb(sub(linear.select_right, linear.left_borrows[L - 1]))
-    fold = fold
-        .absorb(
-            add(
-                mul(
-                    sub(one<F>(), linear.select_right),
-                    linear.left_borrows[L - 1],
-                ),
-                mul(linear.select_right, linear.right_borrows[L - 1]),
+    fold.absorb(sub(linear.same_sign, sub(one<F>(), different)))
+    fold.absorb(sub(linear.select_right, linear.left_borrows[L - 1]))
+    fold.absorb(
+        add(
+            mul(
+                sub(one<F>(), linear.select_right),
+                linear.left_borrows[L - 1],
             ),
-        )
-    fold = fold.absorb(
-            sub(
-                linear.output_nonzero,
-                linear.output.magnitude.range.nonzero,
-            ),
-        )
+            mul(linear.select_right, linear.right_borrows[L - 1]),
+        ),
+    )
+    fold.absorb(
+        sub(
+            linear.output_nonzero,
+            linear.output.magnitude.range.nonzero,
+        ),
+    )
     let selected_difference_sign = add(
         mul(sub(one<F>(), linear.select_right), left.negative),
         mul(linear.select_right, effective_right_sign),
@@ -8653,22 +8645,21 @@ fn absorb_linear<F: Radix2Field, const L: usize>(
 }
 
 fn absorb_fixed_equality<F: Radix2Field, const L: usize>(
-    _ fold: own ConstraintFold<F>,
+    _ fold: mut ConstraintFold<F>,
     _ left: AirRangedFixed<F, L>,
     _ right: AirRangedFixed<F, L>,
-) -> ConstraintFold<F> {
-    let mut fold = fold.absorb(sub(left.negative, right.negative))
+) {
+    fold.absorb(sub(left.negative, right.negative))
     let mut index: usize = 0
     while index < L {
-        fold = fold.absorb(
-                sub(
-                    left.magnitude.digits[index],
-                    right.magnitude.digits[index],
-                ),
-            )
+        fold.absorb(
+            sub(
+                left.magnitude.digits[index],
+                right.magnitude.digits[index],
+            ),
+        )
         index = index + 1
     }
-    fold
 }
 
 pub fn evaluate_transition_constraints<F: Radix2Field, const L: usize>(
@@ -8680,40 +8671,51 @@ pub fn evaluate_transition_constraints<F: Radix2Field, const L: usize>(
         return FixedAirConstraintEvaluation { valid: false, constraints: 0, folded: zero<F>() }
     }
     let mut fold = ConstraintFold<F>::new(challenge)
-    fold = fold.absorb(sub(air.valid, one<F>()))
-    fold = absorb_ranged_fixed<F, L>(fold, air.point.real)
-    fold = absorb_ranged_fixed<F, L>(fold, air.point.imaginary)
-    fold = absorb_ranged_fixed<F, L>(fold, air.current.real)
-    fold = absorb_ranged_fixed<F, L>(fold, air.current.imaginary)
-    fold = absorb_ranged_fixed<F, L>(fold, air.next.real)
-    fold = absorb_ranged_fixed<F, L>(fold, air.next.imaginary)
-    fold = absorb_product<F, L>(fold, air.current.real, air.current.real, air.xx)
-    fold = absorb_product<F, L>(fold, air.current.imaginary, air.current.imaginary, air.yy)
-    fold = absorb_product<F, L>(fold, air.current.real, air.current.imaginary, air.xy)
-    fold = absorb_linear<F, L>(
-        fold,
+    fold.absorb(sub(air.valid, one<F>()))
+    absorb_ranged_fixed<F, L>(mut fold, air.point.real)
+    absorb_ranged_fixed<F, L>(mut fold, air.point.imaginary)
+    absorb_ranged_fixed<F, L>(mut fold, air.current.real)
+    absorb_ranged_fixed<F, L>(mut fold, air.current.imaginary)
+    absorb_ranged_fixed<F, L>(mut fold, air.next.real)
+    absorb_ranged_fixed<F, L>(mut fold, air.next.imaginary)
+    absorb_product<F, L>(mut fold, air.current.real, air.current.real, air.xx)
+    absorb_product<F, L>(
+        mut fold,
+        air.current.imaginary,
+        air.current.imaginary,
+        air.yy,
+    )
+    absorb_product<F, L>(mut fold, air.current.real, air.current.imaginary, air.xy)
+    absorb_linear<F, L>(
+        mut fold,
         air.xx.output,
         air.yy.output,
         true,
         air.real_difference,
     )
-    fold = absorb_linear<F, L>(
-        fold,
+    absorb_linear<F, L>(
+        mut fold,
         air.real_difference.output,
         air.point.real,
         false,
         air.next_real,
     )
-    fold = absorb_linear<F, L>(fold, air.xy.output, air.xy.output, false, air.double_xy)
-    fold = absorb_linear<F, L>(
-        fold,
+    absorb_linear<F, L>(
+        mut fold,
+        air.xy.output,
+        air.xy.output,
+        false,
+        air.double_xy,
+    )
+    absorb_linear<F, L>(
+        mut fold,
         air.double_xy.output,
         air.point.imaginary,
         false,
         air.next_imaginary,
     )
-    fold = absorb_fixed_equality<F, L>(fold, air.next_real.output, air.next.real)
-    fold = absorb_fixed_equality<F, L>(fold, air.next_imaginary.output, air.next.imaginary)
+    absorb_fixed_equality<F, L>(mut fold, air.next_real.output, air.next.real)
+    absorb_fixed_equality<F, L>(mut fold, air.next_imaginary.output, air.next.imaginary)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }
 
@@ -8743,27 +8745,33 @@ pub fn evaluate_transition_witness_constraints<F: Radix2Field, const L: usize>(
     let next_imaginary = air_linear<F, L>(witness.next_imaginary)
 
     let mut fold = ConstraintFold<F>::new(challenge)
-    fold = fold.absorb(sub(boolean<F>(witness.valid), one<F>()))
-    fold = absorb_ranged_fixed<F, L>(fold, point.real)
-    fold = absorb_ranged_fixed<F, L>(fold, point.imaginary)
-    fold = absorb_ranged_fixed<F, L>(fold, current.real)
-    fold = absorb_ranged_fixed<F, L>(fold, current.imaginary)
-    fold = absorb_ranged_fixed<F, L>(fold, next.real)
-    fold = absorb_ranged_fixed<F, L>(fold, next.imaginary)
-    fold = absorb_product<F, L>(fold, current.real, current.real, xx)
-    fold = absorb_product<F, L>(fold, current.imaginary, current.imaginary, yy)
-    fold = absorb_product<F, L>(fold, current.real, current.imaginary, xy)
-    fold = absorb_linear<F, L>(fold, xx.output, yy.output, true, real_difference)
-    fold = absorb_linear<F, L>(fold, real_difference.output, point.real, false, next_real)
-    fold = absorb_linear<F, L>(fold, xy.output, xy.output, false, double_xy)
-    fold = absorb_linear<F, L>(
-        fold,
+    fold.absorb(sub(boolean<F>(witness.valid), one<F>()))
+    absorb_ranged_fixed<F, L>(mut fold, point.real)
+    absorb_ranged_fixed<F, L>(mut fold, point.imaginary)
+    absorb_ranged_fixed<F, L>(mut fold, current.real)
+    absorb_ranged_fixed<F, L>(mut fold, current.imaginary)
+    absorb_ranged_fixed<F, L>(mut fold, next.real)
+    absorb_ranged_fixed<F, L>(mut fold, next.imaginary)
+    absorb_product<F, L>(mut fold, current.real, current.real, xx)
+    absorb_product<F, L>(mut fold, current.imaginary, current.imaginary, yy)
+    absorb_product<F, L>(mut fold, current.real, current.imaginary, xy)
+    absorb_linear<F, L>(mut fold, xx.output, yy.output, true, real_difference)
+    absorb_linear<F, L>(
+        mut fold,
+        real_difference.output,
+        point.real,
+        false,
+        next_real,
+    )
+    absorb_linear<F, L>(mut fold, xy.output, xy.output, false, double_xy)
+    absorb_linear<F, L>(
+        mut fold,
         double_xy.output,
         point.imaginary,
         false,
         next_imaginary,
     )
-    fold = absorb_fixed_equality<F, L>(fold, next_real.output, next.real)
-    fold = absorb_fixed_equality<F, L>(fold, next_imaginary.output, next.imaginary)
+    absorb_fixed_equality<F, L>(mut fold, next_real.output, next.real)
+    absorb_fixed_equality<F, L>(mut fold, next_imaginary.output, next.imaginary)
     FixedAirConstraintEvaluation { valid: true, constraints: fold.constraints, folded: fold.value }
 }

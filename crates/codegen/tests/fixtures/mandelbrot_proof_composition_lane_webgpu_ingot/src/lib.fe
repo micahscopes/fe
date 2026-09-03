@@ -1,0 +1,96 @@
+//! Focused compile gate for one production composition-evaluation lane.
+
+use mandelbrot_proof_fixed_air_baby_bear::{SPARSE_BASE_AIR_FIELDS, SPARSE_INTERACTION_AIR_FIELDS}
+use mandelbrot_proof_fixed_air_webgpu::{
+    sparse_composition_codeword_words,
+    sparse_composition_phase_workspace_words,
+    write_sparse_bound_composition_lane,
+}
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitBoundary,
+    OrbitInterval,
+}
+use precision::baby_bear::BabyBear
+use precision::fixed::Fixed
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Grid,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+const THREADS: usize = 64
+const LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
+const GROUPS: usize = (LDE_LENGTH + THREADS - 1) / THREADS
+const WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    LDE_LENGTH,
+>()
+const BASE_WORDS: usize = LDE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const INTERACTION_WORDS: usize = LDE_LENGTH * SPARSE_INTERACTION_AIR_FIELDS
+const OUTPUT_WORDS: usize = sparse_composition_codeword_words<LDE_LENGTH>()
+
+fn directed_point() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: true, limbs: [0, 0, 6144, 0] },
+        imaginary: Fixed { negative: false, limbs: [0, 0, 1024, 0] },
+    }
+}
+
+fn directed_current() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: false, limbs: [0, 0, 2048, 1] },
+        imaginary: Fixed { negative: true, limbs: [0, 0, 3072, 0] },
+    }
+}
+
+fn directed_interval() -> OrbitInterval<4> {
+    OrbitInterval {
+        claim: HighPrecisionEscapeClaim { point: directed_point(), bound: 16 },
+        start: OrbitBoundary { iteration: 0, z: directed_current(), escaped: false },
+        end: OrbitBoundary {
+            iteration: 1,
+            z: ComplexFixed {
+                real: Fixed { negative: false, limbs: [0, 0, 5504, 0] },
+                imaginary: Fixed { negative: true, limbs: [0, 0, 6656, 0] },
+            },
+            escaped: false,
+        },
+    }
+}
+
+actor CompositionLaneProbe uses (Program<WebGpuBackend>) {
+    workspace: Shared<u32, WORKSPACE_WORDS>,
+    base: Shared<u32, BASE_WORDS>,
+    interaction: Shared<u32, INTERACTION_WORDS>,
+    output: Shared<u32, OUTPUT_WORDS>,
+
+    fn write(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_bound_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            directed_interval(),
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+}

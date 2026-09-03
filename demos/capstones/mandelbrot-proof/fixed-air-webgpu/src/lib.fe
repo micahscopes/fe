@@ -26,9 +26,19 @@ use core::default::Default
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
+    SparseCompositionChallengeSeed,
+    SparseCompositionEvaluationChallenges,
     SparseInteractionAccumulators,
     SparseInteractionChallenges,
     SparseInteractionTraceRow,
+    SparseOpenedAirRow,
+    ZERO_SPARSE_OPENED_AIR_ROW,
+    SparseCompositionTranscriptDigest,
+    evaluate_sparse_bound_composition_challenge_values_opened,
+    sparse_bound_composition_evaluation_challenges,
+    sparse_composition_challenge_seed,
+    sparse_composition_evaluation_challenges_from_seed,
+    sparse_composition_transcript_from_committed_roots,
     sparse_base_air_control_at,
     sparse_base_air_control_link_plan_at,
     sparse_base_air_control_plan_at,
@@ -36,6 +46,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_interaction_challenge_values,
     sparse_control_row_extension,
     sparse_task_row_extension,
+    zero_sparse_composition_evaluation_challenges,
+    zero_sparse_composition_challenge_seed,
     zero_sparse_interaction_challenges,
     zero_sparse_interaction_trace_row,
 }
@@ -97,14 +109,17 @@ use mandelbrot_proof_fixed_air_core::{
     SPARSE_ROUND_PORT_MULTIPLICATIONS,
     zero_sparse_arithmetic_plan_witness,
 }
-use mandelbrot_proof_recursive::ComplexFixed
+use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
+use poseidon_baby_bear::Poseidon2Digest
 use poseidon_baby_bear_webgpu::{
     digest_squeeze_batch_output_valid_start,
     digest_squeeze_batch_output_words,
 }
 use parallel_scan_webgpu::{StageGrid, batched_additive_scan_value}
 use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
-use precision::fixed::Fixed
+use precision::field::{Head, Limbs, Mac, Select, ShiftAppend, SubBorrow, Zero}
+use precision::fixed::{Carry, Fixed, OrLower, Top, TruncRows}
+use precision::polynomial::{radix2_field_domain_supported, radix2_log}
 use quadratic_plan::{
     QuadraticPlanWitness,
     QuadraticWordConstraintInterpreter,
@@ -139,6 +154,57 @@ derive RegionSchema for TransitionWitnessRegions<L> using RegionSchemaProvider
 
 const fn transition_witness_regions<const L: usize>() -> TransitionWitnessRegions<L> {
     <TransitionWitnessRegions<L> as RegionSchema>::regions()
+}
+
+/// Phase-local authority retained after both sparse LDE trees are committed.
+/// The region schema, rather than parallel offsets, owns the physical overlay
+/// used by composition evaluation and the later receipt/FRI stages.
+struct SparseCompositionPhaseRegions<const L: usize, const TRACE: usize, const LDE: usize> {
+    base_root: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
+    interaction_root: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
+    seed: Region<
+        SparseCompositionPhaseRegions<L, TRACE, LDE>,
+        SparseCompositionChallengeSeed<L, TRACE, LDE>,
+    >,
+    challenges: Region<
+        SparseCompositionPhaseRegions<L, TRACE, LDE>,
+        SparseCompositionEvaluationChallenges,
+    >,
+    valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseCompositionPhaseRegions<L, TRACE, LDE> {}
+derive RegionSchema for SparseCompositionPhaseRegions<L, TRACE, LDE> using RegionSchemaProvider
+
+const fn sparse_composition_phase_regions<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> SparseCompositionPhaseRegions<L, TRACE, LDE> {
+    <SparseCompositionPhaseRegions<L, TRACE, LDE> as RegionSchema>::regions()
+}
+
+pub const fn sparse_composition_phase_workspace_words<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> usize {
+    <SparseCompositionPhaseRegions<L, TRACE, LDE> as RegionSchema>::WORDS as usize
+}
+
+pub const fn sparse_composition_phase_validity_word<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> usize {
+    region_bounds(sparse_composition_phase_regions<L, TRACE, LDE>().valid).start as usize
+}
+
+pub const fn sparse_composition_codeword_words<const LDE: usize>() -> usize {
+    LDE * (<BabyBearExt4 as CanonicalWords>::WORDS as usize + 1)
 }
 
 pub const fn transition_witness_workspace_words<const L: usize>() -> usize {
@@ -411,6 +477,225 @@ where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>()
         WorkspaceWordWriter<Space, T, STORAGE_WORDS>::new(storage, region),
     )
         .finish()
+}
+
+/// Persist one authenticated composition context after the AIR roots and
+/// security profile have been bound. Later workgroups receive only this
+/// nominal carrier, never a raw array of host-supplied challenge words.
+pub fn store_sparse_composition_phase_context<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let challenges = sparse_bound_composition_evaluation_challenges(composition, interval)
+    let base = composition.base().value
+    let interaction = composition.interaction().value
+    let seed = sparse_composition_challenge_seed(composition, interval)
+    let mut valid = composition.is_valid() && challenges.is_valid()
+    valid = encode_workspace_value(ref base, workspace, regions.base_root) && valid
+    valid = encode_workspace_value(ref interaction, workspace, regions.interaction_root) && valid
+    valid = encode_workspace_value(ref seed, workspace, regions.seed) && valid
+    valid = encode_workspace_value(ref challenges, workspace, regions.challenges) && valid
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Rebrand the two roots produced by storage-resident ordered trees, bind the
+/// exact recursive leaf statement, and persist the resulting composition
+/// authority. Raw roots cross into the proof protocol only through this one
+/// checked boundary.
+pub fn store_sparse_composition_phase_context_from_committed_roots<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ base_root: Poseidon2Digest,
+    _ interaction_root: Poseidon2Digest,
+    _ roots_valid: bool,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    let composition = sparse_composition_transcript_from_committed_roots<L, TRACE, LDE>(
+        interval,
+        base_root,
+        interaction_root,
+        roots_valid,
+    )
+    store_sparse_composition_phase_context(composition, interval, workspace)
+}
+
+/// Stage the two authenticated AIR roots without deriving transcript
+/// challenges in the same GPU function that finishes a Merkle tree. This
+/// queue-ordered boundary keeps the tree scratch frame and transcript scratch
+/// frame disjoint while preserving one typed workspace layout.
+pub fn stage_sparse_composition_phase_roots<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ base_root: Poseidon2Digest,
+    _ interaction_root: Poseidon2Digest,
+    _ roots_valid: bool,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let mut valid = roots_valid
+    valid = encode_workspace_value(ref base_root, workspace, regions.base_root) && valid
+    valid = encode_workspace_value(ref interaction_root, workspace, regions.interaction_root)
+        && valid
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Bind the statement and staged roots into one opaque challenge seed. The
+/// following pass derives challenges from this compact authority, keeping the
+/// two transcript operations in disjoint private-memory frames.
+pub fn bind_sparse_composition_phase_seed<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ interval: OrbitInterval<L>, _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let base_root = decode_workspace_value(Poseidon2Digest::zero(), workspace, regions.base_root)
+    let interaction_root = decode_workspace_value(
+        Poseidon2Digest::zero(),
+        workspace,
+        regions.interaction_root,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let roots_valid = staged_valid.valid
+        && staged_valid.value == 1
+        && base_root.valid
+        && interaction_root.valid
+    let composition = sparse_composition_transcript_from_committed_roots<L, TRACE, LDE>(
+        interval,
+        base_root.value,
+        interaction_root.value,
+        roots_valid,
+    )
+    let seed = sparse_composition_challenge_seed(composition, interval)
+    let valid = composition.is_valid()
+        && seed.is_valid()
+        && encode_workspace_value(ref seed, workspace, regions.seed)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Derive and persist the per-row composition challenges from the bound seed.
+pub fn finish_sparse_composition_phase_context<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let seed = decode_workspace_value(
+        zero_sparse_composition_challenge_seed<L, TRACE, LDE>(),
+        workspace,
+        regions.seed,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let challenges = sparse_composition_evaluation_challenges_from_seed(seed.value)
+    let valid = staged_valid.valid
+        && staged_valid.value == 1
+        && seed.valid
+        && seed.value.is_valid()
+        && challenges.is_valid()
+        && encode_workspace_value(ref challenges, workspace, regions.challenges)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Private source-branded view recovered from the phase workspace. Public
+/// placement entry points can consume this type, but application code cannot
+/// manufacture one from a raw challenge tuple.
+struct SparseCompositionPhaseContext<const L: usize, const TRACE: usize, const LDE: usize> {
+    valid: bool,
+    challenges: SparseCompositionEvaluationChallenges,
+}
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseCompositionPhaseContext<L, TRACE, LDE> {}
+
+fn load_sparse_composition_phase_context<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> SparseCompositionPhaseContext<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let challenges = decode_workspace_value(
+        zero_sparse_composition_evaluation_challenges(),
+        workspace,
+        regions.challenges,
+    )
+    let valid = load_region_word(workspace, regions.valid, 0)
+    SparseCompositionPhaseContext {
+        valid: challenges.valid && challenges.value.is_valid() && valid.valid && valid.value == 1,
+        challenges: challenges.value,
+    }
 }
 
 fn product_workspace_region<const L: usize>(
@@ -1418,6 +1703,255 @@ impl<const ROWS: usize, const INPUT_WORDS: usize> WordSource for ColumnMajorWord
     }
 }
 
+/// Read a base-field word source as canonical extension-field coordinates.
+/// This is the read-side dual of `BabyBearExt4EmbeddingSink`: the underlying
+/// source advances once, followed by three denotational zero coefficients.
+struct BabyBearExt4EmbeddingSource<R: WordSource> { reader: R, coefficient: u32 }
+impl<R: WordSource> core::marker::Copy for BabyBearExt4EmbeddingSource<R> {}
+
+impl<R: WordSource> BabyBearExt4EmbeddingSource<R> {
+    fn new(_ reader: R) -> Self {
+        Self { reader: reader, coefficient: 0 }
+    }
+
+    fn finish(self) -> R {
+        self.reader
+    }
+}
+
+impl<R: WordSource> WordSource for BabyBearExt4EmbeddingSource<R> {
+    fn read(self) -> WordRead<Self> {
+        if self.coefficient == 0 {
+            let read = self.reader.read()
+            return WordRead {
+                source: Self { reader: read.source, coefficient: 1 },
+                value: read.value,
+            }
+        }
+        WordRead {
+            source: Self {
+                reader: self.reader,
+                coefficient: if self.coefficient == 3 {
+                    0
+                } else {
+                    self.coefficient + 1
+                },
+            },
+            value: 0,
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self { reader: self.reader.reject(), coefficient: self.coefficient }
+    }
+}
+
+fn store_sparse_composition_value<const LDE: usize, const OUTPUT_WORDS: usize>(
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ row: u32,
+    _ value: BabyBearExt4,
+    _ valid: bool,
+)
+where LDE > 0, OUTPUT_WORDS >= sparse_composition_codeword_words<LDE>()
+{
+    let rows: u32 = LDE.downcast_truncate()
+    output.store(index: row, value: value.coefficient_0().to_u32())
+    output.store(index: rows + row, value: value.coefficient_1().to_u32())
+    output.store(
+        index: rows + rows + row,
+        value: value.coefficient_2().to_u32(),
+    )
+    output.store(
+        index: rows + rows + rows + row,
+        value: value.coefficient_3().to_u32(),
+    )
+    let validity = rows * <BabyBearExt4 as CanonicalWords>::WORDS + row
+    output.store(index: validity, value: if valid { 1 } else { 0 })
+}
+
+/// Evaluate one position of the real production sparse composition. The
+/// scalar AIR owns every constraint and transcript value; this function owns
+/// only the physical mapping from one WebGPU invocation to one LDE position.
+pub fn write_sparse_bound_composition_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    INTERACTION_WORDS >= LDE * SPARSE_INTERACTION_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_codeword_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let mut row = ZERO_SPARSE_OPENED_AIR_ROW
+    let row_base_reader = decode_canonical_words(
+        mut row.base,
+        BabyBearExt4EmbeddingSource::new(
+            ColumnMajorWordReader<LDE, BASE_WORDS>::new(
+                base,
+                row_index,
+                0,
+                SPARSE_BASE_AIR_FIELDS.downcast_truncate(),
+            ),
+        ),
+    )
+    let row_interaction_reader = decode_canonical_words(
+        mut row.interaction,
+        ColumnMajorWordReader<LDE, INTERACTION_WORDS>::new(
+            interaction,
+            row_index,
+            0,
+            <SparseInteractionTraceRow<BabyBearExt4> as CanonicalWords>::WORDS,
+        ),
+    )
+    row.valid = row_base_reader.finish().finish() && row_interaction_reader.finish()
+    let mut next = ZERO_SPARSE_OPENED_AIR_ROW
+    let next_base_reader = decode_canonical_words(
+        mut next.base,
+        BabyBearExt4EmbeddingSource::new(
+            ColumnMajorWordReader<LDE, BASE_WORDS>::new(
+                base,
+                next_index,
+                0,
+                SPARSE_BASE_AIR_FIELDS.downcast_truncate(),
+            ),
+        ),
+    )
+    let next_interaction_reader = decode_canonical_words(
+        mut next.interaction,
+        ColumnMajorWordReader<LDE, INTERACTION_WORDS>::new(
+            interaction,
+            next_index,
+            0,
+            <SparseInteractionTraceRow<BabyBearExt4> as CanonicalWords>::WORDS,
+        ),
+    )
+    next.valid = next_base_reader.finish().finish() && next_interaction_reader.finish()
+    let root = BabyBear::two_adic_root(radix2_log<LDE>())
+    let point = BabyBearExt4::from_base(shift * root.pow_u32(row_index))
+    let evaluated = evaluate_sparse_bound_composition_challenge_values_opened<L, TRACE>(
+        interval,
+        context.challenges,
+        point,
+        ref row,
+        ref next,
+    )
+    let valid = context.valid
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && row.valid
+        && next.valid
+        && evaluated.valid
+    store_sparse_composition_value<LDE, OUTPUT_WORDS>(
+        output,
+        row_index,
+        if valid {
+            evaluated.value
+        } else {
+            BabyBearExt4::zero()
+        },
+        valid,
+    )
+}
+
+/// Close the distributed composition phase after every position has written
+/// an independent validity receipt. This updates the same typed phase context
+/// consumed by the later commitment and FRI interpreters.
+pub fn finish_sparse_bound_composition_codeword<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    LDE > 0,
+    LDE > TRACE,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    OUTPUT_WORDS >= sparse_composition_codeword_words<LDE>()
+{
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let validity_start: u32 = (LDE * <BabyBearExt4 as CanonicalWords>::WORDS as usize)
+        .downcast_truncate()
+    let mut valid = context.valid
+    let mut row: u32 = 0
+    while row < LDE.downcast_truncate() {
+        valid = valid && output.load(index: validity_start + row) == 1
+        row = row + 1
+    }
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let stored = store_region_word(workspace, regions.valid, 0, if valid { 1 } else { 0 })
+    valid && stored
+}
+
+pub fn sparse_composition_phase_is_valid<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    LDE > 0,
+    LDE > TRACE,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0
+{
+    load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace).valid
+}
+
 fn decode_column_major_value<
     T: CanonicalWords + core::marker::Copy,
     const ROWS: usize,
@@ -1440,11 +1974,9 @@ fn decode_default_column_major_value<
     T: CanonicalWords + core::marker::Copy + Default,
     const ROWS: usize,
     const INPUT_WORDS: usize,
->(
-    _ input: StorageBuffer<u32, INPUT_WORDS>,
-    _ row: u32,
-    _ column_start: u32,
-) -> WorkspaceDecoded<T> {
+>(_ input: StorageBuffer<u32, INPUT_WORDS>, _ row: u32, _ column_start: u32) -> WorkspaceDecoded<
+    T,
+> {
     let mut value = <T as Default>::default()
     let reader = decode_canonical_words(
         mut value,
@@ -1660,8 +2192,7 @@ const fn boundary_interaction_regions() -> BoundaryInteractionRegions {
     <BoundaryInteractionRegions as RegionSchema>::regions()
 }
 
-pub const SPARSE_INTERACTION_ACCUMULATOR_FIELDS: usize = <SparseInteractionAccumulators as
-    CanonicalWords>::WORDS as usize
+pub const SPARSE_INTERACTION_ACCUMULATOR_FIELDS: usize = <SparseInteractionAccumulators as CanonicalWords>::WORDS as usize
 const EXTENSION_FIELDS: usize = <BabyBearExt4 as CanonicalWords>::WORDS as usize
 static_assert(SPARSE_INTERACTION_ACCUMULATOR_FIELDS == 4 * EXTENSION_FIELDS)
 
@@ -1674,14 +2205,10 @@ fn sparse_interaction_accumulator_column(_ lane: u32) -> u32 {
     let linear_start: u32 = LINEAR_INTERACTION_START.downcast_truncate()
     let boundary_start: u32 = BOUNDARY_INTERACTION_START.downcast_truncate()
     let start: u32 = match bus {
-        0 => product_start
-            + region_bounds(product_interaction_regions().accumulator).start,
-        1 => round_start
-            + region_bounds(round_interaction_regions().accumulator).start,
-        2 => linear_start
-            + region_bounds(linear_interaction_regions().accumulator).start,
-        3 => boundary_start
-            + region_bounds(boundary_interaction_regions().accumulator).start,
+        0 => product_start + region_bounds(product_interaction_regions().accumulator).start,
+        1 => round_start + region_bounds(round_interaction_regions().accumulator).start,
+        2 => linear_start + region_bounds(linear_interaction_regions().accumulator).start,
+        3 => boundary_start + region_bounds(boundary_interaction_regions().accumulator).start,
         _ => SPARSE_INTERACTION_AIR_FIELDS.downcast_truncate(),
     }
     start + word
@@ -1705,13 +2232,23 @@ pub fn prepare_sparse_interaction_accumulator_scan_lane<
 )
 where
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS },
-    { SCAN_WORDS >= TRACE * SPARSE_INTERACTION_ACCUMULATOR_FIELDS },
-    { PROGRESS_WORDS >= TRACE },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        SCAN_WORDS >= TRACE * SPARSE_INTERACTION_ACCUMULATOR_FIELDS
+    },
+    {
+        PROGRESS_WORDS >= TRACE
+    }
 {
     let row = invocation.global.x
-    if row >= TRACE.downcast_truncate() { return }
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
     let rows: u32 = TRACE.downcast_truncate()
     let mut lane: u32 = 0
     while lane < SPARSE_INTERACTION_ACCUMULATOR_FIELDS.downcast_truncate() {
@@ -1753,12 +2290,24 @@ pub fn finish_sparse_interaction_accumulator_scan_lane<
 ) -> SparseInteractionAccumulatorScanFinish
 where
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS },
-    { PRIMARY_WORDS >= SPARSE_INTERACTION_ACCUMULATOR_FIELDS * TRACE },
-    { SECONDARY_WORDS >= SPARSE_INTERACTION_ACCUMULATOR_FIELDS * TRACE },
-    { PROGRESS_WORDS >= TRACE },
-    { Plan::POINTS == TRACE },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        PRIMARY_WORDS >= SPARSE_INTERACTION_ACCUMULATOR_FIELDS * TRACE
+    },
+    {
+        SECONDARY_WORDS >= SPARSE_INTERACTION_ACCUMULATOR_FIELDS * TRACE
+    },
+    {
+        PROGRESS_WORDS >= TRACE
+    },
+    {
+        Plan::POINTS == TRACE
+    }
 {
     let row = invocation.global.x
     if row >= TRACE.downcast_truncate() {
@@ -1786,13 +2335,12 @@ where
         >(primary, secondary, progress, lane, row)
         let column = sparse_interaction_accumulator_column(lane)
         let delta = interaction.load(index: column * rows + row)
-        valid = valid
-            && inclusive.valid
-            && delta < BABY_BEAR_MODULUS
-        let exclusive = (BabyBear::from_u32(inclusive.value) -
-            BabyBear::from_u32(delta)).to_u32()
+        valid = valid && inclusive.valid && delta < BABY_BEAR_MODULUS
+        let exclusive = (BabyBear::from_u32(inclusive.value) - BabyBear::from_u32(delta)).to_u32()
         interaction.store(index: column * rows + row, value: exclusive)
-        if terminal { closed = closed && inclusive.value == 0 }
+        if terminal {
+            closed = closed && inclusive.value == 0
+        }
         lane = lane + 1
     }
     SparseInteractionAccumulatorScanFinish {

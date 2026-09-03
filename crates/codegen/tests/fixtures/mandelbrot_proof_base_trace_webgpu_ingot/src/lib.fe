@@ -22,14 +22,23 @@ use mandelbrot_proof_fixed_air_webgpu::{
     SparseRadixWitnessFamily,
     SparseRoundWitnessFamily,
     SPARSE_INTERACTION_ACCUMULATOR_FIELDS,
+    bind_sparse_composition_phase_seed,
+    finish_sparse_composition_phase_context,
     finish_sparse_interaction_accumulator_scan_lane,
+    finish_sparse_bound_composition_codeword,
     finish_transition_witness_workspace,
     load_transition_phase_receipt,
     prepare_sparse_interaction_accumulator_scan_lane,
+    sparse_composition_codeword_words,
+    sparse_composition_phase_is_valid,
+    sparse_composition_phase_validity_word,
+    sparse_composition_phase_workspace_words,
+    stage_sparse_composition_phase_roots,
     store_transition_phase_receipt,
     transition_phase_workspace_words,
     write_sparse_base_air_partition_lane,
     write_sparse_boundary_interaction_local_lane,
+    write_sparse_bound_composition_lane,
     write_sparse_linear_interaction_local_lane,
     write_sparse_product_interaction_local_lane,
     write_sparse_round_interaction_local_lane,
@@ -45,7 +54,12 @@ use mandelbrot_proof_baby_bear_domains::{
     SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
     sparse_lde_interaction_challenge_domain_tag,
 }
-use mandelbrot_proof_recursive::ComplexFixed
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitBoundary,
+    OrbitInterval,
+}
 use mandelbrot_proof_fixed_air_core::{
     sparse_boundary_task_count,
     sparse_carry_task_count,
@@ -172,11 +186,22 @@ type BaseLdeOutputPlan = RBin<Pair, 13>
 type InteractionAccumulatorScanPlan = RBin<Pair, 12>
 const LDE_INPUT_STAGES: usize = <BaseLdeInputPlan as FactorTree>::FACTORS
 const LDE_OUTPUT_STAGES: usize = <BaseLdeOutputPlan as FactorTree>::FACTORS
-const INTERACTION_ACCUMULATOR_SCAN_STAGES: usize = <InteractionAccumulatorScanPlan as
-    FactorTree>::FACTORS
+const INTERACTION_ACCUMULATOR_SCAN_STAGES: usize = <InteractionAccumulatorScanPlan as FactorTree>::FACTORS
 const INTERACTION_ACCUMULATOR_SCAN_WORDS: usize = PRODUCTION_TRACE_LENGTH
     * SPARSE_INTERACTION_ACCUMULATOR_FIELDS
 const TRANSITION_WORKSPACE_WORDS: usize = transition_phase_workspace_words<PRODUCTION_LIMBS>()
+const COMPOSITION_WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    BASE_LDE_LENGTH,
+>()
+const COMPOSITION_CODEWORD_WORDS: usize = sparse_composition_codeword_words<BASE_LDE_LENGTH>()
+const COMPOSITION_GROUPS: usize = (BASE_LDE_LENGTH + THREADS - 1) / THREADS
+const COMPOSITION_VALIDITY_WORD: usize = sparse_composition_phase_validity_word<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    BASE_LDE_LENGTH,
+>()
 const RETAINED_BASE_ROOT_NODE: u32 = 0
 
 static_assert(PRODUCTION_LIMBS == 4)
@@ -238,6 +263,11 @@ static_assert(LDE_INPUT_STAGES == 12)
 static_assert(LDE_OUTPUT_STAGES == 13)
 static_assert(TRANSITION_WORKSPACE_WORDS == 218)
 static_assert(TRANSITION_WORKSPACE_WORDS >= DIGEST_FIELDS)
+static_assert(COMPOSITION_WORKSPACE_WORDS <= TRANSITION_WORKSPACE_WORDS)
+static_assert(COMPOSITION_VALIDITY_WORD == 81)
+static_assert(COMPOSITION_CODEWORD_WORDS == 40960)
+static_assert(COMPOSITION_CODEWORD_WORDS <= LDE_INPUT_GRID_LANES)
+static_assert(COMPOSITION_GROUPS == 128)
 
 const fn witness_groups(_ rows: usize) -> usize {
     (rows + THREADS - 1) / THREADS
@@ -266,6 +296,21 @@ fn directed_current() -> ComplexFixed<4> {
     ComplexFixed {
         real: Fixed { negative: false, limbs: [0, 0, 2048, 1] },
         imaginary: Fixed { negative: true, limbs: [0, 0, 3072, 0] },
+    }
+}
+
+fn directed_interval() -> OrbitInterval<4> {
+    OrbitInterval {
+        claim: HighPrecisionEscapeClaim { point: directed_point(), bound: 16 },
+        start: OrbitBoundary { iteration: 0, z: directed_current(), escaped: false },
+        end: OrbitBoundary {
+            iteration: 1,
+            z: ComplexFixed {
+                real: Fixed { negative: false, limbs: [0, 0, 5504, 0] },
+                imaginary: Fixed { negative: true, limbs: [0, 0, 6656, 0] },
+            },
+            escaped: false,
+        },
     }
 }
 
@@ -1368,19 +1413,96 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
         >(self.base_trace, self.lde_inverse_values, self.validity)
-        let valid = load_transition_phase_receipt<
+        let base_root = load_poseidon2_digest(
+            self.transition_workspace,
+            RETAINED_BASE_ROOT_NODE,
+        )
+        let roots_valid = load_transition_phase_receipt<
             PRODUCTION_LIMBS,
             TRANSITION_WORKSPACE_WORDS,
         >(self.transition_workspace) && root.valid
-        store_transition_phase_receipt<
+        stage_sparse_composition_phase_roots<
             PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
             TRANSITION_WORKSPACE_WORDS,
-        >(self.transition_workspace, valid)
+        >(
+            base_root,
+            root.value,
+            roots_valid,
+            self.transition_workspace,
+        )
+    }
+
+    fn bind_composition_context(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        bind_sparse_composition_phase_seed<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(directed_interval(), self.transition_workspace)
+    }
+
+    fn derive_composition_challenges(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        finish_sparse_composition_phase_context<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace)
+    }
+
+    fn write_composition(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<COMPOSITION_GROUPS, 1, 1>,
+            >
+        )
+    {
+        write_sparse_bound_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            directed_interval(),
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn finish_composition(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        finish_sparse_bound_composition_codeword<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(self.transition_workspace, self.lde_inverse_progress)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        let color: u32 = if load_transition_phase_receipt<
+        let color: u32 = if sparse_composition_phase_is_valid<
             PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
             TRANSITION_WORKSPACE_WORDS,
         >(self.transition_workspace) {
             4278255360
