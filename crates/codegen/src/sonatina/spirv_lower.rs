@@ -26,6 +26,7 @@ use sonatina_codegen::optim::{
     Pass,
     dead_ret::{DeadRetElimConfig, run_dead_ret_elim},
     exact_func_merge::run_exact_private_func_merge,
+    forwarded_ret::{ForwardedRetElimConfig, run_forwarded_ret_elim},
     inliner::{FullInlineCloneRecord, Inliner, InlinerConfig},
     run_function_passes_on,
 };
@@ -558,8 +559,9 @@ fn inline_spirv_calls_from_roots(
     for (function, hint) in original_hints {
         module.ctx.set_inline_hint(function, hint);
     }
+    let forwarded_ret_stats = run_forwarded_ret_elim(module, ForwardedRetElimConfig::default());
     let dead_ret_stats = run_dead_ret_elim(module, DeadRetElimConfig::default());
-    if dead_ret_stats.removed_rets != 0 {
+    if forwarded_ret_stats.removed_rets != 0 || dead_ret_stats.removed_rets != 0 {
         let mut affected = roots.to_vec();
         affected.extend(preserved_helpers.iter().copied());
         affected.sort_unstable_by_key(|function| function.as_u32());
@@ -567,6 +569,15 @@ fn inline_spirv_calls_from_roots(
         run_function_passes_on(module, &affected, &spirv_post_inline_cleanup_passes());
     }
     if trace {
+        eprintln!(
+            "fe spirv forwarded return lanes: functions={}, removed_rets={}, calls={}, replaced_call_results={}, rounds={}, blocked_higher_order={}",
+            forwarded_ret_stats.rewritten_funcs,
+            forwarded_ret_stats.removed_rets,
+            forwarded_ret_stats.rewritten_calls,
+            forwarded_ret_stats.replaced_call_results,
+            forwarded_ret_stats.rounds,
+            forwarded_ret_stats.blocked_higher_order_funcs,
+        );
         eprintln!(
             "fe spirv dead return lanes: functions={}, removed_rets={}, calls={}, removed_call_results={}, rounds={}, blocked_higher_order={}",
             dead_ret_stats.rewritten_funcs,

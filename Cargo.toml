@@ -50,10 +50,10 @@ tracing-tree = "0.4.0"
 wasm-bindgen-test = "0.3"
 semver = "1.0.26"
 petgraph = "0.8"
-sonatina-ir = { git = "https://github.com/micahscopes/sonatina", rev = "b6b541c7bf5ce165432ca4d8ff1e1e0fe1386634" }
-sonatina-triple = { git = "https://github.com/micahscopes/sonatina", rev = "b6b541c7bf5ce165432ca4d8ff1e1e0fe1386634" }
-sonatina-codegen = { git = "https://github.com/micahscopes/sonatina", rev = "b6b541c7bf5ce165432ca4d8ff1e1e0fe1386634", features = ["wasm"] }
-sonatina-verifier = { git = "https://github.com/micahscopes/sonatina", rev = "b6b541c7bf5ce165432ca4d8ff1e1e0fe1386634" }
+sonatina-ir = { git = "https://github.com/micahscopes/sonatina", rev = "be4e9b118b3ca5c6a2780e8d106146f6c31518ae" }
+sonatina-triple = { git = "https://github.com/micahscopes/sonatina", rev = "be4e9b118b3ca5c6a2780e8d106146f6c31518ae" }
+sonatina-codegen = { git = "https://github.com/micahscopes/sonatina", rev = "be4e9b118b3ca5c6a2780e8d106146f6c31518ae", features = ["wasm"] }
+sonatina-verifier = { git = "https://github.com/micahscopes/sonatina", rev = "be4e9b118b3ca5c6a2780e8d106146f6c31518ae" }
 
 [patch.crates-io]
 naga = { git = "https://github.com/micahscopes/wgpu", rev = "854ed576fa186d19b9f7d5a5bb5a1f2fa533dde1" }
