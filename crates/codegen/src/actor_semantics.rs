@@ -82,7 +82,7 @@ pub(crate) fn semantic_gpu_resource<'db>(
                 kind,
                 element_ty: *element_ty,
                 length_ty: *length_ty,
-                has_typed_policy: false,
+                has_typed_policy: true,
             }
         }
         GpuResource::StorageFamily => {

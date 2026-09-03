@@ -725,11 +725,47 @@ fn typed_resource_policy_projects_to_manifest_and_narrows_physical_access() {
     let policy_json = &serde_json::to_value(&bundle.manifest).unwrap()["resources"][0]["policy"];
     assert_eq!(policy_json["access"], "read_only");
     assert_eq!(policy_json["visibility"], "fragment");
+    assert_eq!(
+        resource.buffer_usage,
+        [fe_codegen::WebBufferUsage::Storage],
+        "zero-initialized shader storage needs no copy capability"
+    );
     assert!(bundle.pass_wgsl[0].source.contains("var<storage> palette"));
     assert!(
         !bundle.pass_wgsl[0]
             .source
             .contains("var<storage, read_write> palette")
+    );
+    assert_eq!(
+        bundle.manifest.passes[0].shader_stages,
+        [fe_codegen::WebShaderStage::Fragment]
+    );
+}
+
+#[test]
+fn resource_visibility_is_an_enforced_fe_capability() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_invalid_visibility");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "visibility fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("invalid-visibility.fe".to_owned())),
+    )
+    .expect_err("fragment-only storage must reject compute-stage demand");
+    let message = error.to_string();
+    assert!(
+        message.contains("Fe visibility")
+            && message.contains("Compute")
+            && message.contains("inspect"),
+        "unexpected resource visibility error: {message}"
     );
 }
 
@@ -808,7 +844,7 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
             .with_resource_asset(BYTES.to_vec()),
     )
     .expect("verified content-addressed bundle");
-    assert_eq!(bundle.manifest.protocol_version, 7);
+    assert_eq!(bundle.manifest.protocol_version, 8);
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("content actor must derive exactly one resource")
     };
@@ -820,6 +856,14 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
     assert_eq!(artifact.path, format!("resources/sha256-{SHA256}.bin"));
     assert_eq!(artifact.bytes, BYTES.len() as u64);
     assert_eq!(artifact.sha256, SHA256);
+    assert_eq!(
+        resource.buffer_usage,
+        [
+            fe_codegen::WebBufferUsage::Storage,
+            fe_codegen::WebBufferUsage::CopyDst,
+        ],
+        "content-addressed initialization requires upload but not readback"
+    );
 
     let materialized = bundle
         .materialized_files()
@@ -858,7 +902,7 @@ fn content_addressed_resource_length_is_checked_against_layout() {
 }
 
 #[test]
-fn attributed_actor_builds_a_materialized_v7_pass_graph() {
+fn attributed_actor_builds_a_materialized_v8_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");
     assert!(!driver::init_ingot(&mut db, &url));
@@ -868,9 +912,9 @@ fn attributed_actor_builds_a_materialized_v7_pass_graph() {
         top_mod,
         WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
     )
-    .expect("v7 actor pass graph");
+    .expect("v8 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 7);
+    assert_eq!(bundle.manifest.protocol_version, 8);
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);
@@ -988,6 +1032,39 @@ fn nominal_readback_derives_one_binary_actor_boundary_without_manifest_semantics
     .expect("typed readback bundle");
     assert!(!bundle.wasm.is_empty());
     assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(
+        bundle.manifest.resources[0].buffer_usage,
+        [
+            fe_codegen::WebBufferUsage::Storage,
+            fe_codegen::WebBufferUsage::CopySrc,
+        ],
+        "the Fe readback effect is the sole source of COPY_SRC capability"
+    );
+    assert_eq!(
+        bundle.manifest.resources[0].policy,
+        serde_json::json!({
+            "kind": "storage",
+            "access": "read_write",
+            "residency": "actor_resident",
+            "initialization": { "kind": "derived" },
+            "recovery": "replay_recipe",
+            "visibility": "compute_fragment",
+        }),
+        "ReadbackBuffer must obtain its complete logical policy from Fe"
+    );
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.shader_stages.as_slice())
+            .collect::<Vec<_>>(),
+        [
+            [fe_codegen::WebShaderStage::Compute].as_slice(),
+            [fe_codegen::WebShaderStage::Fragment].as_slice(),
+        ],
+        "physical stage demand must be derived from the authored Fe pass graph"
+    );
     let manifest = serde_json::to_value(&bundle.manifest).unwrap();
     let resource = manifest["resources"][0].as_object().unwrap();
     assert!(

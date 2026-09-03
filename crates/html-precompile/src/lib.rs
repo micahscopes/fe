@@ -1102,7 +1102,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=7).contains(&version) {
+    if !(4..=8).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),
@@ -1189,6 +1189,29 @@ fn verify_render_deployment(
     if let Some(passes) = value.get("passes").and_then(serde_json::Value::as_array) {
         for (index, pass) in passes.iter().enumerate() {
             let pass_context = format!("{context} pass #{}", index + 1);
+            if version >= 8 {
+                let stages = pass["shader_stages"].as_array().ok_or_else(|| {
+                    VerificationError {
+                        context: pass_context.clone(),
+                        detail: "protocol v8 pass has no shader_stages array".to_owned(),
+                    }
+                })?;
+                let mut seen = BTreeSet::new();
+                if stages.is_empty()
+                    || stages.iter().any(|stage| {
+                        let Some(stage) = stage.as_str() else {
+                            return true;
+                        };
+                        !matches!(stage, "compute" | "vertex" | "fragment")
+                            || !seen.insert(stage)
+                    })
+                {
+                    return Err(VerificationError {
+                        context: pass_context.clone(),
+                        detail: "protocol v8 pass has invalid shader_stages".to_owned(),
+                    });
+                }
+            }
             let shader_ref = pass["shader"].as_str().ok_or_else(|| VerificationError {
                 context: pass_context.clone(),
                 detail: "pass has no shader path".to_owned(),
@@ -1203,7 +1226,7 @@ fn verify_render_deployment(
     if version >= 7 && value.get("resources").is_none() {
         return Err(VerificationError {
             context: format!("{context} manifest resources"),
-            detail: "protocol v7 requires an explicit resources array".to_owned(),
+            detail: "protocol v7+ requires an explicit resources array".to_owned(),
         });
     }
     if let Some(resources) = value.get("resources") {
@@ -1213,6 +1236,29 @@ fn verify_render_deployment(
         })?;
         for (index, resource) in resources.iter().enumerate() {
             let resource_context = format!("{context} resource #{}", index + 1);
+            if version >= 8 {
+                let usages = resource["buffer_usage"].as_array().ok_or_else(|| {
+                    VerificationError {
+                        context: resource_context.clone(),
+                        detail: "protocol v8 resource has no buffer_usage array".to_owned(),
+                    }
+                })?;
+                let mut seen = BTreeSet::new();
+                if usages.is_empty()
+                    || usages.iter().any(|usage| {
+                        let Some(usage) = usage.as_str() else {
+                            return true;
+                        };
+                        !matches!(usage, "storage" | "copy_src" | "copy_dst")
+                            || !seen.insert(usage)
+                    })
+                {
+                    return Err(VerificationError {
+                        context: resource_context.clone(),
+                        detail: "protocol v8 resource has invalid buffer_usage".to_owned(),
+                    });
+                }
+            }
             let initialization = resource
                 .get("policy")
                 .and_then(|policy| policy.get("initialization"));
@@ -4153,7 +4199,9 @@ mod tests {
         }];
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&bundle.manifest_json).unwrap();
-        manifest["protocol_version"] = serde_json::json!(7);
+        manifest["protocol_version"] = serde_json::json!(8);
+        manifest["passes"][0]["shader_stages"] = serde_json::json!(["compute"]);
+        manifest["passes"][1]["shader_stages"] = serde_json::json!(["fragment"]);
         manifest["resources"] = serde_json::json!([{
             "group": 0,
             "binding": 0,
@@ -4162,6 +4210,7 @@ mod tests {
             "stride": 4,
             "span": 4,
             "element": "U32",
+            "buffer_usage": ["storage", "copy_dst"],
             "policy": {
                 "kind": "storage",
                 "access": "read_only",

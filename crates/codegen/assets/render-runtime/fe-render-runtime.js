@@ -1,4 +1,4 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5/v6/v7).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4-v8).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
@@ -15,6 +15,8 @@
 //   - legacy bundles may fall back to module.wasm per pixel in a 2D canvas.
 // v7 adds authenticated immutable resource artifacts and replays them after
 // device replacement.
+// v8 adds compiler-derived minimal buffer usages and pass-stage visibility;
+// missing physical capability data fails closed for newly emitted bundles.
 // Uniform controls are generated from the manifest's input binding members.
 //
 // One shared WebGPU adapter/device serves every surface mounted on a page,
@@ -39,6 +41,90 @@ const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 // `SurfaceQuality<P>` artifacts own all responsive/coarse-pointer policy in Fe.
 const CPU_MAX_DIMENSION = 256;
 const GPU_BYTES_PER_ROW_ALIGNMENT = 256;
+
+/** Mechanically realize compiler-derived physical buffer capabilities.
+ * Missing data retains the broad v6/v7 compatibility allocation; every v8
+ * compiler bundle carries an explicit minimal set. */
+export function resourceBufferUsage(
+  resource,
+  constants = globalThis.GPUBufferUsage,
+  protocolVersion = 7,
+) {
+  if (resource.buffer_usage === undefined && protocolVersion >= 8) {
+    throw new Error("fe render runtime: v8 resource is missing compiler-derived buffer_usage");
+  }
+  const capabilities = resource.buffer_usage ?? ["storage", "copy_dst", "copy_src"];
+  if (!Array.isArray(capabilities) || capabilities.length === 0) {
+    throw new Error("fe render runtime: resource buffer_usage must be a non-empty array");
+  }
+  if (!constants) {
+    throw new Error("fe render runtime: GPUBufferUsage constants are unavailable");
+  }
+  let usage = 0;
+  const seen = new Set();
+  for (const capability of capabilities) {
+    if (seen.has(capability)) {
+      throw new Error(`fe render runtime: duplicate resource buffer usage ${capability}`);
+    }
+    seen.add(capability);
+    switch (capability) {
+      case "storage":
+        usage |= constants.STORAGE;
+        break;
+      case "copy_src":
+        usage |= constants.COPY_SRC;
+        break;
+      case "copy_dst":
+        usage |= constants.COPY_DST;
+        break;
+      default:
+        throw new Error(`fe render runtime: unsupported resource buffer usage ${capability}`);
+    }
+  }
+  return usage;
+}
+
+/** Mechanically realize compiler-derived pass stage demand. */
+export function passShaderVisibility(
+  pass,
+  constants = globalThis.GPUShaderStage,
+  protocolVersion = 7,
+) {
+  let stages = pass.shader_stages;
+  if ((!Array.isArray(stages) || stages.length === 0) && protocolVersion >= 8) {
+    throw new Error("fe render runtime: v8 pass is missing compiler-derived shader_stages");
+  }
+  stages ??= pass.layout.mode === "compute"
+    ? ["compute"]
+    : pass.draw_vertices
+      ? ["vertex", "fragment"]
+      : ["fragment"];
+  if (!Array.isArray(stages) || stages.length === 0 || !constants) {
+    throw new Error("fe render runtime: invalid pass shader_stages");
+  }
+  let visibility = 0;
+  const seen = new Set();
+  for (const stage of stages) {
+    if (seen.has(stage)) {
+      throw new Error(`fe render runtime: duplicate pass shader stage ${stage}`);
+    }
+    seen.add(stage);
+    switch (stage) {
+      case "compute":
+        visibility |= constants.COMPUTE;
+        break;
+      case "vertex":
+        visibility |= constants.VERTEX;
+        break;
+      case "fragment":
+        visibility |= constants.FRAGMENT;
+        break;
+      default:
+        throw new Error(`fe render runtime: unsupported pass shader stage ${stage}`);
+    }
+  }
+  return visibility;
+}
 
 /** Preserve aspect while enforcing an implementation resource ceiling. */
 export function fitBackingExtent(width, height, maxDimension = Infinity) {
@@ -147,6 +233,16 @@ export async function readGpuBufferSnapshot(readback) {
       // A failed map or device loss can leave the buffer unmapped already.
     }
     buffer.destroy();
+  }
+}
+
+function destroyGpuBuffers(buffers) {
+  for (const buffer of new Set(buffers)) {
+    try {
+      buffer?.destroy();
+    } catch {
+      // Device loss may already have invalidated the allocation.
+    }
   }
 }
 
@@ -1195,7 +1291,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -1689,122 +1785,141 @@ export class FeSurfaceElement extends HTMLElement {
       ]),
     ).then(entries => new Map(entries));
     const resourceBuffers = new Map();
-    for (const resource of this._resources) {
-      if (resource.group !== 0) {
-        throw new Error("fe render runtime: pass graphs currently require resource group 0");
+    const ownedBuffers = new Set();
+    try {
+      for (const resource of this._resources) {
+        if (resource.group !== 0) {
+          throw new Error("fe render runtime: pass graphs currently require resource group 0");
+        }
+        const buffer = device.createBuffer({
+          size: Math.max(4, resource.stride * resource.length),
+          usage: resourceBufferUsage(resource, undefined, this._manifest.protocol_version),
+        });
+        ownedBuffers.add(buffer);
+        resourceBuffers.set(resource.name, buffer);
+        const initialBytes = resourceInitialBytes.get(resource.name);
+        if (initialBytes) device.queue.writeBuffer(buffer, 0, initialBytes);
       }
-      const buffer = device.createBuffer({
-        size: Math.max(4, resource.stride * resource.length),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-      });
-      resourceBuffers.set(resource.name, buffer);
-      const initialBytes = resourceInitialBytes.get(resource.name);
-      if (initialBytes) device.queue.writeBuffer(buffer, 0, initialBytes);
-    }
 
-    const raster = rasterPlan(this._surface);
-    const passRecords = [];
-    for (let index = 0; index < this._passes.length; index++) {
-      const pass = this._passes[index];
-      // Fetch and realize one shader at a time. A proof graph may contain many
-      // independently scheduled passes, and retaining every source while
-      // synchronously constructing every pipeline can monopolize the page
-      // thread and overwhelm the browser GPU process. Async pipeline creation
-      // gives the browser an explicit scheduling boundary after each pass and
-      // bounds live source text without changing the Fe-authored pass order.
-      const shaderSource = await (
-        await fetchOrThrow(this._passShaderUrls[index], "WGSL pass shader")
-      ).text();
-      const module = device.createShaderModule({ code: shaderSource });
-      const visibility = pass.layout.mode === "compute"
-        ? GPUShaderStage.COMPUTE
-        : pass.draw_vertices
-          ? GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT
-          : GPUShaderStage.FRAGMENT;
-      const layoutEntries = [];
-      const groupEntries = [];
-      const inputs = [];
-      const outputs = [];
-      for (const binding of pass.layout.bindings) {
-        if (binding.group !== 0) {
-          throw new Error("fe render runtime: pass graphs currently require binding group 0");
+      const raster = rasterPlan(this._surface);
+      const passRecords = [];
+      for (let index = 0; index < this._passes.length; index++) {
+        const pass = this._passes[index];
+        // Fetch and realize one shader at a time. A proof graph may contain many
+        // independently scheduled passes, and retaining every source while
+        // synchronously constructing every pipeline can monopolize the page
+        // thread and overwhelm the browser GPU process. Async pipeline creation
+        // gives the browser an explicit scheduling boundary after each pass and
+        // bounds live source text without changing the Fe-authored pass order.
+        const shaderSource = await (
+          await fetchOrThrow(this._passShaderUrls[index], "WGSL pass shader")
+        ).text();
+        const module = device.createShaderModule({ code: shaderSource });
+        const visibility = passShaderVisibility(
+          pass,
+          undefined,
+          this._manifest.protocol_version,
+        );
+        const layoutEntries = [];
+        const groupEntries = [];
+        const inputs = [];
+        const outputs = [];
+        for (const binding of pass.layout.bindings) {
+          if (binding.group !== 0) {
+            throw new Error("fe render runtime: pass graphs currently require binding group 0");
+          }
+          if (binding.role === "resource") {
+            const buffer = resourceBuffers.get(binding.name);
+            if (!buffer) {
+              throw new Error(`fe render runtime: resource \`${binding.name}\` is undeclared`);
+            }
+            layoutEntries.push({
+              binding: binding.binding,
+              visibility,
+              buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
+            });
+            groupEntries.push({ binding: binding.binding, resource: { buffer } });
+          } else if (binding.role === "input") {
+            const buffer = device.createBuffer({
+              size: Math.max(16, binding.span),
+              usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            ownedBuffers.add(buffer);
+            layoutEntries.push({
+              binding: binding.binding,
+              visibility,
+              buffer: { type: "read-only-storage" },
+            });
+            groupEntries.push({ binding: binding.binding, resource: { buffer } });
+            inputs.push({ binding, buffer });
+          } else if (binding.role === "output") {
+            // Compiler-internal channels, including the checked-arithmetic trap
+            // word, are pass-local. They are deliberately not graph resources:
+            // external actor storage remains shared by resource identity while
+            // these buffers are rebuilt with the pass on device recovery.
+            const buffer = device.createBuffer({
+              size: Math.max(4, binding.span),
+              usage: GPUBufferUsage.STORAGE,
+            });
+            ownedBuffers.add(buffer);
+            layoutEntries.push({
+              binding: binding.binding,
+              visibility,
+              buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
+            });
+            groupEntries.push({ binding: binding.binding, resource: { buffer } });
+            outputs.push({ binding, buffer });
+          }
         }
-        if (binding.role === "resource") {
-          const buffer = resourceBuffers.get(binding.name);
-          if (!buffer) throw new Error(`fe render runtime: resource \`${binding.name}\` is undeclared`);
-          layoutEntries.push({
-            binding: binding.binding,
-            visibility,
-            buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
-          });
-          groupEntries.push({ binding: binding.binding, resource: { buffer } });
-        } else if (binding.role === "input") {
-          const buffer = device.createBuffer({
-            size: Math.max(16, binding.span),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-          });
-          layoutEntries.push({
-            binding: binding.binding,
-            visibility,
-            buffer: { type: "read-only-storage" },
-          });
-          groupEntries.push({ binding: binding.binding, resource: { buffer } });
-          inputs.push({ binding, buffer });
-        } else if (binding.role === "output") {
-          // Compiler-internal channels, including the checked-arithmetic trap
-          // word, are pass-local. They are deliberately not graph resources:
-          // external actor storage remains shared by resource identity while
-          // these buffers are rebuilt with the pass on device recovery.
-          const buffer = device.createBuffer({
-            size: Math.max(4, binding.span),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-          });
-          layoutEntries.push({
-            binding: binding.binding,
-            visibility,
-            buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
-          });
-          groupEntries.push({ binding: binding.binding, resource: { buffer } });
-          outputs.push({ binding, buffer });
-        }
+        const bindGroupLayout = layoutEntries.length
+          ? device.createBindGroupLayout({ entries: layoutEntries })
+          : null;
+        const bindGroup = bindGroupLayout
+          ? device.createBindGroup({ layout: bindGroupLayout, entries: groupEntries })
+          : null;
+        const pipelineLayout = bindGroupLayout
+          ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
+          : "auto";
+        const pipeline = pass.layout.mode === "compute"
+          ? await device.createComputePipelineAsync({
+              layout: pipelineLayout,
+              compute: { module, entryPoint: pass.layout.entry_point },
+            })
+          : await device.createRenderPipelineAsync({
+              layout: pipelineLayout,
+              vertex: { module, entryPoint: pass.layout.vertex_entry },
+              fragment: {
+                module,
+                entryPoint: pass.layout.fragment_entry,
+                targets: [{ format }],
+              },
+              primitive: { topology: "triangle-list", cullMode: raster.cullMode },
+              multisample: { count: raster.sampleCount },
+              ...(pass.draw_vertices && raster.depth
+                ? {
+                    depthStencil: {
+                      format: raster.depth.format,
+                      depthWriteEnabled: raster.depth.writeEnabled,
+                      depthCompare: raster.depth.compare,
+                    },
+                  }
+                : {}),
+            });
+        passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
       }
-      const bindGroupLayout = layoutEntries.length
-        ? device.createBindGroupLayout({ entries: layoutEntries })
-        : null;
-      const bindGroup = bindGroupLayout
-        ? device.createBindGroup({ layout: bindGroupLayout, entries: groupEntries })
-        : null;
-      const pipelineLayout = bindGroupLayout
-        ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
-        : "auto";
-      const pipeline = pass.layout.mode === "compute"
-        ? await device.createComputePipelineAsync({
-            layout: pipelineLayout,
-            compute: { module, entryPoint: pass.layout.entry_point },
-          })
-        : await device.createRenderPipelineAsync({
-            layout: pipelineLayout,
-            vertex: { module, entryPoint: pass.layout.vertex_entry },
-            fragment: {
-              module,
-              entryPoint: pass.layout.fragment_entry,
-              targets: [{ format }],
-            },
-            primitive: { topology: "triangle-list", cullMode: raster.cullMode },
-            multisample: { count: raster.sampleCount },
-            ...(pass.draw_vertices && raster.depth
-              ? {
-                  depthStencil: {
-                    format: raster.depth.format,
-                    depthWriteEnabled: raster.depth.writeEnabled,
-                    depthCompare: raster.depth.compare,
-                  },
-                }
-              : {}),
-          });
-      passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
+      return {
+        device,
+        generation,
+        format,
+        passRecords,
+        resourceBuffers,
+        ownedBuffers,
+        raster,
+      };
+    } catch (error) {
+      destroyGpuBuffers(ownedBuffers);
+      throw error;
     }
-    return { device, generation, format, passRecords, resourceBuffers, raster };
   }
 
   async _ensurePipeline() {
@@ -1883,7 +1998,9 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._graph) {
       const gpu = this._gpu;
       const { device, passRecords } = gpu;
-      ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
+      if (passRecords.some(record => record.pass.layout.mode !== "compute")) {
+        ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
+      }
       for (const record of passRecords) {
         for (const input of record.inputs) {
           const values = input.binding.members.map((member) => {
@@ -2573,16 +2690,12 @@ export class FeSurfaceElement extends HTMLElement {
     this._gpu = null;
     if (!gpu) return;
     releaseRasterAttachments(gpu);
-    const buffers = gpu.resourceBuffers
-      ? [...new Set(gpu.resourceBuffers.values())]
-      : [gpu.uniformBuffer].filter(Boolean);
-    for (const buffer of buffers) {
-      try {
-        buffer.destroy();
-      } catch {
-        // Device loss may already have invalidated the allocation.
-      }
-    }
+    const buffers = gpu.ownedBuffers
+      ? [...gpu.ownedBuffers]
+      : gpu.resourceBuffers
+        ? [...new Set(gpu.resourceBuffers.values())]
+        : [gpu.uniformBuffer].filter(Boolean);
+    destroyGpuBuffers(buffers);
   }
 
   _deviceRecoveryRequired() {
