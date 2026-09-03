@@ -8,7 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, realizePassPipelineAsync, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("Fe pass activation selects a memoized subgraph once per policy", () => {
@@ -65,6 +65,66 @@ test("selected pass pipelines are realized lazily and memoized while resident", 
   const second = realizePassPipeline(device, record);
   assert.equal(first, second);
   assert.deepEqual(calls, { modules: 1, compute: 1, render: 0 });
+});
+
+test("Fe pass preparation groups policies without granting activation", () => {
+  const records = [
+    { pass: { source_entry: "always-lazy" } },
+    { pass: { source_entry: "analytic", preparation: 0 } },
+    { pass: { source_entry: "pullback-a", preparation: 1 } },
+    { pass: { source_entry: "pullback-b", preparation: 1 } },
+  ];
+  const calls = [0, 0];
+  const plan = selectPreparedPassRecords(records, [
+    () => { calls[0] += 1; return PassPreparationMode.Eager; },
+    () => { calls[1] += 1; return PassPreparationMode.VisibleIdle; },
+  ], []);
+  assert.deepEqual(
+    plan.eager.map(record => record.pass.source_entry),
+    ["analytic"],
+  );
+  assert.deepEqual(
+    plan.visibleIdle.map(record => record.pass.source_entry),
+    ["pullback-a", "pullback-b"],
+  );
+  assert.deepEqual(calls, [1, 1]);
+  assert.throws(
+    () => selectPreparedPassRecords(
+      [{ pass: { source_entry: "bad", preparation: 0 } }],
+      [() => 3],
+      [],
+    ),
+    /returned an invalid mode/,
+  );
+});
+
+test("asynchronous pass preparation shares one resident pipeline promise", async () => {
+  const calls = { modules: 0, pipelines: 0 };
+  const device = {
+    createShaderModule() {
+      calls.modules += 1;
+      return { kind: "module" };
+    },
+    async createComputePipelineAsync(descriptor) {
+      calls.pipelines += 1;
+      assert.equal(descriptor.compute.module.kind, "module");
+      await Promise.resolve();
+      return { kind: "prepared-compute" };
+    },
+  };
+  const record = {
+    pass: { layout: { mode: "compute" } },
+    pipeline: null,
+    pipelinePromise: null,
+    shaderModule: null,
+    shaderSource: "@compute @workgroup_size(1) fn sample() {}",
+    pipelineDescriptor: { compute: { entryPoint: "sample" } },
+  };
+  const first = realizePassPipelineAsync(device, record);
+  const second = realizePassPipelineAsync(device, record);
+  assert.equal(first, second);
+  assert.deepEqual(await Promise.all([first, second]), [record.pipeline, record.pipeline]);
+  assert.deepEqual(calls, { modules: 1, pipelines: 1 });
 });
 
 test("WGSL summary aggregates unique pass shaders rather than the primary artifact", () => {

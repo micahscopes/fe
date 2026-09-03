@@ -1657,12 +1657,19 @@ fn typed_pass_activation_selects_memoized_subgraphs_without_host_semantics() {
     assert_eq!(passes[1].activation, Some(1));
     assert_eq!(passes[2].activation, Some(1));
     assert_eq!(passes[3].activation, None);
+    assert_eq!(passes[0].preparation, Some(0));
+    assert_eq!(passes[1].preparation, Some(1));
+    assert_eq!(passes[2].preparation, Some(1));
+    assert_eq!(passes[3].preparation, None);
     assert_eq!(passes[1].cycle, passes[2].cycle);
 
     let encoded = serde_json::to_value(&bundle.manifest).expect("manifest JSON");
     assert_eq!(encoded["passes"][0]["activation"], 0);
     assert_eq!(encoded["passes"][1]["activation"], 1);
     assert!(encoded["passes"][3].get("activation").is_none());
+    assert_eq!(encoded["passes"][0]["preparation"], 0);
+    assert_eq!(encoded["passes"][1]["preparation"], 1);
+    assert!(encoded["passes"][3].get("preparation").is_none());
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("activation Wasm");
@@ -1674,10 +1681,24 @@ fn typed_pass_activation_selects_memoized_subgraphs_without_host_semantics() {
     let pullback = instance
         .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_activation_v1_1")
         .expect("pullback predicate");
+    let analytic_preparation = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_preparation_v1_0")
+        .expect("analytic preparation policy");
+    let pullback_preparation = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_preparation_v1_1")
+        .expect("pullback preparation policy");
     assert_eq!(analytic.call(&mut store, (0.0, 9.0)).unwrap(), 1);
     assert_eq!(pullback.call(&mut store, (0.0, 9.0)).unwrap(), 0);
     assert_eq!(analytic.call(&mut store, (1.0, 9.0)).unwrap(), 0);
     assert_eq!(pullback.call(&mut store, (1.0, 9.0)).unwrap(), 1);
+    assert_eq!(
+        analytic_preparation.call(&mut store, (0.0, 9.0)).unwrap(),
+        2
+    );
+    assert_eq!(
+        pullback_preparation.call(&mut store, (0.0, 9.0)).unwrap(),
+        1
+    );
 }
 
 #[test]

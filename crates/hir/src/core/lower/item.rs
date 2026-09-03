@@ -123,6 +123,7 @@ const HOST_RESULT_TARGETS: &str = "extern functions";
 const HOST_TRAIT_TARGETS: &str = "traits";
 const HOST_TYPE_TARGETS: &str = "structs";
 const HOST_BACKEND_TARGETS: &str = "structs";
+const PASS_PREPARATION_MODE_TARGETS: &str = "enums";
 
 fn target(kind: &'static str, name: Option<String>) -> AttrTarget {
     AttrTarget::new(kind, name)
@@ -151,6 +152,7 @@ fn validate_mod_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -174,6 +176,7 @@ pub(super) fn validate_module_inner_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -220,6 +223,7 @@ fn validate_func_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -259,7 +263,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
-                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, `#[gpu_control(surface_recovery)]`, `#[gpu_control(pass_activation)]`, `#[gpu_control(raster_pipeline)]`, or `#[gpu_control(surface_pointer_motion)]`",
+                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, `#[gpu_control(surface_recovery)]`, `#[gpu_control(pass_activation)]`, `#[gpu_control(pass_preparation)]`, `#[gpu_control(raster_pipeline)]`, or `#[gpu_control(surface_pointer_motion)]`",
             ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported(
@@ -332,6 +336,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -363,6 +368,7 @@ fn validate_trait_attrs<'db>(
             ),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
@@ -388,6 +394,11 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::supported(
+                "web_pass_preparation_mode",
+                BARE_FORM,
+                "`#[web_pass_preparation_mode]`",
+            ),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
@@ -427,6 +438,7 @@ fn validate_unsupported_item_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -461,6 +473,7 @@ fn validate_extern_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
     validate_attr_alias_exclusive(ctxt, attrs, target, "host_import", "wasm_import");

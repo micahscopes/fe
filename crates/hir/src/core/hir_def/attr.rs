@@ -68,6 +68,10 @@ pub enum GpuControl {
     /// the current presentation subgraph. The host observes only an opaque
     /// policy ordinal and a fixed Wasm predicate export.
     PassActivation,
+    /// A pure Fe policy that selects when a compiled GPU pass should be made
+    /// resident ahead of demand. The host observes only an opaque policy
+    /// ordinal and a fixed Wasm decision export.
+    PassPreparation,
     /// Compile-time Fe behavior returning the actor's raster plan.
     RasterPipeline,
     /// Opt a surface into uncaptured primary-pointer motion in addition to
@@ -544,6 +548,7 @@ impl<'db> AttrListId<'db> {
             "surface_quality" => Some(GpuControl::SurfaceQuality),
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
             "pass_activation" => Some(GpuControl::PassActivation),
+            "pass_preparation" => Some(GpuControl::PassPreparation),
             "raster_pipeline" => Some(GpuControl::RasterPipeline),
             "surface_pointer_motion" => Some(GpuControl::SurfacePointerMotion),
             "readback" => Some(GpuControl::Readback),
@@ -669,6 +674,11 @@ impl<'db> AttrListId<'db> {
 
     pub fn is_web_surface_recovery_step(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_surface_recovery_step")
+    }
+
+    /// Marks the nominal Fe enum returned by a pass-preparation policy.
+    pub fn is_web_pass_preparation_mode(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_pass_preparation_mode")
     }
 
     /// Marks the Fe record returned by a raster-configuration behavior. The

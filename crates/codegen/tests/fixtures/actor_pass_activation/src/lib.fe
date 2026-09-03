@@ -5,6 +5,8 @@ use std::webgpu::{
     FragmentSurface,
     GpuProgram,
     PassActivation,
+    PassPreparation,
+    PassPreparationMode,
     StorageBuffer,
     WebGpuBackend,
     Workgroup,
@@ -33,6 +35,22 @@ impl PullbackPipeline {
 
 struct PullbackRound {}
 
+struct AnalyticPreparation {}
+
+impl AnalyticPreparation {
+    pub fn residency(_ state: ActivationState) -> PassPreparationMode {
+        PassPreparationMode::Eager
+    }
+}
+
+struct PullbackPreparation {}
+
+impl PullbackPreparation {
+    pub fn residency(_ state: ActivationState) -> PassPreparationMode {
+        PassPreparationMode::VisibleIdle
+    }
+}
+
 actor ActivatedGraph uses (GpuProgram<WebGpuBackend>) {
     receipt: StorageBuffer<u32, 1>,
     mode: f32,
@@ -41,6 +59,7 @@ actor ActivatedGraph uses (GpuProgram<WebGpuBackend>) {
     fn analytic(self) uses (
         ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
         PassActivation<AnalyticPipeline>,
+        PassPreparation<AnalyticPreparation>,
     ) {
         self.receipt.store(index: 0, value: 11)
     }
@@ -51,6 +70,7 @@ actor ActivatedGraph uses (GpuProgram<WebGpuBackend>) {
             CycledDispatch<PullbackRound, FixedDispatch<1, 1, 1>, 2>,
         >,
         PassActivation<PullbackPipeline>,
+        PassPreparation<PullbackPreparation>,
     ) {
         self.receipt.store(index: 0, value: 22)
     }
@@ -61,6 +81,7 @@ actor ActivatedGraph uses (GpuProgram<WebGpuBackend>) {
             CycledDispatch<PullbackRound, FixedDispatch<1, 1, 1>, 2>,
         >,
         PassActivation<PullbackPipeline>,
+        PassPreparation<PullbackPreparation>,
     ) {
         let value = self.receipt.load(index: 0)
         self.receipt.store(index: 0, value: value + 1)

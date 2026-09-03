@@ -9,9 +9,7 @@
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     name_resolution::{PathRes, resolve_path},
-    ty::{
-        adt_def::AdtRef, trait_def::TraitInstId, trait_resolution::PredicateListId, ty_def::TyId,
-    },
+    ty::{trait_def::TraitInstId, trait_resolution::PredicateListId, ty_def::TyId},
 };
 use hir::hir_def::{AttrListId, GpuResource, ItemKind, PathId, Struct, TopLevelMod};
 use hir::span::{ActorDesugaredFocus, DesugaredOrigin, HirOrigin};
@@ -240,8 +238,8 @@ pub(crate) fn nominal_attrs<'db>(
 ) -> Option<hir::hir_def::AttrListId<'db>> {
     let ty = ty.as_view(db).unwrap_or(ty);
     let adt = ty.adt_def(db)?;
-    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
-        return None;
-    };
-    struct_.scope().attrs(db)
+    // Attributes belong to the nominal ADT scope for both structs and enums.
+    // Resource/control projections historically needed only structs; typed
+    // decision effects also use attributed fieldless enums.
+    adt.scope(db).attrs(db)
 }

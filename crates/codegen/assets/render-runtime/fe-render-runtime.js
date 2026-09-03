@@ -325,6 +325,15 @@ export const SurfaceQueueAction = Object.freeze({
   Drop: 2,
 });
 
+/** Fixed tags of Fe's pass-preparation effect. These determine only when a
+ * physical pipeline is compiled; `PassActivation` independently decides
+ * whether that pipeline may execute in a presentation. */
+export const PassPreparationMode = Object.freeze({
+  Lazy: 0,
+  VisibleIdle: 1,
+  Eager: 2,
+});
+
 /** Fixed tags of Fe's device-recovery effect. Every canonical surface policy
  * returns one; this host only aggregates shared retry demand and realizes the
  * selected per-surface terminal action. */
@@ -1022,6 +1031,37 @@ export function selectActivePassRecords(passRecords, activationKernels, uniforms
   });
 }
 
+/** Evaluate each distinct compiler-derived preparation policy once and group
+ * its physical pass records by the Fe-selected residency mode. Passes without
+ * a `PassPreparation` effect remain lazy and need no host-side policy. */
+export function selectPreparedPassRecords(passRecords, preparationKernels, uniforms) {
+  const decisions = new Map();
+  const plan = { visibleIdle: [], eager: [] };
+  for (const record of passRecords) {
+    const preparation = record.pass.preparation;
+    if (preparation === undefined || preparation === null) continue;
+    if (!Number.isSafeInteger(preparation) || preparation < 0) {
+      throw new Error("fe render runtime: invalid compiler-derived pass preparation ordinal");
+    }
+    if (!decisions.has(preparation)) {
+      const kernel = preparationKernels[preparation];
+      if (typeof kernel !== "function") {
+        throw new Error(`fe render runtime: missing Fe pass preparation policy ${preparation}`);
+      }
+      const decision = kernel(...uniforms);
+      if (!Number.isSafeInteger(decision) ||
+          decision < PassPreparationMode.Lazy || decision > PassPreparationMode.Eager) {
+        throw new Error(`fe render runtime: Fe pass preparation policy ${preparation} returned an invalid mode`);
+      }
+      decisions.set(preparation, decision);
+    }
+    const decision = decisions.get(preparation);
+    if (decision === PassPreparationMode.VisibleIdle) plan.visibleIdle.push(record);
+    if (decision === PassPreparationMode.Eager) plan.eager.push(record);
+  }
+  return plan;
+}
+
 /** Realize one compiler-derived pass on first demand. A mode switch pays
  * shader fetch and asynchronous pipeline creation at most once while the graph
  * is resident; inactive policies retain neither source text nor GPU state. */
@@ -1345,6 +1385,9 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceRecoveryKernel = null;
     this._surfaceQualityKernel = null;
     this._passActivationKernels = [];
+    this._passPreparationKernels = [];
+    this._passPreparationObserver = null;
+    this._passPreparationIdle = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
@@ -1621,6 +1664,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceRecoveryKernel = null;
       this._surfaceQualityKernel = null;
       this._passActivationKernels = [];
+      this._passPreparationKernels = [];
       this._gpuReadbackKernel = null;
       this._gpuReadbackBinding = null;
       this._gpuReadbackResource = null;
@@ -1742,6 +1786,21 @@ export class FeSurfaceElement extends HTMLElement {
           throw new Error(`fe render runtime: pass activation policy ${ordinal} has no callable Fe export`);
         }
         this._passActivationKernels.push(kernel);
+      }
+      const preparationIndices = [...new Set(
+        this._passes
+          .map(pass => pass.preparation)
+          .filter(index => index !== undefined && index !== null),
+      )].sort((left, right) => left - right);
+      for (let ordinal = 0; ordinal < preparationIndices.length; ordinal += 1) {
+        if (preparationIndices[ordinal] !== ordinal) {
+          throw new Error("fe render runtime: pass preparation ordinals must be dense from zero");
+        }
+        const kernel = instance?.exports[`fe_pass_preparation_v1_${ordinal}`];
+        if (typeof kernel !== "function") {
+          throw new Error(`fe render runtime: pass preparation policy ${ordinal} has no callable Fe export`);
+        }
+        this._passPreparationKernels.push(kernel);
       }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
@@ -2210,6 +2269,67 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
+  _cancelPassPreparation() {
+    this._passPreparationObserver?.disconnect();
+    this._passPreparationObserver = null;
+    const pending = this._passPreparationIdle;
+    this._passPreparationIdle = null;
+    if (!pending) return;
+    if (pending.kind === "idle" && typeof cancelIdleCallback === "function") {
+      cancelIdleCallback(pending.handle);
+    } else {
+      clearTimeout(pending.handle);
+    }
+  }
+
+  _scheduleVisibleIdlePreparation(gpu, records) {
+    if (records.length === 0) return;
+    const schedule = () => {
+      if (this._gpu !== gpu || this._passPreparationIdle) return;
+      const run = () => {
+        this._passPreparationIdle = null;
+        if (this._gpu !== gpu) return;
+        Promise.all(records.map(record => realizePassPipeline(gpu.device, record)))
+          .catch((error) => {
+            this._pipelineError = error;
+            console.warn("[fe web] visible-idle pass preparation failed:", error);
+          });
+      };
+      if (typeof requestIdleCallback === "function") {
+        this._passPreparationIdle = {
+          kind: "idle",
+          handle: requestIdleCallback(run, { timeout: 500 }),
+        };
+      } else {
+        this._passPreparationIdle = { kind: "timeout", handle: setTimeout(run, 0) };
+      }
+    };
+    if (typeof IntersectionObserver !== "function") {
+      schedule();
+      return;
+    }
+    this._passPreparationObserver?.disconnect();
+    this._passPreparationObserver = new IntersectionObserver((entries) => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      this._passPreparationObserver?.disconnect();
+      this._passPreparationObserver = null;
+      schedule();
+    });
+    this._passPreparationObserver.observe(this);
+  }
+
+  async _preparePassGraph(gpu) {
+    const plan = selectPreparedPassRecords(
+      gpu.passRecords,
+      this._passPreparationKernels,
+      this._uniforms,
+    );
+    await Promise.all(
+      plan.eager.map(record => realizePassPipeline(gpu.device, record)),
+    );
+    this._scheduleVisibleIdlePreparation(gpu, plan.visibleIdle);
+  }
+
   async _ensurePipeline() {
     this._pipelineError = null;
     const gpu = await this._resolveGpu();
@@ -2219,6 +2339,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       if (this._graph) {
         this._gpu = await this._buildPassGraph(device, gpu.generation);
+        await this._preparePassGraph(this._gpu);
         return this._gpu;
       }
       const wgsl = await (await fetchOrThrow(this._wgslUrl, "WGSL shader")).text();
@@ -2276,6 +2397,7 @@ export class FeSurfaceElement extends HTMLElement {
           : "[fe web] WebGPU pipeline init failed, using wasm fallback:",
         error,
       );
+      if (this._graph) this._releaseGpuResources();
       return null;
     }
   }
@@ -2986,6 +3108,7 @@ export class FeSurfaceElement extends HTMLElement {
    * live transition; this keeps an off-screen gallery from pinning every
    * demo's device resources at once. */
   _releaseGpuResources() {
+    this._cancelPassPreparation();
     const gpu = this._gpu;
     this._gpu = null;
     if (!gpu) return;
@@ -3157,6 +3280,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._recoveryWasLive = false;
     this._surfaceQualityKernel = null;
     this._passActivationKernels = [];
+    this._passPreparationKernels = [];
     this._unwireResizeObserver();
     if (this._liveContext) {
       try {
