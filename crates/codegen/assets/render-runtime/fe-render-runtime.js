@@ -524,7 +524,9 @@ export function installGeneratedWebGpuOperations(operations) {
   if (!operations || typeof operations !== "object" ||
       typeof operations.queueIdle !== "function" ||
       typeof operations.bufferCreate !== "function" ||
-      typeof operations.bufferWrite !== "function") {
+      typeof operations.bufferWrite !== "function" ||
+      typeof operations.renderDraw !== "function" ||
+      typeof operations.renderDrawIndirect !== "function") {
     throw new TypeError("fe render runtime: generated WebGPU operations are incomplete");
   }
   if (generatedWebGpuOperations !== undefined) {
@@ -556,6 +558,20 @@ function writeGpuBuffer(queue, buffer, offset, bytes) {
     throw new TypeError("fe render runtime: GPU buffer writes require a byte view");
   }
   generatedWebGpuOperations.bufferWrite(queue, buffer, offset, bytes);
+}
+
+function drawGpu(renderPass, vertexCount, instanceCount) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  generatedWebGpuOperations.renderDraw(renderPass, vertexCount, instanceCount);
+}
+
+function drawGpuIndirect(renderPass, buffer, offset) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  generatedWebGpuOperations.renderDrawIndirect(renderPass, buffer, offset);
 }
 
 function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
@@ -1107,7 +1123,7 @@ function presentFrame(device, context, pipeline, bindGroup, capture) {
   });
   pass.setPipeline(pipeline);
   if (bindGroup) pass.setBindGroup(0, bindGroup);
-  pass.draw(3);
+  drawGpu(pass, 3, 1);
   pass.end();
   const readback = capture
     ? encodeCanvasReadback(device, encoder, texture, capture.width, capture.height, capture.format)
@@ -2256,7 +2272,7 @@ export class FeSurfaceElement extends HTMLElement {
           render.setPipeline(record.pipeline);
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
           const draw = rasterDrawShape(record.pass);
-          render.draw(draw.vertices, draw.instances);
+          drawGpu(render, draw.vertices, draw.instances);
           render.end();
           rendered = true;
           depthRendered ||= usesDepth;

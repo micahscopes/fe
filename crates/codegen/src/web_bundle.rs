@@ -163,6 +163,8 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
     let queue_idle = operation("GPUQueue", "onSubmittedWorkDone");
     let create_buffer = operation("GPUDevice", "createBuffer");
     let write_buffer = operation("GPUQueue", "writeBuffer");
+    let draw = operation("GPURenderPassEncoder", "draw");
+    let draw_indirect = operation("GPURenderPassEncoder", "drawIndirect");
     let semantic = fe_webidl_bindgen::emit_js_canonical_adapter(&world, &plan)
         .expect("pinned WebGPU runtime semantic adapter must emit");
     format!(
@@ -185,6 +187,17 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
                  feWebGpuOperations[{write_buffer:?}](\n          \
                    queueHandle, bufferHandle, BigInt(bufferOffset), data, BigInt(dataOffset),\n          \
                    size === undefined ? undefined : BigInt(size),\n        \
+                 ))),\n  \
+           renderDraw: (renderPass, vertexCount, instanceCount = 1, firstVertex = 0, firstInstance = 0) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
+               feWebGpuOperations[{draw:?}](\n        \
+                 renderPassHandle, vertexCount, instanceCount, firstVertex, firstInstance,\n      \
+               )),\n  \
+           renderDrawIndirect: (renderPass, buffer, offset = 0) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
+               feWebGpuWebIdlRuntime.resources.withBorrowed(buffer, bufferHandle =>\n        \
+                 feWebGpuOperations[{draw_indirect:?}](\n          \
+                   renderPassHandle, bufferHandle, BigInt(offset),\n        \
                  ))),\n\
          }}));\n",
         fe_webidl_bindgen::HOST_RUNTIME_JS,
@@ -194,6 +207,8 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
         queue_idle = queue_idle,
         create_buffer = create_buffer,
         write_buffer = write_buffer,
+        draw = draw,
+        draw_indirect = draw_indirect,
     )
 });
 
@@ -7860,6 +7875,8 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains("gpu_queue_on_submitted_work_done"));
         assert!(runtime.contains("gpu_device_create_buffer"));
         assert!(runtime.contains("gpu_queue_write_buffer"));
+        assert!(runtime.contains("gpu_render_pass_encoder_draw"));
+        assert!(runtime.contains("gpu_render_pass_encoder_draw_indirect"));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.withBorrowed"));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.take(bufferHandle)"));
         assert_eq!(
@@ -7877,6 +7894,16 @@ pub fn shade(x: u32, y: u32) -> u32 {
             1,
             "the sole standards call must come from generated Web IDL"
         );
+        assert_eq!(
+            runtime.matches("[\"draw\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert_eq!(
+            runtime.matches("[\"drawIndirect\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
         assert!(
             !RENDER_RUNTIME_BASE_JS.contains(".onSubmittedWorkDone("),
             "the handwritten fixed runtime must not retain a standards-call fallback"
@@ -7887,6 +7914,14 @@ pub fn shade(x: u32, y: u32) -> u32 {
         );
         assert!(
             !RENDER_RUNTIME_BASE_JS.contains(".writeBuffer("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".draw("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".drawIndirect("),
             "the handwritten fixed runtime must not retain a standards-call fallback"
         );
 
