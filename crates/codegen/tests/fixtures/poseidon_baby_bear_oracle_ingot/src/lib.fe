@@ -415,7 +415,7 @@ fn poseidon2_permutation_relation<
     _ input: own [BabyBear; WIDTH],
     _ expected: own [BabyBear; WIDTH],
 ) -> Poseidon2PermutationRelation<I> {
-    let planned = poseidon2_permutation_plan(interpreter, input)
+    let planned = poseidon2_permutation_plan(interpreter, ref input)
     let mut interpreter = planned.interpreter
     let mut lane: usize = 0
     while lane < WIDTH {

@@ -231,7 +231,7 @@ impl<I: QuadraticPlanInterpreter<BabyBear>> CanonicalFieldWriter<I> {
     fn with_state(
         self,
         _ interpreter: I,
-        _ state: [BabyBear; WIDTH],
+        _ state: ref [BabyBear; WIDTH],
         _ rate: u32,
         _ written: u32,
         _ valid: u32,
@@ -303,18 +303,17 @@ impl<I: QuadraticPlanInterpreter<BabyBear>> WordSink for CanonicalFieldWriter<I>
         state[rate as usize] = BabyBear::from_u32(value)
         rate = rate + 1
         if rate == SPONGE_RATE.downcast_truncate() {
-            let planned = poseidon2_permutation_plan(interpreter, state)
-            interpreter = planned.interpreter
-            state = planned.output
+            interpreter = poseidon2_permutation_in_place_plan(interpreter, mut state)
             rate = 0
         }
-        self.with_state(interpreter, state, rate, self.written + 1, VALID_WORD)
+        self.with_state(interpreter, ref state, rate, self.written + 1, VALID_WORD)
     }
 
     fn reject(self) -> Self {
+        let state = self.state()
         self.with_state(
             self.interpreter,
-            self.state(),
+            ref state,
             self.rate,
             self.written,
             INVALID_WORD,
@@ -334,9 +333,7 @@ impl<I: QuadraticPlanInterpreter<BabyBear>> CanonicalFieldWriter<I> {
         let mut interpreter = self.interpreter
         let mut state = self.state()
         if self.rate != 0 {
-            let planned = poseidon2_permutation_plan(interpreter, state)
-            interpreter = planned.interpreter
-            state = planned.output
+            interpreter = poseidon2_permutation_in_place_plan(interpreter, mut state)
         }
         let mut values = [BabyBear::zero(); DIGEST_FIELDS]
         let mut index: usize = 0
@@ -846,12 +843,36 @@ impl<I: QuadraticPlanInterpreter<BabyBear>> core::marker::Copy
 /// used by production scalar hashing.
 pub fn poseidon2_permutation_plan<I: QuadraticPlanInterpreter<BabyBear>>(
     _ interpreter: I,
-    _ input: own [BabyBear; WIDTH],
+    _ input: ref [BabyBear; WIDTH],
 ) -> Poseidon2PermutationPlan<I> {
+    let mut output = [BabyBear::zero(); WIDTH]
+    let mut lane: usize = 0
+    while lane < WIDTH {
+        output[lane] = input[lane]
+        lane = lane + 1
+    }
+    let interpreter = poseidon2_permutation_in_place_plan(interpreter, mut output)
+    Poseidon2PermutationPlan {
+        interpreter: interpreter,
+        output: output,
+    }
+}
+
+/// Interpret one complete permutation directly in caller-owned state.
+///
+/// The mutable capability makes the actual data dependency explicit and lets
+/// scalar and GPU interpretations share one state allocation across sponge
+/// rounds. The value-returning plan above remains the copy-preserving adapter.
+pub fn poseidon2_permutation_in_place_plan<
+    I: QuadraticPlanInterpreter<BabyBear>,
+>(
+    _ interpreter: I,
+    _ state: mut [BabyBear; WIDTH],
+) -> I {
     let mut words = [0; WIDTH]
     let mut lane: usize = 0
     while lane < WIDTH {
-        words[lane] = input[lane].to_montgomery_word()
+        words[lane] = state[lane].to_montgomery_word()
         lane = lane + 1
     }
     let parameters = PARAMETERS
@@ -860,16 +881,12 @@ pub fn poseidon2_permutation_plan<I: QuadraticPlanInterpreter<BabyBear>>(
         words,
         ref parameters,
     )
-    let mut output = [BabyBear::zero(); WIDTH]
     lane = 0
     while lane < WIDTH {
-        output[lane] = BabyBear::from_montgomery_word(executed.lanes[lane])
+        state[lane] = BabyBear::from_montgomery_word(executed.lanes[lane])
         lane = lane + 1
     }
-    Poseidon2PermutationPlan {
-        interpreter: executed.interpreter,
-        output: output,
-    }
+    executed.interpreter
 }
 
 /// Serializable, phase-checked interpretation of one Poseidon2 permutation.
@@ -1838,17 +1855,13 @@ pub fn commit_packed_plan<
         state[rate] = packed.field(index.downcast_truncate())
         rate = rate + 1
         if rate == SPONGE_RATE {
-            let planned = poseidon2_permutation_plan(next, state)
-            next = planned.interpreter
-            state = planned.output
+            next = poseidon2_permutation_in_place_plan(next, mut state)
             rate = 0
         }
         index = index + 1
     }
     if rate != 0 {
-        let planned = poseidon2_permutation_plan(next, state)
-        next = planned.interpreter
-        state = planned.output
+        next = poseidon2_permutation_in_place_plan(next, mut state)
     }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
@@ -1988,15 +2001,15 @@ pub fn compress_plan<I: QuadraticPlanInterpreter<BabyBear>>(
         state[index + DIGEST_FIELDS] = right.values[index]
         index = index + 1
     }
-    let planned = poseidon2_permutation_plan(interpreter, state)
+    let interpreter = poseidon2_permutation_in_place_plan(interpreter, mut state)
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
     while index < DIGEST_FIELDS {
-        values[index] = planned.output[index]
+        values[index] = state[index]
         index = index + 1
     }
     Poseidon2CompressionPlan {
-        interpreter: planned.interpreter,
+        interpreter: interpreter,
         value: Poseidon2Digest { values: values },
     }
 }
@@ -2066,9 +2079,7 @@ pub fn bind_plan<
         state[rate] = left.values[index]
         rate = rate + 1
         if rate == SPONGE_RATE {
-            let planned = poseidon2_permutation_plan(next, state)
-            next = planned.interpreter
-            state = planned.output
+            next = poseidon2_permutation_in_place_plan(next, mut state)
             rate = 0
         }
         index = index + 1
@@ -2078,17 +2089,13 @@ pub fn bind_plan<
         state[rate] = right.values[index]
         rate = rate + 1
         if rate == SPONGE_RATE {
-            let planned = poseidon2_permutation_plan(next, state)
-            next = planned.interpreter
-            state = planned.output
+            next = poseidon2_permutation_in_place_plan(next, mut state)
             rate = 0
         }
         index = index + 1
     }
     if rate != 0 {
-        let planned = poseidon2_permutation_plan(next, state)
-        next = planned.interpreter
-        state = planned.output
+        next = poseidon2_permutation_in_place_plan(next, mut state)
     }
     let mut values = [BabyBear::zero(); DIGEST_FIELDS]
     index = 0
