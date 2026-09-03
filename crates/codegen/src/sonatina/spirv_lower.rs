@@ -772,7 +772,13 @@ fn spirv_helper_candidates(
         let Some((body_ok, callees, accesses_resource, instruction_count)) =
             module.func_store.try_view(function_ref, |function| {
                 let inst_set = function.inst_set();
-                let mut body_ok = signature_ok;
+                // Helper outlining is only profitable if the backend can
+                // represent the helper as an independent structured function.
+                // Preflight the same structurizer used by Naga lowering so a
+                // newly legal ABI does not turn an existing inlinable CFG into
+                // a late backend failure.
+                let mut body_ok = signature_ok
+                    && sonatina_codegen::structurize::structurize_function(function).is_ok();
                 let mut callees = Vec::new();
                 let mut accesses_resource = false;
                 let mut instruction_count = 0usize;
@@ -976,6 +982,9 @@ fn trace_spirv_helper_classification(
         module.func_store.try_view(function_ref, |function| {
             let inst_set = function.inst_set();
             let mut accesses_resource = false;
+            if sonatina_codegen::structurize::structurize_function(function).is_err() {
+                reasons.insert("unstructured_control");
+            }
             for block in function.layout.iter_block() {
                 for instruction in function.layout.iter_inst(block) {
                     let data = function.dfg.inst(instruction);

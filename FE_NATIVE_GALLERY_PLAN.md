@@ -1881,6 +1881,17 @@ All four are focused ingots and may remain so permanently.
     bytes. Relative to the 1,600,494-byte baseline, WGSL is down 60.1 percent.
     A focused ordinary-Fe borrow gate plus the production parse, validation,
     and private-heap gates remain green.
+  - [x] Remove conservative scoped-arena checkpoints after shader
+    materialization proves that a body owns no canonical allocation or
+    indirect aggregate result. The cleanup is based on lowered storage and
+    fails closed on any unexpected checkpoint use. Helper selection now also
+    preflights the same structured-control reconstruction used by Naga, so a
+    newly legal ABI cannot create a late backend failure. The production shader
+    falls from 639,232 to 599,015 WGSL bytes, from 17,487 to 16,461 Naga
+    expressions, and from 91,217 to 87,502 SPIR-V words. Its real 1,147-byte
+    private heap is unchanged. Release compilation, Naga validation, WGSL, and
+    SPIR-V emission are green; external Chrome execution of this exact artifact
+    remains the next hardware gate.
   - [ ] Separate statically bounded scratch from genuinely dynamic arena
     allocation, then choose private, workgroup, or storage placement through
     explicit target capabilities and size limits.

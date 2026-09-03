@@ -9969,6 +9969,10 @@ where
     trap_block: Option<BlockId>,
     scoped_arena: bool,
     arena_checkpoint: Option<ValueId>,
+    /// Whether lowering emitted storage whose lifetime is owned by this
+    /// function's canonical-arena frame. Typed shader locals do not set this:
+    /// their function storage is already represented by Sonatina `alloca`.
+    canonical_arena_used: bool,
 }
 
 impl<'ctx, 'db, 'a, I> PortableFunctionLowerer<'ctx, 'db, 'a, I>
@@ -10121,6 +10125,7 @@ where
             trap_block: None,
             scoped_arena,
             arena_checkpoint: None,
+            canonical_arena_used: false,
         })
     }
 
@@ -10287,8 +10292,68 @@ where
                 })?;
         }
 
+        self.remove_empty_scoped_arena()?;
         self.fb.seal_all();
         self.fb.finish();
+        Ok(())
+    }
+
+    /// Remove the conservative function arena frame when target-specific
+    /// materialization proved that the lowered body never used it. The RMIR
+    /// escape analysis deliberately runs before shader typed-local selection,
+    /// so it can request a frame for an aggregate which later becomes a
+    /// function-local `alloca`. Keeping that empty checkpoint and its rewinds
+    /// would make an otherwise callable helper look memory-effectful to the
+    /// SPIR-V backend and force repeated inlining.
+    fn remove_empty_scoped_arena(&mut self) -> Result<(), LowerError> {
+        if !self.scoped_arena || self.canonical_arena_used {
+            return Ok(());
+        }
+        let Some(checkpoint) = self.arena_checkpoint.take() else {
+            return Err(LowerError::Internal(
+                "scoped arena body has no prologue checkpoint".to_owned(),
+            ));
+        };
+        let checkpoint_inst = self.fb.func.dfg.value_inst(checkpoint).ok_or_else(|| {
+            LowerError::Internal("scoped arena checkpoint has no defining instruction".to_owned())
+        })?;
+        let inst_set = self.fb.func.inst_set();
+        let mut rewinds = Vec::new();
+        let mut unexpected_users = Vec::new();
+        for block in self.fb.func.layout.iter_block() {
+            for inst in self.fb.func.layout.iter_inst(block) {
+                let data = self.fb.func.dfg.inst(inst);
+                let mut uses_checkpoint = false;
+                data.for_each_value(&mut |value| uses_checkpoint |= value == checkpoint);
+                if !uses_checkpoint {
+                    continue;
+                }
+                if <&MemRewind as sonatina_ir::InstDowncast>::downcast(inst_set, data)
+                    .is_some_and(|rewind| *rewind.checkpoint() == checkpoint)
+                {
+                    rewinds.push(inst);
+                } else {
+                    unexpected_users.push(inst);
+                }
+            }
+        }
+        if !unexpected_users.is_empty() {
+            return Err(LowerError::Internal(format!(
+                "empty scoped arena checkpoint has unexpected users {unexpected_users:?}"
+            )));
+        }
+        for rewind in rewinds {
+            self.fb.func.layout.remove_inst(rewind);
+            self.fb.func.erase_inst(rewind);
+        }
+        self.fb.func.layout.remove_inst(checkpoint_inst);
+        self.fb.func.erase_inst(checkpoint_inst);
+        wasm_lower_trace_detail(|| {
+            format!(
+                "removed empty scoped arena, symbol={}",
+                self.module.function_symbol(self.body.owner),
+            )
+        });
         Ok(())
     }
 
@@ -12245,6 +12310,7 @@ where
         size: usize,
         description: &str,
     ) -> Result<ValueId, LowerError> {
+        self.canonical_arena_used = true;
         let is = self.inst_set();
         const ALIGN: i32 = 8;
         let alloc_size = size
@@ -13894,6 +13960,7 @@ where
                 Ok(self.fb.insert_inst(Fround::new(is, value), Type::F32))
             }
             RuntimeBuiltin::Malloc { size } => {
+                self.canonical_arena_used = true;
                 let is = self.inst_set();
                 let size = self.local_value(*size)?;
                 if self.fb.type_of(size) != Type::I32 {
@@ -14397,6 +14464,12 @@ where
             Call::new(is, callee_ref, arg_vals.into_iter().collect()),
             ret_ty,
         );
+        // An indirect aggregate result is allocated in the callee but owned by
+        // this function's enclosing arena frame. It is therefore a real use of
+        // our checkpoint even when this body emits no MemAllocDynamic itself.
+        if self.module.indirect_aggregate_returns.contains(&callee) {
+            self.canonical_arena_used = true;
+        }
         self.rewind_call_arena(call_checkpoint);
         Ok(result)
     }
@@ -14862,6 +14935,38 @@ pub fn kernel(_ value: u32) -> u32 {
         assert_eq!(
             typed_pointer_arguments, 2,
             "both ordinary Fe aggregate borrows should retain typed pointer parameters"
+        );
+
+        let arena_scope_ops = module
+            .funcs()
+            .into_iter()
+            .map(|function| {
+                module
+                    .func_store
+                    .try_view(function, |body| {
+                        let inst_set = body.inst_set();
+                        body.layout
+                            .iter_block()
+                            .flat_map(|block| body.layout.iter_inst(block))
+                            .filter(|inst| {
+                                let data = body.dfg.inst(*inst);
+                                <&MemCheckpoint as sonatina_ir::InstDowncast>::downcast(
+                                    inst_set, data,
+                                )
+                                .is_some()
+                                    || <&MemRewind as sonatina_ir::InstDowncast>::downcast(
+                                        inst_set, data,
+                                    )
+                                    .is_some()
+                            })
+                            .count()
+                    })
+                    .unwrap_or_default()
+            })
+            .sum::<usize>();
+        assert_eq!(
+            arena_scope_ops, 0,
+            "typed private helpers should not retain empty canonical-arena frames"
         );
 
         crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
