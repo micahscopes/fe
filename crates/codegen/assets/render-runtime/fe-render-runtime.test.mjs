@@ -460,13 +460,14 @@ test("protocol v9 realizes explicit Fe param plans without inferring from kind",
     kind: "deliberately_misleading",
     visible: true,
     source: "surface_width",
-    presentation: { widget: "range", scale: "logarithmic", readout: "integer" },
+    presentation: { widget: "range", scale: "logarithmic", readout: "integer", options: [] },
   };
   assert.deepEqual(surfaceParamPlan(param, 9), {
     source: "surface_width",
     widget: "range",
     scale: "logarithmic",
     readout: "integer",
+    options: [],
   });
   assert.throws(
     () => surfaceParamPlan({ kind: "range", visible: true }, 9),
@@ -476,6 +477,36 @@ test("protocol v9 realizes explicit Fe param plans without inferring from kind",
     surfaceParamPlan({ kind: "extent_y", visible: false }, 8),
     { source: "surface_height", widget: "hidden", scale: "linear", readout: "scalar" },
     "the kind-derived path is isolated to legacy protocols",
+  );
+});
+
+test("protocol v9 preserves Fe-authored names for scalar select ordinals", () => {
+  const plan = surfaceParamPlan({
+    kind: "int",
+    visible: true,
+    source: "initial",
+    min: 0,
+    max: 3,
+    presentation: {
+      widget: "select",
+      scale: "linear",
+      readout: "integer",
+      options: ["regular grid", "atlas charts", "eight-chart fan", "pullback blue noise"],
+    },
+  }, 9);
+  assert.deepEqual(plan.options, [
+    "regular grid", "atlas charts", "eight-chart fan", "pullback blue noise",
+  ]);
+  assert.throws(
+    () => surfaceParamPlan({
+      kind: "int",
+      visible: true,
+      source: "initial",
+      min: 0,
+      max: 2,
+      presentation: { widget: "select", scale: "linear", readout: "integer", options: ["a", "b"] },
+    }, 9),
+    /options disagree with Fe ordinal bounds/,
   );
 });
 

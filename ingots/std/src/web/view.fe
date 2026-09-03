@@ -19,7 +19,7 @@
 //! values: the generated Wasm calls `Param::drive` below.
 
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
-use core::num::FloatRounding
+use core::num::{FloatRounding, IntDowncast}
 
 /// Append-only identities for raw browser and presentation facts delivered to
 /// a surface actor. The fieldless enum is the single Fe source of this fixed
@@ -290,6 +290,100 @@ impl Copy for ParamWidget {}
 impl Copy for ParamScale {}
 impl Copy for ParamReadout {}
 
+/// One const-packed choice label. Four ordinary `u64` lanes keep the generic
+/// surface transition's params record recursively scalar on wasm32; the
+/// compiler reconstructs the original Fe-authored `String<31>` only while
+/// projecting the target-neutral presentation plan.
+struct ChoiceLabel {
+    low_0: u64,
+    low_1: u64,
+    low_2: u64,
+    low_3: u64,
+}
+
+impl Copy for ChoiceLabel {}
+
+impl ChoiceLabel {
+    const fn empty() -> Self {
+        Self { low_0: 0, low_1: 0, low_2: 0, low_3: 0 }
+    }
+
+    const fn from_string(value: String<31>) -> Self {
+        let word: u256 = value as u256
+        Self {
+            low_0: word.downcast_truncate(),
+            low_1: (word >> 64).downcast_truncate(),
+            low_2: (word >> 128).downcast_truncate(),
+            low_3: (word >> 192).downcast_truncate(),
+        }
+    }
+}
+
+/// A small, explicitly ordered set of human-readable choice labels. The
+/// scalar state remains the zero-based ordinal expected by shaders and Wasm;
+/// these packed lanes exist only to carry Fe-authored const data into the
+/// compiler-projected presentation plan.
+pub struct ChoiceOptions {
+    first: ChoiceLabel,
+    second: ChoiceLabel,
+    third: ChoiceLabel,
+    fourth: ChoiceLabel,
+    count: u32,
+    max: f32,
+}
+
+impl Copy for ChoiceOptions {}
+
+impl ChoiceOptions {
+    const fn empty() -> Self {
+        Self {
+            first: ChoiceLabel::empty(),
+            second: ChoiceLabel::empty(),
+            third: ChoiceLabel::empty(),
+            fourth: ChoiceLabel::empty(),
+            count: 0,
+            max: 0.0,
+        }
+    }
+
+    pub const fn two(first: String<31>, second: String<31>) -> Self {
+        Self {
+            first: ChoiceLabel::from_string(value: first),
+            second: ChoiceLabel::from_string(value: second),
+            third: ChoiceLabel::empty(),
+            fourth: ChoiceLabel::empty(),
+            count: 2,
+            max: 1.0,
+        }
+    }
+
+    pub const fn three(
+        first: String<31>, second: String<31>, third: String<31>,
+    ) -> Self {
+        Self {
+            first: ChoiceLabel::from_string(value: first),
+            second: ChoiceLabel::from_string(value: second),
+            third: ChoiceLabel::from_string(value: third),
+            fourth: ChoiceLabel::empty(),
+            count: 3,
+            max: 2.0,
+        }
+    }
+
+    pub const fn four(
+        first: String<31>, second: String<31>, third: String<31>, fourth: String<31>,
+    ) -> Self {
+        Self {
+            first: ChoiceLabel::from_string(value: first),
+            second: ChoiceLabel::from_string(value: second),
+            third: ChoiceLabel::from_string(value: third),
+            fourth: ChoiceLabel::from_string(value: fourth),
+            count: 4,
+            max: 3.0,
+        }
+    }
+}
+
 /// A complete Fe-authored control presentation. This is target-neutral data:
 /// Leptos, a Web Component, or another view may realize the same denotation.
 pub struct ParamPresentation {
@@ -297,6 +391,7 @@ pub struct ParamPresentation {
     scale: ParamScale,
     readout: ParamReadout,
     visible: bool,
+    options: ChoiceOptions,
 }
 
 impl Copy for ParamPresentation {}
@@ -341,6 +436,7 @@ impl Param {
             source: ParamValueSource::Initial,
             presentation: ParamPresentation {
                 widget: widget, scale: scale, readout: readout, visible: true,
+                options: ChoiceOptions::empty(),
             },
             drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
             wheel_in_factor: 1.0, wheel_out_factor: 1.0,
@@ -361,6 +457,7 @@ impl Param {
                 scale: ParamScale::Linear,
                 readout: ParamReadout::Scalar,
                 visible: false,
+                options: ChoiceOptions::empty(),
             },
             drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
             wheel_in_factor: 1.0, wheel_out_factor: 1.0,
@@ -407,16 +504,33 @@ impl Param {
         )
     }
 
-    /// A finite integral choice over the inclusive ordinal range `[min, max]`.
+    /// A finite named choice transported as a zero-based scalar ordinal.
     ///
     /// The value remains the same GPU-friendly scalar carried by `int`; only
     /// its target-neutral presentation differs. Browser hosts realize this as
     /// a native `<select>` instead of a scrubber.
-    pub const fn choice(min: f32, max: f32, init: f32) -> Param {
-        Param::control(
-            ParamKind::Int, min, max, init,
+    pub const fn choice(options: ChoiceOptions, init: f32) -> Param {
+        let result = Param::control(
+            ParamKind::Int, 0.0, options.max, init,
             ParamWidget::Select, ParamScale::Linear, ParamReadout::Integer,
         )
+        Param {
+            kind: result.kind, min: result.min, max: result.max, init: result.init,
+            bounded: result.bounded, initialized: result.initialized,
+            source: result.source,
+            presentation: ParamPresentation {
+                widget: result.presentation.widget,
+                scale: result.presentation.scale,
+                readout: result.presentation.readout,
+                visible: result.presentation.visible,
+                options: options,
+            },
+            drag_x_per_px: result.drag_x_per_px,
+            drag_y_per_px: result.drag_y_per_px,
+            wheel_per_notch: result.wheel_per_notch,
+            wheel_in_factor: result.wheel_in_factor,
+            wheel_out_factor: result.wheel_out_factor,
+        }
     }
 
     /// A checkbox starting either unchecked or checked. Its scalar carrier is

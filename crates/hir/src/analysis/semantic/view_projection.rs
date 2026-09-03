@@ -64,6 +64,7 @@ pub struct ViewParamPresentation {
     pub scale: String,
     pub readout: String,
     pub visible: bool,
+    pub options: Vec<String>,
 }
 
 /// Why a `view()` projection could not be produced. Both variants carry a
@@ -204,6 +205,112 @@ fn read_bool<'db>(
     }
 }
 
+fn read_u64<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<u64, ViewProjectionError> {
+    match value.value(db) {
+        SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } => value
+            .to_u64()
+            .ok_or_else(|| ViewProjectionError::Shape(format!("{what} is not a u64"))),
+        _ => Err(ViewProjectionError::Shape(format!(
+            "{what} is not an integer scalar"
+        ))),
+    }
+}
+
+fn read_choice_label<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<String, ViewProjectionError> {
+    let mut lanes = [None; 4];
+    for (field_name, field) in struct_named_fields(db, value, what)? {
+        let index = match field_name.as_str() {
+            "low_0" => 0,
+            "low_1" => 1,
+            "low_2" => 2,
+            "low_3" => 3,
+            _ => continue,
+        };
+        lanes[index] = Some(read_u64(
+            db,
+            field,
+            &format!("{what} packed lane `{field_name}`"),
+        )?);
+    }
+    let mut bytes = Vec::with_capacity(32);
+    for (index, lane) in lanes.into_iter().enumerate().rev() {
+        bytes.extend_from_slice(
+            &lane
+                .ok_or_else(|| {
+                    ViewProjectionError::Shape(format!("{what} has no packed lane `low_{index}`"))
+                })?
+                .to_be_bytes(),
+        );
+    }
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len());
+    let bytes = &bytes[first..];
+    if bytes.contains(&0) {
+        return Err(ViewProjectionError::Shape(format!(
+            "{what} contains an embedded NUL"
+        )));
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|error| ViewProjectionError::Shape(format!("{what} is not UTF-8: {error}")))
+}
+
+fn walk_choice_options<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    name: &str,
+) -> Result<Vec<String>, ViewProjectionError> {
+    let fields = struct_named_fields(db, value, &format!("param `{name}` choice options"))?;
+    let mut labels = Vec::with_capacity(4);
+    let mut count = None;
+    for (field_name, field) in fields {
+        match field_name.as_str() {
+            "first" | "second" | "third" | "fourth" => labels.push(read_choice_label(
+                db,
+                field,
+                &format!("param `{name}` choice option `{field_name}`"),
+            )?),
+            "count" => {
+                count = Some(read_u32(
+                    db,
+                    field,
+                    &format!("param `{name}` choice option count"),
+                )?)
+            }
+            _ => {}
+        }
+    }
+    let count = count.ok_or_else(|| {
+        ViewProjectionError::Shape(format!("param `{name}` choice options have no `count`"))
+    })? as usize;
+    if count > labels.len() {
+        return Err(ViewProjectionError::Shape(format!(
+            "param `{name}` declares {count} choice options but carries only {} labels",
+            labels.len()
+        )));
+    }
+    labels.truncate(count);
+    if labels.iter().any(String::is_empty) {
+        return Err(ViewProjectionError::Shape(format!(
+            "param `{name}` has an empty visible choice label"
+        )));
+    }
+    Ok(labels)
+}
+
 fn snake_case_variant(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for (index, character) in name.chars().enumerate() {
@@ -252,6 +359,7 @@ fn walk_param_presentation<'db>(
     let mut scale = None;
     let mut readout = None;
     let mut visible = None;
+    let mut options = None;
     for (field_name, field) in
         struct_named_fields(db, value, &format!("param `{name}` presentation"))?
     {
@@ -284,6 +392,7 @@ fn walk_param_presentation<'db>(
                     &format!("param `{name}` presentation visible"),
                 )?)
             }
+            "options" => options = Some(walk_choice_options(db, field, name)?),
             _ => {}
         }
     }
@@ -299,6 +408,9 @@ fn walk_param_presentation<'db>(
         })?,
         visible: visible.ok_or_else(|| {
             ViewProjectionError::Shape(format!("param `{name}` presentation has no `visible`"))
+        })?,
+        options: options.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `options`"))
         })?,
     })
 }

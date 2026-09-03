@@ -5000,6 +5000,42 @@ fn web_surface_param(
             )));
         }
     }
+    let options = &view_param.presentation.options;
+    if view_param.presentation.widget == "select" {
+        let expected_max = options.len().checked_sub(1).ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "param `{}`: a select requires at least one Fe-authored option",
+                view_param.name
+            ))
+        })? as f32;
+        if view_param.kind != "int"
+            || !view_param.bounded
+            || view_param.min != 0.0
+            || view_param.max != expected_max
+            || view_param.init.round() != view_param.init
+        {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: {} named options require a zero-based integral initial value and bounds [0, {expected_max}]",
+                view_param.name,
+                options.len()
+            )));
+        }
+        if options
+            .iter()
+            .enumerate()
+            .any(|(index, label)| options[..index].contains(label))
+        {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: named choice labels must be unique",
+                view_param.name
+            )));
+        }
+    } else if !options.is_empty() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "param `{}`: named options require a select presentation",
+            view_param.name
+        )));
+    }
     Ok(WebSurfaceParam {
         name: member.name.clone(),
         doc: member.doc.clone(),
@@ -5012,6 +5048,7 @@ fn web_surface_param(
             widget: view_param.presentation.widget.clone(),
             scale: view_param.presentation.scale.clone(),
             readout: view_param.presentation.readout.clone(),
+            options: view_param.presentation.options.clone(),
         }),
         visible: view_param.presentation.visible,
     })
@@ -5400,6 +5437,8 @@ pub struct WebParamPresentation {
     pub widget: String,
     pub scale: String,
     pub readout: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 fn web_surface_param_visible_default() -> bool {

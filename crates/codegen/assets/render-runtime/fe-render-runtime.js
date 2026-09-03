@@ -948,6 +948,19 @@ export function surfaceParamPlan(param, protocolVersion) {
       (presentation.scale !== "linear" || presentation.readout !== "integer")) {
     throw new Error("fe render runtime: select presentation requires linear integer semantics");
   }
+  const options = presentation.options ?? [];
+  if (!Array.isArray(options) || options.some(label => typeof label !== "string" || label.length === 0)) {
+    throw new Error("fe render runtime: Fe param options must be non-empty strings");
+  }
+  if (presentation.widget === "select") {
+    const min = Math.ceil(param.min);
+    const max = Math.floor(param.max);
+    if (min !== 0 || options.length !== max + 1) {
+      throw new Error("fe render runtime: select options disagree with Fe ordinal bounds");
+    }
+  } else if (options.length !== 0) {
+    throw new Error("fe render runtime: only select presentations may carry options");
+  }
   return { source, ...presentation };
 }
 
@@ -3956,6 +3969,7 @@ export class FeSurfaceElement extends HTMLElement {
       const value = document.createElement("b");
       const isInt = presentation.readout === "integer";
       const isToggle = presentation.readout === "toggle";
+      const optionLabels = presentation.options ?? [];
       const min = typeof param.min === "number" ? param.min : 0;
       const max = typeof param.max === "number" ? param.max : 1;
       const isLog = presentation.scale === "logarithmic";
@@ -3971,6 +3985,9 @@ export class FeSurfaceElement extends HTMLElement {
       const format = (v) => {
         const number = +v;
         if (isToggle) return number >= 0.5 ? "on" : "off";
+        if (presentation.widget === "select") {
+          return optionLabels[Math.round(number) - Math.ceil(min)] ?? number.toFixed(0);
+        }
         if (isInt) return number.toFixed(0);
         if (isLog && (number < 0.01 || number >= 1000)) return number.toExponential(2);
         return Number(number.toPrecision(8)).toString();
@@ -3986,7 +4003,7 @@ export class FeSurfaceElement extends HTMLElement {
         for (let optionValue = Math.ceil(min); optionValue <= Math.floor(max); optionValue += 1) {
           const option = document.createElement("option");
           option.value = String(optionValue);
-          option.textContent = String(optionValue);
+          option.textContent = optionLabels[optionValue - Math.ceil(min)] ?? String(optionValue);
           input.append(option);
         }
         input.value = String(Math.round(this._uniforms[index]));
