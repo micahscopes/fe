@@ -26,25 +26,19 @@ pub(crate) struct SemanticActor<'db> {
 ///
 /// Keep positional generic knowledge here rather than teaching every backend
 /// that legacy storage is `<T, N>`, readback is `<T, N, M>`, and the typed
-/// policy family is `<Kind, Access, Residency, Init, Recovery, Visibility, N,
-/// T>`. Backends consume the semantic element/length pair; bundle construction
-/// may additionally inspect the policy marker types.
+/// policy family has six policy axes before its length and element. Backends
+/// consume the semantic element/length pair and the complete concrete type;
+/// they never receive those Fe policy axes as a parallel Rust schema.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SemanticGpuResource<'db> {
+    /// Concrete normalized Fe resource type supplied to generic CTFE policy
+    /// projection. This preserves the complete denotation without exposing its
+    /// policy-axis positions to target backends.
+    pub(crate) resource_ty: TyId<'db>,
     pub(crate) kind: GpuResource,
     pub(crate) element_ty: TyId<'db>,
     pub(crate) length_ty: TyId<'db>,
-    pub(crate) family: Option<SemanticGpuResourceFamily<'db>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SemanticGpuResourceFamily<'db> {
-    pub(crate) kind_ty: TyId<'db>,
-    pub(crate) access_ty: TyId<'db>,
-    pub(crate) residency_ty: TyId<'db>,
-    pub(crate) init_ty: TyId<'db>,
-    pub(crate) recovery_ty: TyId<'db>,
-    pub(crate) visibility_ty: TyId<'db>,
+    pub(crate) has_typed_policy: bool,
 }
 
 /// Recover one GPU resource's semantic shape after aliases and views have been
@@ -70,10 +64,11 @@ pub(crate) fn semantic_gpu_resource<'db>(
                 );
             };
             SemanticGpuResource {
+                resource_ty: ty,
                 kind,
                 element_ty: *element_ty,
                 length_ty: *length_ty,
-                family: None,
+                has_typed_policy: false,
             }
         }
         GpuResource::Readback => {
@@ -83,20 +78,21 @@ pub(crate) fn semantic_gpu_resource<'db>(
                 );
             };
             SemanticGpuResource {
+                resource_ty: ty,
                 kind,
                 element_ty: *element_ty,
                 length_ty: *length_ty,
-                family: None,
+                has_typed_policy: false,
             }
         }
         GpuResource::StorageFamily => {
             let [
-                kind_ty,
-                access_ty,
-                residency_ty,
-                init_ty,
-                recovery_ty,
-                visibility_ty,
+                _kind_ty,
+                _access_ty,
+                _residency_ty,
+                _init_ty,
+                _recovery_ty,
+                _visibility_ty,
                 length_ty,
                 element_ty,
             ] = args
@@ -106,17 +102,11 @@ pub(crate) fn semantic_gpu_resource<'db>(
                 );
             };
             SemanticGpuResource {
+                resource_ty: ty,
                 kind,
                 element_ty: *element_ty,
                 length_ty: *length_ty,
-                family: Some(SemanticGpuResourceFamily {
-                    kind_ty: *kind_ty,
-                    access_ty: *access_ty,
-                    residency_ty: *residency_ty,
-                    init_ty: *init_ty,
-                    recovery_ty: *recovery_ty,
-                    visibility_ty: *visibility_ty,
-                }),
+                has_typed_policy: true,
             }
         }
     };

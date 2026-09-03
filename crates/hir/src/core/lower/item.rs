@@ -257,36 +257,6 @@ fn validate_struct_attrs<'db>(
                 "`#[gpu_resource(storage)]`, `#[gpu_resource(storage_family)]`, or `#[gpu_resource(readback)]`",
             ),
             AttrRule::supported(
-                "gpu_resource_kind",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_kind(storage)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_access",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_access(read_only)]`, `#[gpu_resource_access(write_only)]`, or `#[gpu_resource_access(read_write)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_residency",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_residency(immutable)]`, `#[gpu_resource_residency(actor_resident)]`, `#[gpu_resource_residency(frame_transient)]`, or `#[gpu_resource_residency(imported)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_init",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_init(zeroed)]`, `#[gpu_resource_init(content_addressed)]`, or `#[gpu_resource_init(derived)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_recovery",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_recovery(replay_recipe)]`, `#[gpu_resource_recovery(restore_checkpoint)]`, `#[gpu_resource_recovery(regenerate)]`, or `#[gpu_resource_recovery(nonrecoverable)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_visibility",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_visibility(compute)]`, `#[gpu_resource_visibility(vertex)]`, `#[gpu_resource_visibility(fragment)]`, `#[gpu_resource_visibility(compute_fragment)]`, `#[gpu_resource_visibility(vertex_fragment)]`, or `#[gpu_resource_visibility(all)]`",
-            ),
-            AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
                 "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, `#[gpu_control(surface_recovery)]`, `#[gpu_control(raster_pipeline)]`, or `#[gpu_control(surface_pointer_motion)]`",
@@ -333,6 +303,11 @@ fn validate_struct_attrs<'db>(
                 "`#[web_surface_recovery_step]`",
             ),
             AttrRule::supported("web_raster_plan", BARE_FORM, "`#[web_raster_plan]`"),
+            AttrRule::supported(
+                "web_resource_plan",
+                BARE_FORM,
+                "`#[web_resource_plan]`",
+            ),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported(
                 "gpu_dispatch",

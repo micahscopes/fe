@@ -7,7 +7,6 @@ use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
     compile_runtime_package_wasm_with_options, WasmCompileOptions, WebBuildOptions, WebBundle,
-    WebResourceAccess,
 };
 use hir::hir_def::HirIngot;
 use quilting_core::patch::QBTriPatch;
@@ -348,7 +347,7 @@ fn gpu_parallel_topology_insertion_satisfies_exact_planar_invariants() {
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage {
-                    read_only: resource.policy.access == WebResourceAccess::ReadOnly,
+                    read_only: resource.policy["access"] == "read_only",
                 },
                 has_dynamic_offset: false,
                 min_binding_size: None,
@@ -681,7 +680,7 @@ fn gpu_constrained_delaunay_satisfies_exact_planar_invariants() {
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage {
-                    read_only: resource.policy.access == WebResourceAccess::ReadOnly,
+                    read_only: resource.policy["access"] == "read_only",
                 },
                 has_dynamic_offset: false,
                 min_binding_size: None,
@@ -1018,7 +1017,7 @@ fn gpu_sampling_matches_the_scalar_placement_byte_for_byte() {
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage {
-                    read_only: resource.policy.access == WebResourceAccess::ReadOnly,
+                    read_only: resource.policy["access"] == "read_only",
                 },
                 has_dynamic_offset: false,
                 min_binding_size: None,

@@ -3020,10 +3020,8 @@ fn classic_quilting_lod_is_fe_reactive_and_uses_the_checked_atlas() {
     assert_eq!(resource.artifact.as_ref().unwrap().bytes, 1296);
     assert_eq!(resource.artifact.as_ref().unwrap().sha256, SHA256);
     assert_eq!(
-        resource.policy.initialization,
-        fe_codegen::WebResourceInitialization::ContentAddressed {
-            sha256: SHA256.to_owned(),
-        },
+        resource.policy["initialization"],
+        serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 }),
     );
 
     let center: [f32; 4] = call_state_batch_with_resources(
