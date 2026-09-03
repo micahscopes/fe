@@ -1006,11 +1006,14 @@ existing Definition of done, not a second campaign checklist:
   failed to navigate a fresh page to an inert `health.html` within 120 seconds,
   before the control could request an adapter. Chrome's host log also reports
   that its Wayland platform is incompatible with the selected Vulkan path.
-  The auto-running page is stopped. After relaunching Chrome under X11, the
-  immutable focused probe must pass health, compile-only, one-workgroup,
-  full-grid, and readback gates separately before this actor is counted
-  browser-green. This stage is one production proof relation, not the complete
-  nonrecursive or recursive receipt.
+  CDP `SystemInfo.getInfo` confirms the live command line uses
+  `--ozone-platform=wayland`, reports Vulkan and WebGPU Vulkan-through-GL
+  interop enabled, and records four GPU-process crashes. The auto-running page
+  is stopped. After relaunching Chrome under X11, the immutable focused probe
+  must pass health, compile-only, one-workgroup, full-grid, and readback gates
+  separately before this actor is counted browser-green. This stage is one
+  production proof relation, not the complete nonrecursive or recursive
+  receipt.
 - [ ] **G-INSPECT:** the Fe SourceInspector presents authored, semantic,
   analysis, placement, ABI/layout, artifact, and evidence views from one
   content-addressed `SourceAtlas`, with no gallery `docs.json` or runtime render
