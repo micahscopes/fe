@@ -14,8 +14,9 @@ const BASE_FIELDS: u32 = 260;
 const BASE_TRACE_WORDS: u32 = TRACE_ROWS * BASE_FIELDS;
 const LDE_ROWS: u32 = TRACE_ROWS * 2;
 const BASE_LDE_WORDS: u32 = LDE_ROWS * BASE_FIELDS;
+const INTERACTION_FIELDS: u32 = 152;
+const INTERACTION_LDE_WORDS: u32 = LDE_ROWS * INTERACTION_FIELDS;
 const INPUT_GRID_LANES: u32 = BASE_FIELDS * TRACE_ROWS / 2;
-const OUTPUT_GRID_LANES: u32 = BASE_FIELDS * LDE_ROWS / 2;
 
 #[test]
 fn production_sparse_product_denominators_have_a_focused_browser_webgpu_gate() {
@@ -237,7 +238,10 @@ fn production_sparse_boundary_interaction_streams_the_committed_plan() {
     assert_eq!(bundle.manifest.passes[1].source_entry, "paint");
 
     let shader = &bundle.pass_wgsl[0].source;
-    eprintln!("streaming boundary-interaction WGSL: {} bytes", shader.len());
+    eprintln!(
+        "streaming boundary-interaction WGSL: {} bytes",
+        shader.len()
+    );
     let module = naga::front::wgsl::parse_str(shader)
         .unwrap_or_else(|error| panic!("boundary-interaction WGSL parse failed: {error:?}"));
     naga::valid::Validator::new(
@@ -292,7 +296,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 41);
+    assert_eq!(bundle.manifest.passes.len(), 48);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -459,7 +463,33 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     );
     assert_eq!(bundle.manifest.passes[39].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[39].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[40].source_entry, "paint");
+    let interaction_lde_names = [
+        "prepare_interaction_lde_inverse",
+        "advance_interaction_lde_inverse",
+        "validate_interaction_lde_inverse",
+        "prepare_interaction_lde_forward",
+        "advance_interaction_lde_forward",
+        "validate_interaction_lde_forward",
+        "finish_interaction_lde",
+    ];
+    assert_eq!(
+        bundle.manifest.passes[40..47]
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        interaction_lde_names,
+    );
+    assert_eq!(bundle.manifest.passes[40].dispatch, Some([4_864, 1, 1]));
+    assert_eq!(bundle.manifest.passes[41].dispatch, Some([4_864, 1, 1]));
+    assert_eq!(bundle.manifest.passes[41].repeat, 12);
+    assert_eq!(bundle.manifest.passes[42].dispatch, Some([3, 1, 1]));
+    assert_eq!(bundle.manifest.passes[43].dispatch, Some([9_728, 1, 1]));
+    assert_eq!(bundle.manifest.passes[44].dispatch, Some([9_728, 1, 1]));
+    assert_eq!(bundle.manifest.passes[44].repeat, 13);
+    assert_eq!(bundle.manifest.passes[45].dispatch, Some([3, 1, 1]));
+    assert_eq!(bundle.manifest.passes[46].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[46].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[47].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle
@@ -481,7 +511,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         Some(INPUT_GRID_LANES)
     );
     assert_eq!(resource_length("lde_values"), Some(BASE_LDE_WORDS));
-    assert_eq!(resource_length("lde_progress"), Some(OUTPUT_GRID_LANES));
+    assert_eq!(resource_length("lde_progress"), Some(INTERACTION_LDE_WORDS));
     assert!(
         bundle.manifest.passes.iter().all(|pass| {
             pass.layout

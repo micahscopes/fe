@@ -116,13 +116,19 @@ const BASE_TRACE_WORDS: usize = PRODUCTION_TRACE_LENGTH * SPARSE_BASE_AIR_FIELDS
 const INTERACTION_TRACE_WORDS: usize = PRODUCTION_TRACE_LENGTH * SPARSE_INTERACTION_AIR_FIELDS
 const BASE_LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
 const BASE_LDE_WORDS: usize = BASE_LDE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const INTERACTION_LDE_WORDS: usize = BASE_LDE_LENGTH * SPARSE_INTERACTION_AIR_FIELDS
 const LDE_INPUT_LANES: usize = PRODUCTION_TRACE_LENGTH / 2
 const LDE_OUTPUT_LANES: usize = BASE_LDE_LENGTH / 2
 const LDE_INPUT_GRID_LANES: usize = SPARSE_BASE_AIR_FIELDS * LDE_INPUT_LANES
 const LDE_OUTPUT_GRID_LANES: usize = SPARSE_BASE_AIR_FIELDS * LDE_OUTPUT_LANES
+const INTERACTION_INPUT_GRID_LANES: usize = SPARSE_INTERACTION_AIR_FIELDS * LDE_INPUT_LANES
+const INTERACTION_OUTPUT_GRID_LANES: usize = SPARSE_INTERACTION_AIR_FIELDS * LDE_OUTPUT_LANES
 const LDE_INPUT_GROUPS: usize = (LDE_INPUT_GRID_LANES + THREADS - 1) / THREADS
 const LDE_OUTPUT_GROUPS: usize = (LDE_OUTPUT_GRID_LANES + THREADS - 1) / THREADS
 const LDE_VALIDATION_GROUPS: usize = (SPARSE_BASE_AIR_FIELDS + THREADS - 1) / THREADS
+const INTERACTION_INPUT_GROUPS: usize = (INTERACTION_INPUT_GRID_LANES + THREADS - 1) / THREADS
+const INTERACTION_OUTPUT_GROUPS: usize = (INTERACTION_OUTPUT_GRID_LANES + THREADS - 1) / THREADS
+const INTERACTION_VALIDATION_GROUPS: usize = (SPARSE_INTERACTION_AIR_FIELDS + THREADS - 1) / THREADS
 const BASE_TREE_NODES: usize = ordered_binary_tree_nodes(BASE_LDE_LENGTH)
 const BASE_TREE_WORDS: usize = ordered_binary_tree_digest_words(BASE_LDE_LENGTH)
 const BASE_TREE_PARENT_TASKS: usize = ordered_binary_tree_parent_tasks(BASE_LDE_LENGTH)
@@ -162,11 +168,17 @@ static_assert(BASE_TRACE_WORDS == 1064960)
 static_assert(INTERACTION_TRACE_WORDS == 622592)
 static_assert(BASE_LDE_LENGTH == 8192)
 static_assert(BASE_LDE_WORDS == 2129920)
+static_assert(INTERACTION_LDE_WORDS == 1245184)
 static_assert(LDE_INPUT_GRID_LANES == 532480)
 static_assert(LDE_OUTPUT_GRID_LANES == 1064960)
+static_assert(INTERACTION_INPUT_GRID_LANES == 311296)
+static_assert(INTERACTION_OUTPUT_GRID_LANES == 622592)
 static_assert(LDE_INPUT_GROUPS == 8320)
 static_assert(LDE_OUTPUT_GROUPS == 16640)
 static_assert(LDE_VALIDATION_GROUPS == 5)
+static_assert(INTERACTION_INPUT_GROUPS == 4864)
+static_assert(INTERACTION_OUTPUT_GROUPS == 9728)
+static_assert(INTERACTION_VALIDATION_GROUPS == 3)
 static_assert(BASE_TREE_NODES == 16383)
 static_assert(BASE_TREE_WORDS == 131064)
 static_assert(BASE_TREE_PARENT_TASKS == 4096)
@@ -188,6 +200,9 @@ static_assert(BASE_COMMITMENT_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(CHALLENGE_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(CHALLENGE_OUTPUT_WORDS <= PRODUCTION_TRACE_LENGTH)
 static_assert(INTERACTION_TRACE_WORDS <= BASE_TRACE_WORDS)
+static_assert(INTERACTION_TRACE_WORDS <= INTERACTION_LDE_WORDS)
+static_assert(INTERACTION_INPUT_GRID_LANES <= LDE_INPUT_GRID_LANES)
+static_assert(INTERACTION_OUTPUT_GRID_LANES <= BASE_TRACE_WORDS)
 static_assert(<BaseLdeInputPlan as FactorTree>::POINTS == PRODUCTION_TRACE_LENGTH)
 static_assert(<BaseLdeOutputPlan as FactorTree>::POINTS == BASE_LDE_LENGTH)
 static_assert(LDE_INPUT_STAGES == 12)
@@ -231,7 +246,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     lde_inverse_values: Shared<u32, BASE_TRACE_WORDS>,
     lde_inverse_progress: Shared<u32, LDE_INPUT_GRID_LANES>,
     lde_values: Shared<u32, BASE_LDE_WORDS>,
-    lde_progress: Shared<u32, LDE_OUTPUT_GRID_LANES>,
+    lde_progress: Shared<u32, INTERACTION_LDE_WORDS>,
 
     fn derive_products(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<3, 1, 1>, Grid<1, 1, 1>>)
@@ -587,7 +602,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_TRACE_WORDS,
             LDE_INPUT_GRID_LANES,
             BASE_LDE_WORDS,
-            LDE_OUTPUT_GRID_LANES,
+            INTERACTION_LDE_WORDS,
             BabyBear,
             BaseLdeInputPlan,
             BaseLdeOutputPlan,
@@ -614,7 +629,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             LDE_OUTPUT_LANES,
             BASE_LDE_WORDS,
-            LDE_OUTPUT_GRID_LANES,
+            INTERACTION_LDE_WORDS,
             BabyBear,
             BaseLdeOutputPlan,
         >(self.lde_values, self.lde_progress, invocation)
@@ -632,7 +647,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             SPARSE_BASE_AIR_FIELDS,
             BASE_LDE_LENGTH,
             LDE_OUTPUT_LANES,
-            LDE_OUTPUT_GRID_LANES,
+            INTERACTION_LDE_WORDS,
             BaseLdeOutputPlan,
         >(self.lde_progress, invocation)
         if validation.active {
@@ -662,9 +677,10 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         >(self.transition_workspace, valid)
     }
 
-    /// The completed LDE retires the base trace, inverse values, and row
-    /// validity buffers. Reuse those phase-local allocations as the ordered
-    /// tree digest arena, node validity, and private parent cursors.
+    /// The completed LDE retires the inverse values and transform cursors.
+    /// Reuse those phase-local allocations as the ordered tree digest arena,
+    /// node validity, and private parent cursors. The base trace remains live
+    /// until it has generated the interaction trace.
     fn prepare_base_lde_commitments(self, invocation: ComputeInvocation)
         uses (
             Kernel<
@@ -717,7 +733,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             write_ordered_binary_tree_leaf<
                 BASE_LDE_LENGTH,
                 BASE_TRACE_WORDS,
-                BASE_TRACE_WORDS,
+                INTERACTION_LDE_WORDS,
             >(
                 self.lde_inverse_values,
                 self.lde_progress,
@@ -763,7 +779,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             BASE_TREE_LEVELS,
             BASE_TRACE_WORDS,
-            BASE_TRACE_WORDS,
+            INTERACTION_LDE_WORDS,
             PRODUCTION_TRACE_LENGTH,
         >(
             self.lde_inverse_values,
@@ -781,7 +797,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             BASE_TREE_LEVELS,
             BASE_TRACE_WORDS,
-            BASE_TRACE_WORDS,
+            INTERACTION_LDE_WORDS,
             PRODUCTION_TRACE_LENGTH,
         >(self.lde_inverse_values, self.lde_progress, self.validity)
         self.lde_progress.store(
@@ -868,7 +884,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
-            BASE_TRACE_WORDS,
+            INTERACTION_LDE_WORDS,
             LDE_INPUT_GRID_LANES,
         >(
             self.base_trace, self.validity, self.lde_progress,
@@ -885,7 +901,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
-            BASE_TRACE_WORDS,
+            INTERACTION_LDE_WORDS,
             LDE_INPUT_GRID_LANES,
         >(
             self.base_trace, self.validity, self.lde_progress,
@@ -902,7 +918,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
-            BASE_TRACE_WORDS,
+            INTERACTION_LDE_WORDS,
             LDE_INPUT_GRID_LANES,
         >(
             self.base_trace, self.validity, self.lde_progress,
@@ -919,7 +935,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
-            BASE_TRACE_WORDS,
+            INTERACTION_LDE_WORDS,
             LDE_INPUT_GRID_LANES,
         >(
             self.base_trace, self.validity, self.lde_progress,
@@ -936,6 +952,156 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         while row < PRODUCTION_TRACE_LENGTH.downcast_truncate() {
             valid = valid && self.lde_inverse_progress.load(index: row) == 1
             row = row + 1
+        }
+        store_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace, valid)
+    }
+
+    /// The base trace is retired once every interaction row is materialized.
+    /// Reuse it for the smaller interaction inverse transform, then reuse the
+    /// interaction-trace allocation for the larger coset codeword. The base
+    /// LDE remains untouched for composition and authenticated openings.
+    fn prepare_interaction_lde_inverse(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<INTERACTION_INPUT_GROUPS, 1, 1>>)
+    {
+        prepare_batched_stage_grid<
+            SPARSE_INTERACTION_AIR_FIELDS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_INPUT_LANES,
+            INTERACTION_LDE_WORDS,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.lde_progress,
+            0,
+            self.base_trace,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn advance_interaction_lde_inverse(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<INTERACTION_INPUT_GROUPS, 1, 1, LDE_INPUT_STAGES>,
+            >
+        )
+    {
+        inverse_batched_stage_grid_lane<
+            SPARSE_INTERACTION_AIR_FIELDS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_INPUT_LANES,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+            BabyBear,
+            BaseLdeInputPlan,
+        >(
+            self.base_trace,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn validate_interaction_lde_inverse(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<INTERACTION_VALIDATION_GROUPS, 1, 1>,
+            >
+        )
+    {
+        validate_batched_stage_grid<
+            SPARSE_INTERACTION_AIR_FIELDS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_INPUT_LANES,
+            LDE_INPUT_GRID_LANES,
+            BaseLdeInputPlan,
+        >(self.lde_inverse_progress, invocation)
+    }
+
+    fn prepare_interaction_lde_forward(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<INTERACTION_OUTPUT_GROUPS, 1, 1>>)
+    {
+        prepare_validated_batched_coset_extension<
+            SPARSE_INTERACTION_AIR_FIELDS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            LDE_INPUT_LANES,
+            LDE_OUTPUT_LANES,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+            INTERACTION_LDE_WORDS,
+            BASE_TRACE_WORDS,
+            BabyBear,
+            BaseLdeInputPlan,
+            BaseLdeOutputPlan,
+        >(
+            self.base_trace,
+            self.lde_inverse_progress,
+            self.lde_progress,
+            self.lde_inverse_values,
+            BabyBear::from_u32(7),
+            invocation,
+        )
+    }
+
+    fn advance_interaction_lde_forward(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<INTERACTION_OUTPUT_GROUPS, 1, 1, LDE_OUTPUT_STAGES>,
+            >
+        )
+    {
+        forward_batched_stage_grid_lane<
+            SPARSE_INTERACTION_AIR_FIELDS,
+            BASE_LDE_LENGTH,
+            LDE_OUTPUT_LANES,
+            INTERACTION_LDE_WORDS,
+            BASE_TRACE_WORDS,
+            BabyBear,
+            BaseLdeOutputPlan,
+        >(self.lde_progress, self.lde_inverse_values, invocation)
+    }
+
+    fn validate_interaction_lde_forward(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<INTERACTION_VALIDATION_GROUPS, 1, 1>,
+            >
+        )
+    {
+        let validation = validate_batched_stage_grid<
+            SPARSE_INTERACTION_AIR_FIELDS,
+            BASE_LDE_LENGTH,
+            LDE_OUTPUT_LANES,
+            BASE_TRACE_WORDS,
+            BaseLdeOutputPlan,
+        >(self.lde_inverse_values, invocation)
+        if validation.active {
+            self.validity.store(
+                index: validation.batch,
+                value: if validation.valid { 1 } else { 0 },
+            )
+        }
+    }
+
+    fn finish_interaction_lde(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let mut column: u32 = 0
+        let mut valid = load_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace)
+        while column < SPARSE_INTERACTION_AIR_FIELDS.downcast_truncate() {
+            valid = valid && self.validity.load(index: column) == 1
+            column = column + 1
         }
         store_transition_phase_receipt<
             PRODUCTION_LIMBS,

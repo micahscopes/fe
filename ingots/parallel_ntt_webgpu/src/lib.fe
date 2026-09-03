@@ -218,8 +218,8 @@ pub fn prepare_batched_stage_grid<
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { VALUE_WORDS == BATCHES * N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { VALUE_WORDS >= BATCHES * N },
+    { PROGRESS_WORDS >= BATCHES * LANES },
 {
     let global_lane = invocation.global.x
     let total_lanes: u32 = (BATCHES * LANES).downcast_truncate()
@@ -263,8 +263,8 @@ where
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { VALUE_WORDS == BATCHES * N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { VALUE_WORDS >= BATCHES * N },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { radix2_field_domain_supported<N, F>() },
     { Plan::POINTS == N },
 {
@@ -326,8 +326,8 @@ where
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { VALUE_WORDS == BATCHES * N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { VALUE_WORDS >= BATCHES * N },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { radix2_field_domain_supported<N, F>() },
     { Plan::POINTS == N },
 {
@@ -361,8 +361,8 @@ where
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { VALUE_WORDS == BATCHES * N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { VALUE_WORDS >= BATCHES * N },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { radix2_field_domain_supported<N, F>() },
     { Plan::POINTS == N },
 {
@@ -400,7 +400,7 @@ where
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { Plan::POINTS == N },
 {
     let batch = invocation.global.x
@@ -447,7 +447,7 @@ where
     N > 0,
     N > 1,
     { LANES * 2 == N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { Plan::POINTS == N },
 {
     batch < BATCHES.downcast_truncate()
@@ -489,10 +489,10 @@ pub fn prepare_validated_batched_coset_extension<
     { (OUT & (OUT - 1)) == 0 },
     { (OUT % N) == 0 },
     { OUTPUT_LANES * 2 == OUT },
-    { COEFFICIENT_WORDS == BATCHES * N },
-    { INVERSE_PROGRESS_WORDS == BATCHES * INPUT_LANES },
-    { VALUE_WORDS == BATCHES * OUT },
-    { PROGRESS_WORDS == BATCHES * OUTPUT_LANES },
+    { COEFFICIENT_WORDS >= BATCHES * N },
+    { INVERSE_PROGRESS_WORDS >= BATCHES * INPUT_LANES },
+    { VALUE_WORDS >= BATCHES * OUT },
+    { PROGRESS_WORDS >= BATCHES * OUTPUT_LANES },
     { radix2_field_domain_supported<N, F>() },
     { radix2_field_domain_supported<OUT, F>() },
     { InputPlan::POINTS == N },
@@ -595,10 +595,10 @@ pub fn prepare_batched_coset_extension<
     { (OUT & (OUT - 1)) == 0 },
     { (OUT % N) == 0 },
     { OUTPUT_LANES * 2 == OUT },
-    { COEFFICIENT_WORDS == BATCHES * N },
-    { INVERSE_PROGRESS_WORDS == BATCHES * INPUT_LANES },
-    { VALUE_WORDS == BATCHES * OUT },
-    { PROGRESS_WORDS == BATCHES * OUTPUT_LANES },
+    { COEFFICIENT_WORDS >= BATCHES * N },
+    { INVERSE_PROGRESS_WORDS >= BATCHES * INPUT_LANES },
+    { VALUE_WORDS >= BATCHES * OUT },
+    { PROGRESS_WORDS >= BATCHES * OUTPUT_LANES },
     { radix2_field_domain_supported<N, F>() },
     { radix2_field_domain_supported<OUT, F>() },
     { InputPlan::POINTS == N },
@@ -695,8 +695,8 @@ where
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { VALUE_WORDS == BATCHES * N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { VALUE_WORDS >= BATCHES * N },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { Plan::POINTS == N },
 {
     let global_lane = invocation.global.x
@@ -757,8 +757,8 @@ where
     N > 1,
     { (N & (N - 1)) == 0 },
     { LANES * 2 == N },
-    { VALUE_WORDS == BATCHES * N },
-    { PROGRESS_WORDS == BATCHES * LANES },
+    { VALUE_WORDS >= BATCHES * N },
+    { PROGRESS_WORDS >= BATCHES * LANES },
     { Plan::POINTS == N },
 {
     let finish = finish_batched_stage_grid<
