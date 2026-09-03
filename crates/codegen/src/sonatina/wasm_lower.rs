@@ -6,7 +6,7 @@
 //! recursively flattened struct and fixed-array values, materialized aggregate
 //! slots and object references, target-layout memory projections, fieldless
 //! enum tags, flattened payload-enum values, and the canonical browser ABI
-//! wrappers. Unsupported memory-carried payload enums, wide scalar operations,
+//! wrappers. Unsupported wide scalar operations,
 //! EVM host operations, and other target-specific constructs fail closed rather
 //! than being silently approximated.
 //!
@@ -2552,6 +2552,26 @@ const USIZE_WASM_REPR: ScalarRepr = ScalarRepr::Int {
     bits: 32,
     signed: false,
 };
+
+/// The only source-layout/runtime-local scalar mismatch introduced by Wasm
+/// legalization. Aggregate layouts keep target-neutral `usize` as u256, while
+/// the prepared Wasm body carries that same semantic value as u32. Requiring
+/// the semantic type, exact repr pair, and scalar role keeps genuine `u256`
+/// values outside this bridge.
+fn is_wasm32_usize_rep_bridge<'db>(
+    db: &'db DriverDataBase,
+    semantic_ty: TyId<'db>,
+    actual: &RuntimeClass<'db>,
+    expected: &RuntimeClass<'db>,
+) -> bool {
+    let (RuntimeClass::Scalar(actual), RuntimeClass::Scalar(expected)) = (actual, expected) else {
+        return false;
+    };
+    is_usize_semantic_ty(db, semantic_ty)
+        && actual.repr == USIZE_WASM_REPR
+        && is_u256_unsigned(expected.repr)
+        && actual.role == expected.role
+}
 
 /// Whether a scalar repr is the 256-bit unsigned integer that MIR assigns to
 /// `usize` (and `u256`). Only the ones whose local's `semantic_ty` is `usize`
@@ -5701,6 +5721,8 @@ where
             let semantic_ty = instantiated_runtime_local_ty(self.db, body.owner, semantic_ty);
             if semantic_gpu_resource(self.db, semantic_ty) {
                 args.push(self.gpu_resource_type(semantic_ty)?);
+            } else if let Some(ty) = self.semantic_scalar_ty_r1(semantic_ty, &param.class) {
+                args.push(ty);
             } else if let Some(pointee_class) =
                 self.typed_private_borrow_pointee(body.owner, param.local)
             {
@@ -5754,6 +5776,10 @@ where
                         && semantic_gpu_resource(self.db, semantic_ty)
                     {
                         vec![self.gpu_resource_type(semantic_ty)?]
+                    } else if let Some(ty) = semantic_ty
+                        .and_then(|semantic_ty| self.semantic_scalar_ty_r1(semantic_ty, class))
+                    {
+                        vec![ty]
                     } else if let Some(elem_tys) = semantic_ty
                         .map(|semantic_ty| {
                             self.semantic_scalar_tuple_element_tys(semantic_ty, class)
@@ -9189,7 +9215,8 @@ where
             return Err("inadmissible parameter boundary");
         }
         if body.signature.ret.as_ref().is_some_and(|class| {
-            class.contains_transport(self.db) || self.flat_shape(class).is_none()
+            class.contains_transport(self.db)
+                || (self.flat_shape(class).is_none() && !self.aggregate_is_memory_lowerable(class))
         }) {
             return Err("inadmissible return boundary");
         }
@@ -9333,7 +9360,9 @@ where
                                     && !self.arena_owned_local(body, *arg))
                         })
                     || callee_body.signature.ret.as_ref().is_some_and(|class| {
-                        class.contains_transport(self.db) || self.flat_shape(class).is_none()
+                        class.contains_transport(self.db)
+                            || (self.flat_shape(class).is_none()
+                                && !self.aggregate_is_memory_lowerable(class))
                     })
                 {
                     wasm_lower_trace_detail(|| {
@@ -9525,6 +9554,82 @@ where
         }
     }
 
+    fn aggregate_is_semantically_memory_lowerable(
+        &self,
+        semantic_ty: TyId<'db>,
+        class: &RuntimeClass<'db>,
+    ) -> bool {
+        let semantic_ty = semantic_ty.as_view(self.db).unwrap_or(semantic_ty);
+        match class {
+            RuntimeClass::Scalar(scalar) => {
+                scalar_ty_r1(scalar).is_ok()
+                    || (is_usize_semantic_ty(self.db, semantic_ty) && is_u256_unsigned(scalar.repr))
+            }
+            RuntimeClass::AggregateValue { layout } => match layout.data(self.db) {
+                Layout::Struct(_) if self.canonical_descriptor_layout(*layout) => true,
+                Layout::Struct(struct_layout) => {
+                    let semantic_fields = semantic_ty.field_types(self.db);
+                    semantic_fields.len() == struct_layout.fields.len()
+                        && semantic_fields.into_iter().zip(&struct_layout.fields).all(
+                            |(field_ty, field_class)| {
+                                self.aggregate_is_semantically_memory_lowerable(
+                                    field_ty,
+                                    field_class,
+                                )
+                            },
+                        )
+                }
+                Layout::Array(array_layout) => {
+                    let (_, args) = semantic_ty.decompose_ty_app(self.db);
+                    args.first().is_some_and(|element_ty| {
+                        self.aggregate_is_semantically_memory_lowerable(
+                            *element_ty,
+                            &array_layout.elem,
+                        )
+                    })
+                }
+                Layout::Enum(enum_layout) => {
+                    !enum_layout.variants.is_empty()
+                        && enum_layout.variants.iter().all(|variant| {
+                            variant
+                                .fields
+                                .iter()
+                                .all(|field| self.aggregate_is_memory_lowerable(field))
+                        })
+                }
+            },
+            RuntimeClass::Ref {
+                kind:
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                view: RefView::Whole,
+                ..
+            }
+            | RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                target: Some(_),
+            } => true,
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => false,
+        }
+    }
+
+    fn semantic_scalar_ty_r1(
+        &self,
+        semantic_ty: TyId<'db>,
+        class: &RuntimeClass<'db>,
+    ) -> Option<Type> {
+        let RuntimeClass::Scalar(scalar) = class else {
+            return None;
+        };
+        if is_usize_semantic_ty(self.db, semantic_ty) && is_u256_unsigned(scalar.repr) {
+            Some(Type::I32)
+        } else {
+            scalar_ty_r1(scalar).ok()
+        }
+    }
+
     fn object_value_layout(&self, class: &RuntimeClass<'db>) -> Option<LayoutId<'db>> {
         let RuntimeClass::Ref {
             pointee,
@@ -9632,27 +9737,26 @@ where
     /// addresses). Structs recurse over their fields, arrays over their element.
     /// A typed memory address or whole memory-provider reference is already one
     /// admitted wasm32 word, so an owned product may preserve that exact word in
-    /// compiler-owned aggregate storage. Object/const references, untyped raw or
-    /// non-memory transports, and payload enums continue to fail closed. Nominal
-    /// canonical browser descriptors retain their narrow owned-pointer exception.
+    /// compiler-owned aggregate storage. Payload enums recurse over every
+    /// variant payload and use their target-layout discriminant plus active
+    /// payload in memory. Object/const references and untyped or non-memory
+    /// transports continue to fail closed. Nominal canonical browser descriptors
+    /// retain their narrow owned-pointer exception.
     fn aggregate_is_memory_lowerable(&self, class: &RuntimeClass<'db>) -> bool {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar).is_ok(),
-            RuntimeClass::AggregateValue { layout } => match layout.data(self.db) {
-                Layout::Struct(_) if self.canonical_descriptor_layout(*layout) => true,
-                Layout::Struct(struct_layout) => struct_layout
-                    .fields
-                    .iter()
-                    .all(|field| self.aggregate_is_memory_lowerable(field)),
-                Layout::Array(array_layout) => {
-                    self.aggregate_is_memory_lowerable(&array_layout.elem)
-                }
-                // A payload-free enum is one compact target-layout tag in
-                // memory and one canonical i32 lane in the value ABI. Payload
-                // enums still need a tagged-union memory policy and remain
-                // fail-closed.
-                Layout::Enum(_) => self.fieldless_enum_tag(*layout).is_some(),
-            },
+            RuntimeClass::AggregateValue { layout } => {
+                // Aggregate layouts retain their instantiated source type, so
+                // target legalization can distinguish an embedded `usize`
+                // from a genuine `u256` without weakening the scalar envelope.
+                // This is the aggregate counterpart of `narrow_usize_scalars`.
+                let semantic_ty = match layout.data(self.db) {
+                    Layout::Struct(layout) => layout.source_ty,
+                    Layout::Array(layout) => layout.source_ty,
+                    Layout::Enum(layout) => layout.source_ty,
+                };
+                self.aggregate_is_semantically_memory_lowerable(semantic_ty, class)
+            }
             RuntimeClass::Ref {
                 kind:
                     RefKind::Provider {
@@ -9702,7 +9806,9 @@ where
             return Ok(Some(FlatShape::Leaf(self.gpu_resource_type(semantic_ty)?)));
         }
         match class {
-            RuntimeClass::Scalar(scalar) => Ok(scalar_ty_r1(scalar).ok().map(FlatShape::Leaf)),
+            RuntimeClass::Scalar(_) => Ok(self
+                .semantic_scalar_ty_r1(semantic_ty, class)
+                .map(FlatShape::Leaf)),
             RuntimeClass::AggregateValue { layout } => {
                 if !active.insert(*layout) {
                     return Ok(None);
@@ -10392,7 +10498,7 @@ where
                 })?;
                 let pointer = self.lower_alloc_object(*layout)?;
                 let mut cursor = 0usize;
-                self.store_materialized_leaves(pointer, &param.class, leaves, &mut cursor)?;
+                self.store_materialized_leaves(pointer, &param.class, &shape, leaves, &mut cursor)?;
                 if cursor != leaves.len() {
                     return Err(LowerError::Internal(format!(
                         "materialized parameter {:?} consumed {cursor} of {} leaves",
@@ -11051,6 +11157,28 @@ where
         })
     }
 
+    /// Compare a lowered local with one source-layout field without mistaking
+    /// Wasm32 `usize` legalization for a source representation mismatch. MIR
+    /// layouts retain the target-neutral 256-bit class for `usize`, while the
+    /// Wasm body pass narrows each semantically identified `usize` local to an
+    /// i32 carrier. No other semantic scalar receives this exception.
+    fn local_shares_source_field_rep(
+        &self,
+        local: RLocalId,
+        actual: &RuntimeClass<'db>,
+        expected: &RuntimeClass<'db>,
+    ) -> bool {
+        if actual.shares_runtime_rep_with(self.module.db, expected) {
+            return true;
+        }
+        let Some(local) = self.body.local(local) else {
+            return false;
+        };
+        let semantic_ty =
+            instantiated_runtime_local_ty(self.module.db, self.body.owner, local.semantic_ty);
+        is_wasm32_usize_rep_bridge(self.module.db, semantic_ty, actual, expected)
+    }
+
     fn is_address_carried_aggregate_value(&self, local: RLocalId) -> bool {
         self.materialized_param_slots.contains(&local)
             || self.address_carried_aggregate_values.contains(&local)
@@ -11316,15 +11444,25 @@ where
         let actual = self.body.value_class(source).cloned().ok_or_else(|| {
             LowerError::Internal(format!("aggregate field {source:?} has no class"))
         })?;
-        if !actual.shares_runtime_rep_with(self.module.db, expected) {
+        if !self.local_shares_source_field_rep(source, &actual, expected) {
             return Err(LowerError::Unsupported(format!(
                 "aggregate field {source:?} has an incompatible runtime representation"
             )));
         }
         match expected {
-            RuntimeClass::Scalar(scalar) => {
+            RuntimeClass::Scalar(_) => {
                 let value = self.local_value(source)?;
-                let ty = scalar_ty_r1(scalar)?;
+                let FlatShape::Leaf(ty) = self.local_flat_shape(source)? else {
+                    return Err(LowerError::Internal(format!(
+                        "aggregate scalar field {source:?} has a non-scalar Wasm shape"
+                    )));
+                };
+                if self.fb.type_of(value) != ty {
+                    return Err(LowerError::Internal(format!(
+                        "aggregate scalar field {source:?} has value type {:?}, expected {ty:?}",
+                        self.fb.type_of(value),
+                    )));
+                }
                 self.fb
                     .insert_inst_no_result(Mstore::new(self.inst_set(), destination, value, ty));
                 Ok(())
@@ -11342,7 +11480,7 @@ where
                     ));
                 }
                 let mut cursor = 0;
-                self.store_materialized_leaves(destination, &actual, &leaves, &mut cursor)?;
+                self.store_materialized_leaves(destination, &actual, &shape, &leaves, &mut cursor)?;
                 if cursor != leaves.len() {
                     return Err(LowerError::Internal(
                         "aggregate field materialization did not consume every leaf".to_owned(),
@@ -11551,7 +11689,7 @@ where
                     let actual_class = self.body.value_class(*field).ok_or_else(|| {
                         LowerError::Internal(format!("enum field {field:?} has no class"))
                     })?;
-                    if !actual_class.shares_runtime_rep_with(self.module.db, expected_class) {
+                    if !self.local_shares_source_field_rep(*field, actual_class, expected_class) {
                         return Err(LowerError::Unsupported(
                             "payload enum field has an incompatible runtime representation"
                                 .to_owned(),
@@ -11635,7 +11773,7 @@ where
                     let actual_class = self.body.value_class(*field).ok_or_else(|| {
                         LowerError::Internal(format!("aggregate field {field:?} has no class"))
                     })?;
-                    if !actual_class.shares_runtime_rep_with(self.module.db, expected_class) {
+                    if !self.local_shares_source_field_rep(*field, actual_class, expected_class) {
                         return Err(LowerError::Unsupported(format!(
                             "wasm target (R2.2): aggregate field {field:?} has an incompatible \
                              recursive runtime representation"
@@ -12145,7 +12283,7 @@ where
                     let dst_class = self.body.value_class(dst).ok_or_else(|| {
                         LowerError::Internal(format!("scalar destination {dst:?} has no class"))
                     })?;
-                    if !field_class.shares_runtime_rep_with(self.module.db, dst_class) {
+                    if !self.local_shares_source_field_rep(dst, dst_class, &field_class) {
                         return Err(LowerError::Unsupported(
                             "wasm target (R2.2): scalar projection destination has an \
                              incompatible runtime representation"
@@ -12598,106 +12736,256 @@ where
         &mut self,
         pointer: ValueId,
         class: &RuntimeClass<'db>,
+        shape: &FlatShape,
         leaves: &[ValueId],
         cursor: &mut usize,
     ) -> Result<(), LowerError> {
-        match class {
-            RuntimeClass::Scalar(scalar) => {
+        match (class, shape) {
+            (RuntimeClass::Scalar(_), FlatShape::Leaf(ty)) => {
                 let value = *leaves.get(*cursor).ok_or_else(|| {
                     LowerError::Internal(
                         "materialized aggregate is missing a scalar leaf".to_owned(),
                     )
                 })?;
-                let ty = scalar_ty_r1(scalar)?;
+                if self.fb.type_of(value) != *ty {
+                    return Err(LowerError::Internal(format!(
+                        "materialized scalar leaf has type {:?}, expected {ty:?}",
+                        self.fb.type_of(value),
+                    )));
+                }
                 self.fb
-                    .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                    .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, *ty));
                 *cursor += 1;
                 Ok(())
             }
-            RuntimeClass::AggregateValue { layout } => match layout.data(self.module.db) {
-                Layout::Struct(struct_layout) => {
-                    for (index, field) in struct_layout.fields.iter().enumerate() {
-                        let offset = mir::struct_field_offset_bytes(
-                            self.module.db,
-                            *layout,
-                            hir::analysis::semantic::FieldIndex(index as u16),
-                            crate::WASM_LAYOUT,
-                        );
-                        let address = self.offset_addr(pointer, offset)?;
-                        self.store_materialized_leaves(address, field, leaves, cursor)?;
+            (RuntimeClass::AggregateValue { layout }, FlatShape::Leaf(Type::I32))
+                if self.module.fieldless_enum_tag(*layout).is_some() =>
+            {
+                let tag = self.module.fieldless_enum_tag(*layout).unwrap();
+                let value = *leaves.get(*cursor).ok_or_else(|| {
+                    LowerError::Internal(
+                        "materialized enum is missing its canonical tag leaf".to_owned(),
+                    )
+                })?;
+                let compact_ty = scalar_ty_r1(&tag)?;
+                let actual_ty = self.fb.type_of(value);
+                let stored = if actual_ty == compact_ty {
+                    value
+                } else if actual_ty == Type::I32
+                    && matches!(compact_ty, Type::I1 | Type::I8 | Type::I16)
+                {
+                    self.fb
+                        .insert_inst(Trunc::new(self.inst_set(), value, compact_ty), compact_ty)
+                } else {
+                    return Err(LowerError::Internal(format!(
+                        "materialized enum tag has value type {actual_ty:?}, compact memory requires {compact_ty:?}"
+                    )));
+                };
+                self.fb.insert_inst_no_result(Mstore::new(
+                    self.inst_set(),
+                    pointer,
+                    stored,
+                    compact_ty,
+                ));
+                *cursor += 1;
+                Ok(())
+            }
+            (RuntimeClass::AggregateValue { layout }, FlatShape::Product(fields)) => {
+                match layout.data(self.module.db) {
+                    Layout::Struct(struct_layout) => {
+                        if struct_layout.fields.len() != fields.len() {
+                            return Err(LowerError::Internal(
+                                "materialized struct shape/layout arity mismatch".to_owned(),
+                            ));
+                        }
+                        for (index, (field, field_shape)) in
+                            struct_layout.fields.iter().zip(fields).enumerate()
+                        {
+                            let offset = mir::struct_field_offset_bytes(
+                                self.module.db,
+                                *layout,
+                                hir::analysis::semantic::FieldIndex(index as u16),
+                                crate::WASM_LAYOUT,
+                            );
+                            let address = self.offset_addr(pointer, offset)?;
+                            self.store_materialized_leaves(
+                                address,
+                                field,
+                                field_shape,
+                                leaves,
+                                cursor,
+                            )?;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                Layout::Array(array_layout) => {
-                    let stride =
-                        mir::array_elem_size_bytes(self.module.db, *layout, crate::WASM_LAYOUT);
-                    for index in 0..usize::try_from(array_layout.len).map_err(|_| {
-                        LowerError::Unsupported("wasm array length exceeds usize".to_owned())
-                    })? {
-                        let offset = index.checked_mul(stride).ok_or_else(|| {
-                            LowerError::Unsupported(
-                                "wasm materialization array offset overflow".to_owned(),
+                    Layout::Array(array_layout) => {
+                        let len = usize::try_from(array_layout.len).map_err(|_| {
+                            LowerError::Unsupported("wasm array length exceeds usize".to_owned())
+                        })?;
+                        if len != fields.len() {
+                            return Err(LowerError::Internal(
+                                "materialized array shape/layout arity mismatch".to_owned(),
+                            ));
+                        }
+                        let stride =
+                            mir::array_elem_size_bytes(self.module.db, *layout, crate::WASM_LAYOUT);
+                        for (index, field_shape) in fields.iter().enumerate() {
+                            let offset = index.checked_mul(stride).ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "wasm materialization array offset overflow".to_owned(),
+                                )
+                            })?;
+                            let address = self.offset_addr(pointer, offset)?;
+                            self.store_materialized_leaves(
+                                address,
+                                &array_layout.elem,
+                                field_shape,
+                                leaves,
+                                cursor,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    Layout::Enum(enum_layout) => {
+                        if fields.len() != enum_layout.variants.len() + 1
+                            || fields.first() != Some(&FlatShape::Leaf(Type::I32))
+                        {
+                            return Err(LowerError::Internal(
+                                "materialized payload-enum shape/layout arity mismatch".to_owned(),
+                            ));
+                        }
+                        let tag = *leaves.get(*cursor).ok_or_else(|| {
+                            LowerError::Internal(
+                                "materialized payload enum is missing its tag leaf".to_owned(),
                             )
                         })?;
-                        let address = self.offset_addr(pointer, offset)?;
-                        self.store_materialized_leaves(
-                            address,
-                            &array_layout.elem,
-                            leaves,
-                            cursor,
-                        )?;
-                    }
-                    Ok(())
-                }
-                Layout::Enum(_) => {
-                    let tag = self.module.fieldless_enum_tag(*layout).ok_or_else(|| {
-                        LowerError::Unsupported(
-                            "wasm target: payload-enum materialization is not implemented"
-                                .to_owned(),
-                        )
-                    })?;
-                    let value = *leaves.get(*cursor).ok_or_else(|| {
-                        LowerError::Internal(
-                            "materialized enum is missing its canonical tag leaf".to_owned(),
-                        )
-                    })?;
-                    let compact_ty = scalar_ty_r1(&tag)?;
-                    let actual_ty = self.fb.type_of(value);
-                    let stored = if actual_ty == compact_ty {
-                        value
-                    } else if actual_ty == Type::I32
-                        && matches!(compact_ty, Type::I1 | Type::I8 | Type::I16)
-                    {
+                        if self.fb.type_of(tag) != Type::I32 {
+                            return Err(LowerError::Internal(
+                                "materialized payload enum tag escaped its i32 carrier".to_owned(),
+                            ));
+                        }
+                        *cursor += 1;
+                        let mut ranges = Vec::with_capacity(enum_layout.variants.len());
+                        for variant_shape in &fields[1..] {
+                            let FlatShape::Product(payload_shapes) = variant_shape else {
+                                return Err(LowerError::Internal(
+                                    "materialized payload-enum variant is not a product".to_owned(),
+                                ));
+                            };
+                            let start = *cursor;
+                            for field_shape in payload_shapes {
+                                *cursor = (*cursor)
+                                    .checked_add(field_shape.leaf_count())
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(
+                                            "wasm payload-enum lane count overflow".to_owned(),
+                                        )
+                                    })?;
+                            }
+                            ranges.push((start, *cursor));
+                        }
+
+                        let compact_tag_ty = scalar_ty_r1(&enum_layout.tag)?;
+                        let stored_tag = if compact_tag_ty == Type::I32 {
+                            tag
+                        } else if matches!(compact_tag_ty, Type::I1 | Type::I8 | Type::I16) {
+                            self.fb.insert_inst(
+                                Trunc::new(self.inst_set(), tag, compact_tag_ty),
+                                compact_tag_ty,
+                            )
+                        } else {
+                            return Err(LowerError::Unsupported(format!(
+                                "wasm payload-enum tag has unsupported memory type {compact_tag_ty:?}"
+                            )));
+                        };
+                        self.fb.insert_inst_no_result(Mstore::new(
+                            self.inst_set(),
+                            pointer,
+                            stored_tag,
+                            compact_tag_ty,
+                        ));
+                        let merge = self.fb.append_block();
+                        let invalid = self.fb.append_block();
+                        for (variant_index, (variant, variant_shape)) in
+                            enum_layout.variants.iter().zip(&fields[1..]).enumerate()
+                        {
+                            let active = self.fb.append_block();
+                            let next = if variant_index + 1 == enum_layout.variants.len() {
+                                invalid
+                            } else {
+                                self.fb.append_block()
+                            };
+                            let expected =
+                                self.fb.make_imm_value(Immediate::I32(variant_index as i32));
+                            let matches = self
+                                .fb
+                                .insert_inst(CmpEq::new(self.inst_set(), tag, expected), Type::I1);
+                            self.fb.insert_inst_no_result(Br::new(
+                                self.inst_set(),
+                                matches,
+                                active,
+                                next,
+                            ));
+
+                            self.fb.switch_to_block(active);
+                            let FlatShape::Product(payload_shapes) = variant_shape else {
+                                unreachable!()
+                            };
+                            if payload_shapes.len() != variant.fields.len() {
+                                return Err(LowerError::Internal(
+                                    "materialized payload-enum field arity mismatch".to_owned(),
+                                ));
+                            }
+                            let mut active_cursor = ranges[variant_index].0;
+                            for (field_index, (field, field_shape)) in
+                                variant.fields.iter().zip(payload_shapes).enumerate()
+                            {
+                                let address = self.payload_enum_field_address(
+                                    pointer,
+                                    *layout,
+                                    variant_index,
+                                    field_index,
+                                )?;
+                                self.store_materialized_leaves(
+                                    address,
+                                    field,
+                                    field_shape,
+                                    leaves,
+                                    &mut active_cursor,
+                                )?;
+                            }
+                            if active_cursor != ranges[variant_index].1 {
+                                return Err(LowerError::Internal(
+                                    "materialized payload-enum field width drifted".to_owned(),
+                                ));
+                            }
+                            self.fb
+                                .insert_inst_no_result(Jump::new(self.inst_set(), merge));
+                            self.fb.switch_to_block(next);
+                        }
                         self.fb
-                            .insert_inst(Trunc::new(self.inst_set(), value, compact_ty), compact_ty)
-                    } else {
-                        return Err(LowerError::Internal(format!(
-                            "materialized enum tag has value type {actual_ty:?}, compact memory requires {compact_ty:?}"
-                        )));
-                    };
-                    self.fb.insert_inst_no_result(Mstore::new(
-                        self.inst_set(),
-                        pointer,
-                        stored,
-                        compact_ty,
-                    ));
-                    *cursor += 1;
-                    Ok(())
+                            .insert_inst_no_result(Unreachable::new(self.inst_set()));
+                        self.fb.switch_to_block(merge);
+                        Ok(())
+                    }
                 }
-            },
-            RuntimeClass::Ref {
-                kind:
-                    RefKind::Provider {
-                        space: AddressSpaceKind::Memory,
-                        ..
-                    },
-                view: RefView::Whole,
-                ..
             }
-            | RuntimeClass::RawAddr {
-                space: AddressSpaceKind::Memory,
-                ..
-            } => {
+            (
+                RuntimeClass::Ref {
+                    kind:
+                        RefKind::Provider {
+                            space: AddressSpaceKind::Memory,
+                            ..
+                        },
+                    view: RefView::Whole,
+                    ..
+                }
+                | RuntimeClass::RawAddr {
+                    space: AddressSpaceKind::Memory,
+                    ..
+                },
+                FlatShape::Leaf(Type::I32),
+            ) => {
                 let value = *leaves.get(*cursor).ok_or_else(|| {
                     LowerError::Internal(
                         "materialized aggregate is missing its memory-handle leaf".to_owned(),
@@ -12717,13 +13005,41 @@ where
                 *cursor += 1;
                 Ok(())
             }
-            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
-                Err(LowerError::Unsupported(
-                    "wasm target: materialized aggregate contains a noncanonical transport leaf"
-                        .to_owned(),
-                ))
-            }
+            _ => Err(LowerError::Internal(format!(
+                "materialized aggregate class/shape mismatch: {class:?} / {shape:?}"
+            ))),
         }
+    }
+
+    fn payload_enum_field_address(
+        &mut self,
+        pointer: ValueId,
+        layout: LayoutId<'db>,
+        variant_index: usize,
+        field_index: usize,
+    ) -> Result<ValueId, LowerError> {
+        let variant_index = u16::try_from(variant_index).map_err(|_| {
+            LowerError::Unsupported("wasm payload-enum variant index exceeds u16".to_owned())
+        })?;
+        let field_index = u16::try_from(field_index).map_err(|_| {
+            LowerError::Unsupported("wasm payload-enum field index exceeds u16".to_owned())
+        })?;
+        let payload_offset = mir::enum_variant_field_offset_bytes(
+            self.module.db,
+            layout,
+            VariantId {
+                enum_layout: layout,
+                index: variant_index,
+            },
+            hir::analysis::semantic::FieldIndex(field_index),
+            crate::WASM_LAYOUT,
+        );
+        let offset = mir::enum_tag_size_bytes(self.module.db, layout, crate::WASM_LAYOUT)
+            .checked_add(payload_offset)
+            .ok_or_else(|| {
+                LowerError::Unsupported("wasm payload-enum field offset overflow".to_owned())
+            })?;
+        self.offset_addr(pointer, offset)
     }
 
     fn typed_private_child_pointer(
@@ -12936,11 +13252,7 @@ where
             let source_pointer = self.local_value(source)?;
             return self.lower_copy_object_bytes_into(source_pointer, pointer, layout);
         }
-        let shape = self.module.flat_shape(&source_class).ok_or_else(|| {
-            LowerError::Unsupported(format!(
-                "wasm target: aggregate copy source {source:?} cannot be recursively flattened"
-            ))
-        })?;
+        let shape = self.local_flat_shape(source)?;
         let leaves = self.local_flat_values(source)?;
         if leaves.len() != shape.leaf_count() {
             return Err(LowerError::Internal(format!(
@@ -12949,7 +13261,7 @@ where
             )));
         }
         let mut cursor = 0usize;
-        self.store_materialized_leaves(pointer, &source_class, &leaves, &mut cursor)?;
+        self.store_materialized_leaves(pointer, &source_class, &shape, &leaves, &mut cursor)?;
         if cursor != leaves.len() {
             return Err(LowerError::Internal(format!(
                 "aggregate copy source {source:?} consumed {cursor} of {} leaves",
@@ -13058,9 +13370,126 @@ where
                         }
                         Ok(())
                     }
-                    Layout::Enum(_) => Err(LowerError::Unsupported(
-                        "wasm target: payload-enum aggregate loads are not implemented".to_owned(),
-                    )),
+                    Layout::Enum(enum_layout) => {
+                        if fields.len() != enum_layout.variants.len() + 1
+                            || fields.first() != Some(&FlatShape::Leaf(Type::I32))
+                        {
+                            return Err(LowerError::Internal(
+                                "materialized payload-enum shape/layout arity mismatch".to_owned(),
+                            ));
+                        }
+                        let compact_tag_ty = scalar_ty_r1(&enum_layout.tag)?;
+                        let compact_tag = self.load_memory_scalar(pointer, compact_tag_ty);
+                        let tag = if compact_tag_ty == Type::I32 {
+                            compact_tag
+                        } else if matches!(compact_tag_ty, Type::I1 | Type::I8 | Type::I16) {
+                            self.fb.insert_inst(
+                                Zext::new(self.inst_set(), compact_tag, Type::I32),
+                                Type::I32,
+                            )
+                        } else {
+                            return Err(LowerError::Unsupported(format!(
+                                "wasm payload-enum tag has unsupported memory type {compact_tag_ty:?}"
+                            )));
+                        };
+                        let merge = self.fb.append_block();
+                        let invalid = self.fb.append_block();
+                        let mut leaf_types = Vec::new();
+                        shape.leaf_types(&mut leaf_types);
+                        let mut incoming = Vec::<(BlockId, Vec<ValueId>)>::with_capacity(
+                            enum_layout.variants.len(),
+                        );
+                        for (active_index, _) in enum_layout.variants.iter().enumerate() {
+                            let active = self.fb.append_block();
+                            let next = if active_index + 1 == enum_layout.variants.len() {
+                                invalid
+                            } else {
+                                self.fb.append_block()
+                            };
+                            let expected =
+                                self.fb.make_imm_value(Immediate::I32(active_index as i32));
+                            let matches = self
+                                .fb
+                                .insert_inst(CmpEq::new(self.inst_set(), tag, expected), Type::I1);
+                            self.fb.insert_inst_no_result(Br::new(
+                                self.inst_set(),
+                                matches,
+                                active,
+                                next,
+                            ));
+
+                            self.fb.switch_to_block(active);
+                            let mut branch_values = vec![tag];
+                            for (variant_index, (variant, variant_shape)) in
+                                enum_layout.variants.iter().zip(&fields[1..]).enumerate()
+                            {
+                                let FlatShape::Product(payload_shapes) = variant_shape else {
+                                    return Err(LowerError::Internal(
+                                        "materialized payload-enum variant is not a product"
+                                            .to_owned(),
+                                    ));
+                                };
+                                if payload_shapes.len() != variant.fields.len() {
+                                    return Err(LowerError::Internal(
+                                        "materialized payload-enum field arity mismatch".to_owned(),
+                                    ));
+                                }
+                                for (field_index, (field, field_shape)) in
+                                    variant.fields.iter().zip(payload_shapes).enumerate()
+                                {
+                                    if variant_index == active_index {
+                                        let address = self.payload_enum_field_address(
+                                            pointer,
+                                            *layout,
+                                            active_index,
+                                            field_index,
+                                        )?;
+                                        self.load_materialized_leaves(
+                                            address,
+                                            field,
+                                            field_shape,
+                                            &mut branch_values,
+                                        )?;
+                                    } else {
+                                        let mut leaf_types = Vec::new();
+                                        field_shape.leaf_types(&mut leaf_types);
+                                        for ty in leaf_types {
+                                            branch_values.push(self.zero_value(ty)?);
+                                        }
+                                    }
+                                }
+                            }
+                            if branch_values.len() != leaf_types.len() {
+                                return Err(LowerError::Internal(
+                                    "materialized payload-enum branch width drifted".to_owned(),
+                                ));
+                            }
+                            let predecessor = self.fb.current_block().ok_or_else(|| {
+                                LowerError::Internal(
+                                    "materialized payload-enum active branch was lost".to_owned(),
+                                )
+                            })?;
+                            self.fb
+                                .insert_inst_no_result(Jump::new(self.inst_set(), merge));
+                            incoming.push((predecessor, branch_values));
+                            self.fb.switch_to_block(next);
+                        }
+                        self.fb
+                            .insert_inst_no_result(Unreachable::new(self.inst_set()));
+                        self.fb.switch_to_block(merge);
+
+                        for (lane, ty) in leaf_types.into_iter().enumerate() {
+                            let lane_values = incoming
+                                .iter()
+                                .map(|(block, branch_values)| (branch_values[lane], *block))
+                                .collect();
+                            values.push(
+                                self.fb
+                                    .insert_inst(Phi::new(self.inst_set(), lane_values), ty),
+                            );
+                        }
+                        Ok(())
+                    }
                 }
             }
             _ => Err(LowerError::Internal(format!(
@@ -13141,11 +13570,7 @@ where
             let source = self.local_value(src)?;
             return self.lower_deep_object_copy(source, layout);
         }
-        let shape = self.module.flat_shape(&class).ok_or_else(|| {
-            LowerError::Unsupported(format!(
-                "wasm target: materialization source {src:?} cannot be flattened"
-            ))
-        })?;
+        let shape = self.local_flat_shape(src)?;
         let leaves = self.local_flat_values(src)?;
         if leaves.len() != shape.leaf_count() {
             return Err(LowerError::Internal(format!(
@@ -13155,7 +13580,7 @@ where
         }
         let pointer = self.lower_alloc_object(layout)?;
         let mut cursor = 0usize;
-        self.store_materialized_leaves(pointer, &class, &leaves, &mut cursor)?;
+        self.store_materialized_leaves(pointer, &class, &shape, &leaves, &mut cursor)?;
         if cursor != leaves.len() {
             return Err(LowerError::Internal(format!(
                 "materialization source {src:?} consumed {cursor} of {} leaves",
@@ -14634,30 +15059,28 @@ where
             *self.module.func_map.get(&callee).ok_or_else(|| {
                 LowerError::Internal("wasm call target was not declared".to_string())
             })?;
-        let ret_class = self
-            .module
-            .prepared_interfaces
-            .get(&callee)
-            .ok_or_else(|| {
-                LowerError::Internal(format!(
-                    "prepared Wasm body for `{}` is missing",
-                    self.module.function_symbol(callee),
-                ))
-            })?
-            .ret
-            .clone();
-        let ret_ty = if self.module.indirect_aggregate_returns.contains(&callee) {
-            Type::I32
-        } else {
-            match ret_class {
-                Some(class) => self.module.ty_for_class(&class)?,
-                None => {
-                    return Err(LowerError::Unsupported(
-                        "wasm target (R1) does not support calling a unit-returning function \
+        let signature = self.module.builder.ctx.get_sig(callee_ref).ok_or_else(|| {
+            LowerError::Internal(format!(
+                "declared Wasm signature for `{}` is missing",
+                self.module.function_symbol(callee),
+            ))
+        })?;
+        let ret_ty = match signature.ret_tys() {
+            [ret_ty] => *ret_ty,
+            [] => {
+                return Err(LowerError::Unsupported(
+                    "wasm target (R1) does not support calling a unit-returning function \
                      as a value expression"
-                            .to_string(),
-                    ));
-                }
+                        .to_string(),
+                ));
+            }
+            ret_tys => {
+                return Err(LowerError::Internal(format!(
+                    "value call to `{}` selected a {}-result Wasm signature; recursive \
+                     aggregate calls must use the flattened tuple lane",
+                    self.module.function_symbol(callee),
+                    ret_tys.len(),
+                )));
             }
         };
         let (arg_vals, call_checkpoint) = self.checked_call_arg_values(callee, callee_ref, args)?;
@@ -14710,12 +15133,21 @@ where
                 // ABI even though their function-local representation is one
                 // canonical-arena pointer, so load their leaves before rewinding
                 // the scoped arena. Every other return is the single-value form.
-                let flattened = self
-                    .body
-                    .signature
-                    .ret
-                    .as_ref()
-                    .is_some_and(|class| self.module.scalar_tuple_element_tys(class).is_some());
+                let return_class = self.body.signature.ret.clone();
+                let flattened = match return_class {
+                    Some(class) => {
+                        if let Some(semantic_ty) =
+                            instantiated_runtime_return_ty(self.module.db, self.body.owner)
+                        {
+                            self.module
+                                .semantic_scalar_tuple_element_tys(semantic_ty, &class)?
+                                .is_some()
+                        } else {
+                            self.module.scalar_tuple_element_tys(&class).is_some()
+                        }
+                    }
+                    None => false,
+                };
                 if flattened {
                     let values = self.local_flat_values(*value)?;
                     self.rewind_scoped_arena();
@@ -15853,6 +16285,37 @@ pub fn kernel(k: u32) -> u256 {
             ),
             "genuine u256 local must stay 256-bit (fail-closed); got {:?}",
             narrowed.locals[u256_idx].carrier
+        );
+
+        let narrowed_usize_class = narrowed.locals[usize_idx]
+            .carrier
+            .value_class()
+            .expect("narrowed usize should remain a value");
+        let source_usize_class = body.locals[usize_idx]
+            .carrier
+            .value_class()
+            .expect("source usize should be a value");
+        assert!(
+            is_wasm32_usize_rep_bridge(
+                &db,
+                body.locals[usize_idx].semantic_ty,
+                narrowed_usize_class,
+                source_usize_class,
+            ),
+            "semantic usize should bridge its exact wasm32/source-layout repr pair"
+        );
+        let source_u256_class = body.locals[u256_idx]
+            .carrier
+            .value_class()
+            .expect("source u256 should be a value");
+        assert!(
+            !is_wasm32_usize_rep_bridge(
+                &db,
+                body.locals[u256_idx].semantic_ty,
+                narrowed_usize_class,
+                source_u256_class,
+            ),
+            "genuine u256 must not pass through the semantic usize repr bridge"
         );
     }
 

@@ -2,6 +2,7 @@ use source_atlas::{
     AtlasDocument,
     AtlasLens,
     AtlasNavigation,
+    AtlasQuery,
     ContentDigest,
     HighlightClass,
     HighlightSpan,
@@ -124,6 +125,27 @@ pub fn independent_revision_probe() -> u32 {
         } else {
             0
         }
+}
+
+/// Successive reducers must preserve and replace differently shaped payload
+/// enum variants through the private object-backed state receiver.
+pub fn query_variant_roundtrip_probe() -> u32 {
+    let loading = AtlasNavigation<4>::empty()
+        .visit(
+            target: target(seed: 1, lens: AtlasLens::Authored, line: 1),
+        )
+    let selecting = loading.select_at(point: SourcePoint { line: 4, column: 2 })
+    let symbol = source_atlas::AtlasSymbol::projected(content: digest(seed: 17))
+    let defining = selecting.request_definition(symbol)
+    let referencing = defining.request_references(symbol)
+    let hovering = referencing.request_hover(symbol)
+    match hovering.query {
+        AtlasQuery::ResolveHover(revision, selected) => {
+            (if revision.number() == 1 { 2 } else { 0 })
+                + if selected.equals(other: symbol) { 1 } else { 0 }
+        },
+        _ => 0,
+    }
 }
 
 pub fn semantic_highlight_probe() -> u32 {

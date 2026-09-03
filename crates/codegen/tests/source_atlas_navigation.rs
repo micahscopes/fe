@@ -34,9 +34,39 @@ fn compile_atlas_navigation() -> Vec<u8> {
     wasm
 }
 
+fn compile_source_to_wasm_error(name: &str, source: &str) -> String {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{name}.fe")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_owned()));
+    let file = db
+        .workspace()
+        .get(&db, &url)
+        .expect("test file should load");
+    let top_mod = db.top_mod(file);
+    BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect_err("genuine u256 aggregate should stay outside the Wasm R1 envelope")
+        .to_string()
+}
+
 #[test]
 fn fe_owns_navigation_history_stale_queries_and_semantic_highlights() {
     let wasm = compile_atlas_navigation();
+    let import_count = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(
+            |payload| match payload.expect("Source Atlas Wasm should parse") {
+                wasmparser::Payload::ImportSection(section) => Some(section.count()),
+                _ => None,
+            },
+        )
+        .sum::<u32>();
+    assert_eq!(
+        import_count, 0,
+        "Source Atlas semantics must remain host-free"
+    );
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, wasm).unwrap();
     let mut store = wasmtime::Store::new(&engine, ());
@@ -54,6 +84,35 @@ fn fe_owns_navigation_history_stale_queries_and_semantic_highlights() {
     assert_eq!(call(&mut store, "history_capacity_probe"), 30_021);
     assert_eq!(call(&mut store, "stale_completion_probe"), 11);
     assert_eq!(call(&mut store, "independent_revision_probe"), 7);
+    assert_eq!(call(&mut store, "query_variant_roundtrip_probe"), 3);
     assert_eq!(call(&mut store, "semantic_highlight_probe"), 15);
     assert_eq!(call(&mut store, "range_boundary_probe"), 6);
+}
+
+#[test]
+fn embedded_u256_is_not_mistaken_for_wasm32_usize() {
+    let error = compile_source_to_wasm_error(
+        "source_atlas_genuine_wide_cursor",
+        r#"
+struct WideCursor { entries: [u32; 2], position: u256 }
+
+impl Copy for WideCursor {}
+
+impl WideCursor {
+    fn retained(self) -> Self {
+        Self { entries: self.entries, position: self.position }
+    }
+}
+
+pub fn wide_cursor_probe() -> u32 {
+    let cursor = WideCursor { entries: [7, 11], position: 1 }
+    cursor.retained().entries[0]
+}
+"#,
+    );
+    assert!(
+        error.contains("has no admitted value representation")
+            && error.contains("Wasm function `retained"),
+        "embedded u256 should fail at its private aggregate boundary: {error}",
+    );
 }
