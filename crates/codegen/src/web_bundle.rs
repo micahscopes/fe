@@ -18,17 +18,22 @@ use std::{
 use common::InputDb;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
-    semantic::{ViewParam, ViewParamKind, project_view_surface},
+    semantic::{
+        SemConstId, SemConstScalar, SemConstValue, ViewParam, ViewParamKind,
+        ctfe::{CtfeError, eval_body_owner_const},
+        project_view_surface,
+    },
     ty::{
         adt_def::AdtRef,
         const_ty::{ConstTyData, EvaluatedConstTy},
         trait_resolution::PredicateListId,
+        ty_check::BodyOwner,
         ty_def::{PrimTy, TyBase, TyData, TyId},
         ty_lower::lower_hir_ty,
     },
 };
 use hir::hir_def::{
-    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource,
+    EnumVariant, FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource,
     GpuResourceAccess, GpuResourceInit, GpuResourceKind, GpuResourceRecovery, GpuResourceResidency,
     GpuResourceVisibility, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
@@ -521,11 +526,13 @@ impl WebBuildOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WebActorProgram {
     pub actor: String,
     pub stages: Vec<WebActorStage>,
     pub resources: Vec<WebActorResource>,
+    /// CTFE-evaluated Fe raster and attachment plan.
+    pub raster: Option<WebRasterPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1714,10 +1721,21 @@ pub fn actor_gpu_program(
         }
     }
     validate_actor_pass_cycles(&stages)?;
+    let raster = typed_raster_policy(db, actor)?;
+    if raster.is_some()
+        && !stages
+            .iter()
+            .any(|stage| matches!(stage.kind, WebActorStageKind::Vertex { .. }))
+    {
+        return Err(WebBundleError::EntryDerivation(
+            "RasterConfiguration requires at least one authored vertex/fragment raster pair".into(),
+        ));
+    }
     Ok(Some(WebActorProgram {
         actor: actor_name,
         stages,
         resources: actor_resources(db, actor)?,
+        raster,
     }))
 }
 
@@ -1851,6 +1869,334 @@ fn actor_surface_recovery_policy_tys<'db>(
             Some(*policy_ty)
         })
         .collect()
+}
+
+fn typed_raster_policy(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+) -> Result<Option<WebRasterPolicy>, WebBundleError> {
+    let behaviors = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| {
+            behavior_surface_control_kind(db, *behavior) == Some(GpuControl::RasterPipeline)
+        })
+        .collect::<Vec<_>>();
+    let behavior = match behaviors.as_slice() {
+        [] => return Ok(None),
+        [behavior] => *behavior,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "GPU actor declares {} raster-configuration behaviors; exactly one is allowed",
+                behaviors.len()
+            )));
+        }
+    };
+    if !behavior.arg_tys(db).is_empty() {
+        return Err(WebBundleError::EntryDerivation(
+            "a raster-configuration behavior must be self-less and take no arguments".into(),
+        ));
+    }
+    if !nominal_attrs(db, behavior.return_ty(db)).is_some_and(|attrs| attrs.is_web_raster_plan(db))
+    {
+        return Err(WebBundleError::EntryDerivation(
+            "a raster-configuration behavior must return the nominal Fe RasterPlan record".into(),
+        ));
+    }
+    let value =
+        eval_body_owner_const(db, BodyOwner::Func(behavior), Vec::new()).map_err(|error| {
+            WebBundleError::EntryDerivation(format!(
+                "Fe raster configuration is not const-evaluable: {}",
+                describe_raster_ctfe_error(&error)
+            ))
+        })?;
+    project_raster_plan(db, value).map(Some)
+}
+
+fn describe_raster_ctfe_error(error: &CtfeError<'_>) -> String {
+    match error {
+        CtfeError::NonConstCall { .. } => {
+            "the behavior (or something it calls) is not a `const fn`".into()
+        }
+        CtfeError::NotConstEvaluable { .. } => "the body is not const-evaluable".into(),
+        CtfeError::InvalidBody { .. } => "the body has type errors".into(),
+        CtfeError::StepLimitExceeded { .. } | CtfeError::RecursionLimitExceeded { .. } => {
+            "evaluation exceeded the const-evaluation budget".into()
+        }
+        CtfeError::CalleeError { source, .. } => describe_raster_ctfe_error(source),
+        other => format!("{other:?}"),
+    }
+}
+
+fn raster_struct_fields<'db>(
+    db: &'db DriverDataBase,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<Vec<(String, SemConstId<'db>)>, WebBundleError> {
+    let SemConstValue::Struct { ty, fields } = value.value(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan expected {what} to be a struct value"
+        )));
+    };
+    let adt = ty.adt_def(db).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "Fe raster plan expected {what} to be a struct value"
+        ))
+    })?;
+    let AdtRef::Struct(definition) = adt.adt_ref(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan expected {what} to be a struct value"
+        )));
+    };
+    let definitions = definition.hir_fields(db).data(db);
+    if definitions.len() != fields.len() {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} field count mismatch"
+        )));
+    }
+    definitions
+        .iter()
+        .zip(fields.iter().copied())
+        .map(|(definition, field)| {
+            let name = definition
+                .name
+                .to_opt()
+                .map(|name| name.data(db).to_string())
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(format!(
+                        "Fe raster plan {what} has an unnamed field"
+                    ))
+                })?;
+            Ok((name, field))
+        })
+        .collect()
+}
+
+fn raster_named_field<'db>(
+    fields: &'db [(String, SemConstId<'db>)],
+    name: &str,
+    what: &str,
+) -> Result<SemConstId<'db>, WebBundleError> {
+    fields
+        .iter()
+        .find_map(|(candidate, value)| (candidate == name).then_some(*value))
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!("Fe raster plan {what} has no `{name}` field"))
+        })
+}
+
+fn raster_enum_parts<'db>(
+    db: &'db DriverDataBase,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<(String, Box<[SemConstId<'db>]>), WebBundleError> {
+    let SemConstValue::Enum {
+        ty,
+        variant,
+        fields,
+    } = value.value(db)
+    else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} is not an enum"
+        )));
+    };
+    let adt = ty.adt_def(db).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!("Fe raster plan {what} is not an enum"))
+    })?;
+    let AdtRef::Enum(definition) = adt.adt_ref(db) else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} is not an enum"
+        )));
+    };
+    let name = EnumVariant::new(definition, variant.0 as usize)
+        .name(db)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!("Fe raster plan {what} variant has no name"))
+        })?
+        .to_owned();
+    Ok((name, fields))
+}
+
+fn raster_unit_variant(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+    what: &str,
+) -> Result<String, WebBundleError> {
+    let (name, fields) = raster_enum_parts(db, value, what)?;
+    if !fields.is_empty() {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} variant `{name}` must not carry fields"
+        )));
+    }
+    Ok(name)
+}
+
+fn raster_bool(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+    what: &str,
+) -> Result<bool, WebBundleError> {
+    let SemConstValue::Scalar {
+        value: SemConstScalar::Bool(value),
+        ..
+    } = value.value(db)
+    else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} is not a bool"
+        )));
+    };
+    Ok(value)
+}
+
+fn raster_u32(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+    what: &str,
+) -> Result<u32, WebBundleError> {
+    let SemConstValue::Scalar {
+        value: SemConstScalar::Int { value },
+        ..
+    } = value.value(db)
+    else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} is not an integer"
+        )));
+    };
+    u32::try_from(value)
+        .map_err(|_| WebBundleError::EntryDerivation(format!("Fe raster plan {what} is not a u32")))
+}
+
+fn raster_f32(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+    what: &str,
+) -> Result<f32, WebBundleError> {
+    let SemConstValue::Scalar {
+        value: SemConstScalar::Float { bits },
+        ..
+    } = value.value(db)
+    else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster plan {what} is not an f32"
+        )));
+    };
+    Ok(f32::from_bits(bits))
+}
+
+fn project_raster_depth(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+) -> Result<Option<WebDepthPolicy>, WebBundleError> {
+    let (variant, fields) = raster_enum_parts(db, value, "depth")?;
+    match variant.as_str() {
+        "Disabled" if fields.is_empty() => Ok(None),
+        "Enabled" => {
+            let [value] = fields.as_ref() else {
+                return Err(WebBundleError::EntryDerivation(
+                    "Fe raster plan depth Enabled must carry exactly one DepthPlan".into(),
+                ));
+            };
+            let depth = raster_struct_fields(db, *value, "DepthPlan")?;
+            let format = match raster_unit_variant(
+                db,
+                raster_named_field(&depth, "format", "DepthPlan")?,
+                "DepthPlan.format",
+            )?
+            .as_str()
+            {
+                "Depth24Plus" => WebDepthFormat::Depth24Plus,
+                "Depth32Float" => WebDepthFormat::Depth32Float,
+                other => {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "unknown Fe raster depth format `{other}`"
+                    )));
+                }
+            };
+            let compare = match raster_unit_variant(
+                db,
+                raster_named_field(&depth, "compare", "DepthPlan")?,
+                "DepthPlan.compare",
+            )?
+            .as_str()
+            {
+                "Less" => WebDepthCompare::Less,
+                "LessEqual" => WebDepthCompare::LessEqual,
+                "Greater" => WebDepthCompare::Greater,
+                "GreaterEqual" => WebDepthCompare::GreaterEqual,
+                "Always" => WebDepthCompare::Always,
+                other => {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "unknown Fe raster depth comparison `{other}`"
+                    )));
+                }
+            };
+            let clear = raster_f32(
+                db,
+                raster_named_field(&depth, "clear", "DepthPlan")?,
+                "DepthPlan.clear",
+            )?;
+            if !clear.is_finite() || !(0.0..=1.0).contains(&clear) {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "Fe raster depth clear value must be finite and within [0, 1], got {clear}"
+                )));
+            }
+            Ok(Some(WebDepthPolicy {
+                format,
+                compare,
+                write_enabled: raster_bool(
+                    db,
+                    raster_named_field(&depth, "write_enabled", "DepthPlan")?,
+                    "DepthPlan.write_enabled",
+                )?,
+                clear,
+            }))
+        }
+        "Disabled" => Err(WebBundleError::EntryDerivation(
+            "Fe raster plan depth Disabled must not carry fields".into(),
+        )),
+        other => Err(WebBundleError::EntryDerivation(format!(
+            "unknown Fe raster depth attachment `{other}`"
+        ))),
+    }
+}
+
+fn project_raster_plan(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+) -> Result<WebRasterPolicy, WebBundleError> {
+    let plan = raster_struct_fields(db, value, "RasterPlan")?;
+    let sample_count = raster_u32(
+        db,
+        raster_named_field(&plan, "sample_count", "RasterPlan")?,
+        "RasterPlan.sample_count",
+    )?;
+    if !matches!(sample_count, 1 | 4) {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "Fe raster sample count must be portable WebGPU count 1 or 4, got {sample_count}"
+        )));
+    }
+    let cull_mode = match raster_unit_variant(
+        db,
+        raster_named_field(&plan, "cull", "RasterPlan")?,
+        "RasterPlan.cull",
+    )?
+    .as_str()
+    {
+        "None" => WebFaceCull::None,
+        "Front" => WebFaceCull::Front,
+        "Back" => WebFaceCull::Back,
+        other => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "unknown Fe raster cull mode `{other}`"
+            )));
+        }
+    };
+    Ok(WebRasterPolicy {
+        sample_count,
+        cull_mode,
+        depth: project_raster_depth(db, raster_named_field(&plan, "depth", "RasterPlan")?)?,
+    })
 }
 
 fn actor_has_surface_pointer_motion(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
@@ -4458,6 +4804,7 @@ fn project_surface(
     source_entry: &str,
     layout: &WebLayout,
     resource_field_indices: &[u32],
+    raster: Option<WebRasterPolicy>,
 ) -> Result<Option<WebSurface>, WebBundleError> {
     let decls = hir::lower::module_actor_decls(db, top_mod);
     let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
@@ -4579,6 +4926,7 @@ fn project_surface(
             } else {
                 "fullscreen_fragment".to_string()
             },
+            raster,
         },
         params,
         state: WebSurfaceState {
@@ -4925,9 +5273,54 @@ pub struct WebExtent {
 
 /// The render pipeline kind. An open vocabulary: `"fullscreen_fragment"` today;
 /// `"mesh_gpu"` etc. join in later rungs without a manifest-format change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebPipeline {
     pub kind: String,
+    /// CTFE-evaluated Fe raster plan. Omitted when the actor does not provide a
+    /// `RasterConfiguration` behavior so existing color-only bundles stay compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raster: Option<WebRasterPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebRasterPolicy {
+    pub sample_count: u32,
+    pub cull_mode: WebFaceCull,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<WebDepthPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebDepthPolicy {
+    pub format: WebDepthFormat,
+    pub compare: WebDepthCompare,
+    pub write_enabled: bool,
+    pub clear: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebDepthFormat {
+    Depth24Plus,
+    Depth32Float,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebDepthCompare {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebFaceCull {
+    None,
+    Front,
+    Back,
 }
 
 /// One projected interactive parameter. `min`/`max`/`init` are absent for a
@@ -5607,7 +6000,9 @@ impl WebBundle {
                 if !fragment_entries.contains(&options.source_entry.as_str())
                     || !matches!(
                         program.stages.last().map(|stage| &stage.kind),
-                        Some(WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. })
+                        Some(
+                            WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. }
+                        )
                     )
                 {
                     return Err(WebBundleError::EntryDerivation(format!(
@@ -5991,6 +6386,7 @@ impl WebBundle {
             &options.source_entry,
             &layout,
             &resource_field_indices,
+            program.raster.clone(),
         )?;
         let provenance = options.provenance.with_bundle_shape(
             !wasm.is_empty(),
@@ -6357,7 +6753,7 @@ impl WebBundle {
         validate_browser_wgsl(&wgsl)?;
         let mut layout = WebLayout::from_spirv(&artifact.layout)?;
         project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[])?;
-        let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[])?;
+        let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[], None)?;
         let passes = vec![WebPass {
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),

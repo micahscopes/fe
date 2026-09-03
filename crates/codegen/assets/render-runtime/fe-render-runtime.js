@@ -772,6 +772,80 @@ function writeUniformBuffer(device, uniformBuffer, span, members, uniforms) {
   device.queue.writeBuffer(uniformBuffer, 0, buffer);
 }
 
+/** Validate and translate the compiler-derived Fe raster policy into the
+ * corresponding WebGPU descriptor vocabulary. No application state or
+ * rendering choice is made here. */
+function rasterPlan(surface) {
+  const policy = surface?.pipeline?.raster;
+  if (!policy) return { sampleCount: 1, cullMode: "none", depth: null };
+  if (policy.sample_count !== 1 && policy.sample_count !== 4) {
+    throw new Error("fe render runtime: invalid derived raster sample count");
+  }
+  if (!["none", "front", "back"].includes(policy.cull_mode)) {
+    throw new Error("fe render runtime: invalid derived raster cull mode");
+  }
+  const format = {
+    depth24_plus: "depth24plus",
+    depth32_float: "depth32float",
+  }[policy.depth?.format];
+  const compare = {
+    less: "less",
+    less_equal: "less-equal",
+    greater: "greater",
+    greater_equal: "greater-equal",
+    always: "always",
+  }[policy.depth?.compare];
+  const depth = policy.depth
+    ? {
+        format,
+        compare,
+        writeEnabled: policy.depth.write_enabled === true,
+        clearValue: policy.depth.clear,
+      }
+    : null;
+  if (depth && (
+    !depth.format || !depth.compare || !Number.isFinite(depth.clearValue) ||
+    depth.clearValue < 0 || depth.clearValue > 1
+  )) {
+    throw new Error("fe render runtime: invalid derived depth policy");
+  }
+  return { sampleCount: policy.sample_count, cullMode: policy.cull_mode, depth };
+}
+
+function releaseRasterAttachments(gpu) {
+  for (const texture of [gpu?.multisampleTexture, gpu?.depthTexture]) {
+    try { texture?.destroy(); } catch { /* device loss already released it */ }
+  }
+  if (!gpu) return;
+  gpu.multisampleTexture = null;
+  gpu.depthTexture = null;
+  gpu.attachmentWidth = 0;
+  gpu.attachmentHeight = 0;
+}
+
+function ensureRasterAttachments(gpu, width, height) {
+  const { raster } = gpu;
+  if (
+    gpu.attachmentWidth === width && gpu.attachmentHeight === height &&
+    (raster.sampleCount === 1 || gpu.multisampleTexture) &&
+    (!raster.depth || gpu.depthTexture)
+  ) return;
+  releaseRasterAttachments(gpu);
+  const common = {
+    size: { width, height, depthOrArrayLayers: 1 },
+    sampleCount: raster.sampleCount,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  };
+  if (raster.sampleCount === 4) {
+    gpu.multisampleTexture = gpu.device.createTexture({ ...common, format: gpu.format });
+  }
+  if (raster.depth) {
+    gpu.depthTexture = gpu.device.createTexture({ ...common, format: raster.depth.format });
+  }
+  gpu.attachmentWidth = width;
+  gpu.attachmentHeight = height;
+}
+
 function presentFrame(device, context, pipeline, bindGroup, capture) {
   const encoder = device.createCommandEncoder();
   const texture = context.getCurrentTexture();
@@ -1597,6 +1671,7 @@ export class FeSurfaceElement extends HTMLElement {
       if (initialBytes) device.queue.writeBuffer(buffer, 0, initialBytes);
     }
 
+    const raster = rasterPlan(this._surface);
     const passRecords = [];
     for (let index = 0; index < this._passes.length; index++) {
       const pass = this._passes[index];
@@ -1675,11 +1750,21 @@ export class FeSurfaceElement extends HTMLElement {
               entryPoint: pass.layout.fragment_entry,
               targets: [{ format }],
             },
-            primitive: { topology: "triangle-list" },
+            primitive: { topology: "triangle-list", cullMode: raster.cullMode },
+            multisample: { count: raster.sampleCount },
+            ...(pass.draw_vertices && raster.depth
+              ? {
+                  depthStencil: {
+                    format: raster.depth.format,
+                    depthWriteEnabled: raster.depth.writeEnabled,
+                    depthCompare: raster.depth.compare,
+                  },
+                }
+              : {}),
           });
       passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
     }
-    return { device, generation, format, passRecords, resourceBuffers };
+    return { device, generation, format, passRecords, resourceBuffers, raster };
   }
 
   async _ensurePipeline() {
@@ -1758,6 +1843,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._graph) {
       const gpu = this._gpu;
       const { device, passRecords } = gpu;
+      ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
       for (const record of passRecords) {
         for (const input of record.inputs) {
           const values = input.binding.members.map((member) => {
@@ -1778,6 +1864,7 @@ export class FeSurfaceElement extends HTMLElement {
       let encoderMode = null;
       let texture = null;
       let rendered = false;
+      let depthRendered = false;
       const submitEncoder = () => {
         if (!encoded) return;
         device.queue.submit([encoder.finish()]);
@@ -1854,24 +1941,34 @@ export class FeSurfaceElement extends HTMLElement {
         } else {
           if (encoderMode === "compute") submitEncoder();
           texture ??= context.getCurrentTexture();
+          const targetView = texture.createView();
+          const multisampleView = gpu.multisampleTexture?.createView() ?? null;
+          const colorAttachment = {
+            view: multisampleView ?? targetView,
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: rendered ? "load" : "clear",
+            storeOp: "store",
+          };
+          if (multisampleView) colorAttachment.resolveTarget = targetView;
+          const usesDepth = Boolean(record.pass.draw_vertices && gpu.depthTexture);
+          const depthStencilAttachment = usesDepth
+            ? {
+                view: gpu.depthTexture.createView(),
+                depthClearValue: gpu.raster.depth.clearValue,
+                depthLoadOp: depthRendered ? "load" : "clear",
+                depthStoreOp: "store",
+              }
+            : undefined;
           const render = encoder.beginRenderPass({
-            colorAttachments: [{
-              view: texture.createView(),
-              clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              // Ordered Fe render stages compose onto one presentation target:
-              // the first establishes it, while later authored raster/fullscreen
-              // stages preserve prior color and update only their covered pixels.
-              // This rule is derived from pass order; no manifest flag or
-              // application-specific host branch chooses overlay behavior.
-              loadOp: rendered ? "load" : "clear",
-              storeOp: "store",
-            }],
+            colorAttachments: [colorAttachment],
+            depthStencilAttachment,
           });
           render.setPipeline(record.pipeline);
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
           render.draw(rasterDrawVertexCount(record.pass));
           render.end();
           rendered = true;
+          depthRendered ||= usesDepth;
           encoded = true;
           encoderMode = "render";
         }
@@ -2400,6 +2497,7 @@ export class FeSurfaceElement extends HTMLElement {
     const gpu = this._gpu;
     this._gpu = null;
     if (!gpu) return;
+    releaseRasterAttachments(gpu);
     const buffers = gpu.resourceBuffers
       ? [...new Set(gpu.resourceBuffers.values())]
       : [gpu.uniformBuffer].filter(Boolean);
