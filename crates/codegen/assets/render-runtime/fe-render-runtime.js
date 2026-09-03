@@ -1,4 +1,4 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4-v8).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4-v9).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
@@ -852,18 +852,56 @@ function resolveCanvas(canvasOption) {
   return canvasOption;
 }
 
-/**
- * The initial uniform vector from the declared v5 `surface`: each member takes
- * its param's `init`, and an extent-bound member (`extent_x`/`extent_y`) takes
- * the live canvas size. No search, no guessing.
- */
-function surfaceInitialUniforms(members, surface, width, height) {
+/** Resolve one Fe-authored parameter plan. Only legacy v4-v8 manifests infer
+ * the plan from `kind`; protocol v9 requires the explicit CTFE projection. */
+export function surfaceParamPlan(param, protocolVersion) {
+  if (protocolVersion < 9) {
+    return {
+      source: param.kind === "extent_x"
+        ? "surface_width"
+        : param.kind === "extent_y" ? "surface_height" : "initial",
+      widget: param.visible === false
+        ? "hidden"
+        : param.kind === "toggle" ? "checkbox" : "range",
+      scale: param.kind === "log" ? "logarithmic" : "linear",
+      readout: param.kind === "int"
+        ? "integer"
+        : param.kind === "toggle" ? "toggle" : "scalar",
+    };
+  }
+  const source = param.source;
+  const presentation = param.presentation;
+  if (!presentation ||
+      !["initial", "surface_width", "surface_height"].includes(source) ||
+      !["hidden", "range", "checkbox"].includes(presentation.widget) ||
+      !["linear", "logarithmic"].includes(presentation.scale) ||
+      !["scalar", "integer", "toggle"].includes(presentation.readout)) {
+    throw new Error("fe render runtime: protocol v9 param is missing a supported Fe presentation plan");
+  }
+  if ((presentation.widget === "hidden") !== (param.visible === false)) {
+    throw new Error("fe render runtime: Fe param visibility disagrees with its presentation widget");
+  }
+  if (presentation.widget === "checkbox" &&
+      (presentation.scale !== "linear" || presentation.readout !== "toggle")) {
+    throw new Error("fe render runtime: checkbox presentation requires linear toggle semantics");
+  }
+  if (presentation.widget === "range" && presentation.readout === "toggle") {
+    throw new Error("fe render runtime: range presentation cannot use a toggle readout");
+  }
+  return { source, ...presentation };
+}
+
+/** The initial uniform vector from the declared surface. Protocol v9 consumes
+ * the explicit Fe value source; earlier versions retain their isolated
+ * compatibility interpretation. */
+function surfaceInitialUniforms(members, surface, width, height, protocolVersion) {
   const byName = new Map(surface.params.map((param) => [param.name, param]));
   return members.map((member) => {
     const param = byName.get(member.name);
     if (!param) return 0;
-    if (param.kind === "extent_x") return width;
-    if (param.kind === "extent_y") return height;
+    const plan = surfaceParamPlan(param, protocolVersion);
+    if (plan.source === "surface_width") return width;
+    if (plan.source === "surface_height") return height;
     return typeof param.init === "number" ? param.init : 0;
   });
 }
@@ -881,15 +919,16 @@ function undeclaredViewInitialUniforms(members) {
 
 /** Overwrite only the extent-bound members of `uniforms` (leaving every other
  * live/user-adjusted value untouched); used on mount AND on every resize. */
-function withExtentUniforms(members, surface, uniforms, width, height) {
+function withExtentUniforms(members, surface, uniforms, width, height, protocolVersion) {
   if (!surface) return uniforms;
   const byName = new Map(surface.params.map((param) => [param.name, param]));
   const next = uniforms.slice();
   members.forEach((member, index) => {
     const param = byName.get(member.name);
     if (!param) return;
-    if (param.kind === "extent_x") next[index] = width;
-    else if (param.kind === "extent_y") next[index] = height;
+    const plan = surfaceParamPlan(param, protocolVersion);
+    if (plan.source === "surface_width") next[index] = width;
+    else if (plan.source === "surface_height") next[index] = height;
   });
   return next;
 }
@@ -1329,7 +1368,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -1530,7 +1569,13 @@ export class FeSurfaceElement extends HTMLElement {
       this._uniforms = this._initialOverride ??
         (authoredInitial === undefined
           ? (this._surface
-            ? surfaceInitialUniforms(this._members, this._surface, DEFAULT_SIZE, DEFAULT_SIZE)
+            ? surfaceInitialUniforms(
+              this._members,
+              this._surface,
+              DEFAULT_SIZE,
+              DEFAULT_SIZE,
+              manifest.protocol_version,
+            )
             : undeclaredViewInitialUniforms(this._members))
           : this._surfaceReplyValues(authoredInitial, "surface initializer"));
       this._startScopedTasks();
@@ -1720,7 +1765,14 @@ export class FeSurfaceElement extends HTMLElement {
     this._backingWidth = width;
     this._backingHeight = height;
     this._replaceSurfaceState(
-      withExtentUniforms(this._members, this._surface, this._uniforms, width, height),
+      withExtentUniforms(
+        this._members,
+        this._surface,
+        this._uniforms,
+        width,
+        height,
+        this._manifest?.protocol_version ?? 8,
+      ),
     );
     this._applyExtentAndFilter(width, height);
     return changed;
@@ -3740,9 +3792,9 @@ export class FeSurfaceElement extends HTMLElement {
 
   /**
    * Controls generated from the declared v5 `surface.params`: real label (the
-   * field name), doc hover, range/step/init by kind. Extent-bound and fixed
-   * params are not user-visible. Each param maps to its uniform member by
-   * NAME (the reconciled binding key).
+   * field name), doc hover, range, scale, readout, and widget from the explicit
+   * Fe presentation plan. Each param maps to its uniform member by NAME (the
+   * reconciled binding key).
    */
   _renderControls() {
     this._updateBadge();
@@ -3761,7 +3813,11 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     this._surface.params.forEach((param, paramIndex) => {
-      if (param.visible === false) return;
+      const presentation = surfaceParamPlan(
+        param,
+        this._manifest?.protocol_version ?? 8,
+      );
+      if (presentation.widget === "hidden") return;
       const index = this._memberIndexByName.get(param.name);
       if (index === undefined) return;
       const member = this._members[index];
@@ -3772,11 +3828,16 @@ export class FeSurfaceElement extends HTMLElement {
       if (doc) row.title = doc;
       const label = document.createElement("label");
       const value = document.createElement("b");
-      const isInt = param.kind === "int";
-      const isToggle = param.kind === "toggle";
+      const isInt = presentation.readout === "integer";
+      const isToggle = presentation.readout === "toggle";
       const min = typeof param.min === "number" ? param.min : 0;
       const max = typeof param.max === "number" ? param.max : 1;
-      const isLog = param.kind === "log" && min > 0 && max > min;
+      const isLog = presentation.scale === "logarithmic";
+      if (isLog && !(min > 0 && max > min)) {
+        throw new Error(
+          `fe render runtime: logarithmic param \`${param.name}\` requires positive ordered bounds`,
+        );
+      }
       const encode = isLog
         ? (v) => Math.log10(Math.max(min, Math.min(max, +v)))
         : (v) => +v;
@@ -3793,8 +3854,8 @@ export class FeSurfaceElement extends HTMLElement {
       name.textContent = param.name;
       label.append(name, value);
       const input = document.createElement("input");
-      input.type = isToggle ? "checkbox" : "range";
-      if (isToggle) {
+      input.type = presentation.widget;
+      if (presentation.widget === "checkbox") {
         input.checked = this._uniforms[index] >= 0.5;
         input.oninput = () => {
           this._applyParamEdit(index, input.checked ? 1 : 0, paramIndex);

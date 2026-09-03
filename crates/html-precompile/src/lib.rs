@@ -1102,7 +1102,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=8).contains(&version) {
+    if !(4..=9).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),
@@ -1118,6 +1118,50 @@ fn verify_render_deployment(
         context: format!("{context} manifest {}", manifest.display()),
         detail: "render manifest has no parent directory".to_owned(),
     })?;
+
+    if version >= 9 {
+        if let Some(surface) = value.get("surface") {
+            let params = surface
+                .get("params")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| VerificationError {
+                    context: format!("{context} surface params"),
+                    detail: "protocol v9 surface has no params array".to_owned(),
+                })?;
+            for (index, param) in params.iter().enumerate() {
+                let param_context = format!("{context} surface param #{}", index + 1);
+                if !param
+                    .get("source")
+                    .is_some_and(serde_json::Value::is_string)
+                {
+                    return Err(VerificationError {
+                        context: param_context,
+                        detail: "protocol v9 param has no Fe-authored value source".to_owned(),
+                    });
+                }
+                let Some(presentation) = param
+                    .get("presentation")
+                    .and_then(serde_json::Value::as_object)
+                else {
+                    return Err(VerificationError {
+                        context: param_context,
+                        detail: "protocol v9 param has no Fe-authored presentation".to_owned(),
+                    });
+                };
+                if ["widget", "scale", "readout"].into_iter().any(|field| {
+                    !presentation
+                        .get(field)
+                        .is_some_and(serde_json::Value::is_string)
+                }) {
+                    return Err(VerificationError {
+                        context: param_context,
+                        detail: "protocol v9 param presentation is structurally incomplete"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+    }
 
     let primary_ref = artifacts
         .get("wgsl")
@@ -4364,6 +4408,69 @@ mod tests {
                 .assets
                 .keys()
                 .any(|path| path.contains("fe-render-runtime-"))
+        );
+    }
+
+    #[test]
+    fn protocol_v9_deployment_requires_fe_authored_param_plans() {
+        let mut bundle = fake_attributed_render_bundle(None);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(9);
+        manifest["resources"] = serde_json::json!([]);
+        manifest["surface"] = serde_json::json!({
+            "params": [{
+                "name": "gain",
+                "kind": "opaque",
+                "source": "initial",
+                "presentation": {
+                    "widget": "range",
+                    "scale": "linear",
+                    "readout": "scalar"
+                }
+            }]
+        });
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            r#"<script type="application/fe" data-fe-src="sketches/demo" data-fe-render></script>"#,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(bundle.clone())),
+        )
+        .unwrap();
+
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+
+        let manifest_path = output
+            .assets
+            .keys()
+            .find(|path| path.ends_with(".json"))
+            .map(|path| deployment.path().join(path))
+            .unwrap();
+        let mut published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        published["surface"]["params"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source");
+        let bytes = serde_json::to_vec(&published).unwrap();
+        let old_name = manifest_path.file_name().unwrap().to_str().unwrap();
+        let new_name = format!("fe-render-{}.json", &sha256_hex(&bytes)[..16]);
+        let new_manifest_path = manifest_path.with_file_name(&new_name);
+        std::fs::write(&new_manifest_path, bytes).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        let index_path = deployment.path().join("index.html");
+        let html = std::fs::read_to_string(&index_path)
+            .unwrap()
+            .replace(old_name, &new_name);
+        std::fs::write(&index_path, html).unwrap();
+        let error = verify_precompiled_site(&index_path).unwrap_err();
+        assert!(
+            error.detail.contains("no Fe-authored value source"),
+            "unexpected v9 verification error: {error}"
         );
     }
 

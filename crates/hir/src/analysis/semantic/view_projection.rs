@@ -52,6 +52,17 @@ pub struct ViewParam {
     pub init: f32,
     pub bounded: bool,
     pub initialized: bool,
+    pub source: String,
+    pub presentation: ViewParamPresentation,
+}
+
+/// Opaque projection of the Fe-owned `ParamPresentation` value. Strings are
+/// enum-variant spellings, not a compiler-owned presentation vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewParamPresentation {
+    pub widget: String,
+    pub scale: String,
+    pub readout: String,
     pub visible: bool,
 }
 
@@ -208,27 +219,88 @@ fn snake_case_variant(name: &str) -> String {
     out
 }
 
-fn read_kind<'db>(
+fn read_enum_case<'db>(
     db: &'db dyn HirAnalysisDb,
     value: SemConstId<'db>,
+    what: &str,
 ) -> Result<String, ViewProjectionError> {
     let SemConstValue::Enum { ty, variant, .. } = value.value(db) else {
-        return Err(ViewProjectionError::Shape(
-            "`kind` is not an enum value".into(),
-        ));
+        return Err(ViewProjectionError::Shape(format!(
+            "{what} is not an enum value"
+        )));
     };
     let adt = ty
         .adt_def(db)
-        .ok_or_else(|| ViewProjectionError::Shape("`kind`'s type is not an enum".into()))?;
+        .ok_or_else(|| ViewProjectionError::Shape(format!("{what}'s type is not an enum")))?;
     let AdtRef::Enum(enum_) = adt.adt_ref(db) else {
-        return Err(ViewProjectionError::Shape(
-            "`kind`'s type is not an enum".into(),
-        ));
+        return Err(ViewProjectionError::Shape(format!(
+            "{what}'s type is not an enum"
+        )));
     };
     let variant_name = EnumVariant::new(enum_, variant.0 as usize)
         .name(db)
-        .ok_or_else(|| ViewProjectionError::Shape("`kind` variant has no name".into()))?;
+        .ok_or_else(|| ViewProjectionError::Shape(format!("{what} variant has no name")))?;
     Ok(snake_case_variant(variant_name))
+}
+
+fn walk_param_presentation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    name: &str,
+) -> Result<ViewParamPresentation, ViewProjectionError> {
+    let mut widget = None;
+    let mut scale = None;
+    let mut readout = None;
+    let mut visible = None;
+    for (field_name, field) in
+        struct_named_fields(db, value, &format!("param `{name}` presentation"))?
+    {
+        match field_name.as_str() {
+            "widget" => {
+                widget = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation widget"),
+                )?)
+            }
+            "scale" => {
+                scale = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation scale"),
+                )?)
+            }
+            "readout" => {
+                readout = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation readout"),
+                )?)
+            }
+            "visible" => {
+                visible = Some(read_bool(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation visible"),
+                )?)
+            }
+            _ => {}
+        }
+    }
+    Ok(ViewParamPresentation {
+        widget: widget.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `widget`"))
+        })?,
+        scale: scale.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `scale`"))
+        })?,
+        readout: readout.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `readout`"))
+        })?,
+        visible: visible.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `visible`"))
+        })?,
+    })
 }
 
 fn walk_surface<'db>(
@@ -299,10 +371,11 @@ fn walk_param<'db>(
     let mut init = None;
     let mut bounded = None;
     let mut initialized = None;
-    let mut visible = None;
+    let mut source = None;
+    let mut presentation = None;
     for (field_name, field) in struct_named_fields(db, value, &format!("param `{name}`"))? {
         match field_name.as_str() {
-            "kind" => kind = Some(read_kind(db, field)?),
+            "kind" => kind = Some(read_enum_case(db, field, &format!("param `{name}` kind"))?),
             "min" => min = Some(read_f32(db, field, &format!("param `{name}` min"))?),
             "max" => max = Some(read_f32(db, field, &format!("param `{name}` max"))?),
             "init" => init = Some(read_f32(db, field, &format!("param `{name}` init"))?),
@@ -314,7 +387,14 @@ fn walk_param<'db>(
                     &format!("param `{name}` initialized"),
                 )?)
             }
-            "visible" => visible = Some(read_bool(db, field, &format!("param `{name}` visible"))?),
+            "source" => {
+                source = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` source"),
+                )?)
+            }
+            "presentation" => presentation = Some(walk_param_presentation(db, field, &name)?),
             _ => {}
         }
     }
@@ -331,8 +411,11 @@ fn walk_param<'db>(
     let initialized = initialized.ok_or_else(|| {
         ViewProjectionError::Shape(format!("param `{name}` has no `initialized`"))
     })?;
-    let visible = visible
-        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `visible`")))?;
+    let source = source
+        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `source`")))?;
+    let presentation = presentation.ok_or_else(|| {
+        ViewProjectionError::Shape(format!("param `{name}` has no `presentation`"))
+    })?;
     Ok(ViewParam {
         name,
         kind,
@@ -341,6 +424,7 @@ fn walk_param<'db>(
         init,
         bounded,
         initialized,
-        visible,
+        source,
+        presentation,
     })
 }

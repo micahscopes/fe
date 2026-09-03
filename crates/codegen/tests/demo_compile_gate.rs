@@ -843,13 +843,19 @@ fn new_param_binding_actor_needs_only_fe_source() {
             param.name
         );
         assert!(param.min.is_some() && param.max.is_some() && param.init.is_some());
+        assert_eq!(param.source.as_deref(), Some("initial"));
+        assert_eq!(param.presentation.as_ref().unwrap().widget, "range");
     }
+    assert_eq!(params[0].presentation.as_ref().unwrap().readout, "integer");
+    assert_eq!(params[1].presentation.as_ref().unwrap().scale, "linear");
     let extent = &params[3];
     assert!(
         !extent.visible,
         "Fe extent binding is not a browser control"
     );
     assert_eq!((extent.min, extent.max, extent.init), (None, None, None));
+    assert_eq!(extent.source.as_deref(), Some("surface_width"));
+    assert_eq!(extent.presentation.as_ref().unwrap().widget, "hidden");
 
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [3.0, 0.0, 2.0, 256.0], 640.0,),
@@ -1593,7 +1599,7 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
     wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
     assert_typed_surface_quality(&bundle);
     assert_typed_surface_recovery(&bundle);
-    assert_eq!(bundle.manifest.protocol_version, 8);
+    assert_eq!(bundle.manifest.protocol_version, 9);
     assert_eq!(bundle.manifest.resources.len(), 2);
     assert_eq!(bundle.manifest.passes.len(), 3);
     assert_eq!(bundle.pass_wgsl.len(), 3);
@@ -1686,7 +1692,7 @@ fn perturbational_mandelbrot_graph_compiles() {
         !exports.iter().any(|name| name == "display_reference"),
         "the GPU graph must not acquire a CPU pixel fallback"
     );
-    assert_eq!(bundle.manifest.protocol_version, 8);
+    assert_eq!(bundle.manifest.protocol_version, 9);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.resources[0].name, "orbit");
     assert_eq!(bundle.manifest.resources[0].stride, 32);
