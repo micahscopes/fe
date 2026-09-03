@@ -151,10 +151,11 @@ actor InvocationReceipt uses (Program<WebGpuBackend>) {
             + invocation.workgroups.y * 200000
             + invocation.workgroups.z * 400000
             + invocation.local_index * 1000000
-        let mut staged: [u32; 1] = [0; 1]
+        let mut staged: [u32; 2] = [0; 2]
         staged[0] = receipt
+        staged[1] = receipt
         let placement = ReceiptPlacement { values: self.receipts, base: 0 }
-        write_receipt(placement, slot, staged[0])
+        write_receipt(placement, slot, staged[invocation.local.x as usize])
         let checkpoint = derive_checkpoint(slot + 1)
         let checkpoint_placement = CheckpointPlacement {
             values: self.checkpoints,
