@@ -891,6 +891,38 @@ export function surfaceParamPlan(param, protocolVersion) {
   return { source, ...presentation };
 }
 
+/** Aggregate the unique shader payload behind a pass graph. The compatibility
+ * `artifacts.wgsl_bytes` field names only the primary pass, so it is not a
+ * bundle total once a surface contains multiple GPU stages. */
+export function wgslPayloadSummary(manifest) {
+  const passes = Array.isArray(manifest?.passes) ? manifest.passes : [];
+  if (passes.length === 0) {
+    const bytes = manifest?.artifacts?.wgsl_bytes;
+    return {
+      bytes: Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : 0,
+      shaders: manifest?.artifacts?.wgsl ? 1 : 0,
+    };
+  }
+  const shaders = new Map();
+  for (const pass of passes) {
+    if (typeof pass?.shader !== "string" ||
+        !Number.isSafeInteger(pass.shader_bytes) || pass.shader_bytes < 0) {
+      throw new Error("fe render runtime: pass graph has invalid WGSL payload metadata");
+    }
+    const previous = shaders.get(pass.shader);
+    if (previous !== undefined && previous !== pass.shader_bytes) {
+      throw new Error(
+        `fe render runtime: WGSL payload \`${pass.shader}\` has conflicting byte lengths`,
+      );
+    }
+    shaders.set(pass.shader, pass.shader_bytes);
+  }
+  return {
+    bytes: [...shaders.values()].reduce((sum, bytes) => sum + bytes, 0),
+    shaders: shaders.size,
+  };
+}
+
 /** The initial uniform vector from the declared surface. Protocol v9 consumes
  * the explicit Fe value source; earlier versions retain their isolated
  * compatibility interpretation. */
@@ -3857,9 +3889,13 @@ export class FeSurfaceElement extends HTMLElement {
     const wasm = this._wasmUrl
       ? link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`, "wasm") + ` · `
       : "";
+    const wgsl = wgslPayloadSummary(this._manifest);
+    const wgslLabel = wgsl.shaders > 1
+      ? `wgsl ${wgsl.bytes} B / ${wgsl.shaders} shaders`
+      : `wgsl ${wgsl.bytes} B`;
     this._meta.innerHTML =
       `entry ${this._manifest.source_entry} · ` + wasm +
-      link(this._wgslUrl.href, `wgsl ${this._manifest.artifacts.wgsl_bytes} B`, "wgsl") +
+      link(this._wgslUrl.href, wgslLabel, "wgsl") +
       ` · path ${this._mode} · fe ${this._manifest.provenance.compiler_version} · ` +
       link(this._manifestUrl.href, `manifest`, "manifest");
   }

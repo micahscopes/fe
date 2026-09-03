@@ -8,8 +8,27 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("WGSL summary aggregates unique pass shaders rather than the primary artifact", () => {
+  assert.deepEqual(
+    wgslPayloadSummary({
+      artifacts: { wgsl: "last.wgsl", wgsl_bytes: 790 },
+      passes: [
+        { shader: "patch.wgsl", shader_bytes: 17549 },
+        { shader: "handle.wgsl", shader_bytes: 2400 },
+        { shader: "last.wgsl", shader_bytes: 790 },
+        { shader: "patch.wgsl", shader_bytes: 17549 },
+      ],
+    }),
+    { bytes: 20739, shaders: 3 },
+  );
+  assert.deepEqual(
+    wgslPayloadSummary({ artifacts: { wgsl: "one.wgsl", wgsl_bytes: 790 } }),
+    { bytes: 790, shaders: 1 },
+  );
+});
 
 installGeneratedWebGpuOperations({
   queueIdle: queue => queue.onSubmittedWorkDone(),
