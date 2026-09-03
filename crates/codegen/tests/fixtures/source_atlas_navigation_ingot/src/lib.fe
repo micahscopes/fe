@@ -1,0 +1,175 @@
+use source_atlas::{
+    AtlasDocument,
+    AtlasLens,
+    AtlasNavigation,
+    ContentDigest,
+    HighlightClass,
+    HighlightSpan,
+    NavigationSelection,
+    NavigationTarget,
+    NavigationTrail,
+    OccurrenceSymbol,
+    SourcePoint,
+    SourceRange,
+    SymbolRole,
+    SymbolSelection,
+    present_highlight,
+}
+
+fn digest(seed: u32) -> ContentDigest {
+    let mut words = [0; 8]
+    words[0] = seed
+    ContentDigest { words: words }
+}
+
+fn target(seed: u32, lens: AtlasLens, line: u32) -> NavigationTarget {
+    NavigationTarget {
+        document: AtlasDocument::projected(content: digest(seed)),
+        lens: lens,
+        range: SourceRange {
+            start: SourcePoint { line: line, column: 1 },
+            end: SourcePoint { line: line, column: 9 },
+        },
+    }
+}
+
+fn current_line<const N: usize>(trail: NavigationTrail<N>) -> u32
+where N > 0
+{
+    match trail.current() {
+        NavigationSelection::Some(value,) => value.range.start.line,
+        NavigationSelection::None => 0,
+    }
+}
+
+fn packed_trail<const N: usize>(trail: NavigationTrail<N>) -> u32
+where N > 0
+{
+    let length: u32 = trail.len().downcast_truncate()
+    let position: u32 = trail.position().downcast_truncate()
+    length * 10000
+        + position * 1000
+        + current_line(trail) * 10
+        + if trail.can_back() {
+            2
+        } else { 0 } + if trail.can_forward() { 1 } else { 0 }
+}
+
+/// Visiting from the middle discards the old forward branch.
+pub fn history_branch_probe() -> u32 {
+    let trail = NavigationTrail<4>::empty()
+        .visit(
+            target: target(seed: 1, lens: AtlasLens::Authored, line: 1),
+        )
+        .visit(
+            target: target(seed: 2, lens: AtlasLens::Semantic, line: 2),
+        )
+        .visit(target: target(seed: 3, lens: AtlasLens::Rmir, line: 3))
+        .back()
+        .visit(target: target(seed: 4, lens: AtlasLens::Wgsl, line: 4))
+    packed_trail(trail)
+}
+
+/// A full history evicts only its oldest entry and retains navigation order.
+pub fn history_capacity_probe() -> u32 {
+    let trail = NavigationTrail<3>::empty()
+        .visit(
+            target: target(seed: 1, lens: AtlasLens::Authored, line: 1),
+        )
+        .visit(
+            target: target(seed: 2, lens: AtlasLens::Semantic, line: 2),
+        )
+        .visit(target: target(seed: 3, lens: AtlasLens::Rmir, line: 3))
+        .visit(target: target(seed: 4, lens: AtlasLens::Wgsl, line: 4))
+        .back()
+        .back()
+    packed_trail(trail)
+}
+
+/// Only the latest revision may settle asynchronous document state.
+pub fn stale_completion_probe() -> u32 {
+    let first = AtlasNavigation<4>::empty()
+        .visit(
+            target: target(seed: 1, lens: AtlasLens::Authored, line: 1),
+        )
+    let stale = first.document_revision
+    let second = first.visit(
+            target: target(seed: 2, lens: AtlasLens::Semantic, line: 2),
+        )
+    let current = second.document_revision
+    let rejected = second.document_ready(revision: stale)
+    let accepted = rejected.document_ready(revision: current)
+    (if rejected.status.is_loading() { 10 } else { 0 })
+        + if accepted.status.is_ready() { 1 } else { 0 }
+}
+
+/// A hover generation cannot cancel an independently pending document load.
+pub fn independent_revision_probe() -> u32 {
+    let loading = AtlasNavigation<4>::empty()
+        .visit(
+            target: target(seed: 1, lens: AtlasLens::Authored, line: 1),
+        )
+    let document = loading.document_revision
+    let symbol = source_atlas::AtlasSymbol::projected(content: digest(seed: 7))
+    let hovering = loading.request_hover(symbol)
+    let ready = hovering.document_ready(revision: document)
+    (if ready.status.is_ready() { 4 } else { 0 })
+        + (if hovering.document_revision.equals(other: document) {
+            2
+        } else {
+            0
+        })
+        + if hovering.hover_revision.number() == 1 {
+            1
+        } else {
+            0
+        }
+}
+
+pub fn semantic_highlight_probe() -> u32 {
+    let symbol = source_atlas::AtlasSymbol::projected(content: digest(seed: 9))
+    let selected = SymbolSelection::some(symbol)
+    let definition = present_highlight(
+        selected: selected,
+        span: HighlightSpan {
+            range: SourceRange::empty(),
+            class: HighlightClass::Function,
+            symbol: OccurrenceSymbol::Some(symbol, SymbolRole::Definition),
+        },
+    )
+    let reference = present_highlight(
+        selected: selected,
+        span: HighlightSpan {
+            range: SourceRange::empty(),
+            class: HighlightClass::Function,
+            symbol: OccurrenceSymbol::Some(symbol, SymbolRole::Reference),
+        },
+    )
+    (if definition.active { 8 } else { 0 })
+        + (if definition.definition { 4 } else { 0 })
+        + (if reference.active { 2 } else { 0 })
+        + if reference.reference { 1 } else { 0 }
+}
+
+/// Source ranges follow SCIP's half-open end convention.
+pub fn range_boundary_probe() -> u32 {
+    let range = SourceRange {
+        start: SourcePoint { line: 3, column: 1 },
+        end: SourcePoint { line: 3, column: 9 },
+    }
+    (if range.contains(point: SourcePoint { line: 3, column: 1 }) {
+            4
+        } else {
+            0
+        })
+        + (if range.contains(point: SourcePoint { line: 3, column: 8 }) {
+            2
+        } else {
+            0
+        })
+        + if range.contains(point: SourcePoint { line: 3, column: 9 }) {
+            1
+        } else {
+            0
+        }
+}

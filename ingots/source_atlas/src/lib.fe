@@ -1,0 +1,657 @@
+//! Typed source, provenance, and navigation semantics for Fe tools.
+//!
+//! This ingot deliberately contains no browser API and no serialization
+//! format. A compiler may project a content-addressed atlas into an immutable
+//! resource, and a platform adapter may realize ranges, scrolling, and
+//! history. Application policy remains ordinary Fe data and functions:
+//! artifact selection, semantic highlighting, branch-aware history, query
+//! revisions, and stale-result rejection live here.
+
+/// A compiler-derived content digest. It is an identity by content, never an
+/// application-assigned numeric handle.
+pub struct ContentDigest { pub words: [u32; 8] }
+
+impl Copy for ContentDigest {}
+
+impl ContentDigest {
+    pub const fn zero() -> Self {
+        Self { words: [0; 8] }
+    }
+    pub fn equals(self, other: Self) -> bool {
+        let mut index: usize = 0
+        let mut equal = true
+        while index < 8 {
+            equal = equal && self.words[index] == other.words[index]
+            index = index + 1
+        }
+        equal
+    }
+}
+
+/// One document in a compiler-emitted atlas. The digest names the complete
+/// document record, including its path and bytes, so equal source text in two
+/// files remains distinguishable without an application-assigned numeric ID.
+pub struct AtlasDocument { content: ContentDigest }
+
+impl Copy for AtlasDocument {}
+
+impl AtlasDocument {
+    pub const fn projected(content: ContentDigest) -> Self {
+        Self { content: content }
+    }
+    pub const fn empty() -> Self {
+        Self { content: ContentDigest::zero() }
+    }
+    pub fn same_content(self, other: Self) -> bool {
+        self.content.equals(other: other.content)
+    }
+}
+
+/// A stable SCIP symbol identity, reduced to a content digest by the compiler
+/// projection. The original SCIP symbol spelling remains atlas data and is
+/// never copied into component action IDs or host dispatch tables.
+pub struct AtlasSymbol { pub content: ContentDigest }
+
+impl Copy for AtlasSymbol {}
+
+impl AtlasSymbol {
+    pub const fn projected(content: ContentDigest) -> Self {
+        Self { content: content }
+    }
+    pub const fn empty() -> Self {
+        Self { content: ContentDigest::zero() }
+    }
+    pub fn equals(self, other: Self) -> bool {
+        self.content.equals(other: other.content)
+    }
+}
+
+pub enum SymbolSelection {
+    None,
+    Some(AtlasSymbol,),
+}
+
+impl Copy for SymbolSelection {}
+
+impl SymbolSelection {
+    pub const fn none() -> Self {
+        Self::None
+    }
+    pub const fn some(symbol: AtlasSymbol) -> Self {
+        Self::Some(symbol)
+    }
+    pub fn matches(self, symbol: AtlasSymbol) -> bool {
+        match self {
+            Self::Some(selected,) => selected.equals(other: symbol),
+            Self::None => false,
+        }
+    }
+}
+
+/// UTF-8 source coordinates. Lines and columns are zero-based and use SCIP's
+/// byte-column convention. The compiler projection is responsible for
+/// normalizing any upstream representation before values reach Fe.
+pub struct SourcePoint { pub line: u32, pub column: u32 }
+
+impl Copy for SourcePoint {}
+
+impl SourcePoint {
+    pub const fn origin() -> Self {
+        Self { line: 0, column: 0 }
+    }
+    pub fn precedes_or_equals(self, other: Self) -> bool {
+        self.line < other.line || (self.line == other.line && self.column <= other.column)
+    }
+    pub fn precedes(self, other: Self) -> bool {
+        self.line < other.line || (self.line == other.line && self.column < other.column)
+    }
+}
+
+pub struct SourceRange { pub start: SourcePoint, pub end: SourcePoint }
+
+impl Copy for SourceRange {}
+
+impl SourceRange {
+    pub const fn empty() -> Self {
+        Self { start: SourcePoint::origin(), end: SourcePoint::origin() }
+    }
+    pub fn is_ordered(self) -> bool {
+        self.start.precedes_or_equals(other: self.end)
+    }
+    pub fn contains(self, point: SourcePoint) -> bool {
+        self.is_ordered()
+            && self.start.precedes_or_equals(other: point)
+            && point.precedes(other: self.end)
+    }
+    pub fn equals(self, other: Self) -> bool {
+        self.start.line == other.start.line
+            && self.start.column == other.start.column
+            && self.end.line == other.end.line
+            && self.end.column == other.end.column
+    }
+}
+
+/// The semantic layers of one program. This is one Fe vocabulary shared by
+/// the source viewer, compiler projection, and evidence links. It replaces
+/// filename guesses and per-page artifact action tables.
+pub enum AtlasLens {
+    Authored,
+    Expanded,
+    Semantic,
+    Rmir,
+    Sonatina,
+    Placement,
+    Layout,
+    Wgsl,
+    Spirv,
+    Wasm,
+    Evm,
+    Evidence,
+}
+
+impl Copy for AtlasLens {}
+
+impl AtlasLens {
+    pub fn equals(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Authored, Self::Authored) => true,
+            (Self::Expanded, Self::Expanded) => true,
+            (Self::Semantic, Self::Semantic) => true,
+            (Self::Rmir, Self::Rmir) => true,
+            (Self::Sonatina, Self::Sonatina) => true,
+            (Self::Placement, Self::Placement) => true,
+            (Self::Layout, Self::Layout) => true,
+            (Self::Wgsl, Self::Wgsl) => true,
+            (Self::Spirv, Self::Spirv) => true,
+            (Self::Wasm, Self::Wasm) => true,
+            (Self::Evm, Self::Evm) => true,
+            (Self::Evidence, Self::Evidence) => true,
+            _ => false,
+        }
+    }
+    pub fn is_binary(self) -> bool {
+        match self {
+            Self::Spirv | Self::Wasm | Self::Evm => true,
+            _ => false,
+        }
+    }
+    pub fn is_source(self) -> bool {
+        match self {
+            Self::Authored | Self::Expanded | Self::Semantic => true,
+            _ => false,
+        }
+    }
+}
+
+/// Semantic token classes exposed to presentation. Lexical coloring may be
+/// layered beneath these tokens, but symbol resolution is compiler-owned and
+/// never reconstructed by spelling in the browser.
+pub enum HighlightClass {
+    Attribute,
+    Comment,
+    Constant,
+    Field,
+    Function,
+    Keyword,
+    Label,
+    Literal,
+    Local,
+    Method,
+    Module,
+    Number,
+    Operator,
+    Parameter,
+    Property,
+    Punctuation,
+    String,
+    Trait,
+    Type,
+    Variant,
+}
+
+impl Copy for HighlightClass {}
+
+pub enum SymbolRole {
+    Definition,
+    Reference,
+    Read,
+    Write,
+    Import,
+    Implementation,
+    TypeDefinition,
+}
+
+impl Copy for SymbolRole {}
+
+pub enum OccurrenceSymbol {
+    None,
+    Some(AtlasSymbol, SymbolRole),
+}
+
+impl Copy for OccurrenceSymbol {}
+
+pub struct HighlightSpan {
+    pub range: SourceRange,
+    pub class: HighlightClass,
+    pub symbol: OccurrenceSymbol,
+}
+
+impl Copy for HighlightSpan {}
+
+pub struct HighlightPresentation { pub active: bool, pub definition: bool, pub reference: bool }
+
+impl Copy for HighlightPresentation {}
+
+/// Derive presentation flags from one semantic selection. The DOM adapter
+/// receives only these decisions and source ranges. It never searches class
+/// names or decides which occurrences belong together.
+pub fn present_highlight(selected: SymbolSelection, span: HighlightSpan) -> HighlightPresentation {
+    match span.symbol {
+        OccurrenceSymbol::Some(symbol, role) => {
+            let active = selected.matches(symbol)
+            let definition = match role {
+                SymbolRole::Definition => active,
+                _ => false,
+            }
+            HighlightPresentation {
+                active: active,
+                definition: definition,
+                reference: active && !definition,
+            }
+        },
+        OccurrenceSymbol::None => HighlightPresentation {
+            active: false,
+            definition: false,
+            reference: false,
+        },
+    }
+}
+
+pub struct NavigationTarget {
+    pub document: AtlasDocument,
+    pub lens: AtlasLens,
+    pub range: SourceRange,
+}
+
+impl Copy for NavigationTarget {}
+
+impl NavigationTarget {
+    pub const fn empty() -> Self {
+        Self {
+            document: AtlasDocument::empty(),
+            lens: AtlasLens::Authored,
+            range: SourceRange::empty(),
+        }
+    }
+    pub fn equals(self, other: Self) -> bool {
+        self.document.same_content(other: other.document)
+            && self.lens.equals(other: other.lens)
+            && self.range.equals(other: other.range)
+    }
+}
+
+pub enum NavigationSelection {
+    None,
+    Some(NavigationTarget,),
+}
+
+impl Copy for NavigationSelection {}
+
+impl NavigationSelection {
+    pub const fn none() -> Self {
+        Self::None
+    }
+    pub const fn some(target: NavigationTarget) -> Self {
+        Self::Some(target)
+    }
+}
+
+/// Bounded browser-independent navigation history. Visiting from the middle
+/// replaces the abandoned forward branch. When full, the oldest entry is
+/// removed. Both behaviors are explicit Fe policy rather than History API
+/// side effects hidden in an adapter.
+pub struct NavigationTrail<const N: usize> {
+    entries: [NavigationTarget; N],
+    length: usize,
+    cursor: usize,
+}
+
+impl<const N: usize> Copy for NavigationTrail<N> {}
+
+impl<const N: usize> NavigationTrail<N> where N > 0 {
+    pub const fn empty() -> Self {
+        Self { entries: [NavigationTarget::empty(); N], length: 0, cursor: 0 }
+    }
+    pub fn current(self) -> NavigationSelection {
+        if self.length == 0 {
+            NavigationSelection::None
+        } else {
+            NavigationSelection::Some(self.entries[self.cursor])
+        }
+    }
+    pub fn can_back(self) -> bool {
+        self.length > 0 && self.cursor > 0
+    }
+    pub fn can_forward(self) -> bool {
+        self.length > 0 && self.cursor + 1 < self.length
+    }
+    pub fn len(self) -> usize {
+        self.length
+    }
+    pub fn position(self) -> usize {
+        self.cursor
+    }
+    pub fn visit(self, target: NavigationTarget) -> Self {
+        if self.length > 0 && self.entries[self.cursor].equals(other: target) {
+            return self
+        }
+
+        let mut entries = self.entries
+        let mut length = if self.length == 0 { 0 } else { self.cursor + 1 }
+        let mut cursor = length
+        if length < N {
+            entries[length] = target
+            length = length + 1
+        } else {
+            let mut index: usize = 1
+            while index < N {
+                entries[index - 1] = entries[index]
+                index = index + 1
+            }
+            entries[N - 1] = target
+            cursor = N - 1
+            length = N
+        }
+        Self { entries: entries, length: length, cursor: cursor }
+    }
+    pub fn back(self) -> Self {
+        Self {
+            entries: self.entries,
+            length: self.length,
+            cursor: if self.can_back() {
+                self.cursor - 1
+            } else {
+                self.cursor
+            },
+        }
+    }
+    pub fn forward(self) -> Self {
+        Self {
+            entries: self.entries,
+            length: self.length,
+            cursor: if self.can_forward() {
+                self.cursor + 1
+            } else {
+                self.cursor
+            },
+        }
+    }
+}
+
+/// Query generations are branded by request kind so a document completion
+/// cannot settle a hover, relation, symbol, UI, or GPU request by accident.
+pub struct DocumentRequest {}
+pub struct SymbolRequest {}
+pub struct RelationRequest {}
+pub struct HoverRequest {}
+
+impl Copy for DocumentRequest {}
+impl Copy for SymbolRequest {}
+impl Copy for RelationRequest {}
+impl Copy for HoverRequest {}
+
+pub struct AtlasRevision<Kind: Copy> { value: u32, kind: Kind }
+
+impl<Kind: Copy> Copy for AtlasRevision<Kind> {}
+
+impl<Kind: Copy> AtlasRevision<Kind> {
+    pub const fn initial(kind: Kind) -> Self {
+        Self { value: 0, kind: kind }
+    }
+    pub fn next(self) -> Self {
+        let next = self.value + 1
+        Self { value: if next == 0 { 1 } else { next }, kind: self.kind }
+    }
+    pub fn equals(self, other: Self) -> bool {
+        self.value == other.value
+    }
+    pub fn number(self) -> u32 {
+        self.value
+    }
+}
+
+pub enum AtlasQuery {
+    None,
+    LoadDocument(AtlasRevision<DocumentRequest>, NavigationTarget),
+    ResolveSymbol(AtlasRevision<SymbolRequest>, AtlasDocument, SourcePoint),
+    ResolveDefinition(AtlasRevision<RelationRequest>, AtlasSymbol),
+    ResolveReferences(AtlasRevision<RelationRequest>, AtlasSymbol),
+    ResolveHover(AtlasRevision<HoverRequest>, AtlasSymbol),
+}
+
+impl Copy for AtlasQuery {}
+
+pub enum AtlasStatus {
+    Idle,
+    Loading,
+    Ready,
+    Error,
+}
+
+impl Copy for AtlasStatus {}
+
+impl AtlasStatus {
+    pub fn is_idle(self) -> bool {
+        match self {
+            Self::Idle => true,
+            _ => false,
+        }
+    }
+    pub fn is_loading(self) -> bool {
+        match self {
+            Self::Loading => true,
+            _ => false,
+        }
+    }
+    pub fn is_ready(self) -> bool {
+        match self {
+            Self::Ready => true,
+            _ => false,
+        }
+    }
+    pub fn is_error(self) -> bool {
+        match self {
+            Self::Error => true,
+            _ => false,
+        }
+    }
+}
+
+/// Pure state returned by the navigation policy. A resident actor owns one of
+/// these values and interprets only the typed `query` effect. Query results
+/// carry the revision back so stale asynchronous completions cannot mutate the
+/// visible atlas.
+pub struct AtlasNavigation<const N: usize> {
+    pub trail: NavigationTrail<N>,
+    pub document_revision: AtlasRevision<DocumentRequest>,
+    pub symbol_revision: AtlasRevision<SymbolRequest>,
+    pub relation_revision: AtlasRevision<RelationRequest>,
+    pub hover_revision: AtlasRevision<HoverRequest>,
+    pub status: AtlasStatus,
+    pub selected_symbol: SymbolSelection,
+    pub query: AtlasQuery,
+}
+
+impl<const N: usize> Copy for AtlasNavigation<N> {}
+
+impl<const N: usize> AtlasNavigation<N> where N > 0 {
+    pub const fn empty() -> Self {
+        Self {
+            trail: NavigationTrail::empty(),
+            document_revision: AtlasRevision::initial(kind: DocumentRequest {}),
+            symbol_revision: AtlasRevision::initial(kind: SymbolRequest {}),
+            relation_revision: AtlasRevision::initial(kind: RelationRequest {}),
+            hover_revision: AtlasRevision::initial(kind: HoverRequest {}),
+            status: AtlasStatus::Idle,
+            selected_symbol: SymbolSelection::None,
+            query: AtlasQuery::None,
+        }
+    }
+    pub fn visit(self, target: NavigationTarget) -> Self {
+        let revision = self.document_revision.next()
+        Self {
+            trail: self.trail.visit(target),
+            document_revision: revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: self.relation_revision,
+            hover_revision: self.hover_revision,
+            status: AtlasStatus::Loading,
+            selected_symbol: SymbolSelection::None,
+            query: AtlasQuery::LoadDocument(revision, target),
+        }
+    }
+    pub fn back(self) -> Self {
+        let trail = self.trail.back()
+        match trail.current() {
+            NavigationSelection::Some(target,) => {
+                let revision = self.document_revision.next()
+                Self {
+                    trail: trail,
+                    document_revision: revision,
+                    symbol_revision: self.symbol_revision,
+                    relation_revision: self.relation_revision,
+                    hover_revision: self.hover_revision,
+                    status: AtlasStatus::Loading,
+                    selected_symbol: SymbolSelection::None,
+                    query: AtlasQuery::LoadDocument(revision, target),
+                }
+            },
+            NavigationSelection::None => self,
+        }
+    }
+    pub fn forward(self) -> Self {
+        let trail = self.trail.forward()
+        match trail.current() {
+            NavigationSelection::Some(target,) => {
+                let revision = self.document_revision.next()
+                Self {
+                    trail: trail,
+                    document_revision: revision,
+                    symbol_revision: self.symbol_revision,
+                    relation_revision: self.relation_revision,
+                    hover_revision: self.hover_revision,
+                    status: AtlasStatus::Loading,
+                    selected_symbol: SymbolSelection::None,
+                    query: AtlasQuery::LoadDocument(revision, target),
+                }
+            },
+            NavigationSelection::None => self,
+        }
+    }
+    pub fn select_at(self, point: SourcePoint) -> Self {
+        match self.trail.current() {
+            NavigationSelection::Some(target,) => {
+                let revision = self.symbol_revision.next()
+                Self {
+                    trail: self.trail,
+                    document_revision: self.document_revision,
+                    symbol_revision: revision,
+                    relation_revision: self.relation_revision,
+                    hover_revision: self.hover_revision,
+                    status: self.status,
+                    selected_symbol: self.selected_symbol,
+                    query: AtlasQuery::ResolveSymbol(revision, target.document, point),
+                }
+            },
+            NavigationSelection::None => self,
+        }
+    }
+    pub fn request_definition(self, symbol: AtlasSymbol) -> Self {
+        let revision = self.relation_revision.next()
+        Self {
+            trail: self.trail,
+            document_revision: self.document_revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: revision,
+            hover_revision: self.hover_revision,
+            status: self.status,
+            selected_symbol: SymbolSelection::some(symbol),
+            query: AtlasQuery::ResolveDefinition(revision, symbol),
+        }
+    }
+    pub fn request_references(self, symbol: AtlasSymbol) -> Self {
+        let revision = self.relation_revision.next()
+        Self {
+            trail: self.trail,
+            document_revision: self.document_revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: revision,
+            hover_revision: self.hover_revision,
+            status: self.status,
+            selected_symbol: SymbolSelection::some(symbol),
+            query: AtlasQuery::ResolveReferences(revision, symbol),
+        }
+    }
+    pub fn request_hover(self, symbol: AtlasSymbol) -> Self {
+        let revision = self.hover_revision.next()
+        Self {
+            trail: self.trail,
+            document_revision: self.document_revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: self.relation_revision,
+            hover_revision: revision,
+            status: self.status,
+            selected_symbol: SymbolSelection::some(symbol),
+            query: AtlasQuery::ResolveHover(revision, symbol),
+        }
+    }
+    pub fn document_ready(self, revision: AtlasRevision<DocumentRequest>) -> Self {
+        if !self.document_revision.equals(other: revision) {
+            return self
+        }
+        Self {
+            trail: self.trail,
+            document_revision: self.document_revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: self.relation_revision,
+            hover_revision: self.hover_revision,
+            status: AtlasStatus::Ready,
+            selected_symbol: self.selected_symbol,
+            query: AtlasQuery::None,
+        }
+    }
+    pub fn document_failed(self, revision: AtlasRevision<DocumentRequest>) -> Self {
+        if !self.document_revision.equals(other: revision) {
+            return self
+        }
+        Self {
+            trail: self.trail,
+            document_revision: self.document_revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: self.relation_revision,
+            hover_revision: self.hover_revision,
+            status: AtlasStatus::Error,
+            selected_symbol: self.selected_symbol,
+            query: AtlasQuery::None,
+        }
+    }
+    pub fn symbol_resolved(
+        self,
+        revision: AtlasRevision<SymbolRequest>,
+        symbol: SymbolSelection,
+    ) -> Self {
+        if !self.symbol_revision.equals(other: revision) {
+            return self
+        }
+        Self {
+            trail: self.trail,
+            document_revision: self.document_revision,
+            symbol_revision: self.symbol_revision,
+            relation_revision: self.relation_revision,
+            hover_revision: self.hover_revision,
+            status: self.status,
+            selected_symbol: symbol,
+            query: AtlasQuery::None,
+        }
+    }
+}

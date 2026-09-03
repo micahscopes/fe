@@ -1,0 +1,6 @@
+[ingot]
+name = "source_atlas_navigation_gate"
+version = "0.1.0"
+
+[dependencies]
+source_atlas = "../../../../../ingots/source_atlas"
