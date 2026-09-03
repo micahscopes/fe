@@ -439,6 +439,14 @@ fn inline_spirv_calls_from_roots(
     } else {
         std::collections::HashSet::new()
     };
+    if !preserved_helpers.is_empty() {
+        let helpers = preserved_helpers.iter().copied().collect::<Vec<_>>();
+        run_function_passes_on(
+            module,
+            &helpers,
+            &[Pass::RangeBranchSimplify, Pass::CfgCleanup],
+        );
+    }
     if trace {
         trace_spirv_helper_classification(module, roots, &preserved_helpers);
     }
