@@ -10,7 +10,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -134,14 +134,51 @@ const RENDER_SCOPED_TASK_OPTION_MARKER: &str = "/* FE_SCOPED_TASK_OPTION */";
 /// (crates/html-precompile/assets/bootstrap.js), so both paths share one
 /// render runtime instead of maintaining two.
 const RENDER_RUNTIME_JS_FILE: &str = "fe-render-runtime.js";
-const RENDER_RUNTIME_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
+const RENDER_RUNTIME_BASE_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
+static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
+    let world = fe_webidl_bindgen::parse(fe_webidl_bindgen::WEBGPU_QUEUE_IDLE_WEBIDL)
+        .expect("pinned WebGPU queue-idle Web IDL must parse");
+    let plan = fe_webidl_bindgen::build_adapter_plan(
+        &world,
+        "webgpu-queue-idle",
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
+    )
+    .expect("pinned WebGPU queue-idle adapter plan must lower");
+    let operation = plan
+        .resources
+        .iter()
+        .find(|resource| resource.name == "GPUQueue")
+        .and_then(|resource| {
+            resource
+                .functions
+                .iter()
+                .find(|function| function.member_name == "onSubmittedWorkDone")
+        })
+        .expect("pinned WebGPU queue-idle operation must remain selected");
+    let semantic = fe_webidl_bindgen::emit_js_canonical_adapter(&world, &plan)
+        .expect("pinned WebGPU queue-idle semantic adapter must emit");
+    format!(
+        "{}\n{}\n{}\n\
+         const feWebGpuWebIdlRuntime = createFeHostRuntime();\n\
+         const feWebGpuWebIdlAdapter = createFeHostAdapter({{}}, feWebGpuWebIdlRuntime);\n\
+         const feWebGpuQueueOperations = feWebGpuWebIdlAdapter.imports[{module:?}];\n\
+         installGeneratedWebGpuQueueIdleAdapter(queue =>\n  \
+           feWebGpuWebIdlRuntime.resources.withBorrowed(queue, handle =>\n    \
+             feWebGpuQueueOperations[{operation:?}](handle)));\n",
+        fe_webidl_bindgen::HOST_RUNTIME_JS,
+        semantic,
+        RENDER_RUNTIME_BASE_JS,
+        module = plan.module,
+        operation = operation.import_name,
+    )
+});
 
 /// The fixed render runtime module's source text, for hosts (the standards
 /// `fe web dev`/`fe web precompile` bundle lane) that publish it
 /// content-addressed alongside a render bundle they compile outside
 /// [`WebBundle::write_atomic`]/[`WebBundle::materialized_files`].
 pub fn render_runtime_js() -> &'static str {
-    RENDER_RUNTIME_JS
+    RENDER_RUNTIME_JS.as_str()
 }
 const WEB_ACTOR_RUNTIME: &[(&str, &str)] = BROWSER_ACTOR_RUNTIME_FILES;
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
@@ -1539,7 +1576,9 @@ fn normalize_projected_resource_plan(
     let initialization_kind = if digest.is_some() {
         "content_addressed"
     } else {
-        initialization.as_str().expect("fieldless initialization was checked")
+        initialization
+            .as_str()
+            .expect("fieldless initialization was checked")
     };
     plan.insert(
         "initialization".to_owned(),
@@ -7071,7 +7110,7 @@ impl WebBundle {
         if self.manifest.layout.mode == WebBundleMode::Render {
             push(
                 RENDER_RUNTIME_JS_FILE,
-                Arc::from(RENDER_RUNTIME_JS.as_bytes()),
+                Arc::from(render_runtime_js().as_bytes()),
             )?;
             let task_option = if has_scoped_tasks {
                 "scopedTasksUrl: \"./tasks/tasks.js\","
@@ -7677,6 +7716,42 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains("100vh - var(--fe-surface-window-block-margin, 112px)"));
         assert!(runtime.contains("max-width: 100%"));
         assert!(runtime.contains("new ResizeObserver"));
+    }
+
+    #[test]
+    fn render_runtime_assembles_the_pinned_webgpu_webidl_transport() {
+        let runtime = render_runtime_js();
+        assert!(runtime.contains(fe_webidl_bindgen::HOST_RUNTIME_JS));
+        assert!(runtime.contains("gpu_queue_on_submitted_work_done"));
+        assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.withBorrowed"));
+        assert_eq!(
+            runtime.matches("[\"onSubmittedWorkDone\"]()").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".onSubmittedWorkDone("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("fe-render-runtime.mjs");
+            std::fs::write(&path, runtime).unwrap();
+            let output = std::process::Command::new("node")
+                .args(["--check", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "assembled render runtime is not valid JavaScript:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     fn wasm_exports(wasm: &[u8]) -> Vec<String> {

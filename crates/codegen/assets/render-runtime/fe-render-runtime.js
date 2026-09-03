@@ -508,8 +508,26 @@ function publishSharedGpuQueueIdle(gpu) {
   return sharedGpuQueueIdle.publish(gpu?.generation ?? sharedGpuGeneration);
 }
 
+let generatedWebGpuQueueIdleAdapter;
+
+/** Install the compiler-assembled official-WebIDL transport for one browser
+ * queue-idle observation. Fe owns the scheduling/effect semantics; this
+ * dependency performs only the standards operation. */
+export function installGeneratedWebGpuQueueIdleAdapter(adapter) {
+  if (typeof adapter !== "function") {
+    throw new TypeError("fe render runtime: WebGPU queue-idle adapter must be a function");
+  }
+  if (generatedWebGpuQueueIdleAdapter !== undefined) {
+    throw new Error("fe render runtime: WebGPU queue-idle adapter is already installed");
+  }
+  generatedWebGpuQueueIdleAdapter = adapter;
+}
+
 async function awaitSharedGpuQueueIdle(gpu) {
-  await gpu.device.queue.onSubmittedWorkDone();
+  if (generatedWebGpuQueueIdleAdapter === undefined) {
+    throw new Error("fe render runtime: generated WebGPU queue-idle adapter is unavailable");
+  }
+  await generatedWebGpuQueueIdleAdapter(gpu.device.queue);
   return publishSharedGpuQueueIdle(gpu);
 }
 

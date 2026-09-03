@@ -8,8 +8,10 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuQueueIdleAdapter, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+installGeneratedWebGpuQueueIdleAdapter(queue => queue.onSubmittedWorkDone());
 
 test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {
   const constants = { STORAGE: 0x80, COPY_SRC: 0x04, COPY_DST: 0x08 };

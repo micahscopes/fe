@@ -1,8 +1,8 @@
 //! Typed completion facts for the page's actual shared WebGPU queue.
 //!
 //! A queue-idle observation means that every command submitted before the
-//! fixed host's corresponding `GPUQueue.onSubmittedWorkDone()` observation has
-//! completed. It deliberately does not mint application-visible submission
+//! fixed host's generated-WebIDL `GPUQueue.onSubmittedWorkDone()` observation
+//! has completed. It deliberately does not mint application-visible submission
 //! IDs: Fe consumers usually need backpressure/liveness, while the browser
 //! queue remains an opaque standards authority. Generation separates recovered
 //! devices; sequence and `missed` make the bounded transport honest.

@@ -45,6 +45,19 @@ pub const HOST_WASM_CODEC_JS: &str =
 /// remains outside this Web IDL boundary.
 pub const BROWSER_FETCH_WEBIDL: &str = include_str!("../assets/browser-fetch.webidl");
 
+/// Pinned curated Webref selection for the first generated WebGPU standards
+/// operation used by the fixed render host. Domain scheduling and queue-idle
+/// semantics remain in Fe; this IDL denotes only the browser transport.
+pub const WEBGPU_QUEUE_IDLE_WEBIDL: &str = include_str!("../assets/webgpu-queue-idle.webidl");
+
+/// Auditable origin and exact source ranges for [`WEBGPU_QUEUE_IDLE_WEBIDL`].
+pub const WEBGPU_QUEUE_IDLE_PROVENANCE: &str =
+    include_str!("../assets/webgpu-queue-idle.provenance.json");
+
+/// Private module identity of the generated standards adapter. This is not a
+/// second application-facing WebGPU API.
+pub const WEBGPU_WEBIDL_MODULE: &str = "fe:webgpu-webidl";
+
 pub use adapter_plan::{
     AdapterAsyncIterator, AdapterCallback, AdapterCollection, AdapterCollectionKind,
     AdapterFunction, AdapterInvocation, AdapterIterator, AdapterNamespace, AdapterParam,
@@ -3130,19 +3143,31 @@ fn constructor_import_name(interface: &InterfaceDef, constructor: &ConstructorDe
     }
 }
 
-fn snake_case(name: &str) -> String {
+pub(crate) fn snake_case(name: &str) -> String {
     let mut result = String::new();
-    for (index, ch) in name.chars().enumerate() {
+    let chars = name.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().copied().enumerate() {
         if ch.is_ascii_uppercase() {
-            if index > 0 {
+            let previous = index.checked_sub(1).and_then(|index| chars.get(index));
+            let next = chars.get(index + 1);
+            let begins_word = previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && next.is_some_and(|next| next.is_ascii_lowercase()))
+            });
+            if begins_word && !result.ends_with('_') {
                 result.push('_');
             }
             result.push(ch.to_ascii_lowercase());
         } else if ch.is_ascii_alphanumeric() {
             result.push(ch.to_ascii_lowercase());
-        } else {
+        } else if !result.is_empty() && !result.ends_with('_') {
             result.push('_');
         }
+    }
+    if result.ends_with('_') {
+        result.pop();
     }
     result
 }
@@ -3171,6 +3196,14 @@ fn js_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_idl_acronyms_form_one_identifier_word() {
+        assert_eq!(snake_case("GPUQueue"), "gpu_queue");
+        assert_eq!(snake_case("URLSearchParams"), "url_search_params");
+        assert_eq!(snake_case("DOMTokenList"), "dom_token_list");
+        assert_eq!(snake_case("onSubmittedWorkDone"), "on_submitted_work_done");
+    }
 
     const BASIC: &str = r#"
         interface EventTarget {
