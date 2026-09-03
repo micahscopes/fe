@@ -1832,6 +1832,53 @@ All four are focused ingots and may remain so permanently.
   are end-to-end checkpoint timings, not a complete proof or Wasm comparison.
   Interactive point and disk selection, full browser proof generation, Wasm
   verification, and revm-Wasm verification remain.
+- **G-BROWSER shader materialization boundary, active.** The detailed boundary
+  audit is recorded at
+  `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.
+  Work through these measured rungs in order, retaining the existing
+  Fe-to-Sonatina and Sonatina-to-Naga pipeline rather than adding a second GPU
+  backend:
+  - [x] Split shader private-place materialization from canonical Wasm arena
+    materialization at one explicit policy seam.
+  - [x] Preserve fixed, non-escaping, typed-use-closed arrays and records as
+    Sonatina typed locals, with strict negative escape gates. The production
+    BN254 field-multiply fixture selects six arrays totaling 488 bytes and
+    falls from 70,419 to 15,599 WGSL characters, a 77.8 percent reduction.
+  - [x] Recover SCCP's exact all-zero aggregate projection in the SPIR-V/Naga
+    backend without admitting general pointer reinterpretation.
+  - [ ] Emit a per-allocation rejection census for production proof kernels.
+    The current sparse round-interaction kernel selects zero typed allocations,
+    so its remaining arena use must still be selected from measured rejection
+    causes rather than widened speculatively.
+  - [x] Attribute rooted inliner replication to original helper call sites and
+    record clone survival after every cleanup frontier. Classify the complete
+    reachable helper graph by target legality before choosing outlining work.
+  - [x] Preserve profitable scalar and entry-resource helper graphs without
+    name matching. Normalize exact argument aliases first, carry ordered
+    multi-result exits through one physical WGSL result, prove resource
+    identity through cyclic phi graphs, and retain strict downstream checks.
+    The production sparse round-interaction shader fell from 1,600,494 to
+    874,347 WGSL bytes, from 51,198 to 29,408 Naga expressions, and from 234,707
+    to 136,267 SPIR-V words. The exact production gate parses, validates, and
+    passes below its 1 MB limit.
+  - [ ] Preserve typed aggregate initialization, moves, and non-overlapping
+    copies when address identity and byte layout are unobserved.
+  - [ ] Separate statically bounded scratch from genuinely dynamic arena
+    allocation, then choose private, workgroup, or storage placement through
+    explicit target capabilities and size limits.
+  - [ ] Replace flattened aggregate helper lanes where profitable with a
+    certified borrowed-input and caller-owned-output ABI. Keep scalar ABIs for
+    the first materialization experiments.
+  - [ ] Remove remaining assumptions that portable shader values require Wasm
+    byte layout, canonical-memory operations, and Wasm-oriented limits.
+  - [x] Generalize Sonatina-to-Naga control lowering for multiple return
+    terminators and other currently rejected structured control, with exact
+    result transport, resource-identity, trapping-match, parse, validation, and
+    production shader gates.
+  - [ ] Remeasure each rung using rooted Sonatina instructions, surviving
+    inlined instructions, Naga expressions, arena bytes, WGSL/SPIR-V bytes,
+    release compile time, and browser execution. Do not retain an optimization
+    that does not improve final artifacts while preserving independent oracles.
 - **G-INSPECT, partial.** The Fe SourceInspector and generated artifact views
   exist. `SourceAtlas` must still expose authored, semantic, placement, layout,
   artifact, and evidence layers without a runtime JSON manifest.
@@ -2459,7 +2506,15 @@ Exit condition: one Fe page entrypoint composes the entire gallery.
 1. Project typed WebGPU command/resource plans from Fe actor structure into a
    generated binary/host layout so the host executes data rather than
    re-deriving policy or interpreting a JSON object model.
-2. Expose standards-derived WebGPU host imports with opaque resource handles.
+2. Make `fe-webidl-bindgen` the sole browser WebGPU ingress. Pin the official
+   W3C Webref curated WebGPU IDL by upstream revision and content digest, then
+   derive opaque resource types, dictionaries, promises, callbacks, ownership,
+   and transport from that source rather than maintaining a hand-trimmed IDL.
+   Keep `std::webgpu` as the richer Fe policy facade over those generated
+   bindings. Reimplement and delete both the older hand-declared
+   `std::webgpu::raw` compute/readback broker and direct render-runtime WebGPU
+   object realization as parity gates land. Add negative gates so neither
+   handwritten ingress can expand during the migration.
 3. Move resource lifetime, pass selection, recovery decisions, and presentation
    scheduling into a Fe orchestration actor.
 4. Generate JavaScript import adapters from WebIDL/host ABI metadata.
