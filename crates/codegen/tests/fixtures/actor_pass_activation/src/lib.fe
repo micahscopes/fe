@@ -1,0 +1,74 @@
+use std::webgpu::{
+    ComputeSurface,
+    CycledDispatch,
+    FixedDispatch,
+    FragmentSurface,
+    GpuProgram,
+    PassActivation,
+    StorageBuffer,
+    WebGpuBackend,
+    Workgroup,
+}
+
+pub struct ActivationState {
+    mode: f32,
+    gain: f32,
+}
+
+struct AnalyticPipeline {}
+
+impl AnalyticPipeline {
+    pub fn active(_ state: ActivationState) -> bool {
+        state.mode < 0.5
+    }
+}
+
+struct PullbackPipeline {}
+
+impl PullbackPipeline {
+    pub fn active(_ state: ActivationState) -> bool {
+        state.mode >= 0.5
+    }
+}
+
+struct PullbackRound {}
+
+actor ActivatedGraph uses (GpuProgram<WebGpuBackend>) {
+    receipt: StorageBuffer<u32, 1>,
+    mode: f32,
+    gain: f32,
+
+    fn analytic(self) uses (
+        ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+        PassActivation<AnalyticPipeline>,
+    ) {
+        self.receipt.store(index: 0, value: 11)
+    }
+
+    fn pullback_begin(self) uses (
+        ComputeSurface<
+            Workgroup<1, 1, 1>,
+            CycledDispatch<PullbackRound, FixedDispatch<1, 1, 1>, 2>,
+        >,
+        PassActivation<PullbackPipeline>,
+    ) {
+        self.receipt.store(index: 0, value: 22)
+    }
+
+    fn pullback_finish(self) uses (
+        ComputeSurface<
+            Workgroup<1, 1, 1>,
+            CycledDispatch<PullbackRound, FixedDispatch<1, 1, 1>, 2>,
+        >,
+        PassActivation<PullbackPipeline>,
+    ) {
+        let value = self.receipt.load(index: 0)
+        self.receipt.store(index: 0, value: value + 1)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        let value = self.receipt.load(index: 0)
+        let color: u32 = if value > 0 { 4278255360 } else { 4294901760 }
+        color.downcast_truncate()
+    }
+}

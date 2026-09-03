@@ -109,6 +109,9 @@ const TYPED_SURFACE_QUALITY_EXPORT: &str = "fe_surface_quality_v1";
 /// Fixed discovery point for the actor-level Fe shared-device policy. Its
 /// private supervision state remains resident in generated Wasm.
 const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
+/// Prefix for compiler-owned pure Fe predicates that select the active GPU
+/// pass subgraph. The manifest carries only the dense ordinal suffix.
+const TYPED_PASS_ACTIVATION_EXPORT_PREFIX: &str = "fe_pass_activation_v1_";
 /// Fixed delivery point for one compiler-derived GPU result message. The
 /// authored behavior and message type remain Fe vocabulary; the browser sees
 /// only the canonical `(pointer, length)` transport plus inert resource
@@ -1954,6 +1957,33 @@ fn validate_actor_pass_cycles(stages: &[WebActorStage]) -> Result<(), WebBundleE
     Ok(())
 }
 
+fn validate_pass_activation_cycles(passes: &[WebPass]) -> Result<(), WebBundleError> {
+    let mut index = 0;
+    while index < passes.len() {
+        let Some(cycle) = passes[index].cycle else {
+            index += 1;
+            continue;
+        };
+        let activation = passes[index].activation;
+        let mut end = index + 1;
+        while end < passes.len()
+            && passes[end]
+                .cycle
+                .is_some_and(|next| next.group == cycle.group)
+        {
+            if passes[end].activation != activation {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor pass cycle {} mixes activation policies; every member of one ordered cycle must share one policy",
+                    cycle.group
+                )));
+            }
+            end += 1;
+        }
+        index = end;
+    }
+    Ok(())
+}
+
 fn behavior_surface_control_kind(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
@@ -1995,6 +2025,39 @@ fn behavior_surface_policy_ty<'db>(
             };
             Some(*policy_ty)
         })
+}
+
+fn behavior_pass_activation_policy_ty<'db>(
+    db: &'db DriverDataBase,
+    behavior: Func<'db>,
+) -> Result<Option<TyId<'db>>, WebBundleError> {
+    let policies = behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| {
+            let attrs = nominal_attrs(db, ty)?;
+            (attrs.gpu_control(db) == Some(GpuControl::PassActivation)).then_some(ty)
+        })
+        .map(|ty| {
+            let [policy_ty] = ty.generic_args(db) else {
+                return Err(WebBundleError::SurfaceProjection(
+                    "PassActivation must carry exactly one policy type".to_owned(),
+                ));
+            };
+            Ok(*policy_ty)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match policies.as_slice() {
+        [] => Ok(None),
+        [policy] => Ok(Some(*policy)),
+        _ => Err(WebBundleError::SurfaceProjection(format!(
+            "one GPU stage declares {} PassActivation policies; at most one is allowed",
+            policies.len()
+        ))),
+    }
 }
 
 fn actor_surface_quality_policy_tys<'db>(
@@ -3027,6 +3090,23 @@ struct ResolvedSurfaceRecoveryPolicy<'db> {
     contract: TypedSurfaceRecoveryContract,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedPassActivationContract {
+    params: Vec<WebControlWasmType>,
+    state_fields: usize,
+    state_tag_limits: Vec<(usize, u32)>,
+}
+
+/// A pure Fe predicate selected by the nominal `PassActivation<P>` effect on
+/// one or more GPU stages. Policy identity is compiler-only; the fixed host
+/// receives a dense ordinal and invokes a versioned Wasm export.
+#[derive(Debug, Clone)]
+struct ResolvedPassActivationPolicy<'db> {
+    policy_ty: TyId<'db>,
+    func: Func<'db>,
+    contract: TypedPassActivationContract,
+}
+
 fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
     if contract.scheduled {
         TYPED_SURFACE_SCHEDULED_EXPORT
@@ -4021,6 +4101,121 @@ fn resolve_surface_schedule_policy<'db>(
     }))
 }
 
+/// Resolve the pure policy selected by `PassActivation<P>` on one authored GPU
+/// stage. Exactly one public inherent function on `P` must consume the owning
+/// actor's complete non-resource state record and return `bool`. This makes
+/// activation a typed Fe effect while leaving the browser as a blind executor.
+fn resolve_pass_activation_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<ResolvedPassActivationPolicy<'db>>, WebBundleError> {
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor.behaviors.iter().any(|behavior| {
+                    behavior
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == source_entry)
+                })
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU pass `{source_entry}` has no containing actor"
+            ))
+        })?;
+    let behavior = actor
+        .behaviors
+        .iter()
+        .copied()
+        .find(|behavior| {
+            behavior
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == source_entry)
+        })
+        .expect("containing actor lookup proved the stage behavior");
+    let Some(policy_ty) = behavior_pass_activation_policy_ty(db, behavior)? else {
+        return Ok(None);
+    };
+    let expected_state = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
+        .map(|(state, _)| state)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "PassActivation on `{source_entry}` has no complete actor state"
+            ))
+        })?;
+    let policy_name = policy_ty.pretty_print(db);
+    let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "PassActivation policy `{policy_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = policy_ingot
+        .all_impls(db)
+        .iter()
+        .copied()
+        .filter(|impl_| impl_.admissible_inherent_impl_ty(db) == Some(policy_ty))
+        .flat_map(|impl_| impl_.funcs(db))
+        .filter(|func| {
+            func.vis(db) == Visibility::Public
+                && !func.is_extern(db)
+                && func.body(db).is_some()
+                && func.arg_tys(db).len() == 1
+                && canonical_type_from_semantic(
+                    db,
+                    *func.arg_tys(db)[0].skip_binder(),
+                    "pass_activation_state",
+                )
+                .is_ok_and(|state| state == expected_state)
+                && canonical_type_from_semantic(db, func.return_ty(db), "pass_activation_result")
+                    .is_ok_and(|result| result == CanonicalType::Bool)
+        })
+        .collect::<Vec<_>>();
+    let func = match candidates.as_slice() {
+        [func] => *func,
+        [] => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "PassActivation policy `{policy_name}` has no public Fe implementation with complete actor state -> bool shape"
+            )));
+        }
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "PassActivation policy `{policy_name}` has {} implementations with complete actor state -> bool shape; exactly one is required",
+                candidates.len()
+            )));
+        }
+    };
+    let mut params = Vec::new();
+    append_canonical_wasm_types(&expected_state, &mut params, "pass_activation_state")?;
+    let mut state_tag_limits = Vec::new();
+    let state_fields = surface_scalar_tag_limits(
+        &expected_state,
+        "pass_activation_state",
+        0,
+        &mut state_tag_limits,
+    )?;
+    if state_fields != params.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "PassActivation policy `{policy_name}` state flattened inconsistently: canonical shape has {state_fields} leaves but Wasm ABI has {}",
+            params.len()
+        )));
+    }
+    Ok(Some(ResolvedPassActivationPolicy {
+        policy_ty,
+        func,
+        contract: TypedPassActivationContract {
+            params,
+            state_fields,
+            state_tag_limits,
+        },
+    }))
+}
+
 fn surface_quality_function_shape(db: &DriverDataBase, func: Func<'_>) -> bool {
     let arg_tys = func.arg_tys(db);
     arg_tys.len() == 1
@@ -4536,6 +4731,52 @@ fn with_typed_surface_recovery(
         contract.event_tag_limits.clone(),
         contract.state_tag_limits.clone(),
     )
+}
+
+fn typed_pass_activation_export(index: u32) -> String {
+    format!("{TYPED_PASS_ACTIVATION_EXPORT_PREFIX}{index}")
+}
+
+fn with_typed_pass_activation(
+    options: WasmCompileOptions,
+    source: &str,
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> WasmCompileOptions {
+    // A pass activation predicate is the stateless specialization of the
+    // existing pure resident-policy lowerer: complete actor state is supplied
+    // as the fact record, no private policy state is retained, and one bool is
+    // returned. The authored function and policy type stay private.
+    options.with_resident_policy(
+        source,
+        typed_pass_activation_export(index),
+        true,
+        contract.state_fields,
+        0,
+        1,
+        contract.state_tag_limits.clone(),
+        Vec::new(),
+    )
+}
+
+fn verify_typed_pass_activation_export(
+    wasm: &[u8],
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> Result<(), WebBundleError> {
+    let export = typed_pass_activation_export(index);
+    let (params, results) = wasm_export_signature(wasm, &export).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "PassActivation policy {index} has no fixed Wasm export `{export}`"
+        ))
+    })?;
+    if params != contract.params || results != [WebControlWasmType::I32] {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "PassActivation policy {index} has measured Wasm signature {params:?} -> {results:?}; expected {:?} -> [I32] from the complete Fe actor state",
+            contract.params
+        )));
+    }
+    Ok(())
 }
 
 fn validate_surface_schedule_pair(
@@ -5256,6 +5497,11 @@ pub struct WebPass {
     pub source_entry: String,
     pub shader: String,
     pub shader_bytes: u64,
+    /// Dense compiler-assigned identity of a pure Fe activation policy. The
+    /// fixed host invokes the corresponding versioned Wasm predicate once per
+    /// presentation and omits this pass when it returns false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<u32>,
     /// Physical shader-stage demand derived from this Fe pass. The logical
     /// resource visibility plan is validated as an upper bound before this
     /// target fact reaches the browser.
@@ -6331,6 +6577,29 @@ impl WebBundle {
             .iter()
             .map(|resource| resource.field_index)
             .collect::<Vec<_>>();
+        let mut pass_activation_policies = Vec::<ResolvedPassActivationPolicy<'_>>::new();
+        let mut stage_activation_indices = Vec::with_capacity(program.stages.len());
+        for stage in &program.stages {
+            let activation = resolve_pass_activation_policy(
+                db,
+                top_mod,
+                &stage.source_entry,
+                &resource_field_indices,
+            )?;
+            let index = activation.map(|policy| {
+                if let Some(index) = pass_activation_policies
+                    .iter()
+                    .position(|existing| existing.policy_ty == policy.policy_ty)
+                {
+                    index as u32
+                } else {
+                    let index = pass_activation_policies.len();
+                    pass_activation_policies.push(policy);
+                    u32::try_from(index).expect("pass activation policy count fits in u32")
+                }
+            });
+            stage_activation_indices.push(index);
+        }
         let mut shader_artifacts = compile_actor_shader_artifacts(
             db,
             top_mod,
@@ -6384,10 +6653,23 @@ impl WebBundle {
                     &resource_field_indices,
                 )?;
                 let path = format!("{PASS_DIR}/{index:03}-raster.wgsl");
+                let vertex_activation = stage_activation_indices[index];
+                let fragment_activation = stage_activation_indices[index + 1];
+                let activation = match (vertex_activation, fragment_activation) {
+                    (Some(vertex), Some(fragment)) if vertex != fragment => {
+                        return Err(WebBundleError::SurfaceProjection(format!(
+                            "raster pair `{}` / `{fragment_entry}` selects two different PassActivation policies",
+                            stage.source_entry
+                        )));
+                    }
+                    (Some(activation), _) | (_, Some(activation)) => Some(activation),
+                    (None, None) => None,
+                };
                 passes.push(WebPass {
                     source_entry: fragment_entry.clone(),
                     shader: path.clone(),
                     shader_bytes: shader.len() as u64,
+                    activation,
                     shader_stages: vec![WebShaderStage::Vertex, WebShaderStage::Fragment],
                     dispatch: None,
                     repeat: 1,
@@ -6477,6 +6759,7 @@ impl WebBundle {
                 source_entry: stage.source_entry.clone(),
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
+                activation: stage_activation_indices[index],
                 shader_stages: if dispatch.is_some() {
                     vec![WebShaderStage::Compute]
                 } else {
@@ -6509,6 +6792,7 @@ impl WebBundle {
         }
         validate_resource_stage_visibility(&resources, &passes)?;
         validate_portable_pass_bindings(&passes)?;
+        validate_pass_activation_cycles(&passes)?;
         let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "GPU actor pass graph has no shader for its derived terminal entry".to_owned(),
@@ -6526,6 +6810,7 @@ impl WebBundle {
             || quality_policy.is_some()
             || recovery_policy.is_some()
             || readback.is_some()
+            || !pass_activation_policies.is_empty()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -6581,13 +6866,18 @@ impl WebBundle {
             if let Some(readback) = readback.as_ref() {
                 control_entries.push(readback.source_entry.clone());
             }
-            let internal_funcs = schedule_policy
+            let mut internal_funcs = schedule_policy
                 .as_ref()
                 .map(|policy| policy.func)
                 .into_iter()
                 .chain(quality_policy.as_ref().map(|policy| policy.func))
                 .chain(recovery_policy.as_ref().map(|policy| policy.func))
                 .collect::<Vec<_>>();
+            for policy in &pass_activation_policies {
+                if !internal_funcs.contains(&policy.func) {
+                    internal_funcs.push(policy.func);
+                }
+            }
             let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
                 db,
                 top_mod,
@@ -6644,6 +6934,17 @@ impl WebBundle {
                     &policy.contract,
                 );
             }
+            for (index, policy) in pass_activation_policies.iter().enumerate() {
+                let policy_instance_key =
+                    mir::runtime_package_instance_key_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_pass_activation(
+                    wasm_options,
+                    &policy_instance_key,
+                    u32::try_from(index).expect("pass activation policy count fits in u32"),
+                    &policy.contract,
+                );
+            }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?
@@ -6655,6 +6956,13 @@ impl WebBundle {
             }
             if let Some(readback) = readback.as_ref() {
                 verify_typed_gpu_readback_exports(&wasm, readback)?;
+            }
+            for (index, policy) in pass_activation_policies.iter().enumerate() {
+                verify_typed_pass_activation_export(
+                    &wasm,
+                    u32::try_from(index).expect("pass activation policy count fits in u32"),
+                    &policy.contract,
+                )?;
             }
             let control = control_export
                 .as_deref()
@@ -7055,6 +7363,7 @@ impl WebBundle {
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,
+            activation: None,
             shader_stages: match options.mode {
                 WebBundleMode::Compute | WebBundleMode::Grid => vec![WebShaderStage::Compute],
                 WebBundleMode::Render => vec![WebShaderStage::Fragment],

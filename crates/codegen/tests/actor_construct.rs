@@ -1634,6 +1634,53 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
 }
 
 #[test]
+fn typed_pass_activation_selects_memoized_subgraphs_without_host_semantics() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_pass_activation");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "pass activation fixture diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("pass-activation.fe".to_owned())),
+    )
+    .expect("typed pass activation graph");
+    let passes = &bundle.manifest.passes;
+    assert_eq!(passes.len(), 4);
+    assert_eq!(passes[0].activation, Some(0));
+    assert_eq!(passes[1].activation, Some(1));
+    assert_eq!(passes[2].activation, Some(1));
+    assert_eq!(passes[3].activation, None);
+    assert_eq!(passes[1].cycle, passes[2].cycle);
+
+    let encoded = serde_json::to_value(&bundle.manifest).expect("manifest JSON");
+    assert_eq!(encoded["passes"][0]["activation"], 0);
+    assert_eq!(encoded["passes"][1]["activation"], 1);
+    assert!(encoded["passes"][3].get("activation").is_none());
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("activation Wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("activation instance");
+    let analytic = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_activation_v1_0")
+        .expect("analytic predicate");
+    let pullback = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_activation_v1_1")
+        .expect("pullback predicate");
+    assert_eq!(analytic.call(&mut store, (0.0, 9.0)).unwrap(), 1);
+    assert_eq!(pullback.call(&mut store, (0.0, 9.0)).unwrap(), 0);
+    assert_eq!(analytic.call(&mut store, (1.0, 9.0)).unwrap(), 0);
+    assert_eq!(pullback.call(&mut store, (1.0, 9.0)).unwrap(), 1);
+}
+
+#[test]
 fn compute_invocation_context_must_be_the_first_behavior_argument() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_invocation_misplaced");

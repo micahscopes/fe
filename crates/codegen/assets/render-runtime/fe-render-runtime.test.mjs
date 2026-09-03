@@ -8,8 +8,64 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("Fe pass activation selects a memoized subgraph once per policy", () => {
+  const records = [
+    { pass: { source_entry: "background" } },
+    { pass: { source_entry: "analytic", activation: 0 } },
+    { pass: { source_entry: "pullback-a", activation: 1 } },
+    { pass: { source_entry: "pullback-b", activation: 1 } },
+  ];
+  const calls = [0, 0];
+  const kernels = [
+    (mode) => { calls[0] += 1; return mode < 0.5 ? 1 : 0; },
+    (mode) => { calls[1] += 1; return mode >= 0.5 ? 1 : 0; },
+  ];
+  assert.deepEqual(
+    selectActivePassRecords(records, kernels, [0]).map(record => record.pass.source_entry),
+    ["background", "analytic"],
+  );
+  assert.deepEqual(calls, [1, 1]);
+  calls[0] = 0;
+  calls[1] = 0;
+  assert.deepEqual(
+    selectActivePassRecords(records, kernels, [1]).map(record => record.pass.source_entry),
+    ["background", "pullback-a", "pullback-b"],
+  );
+  assert.deepEqual(calls, [1, 1], "one policy shared by two passes is evaluated once");
+});
+
+test("selected pass pipelines are realized lazily and memoized while resident", () => {
+  const calls = { modules: 0, compute: 0, render: 0 };
+  const device = {
+    createShaderModule() {
+      calls.modules += 1;
+      return { kind: "module" };
+    },
+    createComputePipeline(descriptor) {
+      calls.compute += 1;
+      assert.equal(descriptor.compute.module.kind, "module");
+      return { kind: "compute" };
+    },
+    createRenderPipeline() {
+      calls.render += 1;
+      return { kind: "render" };
+    },
+  };
+  const record = {
+    pass: { layout: { mode: "compute" } },
+    pipeline: null,
+    shaderModule: null,
+    shaderSource: "@compute @workgroup_size(1) fn sample() {}",
+    pipelineDescriptor: { compute: { entryPoint: "sample" } },
+  };
+  const first = realizePassPipeline(device, record);
+  const second = realizePassPipeline(device, record);
+  assert.equal(first, second);
+  assert.deepEqual(calls, { modules: 1, compute: 1, render: 0 });
+});
 
 test("WGSL summary aggregates unique pass shaders rather than the primary artifact", () => {
   assert.deepEqual(
@@ -793,7 +849,7 @@ test("poster-only surfaces destroy all retained GPU buffers exactly once", () =>
   ]);
 });
 
-test("failed graph construction destroys resources and pass-local buffers", async () => {
+test("failed lazy pipeline realization releases resources and pass-local buffers", async () => {
   const oldBufferUsage = globalThis.GPUBufferUsage;
   const oldShaderStage = globalThis.GPUShaderStage;
   try {
@@ -841,10 +897,13 @@ test("failed graph construction destroys resources and pass-local buffers", asyn
       },
     }];
 
-    await assert.rejects(
-      surface._buildPassGraph(device, 1),
+    const graph = await surface._buildPassGraph(device, 1);
+    assert.throws(
+      () => realizePassPipeline(device, graph.passRecords[0]),
       /deliberate pipeline failure/,
     );
+    surface._gpu = graph;
+    surface._releaseGpuResources();
     assert.deepEqual(
       descriptors.map(descriptor => descriptor.usage),
       [0x80, 0x88, 0x80],

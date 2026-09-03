@@ -996,6 +996,53 @@ export function wgslPayloadSummary(manifest) {
   };
 }
 
+/** Evaluate every distinct compiler-derived Fe pass policy exactly once for
+ * one presentation and retain only records in the active subgraph. Pipeline
+ * records themselves remain resident and are never rebuilt on mode changes. */
+export function selectActivePassRecords(passRecords, activationKernels, uniforms) {
+  const decisions = new Map();
+  return passRecords.filter((record) => {
+    const activation = record.pass.activation;
+    if (activation === undefined || activation === null) return true;
+    if (!Number.isSafeInteger(activation) || activation < 0) {
+      throw new Error("fe render runtime: invalid compiler-derived pass activation ordinal");
+    }
+    if (!decisions.has(activation)) {
+      const kernel = activationKernels[activation];
+      if (typeof kernel !== "function") {
+        throw new Error(`fe render runtime: missing Fe pass activation policy ${activation}`);
+      }
+      const decision = kernel(...uniforms);
+      if (decision !== 0 && decision !== 1) {
+        throw new Error(`fe render runtime: Fe pass activation policy ${activation} returned a non-bool value`);
+      }
+      decisions.set(activation, decision === 1);
+    }
+    return decisions.get(activation);
+  });
+}
+
+/** Realize one already-compiled pass descriptor on first demand. A mode switch
+ * therefore pays pipeline creation at most once while the graph is resident;
+ * inactive policies never synchronously compile their pipelines. */
+export function realizePassPipeline(device, record) {
+  if (record.pipeline) return record.pipeline;
+  const module = record.shaderModule ?? device.createShaderModule({ code: record.shaderSource });
+  record.shaderModule = module;
+  const pipeline = record.pass.layout.mode === "compute"
+    ? device.createComputePipeline({
+        ...record.pipelineDescriptor,
+        compute: { ...record.pipelineDescriptor.compute, module },
+      })
+    : device.createRenderPipeline({
+        ...record.pipelineDescriptor,
+        vertex: { ...record.pipelineDescriptor.vertex, module },
+        fragment: { ...record.pipelineDescriptor.fragment, module },
+      });
+  record.pipeline = pipeline;
+  return pipeline;
+}
+
 /** The initial uniform vector from the declared surface. Protocol v9 consumes
  * the explicit Fe value source; earlier versions retain their isolated
  * compatibility interpretation. */
@@ -1284,6 +1331,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceScheduleKernel = null;
     this._surfaceRecoveryKernel = null;
     this._surfaceQualityKernel = null;
+    this._passActivationKernels = [];
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
@@ -1557,6 +1605,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceScheduleKernel = null;
       this._surfaceRecoveryKernel = null;
       this._surfaceQualityKernel = null;
+      this._passActivationKernels = [];
       this._gpuReadbackKernel = null;
       this._gpuReadbackBinding = null;
       this._gpuReadbackResource = null;
@@ -1664,6 +1713,21 @@ export class FeSurfaceElement extends HTMLElement {
         throw new Error("fe render runtime: surface quality export is not callable");
       }
       this._surfaceQualityKernel = surfaceQuality ?? null;
+      const activationIndices = [...new Set(
+        this._passes
+          .map(pass => pass.activation)
+          .filter(index => index !== undefined && index !== null),
+      )].sort((left, right) => left - right);
+      for (let ordinal = 0; ordinal < activationIndices.length; ordinal += 1) {
+        if (activationIndices[ordinal] !== ordinal) {
+          throw new Error("fe render runtime: pass activation ordinals must be dense from zero");
+        }
+        const kernel = instance?.exports[`fe_pass_activation_v1_${ordinal}`];
+        if (typeof kernel !== "function") {
+          throw new Error(`fe render runtime: pass activation policy ${ordinal} has no callable Fe export`);
+        }
+        this._passActivationKernels.push(kernel);
+      }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
@@ -2018,7 +2082,6 @@ export class FeSurfaceElement extends HTMLElement {
       const passRecords = [];
       for (let index = 0; index < this._passes.length; index++) {
         const pass = this._passes[index];
-        const module = device.createShaderModule({ code: shaderSources[index] });
         const layoutEntries = [];
         const groupEntries = [];
         const inputs = [];
@@ -2085,16 +2148,15 @@ export class FeSurfaceElement extends HTMLElement {
         const pipelineLayout = bindGroupLayout
           ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
           : "auto";
-        const pipeline = pass.layout.mode === "compute"
-          ? device.createComputePipeline({
+        const pipelineDescriptor = pass.layout.mode === "compute"
+          ? {
               layout: pipelineLayout,
-              compute: { module, entryPoint: pass.layout.entry_point },
-            })
-          : device.createRenderPipeline({
+              compute: { entryPoint: pass.layout.entry_point },
+            }
+          : {
               layout: pipelineLayout,
-              vertex: { module, entryPoint: pass.layout.vertex_entry },
+              vertex: { entryPoint: pass.layout.vertex_entry },
               fragment: {
-                module,
                 entryPoint: pass.layout.fragment_entry,
                 targets: [{ format }],
               },
@@ -2109,8 +2171,17 @@ export class FeSurfaceElement extends HTMLElement {
                     },
                   }
                 : {}),
-            });
-        passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
+            };
+        passRecords.push({
+          pass,
+          pipeline: null,
+          shaderModule: null,
+          shaderSource: shaderSources[index],
+          pipelineDescriptor,
+          bindGroup,
+          inputs,
+          outputs,
+        });
       }
       return {
         device,
@@ -2208,10 +2279,16 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._graph) {
       const gpu = this._gpu;
       const { device, passRecords } = gpu;
-      if (passRecords.some(record => record.pass.layout.mode !== "compute")) {
+      const activePassRecords = selectActivePassRecords(
+        passRecords,
+        this._passActivationKernels,
+        uniforms,
+      );
+      for (const record of activePassRecords) realizePassPipeline(device, record);
+      if (activePassRecords.some(record => record.pass.layout.mode !== "compute")) {
         ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
       }
-      for (const record of passRecords) {
+      for (const record of activePassRecords) {
         for (const input of record.inputs) {
           const values = input.binding.members.map((member) => {
             const index = this._memberIndexByName.get(member.name);
@@ -2346,8 +2423,8 @@ export class FeSurfaceElement extends HTMLElement {
         }
       };
       let passIndex = 0;
-      while (passIndex < passRecords.length) {
-        const record = passRecords[passIndex];
+      while (passIndex < activePassRecords.length) {
+        const record = activePassRecords[passIndex];
         const cycle = record.pass.cycle;
         if (cycle === undefined || cycle === null) {
           await executeRecord(record);
@@ -2361,8 +2438,8 @@ export class FeSurfaceElement extends HTMLElement {
           throw new Error("fe render runtime: invalid compiler-derived actor pass cycle");
         }
         let cycleEnd = passIndex;
-        while (cycleEnd < passRecords.length) {
-          const member = passRecords[cycleEnd];
+        while (cycleEnd < activePassRecords.length) {
+          const member = activePassRecords[cycleEnd];
           const memberCycle = member.pass.cycle;
           if (memberCycle === undefined || memberCycle === null || memberCycle.group !== cycle.group) {
             break;
@@ -2379,7 +2456,7 @@ export class FeSurfaceElement extends HTMLElement {
         submitEncoder();
         for (let iteration = 0; iteration < cycle.repeat; iteration += 1) {
           for (let memberIndex = passIndex; memberIndex < cycleEnd; memberIndex += 1) {
-            await executeRecord(passRecords[memberIndex], iteration);
+            await executeRecord(activePassRecords[memberIndex], iteration);
           }
           submitEncoder();
         }
@@ -3036,6 +3113,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._recoveryObservedLoss = false;
     this._recoveryWasLive = false;
     this._surfaceQualityKernel = null;
+    this._passActivationKernels = [];
     this._unwireResizeObserver();
     if (this._liveContext) {
       try {

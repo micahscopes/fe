@@ -64,6 +64,10 @@ pub enum GpuControl {
     SurfaceSchedule,
     SurfaceQuality,
     SurfaceRecovery,
+    /// A pure Fe policy that decides whether one compiled GPU pass belongs to
+    /// the current presentation subgraph. The host observes only an opaque
+    /// policy ordinal and a fixed Wasm predicate export.
+    PassActivation,
     /// Compile-time Fe behavior returning the actor's raster plan.
     RasterPipeline,
     /// Opt a surface into uncaptured primary-pointer motion in addition to
@@ -539,6 +543,7 @@ impl<'db> AttrListId<'db> {
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             "surface_quality" => Some(GpuControl::SurfaceQuality),
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
+            "pass_activation" => Some(GpuControl::PassActivation),
             "raster_pipeline" => Some(GpuControl::RasterPipeline),
             "surface_pointer_motion" => Some(GpuControl::SurfacePointerMotion),
             "readback" => Some(GpuControl::Readback),
