@@ -24,6 +24,7 @@ use sonatina_codegen::isa::spirv::{
 };
 use sonatina_codegen::optim::{
     Pass,
+    dead_ret::{DeadRetElimConfig, run_dead_ret_elim},
     exact_func_merge::run_exact_private_func_merge,
     inliner::{FullInlineCloneRecord, Inliner, InlinerConfig},
     run_function_passes_on,
@@ -556,6 +557,25 @@ fn inline_spirv_calls_from_roots(
     }
     for (function, hint) in original_hints {
         module.ctx.set_inline_hint(function, hint);
+    }
+    let dead_ret_stats = run_dead_ret_elim(module, DeadRetElimConfig::default());
+    if dead_ret_stats.removed_rets != 0 {
+        let mut affected = roots.to_vec();
+        affected.extend(preserved_helpers.iter().copied());
+        affected.sort_unstable_by_key(|function| function.as_u32());
+        affected.dedup();
+        run_function_passes_on(module, &affected, &spirv_post_inline_cleanup_passes());
+    }
+    if trace {
+        eprintln!(
+            "fe spirv dead return lanes: functions={}, removed_rets={}, calls={}, removed_call_results={}, rounds={}, blocked_higher_order={}",
+            dead_ret_stats.rewritten_funcs,
+            dead_ret_stats.removed_rets,
+            dead_ret_stats.rewritten_calls,
+            dead_ret_stats.removed_call_results,
+            dead_ret_stats.rounds,
+            dead_ret_stats.blocked_higher_order_funcs,
+        );
     }
     preserved_helpers
 }
