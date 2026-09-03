@@ -44,67 +44,15 @@ pub struct ViewSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewParam {
     pub name: String,
-    pub kind: ViewParamKind,
+    /// Opaque snake-case spelling of the Fe enum variant. The compiler does
+    /// not own or exhaustively mirror the parameter vocabulary.
+    pub kind: String,
     pub min: f32,
     pub max: f32,
     pub init: f32,
-}
-
-/// The presentation/drive kind, read off the evaluated `ParamKind` enum
-/// variant. The variant NAME is the single source of the kind vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewParamKind {
-    Range,
-    Unit,
-    Angle,
-    Log,
-    Int,
-    Fixed,
-    ExtentX,
-    ExtentY,
-    Toggle,
-}
-
-impl ViewParamKind {
-    /// The projected snake-case kind string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Range => "range",
-            Self::Unit => "unit",
-            Self::Angle => "angle",
-            Self::Log => "log",
-            Self::Int => "int",
-            Self::Fixed => "fixed",
-            Self::ExtentX => "extent_x",
-            Self::ExtentY => "extent_y",
-            Self::Toggle => "toggle",
-        }
-    }
-
-    /// Whether this param is bound to the live canvas size rather than a slider.
-    pub fn is_extent(self) -> bool {
-        matches!(self, Self::ExtentX | Self::ExtentY)
-    }
-
-    /// Whether this param is a user-visible control (not fixed / extent-bound).
-    pub fn is_visible(self) -> bool {
-        !matches!(self, Self::Fixed | Self::ExtentX | Self::ExtentY)
-    }
-
-    fn from_variant_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "Range" => Self::Range,
-            "Unit" => Self::Unit,
-            "Angle" => Self::Angle,
-            "Log" => Self::Log,
-            "Int" => Self::Int,
-            "Fixed" => Self::Fixed,
-            "ExtentX" => Self::ExtentX,
-            "ExtentY" => Self::ExtentY,
-            "Toggle" => Self::Toggle,
-            _ => return None,
-        })
-    }
+    pub bounded: bool,
+    pub initialized: bool,
+    pub visible: bool,
 }
 
 /// Why a `view()` projection could not be produced. Both variants carry a
@@ -229,10 +177,41 @@ fn read_f32<'db>(
     }
 }
 
+fn read_bool<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<bool, ViewProjectionError> {
+    match value.value(db) {
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(value),
+            ..
+        } => Ok(value),
+        _ => Err(ViewProjectionError::Shape(format!(
+            "{what} is not a bool scalar"
+        ))),
+    }
+}
+
+fn snake_case_variant(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for (index, character) in name.chars().enumerate() {
+        if character.is_uppercase() {
+            if index != 0 {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
 fn read_kind<'db>(
     db: &'db dyn HirAnalysisDb,
     value: SemConstId<'db>,
-) -> Result<ViewParamKind, ViewProjectionError> {
+) -> Result<String, ViewProjectionError> {
     let SemConstValue::Enum { ty, variant, .. } = value.value(db) else {
         return Err(ViewProjectionError::Shape(
             "`kind` is not an enum value".into(),
@@ -249,9 +228,7 @@ fn read_kind<'db>(
     let variant_name = EnumVariant::new(enum_, variant.0 as usize)
         .name(db)
         .ok_or_else(|| ViewProjectionError::Shape("`kind` variant has no name".into()))?;
-    ViewParamKind::from_variant_name(variant_name).ok_or_else(|| {
-        ViewProjectionError::Shape(format!("unknown `ParamKind` variant `{variant_name}`"))
-    })
+    Ok(snake_case_variant(variant_name))
 }
 
 fn walk_surface<'db>(
@@ -320,12 +297,24 @@ fn walk_param<'db>(
     let mut min = None;
     let mut max = None;
     let mut init = None;
+    let mut bounded = None;
+    let mut initialized = None;
+    let mut visible = None;
     for (field_name, field) in struct_named_fields(db, value, &format!("param `{name}`"))? {
         match field_name.as_str() {
             "kind" => kind = Some(read_kind(db, field)?),
             "min" => min = Some(read_f32(db, field, &format!("param `{name}` min"))?),
             "max" => max = Some(read_f32(db, field, &format!("param `{name}` max"))?),
             "init" => init = Some(read_f32(db, field, &format!("param `{name}` init"))?),
+            "bounded" => bounded = Some(read_bool(db, field, &format!("param `{name}` bounded"))?),
+            "initialized" => {
+                initialized = Some(read_bool(
+                    db,
+                    field,
+                    &format!("param `{name}` initialized"),
+                )?)
+            }
+            "visible" => visible = Some(read_bool(db, field, &format!("param `{name}` visible"))?),
             _ => {}
         }
     }
@@ -337,11 +326,21 @@ fn walk_param<'db>(
         max.ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `max`")))?;
     let init =
         init.ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `init`")))?;
+    let bounded = bounded
+        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `bounded`")))?;
+    let initialized = initialized.ok_or_else(|| {
+        ViewProjectionError::Shape(format!("param `{name}` has no `initialized`"))
+    })?;
+    let visible = visible
+        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `visible`")))?;
     Ok(ViewParam {
         name,
         kind,
         min,
         max,
         init,
+        bounded,
+        initialized,
+        visible,
     })
 }

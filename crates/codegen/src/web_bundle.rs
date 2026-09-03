@@ -19,7 +19,7 @@ use common::InputDb;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     semantic::{
-        SemConstId, SemConstScalar, SemConstValue, ViewParam, ViewParamKind,
+        SemConstId, SemConstScalar, SemConstValue, ViewParam,
         ctfe::{CtfeError, eval_body_owner_const},
         project_view_surface,
     },
@@ -4904,14 +4904,7 @@ fn web_surface_param(
     view_param: &ViewParam,
     member: &WebBindingMember,
 ) -> Result<WebSurfaceParam, WebBundleError> {
-    let kind = view_param.kind;
-    let (min, max, init, visible) = if kind.is_extent() {
-        // Extent-bound: the runtime writes the live canvas size into the member.
-        (None, None, None, false)
-    } else if matches!(kind, ViewParamKind::Fixed) {
-        // Projected constant: carried into the uniform record, no control.
-        (None, None, Some(view_param.init), false)
-    } else {
+    if view_param.bounded {
         if view_param.min >= view_param.max {
             return Err(WebBundleError::SurfaceProjection(format!(
                 "param `{}`: min ({}) must be less than max ({})",
@@ -4924,21 +4917,15 @@ fn web_surface_param(
                 view_param.name, view_param.init, view_param.min, view_param.max
             )));
         }
-        (
-            Some(view_param.min),
-            Some(view_param.max),
-            Some(view_param.init),
-            true,
-        )
-    };
+    }
     Ok(WebSurfaceParam {
         name: member.name.clone(),
         doc: member.doc.clone(),
-        kind: kind.as_str().to_string(),
-        min,
-        max,
-        init,
-        visible,
+        kind: view_param.kind.clone(),
+        min: view_param.bounded.then_some(view_param.min),
+        max: view_param.bounded.then_some(view_param.max),
+        init: view_param.initialized.then_some(view_param.init),
+        visible: view_param.visible,
     })
 }
 
