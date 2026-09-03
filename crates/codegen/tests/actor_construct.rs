@@ -151,10 +151,7 @@ fn actor_without_a_unique_terminal_gpu_behavior_is_rejected() {
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let err = actor_web_entry(&db, top_mod).unwrap_err();
-    assert!(
-        format!("{err}").contains("GPU stage attribute"),
-        "{err}"
-    );
+    assert!(format!("{err}").contains("GPU stage attribute"), "{err}");
 }
 
 #[test]
@@ -272,7 +269,10 @@ fn authored_raster_instancing_is_derived_from_the_fe_draw_policy() {
     else {
         panic!("expected authored vertex stage");
     };
-    assert_eq!((*vertex_count, *instance_count, *instance_index), (3, 4, true));
+    assert_eq!(
+        (*vertex_count, *instance_count, *instance_index),
+        (3, 4, true)
+    );
 
     let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
         .expect("instanced authored raster bundle");
@@ -282,10 +282,24 @@ fn authored_raster_instancing_is_derived_from_the_fe_draw_policy() {
     assert_eq!(pass.draw_vertices, Some(3));
     assert_eq!(pass.draw_instances, Some(4));
     assert_eq!(pass.layout.builtin_inputs.len(), 2);
-    assert_eq!(pass.layout.builtin_inputs[0].source, WebBuiltinSource::VertexIndex);
-    assert_eq!(pass.layout.builtin_inputs[1].source, WebBuiltinSource::InstanceIndex);
-    assert!(bundle.wgsl.contains("@builtin(vertex_index)"), "{}", bundle.wgsl);
-    assert!(bundle.wgsl.contains("@builtin(instance_index)"), "{}", bundle.wgsl);
+    assert_eq!(
+        pass.layout.builtin_inputs[0].source,
+        WebBuiltinSource::VertexIndex
+    );
+    assert_eq!(
+        pass.layout.builtin_inputs[1].source,
+        WebBuiltinSource::InstanceIndex
+    );
+    assert!(
+        bundle.wgsl.contains("@builtin(vertex_index)"),
+        "{}",
+        bundle.wgsl
+    );
+    assert!(
+        bundle.wgsl.contains("@builtin(instance_index)"),
+        "{}",
+        bundle.wgsl
+    );
 }
 
 #[test]
@@ -379,20 +393,60 @@ fn authored_raster_binding_budget_is_validated_per_shader_stage() {
     assert_eq!(
         resources
             .iter()
-            .filter(|binding| {
-                binding.shader_stages == [fe_codegen::WebShaderStage::Vertex]
-            })
+            .filter(|binding| { binding.shader_stages == [fe_codegen::WebShaderStage::Vertex] })
             .count(),
         5
     );
     assert_eq!(
         resources
             .iter()
-            .filter(|binding| {
-                binding.shader_stages == [fe_codegen::WebShaderStage::Fragment]
-            })
+            .filter(|binding| { binding.shader_stages == [fe_codegen::WebShaderStage::Fragment] })
             .count(),
         5
+    );
+}
+
+#[test]
+fn mutable_storage_can_flow_from_compute_to_vertex_with_exact_physical_stages() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_mutable_storage_vertex");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "mutable vertex diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("shade", Some("mutable-vertex.fe".to_owned())),
+    )
+    .expect("mutable storage should be admitted across compute and vertex stages");
+    let [compute, raster] = bundle.manifest.passes.as_slice() else {
+        panic!("expected one compute pass followed by one raster pass")
+    };
+    let compute_resource = compute
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+        .expect("compute resource binding");
+    let raster_resource = raster
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+        .expect("raster resource binding");
+    assert_eq!(
+        compute_resource.shader_stages,
+        [fe_codegen::WebShaderStage::Compute]
+    );
+    assert_eq!(
+        raster_resource.shader_stages,
+        [fe_codegen::WebShaderStage::Vertex],
+        "broad logical admission must still lower to exact pass-local visibility",
     );
 }
 
