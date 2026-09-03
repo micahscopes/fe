@@ -2005,8 +2005,23 @@ All four are focused ingots and may remain so permanently.
     release compile time, and browser execution. Do not retain an optimization
     that does not improve final artifacts while preserving independent oracles.
 - **G-INSPECT, partial.** The Fe SourceInspector and generated artifact views
-  exist. `SourceAtlas` must still expose authored, semantic, placement, layout,
-  artifact, and evidence layers without a runtime JSON manifest.
+  exist. The first typed `SourceAtlas` semantics now define content-derived
+  document and SCIP symbol identities, semantic highlight roles, bounded
+  branch-aware navigation, request-kind-branded revisions, stale-result
+  rejection, typed query effects, and twelve synchronized lenses: authored,
+  expanded, semantic, RMIR, Sonatina, placement, layout, WGSL, SPIR-V, Wasm,
+  EVM, and evidence. Its release Wasm oracle executes history, revisions,
+  payload-query transitions, highlighting, and source ranges with zero imports;
+  a separate negative gate proves that genuine embedded `u256` is not mistaken
+  for wasm32 `usize`. That gate also closed the generic Wasm gaps for semantic
+  `usize` nested in aggregates and for target-layout-correct private payload
+  enums, including compact discriminants and invalid-tag traps. The architecture
+  and parity floor are recorded at
+  `/workspace/scratch/mb2-fe-source-atlas-architecture-and-first-slice-2026-09-03.md`.
+  Still required are the compiler-emitted immutable binary atlas, lexical and
+  semantic token projection, provenance records connecting all generated
+  lenses, virtualized Fe component presentation, and browser execution of SCIP
+  definition/reference/hover navigation without a runtime JSON manifest.
 
 Consume that architecture through six named gates in the authoritative
 campaign SSOT: G-NTT, G-LAYOUT, G-RECEIPT, G-RECURSE, G-BROWSER, and G-INSPECT.
@@ -2073,7 +2088,7 @@ run deliberately at the release gate.
 | Runtime control | Typed `Pending`, `TaskOutcome`, nominal `Suspend`, generated continuation states, resident/scoped actors, typed actor sinks, timer suspension | One `std::runtime` facade; reusable source-to-actor forwarding; explicit scope/supervision policies | ZIO-like typed environment/exit/scope in Fe without a boxed monadic runtime; compiler-derived task handles and exactly-once structured cancellation |
 | Reactive | Typed `Event`, affine `Subscription`, effect-backed `EventSource`/`AsyncEventSource`, zero-state `Stream`, `next_ready`, pure event map/filter/hold, executable `Scan`, `BoundedQueue`, `Latest`, `VirtualTime`, leading `Throttle`, trailing `Debounce`, `SwitchLatest`, bounded `SharedReplay`, non-destructive nested heterogeneous `Select`, two-source merged buffering, and exact Event Studio browser evidence | Lift the proven policies into one stream-graph surface; fuse effectful interpreters and structured shared cancellation | Static typed stream graphs with map/filter/scan/merge/switch/sample/throttle/debounce/share/replay fused by FCO into continuation machines |
 | Browser sources | Render surfaces, visibility, animation frames, viewport, raw Pointer Events, Fe-selected primary-pointer capture, wheel, typed `MessagePort<u64>` observations, the actual shared WebGPU device lifecycle and queue-idle completion stream, and Fe-owned shared-device recovery; host listeners are scoped and demo-blind | Fetch sources, Worker/spawn attachment for opaque ports, compiler-derived rich message payloads; move render surfaces onto the same capture/coordinate vocabulary | Standards-derived adapters generated from typed capabilities, with Fe owning combination, retry, lifetime, and gesture policy |
-| Components/pages | FCO-derived action/part identity, resident reducers, keyed repeats, Fe page composition, TodoMVC/Event Studio/SourceInspector | Fe HTML quasiquotes lowering to existing component values; typed custom-element `attr:`/`prop:`/`on:`/slot composition; split browser resource effects from DOM projection; seal raw part minting and patch buffers | Compiler derives action sums, opaque target identities, event dispatch, dependencies, initial DOM, minimal projection, tasks, and resources from state/handlers/view; no JavaScript template runtime or component registry |
+| Components/pages | Mandatory FCO-derived action/part identity, typed `ComponentEvent<A>`, private patch transport, typed `VisibleParts`, CTFE-expanded accessible icon buttons, resident reducers, keyed repeats, Fe page composition, TodoMVC/Event Studio/SourceInspector | Derive multiword or capability-local visibility beyond the current 32-part carrier; Fe HTML quasiquotes lowering to existing component values; typed custom-element `attr:`/`prop:`/`on:`/slot composition; split browser resource effects from DOM projection; seal raw part minting and patch buffers | Compiler derives action sums, opaque target identities, event dispatch, accessibility, dependencies, initial DOM, minimal projection, tasks, and resources from state/handlers/view; no JavaScript template runtime or component registry |
 | Surface interaction | FCO-derived parameter binding and cursor-aware Fe transitions; QCGA picking/drag/solve is Fe | Shared `PointerTracker`, `PanZoom`, `Orbit`, `PickDrag`, `RangeControl`, coordinate-space types, and capture requests | One typed interaction algebra consumed by every 2D/3D surface with no host gesture state |
 | Scheduling/render | Latest-per-frame, sample-latest, throttle, debounce, accumulate/drop policies, responsive backing, typed pass graphs | Parameterize policies; split `std::webgpu` into program/surface/schedule/quality/resource/compute/device; shared marcher/material packages | Typed kernel values derive identity, layouts, grids, capabilities, and launch; real shared-memory/barrier/subgroup lowering with portable fallbacks |
 | Math/color/precision | Shared scalar/vector/ray/sampling kernels, gallery palette, expansions/fixed arithmetic, BN254 Montgomery multiplication | Promote demo-local libraries; method-oriented vectors/cameras/colors; nominal `Fixed<L>` and `FieldElement<M,L>`; checked nonzero dimensions | Target-neutral numeric traits and compiler-supported fixed arrays remove recursive/storage and target-layout seams |
