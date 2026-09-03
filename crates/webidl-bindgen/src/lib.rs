@@ -54,6 +54,15 @@ pub const WEBGPU_QUEUE_IDLE_WEBIDL: &str = include_str!("../assets/webgpu-queue-
 pub const WEBGPU_QUEUE_IDLE_PROVENANCE: &str =
     include_str!("../assets/webgpu-queue-idle.provenance.json");
 
+/// Pinned curated Webref selection for `GPUDevice.createBuffer` and its exact
+/// descriptor/resource dependency closure.
+pub const WEBGPU_BUFFER_CREATE_WEBIDL: &str = include_str!("../assets/webgpu-buffer-create.webidl");
+
+/// Auditable origin and exact source ranges for
+/// [`WEBGPU_BUFFER_CREATE_WEBIDL`].
+pub const WEBGPU_BUFFER_CREATE_PROVENANCE: &str =
+    include_str!("../assets/webgpu-buffer-create.provenance.json");
+
 /// Private module identity of the generated standards adapter. This is not a
 /// second application-facing WebGPU API.
 pub const WEBGPU_WEBIDL_MODULE: &str = "fe:webgpu-webidl";
