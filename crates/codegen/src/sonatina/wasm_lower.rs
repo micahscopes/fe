@@ -4743,7 +4743,14 @@ where
                     } if root_kind == TypedPrivateRootKind::Materialized && *dst == root => {}
                     RStmt::Assign { .. }
                         if allowed_alias_assignments.contains(&(block_index, statement_index)) => {}
-                    RStmt::Assign { dst, .. } if members.contains(dst) => {
+                    RStmt::Assign { dst, expr } if members.contains(dst) => {
+                        wasm_lower_trace_detail(|| {
+                            format!(
+                                "shader typed-private member reassignment, function={}, block={block_index}, statement={statement_index}, root={root:?}, destination={dst:?}, destination_class={:?}, expression={expr:?}",
+                                self.function_symbol(body.owner),
+                                body.value_class(*dst),
+                            )
+                        });
                         return Err("member-reassignment");
                     }
                     RStmt::Assign {
@@ -4786,6 +4793,14 @@ where
                                     .and_then(|params| params.get(&parameter.local))
                                     != Some(argument_pointee)
                             {
+                                wasm_lower_trace_detail(|| {
+                                    format!(
+                                        "shader typed-private uncertified call borrow, caller={}, callee={}, block={block_index}, statement={statement_index}, root={root:?}, argument={argument:?}, parameter={:?}, pointee={argument_pointee:?}",
+                                        self.function_symbol(body.owner),
+                                        self.function_symbol(*callee),
+                                        parameter.local,
+                                    )
+                                });
                                 return Err("uncertified-call-borrow");
                             }
                         }
