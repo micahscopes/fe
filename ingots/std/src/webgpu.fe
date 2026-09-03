@@ -302,6 +302,15 @@ pub struct CycledDispatch<Group, Dispatch, const N: usize> {}
 #[gpu_draw(triangle_list)]
 pub struct TriangleList<const VERTICES: usize> {}
 
+/// Repeat one draw policy over a compile-time number of instances.
+///
+/// The vertex behavior receives `vertex_index` followed by `instance_index`.
+/// Keeping instancing as a compositional policy lets the same primitive
+/// topology acquire per-instance transforms, LoD keys, or material identity
+/// without expanding those values into one flattened vertex stream.
+#[gpu_draw(instanced)]
+pub struct Instanced<Draw, const INSTANCES: usize> {}
+
 /// The gesture-driven control-state role of an actor behavior (R3 param
 /// gestures): a `self`-taking behavior that maps raw gesture deltas (pan
 /// `dx`/`dy`, wheel `dzoom`, cursor `mx`/`my`; the reserved gesture-argument

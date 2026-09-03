@@ -54,7 +54,7 @@ use crate::resident_actor::{
     StructuredChildActorArtifact, behavior_is_scoped_task, compile_scoped_task_support,
 };
 use crate::sonatina::{
-    WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_resources,
+    WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_interface,
     compile_runtime_package_spirv_compute_with_interface, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
     compile_runtime_package_wasm_with_options,
@@ -619,6 +619,8 @@ pub enum WebActorStageKind {
     Vertex {
         varying: CanonicalType,
         vertex_count: u32,
+        instance_count: u32,
+        instance_index: bool,
     },
     Fragment,
     /// Authored fragment behavior paired with `Vertex` by exact nominal
@@ -1193,11 +1195,85 @@ fn role_payload_ty<'db>(
     Ok(*payload)
 }
 
-fn raster_draw_count(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RasterDrawShape {
+    vertex_count: u32,
+    instance_count: u32,
+    instance_index: bool,
+}
+
+fn raster_draw_shape_from_ty(
+    db: &DriverDataBase,
+    draw: TyId<'_>,
+) -> Result<RasterDrawShape, WebBundleError> {
+    let attrs = nominal_attrs(db, draw).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "vertex-stage draw policy is not an attributed nominal type".to_owned(),
+        )
+    })?;
+    match attrs.gpu_draw(db) {
+        Some(GpuDraw::TriangleList) => {
+            let [count, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "triangle-list draw policy requires one concrete vertex count".to_owned(),
+                ));
+            };
+            let count = semantic_const_u32(db, *count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "triangle-list vertex count must be a concrete u32-sized integer".to_owned(),
+                )
+            })?;
+            if count == 0 {
+                return Err(WebBundleError::EntryDerivation(
+                    "triangle-list vertex count must be nonzero".to_owned(),
+                ));
+            }
+            Ok(RasterDrawShape {
+                vertex_count: count,
+                instance_count: 1,
+                instance_index: false,
+            })
+        }
+        Some(GpuDraw::Instanced) => {
+            let [inner, count, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "instanced draw policy requires one draw policy and one concrete instance count"
+                        .to_owned(),
+                ));
+            };
+            let count = semantic_const_u32(db, *count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "instanced draw count must be a concrete u32-sized integer".to_owned(),
+                )
+            })?;
+            if count == 0 {
+                return Err(WebBundleError::EntryDerivation(
+                    "instanced draw count must be nonzero".to_owned(),
+                ));
+            }
+            let inner = raster_draw_shape_from_ty(db, *inner)?;
+            let instance_count = inner.instance_count.checked_mul(count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "nested instanced draw count exceeds the WebGPU u32 range".to_owned(),
+                )
+            })?;
+            Ok(RasterDrawShape {
+                vertex_count: inner.vertex_count,
+                instance_count,
+                instance_index: true,
+            })
+        }
+        None => Err(WebBundleError::EntryDerivation(
+            "vertex-stage draw policy has no recognized GPU draw attribute".to_owned(),
+        )),
+    }
+}
+
+fn raster_draw_shape(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
     role_path: PathId<'_>,
-) -> Result<u32, WebBundleError> {
+) -> Result<RasterDrawShape, WebBundleError> {
     let role_ty = resolve_metadata_ty(db, role_path, behavior.scope()).ok_or_else(|| {
         WebBundleError::EntryDerivation("vertex-stage role did not resolve".to_owned())
     })?;
@@ -1206,32 +1282,7 @@ fn raster_draw_count(
             "vertex-stage role requires a Fe-authored draw policy".to_owned(),
         ));
     };
-    let attrs = nominal_attrs(db, *draw).ok_or_else(|| {
-        WebBundleError::EntryDerivation(
-            "vertex-stage draw policy is not an attributed nominal type".to_owned(),
-        )
-    })?;
-    if attrs.gpu_draw(db) != Some(GpuDraw::TriangleList) {
-        return Err(WebBundleError::EntryDerivation(
-            "authored raster currently requires `#[gpu_draw(triangle_list)]`".to_owned(),
-        ));
-    }
-    let [count, ..] = draw.generic_args(db) else {
-        return Err(WebBundleError::EntryDerivation(
-            "triangle-list draw policy requires one concrete vertex count".to_owned(),
-        ));
-    };
-    let count = semantic_const_u32(db, *count).ok_or_else(|| {
-        WebBundleError::EntryDerivation(
-            "triangle-list vertex count must be a concrete u32-sized integer".to_owned(),
-        )
-    })?;
-    if count == 0 {
-        return Err(WebBundleError::EntryDerivation(
-            "triangle-list vertex count must be nonzero".to_owned(),
-        ));
-    }
-    Ok(count)
+    raster_draw_shape_from_ty(db, *draw)
 }
 
 fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
@@ -1248,7 +1299,7 @@ fn raster_vertex_stage<'db>(
     role_path: PathId<'db>,
 ) -> Result<(WebActorStageKind, TyId<'db>), WebBundleError> {
     let payload = role_payload_ty(db, behavior, role_path, "vertex")?;
-    let vertex_count = raster_draw_count(db, behavior, role_path)?;
+    let draw = raster_draw_shape(db, behavior, role_path)?;
     let args = behavior.arg_tys(db);
     let Some(vertex_index) = args.first() else {
         return Err(WebBundleError::EntryDerivation(
@@ -1260,6 +1311,20 @@ fn raster_vertex_stage<'db>(
         return Err(WebBundleError::EntryDerivation(
             "authored vertex behavior's first context argument must be exactly `u32`".to_owned(),
         ));
+    }
+    if draw.instance_index {
+        let Some(instance_index) = args.get(1) else {
+            return Err(WebBundleError::EntryDerivation(
+                "instanced vertex behavior must take a `u32` instance-index context after its vertex index"
+                    .to_owned(),
+            ));
+        };
+        if !is_primitive(db, *instance_index.skip_binder(), PrimTy::U32) {
+            return Err(WebBundleError::EntryDerivation(
+                "instanced vertex behavior's second context argument must be exactly `u32`"
+                    .to_owned(),
+            ));
+        }
     }
     let output = behavior.return_ty(db);
     if !nominal_attrs(db, output).is_some_and(|attrs| attrs.is_gpu_vertex_output(db)) {
@@ -1315,7 +1380,9 @@ fn raster_vertex_stage<'db>(
     Ok((
         WebActorStageKind::Vertex {
             varying,
-            vertex_count,
+            vertex_count: draw.vertex_count,
+            instance_count: draw.instance_count,
+            instance_index: draw.instance_index,
         },
         payload,
     ))
@@ -5038,6 +5105,7 @@ pub enum WebBuiltinSource {
     FragmentPositionX,
     FragmentPositionY,
     VertexIndex,
+    InstanceIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -5162,6 +5230,11 @@ pub struct WebPass {
     /// type (`TriangleList<N>`), never page JavaScript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_vertices: Option<u32>,
+    /// Compiler-derived instance count. Presence means the Fe draw policy is
+    /// explicitly `Instanced<D, N>` and the authored vertex behavior receives
+    /// `instance_index` after `vertex_index`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_instances: Option<u32>,
     pub layout: WebLayout,
 }
 
@@ -5768,6 +5841,7 @@ enum ActorShaderCompileKind {
     Fragment,
     Raster {
         vertex_entry: String,
+        instance_index: bool,
     },
 }
 
@@ -5789,7 +5863,7 @@ fn plan_actor_shader_compile_units(
     while index < program.stages.len() {
         let stage = &program.stages[index];
         match &stage.kind {
-            WebActorStageKind::Vertex { .. } => {
+            WebActorStageKind::Vertex { instance_index, .. } => {
                 let Some(WebActorStage {
                     source_entry: fragment_entry,
                     kind: WebActorStageKind::RasterFragment { .. },
@@ -5805,6 +5879,7 @@ fn plan_actor_shader_compile_units(
                     source_entry: fragment_entry.clone(),
                     kind: ActorShaderCompileKind::Raster {
                         vertex_entry: stage.source_entry.clone(),
+                        instance_index: *instance_index,
                     },
                 });
                 index += 2;
@@ -5897,7 +5972,10 @@ fn compile_actor_shader_unit(
             compile_runtime_package_spirv_render_with_resources(db, &package, &external)
                 .map_err(|error| WebBundleError::Lower(error.to_string()))
         }
-        ActorShaderCompileKind::Raster { vertex_entry } => {
+        ActorShaderCompileKind::Raster {
+            vertex_entry,
+            instance_index,
+        } => {
             let package = mir::build_wasm_runtime_package_for_entries(
                 db,
                 top_mod,
@@ -5912,12 +5990,27 @@ fn compile_actor_shader_unit(
                 Access::Read,
                 None,
             )?;
-            compile_runtime_package_spirv_authored_raster_with_resources(
+            let builtin_arguments = if *instance_index {
+                vec![
+                    SpirvBuiltinArgument {
+                        arg_index: 0,
+                        source: SpirvBuiltinSource::VertexIndex,
+                    },
+                    SpirvBuiltinArgument {
+                        arg_index: 1,
+                        source: SpirvBuiltinSource::InstanceIndex,
+                    },
+                ]
+            } else {
+                Vec::new()
+            };
+            compile_runtime_package_spirv_authored_raster_with_interface(
                 db,
                 &package,
                 vertex_entry,
                 &unit.source_entry,
                 &external,
+                &builtin_arguments,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))
         }
@@ -6135,7 +6228,13 @@ impl WebBundle {
         let mut index = 0;
         while index < program.stages.len() {
             let stage = &program.stages[index];
-            if let WebActorStageKind::Vertex { vertex_count, .. } = &stage.kind {
+            if let WebActorStageKind::Vertex {
+                vertex_count,
+                instance_count,
+                instance_index,
+                ..
+            } = &stage.kind
+            {
                 let Some(WebActorStage {
                     source_entry: fragment_entry,
                     kind: WebActorStageKind::RasterFragment { .. },
@@ -6174,6 +6273,7 @@ impl WebBundle {
                     cooperation: None,
                     cycle: None,
                     draw_vertices: Some(*vertex_count),
+                    draw_instances: instance_index.then_some(*instance_count),
                     layout: layout.clone(),
                 });
                 pass_wgsl.push(WebPassShader {
@@ -6266,6 +6366,7 @@ impl WebBundle {
                 cooperation,
                 cycle,
                 draw_vertices: None,
+                draw_instances: None,
                 layout: layout.clone(),
             });
             pass_wgsl.push(WebPassShader {
@@ -6841,6 +6942,7 @@ impl WebBundle {
             cooperation: None,
             cycle: None,
             draw_vertices: None,
+            draw_instances: None,
             layout: layout.clone(),
         }];
 
@@ -7536,6 +7638,7 @@ impl WebLayout {
                             WebBuiltinSource::FragmentPositionY
                         }
                         SpirvBuiltinSource::VertexIndex => WebBuiltinSource::VertexIndex,
+                        SpirvBuiltinSource::InstanceIndex => WebBuiltinSource::InstanceIndex,
                     },
                     scalar: scalar_kind(input.scalar),
                 })

@@ -1,0 +1,55 @@
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    GpuProgram,
+    Instanced,
+    RasterVertex,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+}
+
+struct InstanceVarying { instance: f32 }
+impl Copy for InstanceVarying {}
+
+fn instance_value(_ instance_index: u32) -> f32 {
+    if instance_index == 0 {
+        0.0
+    } else if instance_index == 1 {
+        1.0
+    } else if instance_index == 2 {
+        2.0
+    } else {
+        3.0
+    }
+}
+
+actor InstancedMesh uses (GpuProgram<WebGpuBackend>) {
+    tint: f32,
+
+    fn vertices(
+        self,
+        vertex_index: u32,
+        instance_index: u32,
+    ) -> RasterVertex<InstanceVarying>
+        uses (VertexStage<InstanceVarying, Instanced<TriangleList<3>, 4>>)
+    {
+        let instance = instance_value(instance_index)
+        let offset = instance * 0.25
+        RasterVertex {
+            position: ClipPosition {
+                x: if vertex_index == 1 { 0.2 + offset } else { -0.2 + offset },
+                y: if vertex_index == 2 { 0.2 } else { -0.2 },
+                z: 0.5,
+                w: 1.0,
+            },
+            varying: InstanceVarying { instance: instance },
+        }
+    }
+
+    fn shade(self, varying: InstanceVarying) -> u32
+        uses (FragmentStage<InstanceVarying>)
+    {
+        if varying.instance + self.tint > 1.0 { 4294901760 } else { 4278190335 }
+    }
+}
