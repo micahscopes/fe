@@ -8,7 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 installGeneratedWebGpuOperations({
@@ -351,6 +351,30 @@ test("legacy CPU backing ceiling preserves aspect instead of cropping work", () 
   assert.deepEqual(fitBackingExtent(512, 256), { width: 512, height: 256 });
 });
 
+test("protocol v9 realizes explicit Fe param plans without inferring from kind", () => {
+  const param = {
+    kind: "deliberately_misleading",
+    visible: true,
+    source: "surface_width",
+    presentation: { widget: "range", scale: "logarithmic", readout: "integer" },
+  };
+  assert.deepEqual(surfaceParamPlan(param, 9), {
+    source: "surface_width",
+    widget: "range",
+    scale: "logarithmic",
+    readout: "integer",
+  });
+  assert.throws(
+    () => surfaceParamPlan({ kind: "range", visible: true }, 9),
+    /missing a supported Fe presentation plan/,
+  );
+  assert.deepEqual(
+    surfaceParamPlan({ kind: "extent_y", visible: false }, 8),
+    { source: "surface_height", widget: "hidden", scale: "linear", readout: "scalar" },
+    "the kind-derived path is isolated to legacy protocols",
+  );
+});
+
 test("fixed host supplies raw capability facts and realizes Fe backing extent exactly", () => {
   const oldDpr = globalThis.devicePixelRatio;
   const oldMatchMedia = globalThis.matchMedia;
@@ -420,15 +444,25 @@ test("live resize re-runs the Fe policy against current GPU facts and realizes i
   surface._backingWidth = 400;
   surface._backingHeight = 200;
   surface._uniforms = [400, 200, 9];
+  surface._manifest = { protocol_version: 9 };
   surface._members = [
     { name: "width" },
     { name: "height" },
     { name: "scene" },
   ];
   surface._surface = { params: [
-    { name: "width", kind: "extent_x" },
-    { name: "height", kind: "extent_y" },
-    { name: "scene", kind: "drag_x" },
+    {
+      name: "width", kind: "misleading", visible: false, source: "surface_width",
+      presentation: { widget: "hidden", scale: "linear", readout: "scalar" },
+    },
+    {
+      name: "height", kind: "misleading", visible: false, source: "surface_height",
+      presentation: { widget: "hidden", scale: "linear", readout: "scalar" },
+    },
+    {
+      name: "scene", kind: "misleading", visible: false, source: "initial",
+      presentation: { widget: "hidden", scale: "linear", readout: "scalar" },
+    },
   ] };
   surface._adoptedCanvas = null;
   surface._liveCanvas = { width: 400, height: 200 };

@@ -31,4 +31,6 @@ pub use lower::{
     semantic_instance_effect_bindings,
 };
 pub use verify::{SemanticVerifyError, verify_semantic_body};
-pub use view_projection::{ViewParam, ViewProjectionError, ViewSurface, project_view_surface};
+pub use view_projection::{
+    ViewParam, ViewParamPresentation, ViewProjectionError, ViewSurface, project_view_surface,
+};

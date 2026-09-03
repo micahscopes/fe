@@ -844,7 +844,7 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
             .with_resource_asset(BYTES.to_vec()),
     )
     .expect("verified content-addressed bundle");
-    assert_eq!(bundle.manifest.protocol_version, 8);
+    assert_eq!(bundle.manifest.protocol_version, 9);
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("content actor must derive exactly one resource")
     };
@@ -902,7 +902,7 @@ fn content_addressed_resource_length_is_checked_against_layout() {
 }
 
 #[test]
-fn attributed_actor_builds_a_materialized_v8_pass_graph() {
+fn attributed_actor_builds_a_materialized_v9_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");
     assert!(!driver::init_ingot(&mut db, &url));
@@ -912,9 +912,9 @@ fn attributed_actor_builds_a_materialized_v8_pass_graph() {
         top_mod,
         WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
     )
-    .expect("v8 actor pass graph");
+    .expect("v9 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 8);
+    assert_eq!(bundle.manifest.protocol_version, 9);
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);

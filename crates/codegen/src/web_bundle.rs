@@ -67,7 +67,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 8;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 9;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
@@ -4925,7 +4925,13 @@ fn web_surface_param(
         min: view_param.bounded.then_some(view_param.min),
         max: view_param.bounded.then_some(view_param.max),
         init: view_param.initialized.then_some(view_param.init),
-        visible: view_param.visible,
+        source: Some(view_param.source.clone()),
+        presentation: Some(WebParamPresentation {
+            widget: view_param.presentation.widget.clone(),
+            scale: view_param.presentation.scale.clone(),
+            readout: view_param.presentation.readout.clone(),
+        }),
+        visible: view_param.presentation.visible,
     })
 }
 
@@ -5270,8 +5276,8 @@ pub struct WebSurfaceParam {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
-    /// The kind vocabulary: `range` | `unit` | `angle` | `log` | `int` |
-    /// `fixed` | `extent_x` | `extent_y` | `toggle`.
+    /// Opaque Fe `ParamKind` case, retained for diagnostics and Fe semantics.
+    /// The browser must not infer value-source or presentation policy from it.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f32>,
@@ -5279,6 +5285,14 @@ pub struct WebSurfaceParam {
     pub max: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init: Option<f32>,
+    /// Fe-authored source of the current value. Added in protocol v9; absent
+    /// only while reading a legacy v4-v8 manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Fe-authored, target-neutral control presentation. The host realizes
+    /// this plan and never reconstructs it from `kind` in protocol v9.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<WebParamPresentation>,
     /// Whether the runtime renders a control for this param. Omitted (defaults
     /// true) for ordinary sliders; `false` for extent-bound and fixed params.
     #[serde(
@@ -5286,6 +5300,13 @@ pub struct WebSurfaceParam {
         skip_serializing_if = "is_true"
     )]
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebParamPresentation {
+    pub widget: String,
+    pub scale: String,
+    pub readout: String,
 }
 
 fn web_surface_param_visible_default() -> bool {
