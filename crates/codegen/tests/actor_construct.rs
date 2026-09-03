@@ -237,6 +237,11 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
     assert_eq!(pass.layout.bindings.len(), 1);
     assert_eq!(pass.layout.bindings[0].members[0].name, "tint");
+    assert_eq!(
+        pass.layout.bindings[0].shader_stages,
+        [fe_codegen::WebShaderStage::Fragment],
+        "the scalar state binding is physically visible only to the stage that reads it"
+    );
     assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("@location(3)"), "{}", bundle.wgsl);
@@ -314,6 +319,14 @@ fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
     assert_eq!(binding.role, fe_codegen::WebBindingRole::Resource);
     assert_eq!(binding.name, "fixture");
     assert_eq!(binding.binding, 0);
+    assert_eq!(
+        binding.shader_stages,
+        [
+            fe_codegen::WebShaderStage::Vertex,
+            fe_codegen::WebShaderStage::Fragment,
+        ],
+        "one logical resource retains the exact union of stages that consume it"
+    );
     assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
     assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
     assert!(
@@ -328,6 +341,58 @@ fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
     assert_eq!(
         resource.policy["initialization"],
         serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 })
+    );
+}
+
+#[test]
+fn authored_raster_binding_budget_is_validated_per_shader_stage() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_stage_partition");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "stage-partitioned raster diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("shade", Some("stage-partitioned-raster.fe".to_owned())),
+    )
+    .expect("a binding union above eight is portable when each shader stage stays below eight");
+    let [pass] = bundle.manifest.passes.as_slice() else {
+        panic!("one authored raster pair must produce one pass")
+    };
+    assert!(
+        pass.layout.bindings.len() > 8,
+        "the regression must exercise a union larger than the per-stage limit"
+    );
+    let resources = pass
+        .layout
+        .bindings
+        .iter()
+        .filter(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+        .collect::<Vec<_>>();
+    assert_eq!(resources.len(), 10);
+    assert_eq!(
+        resources
+            .iter()
+            .filter(|binding| {
+                binding.shader_stages == [fe_codegen::WebShaderStage::Vertex]
+            })
+            .count(),
+        5
+    );
+    assert_eq!(
+        resources
+            .iter()
+            .filter(|binding| {
+                binding.shader_stages == [fe_codegen::WebShaderStage::Fragment]
+            })
+            .count(),
+        5
     );
 }
 
@@ -688,6 +753,15 @@ fn pass_layouts_prune_dormant_resources_without_losing_actor_identity() {
         pass_resources(&bundle.manifest.passes[1]),
         vec![("fragment_value".to_owned(), 0)],
     );
+    for binding in &bundle.manifest.passes[0].layout.bindings {
+        assert_eq!(binding.shader_stages, [fe_codegen::WebShaderStage::Compute]);
+    }
+    for binding in &bundle.manifest.passes[1].layout.bindings {
+        assert_eq!(
+            binding.shader_stages,
+            [fe_codegen::WebShaderStage::Fragment]
+        );
+    }
     assert!(!bundle.pass_wgsl[0].source.contains("dormant_"));
     assert!(!bundle.pass_wgsl[1].source.contains("dormant_"));
 }
@@ -712,7 +786,7 @@ fn pass_layouts_reject_a_genuinely_overbudget_shader_stage() {
     .expect_err("eight live resources plus scalar input storage exceed the portable limit");
     let message = format!("{error}");
     assert!(
-        message.contains("requires 9 storage-buffer bindings per shader stage"),
+        message.contains("requires 9 storage-buffer bindings in its Compute shader stage"),
         "{message}"
     );
     assert!(
@@ -980,7 +1054,7 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
             .with_resource_asset(BYTES.to_vec()),
     )
     .expect("verified content-addressed bundle");
-    assert_eq!(bundle.manifest.protocol_version, 9);
+    assert_eq!(bundle.manifest.protocol_version, 10);
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("content actor must derive exactly one resource")
     };
@@ -1038,7 +1112,7 @@ fn content_addressed_resource_length_is_checked_against_layout() {
 }
 
 #[test]
-fn attributed_actor_builds_a_materialized_v9_pass_graph() {
+fn attributed_actor_builds_a_materialized_v10_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");
     assert!(!driver::init_ingot(&mut db, &url));
@@ -1048,9 +1122,9 @@ fn attributed_actor_builds_a_materialized_v9_pass_graph() {
         top_mod,
         WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
     )
-    .expect("v9 actor pass graph");
+    .expect("v10 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 9);
+    assert_eq!(bundle.manifest.protocol_version, 10);
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);

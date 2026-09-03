@@ -8,7 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("WGSL summary aggregates unique pass shaders rather than the primary artifact", () => {
@@ -35,6 +35,10 @@ installGeneratedWebGpuOperations({
   bufferCreate: (device, descriptor) => device.createBuffer(descriptor),
   bufferWrite: (queue, buffer, offset, bytes) =>
     queue.writeBuffer(buffer, offset, bytes),
+  renderDraw: (pass, vertexCount, instanceCount, firstVertex, firstInstance) =>
+    pass.draw(vertexCount, instanceCount, firstVertex, firstInstance),
+  renderDrawIndirect: (pass, buffer, offset) =>
+    pass.drawIndirect(buffer, offset),
 });
 
 test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {
@@ -80,6 +84,46 @@ test("compiler-derived pass stages map exactly and v8 omissions fail closed", ()
   assert.throws(
     () => passShaderVisibility({ layout: { mode: "render" } }, constants, 8),
     /v8 pass is missing compiler-derived shader_stages/,
+  );
+});
+
+test("compiler-derived binding stages stay narrow and v10 omissions fail closed", () => {
+  const constants = { COMPUTE: 0x04, VERTEX: 0x01, FRAGMENT: 0x02 };
+  const pass = { shader_stages: ["vertex", "fragment"] };
+  assert.equal(
+    bindingShaderVisibility({ shader_stages: ["vertex"] }, pass, constants, 10),
+    0x01,
+  );
+  assert.equal(
+    bindingShaderVisibility({ shader_stages: ["fragment"] }, pass, constants, 10),
+    0x02,
+  );
+  assert.equal(
+    bindingShaderVisibility(
+      { shader_stages: ["vertex", "fragment"] },
+      pass,
+      constants,
+      10,
+    ),
+    0x03,
+  );
+  assert.equal(
+    bindingShaderVisibility({}, pass, constants, 9),
+    0x03,
+    "v9 manifests retain pass-wide binding visibility",
+  );
+  assert.throws(
+    () => bindingShaderVisibility({}, pass, constants, 10),
+    /v10 binding is missing compiler-derived shader_stages/,
+  );
+  assert.throws(
+    () => bindingShaderVisibility(
+      { shader_stages: ["compute"] },
+      pass,
+      constants,
+      10,
+    ),
+    /outside its pass stage set/,
   );
 });
 

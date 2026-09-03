@@ -1,4 +1,4 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4-v9).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4-v10).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
@@ -17,6 +17,8 @@
 // device replacement.
 // v8 adds compiler-derived minimal buffer usages and pass-stage visibility;
 // missing physical capability data fails closed for newly emitted bundles.
+// v9 adds Fe-authored parameter presentation plans. v10 narrows every WebGPU
+// binding to the exact compiler-derived shader stages that can reach it.
 // Uniform controls are generated from the manifest's input binding members.
 //
 // One shared WebGPU adapter/device serves every surface mounted on a page,
@@ -84,6 +86,34 @@ export function resourceBufferUsage(
   return usage;
 }
 
+function shaderStagesVisibility(stages, constants, subject) {
+  if (!Array.isArray(stages) || stages.length === 0 || !constants) {
+    throw new Error(`fe render runtime: invalid ${subject} shader_stages`);
+  }
+  let visibility = 0;
+  const seen = new Set();
+  for (const stage of stages) {
+    if (seen.has(stage)) {
+      throw new Error(`fe render runtime: duplicate ${subject} shader stage ${stage}`);
+    }
+    seen.add(stage);
+    switch (stage) {
+      case "compute":
+        visibility |= constants.COMPUTE;
+        break;
+      case "vertex":
+        visibility |= constants.VERTEX;
+        break;
+      case "fragment":
+        visibility |= constants.FRAGMENT;
+        break;
+      default:
+        throw new Error(`fe render runtime: unsupported ${subject} shader stage ${stage}`);
+    }
+  }
+  return visibility;
+}
+
 /** Mechanically realize compiler-derived pass stage demand. */
 export function passShaderVisibility(
   pass,
@@ -99,31 +129,34 @@ export function passShaderVisibility(
     : pass.draw_vertices
       ? ["vertex", "fragment"]
       : ["fragment"];
-  if (!Array.isArray(stages) || stages.length === 0 || !constants) {
-    throw new Error("fe render runtime: invalid pass shader_stages");
+  return shaderStagesVisibility(stages, constants, "pass");
+}
+
+/** Realize the exact compiler-derived visibility of one physical binding. */
+export function bindingShaderVisibility(
+  binding,
+  pass,
+  constants = globalThis.GPUShaderStage,
+  protocolVersion = 9,
+) {
+  const stages = binding.shader_stages;
+  if ((!Array.isArray(stages) || stages.length === 0) && protocolVersion >= 10) {
+    throw new Error("fe render runtime: v10 binding is missing compiler-derived shader_stages");
   }
-  let visibility = 0;
-  const seen = new Set();
-  for (const stage of stages) {
-    if (seen.has(stage)) {
-      throw new Error(`fe render runtime: duplicate pass shader stage ${stage}`);
-    }
-    seen.add(stage);
-    switch (stage) {
-      case "compute":
-        visibility |= constants.COMPUTE;
-        break;
-      case "vertex":
-        visibility |= constants.VERTEX;
-        break;
-      case "fragment":
-        visibility |= constants.FRAGMENT;
-        break;
-      default:
-        throw new Error(`fe render runtime: unsupported pass shader stage ${stage}`);
+  if (!Array.isArray(stages) || stages.length === 0) {
+    return passShaderVisibility(pass, constants, protocolVersion);
+  }
+  if (protocolVersion >= 8) {
+    passShaderVisibility(pass, constants, protocolVersion);
+    for (const stage of stages) {
+      if (!pass.shader_stages.includes(stage)) {
+        throw new Error(
+          `fe render runtime: binding shader stage ${stage} is outside its pass stage set`,
+        );
+      }
     }
   }
-  return visibility;
+  return shaderStagesVisibility(stages, constants, "binding");
 }
 
 /** Preserve aspect while enforcing an implementation resource ceiling. */
@@ -1435,7 +1468,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -1449,6 +1482,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._graph = requiresGpuPassGraph(this._passes, this._resources);
       this._hasRenderPass = this._passes.some((pass) => pass.layout.mode === "render");
       const fragmentPass = [...this._passes].reverse().find((pass) => pass.layout.mode === "render");
+      this._renderPass = fragmentPass ?? null;
       this._layout = fragmentPass?.layout ?? manifest.layout;
       this._surface = manifest.surface || null;
       this._surfaceParamIndexByName = new Map(
@@ -1978,16 +2012,17 @@ export class FeSurfaceElement extends HTMLElement {
           await fetchOrThrow(this._passShaderUrls[index], "WGSL pass shader")
         ).text();
         const module = device.createShaderModule({ code: shaderSource });
-        const visibility = passShaderVisibility(
-          pass,
-          undefined,
-          this._manifest.protocol_version,
-        );
         const layoutEntries = [];
         const groupEntries = [];
         const inputs = [];
         const outputs = [];
         for (const binding of pass.layout.bindings) {
+          const visibility = bindingShaderVisibility(
+            binding,
+            pass,
+            undefined,
+            this._manifest.protocol_version,
+          );
           if (binding.group !== 0) {
             throw new Error("fe render runtime: pass graphs currently require binding group 0");
           }
@@ -2112,7 +2147,12 @@ export class FeSurfaceElement extends HTMLElement {
           entries: [
             {
               binding: this._inputBinding.binding,
-              visibility: GPUShaderStage.FRAGMENT,
+              visibility: bindingShaderVisibility(
+                this._inputBinding,
+                this._renderPass,
+                undefined,
+                this._manifest.protocol_version,
+              ),
               buffer: { type: "read-only-storage" },
             },
           ],

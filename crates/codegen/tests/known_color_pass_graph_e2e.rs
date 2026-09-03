@@ -167,7 +167,7 @@ fn map_bytes(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
 #[test]
 fn known_color_graph_preserves_typed_bits_and_exact_pixel_on_webgpu() {
     let bundle = compile_known_color_graph();
-    assert_eq!(bundle.manifest.protocol_version, 9);
+    assert_eq!(bundle.manifest.protocol_version, 10);
     assert!(
         !bundle.wasm.is_empty(),
         "the Fe-authored surface quality and recovery policies need their control Wasm"
