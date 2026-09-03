@@ -409,6 +409,10 @@ fn collect_argument_metadata(
                 path: format!("{callable}/{}", argument.name),
                 value,
             });
+            // Default conversion supplies this argument before it crosses the
+            // normalized ABI; only optional arguments without defaults remain
+            // represented as Option.
+            argument.optional = false;
         }
         if argument.variadic {
             variadics.push(VariadicBinding {
@@ -1519,7 +1523,7 @@ fn lower_buffer(
     context: &str,
 ) -> Result<abi::Buffer, BindgenError> {
     let element = match kind {
-        BufferKind::ArrayBuffer => abi::BufferElement::U8,
+        BufferKind::ArrayBuffer | BufferKind::AllowSharedBufferSource => abi::BufferElement::U8,
         BufferKind::I8 => abi::BufferElement::I8,
         BufferKind::U8 | BufferKind::U8Clamped => abi::BufferElement::U8,
         BufferKind::I16 => abi::BufferElement::I16,
