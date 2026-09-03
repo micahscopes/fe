@@ -12,6 +12,9 @@ const browserSitePort = Number.parseInt(process.env.FE_BROWSER_PORT ?? "8000", 1
 const healthOnly = process.env.FE_BROWSER_HEALTH_ONLY === "1";
 const computeStageOnly = process.env.FE_BROWSER_COMPUTE_STAGE ?? null;
 const computeEntry = process.env.FE_BROWSER_COMPUTE_ENTRY ?? null;
+const computePassLimit = process.env.FE_BROWSER_PASS_LIMIT === undefined
+  ? null
+  : Number.parseInt(process.env.FE_BROWSER_PASS_LIMIT, 10);
 const tracePath = process.env.FE_BROWSER_TRACE_PATH
   ? resolve(process.env.FE_BROWSER_TRACE_PATH)
   : null;
@@ -94,9 +97,15 @@ if (!Number.isInteger(browserSitePort) || browserSitePort < 1 || browserSitePort
 }
 if (
   computeStageOnly !== null &&
-  !new Set(["compile", "one", "full", "readback"]).has(computeStageOnly)
+  !new Set(["compile", "one", "full", "readback", "prefix"]).has(computeStageOnly)
 ) {
-  throw new Error("FE_BROWSER_COMPUTE_STAGE must be compile, one, full, or readback");
+  throw new Error("FE_BROWSER_COMPUTE_STAGE must be compile, one, full, readback, or prefix");
+}
+if (
+  computePassLimit !== null &&
+  (!Number.isInteger(computePassLimit) || computePassLimit < 1)
+) {
+  throw new Error("FE_BROWSER_PASS_LIMIT must be a positive integer");
 }
 
 async function computeProbeConfiguration() {
@@ -106,21 +115,30 @@ async function computeProbeConfiguration() {
     throw new Error(`expected one render manifest, found ${manifestNames.length}`);
   }
   const manifest = JSON.parse(await readFile(resolve(assetDirectory, manifestNames[0]), "utf8"));
-  const computePasses = manifest.passes.filter(pass =>
+  let computePasses = manifest.passes.filter(pass =>
     pass.layout?.mode === "compute" &&
     (computeEntry === null || pass.source_entry === computeEntry)
   );
+  if (computePassLimit !== null) computePasses = computePasses.slice(0, computePassLimit);
   if (computePasses.length === 0) throw new Error("expected at least one compute pass");
   if (computeEntry !== null && computePasses.length !== 1) {
     throw new Error(`expected one compute pass named ${computeEntry}, found ${computePasses.length}`);
   }
-  if (computeStageOnly !== "compile" && computePasses.length !== 1) {
+  if (
+    computeStageOnly !== "compile" &&
+    computeStageOnly !== "prefix" &&
+    computePasses.length !== 1
+  ) {
     throw new Error(
       `${computeStageOnly} isolates exactly one compute pass, found ${computePasses.length}`,
     );
   }
   const resources = new Map(manifest.resources.map(resource => [resource.name, resource]));
   return {
+    resources: manifest.resources.map(resource => ({
+      name: resource.name,
+      byteLength: resource.length * resource.stride,
+    })),
     passes: computePasses.map(pass => ({
       sourceEntry: pass.source_entry,
       shaderUrl: `/assets/${pass.shader}`,
@@ -128,6 +146,10 @@ async function computeProbeConfiguration() {
       entryPoint: pass.layout.entry_point,
       workgroup: pass.layout.workgroup_size,
       dispatch: pass.dispatch,
+      repeat: pass.repeat ?? 1,
+      cooperation: pass.cooperation ?? null,
+      cycle: pass.cycle ?? null,
+      taper: pass.taper ?? null,
       bindings: pass.layout.bindings.map(binding => {
         const resource = resources.get(binding.name);
         return {
@@ -135,6 +157,7 @@ async function computeProbeConfiguration() {
           binding: binding.binding,
           name: binding.name,
           role: binding.role,
+          access: binding.access,
           byteLength: resource ? resource.length * resource.stride : binding.span,
         };
       }),
@@ -235,7 +258,11 @@ try {
   page = await browser.newPage();
   page.setDefaultTimeout(600_000);
   page.on("console", message => {
-    if (message.type() === "info" && message.text().startsWith("[fe compile] ")) {
+    if (
+      message.type() === "info" &&
+      (message.text().startsWith("[fe compile] ") ||
+        message.text().startsWith("[fe dispatch] "))
+    ) {
       console.log(message.text());
       return;
     }
@@ -384,9 +411,24 @@ try {
         }));
         shaderElapsedMs += performance.now() - shaderStarted;
 
+        const layoutEntries = candidate.bindings.map(binding => ({
+          binding: binding.binding,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: {
+            type: binding.role === "input" || binding.access === "read"
+              ? "read-only-storage"
+              : "storage",
+          },
+        }));
+        const bindGroupLayout = layoutEntries.length === 0
+          ? null
+          : device.createBindGroupLayout({ entries: layoutEntries });
+        const pipelineLayout = bindGroupLayout
+          ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
+          : "auto";
         const pipelineStarted = performance.now();
         const pipeline = await device.createComputePipelineAsync({
-          layout: "auto",
+          layout: pipelineLayout,
           compute: { module, entryPoint: candidate.entryPoint },
         });
         const candidatePipelineElapsedMs = performance.now() - pipelineStarted;
@@ -414,7 +456,107 @@ try {
       let dispatchElapsedMs = null;
       let readbackElapsedMs = null;
       let readbackWord = null;
-      if (stage !== "compile") {
+      const completedEntries = [];
+      if (stage === "prefix") {
+        const shared = new Map(probe.resources.map(resource => [
+          resource.name,
+          device.createBuffer({
+            size: Math.max(4, resource.byteLength),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+          }),
+        ]));
+        const dispatchStarted = performance.now();
+        for (const { candidate, pipeline } of compiled) {
+          if (candidate.cycle || candidate.taper) {
+            throw new Error(
+              `prefix probe does not yet realize scheduled pass ${candidate.sourceEntry}`,
+            );
+          }
+          const repeatBatch = candidate.cooperation?.repeat_batch ?? candidate.repeat;
+          if (
+            !Number.isInteger(repeatBatch) ||
+            repeatBatch < 1 ||
+            repeatBatch > candidate.repeat
+          ) {
+            throw new Error(
+              `invalid cooperative batch for scheduled pass ${candidate.sourceEntry}`,
+            );
+          }
+          const locals = [];
+          const entries = candidate.bindings.map(binding => {
+            if (binding.role === "resource") {
+              const buffer = shared.get(binding.name);
+              if (!buffer) throw new Error(`undeclared resource ${binding.name}`);
+              return { binding: binding.binding, resource: { buffer } };
+            }
+            const buffer = device.createBuffer({
+              size: Math.max(4, binding.byteLength),
+              usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            });
+            locals.push(buffer);
+            return { binding: binding.binding, resource: { buffer } };
+          });
+          const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries,
+          });
+          const passStarted = performance.now();
+          let completion = "done";
+          let remaining = candidate.repeat;
+          while (remaining > 0 && completion === "done") {
+            const batch = Math.min(remaining, repeatBatch);
+            const encoder = device.createCommandEncoder();
+            const compute = encoder.beginComputePass();
+            compute.setPipeline(pipeline);
+            compute.setBindGroup(0, bindGroup);
+            for (let iteration = 0; iteration < batch; iteration += 1) {
+              compute.dispatchWorkgroups(...candidate.dispatch);
+            }
+            compute.end();
+            device.queue.submit([encoder.finish()]);
+            completion = await Promise.race([
+              device.queue.onSubmittedWorkDone().then(() => "done"),
+              lostPromise,
+              new Promise(resolvePromise => setTimeout(() => resolvePromise("timeout"), 120_000)),
+            ]);
+            remaining -= batch;
+          }
+          const passElapsedMs = performance.now() - passStarted;
+          console.info(`[fe dispatch] ${JSON.stringify({
+            entry: candidate.sourceEntry,
+            repeat: candidate.repeat,
+            dispatch: candidate.dispatch,
+            elapsedMs: passElapsedMs,
+            completion,
+          })}`);
+          for (const buffer of locals) buffer.destroy();
+          if (completion !== "done") {
+            for (const buffer of shared.values()) buffer.destroy();
+            return {
+              ok: false,
+              stage,
+              entry: candidate.sourceEntry,
+              completion,
+              lost,
+              uncaptured,
+              compilationMessages,
+              declaredShaderBytes,
+              shaderBytes,
+              shaderElapsedMs,
+              pipelineElapsedMs,
+              dispatchElapsedMs: performance.now() - dispatchStarted,
+            };
+          }
+          completedEntries.push({
+            entry: candidate.sourceEntry,
+            repeat: candidate.repeat,
+            dispatch: candidate.dispatch,
+            elapsedMs: passElapsedMs,
+          });
+        }
+        dispatchElapsedMs = performance.now() - dispatchStarted;
+        for (const buffer of shared.values()) buffer.destroy();
+      } else if (stage !== "compile") {
         const { candidate, pipeline } = compiled[0];
         const buffers = candidate.bindings.map(binding => ({
           binding,
@@ -505,6 +647,7 @@ try {
           shaderBytes: result.shaderBytes,
           pipelineMs: result.pipelineElapsedMs,
         })),
+        completedEntries,
         scopedErrors,
         uncaptured,
         lost,

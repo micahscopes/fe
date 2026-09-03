@@ -56,6 +56,29 @@ reports each Fe source entry as Chrome finishes its pipeline. Select one pass
 from a larger graph with `FE_BROWSER_COMPUTE_ENTRY=source_entry`; the execution
 modes deliberately require that single-pass selection.
 
+The adjacent `production.html` page exercises the complete production sparse
+AIR actor outside the gallery. Its Fe dispatch aliases place every authored
+stage at a queue submission boundary while preserving all repetitions inside
+that stage. Precompile it with the same command by replacing `index.html` with
+`production.html`.
+
+For diagnostic bisection, `prefix` creates the manifest-declared resources once
+and executes an ordered prefix of compute passes, submitting after each one:
+
+```sh
+FE_BROWSER_COMPUTE_STAGE=prefix \
+FE_BROWSER_PASS_LIMIT=20 \
+FE_BROWSER_URL=http://10.0.0.1:9222 \
+FE_BROWSER_HOST=10.0.0.2 \
+FE_BROWSER_PORT=8000 \
+node demos/mandelbrot-round-interaction-probe/round_interaction.browser.mjs \
+  /workspace/scratch/mb2-production-base-trace-site
+```
+
+This mode is an execution observer, not an alternate scheduler. It fails closed
+when the manifest contains a dispatch policy it does not implement. The normal
+surface runtime remains the acceptance gate for Fe-authored scheduling.
+
 For a browser-level GPU trace that survives a GPU subprocess restart, add an
 output path under disk-backed workspace scratch:
 
