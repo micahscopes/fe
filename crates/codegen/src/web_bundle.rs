@@ -531,8 +531,10 @@ pub struct WebActorProgram {
     pub actor: String,
     pub stages: Vec<WebActorStage>,
     pub resources: Vec<WebActorResource>,
-    /// CTFE-evaluated Fe raster and attachment plan.
-    pub raster: Option<WebRasterPolicy>,
+    /// CTFE-evaluated Fe raster and attachment plan. The compiler transports
+    /// the normalized Fe value generically; the vocabulary remains owned by
+    /// `std::webgpu::raster` rather than mirrored as Rust enums here.
+    pub raster: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1874,7 +1876,7 @@ fn actor_surface_recovery_policy_tys<'db>(
 fn typed_raster_policy(
     db: &DriverDataBase,
     actor: &SemanticActor<'_>,
-) -> Result<Option<WebRasterPolicy>, WebBundleError> {
+) -> Result<Option<serde_json::Value>, WebBundleError> {
     let behaviors = actor
         .behaviors
         .iter()
@@ -1911,7 +1913,7 @@ fn typed_raster_policy(
                 describe_raster_ctfe_error(&error)
             ))
         })?;
-    project_raster_plan(db, value).map(Some)
+    project_manifest_const(db, value, "Fe raster plan").map(Some)
 }
 
 fn describe_raster_ctfe_error(error: &CtfeError<'_>) -> String {
@@ -1929,274 +1931,138 @@ fn describe_raster_ctfe_error(error: &CtfeError<'_>) -> String {
     }
 }
 
-fn raster_struct_fields<'db>(
-    db: &'db DriverDataBase,
-    value: SemConstId<'db>,
+/// Project one CTFE-normalized Fe value into manifest data without teaching
+/// the compiler the vocabulary of the plan it carries. Struct field names and
+/// enum cases come from the Fe declarations. Core `Option<T>` has its ordinary
+/// null/value transport; other payload enums retain an explicit generic tag.
+fn project_manifest_const(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
     what: &str,
-) -> Result<Vec<(String, SemConstId<'db>)>, WebBundleError> {
-    let SemConstValue::Struct { ty, fields } = value.value(db) else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan expected {what} to be a struct value"
-        )));
-    };
-    let adt = ty.adt_def(db).ok_or_else(|| {
-        WebBundleError::EntryDerivation(format!(
-            "Fe raster plan expected {what} to be a struct value"
-        ))
-    })?;
-    let AdtRef::Struct(definition) = adt.adt_ref(db) else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan expected {what} to be a struct value"
-        )));
-    };
-    let definitions = definition.hir_fields(db).data(db);
-    if definitions.len() != fields.len() {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} field count mismatch"
-        )));
-    }
-    definitions
-        .iter()
-        .zip(fields.iter().copied())
-        .map(|(definition, field)| {
-            let name = definition
-                .name
+) -> Result<serde_json::Value, WebBundleError> {
+    use serde_json::{Map, Number, Value};
+
+    let fail = |message: &str| WebBundleError::EntryDerivation(format!("{what} {message}"));
+    match value.value(db) {
+        SemConstValue::Unit => Ok(Value::Null),
+        SemConstValue::Scalar { value, .. } => match value {
+            SemConstScalar::Bool(value) => Ok(Value::Bool(value)),
+            SemConstScalar::Int { value } => {
+                let number = i64::try_from(&value)
+                    .map(Number::from)
+                    .or_else(|_| u64::try_from(&value).map(Number::from))
+                    .map_err(|_| fail("contains an integer outside the manifest number range"))?;
+                Ok(Value::Number(number))
+            }
+            SemConstScalar::Float { bits } => {
+                let value = f32::from_bits(bits);
+                let number = Number::from_f64(f64::from(value))
+                    .ok_or_else(|| fail("contains a non-finite float"))?;
+                Ok(Value::Number(number))
+            }
+            SemConstScalar::Bytes(bytes) => Ok(Value::Array(
+                bytes
+                    .into_iter()
+                    .map(|byte| Value::Number(Number::from(byte)))
+                    .collect(),
+            )),
+        },
+        SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => {
+            Ok(Value::Array(
+                elems
+                    .iter()
+                    .copied()
+                    .map(|element| project_manifest_const(db, element, what))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        SemConstValue::Struct { ty, fields } => {
+            let adt = ty
+                .adt_def(db)
+                .ok_or_else(|| fail("contains a value with no struct definition"))?;
+            let AdtRef::Struct(definition) = adt.adt_ref(db) else {
+                return Err(fail("contains a malformed struct value"));
+            };
+            let declarations = definition.hir_fields(db).data(db);
+            if declarations.len() != fields.len() {
+                return Err(fail("contains a struct with mismatched fields"));
+            }
+            let mut object = Map::new();
+            for (declaration, field) in declarations.iter().zip(fields.iter().copied()) {
+                let name = declaration
+                    .name
+                    .to_opt()
+                    .map(|name| name.data(db).to_string())
+                    .ok_or_else(|| fail("contains an unnamed struct field"))?;
+                object.insert(name, project_manifest_const(db, field, what)?);
+            }
+            Ok(Value::Object(object))
+        }
+        SemConstValue::Enum {
+            ty,
+            variant,
+            fields,
+        } => {
+            let adt = ty
+                .adt_def(db)
+                .ok_or_else(|| fail("contains a value with no enum definition"))?;
+            let AdtRef::Enum(definition) = adt.adt_ref(db) else {
+                return Err(fail("contains a malformed enum value"));
+            };
+            let enum_name = definition
+                .name(db)
                 .to_opt()
                 .map(|name| name.data(db).to_string())
-                .ok_or_else(|| {
-                    WebBundleError::EntryDerivation(format!(
-                        "Fe raster plan {what} has an unnamed field"
-                    ))
-                })?;
-            Ok((name, field))
-        })
-        .collect()
-}
-
-fn raster_named_field<'db>(
-    fields: &'db [(String, SemConstId<'db>)],
-    name: &str,
-    what: &str,
-) -> Result<SemConstId<'db>, WebBundleError> {
-    fields
-        .iter()
-        .find_map(|(candidate, value)| (candidate == name).then_some(*value))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!("Fe raster plan {what} has no `{name}` field"))
-        })
-}
-
-fn raster_enum_parts<'db>(
-    db: &'db DriverDataBase,
-    value: SemConstId<'db>,
-    what: &str,
-) -> Result<(String, Box<[SemConstId<'db>]>), WebBundleError> {
-    let SemConstValue::Enum {
-        ty,
-        variant,
-        fields,
-    } = value.value(db)
-    else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} is not an enum"
-        )));
-    };
-    let adt = ty.adt_def(db).ok_or_else(|| {
-        WebBundleError::EntryDerivation(format!("Fe raster plan {what} is not an enum"))
-    })?;
-    let AdtRef::Enum(definition) = adt.adt_ref(db) else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} is not an enum"
-        )));
-    };
-    let name = EnumVariant::new(definition, variant.0 as usize)
-        .name(db)
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!("Fe raster plan {what} variant has no name"))
-        })?
-        .to_owned();
-    Ok((name, fields))
-}
-
-fn raster_unit_variant(
-    db: &DriverDataBase,
-    value: SemConstId<'_>,
-    what: &str,
-) -> Result<String, WebBundleError> {
-    let (name, fields) = raster_enum_parts(db, value, what)?;
-    if !fields.is_empty() {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} variant `{name}` must not carry fields"
-        )));
-    }
-    Ok(name)
-}
-
-fn raster_bool(
-    db: &DriverDataBase,
-    value: SemConstId<'_>,
-    what: &str,
-) -> Result<bool, WebBundleError> {
-    let SemConstValue::Scalar {
-        value: SemConstScalar::Bool(value),
-        ..
-    } = value.value(db)
-    else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} is not a bool"
-        )));
-    };
-    Ok(value)
-}
-
-fn raster_u32(
-    db: &DriverDataBase,
-    value: SemConstId<'_>,
-    what: &str,
-) -> Result<u32, WebBundleError> {
-    let SemConstValue::Scalar {
-        value: SemConstScalar::Int { value },
-        ..
-    } = value.value(db)
-    else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} is not an integer"
-        )));
-    };
-    u32::try_from(value)
-        .map_err(|_| WebBundleError::EntryDerivation(format!("Fe raster plan {what} is not a u32")))
-}
-
-fn raster_f32(
-    db: &DriverDataBase,
-    value: SemConstId<'_>,
-    what: &str,
-) -> Result<f32, WebBundleError> {
-    let SemConstValue::Scalar {
-        value: SemConstScalar::Float { bits },
-        ..
-    } = value.value(db)
-    else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster plan {what} is not an f32"
-        )));
-    };
-    Ok(f32::from_bits(bits))
-}
-
-fn project_raster_depth(
-    db: &DriverDataBase,
-    value: SemConstId<'_>,
-) -> Result<Option<WebDepthPolicy>, WebBundleError> {
-    let (variant, fields) = raster_enum_parts(db, value, "depth")?;
-    match variant.as_str() {
-        "Disabled" if fields.is_empty() => Ok(None),
-        "Enabled" => {
-            let [value] = fields.as_ref() else {
-                return Err(WebBundleError::EntryDerivation(
-                    "Fe raster plan depth Enabled must carry exactly one DepthPlan".into(),
-                ));
-            };
-            let depth = raster_struct_fields(db, *value, "DepthPlan")?;
-            let format = match raster_unit_variant(
-                db,
-                raster_named_field(&depth, "format", "DepthPlan")?,
-                "DepthPlan.format",
-            )?
-            .as_str()
-            {
-                "Depth24Plus" => WebDepthFormat::Depth24Plus,
-                "Depth32Float" => WebDepthFormat::Depth32Float,
-                other => {
-                    return Err(WebBundleError::EntryDerivation(format!(
-                        "unknown Fe raster depth format `{other}`"
-                    )));
-                }
-            };
-            let compare = match raster_unit_variant(
-                db,
-                raster_named_field(&depth, "compare", "DepthPlan")?,
-                "DepthPlan.compare",
-            )?
-            .as_str()
-            {
-                "Less" => WebDepthCompare::Less,
-                "LessEqual" => WebDepthCompare::LessEqual,
-                "Greater" => WebDepthCompare::Greater,
-                "GreaterEqual" => WebDepthCompare::GreaterEqual,
-                "Always" => WebDepthCompare::Always,
-                other => {
-                    return Err(WebBundleError::EntryDerivation(format!(
-                        "unknown Fe raster depth comparison `{other}`"
-                    )));
-                }
-            };
-            let clear = raster_f32(
-                db,
-                raster_named_field(&depth, "clear", "DepthPlan")?,
-                "DepthPlan.clear",
-            )?;
-            if !clear.is_finite() || !(0.0..=1.0).contains(&clear) {
-                return Err(WebBundleError::EntryDerivation(format!(
-                    "Fe raster depth clear value must be finite and within [0, 1], got {clear}"
-                )));
+                .ok_or_else(|| fail("contains an unnamed enum"))?;
+            let variant_name = EnumVariant::new(definition, variant.0 as usize)
+                .name(db)
+                .ok_or_else(|| fail("contains an unnamed enum variant"))?;
+            if enum_name == "Option" {
+                return match (variant_name, fields.as_ref()) {
+                    ("None", []) => Ok(Value::Null),
+                    ("Some", [field]) => project_manifest_const(db, *field, what),
+                    _ => Err(fail("contains a malformed Option value")),
+                };
             }
-            Ok(Some(WebDepthPolicy {
-                format,
-                compare,
-                write_enabled: raster_bool(
-                    db,
-                    raster_named_field(&depth, "write_enabled", "DepthPlan")?,
-                    "DepthPlan.write_enabled",
-                )?,
-                clear,
-            }))
+            let case = manifest_case_name(variant_name);
+            if fields.is_empty() {
+                return Ok(Value::String(case));
+            }
+            let mut object = Map::new();
+            object.insert("case".to_owned(), Value::String(case));
+            object.insert(
+                "fields".to_owned(),
+                Value::Array(
+                    fields
+                        .iter()
+                        .copied()
+                        .map(|field| project_manifest_const(db, field, what))
+                        .collect::<Result<_, _>>()?,
+                ),
+            );
+            Ok(Value::Object(object))
         }
-        "Disabled" => Err(WebBundleError::EntryDerivation(
-            "Fe raster plan depth Disabled must not carry fields".into(),
-        )),
-        other => Err(WebBundleError::EntryDerivation(format!(
-            "unknown Fe raster depth attachment `{other}`"
-        ))),
+        SemConstValue::TypeLevel { .. } => Err(fail("contains a type-level value")),
     }
 }
 
-fn project_raster_plan(
-    db: &DriverDataBase,
-    value: SemConstId<'_>,
-) -> Result<WebRasterPolicy, WebBundleError> {
-    let plan = raster_struct_fields(db, value, "RasterPlan")?;
-    let sample_count = raster_u32(
-        db,
-        raster_named_field(&plan, "sample_count", "RasterPlan")?,
-        "RasterPlan.sample_count",
-    )?;
-    if !matches!(sample_count, 1 | 4) {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "Fe raster sample count must be portable WebGPU count 1 or 4, got {sample_count}"
-        )));
-    }
-    let cull_mode = match raster_unit_variant(
-        db,
-        raster_named_field(&plan, "cull", "RasterPlan")?,
-        "RasterPlan.cull",
-    )?
-    .as_str()
-    {
-        "None" => WebFaceCull::None,
-        "Front" => WebFaceCull::Front,
-        "Back" => WebFaceCull::Back,
-        other => {
-            return Err(WebBundleError::EntryDerivation(format!(
-                "unknown Fe raster cull mode `{other}`"
-            )));
+fn manifest_case_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut previous_is_lower_or_digit = false;
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_is_lower_or_digit {
+                result.push('_');
+            }
+            result.push(character.to_ascii_lowercase());
+            previous_is_lower_or_digit = false;
+        } else {
+            result.push(character);
+            previous_is_lower_or_digit =
+                character.is_ascii_lowercase() || character.is_ascii_digit();
         }
-    };
-    Ok(WebRasterPolicy {
-        sample_count,
-        cull_mode,
-        depth: project_raster_depth(db, raster_named_field(&plan, "depth", "RasterPlan")?)?,
-    })
+    }
+    result
 }
 
 fn actor_has_surface_pointer_motion(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
@@ -4804,7 +4670,7 @@ fn project_surface(
     source_entry: &str,
     layout: &WebLayout,
     resource_field_indices: &[u32],
-    raster: Option<WebRasterPolicy>,
+    raster: Option<serde_json::Value>,
 ) -> Result<Option<WebSurface>, WebBundleError> {
     let decls = hir::lower::module_actor_decls(db, top_mod);
     let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
@@ -5279,48 +5145,7 @@ pub struct WebPipeline {
     /// CTFE-evaluated Fe raster plan. Omitted when the actor does not provide a
     /// `RasterConfiguration` behavior so existing color-only bundles stay compact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raster: Option<WebRasterPolicy>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WebRasterPolicy {
-    pub sample_count: u32,
-    pub cull_mode: WebFaceCull,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub depth: Option<WebDepthPolicy>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WebDepthPolicy {
-    pub format: WebDepthFormat,
-    pub compare: WebDepthCompare,
-    pub write_enabled: bool,
-    pub clear: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebDepthFormat {
-    Depth24Plus,
-    Depth32Float,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebDepthCompare {
-    Less,
-    LessEqual,
-    Greater,
-    GreaterEqual,
-    Always,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebFaceCull {
-    None,
-    Front,
-    Back,
+    pub raster: Option<serde_json::Value>,
 }
 
 /// One projected interactive parameter. `min`/`max`/`init` are absent for a

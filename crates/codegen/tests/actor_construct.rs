@@ -22,10 +22,9 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
     WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
-    WebDepthCompare, WebDepthFormat, WebFaceCull, WebResourceAccess, WebResourceInitialization,
-    WebResourceKind, WebResourcePolicy, WebResourceRecovery, WebResourceResidency,
-    WebResourceVisibility, actor_gpu_program, actor_web_entry,
-    compile_runtime_package_spirv_compute_with_resources,
+    WebResourceAccess, WebResourceInitialization, WebResourceKind, WebResourcePolicy,
+    WebResourceRecovery, WebResourceResidency, WebResourceVisibility, actor_gpu_program,
+    actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
@@ -321,14 +320,20 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
         program.stages[2].kind,
         WebActorStageKind::RasterFragment { .. }
     ));
-    let raster = program.raster.as_ref().expect("Fe-authored raster plan");
-    assert_eq!(raster.sample_count, 4);
-    assert_eq!(raster.cull_mode, WebFaceCull::None);
-    let depth = raster.depth.as_ref().expect("Fe-authored depth attachment");
-    assert_eq!(depth.format, WebDepthFormat::Depth24Plus);
-    assert_eq!(depth.compare, WebDepthCompare::LessEqual);
-    assert!(depth.write_enabled);
-    assert_eq!(depth.clear, 1.0);
+    assert_eq!(
+        program.raster.as_ref().expect("Fe-authored raster plan"),
+        &serde_json::json!({
+            "sample_count": 4,
+            "cull_mode": "none",
+            "depth": {
+                "format": "depth24_plus",
+                "compare": "less_equal",
+                "write_enabled": true,
+                "clear": 1.0,
+            },
+        }),
+        "the manifest plan is the generic projection of the Fe CTFE value",
+    );
     assert_eq!(
         actor_web_entry(&db, top_mod).unwrap(),
         Some(("background".to_owned(), WebBundleMode::Render)),
