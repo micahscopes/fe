@@ -629,6 +629,100 @@ fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
 }
 
 #[test]
+fn pass_layouts_prune_dormant_resources_without_losing_actor_identity() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_liveness");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "resource-liveness fixture diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("resource-liveness.fe".to_owned())),
+    )
+    .expect("more than eight actor resources are portable when each pass uses a small subset");
+    assert_eq!(bundle.manifest.resources.len(), 10);
+    assert_eq!(
+        bundle
+            .manifest
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "dormant_0",
+            "compute_left",
+            "dormant_2",
+            "fragment_value",
+            "dormant_4",
+            "dormant_5",
+            "compute_right",
+            "dormant_7",
+            "dormant_8",
+            "dormant_9",
+        ],
+        "the global manifest retains stable allocation and recovery identity"
+    );
+    let pass_resources = |pass: &fe_codegen::WebPass| {
+        pass.layout
+            .bindings
+            .iter()
+            .filter(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+            .map(|binding| (binding.name.clone(), binding.binding))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(
+        pass_resources(&bundle.manifest.passes[0]),
+        vec![
+            ("compute_left".to_owned(), 0),
+            ("compute_right".to_owned(), 1)
+        ],
+    );
+    assert_eq!(
+        pass_resources(&bundle.manifest.passes[1]),
+        vec![("fragment_value".to_owned(), 0)],
+    );
+    assert!(!bundle.pass_wgsl[0].source.contains("dormant_"));
+    assert!(!bundle.pass_wgsl[1].source.contains("dormant_"));
+}
+
+#[test]
+fn pass_layouts_reject_a_genuinely_overbudget_shader_stage() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_overbudget");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "resource-overbudget fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("resource-overbudget.fe".to_owned())),
+    )
+    .expect_err("eight live resources plus scalar input storage exceed the portable limit");
+    let message = format!("{error}");
+    assert!(
+        message.contains("requires 9 storage-buffer bindings per shader stage"),
+        "{message}"
+    );
+    assert!(
+        message.contains("8 resource, 1 input, 0 output"),
+        "{message}"
+    );
+    assert!(message.contains("portable WebGPU limit is 8"), "{message}");
+}
+
+#[test]
 fn mixed_scalar_storage_layout_reconciles_fco_manifest_and_wgsl() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_mixed_storage");
