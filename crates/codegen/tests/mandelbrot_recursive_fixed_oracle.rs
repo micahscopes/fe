@@ -1237,7 +1237,7 @@ fn expected_sparse_arithmetic_plan(control: [u32; 38], row: [u32; 6]) -> [u32; 2
     let bit_state_before = bb_mul(row[4], row[4]);
     let bit_state_after = bb_mul(row[5], row[5]);
     let radix_state_value = bb_mul(row[4], row[0]);
-    let radix_value_weight = bb_mul(row[0], control[34]);
+    let radix_value_weight = bb_mul(row[0], control[37]);
     let radix_flag_value = bb_mul(control[35], row[0]);
     let radix_finish_auxiliary = bb_mul(row[1], bb_sub(1, radix_flag_value));
     let product_value_auxiliary = bb_mul(row[0], row[1]);
@@ -6270,8 +6270,8 @@ fn sparse_lde_multipaths_authenticate_production_codewords() {
 }
 
 #[test]
-#[ignore = "requires an explicit real-Chrome sparse base trace receipt"]
-fn production_sparse_base_trace_browser_words_match_independent_model() {
+#[ignore = "requires an explicit real-Chrome production proof receipt"]
+fn production_sparse_proof_browser_words_match_independent_model() {
     let receipt_dir = std::env::var_os(SPARSE_BASE_BROWSER_RECEIPT_DIR)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -6280,15 +6280,21 @@ fn production_sparse_base_trace_browser_words_match_independent_model() {
             )
         });
     let actual = read_u32le_file(&receipt_dir.join("base_trace.u32le"));
-    let validity = read_u32le_file(&receipt_dir.join("validity.u32le"));
-    let status = read_u32le_file(&receipt_dir.join("status.u32le"));
+    let transition = read_u32le_file(&receipt_dir.join("transition_workspace.u32le"));
+    let interaction_validity =
+        read_u32le_file(&receipt_dir.join("lde_inverse_progress.u32le"));
     assert_eq!(
         actual.len(),
         PRODUCTION_TRACE_ROWS * SPARSE_BASE_FIELDS,
         "production base trace word count",
     );
-    assert_eq!(validity, vec![1; PRODUCTION_TRACE_ROWS]);
-    assert_eq!(status, [1]);
+    assert_eq!(transition.len(), 218, "production transition workspace words");
+    assert_eq!(transition[217], 1, "all completed proof phases must be valid");
+    assert_eq!(
+        &interaction_validity[..PRODUCTION_TRACE_ROWS],
+        vec![1; PRODUCTION_TRACE_ROWS],
+        "every production interaction row must be valid",
+    );
 
     let point = ComplexFx {
         real: fixed(true, 3, 4),
@@ -6307,8 +6313,12 @@ fn production_sparse_base_trace_browser_words_match_independent_model() {
     {
         let row = index % PRODUCTION_TRACE_ROWS;
         let column = index / PRODUCTION_TRACE_ROWS;
+        let controls = expected_sparse_control_rows();
+        let rows = expected_sparse_rows(&point, &current);
         panic!(
-            "production sparse base trace differs at column {column}, row {row}: browser={actual}, independent={expected}"
+            "production sparse base trace differs at column {column}, row {row}: browser={actual}, independent={expected}, control={:?}, witness={:?}",
+            controls[row],
+            rows[row],
         );
     }
 }
