@@ -1,0 +1,68 @@
+<!doctype html>
+<!--
+  Focused physical-browser feasibility probe for the production-width Fe
+  round-interaction kernel. The sub-1 MB compiler gate remains separate. This
+  page answers whether the exact larger shader can create a pipeline, dispatch,
+  and retain a WebGPU device without loading the gallery.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='13' fill='%23101422'/%3E%3Cpath d='M11 39c8-22 21-28 41-14-13-2-19 4-19 15-5-8-12-9-22-1Z' fill='%23ffb0de'/%3E%3Ccircle cx='42' cy='22' r='7' fill='%235775e2'/%3E%3C/svg%3E">
+<title>Fe round interaction WebGPU probe</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0b0d14;
+    color: #dce3f1;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; padding: 28px; }
+  main { width: min(720px, 100%); margin: 0 auto; }
+  h1 { margin: 0 0 8px; font-size: clamp(20px, 4vw, 30px); line-height: 1.15; }
+  p { color: #aab4c8; max-width: 68ch; }
+  .lab {
+    margin-top: 22px;
+    padding: 14px;
+    border: 1px solid #252b3a;
+    border-radius: 12px;
+    background: #111522;
+    box-shadow: 0 20px 70px #0008;
+  }
+  fe-surface { width: 100%; max-width: none; }
+  fe-surface::part(canvas) {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    border-radius: 8px;
+  }
+  code { color: #becaff; }
+</style>
+</head>
+<body>
+  <main data-round-interaction-probe="production-v1">
+    <h1>Production round interaction probe</h1>
+    <p>
+      This focused page runs the exact Fe-authored production-width round
+      interaction actor. It deliberately accepts the current shader size so a
+      physical browser can measure pipeline creation, dispatch, readback, and
+      device stability. The independent sub-1 MB compiler gate is unchanged.
+    </p>
+
+    <section class="lab" aria-label="Fe round interaction WebGPU probe">
+      <script type="application/fe"
+              data-fe-src="../../crates/codegen/tests/fixtures/mandelbrot_proof_round_interaction_webgpu_ingot"
+              data-fe-render></script>
+    </section>
+
+    <p>
+      The display color is only a liveness signal. Numerical acceptance comes
+      from reading the declared <code>interaction</code> and
+      <code>validity</code> resources and comparing them with an independent
+      oracle.
+    </p>
+  </main>
+</body>
+</html>
