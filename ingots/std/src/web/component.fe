@@ -13,7 +13,7 @@ use core::marker::Copy
 use core::browser::alloc_browser_bytes
 use super::identity::{
     Checkbox, ComponentAction, ComponentClassToken, ComponentNode, ComponentRepeat,
-    ComponentTarget, Input, Link, Text,
+    ComponentTarget, ComponentVisibility, Input, Link, Part, Text, Visibility,
 }
 
 /// Version-1 event kinds at the fixed component boundary. Variants are append-
@@ -72,7 +72,9 @@ pub struct NoTaskPayload {}
 
 impl Copy for NoTaskPayload {}
 
-pub struct ComponentEvent<A = u32, P = NoTaskPayload> {
+/// `A` has no raw-integer default: every resident actor must name its
+/// FCO-derived action vocabulary at the boundary.
+pub struct ComponentEvent<A, P = NoTaskPayload> {
     pub kind: ComponentEventKind,
     /// Fe-declared action identity attached by generated page composition.
     pub target: A,
@@ -264,23 +266,44 @@ impl SequentialSurfaceActivation {
 /// `ComponentWriter`; JavaScript applies its fixed structural vocabulary but
 /// contains no component-specific reducer or rendering policy.
 pub struct ComponentPatch {
-    pub visible_mask: u32,
-    pub focus_target: u32,
-    pub flags: u32,
-    pub commands: BrowserBytes,
+    visible_mask: u32,
+    focus_target: u32,
+    flags: u32,
+    commands: BrowserBytes,
+}
+
+/// A type-checked set of component view parts which should be visible in one
+/// projection. FCO-derived `Part<Visibility>` values enter here directly, so
+/// resident actors never need to observe or combine their transport ordinals.
+pub struct VisibleParts { mask: u32 }
+
+impl Copy for VisibleParts {}
+
+impl VisibleParts {
+    pub const fn none() -> Self { Self { mask: 0 } }
+
+    pub fn show(self, target: Part<Visibility>) -> Self {
+        let id = target.component_visibility_id()
+        if id >= 32 { core::panic() }
+        Self { mask: self.mask | (1 << id) }
+    }
+
+    pub fn show_if(self, target: Part<Visibility>, visible: bool) -> Self {
+        if visible { self.show(target: target) } else { self }
+    }
 }
 
 impl ComponentPatch {
     /// Construct one complete projection without exposing the fixed ABI's
-    /// prevent-default flag bit to application code.
+    /// visibility ordinals or prevent-default flag bit to application code.
     pub fn new<A: ComponentAction>(
-        visible_mask: u32,
+        visible: VisibleParts,
         focus_target: A,
         prevent_default: bool,
         commands: own BrowserBytes,
     ) -> Self {
         Self {
-            visible_mask: visible_mask,
+            visible_mask: visible.mask,
             focus_target: focus_target.component_action_id(),
             flags: if prevent_default { 1 } else { 0 },
             commands: commands,

@@ -7,7 +7,7 @@
 use std::web::component::{
     BrowserBytes, BrowserString, ComponentEvent, ComponentEventKind, ComponentPatch,
     BrowserPtr, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
-    allocate_component_buffer,
+    VisibleParts, allocate_component_buffer,
 }
 use std::text::{
     TextLayout, TextLayoutProvider, TextTable, Utf8Buffer, Utf8View,
@@ -371,13 +371,12 @@ actor TodoApp {
             .attribute(value: PageAttribute::node(value: ui.row_title))
             .attribute(value: PageAttribute::action(value: TodoAction::BeginEdit))
             .close()
-            .open(element: PageElement::Button)
-            .attribute(value: PageAttribute::class(value: "edit-button"))
-            .attribute(value: PageAttribute::action(value: TodoAction::EditButton))
-            .attribute(value: PageAttribute::aria_label(value: "Edit todo"))
-            .attribute(value: PageAttribute::title(value: "Edit"))
-            .text(value: ui_text(value: "✎"))
-            .close()
+            .accessible_icon_button(
+                action: TodoAction::EditButton,
+                class: "edit-button",
+                label: "Edit todo",
+                icon: "✎",
+            )
             .open(element: PageElement::Button)
             .attribute(value: PageAttribute::class(value: "destroy"))
             .attribute(value: PageAttribute::action(value: TodoAction::DestroyTodo))
@@ -679,7 +678,7 @@ actor TodoApp {
         writer = writer.repeat_end()
 
         ComponentPatch::new(
-            visible_mask: 0,
+            visible: VisibleParts::none(),
             focus_target: TodoAction::Unknown,
             prevent_default: self.prevent_default,
             commands: writer.finish(),

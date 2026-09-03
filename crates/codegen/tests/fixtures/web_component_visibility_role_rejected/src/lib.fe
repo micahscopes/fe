@@ -1,0 +1,21 @@
+use std::web::component::VisibleParts
+use std::web::identity::{
+    ComponentSchema,
+    ComponentSchemaProvider,
+    Part,
+    Text,
+}
+use std::web::page::PageAttribute
+
+struct InvalidView { label: Part<Text> }
+
+derive ComponentSchema for InvalidView using ComponentSchemaProvider
+
+pub fn invalid_visibility_role() -> VisibleParts {
+    let view = <InvalidView as ComponentSchema>::component_parts()
+    VisibleParts::none().show(target: view.label)
+}
+
+pub fn invalid_numeric_action() -> PageAttribute {
+    PageAttribute::action<u32>(value: 7)
+}

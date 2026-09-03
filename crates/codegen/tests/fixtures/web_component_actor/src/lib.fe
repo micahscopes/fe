@@ -9,37 +9,60 @@ use core::actor::{
     ComponentComposition as Composition, InitialState as Initial, ProjectState as Projection,
     ResidentTransition as Stateful,
 }
-use std::web::component::{ComponentEvent, ComponentEventKind, ComponentPatch}
-use std::web::component::BrowserBytes
+use std::web::component::{
+    BrowserBytes, ComponentEvent, ComponentEventKind, ComponentPatch, VisibleParts,
+}
+use std::web::identity::{
+    ComponentAction, ComponentActionProvider, ComponentSchema, ComponentSchemaProvider,
+    Part, Visibility,
+}
 use std::web::page::{ComponentView, PageAttribute, PageElement, PageOp, PageText}
 
+pub enum InspectorAction {
+    Unknown,
+    Authored,
+    Generated,
+}
+
+impl Copy for InspectorAction {}
+
+derive ComponentAction for InspectorAction using ComponentActionProvider
+
+struct InspectorView {
+    authored: Part<Visibility>,
+    generated: Part<Visibility>,
+}
+
+derive ComponentSchema for InspectorView using ComponentSchemaProvider
+
 pub struct InspectorState {
-    pub selected: u32,
+    pub selected: InspectorAction,
     pub connected: bool,
     pub revision: u32,
 }
 
 actor SourceInspector {
-    selected: u32,
+    selected: InspectorAction,
     connected: bool,
     revision: u32,
 
     const fn view() -> ComponentView<23> uses (Composition) {
+        let ui = <InspectorView as ComponentSchema>::component_parts()
         ComponentView::exact(body: [
             PageOp::open(element: PageElement::Button),
-            PageOp::attribute(value: PageAttribute::action(value: 0)),
+            PageOp::attribute(value: PageAttribute::action(value: InspectorAction::Authored)),
             PageOp::text(value: PageText::one(value: "Fe")),
             PageOp::close(),
             PageOp::open(element: PageElement::Button),
-            PageOp::attribute(value: PageAttribute::action(value: 1)),
+            PageOp::attribute(value: PageAttribute::action(value: InspectorAction::Generated)),
             PageOp::text(value: PageText::one(value: "Wasm")),
             PageOp::close(),
             PageOp::open(element: PageElement::Section),
-            PageOp::attribute(value: PageAttribute::view(value: 0)),
+            PageOp::attribute(value: PageAttribute::view(value: ui.authored)),
             PageOp::text(value: PageText::one(value: "authored")),
             PageOp::close(),
             PageOp::open(element: PageElement::Section),
-            PageOp::attribute(value: PageAttribute::view(value: 1)),
+            PageOp::attribute(value: PageAttribute::view(value: ui.generated)),
             PageOp::text(value: PageText::one(value: "generated")),
             PageOp::close(),
             PageOp::open(element: PageElement::Label),
@@ -54,27 +77,33 @@ actor SourceInspector {
 
     const fn initial() -> InspectorState uses (Initial) {
         InspectorState {
-            selected: 0,
+            selected: InspectorAction::Authored,
             connected: false,
             revision: 0,
         }
     }
 
     fn project(self) -> ComponentPatch uses (Projection) {
-        let mut visible_mask: u32 = 0
-        if self.connected && self.selected < 32 {
-            visible_mask = 1 << self.selected
+        let ui = <InspectorView as ComponentSchema>::component_parts()
+        let visible = if !self.connected {
+            VisibleParts::none()
+        } else {
+            match self.selected {
+                InspectorAction::Unknown => VisibleParts::none()
+                InspectorAction::Authored => VisibleParts::none().show(target: ui.authored)
+                InspectorAction::Generated => VisibleParts::none().show(target: ui.generated)
+            }
         }
-        ComponentPatch {
-            visible_mask: visible_mask,
-            focus_target: 0,
-            flags: 0,
+        ComponentPatch::new(
+            visible: visible,
+            focus_target: InspectorAction::Unknown,
+            prevent_default: false,
             commands: BrowserBytes { ptr: 0, len: 0 },
-        }
+        )
     }
 
-    fn receive(self, event: own ComponentEvent) -> InspectorState uses (Stateful) {
-        let mut selected: u32 = self.selected
+    fn receive(self, event: own ComponentEvent<InspectorAction>) -> InspectorState uses (Stateful) {
+        let mut selected: InspectorAction = self.selected
         let mut connected: bool = self.connected
         let mut revision: u32 = self.revision
         match event.kind {
@@ -94,11 +123,8 @@ actor SourceInspector {
             }
             ComponentEventKind::KeyDown => {
                 if connected {
-                    if event.detail == 37 {
-                        if selected > 0 { selected = selected - 1 }
-                    } else {
-                        if event.detail == 39 { selected = selected + 1 }
-                    }
+                    if event.detail == 37 { selected = InspectorAction::Authored }
+                    if event.detail == 39 { selected = InspectorAction::Generated }
                     revision = revision + 1
                 }
             }

@@ -5,7 +5,7 @@
 //! numeric tables. FCO providers reflect those declarations and derive every
 //! transport identity as an ordinary const Fe method. Generated resident
 //! wrappers validate every incoming action tag before application code can
-//! observe it.
+//! observe it. Raw integers intentionally implement none of these traits.
 
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 
@@ -94,12 +94,6 @@ pub trait ComponentAction {
     const fn component_action_id(self) -> u32
 }
 
-/// Compatibility for fixed-host fixtures and migrating components. Canonical
-/// application examples derive the trait for a fieldless enum instead.
-impl ComponentAction for u32 {
-    const fn component_action_id(self) -> u32 { self }
-}
-
 pub struct ComponentActionProvider {}
 
 impl Derive<ComponentAction> for ComponentActionProvider {
@@ -131,10 +125,6 @@ impl<Role: NodeRole> ComponentNode for Part<Role> {
     const fn component_node_id(self) -> u32 { self.id }
 }
 
-impl ComponentNode for u32 {
-    const fn component_node_id(self) -> u32 { self }
-}
-
 /// One bit position in a component's visibility projection.
 pub trait ComponentVisibility {
     const fn component_visibility_id(self) -> u32
@@ -142,17 +132,6 @@ pub trait ComponentVisibility {
 
 impl ComponentVisibility for Part<Visibility> {
     const fn component_visibility_id(self) -> u32 { self.id }
-}
-
-impl Part<Visibility> {
-    pub fn bit(self) -> u32 {
-        if self.id >= 32 { core::panic() }
-        1 << self.id
-    }
-}
-
-impl ComponentVisibility for u32 {
-    const fn component_visibility_id(self) -> u32 { self }
 }
 
 pub trait ComponentTemplate {
@@ -170,10 +149,6 @@ impl<Row> ComponentTemplate for Part<Repeat<Row>> {
     const fn component_template_id(self) -> u32 { self.id }
 }
 
-impl ComponentTemplate for u32 {
-    const fn component_template_id(self) -> u32 { self }
-}
-
 pub trait ComponentClassToken {
     const fn component_class_token_id(self) -> u32
 }
@@ -185,18 +160,13 @@ impl<Token> ComponentClassToken for Part<Class<Token>> {
 /// One role-indexed capability for every operation-specific part. The role is
 /// compile-time only: it makes assigning text to a checkbox (or pairing a
 /// repeat region with the wrong row template) ill-typed without proliferating
-/// one marker trait per browser operation. `u32` remains a compatibility
-/// implementation for fixed-host fixtures; canonical components use `Part`.
+/// one marker trait per browser operation.
 pub trait ComponentTarget<Role> {
     const fn component_target_id(self) -> u32
 }
 
 impl<Role> ComponentTarget<Role> for Part<Role> {
     const fn component_target_id(self) -> u32 { self.id }
-}
-
-impl<Role> ComponentTarget<Role> for u32 {
-    const fn component_target_id(self) -> u32 { self }
 }
 
 /// Erases only the row type after it has already coupled a repeat region to
@@ -207,12 +177,4 @@ pub trait ComponentRepeat {
 
 impl<Row> ComponentRepeat for Part<Repeat<Row>> {
     const fn component_repeat_id(self) -> u32 { self.id }
-}
-
-impl ComponentRepeat for u32 {
-    const fn component_repeat_id(self) -> u32 { self }
-}
-
-impl ComponentClassToken for u32 {
-    const fn component_class_token_id(self) -> u32 { self }
 }

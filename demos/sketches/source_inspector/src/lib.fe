@@ -10,7 +10,7 @@
 use std::web::component::{
     BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
     ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
-    allocate_component_buffer,
+    VisibleParts, allocate_component_buffer,
 }
 use std::text::Utf8Buffer
 use core::actor::{ActorSink, ScopedTask}
@@ -90,6 +90,7 @@ impl ArtifactKind {
     fn is_source(self) -> bool { match self { Self::Source => true, _ => false } }
     fn is_wgsl(self) -> bool { match self { Self::Wgsl => true, _ => false } }
     fn is_wasm(self) -> bool { match self { Self::Wasm => true, _ => false } }
+    fn is_manifest(self) -> bool { match self { Self::Manifest => true, _ => false } }
 }
 
 /// One reflected schema owns every DOM/view correlation identity. The source
@@ -891,13 +892,12 @@ actor SourceInspector {
             .attribute(value: PageAttribute::rel(value: "noopener"))
             .text(value: ui_text(value: "Raw"))
             .close()
-            .open(element: PageElement::Button)
-            .attribute(value: PageAttribute::class(value: "close"))
-            .attribute(value: PageAttribute::action(value: InspectorAction::Close))
-            .attribute(value: PageAttribute::input_type(value: "button"))
-            .attribute(value: PageAttribute::aria_label(value: "Close"))
-            .text(value: ui_text(value: "×"))
-            .close()
+            .accessible_icon_button(
+                action: InspectorAction::Close,
+                class: "close",
+                label: "Close",
+                icon: "×",
+            )
             .close()
             .open(element: PageElement::Div)
             .attribute(value: PageAttribute::class(value: "body inspector-body"))
@@ -1185,36 +1185,24 @@ actor SourceInspector {
         let content = Utf8Buffer::with_len(
             ptr: self.content_ptr, len: self.content_len, capacity: CONTENT_CAPACITY,
         ).browser_string()
-        let mut visible_mask: u32 = 0
-        if self.connected && self.open {
-            visible_mask = visible_mask | ui.overlay.bit()
-            if self.selected.is_source() {
-                visible_mask = visible_mask | ui.title_source.bit()
-            } else {
-                if self.selected.is_wgsl() {
-                    visible_mask = visible_mask | ui.title_wgsl.bit()
-                } else {
-                    if self.selected.is_wasm() {
-                        visible_mask = visible_mask | ui.title_wasm.bit()
-                    } else {
-                        visible_mask = visible_mask | ui.title_manifest.bit()
-                    }
-                }
-            }
-            if self.status.is_loading() {
-                visible_mask = visible_mask | ui.loading.bit()
-            } else {
-                if self.status.is_error() {
-                    visible_mask = visible_mask | ui.error_view.bit()
-                } else {
-                    if self.selected.is_wasm() {
-                        visible_mask = visible_mask | ui.binary.bit()
-                    } else {
-                        visible_mask = visible_mask | ui.text.bit()
-                    }
-                }
-            }
-        }
+        let active = self.connected && self.open
+        let content_visible = active && !self.status.is_loading() && !self.status.is_error()
+        let visible = VisibleParts::none()
+            .show_if(target: ui.overlay, visible: active)
+            .show_if(target: ui.title_source, visible: active && self.selected.is_source())
+            .show_if(target: ui.title_wgsl, visible: active && self.selected.is_wgsl())
+            .show_if(target: ui.title_wasm, visible: active && self.selected.is_wasm())
+            .show_if(target: ui.title_manifest, visible: active && self.selected.is_manifest())
+            .show_if(target: ui.loading, visible: active && self.status.is_loading())
+            .show_if(target: ui.error_view, visible: active && self.status.is_error())
+            .show_if(
+                target: ui.binary,
+                visible: content_visible && self.selected.is_wasm(),
+            )
+            .show_if(
+                target: ui.text,
+                visible: content_visible && !self.selected.is_wasm(),
+            )
 
         let mut writer = ComponentWriter::new(
             buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
@@ -1234,7 +1222,7 @@ actor SourceInspector {
             }
         }
         ComponentPatch::new(
-            visible_mask: visible_mask,
+            visible: visible,
             focus_target: if self.focus_close {
                 InspectorAction::Close
             } else {

@@ -32,6 +32,23 @@ fn repository_has_one_canonical_gallery_source() {
 }
 
 #[test]
+fn component_projection_rejects_wrong_roles_and_numeric_protocol_ids() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/web_component_visibility_role_rejected")
+        .canonicalize()
+        .expect("invalid visibility fixture path");
+    let url = Url::from_directory_path(path).expect("invalid visibility fixture URL");
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+    let diagnostics = db.run_on_top_mod(ingot.root_mod(&db)).format_diags(&db);
+    assert!(
+        diagnostics.contains("type mismatch") && diagnostics.contains("ComponentAction"),
+        "component projections must reject wrong roles and numeric protocol IDs:\n{diagnostics}",
+    );
+}
+
+#[test]
 fn role_selected_fe_page_projects_typed_structure_without_json() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/web_page_actor")
@@ -79,7 +96,8 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
             render.wasm_action,
             render.manifest_action
         ),
-        (101, 102, 103)
+        (2, 3, 4),
+        "render inspection actions must come from Fe enum order",
     );
     let PageProjectionOp::Render(second_render) = &page.body[7] else {
         panic!("expected second render program")
@@ -98,7 +116,7 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
         .expect("selected component view");
     assert_eq!(component.actor, "TodoComponent");
     assert_eq!(component.source_entry, "view");
-    assert_eq!(component.body.len(), 7);
+    assert_eq!(component.body.len(), 15);
     let PageProjectionOp::Attribute(local_for) = &component.body[1] else {
         panic!("expected component-local for attribute")
     };
@@ -109,4 +127,38 @@ fn role_selected_fe_page_projects_typed_structure_without_json() {
     };
     assert_eq!(local_id.kind, PageAttributeKind::LocalId);
     assert_eq!(local_id.text, "toggle-all");
+    assert_eq!(
+        component.body[7],
+        PageProjectionOp::Open(PageElement::Button)
+    );
+    let PageProjectionOp::Attribute(class) = &component.body[8] else {
+        panic!("expected icon-button class")
+    };
+    assert_eq!(class.kind, PageAttributeKind::Class);
+    assert_eq!(class.text, "close");
+    let PageProjectionOp::Attribute(action) = &component.body[9] else {
+        panic!("expected derived icon-button action")
+    };
+    assert_eq!(action.kind, PageAttributeKind::Action);
+    assert_eq!(
+        action.number, 1,
+        "the action identity must come from Fe enum order"
+    );
+    let PageProjectionOp::Attribute(input_type) = &component.body[10] else {
+        panic!("expected icon-button type")
+    };
+    assert_eq!(input_type.kind, PageAttributeKind::InputType);
+    assert_eq!(input_type.text, "button");
+    let PageProjectionOp::Attribute(aria_label) = &component.body[11] else {
+        panic!("expected icon-button accessible name")
+    };
+    assert_eq!(aria_label.kind, PageAttributeKind::AriaLabel);
+    assert_eq!(aria_label.text, "Close inspector");
+    let PageProjectionOp::Attribute(title) = &component.body[12] else {
+        panic!("expected icon-button title")
+    };
+    assert_eq!(title.kind, PageAttributeKind::Title);
+    assert_eq!(title.text, "Close inspector");
+    assert_eq!(component.body[13], PageProjectionOp::Text("x".to_owned()));
+    assert_eq!(component.body[14], PageProjectionOp::Close);
 }

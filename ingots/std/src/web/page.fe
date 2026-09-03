@@ -340,6 +340,27 @@ impl<const N: usize> PageBuilder<N> {
         self.push(operation: PageOp::close())
     }
 
+    /// Project one icon-only action as a standards button with an explicit
+    /// accessible name. The semantic action supplies its FCO-derived identity;
+    /// the visible glyph is presentation and never becomes an event protocol.
+    pub const fn accessible_icon_button<A: ComponentAction>(
+        self,
+        action: A,
+        class: String<31>,
+        label: String<31>,
+        icon: String<31>,
+    ) -> Self {
+        self
+            .open(element: PageElement::Button)
+            .attribute(value: PageAttribute::class(value: class))
+            .attribute(value: PageAttribute::action(value: action))
+            .attribute(value: PageAttribute::input_type(value: "button"))
+            .attribute(value: PageAttribute::aria_label(value: label))
+            .attribute(value: PageAttribute::title(value: label))
+            .text(value: PageText::one(value: icon))
+            .close()
+    }
+
     pub const fn render<A: ComponentAction>(
         self,
         source: PageText,

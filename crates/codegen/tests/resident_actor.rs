@@ -485,8 +485,8 @@ fn oracle(mut state: InspectorState, event: Event) -> InspectorState {
         }
         7 if state.connected => {
             match event.detail {
-                37 if state.selected > 0 => state.selected -= 1,
-                39 => state.selected += 1,
+                37 => state.selected = 1,
+                39 => state.selected = 2,
                 _ => {}
             }
             state.revision += 1;
@@ -592,7 +592,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
     let initial = initialize
         .call(&mut store, ())
         .expect("initialize component from authored Fe");
-    assert_eq!(initial, (0, 0, 0));
+    assert_eq!(initial, (1, 0, 0));
     assert_eq!(
         project.call(&mut store, ()).expect("initial patch"),
         (0, 0, 0, 0, 0)
@@ -600,18 +600,22 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
 
     // The replacement ABI remains an explicit restoration boundary, not the
     // ordinary startup path. Exercise it once, then return to Fe's initializer.
+    assert!(
+        replace.call(&mut store, (99, 1, 7)).is_err(),
+        "state restoration must reject an invalid FCO-derived action tag"
+    );
     replace
-        .call(&mut store, (99, 1, 7))
+        .call(&mut store, (2, 1, 7))
         .expect("explicit restoration state replacement");
     assert_eq!(
         initialize.call(&mut store, ()).expect("reinitialize in Fe"),
-        (0, 0, 0)
+        (1, 0, 0)
     );
 
     let tape = [
         Event {
             kind: 3,
-            target: 7,
+            target: 2,
             key: 0,
             detail: 0,
             value: 11.0,
@@ -671,7 +675,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
         },
         Event {
             kind: 3,
-            target: 9,
+            target: 2,
             key: 0,
             detail: 0,
             value: 17.0,
@@ -701,7 +705,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
         },
         Event {
             kind: 4,
-            target: 99,
+            target: 0,
             key: 0,
             detail: 12,
             value: 20.0,
@@ -711,7 +715,7 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
         },
     ];
     let mut expected = InspectorState {
-        selected: 0,
+        selected: 1,
         connected: false,
         revision: 0,
     };
@@ -738,8 +742,8 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
             (expected.selected, expected.connected, expected.revision),
             "component state differs after event {index}"
         );
-        let expected_mask = if expected.connected && expected.selected < 32 {
-            1u32 << expected.selected
+        let expected_mask = if expected.connected {
+            1u32 << (expected.selected - 1)
         } else {
             0
         };
@@ -764,6 +768,12 @@ fn fe_component_actor_owns_lifecycle_selection_and_resident_state() {
             .call(&mut store, (99, 0, 0, 0, 0, 0.0, 11.0, 0, 0))
             .is_err(),
         "an invalid fieldless-enum tag must trap before Fe can interpret it"
+    );
+    assert!(
+        transition
+            .call(&mut store, (3, 3, 0, 0, 0, 0.0, 11.0, 0, 0))
+            .is_err(),
+        "an invalid FCO-derived action tag must trap before Fe can interpret it"
     );
 }
 

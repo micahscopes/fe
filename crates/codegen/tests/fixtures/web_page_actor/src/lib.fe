@@ -1,7 +1,20 @@
 use std::web::page::{
     ComponentComposition, ComponentView, Page, PageAttribute, PageBuilder,
-    PageComposition, PageElement, PageOp, PageText,
+    PageComposition, PageElement, PageText,
 }
+use std::web::identity::{ComponentAction, ComponentActionProvider}
+
+enum FixtureAction {
+    Unknown,
+    Close,
+    InspectWgsl,
+    InspectWasm,
+    InspectManifest,
+}
+
+impl Copy for FixtureAction {}
+
+derive ComponentAction for FixtureAction using ComponentActionProvider
 
 actor GalleryPage {
     version: u32,
@@ -16,15 +29,15 @@ actor GalleryPage {
             .close()
             .render_sequenced(
                 source: PageText::one(value: "sketches/gradient"),
-                wgsl_action: 101,
-                wasm_action: 102,
-                manifest_action: 103,
+                wgsl_action: FixtureAction::InspectWgsl,
+                wasm_action: FixtureAction::InspectWasm,
+                manifest_action: FixtureAction::InspectManifest,
             )
             .render_sequenced(
                 source: PageText::one(value: "sketches/plasma"),
-                wgsl_action: 101,
-                wasm_action: 102,
-                manifest_action: 103,
+                wgsl_action: FixtureAction::InspectWgsl,
+                wasm_action: FixtureAction::InspectWasm,
+                manifest_action: FixtureAction::InspectManifest,
             )
             .component(
                 source: PageText::one(value: "sketches/todomvc/src/lib.fe"),
@@ -38,15 +51,21 @@ actor GalleryPage {
 actor TodoComponent {
     version: u32,
 
-    const fn view() -> ComponentView<7> uses (ComponentComposition) {
-        ComponentView::exact(body: [
-            PageOp::open(element: PageElement::Label),
-            PageOp::attribute(value: PageAttribute::local_for(value: "toggle-all")),
-            PageOp::text(value: PageText::one(value: "Toggle all")),
-            PageOp::close(),
-            PageOp::open(element: PageElement::Input),
-            PageOp::attribute(value: PageAttribute::local_id(value: "toggle-all")),
-            PageOp::close(),
-        ])
+    const fn view() -> ComponentView<16> uses (ComponentComposition) {
+        PageBuilder::new()
+            .open(element: PageElement::Label)
+            .attribute(value: PageAttribute::local_for(value: "toggle-all"))
+            .text(value: PageText::one(value: "Toggle all"))
+            .close()
+            .open(element: PageElement::Input)
+            .attribute(value: PageAttribute::local_id(value: "toggle-all"))
+            .close()
+            .accessible_icon_button(
+                action: FixtureAction::Close,
+                class: "close",
+                label: "Close inspector",
+                icon: "x",
+            )
+            .finish_component()
     }
 }

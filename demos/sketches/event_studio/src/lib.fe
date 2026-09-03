@@ -48,6 +48,7 @@ use std::web::component::{
     InitialState,
     ProjectState,
     ResidentTransition,
+    VisibleParts,
     allocate_component_buffer,
 }
 use std::web::identity::{
@@ -1066,7 +1067,7 @@ actor EventStudio {
             .set_u32_text(target: ui.queue_events, value: self.queue_events)
             .set_u32_text(target: ui.queue_missed, value: self.queue_missed)
         ComponentPatch::new(
-            visible_mask: 0,
+            visible: VisibleParts::none(),
             focus_target: StudioAction::Unknown,
             prevent_default: false,
             commands: writer.finish(),

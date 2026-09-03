@@ -1,5 +1,5 @@
 [ingot]
-name = "web_page_actor"
+name = "web_component_visibility_role_rejected"
 version = "0.1.0"
 
 [dependencies]
