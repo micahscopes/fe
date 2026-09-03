@@ -224,7 +224,7 @@ fn pinned_webgpu_buffer_write_selection_preserves_fe_argument_semantics() {
 }
 
 #[test]
-fn consolidated_render_runtime_profile_is_exactly_the_three_proven_operations() {
+fn consolidated_render_runtime_profile_is_exactly_the_five_proven_operations() {
     let provenance: serde_json::Value =
         serde_json::from_str(WEBGPU_RENDER_RUNTIME_PROVENANCE).unwrap();
     assert_eq!(
@@ -252,7 +252,91 @@ fn consolidated_render_runtime_profile_is_exactly_the_three_proven_operations() 
             "gpu_device_create_buffer",
             "gpu_queue_on_submitted_work_done",
             "gpu_queue_write_buffer",
+            "gpu_render_pass_encoder_draw",
+            "gpu_render_pass_encoder_draw_indirect",
         ]
+    );
+
+    let fe = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    assert!(fe.contains(
+        "gpu_render_pass_encoder_draw(self_: GPURenderPassEncoder, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32)"
+    ));
+    assert!(fe.contains(
+        "gpu_render_pass_encoder_draw_indirect(self_: GPURenderPassEncoder, indirectBuffer: GPUBuffer, indirectOffset: u64)"
+    ));
+}
+
+#[test]
+fn generated_webgpu_render_commands_preserve_draw_shape_and_resource_borrows() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = parse(WEBGPU_RENDER_RUNTIME_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-render-runtime", WEBGPU_WEBIDL_MODULE).unwrap();
+    let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "fe-webidl-webgpu-render-commands-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let adapter_path = directory.join("adapter.mjs");
+    let test_path = directory.join("test.mjs");
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let runtime_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/browser-runtime/host-runtime.js")
+        .canonicalize()
+        .unwrap();
+    let script = format!(
+        r#"
+import {{ createFeHostAdapter }} from {adapter_url:?};
+import {{ createFeHostRuntime }} from {runtime_url:?};
+
+const runtime = createFeHostRuntime();
+const adapter = createFeHostAdapter({{}}, runtime);
+const operations = adapter.imports[{module:?}];
+const calls = [];
+const buffer = Object.freeze({{ identity: "indirect-buffer" }});
+const renderPass = {{
+  draw(...args) {{ calls.push(["draw", ...args]); }},
+  drawIndirect(...args) {{ calls.push(["drawIndirect", ...args]); }},
+}};
+
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  operations.gpu_render_pass_encoder_draw(passHandle, 12, 7, 3, 2));
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  runtime.resources.withBorrowed(buffer, bufferHandle =>
+    operations.gpu_render_pass_encoder_draw_indirect(passHandle, bufferHandle, 32n)));
+
+if (calls.length !== 2) throw new Error(`unexpected call count: ${{calls.length}}`);
+if (calls[0][0] !== "draw" || calls[0].slice(1).join(",") !== "12,7,3,2")
+  throw new Error(`direct draw shape changed: ${{JSON.stringify(calls[0])}}`);
+if (calls[1][0] !== "drawIndirect" || calls[1][1] !== buffer || calls[1][2] !== 32)
+  throw new Error(`indirect draw shape changed: ${{JSON.stringify(calls[1])}}`);
+if (runtime.inventory().resources !== 0)
+  throw new Error("render-command borrows escaped their synchronous calls");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        runtime_url = format!("file://{}", runtime_path.display()),
+        module = WEBGPU_WEBIDL_MODULE,
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("node")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "generated WebGPU render-command adapter failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
