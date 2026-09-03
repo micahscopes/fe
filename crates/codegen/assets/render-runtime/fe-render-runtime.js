@@ -1154,12 +1154,17 @@ const SHADOW_CSS = `
         max-width: 100%; margin-inline: auto;
         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
         color: #cfd6e4; }
-.root { display: flex; flex-direction: column; gap: 10px; }
+.root { position: relative; display: flex; flex-direction: column; gap: 10px; }
 .stage { position: relative; width: 100%; background: #000; border-radius: 10px; overflow: hidden;
          box-shadow: 0 8px 40px #0008; }
 .surface-canvas { display: block; width: 100%; height: auto; }
 .surface-canvas[hidden] { display: none; }
 .side { display: grid; gap: 10px; }
+.side:not([open]) > :not(summary) { display: none; }
+.side summary { list-style: none; }
+.side summary::-webkit-details-marker { display: none; }
+.side summary::before { content: "▸ "; color: #6f7889; }
+.side[open] summary::before { content: "▾ "; }
 .badge { justify-self: start; display: inline-block; padding: 2px 7px; border-radius: 6px;
          font-size: 11px; font-weight: 600; }
 .badge.webgpu { background: #10281a; color: #5bffa0; }
@@ -1244,6 +1249,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._recoveryWasLive = false;
     this._gestureListeners = null; // { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel }
     this._gestureFrame = null;
+    this._surfaceFrameRequested = false;
     this._gesturePresenting = false;
     this._gestureDirty = false;
     this._presentationTail = Promise.resolve();
@@ -1697,8 +1703,13 @@ export class FeSurfaceElement extends HTMLElement {
     this._root = document.createElement("div");
     this._root.className = "root";
 
-    this._side = document.createElement("div");
+    this._side = document.createElement("details");
     this._side.className = "side";
+    this._side.setAttribute("part", "side");
+    this._side.open = true;
+    const controlsToggle = document.createElement("summary");
+    controlsToggle.setAttribute("part", "controls-toggle");
+    controlsToggle.textContent = "parameters";
     this._badge = document.createElement("span");
     this._badge.className = "badge";
     this._badge.setAttribute("part", "badge");
@@ -1708,7 +1719,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._meta = document.createElement("div");
     this._meta.className = "meta";
     this._meta.setAttribute("part", "meta");
-    this._side.append(this._badge, this._panel, this._meta);
+    this._side.append(controlsToggle, this._badge, this._panel, this._meta);
 
     const captionWrap = document.createElement("div");
     captionWrap.className = "caption";
@@ -1728,6 +1739,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._stage) return;
     this._stage = document.createElement("div");
     this._stage.className = "stage";
+    this._stage.setAttribute("part", "stage");
     this._posterCanvas = document.createElement("canvas");
     this._posterCanvas.className = "surface-canvas poster";
     this._posterCanvas.setAttribute("part", "canvas");
@@ -2986,6 +2998,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._actor = null;
     if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
     this._gestureFrame = null;
+    this._surfaceFrameRequested = false;
     this._gestureDirty = false;
     this._pendingSurfaceEvents = [];
     this._surfaceTransitionMemory = null;
@@ -3566,7 +3579,23 @@ export class FeSurfaceElement extends HTMLElement {
     includePending = false,
   ) {
     if (!this._surfaceTransitionKernel) return null;
-    const event = {
+    const event = this._surfaceBoundaryEvent(kind, timestamp);
+    const next = this._surfaceTransitionSchedule === "resident"
+      ? this._runSurfaceFrame([
+          ...(includePending ? this._pendingSurfaceEvents.splice(0) : []),
+          event,
+        ])
+      : this._runSurfaceTransition(event);
+    if (!next) return null;
+    this._uniforms = next;
+    this._refreshControlValues();
+    return next;
+  }
+
+  /** Construct one fixed standards-boundary surface fact. The same typed
+   * record feeds compatibility transitions and resident continuous frames. */
+  _surfaceBoundaryEvent(kind, timestamp = globalThis.performance?.now?.() ?? 0) {
+    return {
       mx: 0,
       my: 0,
       dx: 0,
@@ -3581,16 +3610,6 @@ export class FeSurfaceElement extends HTMLElement {
       paramIndex: 0,
       paramValue: 0,
     };
-    const next = this._surfaceTransitionSchedule === "resident"
-      ? this._runSurfaceFrame([
-          ...(includePending ? this._pendingSurfaceEvents.splice(0) : []),
-          event,
-        ])
-      : this._runSurfaceTransition(event);
-    if (!next) return null;
-    this._uniforms = next;
-    this._refreshControlValues();
-    return next;
   }
 
   /** Invoke the generated resident Fe presentation policy. Private policy
@@ -3672,6 +3691,16 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
+  /** Realize the selected Fe policy's bounded queue and browser-frame effects.
+   * The remembered request lets a Visible fact arrive before `_enterLive`
+   * without losing the first continuous frame. */
+  _realizeSurfaceSchedule(decision) {
+    if (!decision) return;
+    this._applySurfaceQueueAction(decision);
+    this._surfaceFrameRequested = decision.requestFrame;
+    if (this._surfaceFrameRequested) this._scheduleGestureFrame();
+  }
+
   /** Notify Fe that one untouched application input entered the raw queue.
    * Fe alone chooses retention and whether the browser should request a frame. */
   _notifyScheduledInput(kind, timestamp) {
@@ -3682,8 +3711,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (decision.present) {
       throw new Error("fe render runtime: Fe requested presentation outside an animation frame");
     }
-    this._applySurfaceQueueAction(decision);
-    if (decision.requestFrame) this._scheduleGestureFrame();
+    this._realizeSurfaceSchedule(decision);
   }
 
   /** Deliver a standards fact to the resident Fe scheduling policy without
@@ -3697,8 +3725,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._deliverSurfaceBoundary(kind, timestamp, false);
     }
     const decision = this._runSurfaceSchedule(kind, timestamp);
-    this._applySurfaceQueueAction(decision);
-    if (decision?.requestFrame) this._scheduleGestureFrame();
+    this._realizeSurfaceSchedule(decision);
     return decision;
   }
 
@@ -3741,7 +3768,8 @@ export class FeSurfaceElement extends HTMLElement {
   _scheduleGestureFrame() {
     if (this._gestureFrame !== null || this._fsm !== "live") return;
     if (this._surfaceScheduleKernel) {
-      if (this._pendingSurfaceEvents.length === 0) return;
+      if (!this._surfaceFrameRequested) return;
+      this._surfaceFrameRequested = false;
     } else if (this._gesturePresenting || !this._gestureDirty) {
       return;
     }
@@ -3758,16 +3786,13 @@ export class FeSurfaceElement extends HTMLElement {
         SurfaceEventKind.AnimationFrame,
         timestamp,
       );
-      this._applySurfaceQueueAction(decision);
-      if (decision?.requestFrame) this._scheduleGestureFrame();
+      this._realizeSurfaceSchedule(decision);
       if (!decision?.present) return;
-      if (this._pendingSurfaceEvents.length === 0) {
-        throw new Error(
-          "fe render runtime: Fe requested presentation without pending surface input",
-        );
-      }
 
-      const events = this._pendingSurfaceEvents.splice(0);
+      const events = [
+        ...this._pendingSurfaceEvents.splice(0),
+        this._surfaceBoundaryEvent(SurfaceEventKind.AnimationFrame, timestamp),
+      ];
       const next = this._surfaceTransitionSchedule === "resident"
         ? this._runSurfaceFrame(events)
         : null;
@@ -3782,8 +3807,7 @@ export class FeSurfaceElement extends HTMLElement {
         if (queue?.onSubmittedWorkDone) await awaitSharedGpuQueueIdle(this._gpu);
       } finally {
         const complete = this._runSurfaceSchedule(SurfaceEventKind.GpuComplete);
-        this._applySurfaceQueueAction(complete);
-        if (complete?.requestFrame) this._scheduleGestureFrame();
+        this._realizeSurfaceSchedule(complete);
       }
       return;
     }

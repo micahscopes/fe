@@ -346,6 +346,12 @@ pub struct SurfaceTransition {}
 /// frame calls carry raw inputs plus inert external resource slots.
 pub struct LatestPerFrame {}
 
+/// Present every browser animation frame while the surface is visible and the
+/// device is usable. Application input remains an independent typed queue;
+/// the presentation clock itself is also delivered to the surface transition,
+/// allowing animation state to be derived in Fe without a browser-side timer.
+pub struct ContinuousFrames {}
+
 /// Sample the newest raw input record at the next available presentation
 /// frame. Older queued records are discarded by an explicit Fe effect.
 pub struct SampleLatest {}
@@ -587,6 +593,71 @@ impl ResponsiveBacking {
     }
 }
 
+fn frame_schedule(
+    _ state: SurfaceScheduleState,
+    _ event: SurfaceScheduleEvent,
+    _ continuous: bool,
+) -> SurfaceScheduleStep {
+    let mut presenting: bool = state.presenting
+    let mut visible: bool = state.visible
+    let mut device_lost: bool = state.device_lost
+    let mut present: bool = false
+    let mut request_frame: bool = false
+    let mut last_presented_at: f32 = state.last_presented_at
+    let deadline: f32 = state.deadline
+    let mut observed_inputs: u32 = state.observed_inputs
+    let demand = continuous || event.pending_events > 0
+
+    if event.kind.is_application_input() {
+        observed_inputs = observed_inputs + 1
+        request_frame = visible && device_lost == false && presenting == false && demand
+    }
+
+    match event.kind {
+        SurfaceEventKind::AnimationFrame => {
+            if visible && device_lost == false && presenting == false && demand {
+                presenting = true
+                present = true
+                last_presented_at = event.timestamp
+            }
+        }
+        SurfaceEventKind::GpuComplete => {
+            presenting = false
+            request_frame = visible && device_lost == false && demand
+        }
+        SurfaceEventKind::Visible => {
+            visible = true
+            request_frame = device_lost == false && presenting == false && demand
+        }
+        SurfaceEventKind::Hidden => {
+            visible = false
+        }
+        SurfaceEventKind::DeviceLost => {
+            device_lost = true
+            presenting = false
+        }
+        SurfaceEventKind::DeviceRecovered => {
+            device_lost = false
+            request_frame = visible && presenting == false && demand
+        }
+        _ => {}
+    }
+
+    SurfaceScheduleStep {
+        state: SurfaceScheduleState {
+            presenting: presenting,
+            visible: visible,
+            device_lost: device_lost,
+            last_presented_at: last_presented_at,
+            deadline: deadline,
+            observed_inputs: observed_inputs,
+        },
+        present: present,
+        request_frame: request_frame,
+        queue: SurfaceQueueAction::Retain,
+    }
+}
+
 impl LatestPerFrame {
     /// Keep at most one presentation in flight. Browser input remains raw and
     /// queued until an animation-frame fact arrives while the surface is
@@ -596,63 +667,19 @@ impl LatestPerFrame {
         _ state: own SurfaceScheduleState,
         _ event: own SurfaceScheduleEvent,
     ) -> SurfaceScheduleStep {
-        let mut presenting: bool = state.presenting
-        let mut visible: bool = state.visible
-        let mut device_lost: bool = state.device_lost
-        let mut present: bool = false
-        let mut request_frame: bool = false
-        let mut last_presented_at: f32 = state.last_presented_at
-        let deadline: f32 = state.deadline
-        let mut observed_inputs: u32 = state.observed_inputs
+        frame_schedule(state, event, false)
+    }
+}
 
-        if event.kind.is_application_input() {
-            observed_inputs = observed_inputs + 1
-            request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
-        }
-
-        match event.kind {
-            SurfaceEventKind::AnimationFrame => {
-                if visible && device_lost == false && presenting == false && event.pending_events > 0 {
-                    presenting = true
-                    present = true
-                    last_presented_at = event.timestamp
-                }
-            }
-            SurfaceEventKind::GpuComplete => {
-                presenting = false
-                request_frame = visible && device_lost == false && event.pending_events > 0
-            }
-            SurfaceEventKind::Visible => {
-                visible = true
-                request_frame = device_lost == false && presenting == false && event.pending_events > 0
-            }
-            SurfaceEventKind::Hidden => {
-                visible = false
-            }
-            SurfaceEventKind::DeviceLost => {
-                device_lost = true
-                presenting = false
-            }
-            SurfaceEventKind::DeviceRecovered => {
-                device_lost = false
-                request_frame = visible && presenting == false && event.pending_events > 0
-            }
-            _ => {}
-        }
-
-        SurfaceScheduleStep {
-            state: SurfaceScheduleState {
-                presenting: presenting,
-                visible: visible,
-                device_lost: device_lost,
-                last_presented_at: last_presented_at,
-                deadline: deadline,
-                observed_inputs: observed_inputs,
-            },
-            present: present,
-            request_frame: request_frame,
-            queue: SurfaceQueueAction::Retain,
-        }
+impl ContinuousFrames {
+    /// Keep at most one presentation in flight and request its successor only
+    /// after the GPU completes. Visibility and device facts stop and resume the
+    /// chain without moving animation policy into the browser host.
+    pub fn decide(
+        _ state: own SurfaceScheduleState,
+        _ event: own SurfaceScheduleEvent,
+    ) -> SurfaceScheduleStep {
+        frame_schedule(state, event, true)
     }
 }
 

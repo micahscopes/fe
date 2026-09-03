@@ -7866,6 +7866,21 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains("100vh - var(--fe-surface-window-block-margin, 112px)"));
         assert!(runtime.contains("max-width: 100%"));
         assert!(runtime.contains("new ResizeObserver"));
+        assert!(runtime.contains("document.createElement(\"details\")"));
+        assert!(runtime.contains("controlsToggle.textContent = \"parameters\""));
+        assert!(runtime.contains("this._side.setAttribute(\"part\", \"side\")"));
+        assert!(runtime.contains("this._stage.setAttribute(\"part\", \"stage\")"));
+    }
+
+    #[test]
+    fn resident_surface_clock_is_delivered_without_synthetic_input() {
+        let runtime = render_runtime_js();
+        assert!(runtime.contains("this._surfaceFrameRequested = decision.requestFrame"));
+        assert!(
+            runtime
+                .contains("this._surfaceBoundaryEvent(SurfaceEventKind.AnimationFrame, timestamp)")
+        );
+        assert!(!runtime.contains("Fe requested presentation without pending surface input"));
     }
 
     #[test]
