@@ -13,9 +13,9 @@ pub struct RasterConfiguration {}
 /// The physical value projected from Fe into a render bundle.
 #[web_raster_plan]
 pub struct RasterPlan {
-    pub sample_count: u32,
-    pub cull: FaceCull,
-    pub depth: DepthAttachment,
+    sample_count: u32,
+    cull_mode: FaceCull,
+    depth: DepthAttachment,
 }
 
 pub enum FaceCull {
@@ -38,22 +38,21 @@ pub enum DepthCompare {
 }
 
 pub struct DepthPlan {
-    pub format: DepthFormat,
-    pub compare: DepthCompare,
-    pub write_enabled: bool,
-    pub clear: f32,
+    format: DepthFormat,
+    compare: DepthCompare,
+    write_enabled: bool,
+    clear: f32,
 }
 
-pub enum DepthAttachment {
-    Disabled,
-    Enabled(DepthPlan),
-}
+/// Optional depth attachment in the physical plan. Keeping this as the
+/// ordinary Fe `Option` gives every CTFE-projected host plan the same generic
+/// null/value transport instead of teaching the compiler a raster-only enum.
+pub type DepthAttachment = Option<DepthPlan>
 
 impl Copy for FaceCull {}
 impl Copy for DepthFormat {}
 impl Copy for DepthCompare {}
 impl Copy for DepthPlan {}
-impl Copy for DepthAttachment {}
 impl Copy for RasterPlan {}
 
 /// A policy denotes one complete physical raster plan at compile time.
@@ -94,7 +93,7 @@ pub struct NoDepth {}
 
 impl RasterDepthPolicy for NoDepth {
     const fn depth() -> DepthAttachment {
-        DepthAttachment::Disabled
+        Option::None
     }
 }
 
@@ -106,7 +105,7 @@ impl<Format, Compare, Write> RasterDepthPolicy for DepthTest<Format, Compare, Wr
           Write: RasterDepthWrite
 {
     const fn depth() -> DepthAttachment {
-        DepthAttachment::Enabled(DepthPlan {
+        Option::Some(DepthPlan {
             format: Format::format(),
             compare: Compare::compare(),
             write_enabled: Write::enabled(),
@@ -203,7 +202,7 @@ impl<Depth, Samples, Cull> RasterPolicy for RasterState<Depth, Samples, Cull>
     const fn plan() -> RasterPlan {
         RasterPlan {
             sample_count: Samples::sample_count(),
-            cull: Cull::cull(),
+            cull_mode: Cull::cull(),
             depth: Depth::depth(),
         }
     }
