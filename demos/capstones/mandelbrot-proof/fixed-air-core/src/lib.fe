@@ -7847,10 +7847,10 @@ fn sparse_boundary_next_coordinate<F: Radix2Field>(_ control: SparseControlRow<F
     control.range_roles.next_coordinate
 }
 
-struct SparseBoundaryCopyPlan<I: QuadraticPlanInterpreter<F>, F: Radix2Field> {
-    interpreter: I,
-    first: SparseCopyPort<F>,
-    second: SparseCopyPort<F>,
+pub struct SparseBoundaryCopyPlan<I: QuadraticPlanInterpreter<F>, F: Radix2Field> {
+    pub interpreter: I,
+    pub first: SparseCopyPort<F>,
+    pub second: SparseCopyPort<F>,
 }
 impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy for SparseBoundaryCopyPlan<
     I,
@@ -7861,7 +7861,7 @@ impl<I: QuadraticPlanInterpreter<F>, F: Radix2Field> core::marker::Copy for Spar
 /// non-affine multiplication is named once here. Direct port inspection,
 /// witness generation, and quadratic constraint evaluation differ only in
 /// the interpreter supplied at this boundary.
-fn sparse_boundary_copy_plan<I: QuadraticPlanInterpreter<F>, F: Radix2Field, const L: usize>(
+pub fn sparse_boundary_copy_plan<I: QuadraticPlanInterpreter<F>, F: Radix2Field, const L: usize>(
     _ control: SparseControlRow<F>,
     _ row: SparseTaskRow<F>,
     _ interpreter: I,

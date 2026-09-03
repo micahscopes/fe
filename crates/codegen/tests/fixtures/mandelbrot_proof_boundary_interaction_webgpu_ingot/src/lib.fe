@@ -1,0 +1,80 @@
+//! Focused compile-scale gate for the production boundary interaction bus.
+
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+    sparse_interaction_challenge_values,
+}
+use mandelbrot_proof_fixed_air_webgpu::write_sparse_boundary_interaction_local_lane
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use poseidon_baby_bear_webgpu::digest_squeeze_batch_output_words
+use std::web::view::{Extent, Surface}
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Grid,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+const THREADS: usize = 64
+const TRACE_GROUPS: usize = (PRODUCTION_TRACE_LENGTH + THREADS - 1) / THREADS
+const BASE_TRACE_WORDS: usize = PRODUCTION_TRACE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const INTERACTION_TRACE_WORDS: usize = PRODUCTION_TRACE_LENGTH * SPARSE_INTERACTION_AIR_FIELDS
+const CHALLENGE_OUTPUT_WORDS: usize = digest_squeeze_batch_output_words(
+    sparse_interaction_challenge_values(),
+)
+
+static_assert(PRODUCTION_LIMBS == 4)
+static_assert(PRODUCTION_TRACE_LENGTH == 4096)
+static_assert(BASE_TRACE_WORDS == 1064960)
+static_assert(INTERACTION_TRACE_WORDS == 622592)
+static_assert(CHALLENGE_OUTPUT_WORDS == 40)
+
+struct BoundaryInteractionParams {}
+
+actor ProductionSparseBoundaryInteraction uses (Program<WebGpuBackend>) {
+    base_trace: Shared<u32, BASE_TRACE_WORDS>,
+    challenge_output: Shared<u32, CHALLENGE_OUTPUT_WORDS>,
+    interaction: Shared<u32, INTERACTION_TRACE_WORDS>,
+    validity: Shared<u32, PRODUCTION_TRACE_LENGTH>,
+
+    const fn view() -> Surface<BoundaryInteractionParams> {
+        Surface {
+            extent: Extent::square(64),
+            params: BoundaryInteractionParams {},
+        }
+    }
+
+    fn write_boundary_locals(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        write_sparse_boundary_interaction_local_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            {PRODUCTION_TRACE_LENGTH * 2},
+            BASE_TRACE_WORDS,
+            CHALLENGE_OUTPUT_WORDS,
+            INTERACTION_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.base_trace,
+            self.challenge_output,
+            self.interaction,
+            self.validity,
+            invocation,
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let color: u32 = if self.validity.load(index: 0) == 1 {
+            4278255360
+        } else {
+            4294901760
+        }
+        color.downcast_truncate()
+    }
+}

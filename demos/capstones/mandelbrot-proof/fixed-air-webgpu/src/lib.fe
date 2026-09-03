@@ -59,11 +59,11 @@ use mandelbrot_proof_fixed_air_core::{
     SparseTaskRow,
     SparseTransitionTask,
     empty_sparse_row,
-    evaluate_sparse_boundary_interaction_row,
     evaluate_sparse_product_interaction_row,
     interpret_sparse_linear_plan,
     sparse_arithmetic_link_plan_witness,
     sparse_arithmetic_plan_witness,
+    sparse_boundary_copy_plan,
     sparse_boundary_row,
     sparse_boundary_plan_witness,
     sparse_boundary_task_count,
@@ -86,12 +86,12 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_transition_task_at,
     sparse_transition_task_count,
     sparse_transition_trace_length,
-    write_sparse_boundary_interaction_row,
     write_sparse_copy_interaction_inverses,
     write_sparse_copy_interaction_batch_denominators,
     write_sparse_product_interaction_row,
     sparse_control_row_at,
     SPARSE_LINEAR_PORT_MULTIPLICATIONS,
+    SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
     SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
     SPARSE_ROUND_PORT_MULTIPLICATIONS,
     zero_sparse_arithmetic_plan_witness,
@@ -2081,6 +2081,10 @@ where
     validity.store(index: row, value: if valid { 1 } else { 0 })
 }
 
+/// Reinterpret the committed base-field boundary plan directly from trace
+/// storage, then lift only its two ports into the extension-field interaction
+/// bus. The authored plan executes once and no private plan or residual array
+/// exists in this kernel.
 pub fn write_sparse_boundary_interaction_local_lane<
     const L: usize,
     const TRACE: usize,
@@ -2121,31 +2125,51 @@ where
     let batch = load_sparse_lde_interaction_challenge_batch<L, TRACE, LDE, CHALLENGE_OUTPUT_WORDS>(
         challenge_output,
     )
+    let decoded_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
     let decoded = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
-    let control = sparse_control_row_at<BabyBearExt4, L>(row)
-    let row_value = sparse_task_row_extension(decoded.value)
+    let plan_reader = ColumnMajorWordReader<TRACE, BASE_TRACE_WORDS>::new(
+        base_trace,
+        row,
+        BOUNDARY_PLAN_START.downcast_truncate(),
+        BOUNDARY_PLAN_WORDS.downcast_truncate(),
+    )
+    let planned = sparse_boundary_copy_plan<
+        QuadraticWordConstraintInterpreter<
+            ColumnMajorWordReader<TRACE, BASE_TRACE_WORDS>,
+            SPARSE_BOUNDARY_PORT_MULTIPLICATIONS,
+        >,
+        BabyBear,
+        L,
+    >(
+        decoded_control.value,
+        decoded.value,
+        QuadraticWordConstraintInterpreter::new(plan_reader),
+    )
+    let checked = planned.interpreter.finish()
+    let ports: [SparseCopyPort<BabyBearExt4>; 2] = [
+        sparse_copy_port_extension(planned.first),
+        sparse_copy_port_extension(planned.second),
+    ]
+    let mut inverses = [BabyBearExt4::zero(); 2]
+    write_sparse_copy_interaction_inverses<BabyBearExt4, 2>(
+        batch.value.boundary,
+        ref ports,
+        mut inverses,
+    )
     let mut value = zero_sparse_interaction_trace_row().boundary
-    write_sparse_boundary_interaction_row<BabyBearExt4, L>(
-        batch.value.boundary,
-        control,
-        row_value,
-        BabyBearExt4::zero(),
-        mut value,
-    )
-    let evaluated = evaluate_sparse_boundary_interaction_row<BabyBearExt4, L>(
-        BabyBearExt4::one(),
-        batch.value.boundary,
-        control,
-        row_value,
-        sparse_boundary_plan_witness<BabyBearExt4, L>(control, row_value),
-        value,
-    )
-    value.accumulator = evaluated.delta
+    value.accumulator = sparse_copy_interaction_delta<BabyBearExt4, 2>(ports, inverses)
+    value.inverses = inverses
     let valid = validity.load(index: row) == 1
         && batch.valid
+        && decoded_control.valid
         && decoded.valid
-        && evaluated.valid
-        && evaluated.folded.is_zero()
+        && checked.valid
+        && checked.reader.finish()
+        && sparse_copy_interaction_witness_valid<BabyBearExt4, 2>(
+            batch.value.boundary,
+            ports,
+            inverses,
+        )
         && encode_interaction_bus<
             SparseBoundaryInteractionRow<BabyBearExt4>,
             TRACE,

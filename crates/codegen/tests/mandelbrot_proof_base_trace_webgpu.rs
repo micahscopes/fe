@@ -196,6 +196,63 @@ fn production_sparse_linear_interaction_fits_the_private_heap() {
     );
 }
 
+#[test]
+fn production_sparse_boundary_interaction_streams_the_committed_plan() {
+    let dir = repo_root()
+        .join("crates/codegen/tests/fixtures/mandelbrot_proof_boundary_interaction_webgpu_ingot");
+    let mut db = DriverDataBase::default();
+    let url = Url::from_directory_path(&dir)
+        .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "focused boundary interaction fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("focused boundary interaction fixture should resolve to one ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "focused boundary interaction source diagnostics:\n{diagnostics}",
+    );
+    let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)
+        .expect("the actor should derive its typed WebGPU entry");
+    assert_eq!(mode, WebBundleMode::Render);
+    let bundle = fe_codegen::WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some("mandelbrot_sparse_boundary_interaction".into())),
+    )
+    .expect("the streaming boundary interaction should fit the private heap");
+
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(bundle.manifest.resources.len(), 4);
+    let write = &bundle.manifest.passes[0];
+    assert_eq!(write.source_entry, "write_boundary_locals");
+    assert_eq!(write.layout.workgroup_size, [THREADS, 1, 1]);
+    assert_eq!(write.dispatch, Some([TRACE_ROWS / THREADS, 1, 1]));
+    assert_eq!(write.repeat, 1);
+    assert_eq!(bundle.manifest.passes[1].source_entry, "paint");
+
+    let shader = &bundle.pass_wgsl[0].source;
+    eprintln!("streaming boundary-interaction WGSL: {} bytes", shader.len());
+    let module = naga::front::wgsl::parse_str(shader)
+        .unwrap_or_else(|error| panic!("boundary-interaction WGSL parse failed: {error:?}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("boundary-interaction WGSL validation failed: {error:?}"));
+    assert!(
+        shader.len() < 250_000,
+        "streaming boundary-interaction shader is unexpectedly large: {} bytes",
+        shader.len(),
+    );
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
