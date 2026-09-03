@@ -26,6 +26,7 @@ use core::default::Default
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
+    SparseInteractionAccumulators,
     SparseInteractionChallenges,
     SparseInteractionTraceRow,
     sparse_base_air_control_at,
@@ -101,7 +102,8 @@ use poseidon_baby_bear_webgpu::{
     digest_squeeze_batch_output_valid_start,
     digest_squeeze_batch_output_words,
 }
-use precision::baby_bear::{BabyBear, BabyBearExt4}
+use parallel_scan_webgpu::{StageGrid, batched_additive_scan_value}
+use precision::baby_bear::{BabyBear, BabyBearExt4, BABY_BEAR_MODULUS}
 use precision::fixed::Fixed
 use quadratic_plan::{
     QuadraticPlanWitness,
@@ -1624,6 +1626,182 @@ const fn product_interaction_regions() -> ProductInteractionRegions {
 
 static_assert(<ProductInteractionRegions as RegionSchema>::WORDS as usize
     == PRODUCT_INTERACTION_WORDS)
+
+struct RoundInteractionRegions {
+    accumulator: Region<RoundInteractionRegions, BabyBearExt4>,
+    inverses: Region<RoundInteractionRegions, [BabyBearExt4; 5]>,
+}
+impl core::marker::Copy for RoundInteractionRegions {}
+derive RegionSchema for RoundInteractionRegions using RegionSchemaProvider
+
+struct LinearInteractionRegions {
+    accumulator: Region<LinearInteractionRegions, BabyBearExt4>,
+    inverses: Region<LinearInteractionRegions, [BabyBearExt4; 8]>,
+}
+impl core::marker::Copy for LinearInteractionRegions {}
+derive RegionSchema for LinearInteractionRegions using RegionSchemaProvider
+
+struct BoundaryInteractionRegions {
+    accumulator: Region<BoundaryInteractionRegions, BabyBearExt4>,
+    inverses: Region<BoundaryInteractionRegions, [BabyBearExt4; 2]>,
+}
+impl core::marker::Copy for BoundaryInteractionRegions {}
+derive RegionSchema for BoundaryInteractionRegions using RegionSchemaProvider
+
+const fn round_interaction_regions() -> RoundInteractionRegions {
+    <RoundInteractionRegions as RegionSchema>::regions()
+}
+
+const fn linear_interaction_regions() -> LinearInteractionRegions {
+    <LinearInteractionRegions as RegionSchema>::regions()
+}
+
+const fn boundary_interaction_regions() -> BoundaryInteractionRegions {
+    <BoundaryInteractionRegions as RegionSchema>::regions()
+}
+
+pub const SPARSE_INTERACTION_ACCUMULATOR_FIELDS: usize = <SparseInteractionAccumulators as
+    CanonicalWords>::WORDS as usize
+const EXTENSION_FIELDS: usize = <BabyBearExt4 as CanonicalWords>::WORDS as usize
+static_assert(SPARSE_INTERACTION_ACCUMULATOR_FIELDS == 4 * EXTENSION_FIELDS)
+
+fn sparse_interaction_accumulator_column(_ lane: u32) -> u32 {
+    let field: u32 = EXTENSION_FIELDS.downcast_truncate()
+    let bus = lane / field
+    let word = lane % field
+    let product_start: u32 = PRODUCT_INTERACTION_START.downcast_truncate()
+    let round_start: u32 = ROUND_INTERACTION_START.downcast_truncate()
+    let linear_start: u32 = LINEAR_INTERACTION_START.downcast_truncate()
+    let boundary_start: u32 = BOUNDARY_INTERACTION_START.downcast_truncate()
+    let start: u32 = match bus {
+        0 => product_start
+            + region_bounds(product_interaction_regions().accumulator).start,
+        1 => round_start
+            + region_bounds(round_interaction_regions().accumulator).start,
+        2 => linear_start
+            + region_bounds(linear_interaction_regions().accumulator).start,
+        3 => boundary_start
+            + region_bounds(boundary_interaction_regions().accumulator).start,
+        _ => SPARSE_INTERACTION_AIR_FIELDS.downcast_truncate(),
+    }
+    start + word
+}
+
+/// Gather the four quartic row deltas into a compact scan matrix.
+///
+/// The source columns are located from the nominal interaction records. The
+/// compact scan placement is column-major and contains no copied schema or
+/// browser-authored offset table.
+pub fn prepare_sparse_interaction_accumulator_scan_lane<
+    const TRACE: usize,
+    const INTERACTION_WORDS: usize,
+    const SCAN_WORDS: usize,
+    const PROGRESS_WORDS: usize,
+>(
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ scan: StorageBuffer<u32, SCAN_WORDS>,
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS },
+    { SCAN_WORDS >= TRACE * SPARSE_INTERACTION_ACCUMULATOR_FIELDS },
+    { PROGRESS_WORDS >= TRACE },
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() { return }
+    let rows: u32 = TRACE.downcast_truncate()
+    let mut lane: u32 = 0
+    while lane < SPARSE_INTERACTION_ACCUMULATOR_FIELDS.downcast_truncate() {
+        let column = sparse_interaction_accumulator_column(lane)
+        scan.store(
+            index: lane * rows + row,
+            value: interaction.load(index: column * rows + row),
+        )
+        lane = lane + 1
+    }
+    progress.store(index: row, value: 0)
+}
+
+pub struct SparseInteractionAccumulatorScanFinish {
+    pub active: bool,
+    pub valid: bool,
+    pub terminal: bool,
+    pub closed: bool,
+}
+impl core::marker::Copy for SparseInteractionAccumulatorScanFinish {}
+
+/// Replace row-local deltas with the exclusive accumulators required by the
+/// AIR, and expose closure of all four extension-field buses at the terminal
+/// row. The inclusive scan retains the total, while subtracting the original
+/// row delta produces the exact accumulator before that row.
+pub fn finish_sparse_interaction_accumulator_scan_lane<
+    const TRACE: usize,
+    const INTERACTION_WORDS: usize,
+    const PRIMARY_WORDS: usize,
+    const SECONDARY_WORDS: usize,
+    const PROGRESS_WORDS: usize,
+    Plan: StageGrid,
+>(
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ primary: StorageBuffer<u32, PRIMARY_WORDS>,
+    _ secondary: StorageBuffer<u32, SECONDARY_WORDS>,
+    _ progress: StorageBuffer<u32, PROGRESS_WORDS>,
+    _ invocation: ComputeInvocation,
+) -> SparseInteractionAccumulatorScanFinish
+where
+    TRACE > 1,
+    { (TRACE & (TRACE - 1)) == 0 },
+    { INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS },
+    { PRIMARY_WORDS >= SPARSE_INTERACTION_ACCUMULATOR_FIELDS * TRACE },
+    { SECONDARY_WORDS >= SPARSE_INTERACTION_ACCUMULATOR_FIELDS * TRACE },
+    { PROGRESS_WORDS >= TRACE },
+    { Plan::POINTS == TRACE },
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() {
+        return SparseInteractionAccumulatorScanFinish {
+            active: false,
+            valid: true,
+            terminal: false,
+            closed: true,
+        }
+    }
+    let rows: u32 = TRACE.downcast_truncate()
+    let terminal = row + 1 == rows
+    let mut lane: u32 = 0
+    let mut valid = true
+    let mut closed = true
+    while lane < SPARSE_INTERACTION_ACCUMULATOR_FIELDS.downcast_truncate() {
+        let inclusive = batched_additive_scan_value<
+            SPARSE_INTERACTION_ACCUMULATOR_FIELDS,
+            TRACE,
+            PRIMARY_WORDS,
+            SECONDARY_WORDS,
+            PROGRESS_WORDS,
+            BabyBear,
+            Plan,
+        >(primary, secondary, progress, lane, row)
+        let column = sparse_interaction_accumulator_column(lane)
+        let delta = interaction.load(index: column * rows + row)
+        valid = valid
+            && inclusive.valid
+            && delta < BABY_BEAR_MODULUS
+        let exclusive = (BabyBear::from_u32(inclusive.value) -
+            BabyBear::from_u32(delta)).to_u32()
+        interaction.store(index: column * rows + row, value: exclusive)
+        if terminal { closed = closed && inclusive.value == 0 }
+        lane = lane + 1
+    }
+    SparseInteractionAccumulatorScanFinish {
+        active: true,
+        valid: valid,
+        terminal: terminal,
+        closed: closed,
+    }
+}
 
 fn encode_interaction_bus<T: CanonicalWords, const TRACE: usize, const INTERACTION_WORDS: usize>(
     _ value: ref T,

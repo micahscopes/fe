@@ -21,8 +21,11 @@ use mandelbrot_proof_fixed_air_webgpu::{
     SparseProductWitnessFamily,
     SparseRadixWitnessFamily,
     SparseRoundWitnessFamily,
+    SPARSE_INTERACTION_ACCUMULATOR_FIELDS,
+    finish_sparse_interaction_accumulator_scan_lane,
     finish_transition_witness_workspace,
     load_transition_phase_receipt,
+    prepare_sparse_interaction_accumulator_scan_lane,
     store_transition_phase_receipt,
     transition_phase_workspace_words,
     write_sparse_base_air_partition_lane,
@@ -60,6 +63,7 @@ use parallel_ntt_webgpu::{
     prepare_validated_batched_coset_extension,
     validate_batched_stage_grid,
 }
+use parallel_scan_webgpu::advance_batched_additive_scan_row
 use parallel_structure::FactorTree
 use poseidon_baby_bear_webgpu::{
     DIGEST_SQUEEZE_STEPS,
@@ -154,8 +158,13 @@ const CHALLENGE_OUTPUT_WORDS: usize = digest_squeeze_batch_output_words(
 )
 type BaseLdeInputPlan = RBin<Pair, 12>
 type BaseLdeOutputPlan = RBin<Pair, 13>
+type InteractionAccumulatorScanPlan = RBin<Pair, 12>
 const LDE_INPUT_STAGES: usize = <BaseLdeInputPlan as FactorTree>::FACTORS
 const LDE_OUTPUT_STAGES: usize = <BaseLdeOutputPlan as FactorTree>::FACTORS
+const INTERACTION_ACCUMULATOR_SCAN_STAGES: usize = <InteractionAccumulatorScanPlan as
+    FactorTree>::FACTORS
+const INTERACTION_ACCUMULATOR_SCAN_WORDS: usize = PRODUCTION_TRACE_LENGTH
+    * SPARSE_INTERACTION_ACCUMULATOR_FIELDS
 const TRANSITION_WORKSPACE_WORDS: usize = transition_phase_workspace_words<PRODUCTION_LIMBS>()
 
 static_assert(PRODUCTION_LIMBS == 4)
@@ -179,6 +188,9 @@ static_assert(LDE_VALIDATION_GROUPS == 5)
 static_assert(INTERACTION_INPUT_GROUPS == 4864)
 static_assert(INTERACTION_OUTPUT_GROUPS == 9728)
 static_assert(INTERACTION_VALIDATION_GROUPS == 3)
+static_assert(SPARSE_INTERACTION_ACCUMULATOR_FIELDS == 16)
+static_assert(INTERACTION_ACCUMULATOR_SCAN_STAGES == 12)
+static_assert(INTERACTION_ACCUMULATOR_SCAN_WORDS == 65536)
 static_assert(BASE_TREE_NODES == 16383)
 static_assert(BASE_TREE_WORDS == 131064)
 static_assert(BASE_TREE_PARENT_TASKS == 4096)
@@ -957,6 +969,91 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             PRODUCTION_LIMBS,
             TRANSITION_WORKSPACE_WORDS,
         >(self.transition_workspace, valid)
+    }
+
+    /// Interpret the row-local copy-bus deltas through one factor-derived
+    /// additive scan. `base_trace` and `lde_inverse_values` are retired phase
+    /// storage here; the interaction table remains the only semantic output.
+    fn prepare_interaction_accumulator_scan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        prepare_sparse_interaction_accumulator_scan_lane<
+            PRODUCTION_TRACE_LENGTH,
+            INTERACTION_LDE_WORDS,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.lde_progress,
+            self.base_trace,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn advance_interaction_accumulator_scan(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    TRACE_GROUPS,
+                    1,
+                    1,
+                    INTERACTION_ACCUMULATOR_SCAN_STAGES,
+                >,
+            >
+        )
+    {
+        advance_batched_additive_scan_row<
+            SPARSE_INTERACTION_ACCUMULATOR_FIELDS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+            BabyBear,
+            InteractionAccumulatorScanPlan,
+        >(
+            self.base_trace,
+            self.lde_inverse_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn finish_interaction_accumulator_scan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        let finish = finish_sparse_interaction_accumulator_scan_lane<
+            PRODUCTION_TRACE_LENGTH,
+            INTERACTION_LDE_WORDS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+            InteractionAccumulatorScanPlan,
+        >(
+            self.lde_progress,
+            self.base_trace,
+            self.lde_inverse_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+        if finish.active {
+            self.validity.store(
+                index: invocation.global.x,
+                value: if finish.valid { 1 } else { 0 },
+            )
+            if finish.terminal {
+                let valid = load_transition_phase_receipt<
+                    PRODUCTION_LIMBS,
+                    TRANSITION_WORKSPACE_WORDS,
+                >(self.transition_workspace)
+                    && finish.valid
+                    && finish.closed
+                store_transition_phase_receipt<
+                    PRODUCTION_LIMBS,
+                    TRANSITION_WORKSPACE_WORDS,
+                >(self.transition_workspace, valid)
+            }
+        }
     }
 
     /// The base trace is retired once every interaction row is materialized.

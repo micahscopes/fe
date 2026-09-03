@@ -1795,9 +1795,18 @@ All four are focused ingots and may remain so permanently.
   node. The production-sized graph now executes numerically in Chrome through
   its generated challenge carrier and interaction trace. All 1,064,960
   committed base-trace words match the independent bigint model, all 4,096
-  final interaction-row validity words accept, and the trailing Fe phase
-  receipt accepts. Interaction-trace LDE and its ordered commitment remain
-  open.
+  row-local inverse-validity words accept, and the trailing Fe phase receipt
+  accepts. A later all-word Plonky3 audit established that this was not yet a
+  valid interaction trace: each local kernel wrote its row delta into the
+  nominal accumulator column, but the AIR requires the exclusive running sum.
+  The old 48-pass Chrome receipt matches the independently derived base LDE,
+  then fails immediately at interaction-LDE column 0, row 0
+  (`153447882` versus `1210667320`). A portable factor-derived additive scan
+  is active work: it gathers all four quartic bus deltas, performs twelve
+  queue-synchronized stages over 4,096 rows, rewrites the sixteen accumulator
+  limbs to exclusive prefixes, and requires terminal closure. Its positive
+  physical Chrome receipt, interaction-trace commitment, and complete proof
+  continuation remain open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
   Fiat-Shamir sampling, and canonical encoding exist. The four-query regression
@@ -1843,9 +1852,16 @@ All four are focused ingots and may remain so permanently.
   stays batched within the stage. This eliminates the device loss caused by
   one protocol-sized command buffer without a demo-specific host branch. A
   typed browser readback matches all 1,064,960 base-trace words against the
-  independent bigint oracle and confirms every interaction-row and final phase
-  validity word. Interactive point and disk selection, complete proof receipt
-  encoding, Wasm verification, and revm-Wasm verification remain.
+  independent bigint oracle and confirms every row-local interaction inverse
+  and final phase-validity word. That gate proved browser execution and the
+  base codeword, not the missing exclusive interaction accumulators. The
+  independent Plonky3 production-LDE gate now rejects the old receipt at the
+  first interaction column while accepting its complete base LDE. A new
+  51-pass candidate adds the Fe-authored accumulator scan without another
+  actor resource; full lowering, physical Chrome execution, and all-word
+  Plonky3 equality remain its acceptance gates. Interactive point and disk
+  selection, complete proof receipt encoding, Wasm verification, and
+  revm-Wasm verification remain.
 - **G-BROWSER shader materialization boundary, active.** The detailed boundary
   audit is recorded at
   `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.

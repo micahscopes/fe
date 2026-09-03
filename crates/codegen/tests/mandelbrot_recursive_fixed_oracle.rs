@@ -15,7 +15,9 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use num_bigint::BigUint;
 use p3_baby_bear::{BabyBear as P3BabyBear, default_babybear_poseidon2_16};
+use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::Permutation;
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -36,6 +38,7 @@ const BABY_BEAR_MODULUS: u32 = 2_013_265_921;
 const PRODUCTION_TRACE_ROWS: usize = 4_096;
 const SPARSE_BASE_FIELDS: usize = 260;
 const SPARSE_BASE_BROWSER_RECEIPT_DIR: &str = "MB2_SPARSE_BASE_BROWSER_RECEIPT_DIR";
+const SPARSE_LDE_BROWSER_RECEIPT_DIR: &str = "MB2_SPARSE_LDE_BROWSER_RECEIPT_DIR";
 
 fn expected_fixed_air_constraint_count(limbs: u32) -> u32 {
     let radix_range = 40 * limbs + 2;
@@ -2695,6 +2698,138 @@ fn expected_sparse_production_base_trace_words(
             columns[column * PRODUCTION_TRACE_ROWS + row] = word;
         }
     }
+    columns
+}
+
+fn plonky3_coset_lde_column_major(evaluations: &[u32], rows: usize, columns: usize) -> Vec<u32> {
+    assert_eq!(evaluations.len(), rows * columns);
+    assert!(rows.is_power_of_two());
+    let row_major = (0..rows)
+        .flat_map(|row| {
+            (0..columns).map(move |column| P3BabyBear::from_u32(evaluations[column * rows + row]))
+        })
+        .collect::<Vec<_>>();
+    let extended = Radix2Dit::<P3BabyBear>::default().coset_lde_batch(
+        RowMajorMatrix::new(row_major, columns),
+        1,
+        P3BabyBear::from_u32(7),
+    );
+    let extended_rows = rows * 2;
+    assert_eq!(extended.width, columns);
+    assert_eq!(extended.values.len(), extended_rows * columns);
+    let mut column_major = vec![0; extended_rows * columns];
+    for row in 0..extended_rows {
+        for column in 0..columns {
+            column_major[column * extended_rows + row] =
+                extended.values[row * columns + column].as_canonical_u32();
+        }
+    }
+    column_major
+}
+
+fn expected_sparse_production_base_lde_root(lde: &[u32]) -> [u32; 8] {
+    let permutation = default_babybear_poseidon2_16();
+    let lde_rows = PRODUCTION_TRACE_ROWS * 2;
+    assert_eq!(lde.len(), lde_rows * SPARSE_BASE_FIELDS);
+    let mut leaves = Vec::with_capacity(lde_rows);
+    for row in 0..lde_rows {
+        let mut fields = Vec::with_capacity(4 + SPARSE_BASE_FIELDS);
+        fields.extend([
+            LIMBS as u32,
+            PRODUCTION_TRACE_ROWS as u32,
+            lde_rows as u32,
+            row as u32,
+        ]);
+        for column in 0..SPARSE_BASE_FIELDS {
+            fields.push(lde[column * lde_rows + row]);
+        }
+        leaves.push(reference_poseidon_digest_with(
+            &permutation,
+            b"LD01",
+            &fields,
+        ));
+    }
+    reference_merkle_root_with(&permutation, leaves)
+}
+
+fn expected_sparse_production_interaction_trace_words(
+    point: &ComplexFx,
+    current: &ComplexFx,
+    base_lde_root: [u32; 8],
+) -> Vec<u32> {
+    const INTERACTION_FIELDS: usize = 152;
+    let words = expected_sparse_lde_interaction_challenges(base_lde_root);
+    let challenges = [
+        Ext4::from_words(&words[1..5]),
+        Ext4::from_words(&words[5..9]),
+        Ext4::from_words(&words[9..13]),
+        Ext4::from_words(&words[13..17]),
+        Ext4::from_words(&words[17..21]),
+        Ext4::from_words(&words[21..25]),
+        Ext4::from_words(&words[25..29]),
+        Ext4::from_words(&words[29..33]),
+    ];
+    let controls = expected_sparse_control_rows();
+    let mut tasks = expected_sparse_transition_tasks(LIMBS as u32);
+    tasks.resize(PRODUCTION_TRACE_ROWS, [14, 0, 0, 0, 0]);
+    let rows = expected_sparse_rows(point, current);
+    let mut accumulators = [Ext4::ZERO; 4];
+    let mut columns = vec![0; PRODUCTION_TRACE_ROWS * INTERACTION_FIELDS];
+    for row_index in 0..PRODUCTION_TRACE_ROWS {
+        let task = tasks[row_index];
+        let row = rows[row_index];
+        let (product_inverses, product_delta) = expected_ext4_interaction_row(
+            expected_product_copy_ports(task, row),
+            challenges[0],
+            challenges[1],
+        );
+        let (round_inverses, round_delta) = expected_ext4_interaction_row(
+            expected_round_copy_ports(task, row),
+            challenges[2],
+            challenges[3],
+        );
+        let (linear_inverses, linear_delta) = expected_ext4_interaction_row(
+            expected_linear_copy_ports(task, row),
+            challenges[4],
+            challenges[5],
+        );
+        let (boundary_inverses, boundary_delta) = expected_ext4_interaction_row(
+            expected_boundary_copy_ports(task, row),
+            challenges[6],
+            challenges[7],
+        );
+
+        let mut fields = Vec::with_capacity(INTERACTION_FIELDS);
+        extend_ext4_words(&mut fields, accumulators[0]);
+        for inverse in product_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        for node in expected_sparse_product_address_plan(controls[row_index]) {
+            extend_ext4_words(&mut fields, Ext4::from_base(node));
+        }
+        extend_ext4_words(&mut fields, accumulators[1]);
+        for inverse in round_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, accumulators[2]);
+        for inverse in linear_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        extend_ext4_words(&mut fields, accumulators[3]);
+        for inverse in boundary_inverses {
+            extend_ext4_words(&mut fields, inverse);
+        }
+        assert_eq!(fields.len(), INTERACTION_FIELDS);
+        for (column, word) in fields.into_iter().enumerate() {
+            columns[column * PRODUCTION_TRACE_ROWS + row_index] = word;
+        }
+
+        accumulators[0] = accumulators[0].add(product_delta);
+        accumulators[1] = accumulators[1].add(round_delta);
+        accumulators[2] = accumulators[2].add(linear_delta);
+        accumulators[3] = accumulators[3].add(boundary_delta);
+    }
+    assert_eq!(accumulators, [Ext4::ZERO; 4]);
     columns
 }
 
@@ -6319,6 +6454,89 @@ fn production_sparse_proof_browser_words_match_independent_model() {
             "production sparse base trace differs at column {column}, row {row}: browser={actual}, independent={expected}, control={:?}, witness={:?}",
             controls[row],
             rows[row],
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires an explicit real-Chrome production LDE receipt"]
+fn production_sparse_lde_browser_codewords_match_independent_plonky3() {
+    const INTERACTION_FIELDS: usize = 152;
+    const LDE_ROWS: usize = PRODUCTION_TRACE_ROWS * 2;
+
+    let receipt_dir = std::env::var_os(SPARSE_LDE_BROWSER_RECEIPT_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "set {SPARSE_LDE_BROWSER_RECEIPT_DIR} to the directory emitted by the generic browser resource snapshot"
+            )
+        });
+    let transition = read_u32le_file(&receipt_dir.join("transition_workspace.u32le"));
+    let actual_base_lde = read_u32le_file(&receipt_dir.join("lde_values.u32le"));
+    let actual_interaction_lde = read_u32le_file(&receipt_dir.join("lde_progress.u32le"));
+
+    assert_eq!(
+        transition.len(),
+        218,
+        "production transition workspace words"
+    );
+    assert_eq!(
+        transition[217], 1,
+        "all completed production LDE phases must be valid",
+    );
+    assert_eq!(
+        actual_base_lde.len(),
+        LDE_ROWS * SPARSE_BASE_FIELDS,
+        "production base LDE word count",
+    );
+    assert_eq!(
+        actual_interaction_lde.len(),
+        LDE_ROWS * INTERACTION_FIELDS,
+        "production interaction LDE word count",
+    );
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let base_trace = expected_sparse_production_base_trace_words(&point, &current);
+    let expected_base_lde =
+        plonky3_coset_lde_column_major(&base_trace, PRODUCTION_TRACE_ROWS, SPARSE_BASE_FIELDS);
+    if let Some((index, (actual, expected))) = actual_base_lde
+        .iter()
+        .zip(&expected_base_lde)
+        .enumerate()
+        .find(|(_, (actual, expected))| actual != expected)
+    {
+        let row = index % LDE_ROWS;
+        let column = index / LDE_ROWS;
+        panic!(
+            "production base LDE differs at column {column}, row {row}: browser={actual}, Plonky3={expected}"
+        );
+    }
+
+    let base_lde_root = expected_sparse_production_base_lde_root(&expected_base_lde);
+    let interaction_trace =
+        expected_sparse_production_interaction_trace_words(&point, &current, base_lde_root);
+    let expected_interaction_lde = plonky3_coset_lde_column_major(
+        &interaction_trace,
+        PRODUCTION_TRACE_ROWS,
+        INTERACTION_FIELDS,
+    );
+    if let Some((index, (actual, expected))) = actual_interaction_lde
+        .iter()
+        .zip(&expected_interaction_lde)
+        .enumerate()
+        .find(|(_, (actual, expected))| actual != expected)
+    {
+        let row = index % LDE_ROWS;
+        let column = index / LDE_ROWS;
+        panic!(
+            "production interaction LDE differs at column {column}, row {row}: browser={actual}, Plonky3={expected}"
         );
     }
 }

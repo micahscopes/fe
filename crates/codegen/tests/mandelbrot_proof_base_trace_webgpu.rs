@@ -296,7 +296,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 48);
+    assert_eq!(bundle.manifest.passes.len(), 51);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -463,6 +463,24 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     );
     assert_eq!(bundle.manifest.passes[39].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[39].dispatch, Some([1, 1, 1]));
+    let interaction_scan_names = [
+        "prepare_interaction_accumulator_scan",
+        "advance_interaction_accumulator_scan",
+        "finish_interaction_accumulator_scan",
+    ];
+    assert_eq!(
+        bundle.manifest.passes[40..43]
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        interaction_scan_names,
+    );
+    assert_eq!(bundle.manifest.passes[40].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[40].repeat, 1);
+    assert_eq!(bundle.manifest.passes[41].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[41].repeat, 12);
+    assert_eq!(bundle.manifest.passes[42].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[42].repeat, 1);
     let interaction_lde_names = [
         "prepare_interaction_lde_inverse",
         "advance_interaction_lde_inverse",
@@ -473,23 +491,23 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         "finish_interaction_lde",
     ];
     assert_eq!(
-        bundle.manifest.passes[40..47]
+        bundle.manifest.passes[43..50]
             .iter()
             .map(|pass| pass.source_entry.as_str())
             .collect::<Vec<_>>(),
         interaction_lde_names,
     );
-    assert_eq!(bundle.manifest.passes[40].dispatch, Some([4_864, 1, 1]));
-    assert_eq!(bundle.manifest.passes[41].dispatch, Some([4_864, 1, 1]));
-    assert_eq!(bundle.manifest.passes[41].repeat, 12);
-    assert_eq!(bundle.manifest.passes[42].dispatch, Some([3, 1, 1]));
-    assert_eq!(bundle.manifest.passes[43].dispatch, Some([9_728, 1, 1]));
-    assert_eq!(bundle.manifest.passes[44].dispatch, Some([9_728, 1, 1]));
-    assert_eq!(bundle.manifest.passes[44].repeat, 13);
+    assert_eq!(bundle.manifest.passes[43].dispatch, Some([4_864, 1, 1]));
+    assert_eq!(bundle.manifest.passes[44].dispatch, Some([4_864, 1, 1]));
+    assert_eq!(bundle.manifest.passes[44].repeat, 12);
     assert_eq!(bundle.manifest.passes[45].dispatch, Some([3, 1, 1]));
-    assert_eq!(bundle.manifest.passes[46].layout.workgroup_size, [1, 1, 1]);
-    assert_eq!(bundle.manifest.passes[46].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[47].source_entry, "paint");
+    assert_eq!(bundle.manifest.passes[46].dispatch, Some([9_728, 1, 1]));
+    assert_eq!(bundle.manifest.passes[47].dispatch, Some([9_728, 1, 1]));
+    assert_eq!(bundle.manifest.passes[47].repeat, 13);
+    assert_eq!(bundle.manifest.passes[48].dispatch, Some([3, 1, 1]));
+    assert_eq!(bundle.manifest.passes[49].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[49].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[50].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle

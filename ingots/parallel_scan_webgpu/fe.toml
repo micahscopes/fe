@@ -1,0 +1,9 @@
+[ingot]
+name = "parallel_scan_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = "../core"
+parallel_ntt = "../parallel_ntt"
+precision = "../../demos/sketches/precision"
+std = "../std"
