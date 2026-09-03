@@ -682,29 +682,50 @@ fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
     run_function_passes_on(module, &functions, &[Pass::CfgCleanup]);
 }
 
-fn spirv_reachable_call_counts(
+fn spirv_root_expansion_counts(
     module: &sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
 ) -> std::collections::HashMap<sonatina_ir::module::FuncRef, usize> {
+    // Count the occurrences produced by rooted expansion, not only the number
+    // of distinct source call instructions. A generated wrapper chain may
+    // contain one call at each layer yet materialize a leaf dozens of times.
+    // Cap propagation just above the largest useful profitability threshold,
+    // which also makes an unexpected recursive call graph terminate.
+    const MAX_EXPANDED_CALL_COUNT: usize = 129;
     let mut counts = std::collections::HashMap::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut pending = roots.to_vec();
-    while let Some(function_ref) = pending.pop() {
-        if !visited.insert(function_ref) {
-            continue;
+    let mut pending = std::collections::VecDeque::new();
+    for &root in roots {
+        let count = counts.entry(root).or_insert(0usize);
+        if *count == 0 {
+            *count = 1;
+            pending.push_back((root, 1usize));
         }
+    }
+    while let Some((function_ref, added_occurrences)) = pending.pop_front() {
         if let Some(callees) = module.func_store.try_view(function_ref, |function| {
-            function
+            let mut callees = std::collections::HashMap::new();
+            for instruction in function
                 .layout
                 .iter_block()
                 .flat_map(|block| function.layout.iter_inst(block))
-                .filter_map(|instruction| function.dfg.call_info(instruction))
-                .map(|call| call.callee())
-                .collect::<Vec<_>>()
+            {
+                if let Some(call) = function.dfg.call_info(instruction) {
+                    *callees.entry(call.callee()).or_insert(0usize) += 1;
+                }
+            }
+            callees
         }) {
-            for callee in callees {
-                *counts.entry(callee).or_default() += 1;
-                pending.push(callee);
+            for (callee, calls_per_body) in callees {
+                let added = added_occurrences
+                    .saturating_mul(calls_per_body)
+                    .min(MAX_EXPANDED_CALL_COUNT);
+                let count = counts.entry(callee).or_insert(0usize);
+                let next = count.saturating_add(added).min(MAX_EXPANDED_CALL_COUNT);
+                let propagated = next - *count;
+                if propagated != 0 {
+                    *count = next;
+                    pending.push_back((callee, propagated));
+                }
             }
         }
     }
@@ -712,7 +733,7 @@ fn spirv_reachable_call_counts(
 }
 
 fn spirv_resource_passthrough_outline_worthy(
-    static_call_count: usize,
+    expanded_call_count: usize,
     instruction_count: usize,
 ) -> bool {
     // A tiny resource-cursor wrapper is normally more useful inlined because
@@ -721,7 +742,7 @@ fn spirv_resource_passthrough_outline_worthy(
     // smaller representation. This is a target cost policy, never a legality
     // exception: resource identity is still independently proved downstream.
     const MIN_AVOIDED_SOURCE_INSTRUCTIONS: usize = 128;
-    instruction_count.saturating_mul(static_call_count.saturating_sub(1))
+    instruction_count.saturating_mul(expanded_call_count.saturating_sub(1))
         >= MIN_AVOIDED_SOURCE_INSTRUCTIONS
 }
 
@@ -859,7 +880,7 @@ fn spirv_helper_candidates(
         .copied()
         .collect::<std::collections::HashSet<_>>();
     let call_counts =
-        spirv_reachable_call_counts(module, &roots.iter().copied().collect::<Vec<_>>());
+        spirv_root_expansion_counts(module, &roots.iter().copied().collect::<Vec<_>>());
     let root_callees = roots
         .iter()
         .flat_map(|&root| {
@@ -899,7 +920,7 @@ fn trace_spirv_helper_classification(
 ) {
     use sonatina_ir::inst::control_flow;
 
-    let call_counts = spirv_reachable_call_counts(module, roots);
+    let call_counts = spirv_root_expansion_counts(module, roots);
     let root_set = roots
         .iter()
         .copied()
@@ -1066,7 +1087,7 @@ fn trace_spirv_helper_classification(
         );
     }
     rejected.sort_unstable_by_key(|(_, instructions, _)| std::cmp::Reverse(*instructions));
-    for (function_ref, instructions, reasons) in rejected.into_iter().take(12) {
+    for (function_ref, instructions, reasons) in rejected {
         let name = module
             .ctx
             .get_sig(function_ref)
