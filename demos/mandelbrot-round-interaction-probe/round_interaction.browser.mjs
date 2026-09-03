@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { constants as fsConstants } from "node:fs";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, open, readFile, readdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,7 +11,70 @@ const browserSiteHost = process.env.FE_BROWSER_HOST ?? "10.0.0.2";
 const browserSitePort = Number.parseInt(process.env.FE_BROWSER_PORT ?? "8000", 10);
 const healthOnly = process.env.FE_BROWSER_HEALTH_ONLY === "1";
 const computeStageOnly = process.env.FE_BROWSER_COMPUTE_STAGE ?? null;
+const tracePath = process.env.FE_BROWSER_TRACE_PATH
+  ? resolve(process.env.FE_BROWSER_TRACE_PATH)
+  : null;
 const harnessStarted = performance.now();
+
+const traceCategories = [
+  "blink.user_timing",
+  "gpu",
+  "disabled-by-default-gpu.debug",
+  "disabled-by-default-gpu.device",
+  "disabled-by-default-gpu.dawn",
+  "disabled-by-default-gpu.service",
+];
+
+function reportPhase(phase, details = {}) {
+  console.log(JSON.stringify({
+    kind: "WebGPU probe phase",
+    phase,
+    elapsedMs: Number((performance.now() - harnessStarted).toFixed(2)),
+    ...details,
+  }));
+}
+
+async function startBrowserTrace(browser) {
+  if (!tracePath) return null;
+  const session = await browser.target().createCDPSession();
+  await session.send("Tracing.start", {
+    transferMode: "ReturnAsStream",
+    traceConfig: {
+      recordMode: "recordUntilFull",
+      includedCategories: traceCategories,
+    },
+  });
+  return session;
+}
+
+async function stopBrowserTrace(session) {
+  if (!session || !tracePath) return null;
+  const completed = new Promise(resolvePromise => {
+    session.once("Tracing.tracingComplete", resolvePromise);
+  });
+  await session.send("Tracing.end");
+  const { stream } = await completed;
+  if (!stream) throw new Error("Chrome trace completed without an IO stream");
+
+  const output = await open(tracePath, "w");
+  let bytes = 0;
+  try {
+    while (true) {
+      const chunk = await session.send("IO.read", { handle: stream });
+      const data = chunk.base64Encoded
+        ? Buffer.from(chunk.data, "base64")
+        : Buffer.from(chunk.data);
+      await output.write(data);
+      bytes += data.byteLength;
+      if (chunk.eof) break;
+    }
+  } finally {
+    await output.close();
+    await session.send("IO.close", { handle: stream }).catch(() => {});
+    await session.detach().catch(() => {});
+  }
+  return { path: tracePath, bytes, categories: traceCategories };
+}
 
 async function exists(path) {
   try {
@@ -149,11 +212,14 @@ const puppeteer = imported.puppeteer ?? imported.default ?? imported;
 const browserErrors = [];
 let browser;
 let page;
+let traceSession;
 try {
+  reportPhase("connect", { remoteBrowserUrl });
   browser = await puppeteer.connect({
     browserURL: remoteBrowserUrl,
     protocolTimeout: 600_000,
   });
+  reportPhase("new-page");
   page = await browser.newPage();
   page.setDefaultTimeout(600_000);
   page.on("console", message => {
@@ -179,8 +245,13 @@ try {
 
   const isolatedProbe = healthOnly || computeStageOnly !== null;
   const pageUrl = `http://${browserSiteHost}:${browserSitePort}/${isolatedProbe ? "health.html" : ""}`;
+  reportPhase("navigate", { pageUrl });
   await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
+  reportPhase("navigated", { pageUrl });
+  traceSession = await startBrowserTrace(browser);
+  if (traceSession) reportPhase("trace-started", { tracePath });
   if (healthOnly) {
+    reportPhase("health-control");
     const health = await page.evaluate(async () => {
       const started = performance.now();
       const adapter = await navigator.gpu?.requestAdapter();
@@ -252,8 +323,10 @@ try {
     assert.deepEqual(health.scopedErrors, []);
     assert.equal(health.loss, null);
     assert.deepEqual(browserErrors, []);
+    reportPhase("health-control-complete", { elapsedMs: health.elapsedMs });
     console.log(JSON.stringify({ ok: true, kind: "WebGPU health", ...health }, null, 2));
   } else if (computeStageOnly !== null) {
+    reportPhase("compute-stage", { stage: computeStageOnly });
     const result = await page.evaluate(async ({ stage, probe }) => {
       const started = performance.now();
       const uncaptured = [];
@@ -399,8 +472,13 @@ try {
     assert.equal(result.compilationMessages.filter(message => message.type === "error").length, 0);
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(browserErrors, []);
+    reportPhase("compute-stage-complete", {
+      stage: computeStageOnly,
+      timingsMs: result.timingsMs,
+    });
     console.log(JSON.stringify(result, null, 2));
   } else {
+  reportPhase("surface-mount");
   await page.waitForFunction(() => {
     const surface = document.querySelector("fe-surface");
     return surface?.state === "ready" || surface?.state === "error";
@@ -559,9 +637,24 @@ try {
     events: evidence,
     exactness: "not asserted by this feasibility probe",
   }, null, 2));
+  reportPhase("surface-complete", {
+    timingsMs: {
+      launchToReady: Number(readyElapsedMs.toFixed(2)),
+      readyToLiveAndIdle: Number(liveElapsedMs.toFixed(2)),
+      readbackAndHash: Number(readback.elapsedMs.toFixed(2)),
+    },
+  });
   }
 } finally {
   if (page) await page.close().catch(() => {});
+  if (traceSession) {
+    try {
+      const trace = await stopBrowserTrace(traceSession);
+      console.log(JSON.stringify({ ok: true, kind: "Chrome trace", ...trace }, null, 2));
+    } catch (error) {
+      console.error(`could not collect Chrome trace: ${error?.stack ?? error}`);
+    }
+  }
   if (browser) browser.disconnect();
   const serverClosed = new Promise(resolvePromise => server.close(resolvePromise));
   server.closeAllConnections?.();

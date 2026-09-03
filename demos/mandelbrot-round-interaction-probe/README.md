@@ -53,6 +53,25 @@ These modes derive their shader, bindings, buffer sizes, entry point, and
 dispatch geometry from the compiler-emitted manifest. They do not duplicate
 proof logic.
 
+For a browser-level GPU trace that survives a GPU subprocess restart, add an
+output path under disk-backed workspace scratch:
+
+```sh
+FE_BROWSER_COMPUTE_STAGE=compile \
+FE_BROWSER_TRACE_PATH=/workspace/scratch/round-interaction-compile-trace.json \
+FE_BROWSER_URL=http://10.0.0.1:9222 \
+FE_BROWSER_HOST=10.0.0.2 \
+FE_BROWSER_PORT=8000 \
+node demos/mandelbrot-round-interaction-probe/round_interaction.browser.mjs \
+  /workspace/scratch/mb2-round-interaction-probe-site
+```
+
+The trace starts after navigation and is streamed directly to disk. It includes
+GPU, command-buffer, and Dawn/WebGPU categories. The harness prints every phase
+before entering it, so navigation, compilation, dispatch, and readback failures
+remain distinct. The trace contains execution diagnostics, not proof data or an
+alternate implementation.
+
 This browser harness contains no proof implementation. It checks the
 compiler-derived pass and resource geometry, waits for queue completion, and
 records hashes and summary counts from test-only readback. Exactness remains a
