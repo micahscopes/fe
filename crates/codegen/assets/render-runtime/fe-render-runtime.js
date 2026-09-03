@@ -1775,6 +1775,7 @@ export class FeSurfaceElement extends HTMLElement {
       }
       let encoder = device.createCommandEncoder();
       let encoded = false;
+      let encoderMode = null;
       let texture = null;
       let rendered = false;
       const submitEncoder = () => {
@@ -1782,9 +1783,15 @@ export class FeSurfaceElement extends HTMLElement {
         device.queue.submit([encoder.finish()]);
         encoder = device.createCommandEncoder();
         encoded = false;
+        encoderMode = null;
       };
       const executeRecord = async (record, cycleIteration = null) => {
         if (record.pass.layout.mode === "compute") {
+          // Queue ordering preserves pass dependencies across submissions.
+          // Keep compute and presentation work in separate command buffers so
+          // browser GPU processes do not need to compile and execute one mixed
+          // protocol-sized encoder before a canvas texture can be captured.
+          if (encoderMode === "render") submitEncoder();
           let dispatch = record.pass.dispatch;
           if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
           let repeat = record.pass.repeat ?? 1;
@@ -1837,6 +1844,7 @@ export class FeSurfaceElement extends HTMLElement {
             }
             compute.end();
             encoded = true;
+            encoderMode = "compute";
             remaining -= batch;
             if (cooperation !== undefined && cooperation !== null) {
               submitEncoder();
@@ -1844,6 +1852,7 @@ export class FeSurfaceElement extends HTMLElement {
             }
           }
         } else {
+          if (encoderMode === "compute") submitEncoder();
           texture ??= context.getCurrentTexture();
           const render = encoder.beginRenderPass({
             colorAttachments: [{
@@ -1864,6 +1873,7 @@ export class FeSurfaceElement extends HTMLElement {
           render.end();
           rendered = true;
           encoded = true;
+          encoderMode = "render";
         }
       };
       let passIndex = 0;
@@ -3414,7 +3424,7 @@ export class FeSurfaceElement extends HTMLElement {
       notice.className = "control notice";
       notice.setAttribute("part", "control");
       notice.textContent = this._members.length
-        ? `no view() declared — ${this._members.length} uniform member(s) held at 1.0`
+        ? `no view() declared: ${this._members.length} uniform member(s) held at 1.0`
         : "no view() declared";
       this._panel.append(notice);
       return;
