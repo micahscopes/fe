@@ -179,6 +179,7 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     let WebActorStageKind::Vertex {
         varying: vertex,
         vertex_count,
+        ..
     } = &program.stages[0].kind
     else {
         panic!(
@@ -231,6 +232,7 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert_eq!(bundle.manifest.passes.len(), 1);
     let pass = &bundle.manifest.passes[0];
     assert_eq!(pass.draw_vertices, Some(3));
+    assert_eq!(pass.draw_instances, None);
     assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
     assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
     assert_eq!(pass.layout.bindings.len(), 1);
@@ -239,6 +241,46 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("@location(3)"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("unpack4x8unorm"), "{}", bundle.wgsl);
+}
+
+#[test]
+fn authored_raster_instancing_is_derived_from_the_fe_draw_policy() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_instanced");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "instanced raster diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("instanced raster plan")
+        .expect("GPU actor");
+    let WebActorStageKind::Vertex {
+        vertex_count,
+        instance_count,
+        instance_index,
+        ..
+    } = &program.stages[0].kind
+    else {
+        panic!("expected authored vertex stage");
+    };
+    assert_eq!((*vertex_count, *instance_count, *instance_index), (3, 4, true));
+
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("instanced authored raster bundle");
+    let [pass] = bundle.manifest.passes.as_slice() else {
+        panic!("expected one instanced raster pass");
+    };
+    assert_eq!(pass.draw_vertices, Some(3));
+    assert_eq!(pass.draw_instances, Some(4));
+    assert_eq!(pass.layout.builtin_inputs.len(), 2);
+    assert_eq!(pass.layout.builtin_inputs[0].source, WebBuiltinSource::VertexIndex);
+    assert_eq!(pass.layout.builtin_inputs[1].source, WebBuiltinSource::InstanceIndex);
+    assert!(bundle.wgsl.contains("@builtin(vertex_index)"), "{}", bundle.wgsl);
+    assert!(bundle.wgsl.contains("@builtin(instance_index)"), "{}", bundle.wgsl);
 }
 
 #[test]

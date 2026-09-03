@@ -8,7 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("WGSL summary aggregates unique pass shaders rather than the primary artifact", () => {
@@ -906,12 +906,27 @@ test("Fe-selected surface pointer motion delivers hover without weakening captur
   );
 });
 
-test("fixed host consumes the Fe-derived authored-raster draw count", () => {
-  assert.equal(rasterDrawVertexCount({ draw_vertices: 7 }), 7);
-  assert.equal(rasterDrawVertexCount({}), 3, "legacy fullscreen render remains three vertices");
+test("fixed host consumes the Fe-derived authored-raster draw shape", () => {
+  assert.deepEqual(rasterDrawShape({ draw_vertices: 7, draw_instances: 11 }), {
+    vertices: 7,
+    instances: 11,
+  });
+  assert.deepEqual(
+    rasterDrawShape({}),
+    { vertices: 3, instances: 1 },
+    "legacy fullscreen render remains one three-vertex instance",
+  );
   assert.throws(
-    () => rasterDrawVertexCount({ draw_vertices: 0 }),
+    () => rasterDrawShape({ draw_vertices: 0 }),
     /invalid compiler-derived raster vertex count/,
+  );
+  assert.throws(
+    () => rasterDrawShape({ draw_vertices: 3, draw_instances: 0 }),
+    /invalid compiler-derived raster instance count/,
+  );
+  assert.throws(
+    () => rasterDrawShape({ draw_instances: 2 }),
+    /instances require an authored raster draw/,
   );
 });
 
@@ -936,7 +951,7 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
       return {
         setPipeline() {},
         setBindGroup() {},
-        draw(count) { draws.push(count); },
+        draw(vertices, instances) { draws.push([vertices, instances]); },
         end() {},
       };
     },
@@ -974,7 +989,7 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
 
   await surface._presentOn(context, []);
   assert.deepEqual(loadOps, ["clear", "load"]);
-  assert.deepEqual(draws, [3, 54]);
+  assert.deepEqual(draws, [[3, 1], [54, 1]]);
 });
 
 test("typed actor readback follows all Fe GPU passes in the same submission", async () => {

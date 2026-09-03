@@ -246,12 +246,19 @@ function destroyGpuBuffers(buffers) {
   }
 }
 
-export function rasterDrawVertexCount(pass) {
-  const count = pass.draw_vertices ?? 3;
-  if (!Number.isSafeInteger(count) || count <= 0) {
-    throw new Error(`fe render runtime: invalid compiler-derived raster vertex count ${count}`);
+export function rasterDrawShape(pass) {
+  if (pass.draw_instances !== undefined && pass.draw_vertices === undefined) {
+    throw new Error("fe render runtime: compiler-derived instances require an authored raster draw");
   }
-  return count;
+  const vertices = pass.draw_vertices ?? 3;
+  const instances = pass.draw_instances ?? 1;
+  if (!Number.isSafeInteger(vertices) || vertices <= 0) {
+    throw new Error(`fe render runtime: invalid compiler-derived raster vertex count ${vertices}`);
+  }
+  if (!Number.isSafeInteger(instances) || instances <= 0) {
+    throw new Error(`fe render runtime: invalid compiler-derived raster instance count ${instances}`);
+  }
+  return { vertices, instances };
 }
 
 export function requiresGpuPassGraph(passes, resources = []) {
@@ -2242,7 +2249,8 @@ export class FeSurfaceElement extends HTMLElement {
           });
           render.setPipeline(record.pipeline);
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
-          render.draw(rasterDrawVertexCount(record.pass));
+          const draw = rasterDrawShape(record.pass);
+          render.draw(draw.vertices, draw.instances);
           render.end();
           rendered = true;
           depthRendered ||= usesDepth;

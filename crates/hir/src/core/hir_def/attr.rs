@@ -96,6 +96,7 @@ pub enum GpuDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuDraw {
     TriangleList,
+    Instanced,
 }
 
 /// A target-neutral description of an aggregate result returned indirectly by
@@ -596,6 +597,7 @@ impl<'db> AttrListId<'db> {
     pub fn gpu_draw(self, db: &'db dyn HirDb) -> Option<GpuDraw> {
         match self.single_ident_arg(db, "gpu_draw")?.as_str() {
             "triangle_list" => Some(GpuDraw::TriangleList),
+            "instanced" => Some(GpuDraw::Instanced),
             _ => None,
         }
     }

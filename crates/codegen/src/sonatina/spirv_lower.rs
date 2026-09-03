@@ -319,6 +319,28 @@ pub fn compile_runtime_package_spirv_authored_raster_with_resources(
     fragment_entry: &str,
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
+    compile_runtime_package_spirv_authored_raster_with_interface(
+        db,
+        package,
+        vertex_entry,
+        fragment_entry,
+        resources,
+        &[],
+    )
+}
+
+/// Lower an authored raster pair with compiler-described resources and a
+/// physical vertex invocation context. The ordinary path supplies no explicit
+/// builtins and retains the established implicit vertex index; an instanced
+/// draw supplies vertex and instance indices as two source-language arguments.
+pub fn compile_runtime_package_spirv_authored_raster_with_interface(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    resources: &[SpirvExternalResource],
+    builtin_arguments: &[SpirvBuiltinArgument],
+) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
     ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
@@ -327,15 +349,19 @@ pub fn compile_runtime_package_spirv_authored_raster_with_resources(
     for resource in resources {
         backend = backend.with_external_resource(resource.clone());
     }
-    backend.compile_module(&module).map_err(|errors| {
-        LowerError::Spirv(
-            errors
-                .iter()
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    })
+    for argument in builtin_arguments {
+        backend = backend.with_builtin_argument(*argument);
+    }
+    backend.compile_module(&module)
+        .map_err(|errors| {
+            LowerError::Spirv(
+                errors
+                    .iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })
 }
 
 /// Build the render-shaped MIR runtime package rooted at `entry` and lower it
