@@ -3960,9 +3960,17 @@ enum GpuResourceElementType {
 #[derive(Clone)]
 struct TypedPrivateLocal<'db> {
     component_root: RLocalId,
+    storage_root: RLocalId,
     pointee: RuntimeClass<'db>,
     pointee_ty: Type,
     pointer_ty: Type,
+}
+
+struct TypedPrivateStorageSlot<'db> {
+    root: RLocalId,
+    pointee: RuntimeClass<'db>,
+    start_statement: usize,
+    end_statement: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4847,6 +4855,52 @@ where
         Ok(member_pointees)
     }
 
+    /// Return the inclusive statement interval in which one typed-private
+    /// component is observable. The first storage-coalescing slice is
+    /// deliberately limited to a single basic block. This gives a direct
+    /// dominance and non-overlap proof without guessing across branches,
+    /// loops, phis, or terminator uses.
+    fn typed_private_straight_line_interval(
+        &self,
+        body: &RuntimeBody<'db>,
+        root: RLocalId,
+        members: &FxHashMap<RLocalId, RuntimeClass<'db>>,
+    ) -> Option<(usize, usize)> {
+        let [block] = body.blocks.as_slice() else {
+            return None;
+        };
+        let start = block
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, RStmt::Assign { dst, .. } if *dst == root))?;
+        let members = members.keys().copied().collect::<HashSet<_>>();
+        let mut end = start;
+        for (statement_index, stmt) in block.stmts.iter().enumerate() {
+            if matches!(stmt, RStmt::Assign { dst, .. } if members.contains(dst))
+                && statement_index < start
+            {
+                return None;
+            }
+            let mut uses = FxHashMap::default();
+            collect_stmt_uses(stmt, &mut uses);
+            if members.iter().any(|member| uses.contains_key(member)) {
+                if statement_index < start {
+                    return None;
+                }
+                end = end.max(statement_index);
+            }
+        }
+        let mut terminator_uses = FxHashMap::default();
+        collect_terminator_uses(&block.terminator, &mut terminator_uses);
+        if members
+            .iter()
+            .any(|member| terminator_uses.contains_key(member))
+        {
+            return None;
+        }
+        Some((start, end))
+    }
+
     fn typed_private_borrow_pointee(
         &self,
         instance: RuntimeInstance<'db>,
@@ -4975,6 +5029,7 @@ where
 
         let mut selected = FxHashMap::default();
         let mut selected_roots = HashSet::new();
+        let mut reusable_storage = Vec::<TypedPrivateStorageSlot<'db>>::new();
         let mut private_bytes = 0usize;
         for (root, pointee, root_kind) in roots {
             if selected.contains_key(&root) {
@@ -4985,20 +5040,6 @@ where
                 reject_root!(root, pointee, None, "unsupported-pointee");
                 continue;
             };
-            let next_private_bytes = if root_kind == TypedPrivateRootKind::Parameter {
-                Some(private_bytes)
-            } else {
-                private_bytes.checked_add(pointee_size)
-            };
-            let Some(next_private_bytes) = next_private_bytes else {
-                reject_root!(root, pointee, Some(pointee_size), "private-byte-overflow");
-                continue;
-            };
-            if next_private_bytes > MAX_SHADER_TYPED_PRIVATE_BYTES_PER_FUNCTION {
-                reject_root!(root, pointee, Some(pointee_size), "private-byte-budget");
-                continue;
-            }
-
             let members = match self.typed_private_component(
                 body,
                 root,
@@ -5020,6 +5061,32 @@ where
                 }
             };
 
+            let interval = (root_kind != TypedPrivateRootKind::Parameter)
+                .then(|| self.typed_private_straight_line_interval(body, root, &members))
+                .flatten();
+            let reusable_slot = interval.and_then(|(start, _)| {
+                reusable_storage.iter().position(|slot| {
+                    slot.pointee == pointee
+                        && slot.start_statement < start
+                        && slot.end_statement < start
+                })
+            });
+            let additional_private_bytes =
+                if root_kind == TypedPrivateRootKind::Parameter || reusable_slot.is_some() {
+                    0
+                } else {
+                    pointee_size
+                };
+            let Some(next_private_bytes) = private_bytes.checked_add(additional_private_bytes)
+            else {
+                reject_root!(root, pointee, Some(pointee_size), "private-byte-overflow");
+                continue;
+            };
+            if next_private_bytes > MAX_SHADER_TYPED_PRIVATE_BYTES_PER_FUNCTION {
+                reject_root!(root, pointee, Some(pointee_size), "private-byte-budget");
+                continue;
+            }
+
             if members.keys().any(|member| selected.contains_key(member)) {
                 reject_root!(root, pointee, Some(pointee_size), "overlapping-selection");
                 continue;
@@ -5039,11 +5106,30 @@ where
                 reject_root!(root, pointee, Some(pointee_size), "type-realization");
                 continue;
             }
+
+            let storage_root = if root_kind == TypedPrivateRootKind::Parameter {
+                root
+            } else if let Some(slot_index) = reusable_slot {
+                let (_, end) = interval.expect("a reusable slot has a straight-line interval");
+                reusable_storage[slot_index].end_statement = end;
+                reusable_storage[slot_index].root
+            } else {
+                if let Some((start, end)) = interval {
+                    reusable_storage.push(TypedPrivateStorageSlot {
+                        root,
+                        pointee: pointee.clone(),
+                        start_statement: start,
+                        end_statement: end,
+                    });
+                }
+                root
+            };
             for (member, member_pointee, pointee_ty, pointer_ty) in realized_members {
                 selected.insert(
                     member,
                     TypedPrivateLocal {
                         component_root: root,
+                        storage_root,
                         pointee: member_pointee,
                         pointee_ty,
                         pointer_ty,
@@ -12365,17 +12451,21 @@ where
                             "shader typed-private allocation {dst:?} changed layout"
                         )));
                     }
-                    Ok(self.fb.insert_inst(
-                        Alloca::new(self.inst_set(), local.pointee_ty),
-                        local.pointer_ty,
-                    ))
+                    if local.storage_root == dst {
+                        Ok(self.fb.insert_inst(
+                            Alloca::new(self.inst_set(), local.pointee_ty),
+                            local.pointer_ty,
+                        ))
+                    } else {
+                        self.local_value(local.storage_root)
+                    }
                 } else {
                     self.lower_alloc_object(*layout)
                 }
             }
             RExpr::MaterializeToObject { src } => {
                 if let Some(local) = self.typed_private_locals.get(&dst).cloned() {
-                    self.lower_materialize_to_typed_object(*src, local)
+                    self.lower_materialize_to_typed_object(*src, dst, local)
                 } else {
                     self.lower_materialize_to_object(*src)
                 }
@@ -12982,6 +13072,7 @@ where
     fn lower_materialize_to_typed_object(
         &mut self,
         src: RLocalId,
+        dst: RLocalId,
         local: TypedPrivateLocal<'db>,
     ) -> Result<ValueId, LowerError> {
         let class = self.body.value_class(src).cloned().ok_or_else(|| {
@@ -13003,10 +13094,17 @@ where
         } else {
             self.local_flat_values(src)?
         };
-        let pointer = self.fb.insert_inst(
-            Alloca::new(self.inst_set(), local.pointee_ty),
-            local.pointer_ty,
-        );
+        // Read every source leaf before a reused slot is overwritten. The
+        // interval proof guarantees that the former component is dead here;
+        // this ordering also preserves a final by-value copy from that slot.
+        let pointer = if local.storage_root == dst {
+            self.fb.insert_inst(
+                Alloca::new(self.inst_set(), local.pointee_ty),
+                local.pointer_ty,
+            )
+        } else {
+            self.local_value(local.storage_root)?
+        };
         let mut cursor = 0usize;
         self.store_typed_private_leaves(pointer, &class, &leaves, &mut cursor)?;
         if cursor != leaves.len() {
@@ -15157,6 +15255,78 @@ pub fn kernel(_ seed: u32) -> u32 {
             [1, 1, 1],
         )
         .expect("the typed value-parameter alias should reach validated SPIR-V");
+    }
+
+    #[test]
+    fn shader_ir_reuses_non_overlapping_typed_private_storage() {
+        let source = r#"
+struct Words { limbs: [u32; 4] }
+
+fn sum_words(_ value: Words) -> u32 {
+    value.limbs[0] + value.limbs[1] + value.limbs[2] + value.limbs[3]
+}
+
+pub fn kernel(_ seed: u32) -> u32 {
+    let first = Words {
+        limbs: [seed, seed + 1, seed + 2, seed + 3],
+    }
+    let first_sum = sum_words(first)
+    let second = Words {
+        limbs: [seed + 4, seed + 5, seed + 6, seed + 7],
+    }
+    let second_sum = sum_words(second)
+    first_sum + second_sum
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///shader_typed_private_slot_reuse.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let (module, _) = compile_runtime_package_shader_ir(&db, &package)
+            .expect("sequential typed-private values should share storage");
+
+        let allocas = module
+            .funcs()
+            .into_iter()
+            .map(|function| {
+                module
+                    .func_store
+                    .try_view(function, |body| {
+                        use sonatina_ir::InstDowncast;
+
+                        let inst_set = body.inst_set();
+                        body.layout
+                            .iter_block()
+                            .flat_map(|block| body.layout.iter_inst(block))
+                            .filter(|inst| {
+                                <&Alloca as InstDowncast>::downcast(inst_set, body.dfg.inst(*inst))
+                                    .is_some()
+                            })
+                            .count()
+                    })
+                    .unwrap_or_default()
+            })
+            .sum::<usize>();
+        assert_eq!(
+            allocas, 1,
+            "two sequential Words values should reuse one typed-private allocation"
+        );
+        assert!(
+            !module_emits_dynamic_alloc(&module),
+            "fixed typed-private values should not fall back to the byte arena"
+        );
+
+        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+            &db,
+            &package,
+            [1, 1, 1],
+        )
+        .expect("reused typed-private storage should reach validated SPIR-V");
     }
 
     #[test]
