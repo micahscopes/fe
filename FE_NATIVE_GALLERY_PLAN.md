@@ -1905,6 +1905,29 @@ All four are focused ingots and may remain so permanently.
     terminators and other currently rejected structured control, with exact
     result transport, resource-identity, trapping-match, parse, validation, and
     production shader gates.
+  - [x] Consume the already committed quadratic plans when deriving the
+    interaction trace instead of rebuilding plan witnesses inside each GPU
+    invocation. The focused production linear-interaction shader fell from
+    2,760,032 to 111,254 WGSL bytes, a 96.0 percent reduction. The focused
+    round-interaction compute shader is 91,675 bytes. The complete 41-pass
+    production graph now compiles and Naga-validates in release mode; its gate
+    passed in 370.48 seconds. The independent production copy-bus oracle and
+    mutation matrix passed separately in 220.15 seconds. Commit `db05ecc9e`
+    conservatively reuses equal-layout typed private storage only for proven
+    non-overlapping single-block lifetimes, with an independent one-allocation,
+    no-byte-arena, SPIR-V regression. Commit `dd2f73554` lands the Fe streaming
+    interpretation and focused production gates.
+  - [x] Execute the focused production round-interaction actor on physical AMD
+    RDNA 3 WebGPU through Chrome 149 before returning to the full page. The
+    one-word health control returned 42 without device loss. The exact
+    91,675-byte Fe shader created its module in 10.5 ms and pipeline in 25.8 ms;
+    one workgroup completed in 8.3 ms, the full 4,096-row grid completed in
+    3.8 ms on a warm run, and a separate full dispatch plus four-byte readback
+    took 3.5 ms plus 0.8 ms. The actual Fe render surface reached ready in
+    1.18 seconds, rendered one frame, read both declared buffers, and reported
+    no console, scoped, uncaptured, or device-loss error. This is a physical
+    execution and transport gate over zero-initialized inputs, not the pending
+    independent numerical comparison for the complete 41-pass graph.
   - [ ] Remeasure each rung using rooted Sonatina instructions, surviving
     inlined instructions, Naga expressions, arena bytes, WGSL/SPIR-V bytes,
     release compile time, and browser execution. Do not retain an optimization

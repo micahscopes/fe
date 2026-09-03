@@ -3565,6 +3565,35 @@ browser proof flow merely to complete this list.
    then run the immutable production artifact before attributing the loss to
    shader size or private-memory pressure.
 
-The Definition of done is not yet met. In particular, the real-GPU gate,
-manifest deletion, Worker/DEC general messaging, complete legacy disposition,
-and bounded proof remain open.
+   The September 3 follow-through closed that uncertainty for the focused
+   production round-interaction stage. Sonatina resource specialization and
+   Fe's typed-private materialization first made the stage callable. A
+   conservative compiler lifetime proof now coalesces equal-layout typed
+   private storage only when the complete component intervals are
+   non-overlapping in one basic block; its independent regression observes one
+   allocation, no byte-arena fallback, and validated SPIR-V. More importantly,
+   the Fe stage now reinterprets the 52-node linear and 23-node round plans
+   already committed in the base trace instead of regenerating witness and
+   constraint plans per invocation. The focused linear shader fell from
+   2,760,032 to 111,254 WGSL bytes, a 96.0 percent reduction, while the focused
+   round compute shader is 91,675 bytes. The complete 41-pass production graph
+   compiled and Naga-validated in 370.48 seconds. The independent copy-bus
+   oracle and its mutation cases passed separately in 220.15 seconds.
+
+   A fresh single-surface site then advanced physical Chrome 149 through
+   explicit health, compile, one-workgroup, full-grid, readback, and surface
+   gates on an AMD RDNA 3 adapter. The one-word control returned 42. The exact
+   91,675-byte compute shader produced no compilation message, scoped error,
+   uncaptured error, or device loss. Module creation took 10.5 ms, pipeline
+   creation 25.8 ms, one 64-invocation workgroup 8.3 ms, and the warm 64-group
+   grid over 4,096 rows 3.8 ms. A separate full dispatch plus four-byte
+   readback took 3.5 ms plus 0.8 ms. The Fe render runtime reached ready in
+   1.18 seconds, emitted one frame, and read both declared resources without
+   loss. Those buffers were intentionally zero-initialized, so this closes the
+   focused physical execution and transport risk, not numerical exactness for
+   the complete 41-pass proof graph. Fe commits `db05ecc9e` and `dd2f73554`
+   contain the compiler and proof-stage checkpoints respectively.
+
+The Definition of done is not yet met. In particular, complete-proof real-GPU
+exactness, manifest deletion, Worker/DEC general messaging, complete legacy
+disposition, and the bounded recursive proof remain open.
