@@ -5635,17 +5635,21 @@ fn validate_resource_stage_visibility(
             .iter()
             .filter(|binding| binding.role == WebBindingRole::Resource)
         {
-            let resource = resources
+            let mut matches = resources
                 .iter()
-                .find(|resource| {
-                    resource.group == binding.group && resource.binding == binding.binding
-                })
-                .ok_or_else(|| {
-                    WebBundleError::EntryDerivation(format!(
-                        "pass `{}` binds undeclared resource `{}` at {}:{}",
-                        pass.source_entry, binding.name, binding.group, binding.binding
-                    ))
-                })?;
+                .filter(|resource| resource.name == binding.name);
+            let resource = matches.next().ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "pass `{}` binds undeclared resource `{}` at physical slot {}:{}",
+                    pass.source_entry, binding.name, binding.group, binding.binding
+                ))
+            })?;
+            if matches.next().is_some() {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "pass `{}` cannot resolve non-unique resource identity `{}`",
+                    pass.source_entry, binding.name
+                )));
+            }
             for stage in &pass.shader_stages {
                 if !resource_visibility_allows(resource, *stage)? {
                     return Err(WebBundleError::EntryDerivation(format!(
@@ -5655,6 +5659,34 @@ fn validate_resource_stage_visibility(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+const PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE: usize = 8;
+
+fn validate_portable_pass_bindings(passes: &[WebPass]) -> Result<(), WebBundleError> {
+    for pass in passes {
+        let count = pass.layout.bindings.len();
+        if count <= PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE {
+            continue;
+        }
+        let role_count = |role| {
+            pass.layout
+                .bindings
+                .iter()
+                .filter(|binding| binding.role == role)
+                .count()
+        };
+        return Err(WebBundleError::EntryDerivation(format!(
+            "pass `{}` ({:?}) requires {count} storage-buffer bindings per shader stage: {} resource, {} input, {} output; the portable WebGPU limit is {}",
+            pass.source_entry,
+            pass.layout.mode,
+            role_count(WebBindingRole::Resource),
+            role_count(WebBindingRole::Input),
+            role_count(WebBindingRole::Output),
+            PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE,
+        )));
     }
     Ok(())
 }
@@ -6401,6 +6433,7 @@ impl WebBundle {
             index += 1;
         }
         validate_resource_stage_visibility(&resources, &passes)?;
+        validate_portable_pass_bindings(&passes)?;
         let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "GPU actor pass graph has no shader for its derived terminal entry".to_owned(),

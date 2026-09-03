@@ -1,0 +1,49 @@
+use std::webgpu::{
+    ActorResident,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentOnly,
+    FragmentSurface as Pixel,
+    GpuBuffer,
+    GpuProgram as Program,
+    ReadOnly,
+    ReplayRecipe,
+    StorageBuffer as Shared,
+    StorageKind,
+    Workgroup as Threads,
+    WebGpuBackend,
+    Zeroed,
+}
+
+pub type DormantFragmentWords = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    FragmentOnly,
+    1,
+    u32,
+>
+
+actor ResourceLiveness uses (Program<WebGpuBackend>) {
+    dormant_0: DormantFragmentWords,
+    compute_left: Shared<u32, 1>,
+    dormant_2: Shared<u32, 1>,
+    fragment_value: Shared<u32, 1>,
+    dormant_4: Shared<u32, 1>,
+    dormant_5: Shared<u32, 1>,
+    compute_right: Shared<u32, 1>,
+    dormant_7: Shared<u32, 1>,
+    dormant_8: Shared<u32, 1>,
+    dormant_9: Shared<u32, 1>,
+
+    fn prepare(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        self.compute_left.store(index: 0, value: 17)
+        self.compute_right.store(index: 0, value: 29)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.fragment_value.load(index: 0).downcast_truncate()
+    }
+}

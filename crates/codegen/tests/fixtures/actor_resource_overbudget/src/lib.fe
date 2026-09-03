@@ -1,0 +1,40 @@
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Once,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    Workgroup as Threads,
+    WebGpuBackend,
+}
+
+actor ResourceOverbudget uses (Program<WebGpuBackend>) {
+    seed: u32,
+    value_0: Shared<u32, 1>,
+    value_1: Shared<u32, 1>,
+    value_2: Shared<u32, 1>,
+    value_3: Shared<u32, 1>,
+    value_4: Shared<u32, 1>,
+    value_5: Shared<u32, 1>,
+    value_6: Shared<u32, 1>,
+    value_7: Shared<u32, 1>,
+
+    fn prepare(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        let index = invocation.global.x
+        self.value_0.store(index: index, value: self.seed)
+        self.value_1.store(index: index, value: self.seed + 1)
+        self.value_2.store(index: index, value: self.seed + 2)
+        self.value_3.store(index: index, value: self.seed + 3)
+        self.value_4.store(index: index, value: self.seed + 4)
+        self.value_5.store(index: index, value: self.seed + 5)
+        self.value_6.store(index: index, value: self.seed + 6)
+        self.value_7.store(index: index, value: self.seed + 7)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.value_0.load(index: 0).downcast_truncate()
+    }
+}

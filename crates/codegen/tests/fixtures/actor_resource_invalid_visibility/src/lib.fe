@@ -8,6 +8,7 @@ use std::webgpu::{
     GpuProgram,
     ReadOnly,
     ReplayRecipe,
+    StorageBuffer,
     StorageKind,
     WebGpuBackend,
     Workgroup,
@@ -27,9 +28,11 @@ pub type FragmentWords = GpuBuffer<
 
 actor InvalidVisibility uses (GpuProgram<WebGpuBackend>) {
     words: FragmentWords,
+    sink: StorageBuffer<u32, 1>,
 
     fn inspect(self) uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
         let observed = self.words.load(index: 0)
+        self.sink.store(index: 0, value: observed)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
