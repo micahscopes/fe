@@ -597,10 +597,12 @@ fn spirv_helper_memory_effect_is_lowerable(
 ) -> bool {
     use sonatina_ir::{
         InstDowncast,
-        inst::data::{Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
+        inst::data::{Alloca, Gep, Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
     };
 
-    <&Mload as InstDowncast>::downcast(inst_set, instruction).is_some()
+    <&Alloca as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&Gep as InstDowncast>::downcast(inst_set, instruction).is_some()
+        || <&Mload as InstDowncast>::downcast(inst_set, instruction).is_some()
         || <&Mstore as InstDowncast>::downcast(inst_set, instruction).is_some()
         || <&ObjIndex as InstDowncast>::downcast(inst_set, instruction).is_some()
         || <&ObjLoad as InstDowncast>::downcast(inst_set, instruction).is_some()
@@ -639,15 +641,26 @@ fn spirv_helper_resource_root_type(module: &sonatina_ir::Module, ty: sonatina_ir
     )
 }
 
-fn spirv_helper_abi_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
+fn spirv_helper_result_abi_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
     spirv_helper_scalar_type(ty) || spirv_helper_resource_root_type(module, ty)
+}
+
+fn spirv_helper_argument_abi_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
+    spirv_helper_result_abi_type(module, ty)
+        || matches!(
+            ty.resolve_compound(&module.ctx),
+            Some(sonatina_ir::types::CompoundType::Ptr(_))
+        )
 }
 
 fn spirv_helper_body_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
     spirv_helper_scalar_type(ty)
         || matches!(
             ty.resolve_compound(&module.ctx),
-            Some(sonatina_ir::types::CompoundType::ObjRef(_))
+            Some(
+                sonatina_ir::types::CompoundType::ObjRef(_)
+                    | sonatina_ir::types::CompoundType::Ptr(_)
+            )
         )
 }
 
@@ -708,8 +721,7 @@ fn spirv_resource_passthrough_outline_worthy(
     // smaller representation. This is a target cost policy, never a legality
     // exception: resource identity is still independently proved downstream.
     const MIN_AVOIDED_SOURCE_INSTRUCTIONS: usize = 128;
-    instruction_count
-        .saturating_mul(static_call_count.saturating_sub(1))
+    instruction_count.saturating_mul(static_call_count.saturating_sub(1))
         >= MIN_AVOIDED_SOURCE_INSTRUCTIONS
 }
 
@@ -751,12 +763,12 @@ fn spirv_helper_candidates(
             .args()
             .iter()
             .copied()
-            .all(|ty| spirv_helper_abi_type(module, ty))
+            .all(|ty| spirv_helper_argument_abi_type(module, ty))
             && signature
                 .ret_tys()
                 .iter()
                 .copied()
-                .all(|ty| spirv_helper_abi_type(module, ty));
+                .all(|ty| spirv_helper_result_abi_type(module, ty));
         let Some((body_ok, callees, accesses_resource, instruction_count)) =
             module.func_store.try_view(function_ref, |function| {
                 let inst_set = function.inst_set();
@@ -945,7 +957,7 @@ fn trace_spirv_helper_classification(
                     .args()
                     .iter()
                     .copied()
-                    .all(|ty| spirv_helper_abi_type(module, ty))
+                    .all(|ty| spirv_helper_argument_abi_type(module, ty))
                 {
                     reasons.insert("signature_args");
                 }
@@ -953,7 +965,7 @@ fn trace_spirv_helper_classification(
                     .ret_tys()
                     .iter()
                     .copied()
-                    .all(|ty| spirv_helper_abi_type(module, ty))
+                    .all(|ty| spirv_helper_result_abi_type(module, ty))
                 {
                     reasons.insert("signature_results");
                 }

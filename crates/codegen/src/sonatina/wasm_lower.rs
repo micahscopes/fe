@@ -3868,6 +3868,12 @@ where
     private_place_materialization: PrivatePlaceMaterialization,
     typed_private_type_cache: FxHashMap<LayoutId<'db>, Type>,
     typed_private_layout_names: FxHashMap<LayoutId<'db>, String>,
+    /// Private shader helper parameters whose ordinary Fe aggregate borrow is
+    /// preserved as a typed function-local pointer. The selection is derived
+    /// from the parameter class and target-representable layout before
+    /// Sonatina signatures are declared. Wasm never populates this map.
+    typed_private_borrow_params:
+        FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>>,
     /// By-value aggregate parameters selected for the private indirect ABI.
     /// Selection is derived from the complete flattened signature and the
     /// validated core-Wasm arity limit. The caller materializes a fresh arena
@@ -3956,6 +3962,23 @@ struct TypedPrivateLocal<'db> {
     layout: LayoutId<'db>,
     pointee_ty: Type,
     pointer_ty: Type,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TypedPrivateBorrowOrigin {
+    Parameter(RLocalId),
+    LocalStorage {
+        root: RLocalId,
+        kind: TypedPrivateRootKind,
+    },
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TypedPrivateRootKind {
+    Parameter,
+    Allocation,
+    Materialized,
 }
 
 /// Leave room below the backend's independent 16 KiB fail-closed limit. This
@@ -4161,6 +4184,7 @@ where
             private_place_materialization,
             typed_private_type_cache: FxHashMap::default(),
             typed_private_layout_names: FxHashMap::default(),
+            typed_private_borrow_params: FxHashMap::default(),
             indirect_aggregate_params: FxHashMap::default(),
             indirect_aggregate_returns: HashSet::new(),
             address_carried_aggregate_values: FxHashMap::default(),
@@ -4177,6 +4201,7 @@ where
             indirect_aggregate_safe_bodies: HashSet::new(),
             arena_owned_locals: FxHashMap::default(),
         };
+        lowerer.typed_private_borrow_params = lowerer.derive_typed_private_borrow_params();
         let (indirect_params, indirect_returns) = lowerer.derive_indirect_aggregate_abi()?;
         lowerer.indirect_aggregate_params = indirect_params;
         lowerer.indirect_aggregate_returns = indirect_returns;
@@ -4312,12 +4337,510 @@ where
         Ok(Some(ty))
     }
 
-    /// Select only fresh, fixed, function-private object allocations whose
-    /// complete RMIR use closure remains typed. The first slice deliberately
-    /// admits one initialization move from the allocation temporary into its
-    /// authored local, then scalar field/index loads and stores only. Any copy,
-    /// call, return, raw address observation, bytewise operation, or ambiguous
-    /// alias leaves the complete allocation group on the canonical arena.
+    fn derive_typed_private_borrow_params(
+        &self,
+    ) -> FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>> {
+        if self.private_place_materialization != PrivatePlaceMaterialization::ShaderTypedWhenLegal {
+            return FxHashMap::default();
+        }
+
+        let mut selected = FxHashMap::default();
+        for function in self.functions_in_declaration_order() {
+            if !matches!(self.effective_linkage(function), Linkage::Private) {
+                continue;
+            }
+            let instance = function.instance(self.db);
+            let body = self
+                .prepared_bodies
+                .get(&instance)
+                .cloned()
+                .unwrap_or_else(|| instance.body(self.db));
+            let mut params = FxHashMap::default();
+            for param in &body.signature.params {
+                let RuntimeClass::Ref {
+                    pointee,
+                    kind: RefKind::Const | RefKind::Object,
+                    view: RefView::Whole,
+                } = &param.class
+                else {
+                    continue;
+                };
+                let Some(layout) = pointee.aggregate_layout() else {
+                    continue;
+                };
+                if self.typed_private_layout_size(layout).is_some() {
+                    params.insert(param.local, layout);
+                }
+            }
+            if !params.is_empty() {
+                selected.insert(instance, params);
+            }
+        }
+
+        // A typed pointer is declared in the callee signature, so local use
+        // closure must be proven before any body is lowered. Selection is a
+        // least fixed point over private calls: if one callee parameter cannot
+        // retain its typed borrow, every caller borrow that flows exclusively
+        // through that edge is reconsidered and rejected when necessary.
+        let mut rejected_by_use = HashMap::<&'static str, usize>::new();
+        loop {
+            let mut round = Vec::new();
+            for caller in self.functions_in_declaration_order() {
+                let caller_instance = caller.instance(self.db);
+                let caller_body = self
+                    .prepared_bodies
+                    .get(&caller_instance)
+                    .cloned()
+                    .unwrap_or_else(|| caller_instance.body(self.db));
+                for block in &caller_body.blocks {
+                    for stmt in &block.stmts {
+                        let RStmt::Assign {
+                            expr: RExpr::Call { callee, args },
+                            ..
+                        } = stmt
+                        else {
+                            continue;
+                        };
+                        let Some(callee_params) = selected.get(callee) else {
+                            continue;
+                        };
+                        let callee_body = self
+                            .prepared_bodies
+                            .get(callee)
+                            .cloned()
+                            .unwrap_or_else(|| callee.body(self.db));
+                        for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
+                        {
+                            let Some(&layout) = callee_params.get(&parameter.local) else {
+                                continue;
+                            };
+                            let source_is_preserved = match self.typed_private_borrow_origin(
+                                &caller_body,
+                                *argument,
+                                layout,
+                                &mut HashSet::new(),
+                            ) {
+                                TypedPrivateBorrowOrigin::Parameter(source) => {
+                                    selected
+                                        .get(&caller_instance)
+                                        .and_then(|params| params.get(&source))
+                                        .copied()
+                                        == Some(layout)
+                                }
+                                TypedPrivateBorrowOrigin::LocalStorage { root, kind } => self
+                                    .typed_private_component(
+                                        &caller_body,
+                                        root,
+                                        layout,
+                                        kind,
+                                        &selected,
+                                    )
+                                    .is_ok(),
+                                TypedPrivateBorrowOrigin::Unsupported => false,
+                            };
+                            if !source_is_preserved {
+                                round.push((
+                                    *callee,
+                                    parameter.local,
+                                    layout,
+                                    "uncertified-caller-borrow",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            for (&instance, params) in &selected {
+                let body = self
+                    .prepared_bodies
+                    .get(&instance)
+                    .cloned()
+                    .unwrap_or_else(|| instance.body(self.db));
+                for (&parameter, &layout) in params {
+                    if let Err(reason) = self.typed_private_component(
+                        &body,
+                        parameter,
+                        layout,
+                        TypedPrivateRootKind::Parameter,
+                        &selected,
+                    ) {
+                        round.push((instance, parameter, layout, reason));
+                    }
+                }
+            }
+            if round.is_empty() {
+                break;
+            }
+            for (instance, parameter, layout, reason) in round {
+                if selected
+                    .get_mut(&instance)
+                    .is_some_and(|params| params.remove(&parameter).is_some())
+                {
+                    *rejected_by_use.entry(reason).or_default() += 1;
+                    wasm_lower_trace_detail(|| {
+                        format!(
+                            "shader typed-borrow ABI rejection, function={}, parameter={parameter:?}, layout={:?}, reason={reason}",
+                            self.function_symbol(instance),
+                            layout.data(self.db),
+                        )
+                    });
+                }
+            }
+            selected.retain(|_, params| !params.is_empty());
+        }
+        let mut rejected_by_use = rejected_by_use.into_iter().collect::<Vec<_>>();
+        rejected_by_use.sort_by_key(|(reason, _)| *reason);
+        wasm_lower_trace(|| {
+            format!(
+                "derived shader typed-borrow ABI, functions={}, parameters={}, rejected={rejected_by_use:?}",
+                selected.len(),
+                selected.values().map(FxHashMap::len).sum::<usize>(),
+            )
+        });
+        selected
+    }
+
+    fn typed_private_borrow_origin(
+        &self,
+        body: &RuntimeBody<'db>,
+        local: RLocalId,
+        layout: LayoutId<'db>,
+        visiting: &mut HashSet<RLocalId>,
+    ) -> TypedPrivateBorrowOrigin {
+        let local_layout = match body.value_class(local) {
+            Some(RuntimeClass::Ref {
+                pointee,
+                kind: RefKind::Const | RefKind::Object,
+                view: RefView::Whole,
+            }) => pointee.aggregate_layout(),
+            _ => None,
+        };
+        if local_layout != Some(layout) || !visiting.insert(local) {
+            return TypedPrivateBorrowOrigin::Unsupported;
+        }
+        if body
+            .signature
+            .params
+            .iter()
+            .any(|parameter| parameter.local == local)
+        {
+            return TypedPrivateBorrowOrigin::Parameter(local);
+        }
+        let origin = match Self::unique_local_definition(body, local) {
+            Some(RExpr::AllocObject { layout: actual }) if *actual == layout => {
+                TypedPrivateBorrowOrigin::LocalStorage {
+                    root: local,
+                    kind: TypedPrivateRootKind::Allocation,
+                }
+            }
+            Some(RExpr::MaterializeToObject { .. }) => TypedPrivateBorrowOrigin::LocalStorage {
+                root: local,
+                kind: TypedPrivateRootKind::Materialized,
+            },
+            Some(RExpr::Use(source) | RExpr::RetagRef { value: source }) => {
+                self.typed_private_borrow_origin(body, *source, layout, visiting)
+            }
+            Some(RExpr::AddrOf { place } | RExpr::Load { place }) => {
+                let Some(source) = Self::arena_owned_place_source(body, place) else {
+                    return TypedPrivateBorrowOrigin::Unsupported;
+                };
+                let source_members = HashSet::from([source]);
+                if self
+                    .typed_private_candidate_place_class(body, place, &source_members)
+                    .is_some_and(|class| class.aggregate_layout() == Some(layout))
+                {
+                    self.typed_private_borrow_origin(body, source, layout, visiting)
+                } else {
+                    TypedPrivateBorrowOrigin::Unsupported
+                }
+            }
+            _ => TypedPrivateBorrowOrigin::Unsupported,
+        };
+        visiting.remove(&local);
+        origin
+    }
+
+    /// Prove the complete typed-use closure of one aggregate storage component.
+    /// This single analysis gates both predeclared pointer parameters and the
+    /// fresh caller-local storage passed to them, so signature selection and
+    /// body materialization cannot disagree.
+    fn typed_private_component(
+        &self,
+        body: &RuntimeBody<'db>,
+        root: RLocalId,
+        layout: LayoutId<'db>,
+        root_kind: TypedPrivateRootKind,
+        selected: &FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>>,
+    ) -> Result<HashSet<RLocalId>, &'static str> {
+        fn object_layout<'db>(body: &RuntimeBody<'db>, local: RLocalId) -> Option<LayoutId<'db>> {
+            match body.value_class(local)? {
+                RuntimeClass::Ref {
+                    pointee,
+                    kind: RefKind::Const | RefKind::Object,
+                    view: RefView::Whole,
+                } => pointee.aggregate_layout(),
+                _ => None,
+            }
+        }
+
+        let mut members = HashSet::from([root]);
+        let mut borrow_aliases = HashSet::new();
+        let mut allowed_alias_assignments = HashSet::new();
+        if root_kind == TypedPrivateRootKind::Parameter {
+            borrow_aliases.insert(root);
+        } else {
+            'first_move: for (block_index, block) in body.blocks.iter().enumerate() {
+                for (statement_index, stmt) in block.stmts.iter().enumerate() {
+                    let RStmt::Assign {
+                        dst,
+                        expr: RExpr::Use(source),
+                    } = stmt
+                    else {
+                        continue;
+                    };
+                    if *source == root && object_layout(body, *dst) == Some(layout) {
+                        members.insert(*dst);
+                        allowed_alias_assignments.insert((block_index, statement_index));
+                        break 'first_move;
+                    }
+                }
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (block_index, block) in body.blocks.iter().enumerate() {
+                for (statement_index, stmt) in block.stmts.iter().enumerate() {
+                    let RStmt::Assign { dst, expr } = stmt else {
+                        continue;
+                    };
+                    if members.contains(dst) || object_layout(body, *dst) != Some(layout) {
+                        continue;
+                    }
+                    let is_borrow_alias = match expr {
+                        RExpr::RetagRef { value } => members.contains(value),
+                        RExpr::Use(source) => borrow_aliases.contains(source),
+                        RExpr::AddrOf { place } | RExpr::Load { place } => self
+                            .typed_private_candidate_place_class(body, place, &members)
+                            .is_some_and(|class| class.aggregate_layout() == Some(layout)),
+                        _ => false,
+                    };
+                    if is_borrow_alias {
+                        members.insert(*dst);
+                        borrow_aliases.insert(*dst);
+                        allowed_alias_assignments.insert((block_index, statement_index));
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        if body
+            .provider_bindings
+            .iter()
+            .any(|binding| members.contains(&binding.value))
+        {
+            return Err("provider-binding");
+        }
+
+        for (block_index, block) in body.blocks.iter().enumerate() {
+            for (statement_index, stmt) in block.stmts.iter().enumerate() {
+                match stmt {
+                    RStmt::Assign {
+                        dst,
+                        expr: RExpr::AllocObject { layout: actual },
+                    } if root_kind == TypedPrivateRootKind::Allocation
+                        && *dst == root
+                        && *actual == layout => {}
+                    RStmt::Assign {
+                        dst,
+                        expr: RExpr::MaterializeToObject { .. },
+                    } if root_kind == TypedPrivateRootKind::Materialized && *dst == root => {}
+                    RStmt::Assign { .. }
+                        if allowed_alias_assignments.contains(&(block_index, statement_index)) => {}
+                    RStmt::Assign { dst, .. } if members.contains(dst) => {
+                        return Err("member-reassignment");
+                    }
+                    RStmt::Assign {
+                        dst,
+                        expr: RExpr::Load { place },
+                    } if members
+                        .iter()
+                        .any(|member| place_is_rooted_at(place, *member)) =>
+                    {
+                        let compatible = self
+                            .typed_private_candidate_place_class(body, place, &members)
+                            .and_then(|place_class| {
+                                body.value_class(*dst).map(|destination| {
+                                    let destination = match destination {
+                                        RuntimeClass::Ref { pointee, .. } => pointee.as_ref(),
+                                        other => other,
+                                    };
+                                    place_class.shares_runtime_rep_with(self.db, destination)
+                                })
+                            })
+                            .unwrap_or(false);
+                        if !compatible {
+                            return Err("untyped-or-incompatible-load");
+                        }
+                    }
+                    RStmt::Assign {
+                        expr: RExpr::Call { callee, args },
+                        ..
+                    } => {
+                        let callee_body = self
+                            .prepared_bodies
+                            .get(callee)
+                            .cloned()
+                            .unwrap_or_else(|| callee.body(self.db));
+                        for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
+                        {
+                            if members.contains(argument)
+                                && selected
+                                    .get(callee)
+                                    .and_then(|params| params.get(&parameter.local))
+                                    .copied()
+                                    != Some(layout)
+                            {
+                                return Err("uncertified-call-borrow");
+                            }
+                        }
+                    }
+                    RStmt::Assign { expr, .. } => {
+                        let mut uses = FxHashMap::default();
+                        collect_expr_uses(expr, &mut uses);
+                        if members.iter().any(|member| uses.contains_key(member)) {
+                            return Err("expression-escape");
+                        }
+                    }
+                    RStmt::Store { dst, src }
+                        if members
+                            .iter()
+                            .any(|member| place_is_rooted_at(dst, *member)) =>
+                    {
+                        let compatible = !members.contains(src)
+                            && self
+                                .typed_private_candidate_place_class(body, dst, &members)
+                                .zip(body.value_class(*src))
+                                .is_some_and(|(destination, source)| {
+                                    source.shares_runtime_rep_with(self.db, &destination)
+                                });
+                        if !compatible {
+                            return Err("untyped-or-incompatible-store");
+                        }
+                    }
+                    RStmt::CopyInto { dst, src }
+                        if members
+                            .iter()
+                            .any(|member| place_is_rooted_at(dst, *member)) =>
+                    {
+                        let compatible = !members.contains(src)
+                            && self
+                                .typed_private_candidate_place_class(body, dst, &members)
+                                .zip(body.value_class(*src))
+                                .is_some_and(|(destination, source)| {
+                                    source.shares_runtime_rep_with(self.db, &destination)
+                                });
+                        if !compatible {
+                            return Err("untyped-or-incompatible-copy");
+                        }
+                    }
+                    RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } => {
+                        let mut uses = FxHashMap::default();
+                        collect_place_uses(dst, &mut uses);
+                        uses.insert(*src, ());
+                        if members.iter().any(|member| uses.contains_key(member)) {
+                            return Err("copy-or-external-store");
+                        }
+                    }
+                    RStmt::EnumAssertVariant { value, .. } => {
+                        if members.contains(value) {
+                            return Err("enum-operation");
+                        }
+                    }
+                    RStmt::EnumSetTag { root, .. } => {
+                        if members.contains(root) {
+                            return Err("enum-operation");
+                        }
+                    }
+                    RStmt::EnumWriteVariant { root, fields, .. } => {
+                        if members.contains(root)
+                            || fields.iter().any(|field| members.contains(field))
+                        {
+                            return Err("enum-operation");
+                        }
+                    }
+                }
+            }
+            let mut terminator_uses = FxHashMap::default();
+            collect_terminator_uses(&block.terminator, &mut terminator_uses);
+            if members
+                .iter()
+                .any(|member| terminator_uses.contains_key(member))
+            {
+                return Err("terminator-escape");
+            }
+        }
+        Ok(members)
+    }
+
+    fn typed_private_borrow_layout(
+        &self,
+        instance: RuntimeInstance<'db>,
+        local: RLocalId,
+    ) -> Option<LayoutId<'db>> {
+        self.typed_private_borrow_params
+            .get(&instance)
+            .and_then(|params| params.get(&local))
+            .copied()
+    }
+
+    fn typed_private_candidate_place_class(
+        &self,
+        body: &RuntimeBody<'db>,
+        place: &RuntimePlace<'db>,
+        members: &HashSet<RLocalId>,
+    ) -> Option<RuntimeClass<'db>> {
+        let mut uses = FxHashMap::default();
+        collect_place_uses(place, &mut uses);
+        if members
+            .iter()
+            .any(|member| uses.contains_key(member) && !place_is_rooted_at(place, *member))
+        {
+            return None;
+        }
+        if !members
+            .iter()
+            .any(|member| place_is_rooted_at(place, *member))
+        {
+            return None;
+        }
+        let program = self.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.db, &program, body, place).ok()?;
+        if resolved.path.iter().any(|element| {
+            !matches!(
+                element,
+                mir::ResolvedPlaceElem::Field { .. } | mir::ResolvedPlaceElem::Index { .. }
+            )
+        }) {
+            return None;
+        }
+        self.typed_private_class_size(&resolved.result_class)?;
+        Some(resolved.result_class)
+    }
+
+    /// Preserve fixed, function-private aggregate storage and borrows as one
+    /// typed pointer component. Storage roots may be fresh allocations or
+    /// materialized values. A private aggregate-reference parameter is a
+    /// caller-owned root and therefore consumes no local storage budget.
+    ///
+    /// The component closure admits only compiler-visible identity edges,
+    /// typed field/index places, and calls whose corresponding callee parameter
+    /// was selected for the exact same typed borrow ABI. Authored object copies
+    /// remain deep copies: only the first binding of a fresh storage root is a
+    /// move, while subsequent `Use` edges are rejected from this component.
     fn derive_typed_private_locals(
         &mut self,
         body: &RuntimeBody<'db>,
@@ -4330,213 +4853,115 @@ where
             match body.value_class(local)? {
                 RuntimeClass::Ref {
                     pointee,
-                    kind: RefKind::Object,
+                    kind: RefKind::Const | RefKind::Object,
                     view: RefView::Whole,
                 } => pointee.aggregate_layout(),
                 _ => None,
             }
         }
 
-        let mut allocations = Vec::new();
-        let mut allocation_statements = 0usize;
+        let mut roots = self
+            .typed_private_borrow_params
+            .get(&body.owner)
+            .into_iter()
+            .flat_map(|params| params.iter())
+            .map(|(&local, &layout)| (local, layout, TypedPrivateRootKind::Parameter))
+            .collect::<Vec<_>>();
+        let parameter_roots = roots.len();
+        let mut storage_root_statements = 0usize;
         let mut rejected = HashMap::<&'static str, usize>::new();
+        let mut rejection_details =
+            Vec::<(RLocalId, LayoutId<'db>, Option<usize>, &'static str)>::new();
+        macro_rules! reject_root {
+            ($root:expr, $layout:expr, $size:expr, $reason:literal) => {{
+                *rejected.entry($reason).or_default() += 1;
+                rejection_details.push(($root, $layout, $size, $reason));
+            }};
+        }
         for block in &body.blocks {
             for stmt in &block.stmts {
-                if let RStmt::Assign {
-                    dst,
-                    expr: RExpr::AllocObject { layout },
-                } = stmt
-                {
-                    allocation_statements += 1;
-                    if object_layout(body, *dst) == Some(*layout) {
-                        allocations.push((*dst, *layout));
-                    } else {
-                        *rejected.entry("allocation-class-mismatch").or_default() += 1;
+                let RStmt::Assign { dst, expr } = stmt else {
+                    continue;
+                };
+                match expr {
+                    RExpr::AllocObject { layout } => {
+                        storage_root_statements += 1;
+                        if object_layout(body, *dst) == Some(*layout) {
+                            roots.push((*dst, *layout, TypedPrivateRootKind::Allocation));
+                        } else {
+                            reject_root!(*dst, *layout, None, "allocation-class-mismatch");
+                        }
                     }
+                    RExpr::MaterializeToObject { .. } => {
+                        storage_root_statements += 1;
+                        if let Some(layout) = object_layout(body, *dst) {
+                            roots.push((*dst, layout, TypedPrivateRootKind::Materialized));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
-        allocations.sort_by_key(|(local, _)| local.as_u32());
-        let candidate_allocations = allocations.len();
+        roots.sort_by_key(|(local, _, kind)| {
+            (local.as_u32(), *kind != TypedPrivateRootKind::Parameter)
+        });
+        roots.dedup_by_key(|(local, _, _)| *local);
+        let candidate_roots = roots.len();
 
         let mut selected = FxHashMap::default();
-        let mut selected_allocations = HashSet::new();
+        let mut selected_roots = HashSet::new();
         let mut private_bytes = 0usize;
-        for (allocation, layout) in allocations {
-            if selected.contains_key(&allocation) {
-                *rejected.entry("already-selected").or_default() += 1;
+        for (root, layout, root_kind) in roots {
+            if selected.contains_key(&root) {
+                reject_root!(root, layout, None, "already-selected");
                 continue;
             }
             let Some(layout_size) = self.typed_private_layout_size(layout) else {
-                *rejected.entry("unsupported-layout").or_default() += 1;
+                reject_root!(root, layout, None, "unsupported-layout");
                 continue;
             };
-            let Some(next_private_bytes) = private_bytes.checked_add(layout_size) else {
-                *rejected.entry("private-byte-overflow").or_default() += 1;
+            let next_private_bytes = if root_kind == TypedPrivateRootKind::Parameter {
+                Some(private_bytes)
+            } else {
+                private_bytes.checked_add(layout_size)
+            };
+            let Some(next_private_bytes) = next_private_bytes else {
+                reject_root!(root, layout, Some(layout_size), "private-byte-overflow");
                 continue;
             };
             if next_private_bytes > MAX_SHADER_TYPED_PRIVATE_BYTES_PER_FUNCTION {
-                *rejected.entry("private-byte-budget").or_default() += 1;
+                reject_root!(root, layout, Some(layout_size), "private-byte-budget");
                 continue;
             }
 
-            let aliases = body
-                .blocks
-                .iter()
-                .flat_map(|block| block.stmts.iter())
-                .filter_map(|stmt| match stmt {
-                    RStmt::Assign {
-                        dst,
-                        expr: RExpr::Use(source),
-                    } if *source == allocation => Some(*dst),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if aliases.len() > 1 {
-                *rejected.entry("multiple-use-aliases").or_default() += 1;
-                continue;
-            }
-            let alias = aliases.first().copied();
-            if alias.is_some_and(|alias| object_layout(body, alias) != Some(layout)) {
-                *rejected.entry("alias-layout-mismatch").or_default() += 1;
-                continue;
-            }
-            let mut members = HashSet::from([allocation]);
-            if let Some(alias) = alias {
-                members.insert(alias);
-            }
-            if members.iter().any(|member| selected.contains_key(member)) {
-                *rejected.entry("overlapping-selection").or_default() += 1;
-                continue;
-            }
-            if body
-                .provider_bindings
-                .iter()
-                .any(|binding| members.contains(&binding.value))
-            {
-                *rejected.entry("provider-binding").or_default() += 1;
-                continue;
-            }
-
-            let typed_scalar_place = |place: &RuntimePlace<'db>| -> bool {
-                let mut place_uses = FxHashMap::default();
-                collect_place_uses(place, &mut place_uses);
-                if members.iter().any(|member| {
-                    place_uses.contains_key(member) && !place_is_rooted_at(place, *member)
-                }) {
-                    return false;
-                }
-                let program = self.db as &dyn mir::MirDb;
-                let Ok(resolved) = mir::resolve_runtime_place(self.db, &program, body, place)
-                else {
-                    return false;
-                };
-                match resolved.result_class {
-                    RuntimeClass::Scalar(ref scalar) => {
-                        matches!(scalar_ty_r1(scalar), Ok(Type::I1 | Type::I32 | Type::F32))
+            let members = match self.typed_private_component(
+                body,
+                root,
+                layout,
+                root_kind,
+                &self.typed_private_borrow_params,
+            ) {
+                Ok(members) => members,
+                Err(reason) => {
+                    *rejected.entry(reason).or_default() += 1;
+                    rejection_details.push((root, layout, Some(layout_size), reason));
+                    if root_kind == TypedPrivateRootKind::Parameter {
+                        return Err(LowerError::Unsupported(format!(
+                            "shader typed-borrow parameter {root:?} of `{}` failed its complete use closure: {reason}",
+                            self.function_symbol(body.owner),
+                        )));
                     }
-                    RuntimeClass::AggregateValue { layout } => {
-                        self.single_scalar_field(layout).is_some_and(|scalar| {
-                            matches!(scalar_ty_r1(&scalar), Ok(Type::I1 | Type::I32 | Type::F32))
-                        })
-                    }
-                    RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => false,
+                    continue;
                 }
             };
 
-            let mut reject_reason = None;
-            for block in &body.blocks {
-                for stmt in &block.stmts {
-                    match stmt {
-                        RStmt::Assign {
-                            dst,
-                            expr: RExpr::AllocObject { layout: actual },
-                        } if *dst == allocation && *actual == layout => {}
-                        RStmt::Assign {
-                            dst,
-                            expr: RExpr::Use(source),
-                        } if Some(*dst) == alias && *source == allocation => {}
-                        RStmt::Assign { dst, .. } if members.contains(dst) => {
-                            reject_reason.get_or_insert("member-reassignment");
-                        }
-                        RStmt::Assign {
-                            expr: RExpr::Load { place },
-                            ..
-                        } if members
-                            .iter()
-                            .any(|member| place_is_rooted_at(place, *member)) =>
-                        {
-                            if !typed_scalar_place(place) {
-                                reject_reason.get_or_insert("non-scalar-or-untyped-load");
-                            }
-                        }
-                        RStmt::Assign { expr, .. } => {
-                            let mut uses = FxHashMap::default();
-                            collect_expr_uses(expr, &mut uses);
-                            if members.iter().any(|member| uses.contains_key(member)) {
-                                reject_reason.get_or_insert("expression-escape");
-                            }
-                        }
-                        RStmt::Store { dst, src }
-                            if members
-                                .iter()
-                                .any(|member| place_is_rooted_at(dst, *member)) =>
-                        {
-                            if members.contains(src) {
-                                reject_reason.get_or_insert("aggregate-store-source");
-                            } else if !typed_scalar_place(dst) {
-                                reject_reason.get_or_insert("non-scalar-or-untyped-store");
-                            }
-                        }
-                        RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } => {
-                            let mut uses = FxHashMap::default();
-                            collect_place_uses(dst, &mut uses);
-                            uses.insert(*src, ());
-                            if members.iter().any(|member| uses.contains_key(member)) {
-                                reject_reason.get_or_insert("copy-or-external-store");
-                            }
-                        }
-                        RStmt::EnumAssertVariant { value, .. } => {
-                            if members.contains(value) {
-                                reject_reason.get_or_insert("enum-operation");
-                            }
-                        }
-                        RStmt::EnumSetTag { root, .. } => {
-                            if members.contains(root) {
-                                reject_reason.get_or_insert("enum-operation");
-                            }
-                        }
-                        RStmt::EnumWriteVariant { root, fields, .. } => {
-                            if members.contains(root)
-                                || fields.iter().any(|field| members.contains(field))
-                            {
-                                reject_reason.get_or_insert("enum-operation");
-                            }
-                        }
-                    }
-                    if reject_reason.is_some() {
-                        break;
-                    }
-                }
-                let mut terminator_uses = FxHashMap::default();
-                collect_terminator_uses(&block.terminator, &mut terminator_uses);
-                if members
-                    .iter()
-                    .any(|member| terminator_uses.contains_key(member))
-                {
-                    reject_reason.get_or_insert("terminator-escape");
-                }
-                if reject_reason.is_some() {
-                    break;
-                }
-            }
-            if let Some(reason) = reject_reason {
-                *rejected.entry(reason).or_default() += 1;
+            if members.iter().any(|member| selected.contains_key(member)) {
+                reject_root!(root, layout, Some(layout_size), "overlapping-selection");
                 continue;
             }
 
             let Some(pointee_ty) = self.typed_private_type_for_layout(layout)? else {
-                *rejected.entry("type-realization").or_default() += 1;
+                reject_root!(root, layout, Some(layout_size), "type-realization");
                 continue;
             };
             let pointer_ty = self.builder.ptr_type(pointee_ty);
@@ -4550,16 +4975,26 @@ where
                     },
                 );
             }
-            selected_allocations.insert(allocation);
+            selected_roots.insert(root);
             private_bytes = next_private_bytes;
         }
         let mut rejection_summary = rejected.into_iter().collect::<Vec<_>>();
         rejection_summary.sort_by_key(|(reason, _)| *reason);
+        rejection_details.sort_by_key(|(allocation, _, _, _)| allocation.as_u32());
+        let function = self.function_symbol(body.owner);
+        for (root, layout, bytes, reason) in rejection_details {
+            wasm_lower_trace_detail(|| {
+                format!(
+                    "shader typed-private rejection, function={function}, root={root:?}, layout={:?}, bytes={bytes:?}, reason={reason}",
+                    layout.data(self.db),
+                )
+            });
+        }
         wasm_lower_trace_detail(|| {
             format!(
-                "selected shader typed-private storage, function={}, allocation_statements={allocation_statements}, candidates={candidate_allocations}, allocations={}, locals={}, bytes={private_bytes}, rejected={rejection_summary:?}",
-                self.function_symbol(body.owner),
-                selected_allocations.len(),
+                "selected shader typed-private storage, function={}, parameter_roots={parameter_roots}, storage_root_statements={storage_root_statements}, candidates={candidate_roots}, roots={}, locals={}, bytes={private_bytes}, rejected={rejection_summary:?}",
+                function,
+                selected_roots.len(),
                 selected.len(),
             )
         });
@@ -4767,7 +5202,9 @@ where
             let Some(shape) = self.flat_shape(class) else {
                 continue;
             };
-            if shape.leaf_count() > MAX_WASM_FLATTENED_LOCAL_AGGREGATE {
+            if self.private_place_materialization == PrivatePlaceMaterialization::CanonicalArena
+                && shape.leaf_count() > MAX_WASM_FLATTENED_LOCAL_AGGREGATE
+            {
                 values.insert(RLocalId::from_u32(index as u32));
             }
         }
@@ -5104,6 +5541,14 @@ where
             let semantic_ty = instantiated_runtime_local_ty(self.db, body.owner, semantic_ty);
             if semantic_gpu_resource(self.db, semantic_ty) {
                 args.push(self.gpu_resource_type(semantic_ty)?);
+            } else if let Some(layout) = self.typed_private_borrow_layout(body.owner, param.local) {
+                let pointee = self.typed_private_type_for_layout(layout)?.ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "shader typed-borrow parameter {:?} of `{symbol}` lost its representable layout",
+                        param.local,
+                    ))
+                })?;
+                args.push(self.builder.ptr_type(pointee));
             } else if indirect_params.contains(&param.local) {
                 args.push(Type::I32);
             } else if let Some(elem_tys) =
@@ -10212,6 +10657,9 @@ where
             let source = self.body.value_class(*arg).cloned().ok_or_else(|| {
                 LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
             })?;
+            let typed_borrow_layout = self
+                .module
+                .typed_private_borrow_layout(callee, prepared_param.local);
             let materialize_indirect_value = indirect_params.contains(&prepared_param.local);
             let materialize_read_borrow = matches!(
                 param,
@@ -10223,7 +10671,29 @@ where
                     && source.shares_runtime_rep_with(self.module.db, pointee)
                     && self.module.aggregate_is_memory_lowerable(&source)
             );
-            if materialize_indirect_value {
+            if let Some(layout) = typed_borrow_layout {
+                let source_layout = match &source {
+                    RuntimeClass::Ref {
+                        pointee,
+                        kind: RefKind::Const | RefKind::Object,
+                        view: RefView::Whole,
+                    } => pointee.aggregate_layout(),
+                    _ => None,
+                };
+                let local = self.typed_private_locals.get(arg).copied().ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "call to `{}` selected typed aggregate borrow {arg:?}, but the caller did not preserve its storage",
+                        self.module.function_symbol(callee),
+                    ))
+                })?;
+                if source_layout != Some(layout) || local.layout != layout {
+                    return Err(LowerError::Internal(format!(
+                        "call to `{}` selected incompatible typed aggregate borrow {arg:?}",
+                        self.module.function_symbol(callee),
+                    )));
+                }
+                values.push(self.local_value(*arg)?);
+            } else if materialize_indirect_value {
                 if !self.scoped_arena
                     && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
                 {
@@ -11097,11 +11567,17 @@ where
                 Ok(())
             }
             RExpr::Load { place } => {
-                let Some((pointer, source_class)) = self.raw_memory_aggregate_place(place)? else {
-                    return Err(LowerError::Unsupported(format!(
-                        "wasm target: aggregate load requires a memory-backed aggregate place: \
-                         {place:?}"
-                    )));
+                let typed_source = self.typed_private_place(place)?;
+                let (pointer, source_class) = if let Some(source) = typed_source.clone() {
+                    source
+                } else {
+                    let Some(source) = self.raw_memory_aggregate_place(place)? else {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm target: aggregate load requires a memory-backed aggregate place: \
+                             {place:?}"
+                        )));
+                    };
+                    source
                 };
                 let dst_class = self.body.value_class(dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("aggregate destination {dst:?} has no class"))
@@ -11113,7 +11589,11 @@ where
                 }
                 let shape = self.local_flat_shape(dst)?;
                 let mut values = Vec::with_capacity(shape.leaf_count());
-                self.load_materialized_leaves(pointer, &source_class, &shape, &mut values)?;
+                if typed_source.is_some() {
+                    self.load_typed_private_leaves(pointer, &source_class, &mut values)?;
+                } else {
+                    self.load_materialized_leaves(pointer, &source_class, &shape, &mut values)?;
+                }
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("aggregate destination {dst:?} has no vars"))
                 })?;
@@ -11623,6 +12103,9 @@ where
             // address. Preserve that address as the reference value; the
             // callee's ordinary field loads remain target-layout-derived.
             RExpr::AddrOf { place } => {
+                if let Some((address, _)) = self.typed_private_place(place)? {
+                    return Ok(address);
+                }
                 if let Some((address, _)) = self.raw_memory_scalar_place(place)? {
                     return Ok(address);
                 }
@@ -11648,6 +12131,9 @@ where
                     && (self.module.single_scalar_field(*layout).is_some()
                         || self.module.fieldless_enum_tag(*layout).is_some())
                 {
+                    if let Some((address, ty)) = self.typed_private_scalar_place(place)? {
+                        return Ok(self.load_memory_scalar(address, ty));
+                    }
                     let Some((address, projected)) = self.raw_memory_aggregate_place(place)? else {
                         return Err(LowerError::Unsupported(format!(
                             "wasm target: scalar-represented aggregate load requires a memory-backed place: {place:?}"
@@ -11683,6 +12169,15 @@ where
                         .memory_lowerable_ref_layout(&dst_class)
                         .is_some()
                 {
+                    if let Some((address, projected)) = self.typed_private_place(place)? {
+                        if !projected.shares_runtime_rep_with(self.module.db, pointee) {
+                            return Err(LowerError::Unsupported(
+                                "shader typed-private aggregate borrow has an incompatible pointee"
+                                    .to_owned(),
+                            ));
+                        }
+                        return Ok(address);
+                    }
                     let Some((address, projected)) = self.raw_memory_aggregate_place(place)? else {
                         return Err(LowerError::Unsupported(format!(
                             "wasm target: aggregate borrow requires a memory-backed place: {place:?}"
@@ -11716,7 +12211,13 @@ where
                     self.lower_alloc_object(*layout)
                 }
             }
-            RExpr::MaterializeToObject { src } => self.lower_materialize_to_object(*src),
+            RExpr::MaterializeToObject { src } => {
+                if let Some(local) = self.typed_private_locals.get(&dst).copied() {
+                    self.lower_materialize_to_typed_object(*src, local)
+                } else {
+                    self.lower_materialize_to_object(*src)
+                }
+            }
             RExpr::MaterializePlaceToObject { place } => {
                 self.lower_materialize_place_to_object(place, dst)
             }
@@ -11972,6 +12473,142 @@ where
         }
     }
 
+    fn typed_private_child_pointer(
+        &mut self,
+        pointer: ValueId,
+        child: &RuntimeClass<'db>,
+        index: usize,
+    ) -> Result<ValueId, LowerError> {
+        let Some(child_ty) = self.module.typed_private_type_for_class(child)? else {
+            return Err(LowerError::Unsupported(format!(
+                "shader typed-private child {child:?} has no target representation"
+            )));
+        };
+        let index = i32::try_from(index).map_err(|_| {
+            LowerError::Unsupported("shader typed-private index exceeds i32".to_owned())
+        })?;
+        let is = self.inst_set();
+        let zero = self.fb.make_imm_value(Immediate::I32(0));
+        let index = self.fb.make_imm_value(Immediate::I32(index));
+        let pointer_ty = self.module.builder.ptr_type(child_ty);
+        Ok(self.fb.insert_inst(
+            Gep::new(is, smallvec1::smallvec![pointer, zero, index]),
+            pointer_ty,
+        ))
+    }
+
+    fn store_typed_private_leaves(
+        &mut self,
+        pointer: ValueId,
+        class: &RuntimeClass<'db>,
+        leaves: &[ValueId],
+        cursor: &mut usize,
+    ) -> Result<(), LowerError> {
+        match class {
+            RuntimeClass::Scalar(scalar) => {
+                let ty = scalar_ty_r1(scalar)?;
+                if !matches!(ty, Type::I1 | Type::I32 | Type::F32) {
+                    return Err(LowerError::Unsupported(format!(
+                        "shader typed-private scalar {ty:?} is unsupported"
+                    )));
+                }
+                let value = *leaves.get(*cursor).ok_or_else(|| {
+                    LowerError::Internal(
+                        "shader typed-private aggregate is missing a scalar leaf".to_owned(),
+                    )
+                })?;
+                if self.fb.type_of(value) != ty {
+                    return Err(LowerError::Internal(format!(
+                        "shader typed-private leaf has type {:?}, expected {ty:?}",
+                        self.fb.type_of(value),
+                    )));
+                }
+                self.fb
+                    .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                *cursor += 1;
+                Ok(())
+            }
+            RuntimeClass::AggregateValue { layout } => match layout.data(self.module.db) {
+                Layout::Struct(data) => {
+                    for (index, field) in data.fields.iter().enumerate() {
+                        let child = self.typed_private_child_pointer(pointer, field, index)?;
+                        self.store_typed_private_leaves(child, field, leaves, cursor)?;
+                    }
+                    Ok(())
+                }
+                Layout::Array(data) => {
+                    let len = usize::try_from(data.len).map_err(|_| {
+                        LowerError::Unsupported(
+                            "shader typed-private array length exceeds usize".to_owned(),
+                        )
+                    })?;
+                    for index in 0..len {
+                        let child = self.typed_private_child_pointer(pointer, &data.elem, index)?;
+                        self.store_typed_private_leaves(child, &data.elem, leaves, cursor)?;
+                    }
+                    Ok(())
+                }
+                Layout::Enum(_) => Err(LowerError::Unsupported(
+                    "shader typed-private payload enums are not implemented".to_owned(),
+                )),
+            },
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
+                Err(LowerError::Unsupported(
+                    "shader typed-private aggregates cannot contain transport leaves".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn load_typed_private_leaves(
+        &mut self,
+        pointer: ValueId,
+        class: &RuntimeClass<'db>,
+        values: &mut Vec<ValueId>,
+    ) -> Result<(), LowerError> {
+        match class {
+            RuntimeClass::Scalar(scalar) => {
+                let ty = scalar_ty_r1(scalar)?;
+                if !matches!(ty, Type::I1 | Type::I32 | Type::F32) {
+                    return Err(LowerError::Unsupported(format!(
+                        "shader typed-private scalar {ty:?} is unsupported"
+                    )));
+                }
+                values.push(self.load_memory_scalar(pointer, ty));
+                Ok(())
+            }
+            RuntimeClass::AggregateValue { layout } => match layout.data(self.module.db) {
+                Layout::Struct(data) => {
+                    for (index, field) in data.fields.iter().enumerate() {
+                        let child = self.typed_private_child_pointer(pointer, field, index)?;
+                        self.load_typed_private_leaves(child, field, values)?;
+                    }
+                    Ok(())
+                }
+                Layout::Array(data) => {
+                    let len = usize::try_from(data.len).map_err(|_| {
+                        LowerError::Unsupported(
+                            "shader typed-private array length exceeds usize".to_owned(),
+                        )
+                    })?;
+                    for index in 0..len {
+                        let child = self.typed_private_child_pointer(pointer, &data.elem, index)?;
+                        self.load_typed_private_leaves(child, &data.elem, values)?;
+                    }
+                    Ok(())
+                }
+                Layout::Enum(_) => Err(LowerError::Unsupported(
+                    "shader typed-private payload enums are not implemented".to_owned(),
+                )),
+            },
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
+                Err(LowerError::Unsupported(
+                    "shader typed-private aggregates cannot contain transport leaves".to_owned(),
+                ))
+            }
+        }
+    }
+
     /// Store one recursively flattened Fe value into an addressable aggregate
     /// projection. This is the write-side twin of aggregate-place loading: the
     /// source remains a value tree, the destination address and every nested
@@ -11983,12 +12620,6 @@ where
         destination: &RuntimePlace<'db>,
         source: RLocalId,
     ) -> Result<(), LowerError> {
-        let Some((pointer, destination_class)) = self.raw_memory_aggregate_place(destination)?
-        else {
-            return Err(LowerError::Unsupported(format!(
-                "wasm target: aggregate copy destination is not canonical-arena-backed: {destination:?}"
-            )));
-        };
         let source_class = self.body.value_class(source).cloned().ok_or_else(|| {
             LowerError::Internal(format!("aggregate copy source {source:?} has no class"))
         })?;
@@ -11997,6 +12628,37 @@ where
                 "wasm target: aggregate copy source {source:?} is not a flattened value"
             )));
         }
+        if let Some((pointer, destination_class)) = self.typed_private_place(destination)? {
+            if !source_class.shares_runtime_rep_with(self.module.db, &destination_class) {
+                return Err(LowerError::Unsupported(format!(
+                    "shader typed-private copy source and destination layouts differ: {source_class:?} / {destination_class:?}"
+                )));
+            }
+            let leaves = if self.is_address_carried_aggregate_value(source) {
+                let shape = self.local_flat_shape(source)?;
+                let mut leaves = Vec::with_capacity(shape.leaf_count());
+                let source_pointer = self.local_value(source)?;
+                self.load_materialized_leaves(source_pointer, &source_class, &shape, &mut leaves)?;
+                leaves
+            } else {
+                self.local_flat_values(source)?
+            };
+            let mut cursor = 0usize;
+            self.store_typed_private_leaves(pointer, &destination_class, &leaves, &mut cursor)?;
+            if cursor != leaves.len() {
+                return Err(LowerError::Internal(format!(
+                    "shader typed-private copy source {source:?} consumed {cursor} of {} leaves",
+                    leaves.len(),
+                )));
+            }
+            return Ok(());
+        }
+        let Some((pointer, destination_class)) = self.raw_memory_aggregate_place(destination)?
+        else {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: aggregate copy destination is not canonical-arena-backed: {destination:?}"
+            )));
+        };
         if !source_class.shares_runtime_rep_with(self.module.db, &destination_class) {
             return Err(LowerError::Unsupported(format!(
                 "wasm target: aggregate copy source and destination layouts differ: {source_class:?} / {destination_class:?}"
@@ -12152,6 +12814,45 @@ where
                 "materialized aggregate class/shape mismatch: {class:?} / {shape:?}"
             ))),
         }
+    }
+
+    fn lower_materialize_to_typed_object(
+        &mut self,
+        src: RLocalId,
+        local: TypedPrivateLocal<'db>,
+    ) -> Result<ValueId, LowerError> {
+        let class = self.body.value_class(src).cloned().ok_or_else(|| {
+            LowerError::Internal(format!(
+                "typed materialization source {src:?} has no runtime class"
+            ))
+        })?;
+        if class.aggregate_layout() != Some(local.layout) {
+            return Err(LowerError::Internal(format!(
+                "typed materialization source {src:?} changed layouts"
+            )));
+        }
+        let leaves = if self.is_address_carried_aggregate_value(src) {
+            let shape = self.local_flat_shape(src)?;
+            let mut leaves = Vec::with_capacity(shape.leaf_count());
+            let source = self.local_value(src)?;
+            self.load_materialized_leaves(source, &class, &shape, &mut leaves)?;
+            leaves
+        } else {
+            self.local_flat_values(src)?
+        };
+        let pointer = self.fb.insert_inst(
+            Alloca::new(self.inst_set(), local.pointee_ty),
+            local.pointer_ty,
+        );
+        let mut cursor = 0usize;
+        self.store_typed_private_leaves(pointer, &class, &leaves, &mut cursor)?;
+        if cursor != leaves.len() {
+            return Err(LowerError::Internal(format!(
+                "typed materialization source {src:?} consumed {cursor} of {} leaves",
+                leaves.len(),
+            )));
+        }
+        Ok(pointer)
     }
 
     fn lower_materialize_to_object(&mut self, src: RLocalId) -> Result<ValueId, LowerError> {
@@ -12529,15 +13230,15 @@ where
         Ok(Some((addr, resolved.result_class)))
     }
 
-    /// Resolve a scalar projection rooted in compiler-selected typed private
-    /// storage. The leading zero indexes the allocation itself, after which
-    /// struct fields and fixed-array indexes retain their source topology in a
+    /// Resolve a projection rooted in compiler-selected typed private storage.
+    /// The leading zero indexes the allocation itself, after which struct
+    /// fields and fixed-array indexes retain their source topology in a
     /// Sonatina `Gep`. Dynamic indexes keep the same explicit bounds trap as
     /// the arena path.
-    fn typed_private_scalar_place(
+    fn typed_private_place(
         &mut self,
         place: &RuntimePlace<'db>,
-    ) -> Result<Option<(ValueId, Type)>, LowerError> {
+    ) -> Result<Option<(ValueId, RuntimeClass<'db>)>, LowerError> {
         let program = self.module.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
             .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
@@ -12564,6 +13265,9 @@ where
 
         let is = self.inst_set();
         let base = self.local_value(root)?;
+        if resolved.path.is_empty() {
+            return Ok(Some((base, resolved.result_class)));
+        }
         let zero = self.fb.make_imm_value(Immediate::I32(0));
         let mut indices = smallvec1::smallvec![base, zero];
         for elem in resolved.path {
@@ -12640,14 +13344,41 @@ where
             }
         }
 
-        let scalar = match current_class {
+        if !current_class.shares_runtime_rep_with(self.module.db, &resolved.result_class) {
+            return Err(LowerError::Internal(
+                "typed private place resolution changed its result class".to_owned(),
+            ));
+        }
+        let Some(pointee_ty) = self.module.typed_private_type_for_class(&current_class)? else {
+            return Ok(None);
+        };
+        let pointer_ty = self.module.builder.ptr_type(pointee_ty);
+        let pointer = self.fb.insert_inst(Gep::new(is, indices), pointer_ty);
+        Ok(Some((pointer, resolved.result_class)))
+    }
+
+    fn typed_private_scalar_place(
+        &mut self,
+        place: &RuntimePlace<'db>,
+    ) -> Result<Option<(ValueId, Type)>, LowerError> {
+        let Some((mut pointer, class)) = self.typed_private_place(place)? else {
+            return Ok(None);
+        };
+        let scalar = match class {
             RuntimeClass::Scalar(scalar) => scalar,
             RuntimeClass::AggregateValue { layout } => {
                 let Some(scalar) = self.module.single_scalar_field(layout) else {
                     return Ok(None);
                 };
+                let is = self.inst_set();
+                let zero = self.fb.make_imm_value(Immediate::I32(0));
                 let field = self.fb.make_imm_value(Immediate::I32(0));
-                indices.push(field);
+                let ty = scalar_ty_r1(&scalar)?;
+                let pointer_ty = self.module.builder.ptr_type(ty);
+                pointer = self.fb.insert_inst(
+                    Gep::new(is, smallvec1::smallvec![pointer, zero, field]),
+                    pointer_ty,
+                );
                 scalar
             }
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => return Ok(None),
@@ -12656,8 +13387,6 @@ where
         if !matches!(ty, Type::I1 | Type::I32 | Type::F32) {
             return Ok(None);
         }
-        let pointer_ty = self.module.builder.ptr_type(ty);
-        let pointer = self.fb.insert_inst(Gep::new(is, indices), pointer_ty);
         Ok(Some((pointer, ty)))
     }
 
@@ -14082,6 +14811,65 @@ mod tests {
 
     fn runtime_local(index: u32) -> RLocalId {
         RLocalId::from_u32(index)
+    }
+
+    #[test]
+    fn shader_ir_preserves_proven_aggregate_borrows_as_typed_pointers() {
+        let source = r#"
+struct Cell { left: u32, right: u32 }
+
+fn update(_ cell: mut Cell, _ delta: u32) {
+    cell.left = cell.left + delta
+    cell.right = cell.right + delta
+}
+
+fn sum(_ cell: ref Cell) -> u32 {
+    cell.left + cell.right
+}
+
+pub fn kernel(_ value: u32) -> u32 {
+    let mut cell = Cell { left: value, right: value + 1 }
+    update(mut cell, 3)
+    sum(ref cell)
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///shader_typed_aggregate_borrow.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let (module, _) = compile_runtime_package_shader_ir(&db, &package).unwrap();
+
+        let typed_pointer_arguments = module
+            .funcs()
+            .into_iter()
+            .flat_map(|function| {
+                module
+                    .ctx
+                    .func_sig(function, |signature| signature.args().to_vec())
+            })
+            .filter(|ty| {
+                matches!(
+                    ty.resolve_compound(&module.ctx),
+                    Some(sonatina_ir::types::CompoundType::Ptr(_))
+                )
+            })
+            .count();
+        assert_eq!(
+            typed_pointer_arguments, 2,
+            "both ordinary Fe aggregate borrows should retain typed pointer parameters"
+        );
+
+        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+            &db,
+            &package,
+            [1, 1, 1],
+        )
+        .expect("typed aggregate borrows should lower through naga-validated SPIR-V");
     }
 
     #[test]
