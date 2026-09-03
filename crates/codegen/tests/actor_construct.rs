@@ -20,8 +20,8 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
-    WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
+    CanonicalType, WasmCompileOptions, WebActorDraw, WebActorPassCycle, WebActorResourceElement,
+    WebActorStageKind, WebBufferUsage, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
     actor_gpu_program, actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
@@ -35,6 +35,115 @@ use url::Url;
 fn ingot_root(relative: &str) -> Url {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
     Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
+}
+
+#[test]
+fn indirect_raster_draw_is_derived_from_one_exact_fe_resource_type() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_indirect");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "indirect raster diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("indirect raster plan")
+        .expect("GPU actor");
+    assert_eq!(program.resources.len(), 1);
+    assert_eq!(program.resources[0].name, "draw");
+    assert_eq!(program.resources[0].kind, GpuResource::Indirect);
+    let WebActorStageKind::Vertex {
+        draw: WebActorDraw::Indirect {
+            resource_field_index,
+        },
+        instance_index,
+        ..
+    } = &program.stages[1].kind
+    else {
+        panic!("expected indirect authored vertex stage");
+    };
+    assert_eq!(*resource_field_index, program.resources[0].field_index);
+    assert!(*instance_index);
+
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("indirect authored raster bundle");
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    let prepare = &bundle.manifest.passes[0];
+    let raster = &bundle.manifest.passes[1];
+    assert_eq!(prepare.source_entry, "prepare");
+    assert_eq!(raster.source_entry, "shade");
+    assert_eq!(raster.draw_vertices, None);
+    assert_eq!(raster.draw_instances, None);
+    let indirect = raster
+        .draw_indirect
+        .as_ref()
+        .expect("indirect draw command");
+    assert_eq!(indirect.resource, "draw");
+    assert_eq!(indirect.offset, 0);
+    assert_eq!(raster.layout.builtin_inputs.len(), 2);
+    assert_eq!(
+        raster.layout.builtin_inputs[0].source,
+        WebBuiltinSource::VertexIndex
+    );
+    assert_eq!(
+        raster.layout.builtin_inputs[1].source,
+        WebBuiltinSource::InstanceIndex
+    );
+    assert!(
+        raster
+            .layout
+            .bindings
+            .iter()
+            .all(|binding| binding.name != "draw"),
+        "the draw-command resource is not a shader binding in a stage that does not read it"
+    );
+    assert_eq!(
+        bundle.manifest.resources[0].buffer_usage,
+        [WebBufferUsage::Storage, WebBufferUsage::Indirect]
+    );
+}
+
+#[test]
+fn indirect_raster_draw_rejects_a_resource_type_the_actor_does_not_own() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_indirect_missing");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "fixture diagnostics:\n{diagnostics}"
+    );
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("has no field of that exact resource type"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn indirect_raster_draw_rejects_ambiguous_resource_identity() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_indirect_ambiguous");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "fixture diagnostics:\n{diagnostics}"
+    );
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("actor fields have that exact resource type"),
+        "unexpected diagnostic: {error}"
+    );
 }
 
 fn ingot_top_mod<'db>(db: &'db DriverDataBase, url: &Url) -> TopLevelMod<'db> {
@@ -175,7 +284,11 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert_eq!(program.stages[1].source_entry, "shade");
     let WebActorStageKind::Vertex {
         varying: vertex,
-        vertex_count,
+        draw:
+            WebActorDraw::Direct {
+                vertex_count,
+                instance_count: 1,
+            },
         ..
     } = &program.stages[0].kind
     else {
@@ -261,8 +374,10 @@ fn authored_raster_instancing_is_derived_from_the_fe_draw_policy() {
         .expect("instanced raster plan")
         .expect("GPU actor");
     let WebActorStageKind::Vertex {
-        vertex_count,
-        instance_count,
+        draw: WebActorDraw::Direct {
+            vertex_count,
+            instance_count,
+        },
         instance_index,
         ..
     } = &program.stages[0].kind
@@ -472,7 +587,10 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
     assert!(matches!(
         program.stages[1].kind,
         WebActorStageKind::Vertex {
-            vertex_count: 6,
+            draw: WebActorDraw::Direct {
+                vertex_count: 6,
+                instance_count: 1,
+            },
             ..
         }
     ));

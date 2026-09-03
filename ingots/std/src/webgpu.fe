@@ -32,6 +32,7 @@ pub use resource::{
     ComputeOnly,
     ContentAddressed,
     Derived,
+    DrawIndirectBuffer,
     DynamicStorageBuffer,
     FragmentOnly,
     FrameTransient,
@@ -43,6 +44,7 @@ pub use resource::{
     Immutable,
     ImmutableStorageBuffer,
     Imported,
+    IndirectBuffer,
     NonRecoverable,
     ReadOnly,
     ReadbackBuffer,
@@ -310,6 +312,16 @@ pub struct TriangleList<const VERTICES: usize> {}
 /// without expanding those values into one flattened vertex stream.
 #[gpu_draw(instanced)]
 pub struct Instanced<Draw, const INSTANCES: usize> {}
+
+/// Draw one non-indexed triangle list from the four WebGPU draw arguments in
+/// the exact actor resource `Args`:
+/// `[vertex_count, instance_count, first_vertex, first_instance]`.
+///
+/// Compute may author the arguments and the following raster pass consumes
+/// them without host readback. Both `vertex_index` and `instance_index` are
+/// therefore available to the vertex behavior even when one count is one.
+#[gpu_draw(indirect_triangle_list)]
+pub struct IndirectTriangleList<Args> {}
 
 /// The gesture-driven control-state role of an actor behavior (R3 param
 /// gestures): a `self`-taking behavior that maps raw gesture deltas (pan

@@ -856,7 +856,10 @@ fn canonical_de_actor_owns_the_complete_scene_lifecycle() {
         assert!(matches!(
             program.stages[1].kind,
             WebActorStageKind::Vertex {
-                vertex_count: 54,
+                draw: fe_codegen::WebActorDraw::Direct {
+                    vertex_count: 54,
+                    instance_count: 1,
+                },
                 ..
             }
         ));

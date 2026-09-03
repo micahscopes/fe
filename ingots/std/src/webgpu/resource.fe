@@ -376,6 +376,46 @@ impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
     }
 }
 
+/// One nominal GPU-written command buffer consumed by a later indirect draw.
+///
+/// `Brand` gives independently authored draw streams distinct type identity.
+/// The browser never observes it; the compiler uses the complete concrete type
+/// to resolve the draw policy to exactly one actor field. `N` and `T` remain
+/// explicit so future indexed or multi-draw command records can reuse the same
+/// family without adding a parallel resource mechanism.
+#[gpu_resource(indirect)]
+pub struct IndirectBuffer<Brand, const N: usize, T> { binding: u32 }
+
+impl<Brand, const N: usize, T> core::marker::Copy for IndirectBuffer<Brand, N, T> {}
+
+impl<Brand, const N: usize, T> GpuResourcePolicy for IndirectBuffer<Brand, N, T> {
+    const fn plan() -> ResourcePlan {
+        ResourcePlan {
+            kind: ResourceKind::Storage,
+            access: ResourceAccess::ReadWrite,
+            residency: ResourceResidency::ActorResident,
+            initialization: ResourceInitialization::Derived,
+            recovery: ResourceRecovery::ReplayRecipe,
+            visibility: ResourceVisibility::Compute,
+        }
+    }
+}
+
+impl<Brand, const N: usize, T> IndirectBuffer<Brand, N, T> {
+    #[gpu_intrinsic(storage_load)]
+    pub fn load(self, index: u32) -> T {
+        core::panic()
+    }
+
+    #[gpu_intrinsic(storage_store)]
+    pub fn store(self, index: u32, value: T) {
+        core::panic()
+    }
+}
+
+/// Four words consumed by `drawIndirect` for one non-indexed draw.
+pub type DrawIndirectBuffer<Brand> = IndirectBuffer<Brand, 4, u32>
+
 /// GPU storage whose completed contents are transported as one typed actor
 /// message `M`. `T` and `N` retain the ordinary storage element and extent
 /// contract; `M` is a compile-time brand consumed by `ReadbackTransition<M>`.
