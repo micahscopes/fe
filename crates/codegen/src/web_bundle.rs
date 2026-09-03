@@ -33,9 +33,8 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    EnumVariant, FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource,
-    GpuResourceAccess, GpuResourceInit, GpuResourceKind, GpuResourceRecovery, GpuResourceResidency,
-    GpuResourceVisibility, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
+    EnumVariant, FieldParent, Func, GenericArg, GenericParam, GpuControl, GpuDispatch, GpuDraw,
+    GpuResource, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,8 +45,7 @@ use sonatina_codegen::isa::spirv::{
 };
 
 use crate::actor_semantics::{
-    SemanticActor, SemanticGpuResourceFamily, nominal_attrs, resolve_metadata_ty, semantic_actors,
-    semantic_gpu_resource,
+    SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors, semantic_gpu_resource,
 };
 use crate::browser_actor_runtime::{
     BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
@@ -605,83 +603,65 @@ pub struct WebActorResource {
     pub kind: GpuResource,
     /// Type-derived logical policy. The fixed host may narrow physical access
     /// for a stage, but it may never grant more than this declaration.
-    pub policy: WebResourcePolicy,
+    pub policy: serde_json::Value,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceKind {
-    #[default]
-    Storage,
+fn legacy_resource_policy() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "storage",
+        "access": "read_write",
+        "residency": "actor_resident",
+        "initialization": { "kind": "zeroed" },
+        "recovery": "replay_recipe",
+        "visibility": "compute_fragment",
+    })
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceAccess {
-    ReadOnly,
-    WriteOnly,
-    #[default]
-    ReadWrite,
+fn is_default_resource_policy(policy: &serde_json::Value) -> bool {
+    *policy == legacy_resource_policy()
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceResidency {
-    Immutable,
-    #[default]
-    ActorResident,
-    FrameTransient,
-    Imported,
+fn normalized_resource_policy_field<'a>(
+    policy: &'a serde_json::Value,
+    field: &str,
+    resource: &str,
+) -> Result<&'a str, WebBundleError> {
+    policy
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{resource}` manifest policy has no scalar `{field}` field"
+            ))
+        })
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WebResourceInitialization {
-    #[default]
-    Zeroed,
-    ContentAddressed {
-        sha256: String,
-    },
-    Derived,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceRecovery {
-    #[default]
-    ReplayRecipe,
-    RestoreCheckpoint,
-    Regenerate,
-    NonRecoverable,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceVisibility {
-    Compute,
-    Vertex,
-    Fragment,
-    #[default]
-    ComputeFragment,
-    VertexFragment,
-    All,
-}
-
-/// Orthogonal logical resource policy derived exclusively from Fe marker
-/// types. Its default is the historical mutable actor storage contract, so
-/// legacy manifests retain their compact spelling.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebResourcePolicy {
-    pub kind: WebResourceKind,
-    pub access: WebResourceAccess,
-    pub residency: WebResourceResidency,
-    pub initialization: WebResourceInitialization,
-    pub recovery: WebResourceRecovery,
-    pub visibility: WebResourceVisibility,
-}
-
-fn is_default_resource_policy(policy: &WebResourcePolicy) -> bool {
-    *policy == WebResourcePolicy::default()
+fn normalized_resource_initialization<'a>(
+    policy: &'a serde_json::Value,
+    resource: &str,
+) -> Result<(&'a str, Option<&'a str>), WebBundleError> {
+    let initialization = policy
+        .get("initialization")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{resource}` manifest policy has no initialization record"
+            ))
+        })?;
+    let kind = initialization
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{resource}` manifest initialization has no scalar kind"
+            ))
+        })?;
+    Ok((
+        kind,
+        initialization
+            .get("sha256")
+            .and_then(serde_json::Value::as_str),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1398,21 +1378,101 @@ fn resource_element(
     Ok(WebActorResourceElement::Record { fields, span })
 }
 
-fn content_addressed_digest(
-    db: &DriverDataBase,
-    init_ty: TyId<'_>,
+fn projected_resource_plan_function<'db>(
+    db: &'db DriverDataBase,
+    resource_ty: TyId<'db>,
     path: &str,
-) -> Result<String, WebBundleError> {
-    let init_ty = init_ty.as_view(db).unwrap_or(init_ty);
-    let [h0, h1, h2, h3, h4, h5, h6, h7] = init_ty.generic_args(db) else {
+) -> Result<Func<'db>, WebBundleError> {
+    let resource_name = resource_ty.pretty_print(db);
+    let ingot = resource_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` type `{resource_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = ingot
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|func| {
+            func.vis(db) == Visibility::Public
+                && func.is_const(db)
+                && !func.is_extern(db)
+                && func.body(db).is_some()
+                && func.params(db).next().is_none()
+                && matches!(
+                    func.hir_generic_params(db).data(db).as_slice(),
+                    [GenericParam::Type(_)]
+                )
+                && nominal_attrs(db, func.return_ty(db))
+                    .is_some_and(|attrs| attrs.is_web_resource_plan(db))
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [function] => Ok(*function),
+        [] => Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` type `{resource_name}` has no unique public generic Fe const evaluator returning the nominal ResourcePlan"
+        ))),
+        _ => Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` type `{resource_name}` has {} matching Fe resource-plan evaluators; exactly one is required",
+            candidates.len()
+        ))),
+    }
+}
+
+fn projected_resource_digest(
+    initialization: &serde_json::Value,
+    path: &str,
+) -> Result<Option<String>, WebBundleError> {
+    if let Some(kind) = initialization.as_str() {
+        return match kind {
+            "zeroed" | "derived" => Ok(None),
+            _ => Err(WebBundleError::EntryDerivation(format!(
+                "resource `{path}` has unsupported Fe initialization `{kind}`"
+            ))),
+        };
+    }
+    let object = initialization.as_object().ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` Fe initialization is not a projected enum value"
+        ))
+    })?;
+    if object.get("case").and_then(serde_json::Value::as_str) != Some("content_addressed") {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` content-addressed initialization requires exactly eight SHA-256 words"
+            "resource `{path}` has unsupported Fe initialization payload"
+        )));
+    }
+    let [digest] = object
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` content-addressed initialization has no digest payload"
+            ))
+        })?
+    else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires one digest payload"
         )));
     };
-    [h0, h1, h2, h3, h4, h5, h6, h7]
-        .into_iter()
+    let words = digest
+        .get("words")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` content-addressed initialization has no SHA-256 words"
+            ))
+        })?;
+    if words.len() != 8 {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires eight SHA-256 words"
+        )));
+    }
+    words
+        .iter()
         .map(|word| {
-            semantic_const_u32(db, *word)
+            word.as_u64()
+                .and_then(|word| u32::try_from(word).ok())
                 .map(|word| format!("{word:08x}"))
                 .ok_or_else(|| {
                     WebBundleError::EntryDerivation(format!(
@@ -1421,132 +1481,99 @@ fn content_addressed_digest(
                 })
         })
         .collect::<Result<Vec<_>, _>>()
-        .map(|words| words.concat())
+        .map(|words| Some(words.concat()))
 }
 
-fn typed_resource_policy(
-    db: &DriverDataBase,
-    family: SemanticGpuResourceFamily<'_>,
+fn projected_resource_field<'a>(
+    plan: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
     path: &str,
-) -> Result<WebResourcePolicy, WebBundleError> {
-    let kind = nominal_attrs(db, family.kind_ty)
-        .and_then(|attrs| attrs.gpu_resource_kind(db))
+) -> Result<&'a str, WebBundleError> {
+    plan.get(field)
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
-                "resource `{path}` kind argument lacks #[gpu_resource_kind(...)] evidence"
+                "resource `{path}` Fe plan has no scalar `{field}` field"
             ))
-        })?;
-    let access = nominal_attrs(db, family.access_ty)
-        .and_then(|attrs| attrs.gpu_resource_access(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` access argument lacks #[gpu_resource_access(...)] evidence"
-            ))
-        })?;
-    let residency = nominal_attrs(db, family.residency_ty)
-        .and_then(|attrs| attrs.gpu_resource_residency(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` residency argument lacks #[gpu_resource_residency(...)] evidence"
-            ))
-        })?;
-    let initialization = nominal_attrs(db, family.init_ty)
-        .and_then(|attrs| attrs.gpu_resource_init(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` initialization argument lacks #[gpu_resource_init(...)] evidence"
-            ))
-        })?;
-    let recovery = nominal_attrs(db, family.recovery_ty)
-        .and_then(|attrs| attrs.gpu_resource_recovery(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` recovery argument lacks #[gpu_resource_recovery(...)] evidence"
-            ))
-        })?;
-    let visibility = nominal_attrs(db, family.visibility_ty)
-        .and_then(|attrs| attrs.gpu_resource_visibility(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` visibility argument lacks #[gpu_resource_visibility(...)] evidence"
-            ))
-        })?;
+        })
+}
 
-    let policy = WebResourcePolicy {
-        kind: match kind {
-            GpuResourceKind::Storage => WebResourceKind::Storage,
-        },
-        access: match access {
-            GpuResourceAccess::ReadOnly => WebResourceAccess::ReadOnly,
-            GpuResourceAccess::WriteOnly => WebResourceAccess::WriteOnly,
-            GpuResourceAccess::ReadWrite => WebResourceAccess::ReadWrite,
-        },
-        residency: match residency {
-            GpuResourceResidency::Immutable => WebResourceResidency::Immutable,
-            GpuResourceResidency::ActorResident => WebResourceResidency::ActorResident,
-            GpuResourceResidency::FrameTransient => WebResourceResidency::FrameTransient,
-            GpuResourceResidency::Imported => WebResourceResidency::Imported,
-        },
-        initialization: match initialization {
-            GpuResourceInit::Zeroed => WebResourceInitialization::Zeroed,
-            GpuResourceInit::ContentAddressed => WebResourceInitialization::ContentAddressed {
-                sha256: content_addressed_digest(db, family.init_ty, path)?,
-            },
-            GpuResourceInit::Derived => WebResourceInitialization::Derived,
-        },
-        recovery: match recovery {
-            GpuResourceRecovery::ReplayRecipe => WebResourceRecovery::ReplayRecipe,
-            GpuResourceRecovery::RestoreCheckpoint => WebResourceRecovery::RestoreCheckpoint,
-            GpuResourceRecovery::Regenerate => WebResourceRecovery::Regenerate,
-            GpuResourceRecovery::NonRecoverable => WebResourceRecovery::NonRecoverable,
-        },
-        visibility: match visibility {
-            GpuResourceVisibility::Compute => WebResourceVisibility::Compute,
-            GpuResourceVisibility::Vertex => WebResourceVisibility::Vertex,
-            GpuResourceVisibility::Fragment => WebResourceVisibility::Fragment,
-            GpuResourceVisibility::ComputeFragment => WebResourceVisibility::ComputeFragment,
-            GpuResourceVisibility::VertexFragment => WebResourceVisibility::VertexFragment,
-            GpuResourceVisibility::All => WebResourceVisibility::All,
-        },
-    };
-
-    if policy.residency == WebResourceResidency::Immutable
-        && policy.access != WebResourceAccess::ReadOnly
-    {
+/// Lower the generic Fe plan into the stable browser-manifest representation.
+/// This translates the Fe digest words into the target's canonical SHA-256
+/// spelling but does not restate or compose resource policy in Rust.
+fn normalize_projected_resource_plan(
+    projected: serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value, WebBundleError> {
+    let mut plan = projected.as_object().cloned().ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` Fe policy did not evaluate to a ResourcePlan record"
+        ))
+    })?;
+    let kind = projected_resource_field(&plan, "kind", path)?;
+    if kind != "storage" {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` immutable residency requires read-only access"
+            "resource `{path}` kind `{kind}` has no WebGPU buffer realization yet"
         )));
     }
-    if matches!(
-        policy.initialization,
-        WebResourceInitialization::ContentAddressed { .. }
-    ) && (policy.residency != WebResourceResidency::Immutable
-        || policy.access != WebResourceAccess::ReadOnly
-        || policy.recovery != WebResourceRecovery::ReplayRecipe)
-    {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` content-addressed initialization requires immutable, read-only, replayable policy"
-        )));
-    }
-    if policy.initialization == WebResourceInitialization::Derived
-        && policy.access == WebResourceAccess::ReadOnly
-    {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` derived initialization requires writable access"
-        )));
-    }
-    if policy.residency == WebResourceResidency::Imported {
+    projected_resource_field(&plan, "access", path)?;
+    let residency = projected_resource_field(&plan, "residency", path)?;
+    if residency == "imported" {
         return Err(WebBundleError::EntryDerivation(format!(
             "resource `{path}` imported residency has no authorized browser realization yet"
         )));
     }
-    if policy.recovery != WebResourceRecovery::ReplayRecipe {
+    let recovery = projected_resource_field(&plan, "recovery", path)?;
+    if recovery != "replay_recipe" {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` requests {:?} recovery, which the fixed browser host does not realize yet",
-            policy.recovery
+            "resource `{path}` requests `{recovery}` recovery, which the fixed browser host does not realize yet"
         )));
     }
-    Ok(policy)
+    projected_resource_field(&plan, "visibility", path)?;
+    let initialization = plan.get("initialization").ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` Fe plan has no `initialization` field"
+        ))
+    })?;
+    let digest = projected_resource_digest(initialization, path)?;
+    let initialization_kind = if digest.is_some() {
+        "content_addressed"
+    } else {
+        initialization.as_str().expect("fieldless initialization was checked")
+    };
+    plan.insert(
+        "initialization".to_owned(),
+        match digest {
+            Some(sha256) => serde_json::json!({
+                "kind": initialization_kind,
+                "sha256": sha256,
+            }),
+            None => serde_json::json!({ "kind": initialization_kind }),
+        },
+    );
+    Ok(serde_json::Value::Object(plan))
+}
+
+fn typed_resource_policy(
+    db: &DriverDataBase,
+    resource_ty: TyId<'_>,
+    path: &str,
+) -> Result<serde_json::Value, WebBundleError> {
+    let function = projected_resource_plan_function(db, resource_ty, path)?;
+    let value = eval_body_owner_const(db, BodyOwner::Func(function), vec![resource_ty]).map_err(
+        |error| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` has no valid Fe GpuResourcePolicy evidence: {}",
+                describe_raster_ctfe_error(&error)
+            ))
+        },
+    )?;
+    let projected = project_manifest_const(db, value, "Fe GPU resource plan")?;
+    normalize_projected_resource_plan(projected, path).map_err(|error| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` has no valid Fe GpuResourcePolicy evidence: {error}"
+        ))
+    })
 }
 
 fn actor_resources(
@@ -1575,11 +1602,11 @@ fn actor_resources(
                     "actor storage resource fields must be named".to_owned(),
                 )
             })?;
-        let policy = resource
-            .family
-            .map(|family| typed_resource_policy(db, family, &name))
-            .transpose()?
-            .unwrap_or_default();
+        let policy = if resource.has_typed_policy {
+            typed_resource_policy(db, resource.resource_ty, &name)?
+        } else {
+            legacy_resource_policy()
+        };
         let length = semantic_const_u32(db, resource.length_ty).ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
                 "storage resource `{name}` length must be a concrete u32-sized integer"
@@ -4996,8 +5023,11 @@ pub struct WebResource {
     pub stride: u32,
     pub span: u32,
     pub element: WebActorResourceElement,
-    #[serde(default, skip_serializing_if = "is_default_resource_policy")]
-    pub policy: WebResourcePolicy,
+    #[serde(
+        default = "legacy_resource_policy",
+        skip_serializing_if = "is_default_resource_policy"
+    )]
+    pub policy: serde_json::Value,
     /// Exact immutable bundle artifact used to initialize this resource.
     /// Absent for zeroed and GPU-derived storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5299,13 +5329,21 @@ fn web_resource_manifest(
             resource.name
         ))
     })?;
-    let artifact = match &resource.policy.initialization {
-        WebResourceInitialization::ContentAddressed { sha256 } => Some(WebResourceArtifact {
+    let (initialization, digest) =
+        normalized_resource_initialization(&resource.policy, &resource.name)?;
+    let artifact = match (initialization, digest) {
+        ("content_addressed", Some(sha256)) => Some(WebResourceArtifact {
             path: format!("{RESOURCE_DIR}/sha256-{sha256}.bin"),
             bytes: u64::from(bytes),
-            sha256: sha256.clone(),
+            sha256: sha256.to_owned(),
         }),
-        WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+        ("zeroed" | "derived", None) => None,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{}` has an inconsistent normalized initialization plan",
+                resource.name
+            )));
+        }
     };
     Ok(WebResource {
         group: 0,
@@ -5401,41 +5439,59 @@ fn stage_external_resources(
             resources.len()
         )));
     }
-    Ok(resources
+    resources
         .iter()
         .zip(arg_indices)
-        .map(|(resource, arg_index)| SpirvExternalResource {
-            arg_index,
-            group: resource.group,
-            binding: resource.binding,
-            name: resource.name.clone(),
-            access: match resource.policy.access {
-                WebResourceAccess::ReadOnly => Access::Read,
-                // WGSL/Naga have no write-only storage declaration. Fe's
-                // missing GpuReadable evidence still rejects authored loads;
-                // the physical carrier therefore uses read_write.
-                WebResourceAccess::WriteOnly => Access::ReadWrite,
-                WebResourceAccess::ReadWrite => access,
-            },
-            element: match &resource.element {
-                WebActorResourceElement::U32 => SpirvResourceElement::Scalar(SpirvScalarKind::U32),
-                WebActorResourceElement::F32 => SpirvResourceElement::Scalar(SpirvScalarKind::F32),
-                WebActorResourceElement::Record { fields, span } => SpirvResourceElement::Record {
-                    fields: fields
-                        .iter()
-                        .map(|field| SpirvResourceField {
-                            name: field.name.clone(),
-                            scalar: spirv_scalar_kind(field.scalar),
-                            offset: field.offset,
-                        })
-                        .collect(),
-                    span: *span,
+        .map(|(resource, arg_index)| {
+            Ok(SpirvExternalResource {
+                arg_index,
+                group: resource.group,
+                binding: resource.binding,
+                name: resource.name.clone(),
+                access: match normalized_resource_policy_field(
+                    &resource.policy,
+                    "access",
+                    &resource.name,
+                )? {
+                    "read_only" => Access::Read,
+                    // WGSL/Naga have no write-only storage declaration. Fe's
+                    // missing GpuReadable evidence still rejects authored loads;
+                    // the physical carrier therefore uses read_write.
+                    "write_only" => Access::ReadWrite,
+                    "read_write" => access,
+                    unsupported => {
+                        return Err(WebBundleError::EntryDerivation(format!(
+                            "resource `{}` has unsupported Fe access `{unsupported}`",
+                            resource.name
+                        )));
+                    }
                 },
-            },
-            stride: resource.stride,
-            length: resource.length,
+                element: match &resource.element {
+                    WebActorResourceElement::U32 => {
+                        SpirvResourceElement::Scalar(SpirvScalarKind::U32)
+                    }
+                    WebActorResourceElement::F32 => {
+                        SpirvResourceElement::Scalar(SpirvScalarKind::F32)
+                    }
+                    WebActorResourceElement::Record { fields, span } => {
+                        SpirvResourceElement::Record {
+                            fields: fields
+                                .iter()
+                                .map(|field| SpirvResourceField {
+                                    name: field.name.clone(),
+                                    scalar: spirv_scalar_kind(field.scalar),
+                                    offset: field.offset,
+                                })
+                                .collect(),
+                            span: *span,
+                        }
+                    }
+                },
+                stride: resource.stride,
+                length: resource.length,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// One immutable file in a fully materialized [`WebBundle`].
@@ -6820,9 +6876,17 @@ impl WebBundle {
         }
         let mut materialized_resource_hashes = std::collections::BTreeSet::new();
         for resource in &self.manifest.resources {
-            let content_digest = match &resource.policy.initialization {
-                WebResourceInitialization::ContentAddressed { sha256 } => Some(sha256),
-                WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+            let (initialization, digest) =
+                normalized_resource_initialization(&resource.policy, &resource.name)?;
+            let content_digest = match (initialization, digest) {
+                ("content_addressed", Some(sha256)) => Some(sha256),
+                ("zeroed" | "derived", None) => None,
+                _ => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` has an inconsistent normalized initialization plan",
+                        resource.name
+                    )));
+                }
             };
             match (content_digest, resource.artifact.as_ref()) {
                 (None, None) => continue,

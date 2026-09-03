@@ -22,9 +22,7 @@ use driver::DriverDataBase;
 use fe_codegen::{
     CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
     WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
-    WebResourceAccess, WebResourceInitialization, WebResourceKind, WebResourcePolicy,
-    WebResourceRecovery, WebResourceResidency, WebResourceVisibility, actor_gpu_program,
-    actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
+    actor_gpu_program, actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
@@ -138,7 +136,7 @@ fn flags_contradicting_the_actor_are_rejected() {
 }
 
 #[test]
-fn actor_without_a_unique_fragment_behavior_is_rejected() {
+fn actor_without_a_unique_terminal_gpu_behavior_is_rejected() {
     // Two role-marked behaviors in one actor: no unique render entry to pick.
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_two_fragment");
@@ -147,13 +145,16 @@ fn actor_without_a_unique_fragment_behavior_is_rejected() {
     let err = actor_web_entry(&db, top_mod).unwrap_err();
     assert!(format!("{err}").contains("fragment-stage"), "{err}");
 
-    // An actor with the placement row but no fragment behavior at all.
+    // An actor with the placement row but no GPU stage behavior at all.
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_no_fragment");
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let err = actor_web_entry(&db, top_mod).unwrap_err();
-    assert!(format!("{err}").contains("gpu_stage(fragment)"), "{err}");
+    assert!(
+        format!("{err}").contains("GPU stage attribute"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -283,10 +284,8 @@ fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
         panic!("one content-addressed actor resource must be materialized once")
     };
     assert_eq!(
-        resource.policy.initialization,
-        WebResourceInitialization::ContentAddressed {
-            sha256: SHA256.to_owned(),
-        }
+        resource.policy["initialization"],
+        serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 })
     );
 }
 
@@ -714,14 +713,14 @@ fn typed_resource_policy_projects_to_manifest_and_narrows_physical_access() {
     };
     assert_eq!(
         resource.policy,
-        WebResourcePolicy {
-            kind: WebResourceKind::Storage,
-            access: WebResourceAccess::ReadOnly,
-            residency: WebResourceResidency::ActorResident,
-            initialization: WebResourceInitialization::Zeroed,
-            recovery: WebResourceRecovery::ReplayRecipe,
-            visibility: WebResourceVisibility::Fragment,
-        }
+        serde_json::json!({
+            "kind": "storage",
+            "access": "read_only",
+            "residency": "actor_resident",
+            "initialization": { "kind": "zeroed" },
+            "recovery": "replay_recipe",
+            "visibility": "fragment",
+        })
     );
     let policy_json = &serde_json::to_value(&bundle.manifest).unwrap()["resources"][0]["policy"];
     assert_eq!(policy_json["access"], "read_only");
@@ -771,7 +770,7 @@ fn invalid_immutable_policy_fails_closed_before_shader_lowering() {
     assert!(
         error
             .to_string()
-            .contains("immutable residency requires read-only access"),
+            .contains("no valid Fe GpuResourcePolicy evidence"),
         "unexpected invalid immutable policy error: {error}"
     );
 }
@@ -814,10 +813,8 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
         panic!("content actor must derive exactly one resource")
     };
     assert_eq!(
-        resource.policy.initialization,
-        WebResourceInitialization::ContentAddressed {
-            sha256: SHA256.to_owned(),
-        }
+        resource.policy["initialization"],
+        serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 })
     );
     let artifact = resource.artifact.as_ref().expect("resource artifact");
     assert_eq!(artifact.path, format!("resources/sha256-{SHA256}.bin"));

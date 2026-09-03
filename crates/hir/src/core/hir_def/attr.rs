@@ -49,51 +49,6 @@ pub enum GpuResource {
     Readback,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceKind {
-    Storage,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceAccess {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceResidency {
-    Immutable,
-    ActorResident,
-    FrameTransient,
-    Imported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceInit {
-    Zeroed,
-    ContentAddressed,
-    Derived,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceRecovery {
-    ReplayRecipe,
-    RestoreCheckpoint,
-    Regenerate,
-    NonRecoverable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceVisibility {
-    Compute,
-    Vertex,
-    Fragment,
-    ComputeFragment,
-    VertexFragment,
-    All,
-}
-
 /// GPU operation implemented directly by the compiler backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuIntrinsic {
@@ -568,69 +523,6 @@ impl<'db> AttrListId<'db> {
         }
     }
 
-    pub fn gpu_resource_kind(self, db: &'db dyn HirDb) -> Option<GpuResourceKind> {
-        match self.single_ident_arg(db, "gpu_resource_kind")?.as_str() {
-            "storage" => Some(GpuResourceKind::Storage),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_access(self, db: &'db dyn HirDb) -> Option<GpuResourceAccess> {
-        match self.single_ident_arg(db, "gpu_resource_access")?.as_str() {
-            "read_only" => Some(GpuResourceAccess::ReadOnly),
-            "write_only" => Some(GpuResourceAccess::WriteOnly),
-            "read_write" => Some(GpuResourceAccess::ReadWrite),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_residency(self, db: &'db dyn HirDb) -> Option<GpuResourceResidency> {
-        match self
-            .single_ident_arg(db, "gpu_resource_residency")?
-            .as_str()
-        {
-            "immutable" => Some(GpuResourceResidency::Immutable),
-            "actor_resident" => Some(GpuResourceResidency::ActorResident),
-            "frame_transient" => Some(GpuResourceResidency::FrameTransient),
-            "imported" => Some(GpuResourceResidency::Imported),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_init(self, db: &'db dyn HirDb) -> Option<GpuResourceInit> {
-        match self.single_ident_arg(db, "gpu_resource_init")?.as_str() {
-            "zeroed" => Some(GpuResourceInit::Zeroed),
-            "content_addressed" => Some(GpuResourceInit::ContentAddressed),
-            "derived" => Some(GpuResourceInit::Derived),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_recovery(self, db: &'db dyn HirDb) -> Option<GpuResourceRecovery> {
-        match self.single_ident_arg(db, "gpu_resource_recovery")?.as_str() {
-            "replay_recipe" => Some(GpuResourceRecovery::ReplayRecipe),
-            "restore_checkpoint" => Some(GpuResourceRecovery::RestoreCheckpoint),
-            "regenerate" => Some(GpuResourceRecovery::Regenerate),
-            "nonrecoverable" => Some(GpuResourceRecovery::NonRecoverable),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_visibility(self, db: &'db dyn HirDb) -> Option<GpuResourceVisibility> {
-        match self
-            .single_ident_arg(db, "gpu_resource_visibility")?
-            .as_str()
-        {
-            "compute" => Some(GpuResourceVisibility::Compute),
-            "vertex" => Some(GpuResourceVisibility::Vertex),
-            "fragment" => Some(GpuResourceVisibility::Fragment),
-            "compute_fragment" => Some(GpuResourceVisibility::ComputeFragment),
-            "vertex_fragment" => Some(GpuResourceVisibility::VertexFragment),
-            "all" => Some(GpuResourceVisibility::All),
-            _ => None,
-        }
-    }
-
     pub fn gpu_intrinsic(self, db: &'db dyn HirDb) -> Option<GpuIntrinsic> {
         match self.single_ident_arg(db, "gpu_intrinsic")?.as_str() {
             "storage_load" => Some(GpuIntrinsic::StorageLoad),
@@ -777,6 +669,13 @@ impl<'db> AttrListId<'db> {
     /// its evaluated physical value into a render bundle.
     pub fn is_web_raster_plan(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_raster_plan")
+    }
+
+    /// Marks the Fe record returned by the generic GPU-resource policy
+    /// evaluator. Resource vocabulary and composition remain authored in Fe;
+    /// compiler consumers only project the resulting concrete value.
+    pub fn is_web_resource_plan(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_resource_plan")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

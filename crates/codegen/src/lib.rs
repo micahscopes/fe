@@ -115,11 +115,9 @@ pub use web_bundle::{
     WebCanonicalStatus, WebControl, WebControlArgSource, WebControlWasmType,
     WebDispatchCooperation, WebDispatchTaper, WebFeResponsibility, WebFixedHostProvenance,
     WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility, WebLayout, WebPass,
-    WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceAccess,
-    WebResourceArtifact, WebResourceAsset, WebResourceInitialization, WebResourceKind,
-    WebResourcePolicy, WebResourceRecovery, WebResourceResidency, WebResourceVisibility, WebResult,
-    WebScalarKind, WebSourceProvenance, WebSurfacePointerMotion, actor_gpu_program,
-    actor_web_entry, render_runtime_js, resolve_web_entry,
+    WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceArtifact,
+    WebResourceAsset, WebResult, WebScalarKind, WebSourceProvenance, WebSurfacePointerMotion,
+    actor_gpu_program, actor_web_entry, render_runtime_js, resolve_web_entry,
 };
 #[cfg(all(
     feature = "spirv-backend",
