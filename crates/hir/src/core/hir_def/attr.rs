@@ -47,6 +47,10 @@ pub enum GpuResource {
     /// Storage-written bytes returned through one compiler-derived typed
     /// message transition after GPU completion.
     Readback,
+    /// Storage-written arguments consumed directly by a GPU draw command.
+    /// The resource remains ordinary shader storage for authored compute
+    /// stages while its physical buffer also carries WebGPU INDIRECT usage.
+    Indirect,
 }
 
 /// GPU operation implemented directly by the compiler backend.
@@ -105,6 +109,9 @@ pub enum GpuDispatch {
 pub enum GpuDraw {
     TriangleList,
     Instanced,
+    /// A non-indexed triangle-list draw whose four WebGPU arguments are read
+    /// from one exact nominal actor resource selected by the policy type.
+    IndirectTriangleList,
 }
 
 /// A target-neutral description of an aggregate result returned indirectly by
@@ -528,6 +535,7 @@ impl<'db> AttrListId<'db> {
             "storage" => Some(GpuResource::Storage),
             "storage_family" => Some(GpuResource::StorageFamily),
             "readback" => Some(GpuResource::Readback),
+            "indirect" => Some(GpuResource::Indirect),
             _ => None,
         }
     }
@@ -608,6 +616,7 @@ impl<'db> AttrListId<'db> {
         match self.single_ident_arg(db, "gpu_draw")?.as_str() {
             "triangle_list" => Some(GpuDraw::TriangleList),
             "instanced" => Some(GpuDraw::Instanced),
+            "indirect_triangle_list" => Some(GpuDraw::IndirectTriangleList),
             _ => None,
         }
     }

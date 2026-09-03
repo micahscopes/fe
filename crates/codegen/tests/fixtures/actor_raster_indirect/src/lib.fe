@@ -1,0 +1,57 @@
+use std::webgpu::{
+    ClipPosition,
+    ComputeInvocation,
+    ComputeSurface,
+    DrawIndirectBuffer,
+    FixedDispatch,
+    FragmentStage,
+    GpuProgram,
+    IndirectTriangleList,
+    RasterVertex,
+    VertexStage,
+    WebGpuBackend,
+    Workgroup,
+}
+
+struct MainDraw {}
+struct DrawVarying { intensity: f32 }
+impl Copy for DrawVarying {}
+
+actor IndirectTriangle uses (GpuProgram<WebGpuBackend>) {
+    draw: DrawIndirectBuffer<MainDraw>,
+
+    fn prepare(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        if invocation.global.x == 0 {
+            self.draw.store(index: 0, value: 3)
+            self.draw.store(index: 1, value: 1)
+            self.draw.store(index: 2, value: 0)
+            self.draw.store(index: 3, value: 0)
+        }
+    }
+
+    fn vertices(
+        self,
+        vertex_index: u32,
+        instance_index: u32,
+    ) -> RasterVertex<DrawVarying>
+        uses (VertexStage<DrawVarying, IndirectTriangleList<DrawIndirectBuffer<MainDraw>>>)
+    {
+        RasterVertex {
+            position: ClipPosition {
+                x: if vertex_index == 1 { 0.8 } else { -0.8 },
+                y: if vertex_index == 2 { 0.8 } else { -0.8 },
+                z: 0.0,
+                w: 1.0,
+            },
+            varying: DrawVarying {
+                intensity: if instance_index == 0 { 1.0 } else { 0.0 },
+            },
+        }
+    }
+
+    fn shade(self, varying: DrawVarying) -> u32 uses (FragmentStage<DrawVarying>) {
+        if varying.intensity > 0.5 { 4294901760 } else { 4278190335 }
+    }
+}

@@ -258,7 +258,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_resource",
                 GPU_IDENT_FORM,
-                "`#[gpu_resource(storage)]`, `#[gpu_resource(storage_family)]`, or `#[gpu_resource(readback)]`",
+                "`#[gpu_resource(storage)]`, `#[gpu_resource(storage_family)]`, `#[gpu_resource(readback)]`, or `#[gpu_resource(indirect)]`",
             ),
             AttrRule::supported(
                 "gpu_control",
@@ -318,7 +318,11 @@ fn validate_struct_attrs<'db>(
                 GPU_IDENT_FORM,
                 "`#[gpu_dispatch(fixed)]`, `#[gpu_dispatch(repeated)]`, `#[gpu_dispatch(tapered)]`, `#[gpu_dispatch(cooperative)]`, or `#[gpu_dispatch(cycled)]`",
             ),
-            AttrRule::supported("gpu_draw", GPU_IDENT_FORM, "`#[gpu_draw(triangle_list)]`"),
+            AttrRule::supported(
+                "gpu_draw",
+                GPU_IDENT_FORM,
+                "`#[gpu_draw(triangle_list)]`, `#[gpu_draw(instanced)]`, or `#[gpu_draw(indirect_triangle_list)]`",
+            ),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
             AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),

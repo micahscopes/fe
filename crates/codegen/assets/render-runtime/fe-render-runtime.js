@@ -79,6 +79,9 @@ export function resourceBufferUsage(
       case "copy_dst":
         usage |= constants.COPY_DST;
         break;
+      case "indirect":
+        usage |= constants.INDIRECT;
+        break;
       default:
         throw new Error(`fe render runtime: unsupported resource buffer usage ${capability}`);
     }
@@ -126,7 +129,7 @@ export function passShaderVisibility(
   }
   stages ??= pass.layout.mode === "compute"
     ? ["compute"]
-    : pass.draw_vertices
+    : pass.draw_vertices !== undefined || pass.draw_indirect !== undefined
       ? ["vertex", "fragment"]
       : ["fragment"];
   return shaderStagesVisibility(stages, constants, "pass");
@@ -280,6 +283,19 @@ function destroyGpuBuffers(buffers) {
 }
 
 export function rasterDrawShape(pass) {
+  if (pass.draw_indirect !== undefined) {
+    if (pass.draw_vertices !== undefined || pass.draw_instances !== undefined) {
+      throw new Error("fe render runtime: indirect and direct raster draws are mutually exclusive");
+    }
+    const { resource, offset = 0 } = pass.draw_indirect ?? {};
+    if (typeof resource !== "string" || resource.length === 0) {
+      throw new Error("fe render runtime: indirect raster draw requires one compiler-derived resource");
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset % 4 !== 0) {
+      throw new Error(`fe render runtime: invalid indirect draw byte offset ${offset}`);
+    }
+    return { indirect: { resource, offset } };
+  }
   if (pass.draw_instances !== undefined && pass.draw_vertices === undefined) {
     throw new Error("fe render runtime: compiler-derived instances require an authored raster draw");
   }
@@ -296,8 +312,13 @@ export function rasterDrawShape(pass) {
 
 export function requiresGpuPassGraph(passes, resources = []) {
   return resources.length > 0 || passes.some(
-    (pass) => pass.layout.mode === "compute" || pass.draw_vertices !== undefined,
+    (pass) => pass.layout.mode === "compute" ||
+      pass.draw_vertices !== undefined || pass.draw_indirect !== undefined,
   );
+}
+
+function isAuthoredRasterPass(pass) {
+  return pass.draw_vertices !== undefined || pass.draw_indirect !== undefined;
 }
 
 /** Fixed tags of the append-only Fe `SurfaceEventKind` enum. These are browser
@@ -2258,7 +2279,7 @@ export class FeSurfaceElement extends HTMLElement {
               },
               primitive: { topology: "triangle-list", cullMode: raster.cullMode },
               multisample: { count: raster.sampleCount },
-              ...(pass.draw_vertices && raster.depth
+              ...(isAuthoredRasterPass(pass) && raster.depth
                 ? {
                     depthStencil: {
                       format: raster.depth.format,
@@ -2268,6 +2289,14 @@ export class FeSurfaceElement extends HTMLElement {
                   }
                 : {}),
             };
+        const indirectBuffer = pass.draw_indirect === undefined
+          ? null
+          : resourceBuffers.get(pass.draw_indirect.resource);
+        if (pass.draw_indirect !== undefined && !indirectBuffer) {
+          throw new Error(
+            `fe render runtime: indirect draw resource \`${pass.draw_indirect.resource}\` is undeclared`,
+          );
+        }
         passRecords.push({
           pass,
           pipeline: null,
@@ -2278,6 +2307,7 @@ export class FeSurfaceElement extends HTMLElement {
           bindGroup,
           inputs,
           outputs,
+          indirectBuffer,
         });
       }
       return {
@@ -2558,7 +2588,7 @@ export class FeSurfaceElement extends HTMLElement {
             storeOp: gpu.raster.color.store,
           };
           if (multisampleView) colorAttachment.resolveTarget = targetView;
-          const usesDepth = Boolean(record.pass.draw_vertices && gpu.depthTexture);
+          const usesDepth = Boolean(isAuthoredRasterPass(record.pass) && gpu.depthTexture);
           const depthStencilAttachment = usesDepth
             ? {
                 view: gpu.depthTexture.createView(),
@@ -2576,7 +2606,11 @@ export class FeSurfaceElement extends HTMLElement {
           render.setPipeline(record.pipeline);
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
           const draw = rasterDrawShape(record.pass);
-          drawGpu(render, draw.vertices, draw.instances);
+          if (draw.indirect) {
+            drawGpuIndirect(render, record.indirectBuffer, draw.indirect.offset);
+          } else {
+            drawGpu(render, draw.vertices, draw.instances);
+          }
           render.end();
           rendered = true;
           depthRendered ||= usesDepth;

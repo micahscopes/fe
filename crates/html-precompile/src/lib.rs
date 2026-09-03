@@ -1309,6 +1309,7 @@ fn verify_render_deployment(
             detail: "protocol v7+ requires an explicit resources array".to_owned(),
         });
     }
+    let mut indirect_resources = BTreeSet::new();
     if let Some(resources) = value.get("resources") {
         let resources = resources.as_array().ok_or_else(|| VerificationError {
             context: format!("{context} manifest resources"),
@@ -1329,7 +1330,7 @@ fn verify_render_deployment(
                         let Some(usage) = usage.as_str() else {
                             return true;
                         };
-                        !matches!(usage, "storage" | "copy_src" | "copy_dst")
+                        !matches!(usage, "storage" | "copy_src" | "copy_dst" | "indirect")
                             || !seen.insert(usage)
                     })
                 {
@@ -1337,6 +1338,22 @@ fn verify_render_deployment(
                         context: resource_context.clone(),
                         detail: "protocol v8 resource has invalid buffer_usage".to_owned(),
                     });
+                }
+                if seen.contains("indirect") {
+                    let name = resource["name"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .ok_or_else(|| VerificationError {
+                            context: resource_context.clone(),
+                            detail: "indirect resource has no stable name".to_owned(),
+                        })?;
+                    if !seen.contains("storage") || !indirect_resources.insert(name.to_owned()) {
+                        return Err(VerificationError {
+                            context: resource_context.clone(),
+                            detail: "indirect resource must have unique identity and storage usage"
+                                .to_owned(),
+                        });
+                    }
                 }
             }
             let initialization = resource
@@ -1426,6 +1443,46 @@ fn verify_render_deployment(
                     verify_generated_browser_artifact(&artifact_path, artifact, &resource_context)?;
                     verified.insert(artifact_path);
                 }
+            }
+        }
+    }
+
+    if let Some(passes) = passes {
+        for (index, pass) in passes.iter().enumerate() {
+            let Some(indirect) = pass.get("draw_indirect").filter(|value| !value.is_null()) else {
+                continue;
+            };
+            let pass_context = format!("{context} pass #{}", index + 1);
+            if pass
+                .get("draw_vertices")
+                .is_some_and(|value| !value.is_null())
+                || pass
+                    .get("draw_instances")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return Err(VerificationError {
+                    context: pass_context,
+                    detail: "indirect and direct raster draws are mutually exclusive".to_owned(),
+                });
+            }
+            let resource = indirect["resource"]
+                .as_str()
+                .filter(|resource| indirect_resources.contains(*resource))
+                .ok_or_else(|| VerificationError {
+                    context: pass_context.clone(),
+                    detail: "indirect draw does not name a deployed indirect resource".to_owned(),
+                })?;
+            let offset = indirect
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if offset % 4 != 0 {
+                return Err(VerificationError {
+                    context: pass_context,
+                    detail: format!(
+                        "indirect draw resource `{resource}` has unaligned byte offset {offset}"
+                    ),
+                });
             }
         }
     }
@@ -4337,6 +4394,41 @@ mod tests {
         bundle
     }
 
+    fn fake_indirect_raster_bundle() -> RenderBundleArtifact {
+        let mut bundle = fake_render_graph_bundle();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(10);
+        manifest["resources"] = serde_json::json!([{
+            "group": 0,
+            "binding": 0,
+            "name": "draw",
+            "length": 4,
+            "stride": 4,
+            "span": 4,
+            "element": "U32",
+            "buffer_usage": ["storage", "indirect"],
+            "policy": {
+                "kind": "storage",
+                "access": "read_write",
+                "residency": "actor_resident",
+                "initialization": { "kind": "derived" },
+                "recovery": "replay_recipe",
+                "visibility": "compute"
+            }
+        }]);
+        manifest["passes"][0]["shader_stages"] = serde_json::json!(["compute"]);
+        manifest["passes"][0]["layout"] = serde_json::json!({ "bindings": [] });
+        manifest["passes"][1]["shader_stages"] = serde_json::json!(["vertex", "fragment"]);
+        manifest["passes"][1]["layout"] = serde_json::json!({ "bindings": [] });
+        manifest["passes"][1]["draw_indirect"] = serde_json::json!({
+            "resource": "draw",
+            "offset": 0
+        });
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        bundle
+    }
+
     #[test]
     fn canonical_gallery_rejects_authored_browser_javascript() {
         for authored_javascript in [
@@ -4791,6 +4883,23 @@ mod tests {
             error.detail.contains("binding has no shader_stages"),
             "unexpected v10 verification error: {error}"
         );
+    }
+
+    #[test]
+    fn deployment_verifies_a_storage_written_indirect_raster_draw() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(fake_indirect_raster_bundle())),
+        )
+        .unwrap();
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+        assert_eq!(report.modules, 1);
     }
 
     #[test]

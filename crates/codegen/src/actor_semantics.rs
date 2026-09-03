@@ -83,6 +83,20 @@ pub(crate) fn semantic_gpu_resource<'db>(
                 has_typed_policy: true,
             }
         }
+        GpuResource::Indirect => {
+            let [_brand_ty, length_ty, element_ty] = args else {
+                return Err(
+                    "GPU indirect resource type requires exactly brand, length, and element arguments",
+                );
+            };
+            SemanticGpuResource {
+                resource_ty: ty,
+                kind,
+                element_ty: *element_ty,
+                length_ty: *length_ty,
+                has_typed_policy: true,
+            }
+        }
         GpuResource::StorageFamily => {
             let [
                 _kind_ty,

@@ -639,8 +639,7 @@ pub enum WebActorStageKind {
     /// into the transitional render manifest.
     Vertex {
         varying: CanonicalType,
-        vertex_count: u32,
-        instance_count: u32,
+        draw: WebActorDraw,
         instance_index: bool,
     },
     Fragment,
@@ -648,6 +647,21 @@ pub enum WebActorStageKind {
     /// payload identity before this serializable-free descriptor is produced.
     RasterFragment {
         varying: CanonicalType,
+    },
+}
+
+/// Compiler-owned source of one authored raster draw. Direct counts remain
+/// compile-time Fe values; indirect draws retain the exact actor field that
+/// supplies their GPU-written four-word command. This type is never a page or
+/// browser API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebActorDraw {
+    Direct {
+        vertex_count: u32,
+        instance_count: u32,
+    },
+    Indirect {
+        resource_field_index: u32,
     },
 }
 
@@ -1218,13 +1232,86 @@ fn role_payload_ty<'db>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RasterDrawShape {
-    vertex_count: u32,
-    instance_count: u32,
+    draw: WebActorDraw,
     instance_index: bool,
+}
+
+fn exact_indirect_resource_field(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+    requested: TyId<'_>,
+) -> Result<u32, WebBundleError> {
+    let requested = requested.as_view(db).unwrap_or(requested);
+    let assumptions = PredicateListId::empty_list(db);
+    let mut matches = Vec::new();
+    for (field_index, field) in actor.state.hir_fields(db).data(db).iter().enumerate() {
+        let Some(type_ref) = field.type_ref().to_opt() else {
+            continue;
+        };
+        let found = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
+        let found = found.as_view(db).unwrap_or(found);
+        if found == requested {
+            matches.push((field_index, field));
+        }
+    }
+    let (field_index, field) = match matches.as_slice() {
+        [] => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "indirect triangle-list draw policy names `{}`, but the actor has no field of that exact resource type",
+                requested.pretty_print(db),
+            )));
+        }
+        [found] => *found,
+        found => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "indirect triangle-list draw policy names `{}`, but {count} actor fields have that exact resource type; use distinct nominal brands",
+                requested.pretty_print(db),
+                count = found.len(),
+            )));
+        }
+    };
+    let name = field
+        .name
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .unwrap_or_else(|| format!("field {field_index}"));
+    let resource = semantic_gpu_resource(db, requested)
+        .map_err(|message| {
+            WebBundleError::EntryDerivation(format!(
+                "indirect draw resource `{name}` is malformed: {message}"
+            ))
+        })?
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "indirect draw resource `{name}` has no GPU resource meaning"
+            ))
+        })?;
+    if resource.kind != GpuResource::Indirect {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "indirect triangle-list draw resource `{name}` must use the nominal Fe indirect-buffer family"
+        )));
+    }
+    if semantic_const_u32(db, resource.length_ty) != Some(4)
+        || !matches!(
+            resource
+                .element_ty
+                .as_view(db)
+                .unwrap_or(resource.element_ty)
+                .base_ty(db)
+                .data(db),
+            TyData::TyBase(TyBase::Prim(PrimTy::U32))
+        )
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "indirect triangle-list draw resource `{name}` must contain exactly four `u32` words"
+        )));
+    }
+    Ok(u32::try_from(field_index).expect("actor field count fits in u32"))
 }
 
 fn raster_draw_shape_from_ty(
     db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
     draw: TyId<'_>,
 ) -> Result<RasterDrawShape, WebBundleError> {
     let attrs = nominal_attrs(db, draw).ok_or_else(|| {
@@ -1250,8 +1337,10 @@ fn raster_draw_shape_from_ty(
                 ));
             }
             Ok(RasterDrawShape {
-                vertex_count: count,
-                instance_count: 1,
+                draw: WebActorDraw::Direct {
+                    vertex_count: count,
+                    instance_count: 1,
+                },
                 instance_index: false,
             })
         }
@@ -1272,15 +1361,41 @@ fn raster_draw_shape_from_ty(
                     "instanced draw count must be nonzero".to_owned(),
                 ));
             }
-            let inner = raster_draw_shape_from_ty(db, *inner)?;
-            let instance_count = inner.instance_count.checked_mul(count).ok_or_else(|| {
+            let inner = raster_draw_shape_from_ty(db, actor, *inner)?;
+            let WebActorDraw::Direct {
+                vertex_count,
+                instance_count: inner_instances,
+            } = inner.draw
+            else {
+                return Err(WebBundleError::EntryDerivation(
+                    "an indirect draw already carries its instance count and cannot be wrapped in `Instanced`"
+                        .to_owned(),
+                ));
+            };
+            let instance_count = inner_instances.checked_mul(count).ok_or_else(|| {
                 WebBundleError::EntryDerivation(
                     "nested instanced draw count exceeds the WebGPU u32 range".to_owned(),
                 )
             })?;
             Ok(RasterDrawShape {
-                vertex_count: inner.vertex_count,
-                instance_count,
+                draw: WebActorDraw::Direct {
+                    vertex_count,
+                    instance_count,
+                },
+                instance_index: true,
+            })
+        }
+        Some(GpuDraw::IndirectTriangleList) => {
+            let [resource, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "indirect triangle-list draw policy requires one exact actor resource type"
+                        .to_owned(),
+                ));
+            };
+            Ok(RasterDrawShape {
+                draw: WebActorDraw::Indirect {
+                    resource_field_index: exact_indirect_resource_field(db, actor, *resource)?,
+                },
                 instance_index: true,
             })
         }
@@ -1292,6 +1407,7 @@ fn raster_draw_shape_from_ty(
 
 fn raster_draw_shape(
     db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
     behavior: hir::hir_def::Func<'_>,
     role_path: PathId<'_>,
 ) -> Result<RasterDrawShape, WebBundleError> {
@@ -1303,7 +1419,7 @@ fn raster_draw_shape(
             "vertex-stage role requires a Fe-authored draw policy".to_owned(),
         ));
     };
-    raster_draw_shape_from_ty(db, *draw)
+    raster_draw_shape_from_ty(db, actor, *draw)
 }
 
 fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
@@ -1316,11 +1432,12 @@ fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
 
 fn raster_vertex_stage<'db>(
     db: &'db DriverDataBase,
+    actor: &SemanticActor<'db>,
     behavior: hir::hir_def::Func<'db>,
     role_path: PathId<'db>,
 ) -> Result<(WebActorStageKind, TyId<'db>), WebBundleError> {
     let payload = role_payload_ty(db, behavior, role_path, "vertex")?;
-    let draw = raster_draw_shape(db, behavior, role_path)?;
+    let draw = raster_draw_shape(db, actor, behavior, role_path)?;
     let args = behavior.arg_tys(db);
     let Some(vertex_index) = args.first() else {
         return Err(WebBundleError::EntryDerivation(
@@ -1401,8 +1518,7 @@ fn raster_vertex_stage<'db>(
     Ok((
         WebActorStageKind::Vertex {
             varying,
-            vertex_count: draw.vertex_count,
-            instance_count: draw.instance_count,
+            draw: draw.draw,
             instance_index: draw.instance_index,
         },
         payload,
@@ -1829,7 +1945,7 @@ pub fn actor_gpu_program(
             })?;
         let (kind, raster_payload) = match stage {
             GpuStage::Vertex => {
-                let (kind, payload) = raster_vertex_stage(db, *behavior, role_path)?;
+                let (kind, payload) = raster_vertex_stage(db, actor, *behavior, role_path)?;
                 (kind, Some(payload))
             }
             GpuStage::Fragment => (WebActorStageKind::Fragment, None),
@@ -5659,6 +5775,7 @@ pub enum WebBufferUsage {
     Storage,
     CopySrc,
     CopyDst,
+    Indirect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -5735,7 +5852,23 @@ pub struct WebPass {
     /// `instance_index` after `vertex_index`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_instances: Option<u32>,
+    /// Exact actor resource supplying `[vertex_count, instance_count,
+    /// first_vertex, first_instance]` to one GPU-resident non-indexed draw.
+    /// This is mutually exclusive with the direct count fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_indirect: Option<WebDrawIndirect>,
     pub layout: WebLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebDrawIndirect {
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub offset: u64,
+}
+
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -6027,6 +6160,9 @@ fn web_resource_manifest(
         }
     };
     let mut buffer_usage = vec![WebBufferUsage::Storage];
+    if resource.kind == GpuResource::Indirect {
+        buffer_usage.push(WebBufferUsage::Indirect);
+    }
     if artifact.is_some() {
         buffer_usage.push(WebBufferUsage::CopyDst);
     }
@@ -6838,8 +6974,7 @@ impl WebBundle {
         while index < program.stages.len() {
             let stage = &program.stages[index];
             if let WebActorStageKind::Vertex {
-                vertex_count,
-                instance_count,
+                draw,
                 instance_index,
                 ..
             } = &stage.kind
@@ -6895,6 +7030,38 @@ impl WebBundle {
                     (Some(preparation), _) | (_, Some(preparation)) => Some(preparation),
                     (None, None) => None,
                 };
+                let (draw_vertices, draw_instances, draw_indirect) = match draw {
+                    WebActorDraw::Direct {
+                        vertex_count,
+                        instance_count,
+                    } => (
+                        Some(*vertex_count),
+                        instance_index.then_some(*instance_count),
+                        None,
+                    ),
+                    WebActorDraw::Indirect {
+                        resource_field_index,
+                    } => {
+                        let resource = program
+                            .resources
+                            .iter()
+                            .find(|resource| resource.field_index == *resource_field_index)
+                            .ok_or_else(|| {
+                                WebBundleError::Lower(format!(
+                                    "authored raster stage `{}` lost indirect actor resource field {}",
+                                    stage.source_entry, resource_field_index
+                                ))
+                            })?;
+                        (
+                            None,
+                            None,
+                            Some(WebDrawIndirect {
+                                resource: resource.name.clone(),
+                                offset: 0,
+                            }),
+                        )
+                    }
+                };
                 passes.push(WebPass {
                     source_entry: fragment_entry.clone(),
                     shader: path.clone(),
@@ -6907,8 +7074,9 @@ impl WebBundle {
                     taper: None,
                     cooperation: None,
                     cycle: None,
-                    draw_vertices: Some(*vertex_count),
-                    draw_instances: instance_index.then_some(*instance_count),
+                    draw_vertices,
+                    draw_instances,
+                    draw_indirect,
                     layout: layout.clone(),
                 });
                 pass_wgsl.push(WebPassShader {
@@ -7004,6 +7172,7 @@ impl WebBundle {
                 cycle,
                 draw_vertices: None,
                 draw_instances: None,
+                draw_indirect: None,
                 layout: layout.clone(),
             });
             pass_wgsl.push(WebPassShader {
@@ -7633,6 +7802,7 @@ impl WebBundle {
             cycle: None,
             draw_vertices: None,
             draw_instances: None,
+            draw_indirect: None,
             layout: layout.clone(),
         }];
 
@@ -8642,6 +8812,69 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    #[test]
+    fn render_runtime_executes_the_indirect_draw_manifest_contract() {
+        if !std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime_path = directory.path().join("fe-render-runtime.mjs");
+        std::fs::write(&runtime_path, render_runtime_js()).unwrap();
+        let runtime_url = Url::from_file_path(&runtime_path).unwrap();
+        let probe_path = directory.path().join("indirect-contract.mjs");
+        std::fs::write(
+            &probe_path,
+            format!(
+                r#"
+globalThis.HTMLElement = class {{}};
+globalThis.customElements = {{ define() {{}}, get() {{ return undefined; }} }};
+const runtime = await import({runtime_url:?});
+const usage = runtime.resourceBufferUsage(
+  {{ buffer_usage: ["storage", "indirect"] }},
+  {{ STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, INDIRECT: 8 }},
+  10,
+);
+if (usage !== 9) throw new Error(`unexpected indirect usage ${{usage}}`);
+const draw = runtime.rasterDrawShape({{
+  draw_indirect: {{ resource: "draw", offset: 16 }},
+}});
+if (draw.indirect.resource !== "draw" || draw.indirect.offset !== 16) {{
+  throw new Error(`unexpected indirect draw ${{JSON.stringify(draw)}}`);
+}}
+if (!runtime.requiresGpuPassGraph([{{ layout: {{ mode: "render" }}, draw_indirect: draw.indirect }}])) {{
+  throw new Error("indirect draw did not require the GPU pass graph");
+}}
+let rejected = false;
+try {{
+  runtime.rasterDrawShape({{
+    draw_vertices: 3,
+    draw_indirect: {{ resource: "draw", offset: 0 }},
+  }});
+}} catch {{
+  rejected = true;
+}}
+if (!rejected) throw new Error("mixed direct and indirect draw was accepted");
+"#,
+                runtime_url = runtime_url.as_str(),
+            ),
+        )
+        .unwrap();
+        let output = std::process::Command::new("node")
+            .arg(&probe_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "indirect runtime contract failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     fn wasm_exports(wasm: &[u8]) -> Vec<String> {

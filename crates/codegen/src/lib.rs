@@ -108,13 +108,13 @@ pub fn standalone_ctfe_ingot_source(source: &str) -> String {
 #[cfg(feature = "spirv-backend")]
 pub use web_bundle::{
     WEB_ACTOR_RUNTIME_PROTOCOL, WEB_ACTOR_RUNTIME_VERSION, WEB_BUNDLE_PROTOCOL,
-    WEB_BUNDLE_PROTOCOL_VERSION, WebActorPassCycle, WebActorProgram, WebActorResource,
+    WEB_BUNDLE_PROTOCOL_VERSION, WebActorDraw, WebActorPassCycle, WebActorProgram, WebActorResource,
     WebActorResourceElement, WebActorResourceField, WebActorStage, WebActorStageKind,
     WebArtifactManifest, WebAuthoredSourceKind, WebBinding, WebBindingAccess, WebBindingMember,
     WebBindingRole, WebBrowserRuntimeManifest, WebBuildOptions, WebBuiltinInput, WebBuiltinSource,
     WebBundle, WebBundleError, WebBundleFile, WebBundleManifest, WebBundleMode, WebCanonicalPolicy,
     WebCanonicalStatus, WebControl, WebControlArgSource, WebControlWasmType,
-    WebDispatchCooperation, WebDispatchTaper, WebFeResponsibility, WebFixedHostProvenance,
+    WebDispatchCooperation, WebDispatchTaper, WebDrawIndirect, WebFeResponsibility, WebFixedHostProvenance,
     WebBufferUsage, WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility,
     WebLayout, WebPass, WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceArtifact,
     WebResourceAsset, WebResult, WebScalarKind, WebShaderStage, WebSourceProvenance,
