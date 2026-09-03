@@ -1575,7 +1575,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
 
   assert.equal(transitionCalls, 1);
   assert.equal(renders, 1);
-  assert.deepEqual(allocations, [[156, 4]]);
+  assert.deepEqual(allocations, [[208, 4]]);
   assert.deepEqual(transportedEvents, [
     {
       mx: 100, my: 110, dx: 3, dy: -2, wheelDelta: 0,
@@ -1591,6 +1591,11 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
       mx: 109, my: 117, dx: 5, dy: -1, wheelDelta: -40,
       wheelMode: 1, buttons: 0, timestamp: 3, width: 512, height: 256,
       eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
+    },
+    {
+      mx: 0, my: 0, dx: 0, dy: 0, wheelDelta: 0,
+      wheelMode: 0, buttons: 0, timestamp: 10, width: 512, height: 256,
+      eventKind: SurfaceEventKind.AnimationFrame, paramIndex: 0, paramValue: 0,
     },
   ]);
   assert.deepEqual(surface._uniforms, [42]);
@@ -1615,7 +1620,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   await surface._flushGestureFrame(20);
   assert.equal(transitionCalls, 2);
   assert.equal(renders, 2);
-  assert.deepEqual(allocations, [[156, 4], [52, 4]]);
+  assert.deepEqual(allocations, [[208, 4], [104, 4]]);
   assert.deepEqual(surface._uniforms, [43]);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2, 2]);
@@ -1820,7 +1825,11 @@ test("gesture and parameter edits stay in one ordered raw batch until Fe admits 
   assert.equal(transported.length, 1);
   assert.deepEqual(
     transported[0].map(event => event.eventKind),
-    [SurfaceEventKind.Gesture, SurfaceEventKind.ParamEdit],
+    [
+      SurfaceEventKind.Gesture,
+      SurfaceEventKind.ParamEdit,
+      SurfaceEventKind.AnimationFrame,
+    ],
   );
 });
 
