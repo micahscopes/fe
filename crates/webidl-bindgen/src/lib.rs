@@ -183,6 +183,42 @@ pub struct DictionaryMemberDef {
     pub default_: Option<DefaultValueDef>,
 }
 
+/// Return a dictionary's effective fields in canonical Web IDL order:
+/// inherited declarations first, followed by the child declarations.
+///
+/// Host-ABI lowering, Fe declaration emission, and JavaScript realization all
+/// use this one walk so field order can never drift between those layers.
+pub(crate) fn inherited_dictionary_members<'a>(
+    world: &'a World,
+    dictionary: &'a DictionaryDef,
+) -> Result<Vec<&'a DictionaryMemberDef>, BindgenError> {
+    let mut lineage = Vec::new();
+    let mut cursor = Some(dictionary);
+    while let Some(current) = cursor {
+        lineage.push(current);
+        cursor = current
+            .inherits
+            .as_ref()
+            .and_then(|parent| world.dictionaries.get(parent));
+    }
+    lineage.reverse();
+
+    let mut names = BTreeSet::new();
+    let mut members = Vec::new();
+    for definition in lineage {
+        for member in &definition.members {
+            if !names.insert(&member.name) {
+                return Err(BindgenError::new(
+                    format!("dictionary `{}` member `{}`", dictionary.name, member.name),
+                    "member shadows an inherited dictionary member",
+                ));
+            }
+            members.push(member);
+        }
+    }
+    Ok(members)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MixinDef {
     pub name: String,
@@ -2363,6 +2399,25 @@ fn emit_fe_import_layer(
             output.push_str("use core::pending::Pending\nuse std::wasm::WasmBackend\n\n");
         }
     }
+    if rich_flat_values {
+        for dictionary in world.dictionaries.values() {
+            output.push_str(&format!("pub struct {} {{\n", fe_ident(&dictionary.name)));
+            for member in inherited_dictionary_members(world, dictionary)? {
+                let context = format!("dictionary `{}` member `{}`", dictionary.name, member.name);
+                let value = fe_import_type(world, &member.type_, &context, rich_flat_values)?;
+                let type_ = if member.required || member.default_.is_some() {
+                    value
+                } else {
+                    format!("Option<{value}>")
+                };
+                output.push_str(&format!(
+                    "    pub {}: {type_},\n",
+                    fe_ident(&snake_case(&member.name))
+                ));
+            }
+            output.push_str("}\n\n");
+        }
+    }
     for interface in world.interfaces.values() {
         output.push_str(&format!(
             "pub struct {} {{ handle: u32 }}\n\n",
@@ -3039,6 +3094,9 @@ fn fe_import_type(
             "BrowserBytes"
         }
         TypeRef::Named(name) if world.interfaces.contains_key(name) => return Ok(fe_ident(name)),
+        TypeRef::Named(name) if rich_flat_values && world.dictionaries.contains_key(name) => {
+            return Ok(fe_ident(name));
+        }
         TypeRef::Sequence(inner) if rich_flat_values => {
             let item = fe_import_type(world, inner, context, rich_flat_values)?;
             return Ok(format!("BrowserList<{item}, 0>"));

@@ -6,8 +6,8 @@ use fe_host_abi as abi;
 
 use crate::{
     ArgumentDef, BindgenError, BufferKind, CollectionKind, ConstructorDef, DefaultValueDef,
-    DictionaryDef, ExtendedAttributesDef, Member, NamespaceMember, OperationDef, OperationSpecial,
-    StringKind, TypeRef, World,
+    ExtendedAttributesDef, Member, NamespaceMember, OperationDef, OperationSpecial, StringKind,
+    TypeRef, World, inherited_dictionary_members,
 };
 
 /// Names that are transport policy rather than Web IDL semantics.
@@ -131,6 +131,10 @@ pub fn lower_host_abi_with_metadata(
                     path: format!("dictionary/{}/{}", dictionary.name, member.name),
                     value,
                 });
+                // Web IDL dictionary conversion materializes a defaulted
+                // member before the value crosses the normalized host ABI.
+                // It is therefore a concrete record field, not an Option.
+                member.required = true;
             }
         }
     }
@@ -1552,36 +1556,6 @@ fn lower_buffer(
             }
         },
     })
-}
-
-fn inherited_dictionary_members<'a>(
-    world: &'a World,
-    dictionary: &'a DictionaryDef,
-) -> Result<Vec<&'a crate::DictionaryMemberDef>, BindgenError> {
-    let mut lineage = Vec::new();
-    let mut cursor = Some(dictionary);
-    while let Some(current) = cursor {
-        lineage.push(current);
-        cursor = current
-            .inherits
-            .as_ref()
-            .and_then(|parent| world.dictionaries.get(parent));
-    }
-    lineage.reverse();
-    let mut names = BTreeSet::new();
-    let mut members = Vec::new();
-    for definition in lineage {
-        for member in &definition.members {
-            if !names.insert(&member.name) {
-                return Err(BindgenError::new(
-                    format!("dictionary `{}` member `{}`", dictionary.name, member.name),
-                    "member shadows an inherited dictionary member",
-                ));
-            }
-            members.push(member);
-        }
-    }
-    Ok(members)
 }
 
 fn receiver(static_: bool) -> abi::Receiver {

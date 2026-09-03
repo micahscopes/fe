@@ -114,6 +114,42 @@ fn pinned_webgpu_buffer_create_selection_has_exact_provenance_and_generated_shap
         .find(|function| function.member_name == "createBuffer")
         .unwrap();
     assert_eq!(create.import_name, "gpu_device_create_buffer");
+    let host_descriptor = plan
+        .host_abi
+        .types
+        .iter()
+        .find(|definition| definition.name == "GPUBufferDescriptor")
+        .expect("host ABI should contain the descriptor record");
+    let fe_host_abi::TypeDefKind::Record { fields } = &host_descriptor.kind else {
+        panic!("GPUBufferDescriptor should lower as a record");
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["label", "size", "usage", "mappedAtCreation"],
+        "inherited dictionary fields must stay parent-first",
+    );
+    assert!(
+        fields
+            .iter()
+            .all(|field| !matches!(field.type_, fe_host_abi::Type::Option(_))),
+        "required and default-materialized descriptor fields must be concrete: {fields:?}",
+    );
+    let fe = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    for declaration in [
+        "pub label: BrowserString",
+        "pub size: u64",
+        "pub usage: u32",
+        "pub mapped_at_creation: bool",
+        "gpu_device_create_buffer(self_: GPUDevice, descriptor: GPUBufferDescriptor) -> GPUBuffer",
+    ] {
+        assert!(
+            fe.contains(declaration),
+            "missing `{declaration}` in:\n{fe}"
+        );
+    }
     let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
     assert!(adapter.contains("fromFeDictionary_GPUBufferDescriptor(desc"));
     assert!(adapter.contains("[\"createBuffer\"]("));
@@ -164,7 +200,7 @@ const device = {{
 const realized = runtime.resources.withBorrowed(device, deviceHandle => {{
   const bufferHandle = operations.gpu_device_create_buffer(
     deviceHandle,
-    {{ size: 64, usage: 0x80 }},
+    {{ size: 64n, usage: 0x80 }},
   );
   return runtime.resources.take(bufferHandle);
 }});
@@ -174,6 +210,19 @@ if (observed.size !== 64 || observed.usage !== 0x80 ||
   throw new Error(`descriptor defaults were not preserved: ${{JSON.stringify(observed)}}`);
 if (runtime.inventory().resources !== 0)
   throw new Error("createBuffer retained a host resource after transfer");
+
+let rangeError;
+try {{
+  runtime.resources.withBorrowed(
+    device,
+    deviceHandle => operations.gpu_device_create_buffer(
+      deviceHandle,
+      {{ size: 9007199254740992n, usage: 0x80 }},
+    ),
+  );
+}} catch (error) {{ rangeError = error; }}
+if (!(rangeError instanceof RangeError) || runtime.inventory().resources !== 0)
+  throw new Error("unsafe GPUSize64 conversion did not fail closed and retire its device borrow");
 
 let observedError;
 try {{
