@@ -1,0 +1,49 @@
+use poseidon_baby_bear::Poseidon2Digest
+use poseidon_baby_bear_webgpu::{
+    DIGEST_SQUEEZE_STEPS,
+    POSEIDON2_LANES,
+    advance_digest_squeeze_batch_lane,
+    digest_squeeze_batch_output_words,
+    digest_squeeze_batch_workspace_words,
+}
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    RepeatedDispatch as Repeat,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+const STATES: usize = 1
+const THREADS: usize = POSEIDON2_LANES
+const WORKSPACE_WORDS: usize = digest_squeeze_batch_workspace_words(STATES)
+const OUTPUT_WORDS: usize = digest_squeeze_batch_output_words(STATES)
+
+actor DigestSqueezeProbe uses (Program<WebGpuBackend>) {
+    workspace: Shared<u32, WORKSPACE_WORDS>,
+    output: Shared<u32, OUTPUT_WORDS>,
+
+    fn advance(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<1, 1, 1, DIGEST_SQUEEZE_STEPS>,
+            >
+        )
+    {
+        advance_digest_squeeze_batch_lane<STATES, WORKSPACE_WORDS, OUTPUT_WORDS>(
+            self.workspace,
+            self.output,
+            invocation,
+            7,
+            Poseidon2Digest::zero(),
+            true,
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        self.output.load(index: 0).downcast_truncate()
+    }
+}

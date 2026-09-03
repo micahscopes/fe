@@ -1,0 +1,8 @@
+[ingot]
+name = "poseidon_digest_squeeze_webgpu_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
+poseidon_baby_bear_webgpu = "../../../../../ingots/poseidon_baby_bear_webgpu"
