@@ -746,6 +746,60 @@ fn spirv_resource_passthrough_outline_worthy(
         >= MIN_AVOIDED_SOURCE_INSTRUCTIONS
 }
 
+fn spirv_profitable_helper_dependency_closure(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+    expansion_counts: &std::collections::HashMap<sonatina_ir::module::FuncRef, usize>,
+) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
+    let roots = roots
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut required = std::collections::HashSet::new();
+    let mut pending = Vec::new();
+    for function_ref in module.funcs() {
+        if roots.contains(&function_ref) {
+            continue;
+        }
+        let Some(instruction_count) = module.func_store.try_view(function_ref, |function| {
+            function
+                .layout
+                .iter_block()
+                .map(|block| function.layout.iter_inst(block).count())
+                .sum::<usize>()
+        }) else {
+            continue;
+        };
+        if spirv_resource_passthrough_outline_worthy(
+            expansion_counts
+                .get(&function_ref)
+                .copied()
+                .unwrap_or_default(),
+            instruction_count,
+        ) {
+            pending.push(function_ref);
+        }
+    }
+
+    while let Some(function_ref) = pending.pop() {
+        if roots.contains(&function_ref) || !required.insert(function_ref) {
+            continue;
+        }
+        if let Some(callees) = module.func_store.try_view(function_ref, |function| {
+            function
+                .layout
+                .iter_block()
+                .flat_map(|block| function.layout.iter_inst(block))
+                .filter_map(|instruction| function.dfg.call_info(instruction))
+                .map(|call| call.callee())
+                .collect::<Vec<_>>()
+        }) {
+            pending.extend(callees);
+        }
+    }
+    required
+}
+
 fn spirv_helper_candidates(
     module: &sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
@@ -757,6 +811,7 @@ fn spirv_helper_candidates(
         roots: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
         function_ref: sonatina_ir::module::FuncRef,
         call_counts: &std::collections::HashMap<sonatina_ir::module::FuncRef, usize>,
+        profitable_dependencies: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
         states: &mut std::collections::HashMap<sonatina_ir::module::FuncRef, u8>,
         accepted: &mut std::collections::HashSet<sonatina_ir::module::FuncRef>,
     ) -> bool {
@@ -853,7 +908,15 @@ fn spirv_helper_candidates(
         // must still be inlined.
         let mut callees_ok = true;
         for callee in callees {
-            if !classify(module, roots, callee, call_counts, states, accepted) {
+            if !classify(
+                module,
+                roots,
+                callee,
+                call_counts,
+                profitable_dependencies,
+                states,
+                accepted,
+            ) {
                 callees_ok = false;
             }
         }
@@ -867,7 +930,10 @@ fn spirv_helper_candidates(
         );
         if body_ok
             && callees_ok
-            && (!signature_carries_resource || accesses_resource || passthrough_outline_worthy)
+            && (!signature_carries_resource
+                || accesses_resource
+                || passthrough_outline_worthy
+                || profitable_dependencies.contains(&function_ref))
         {
             accepted.insert(function_ref);
         }
@@ -881,6 +947,11 @@ fn spirv_helper_candidates(
         .collect::<std::collections::HashSet<_>>();
     let call_counts =
         spirv_root_expansion_counts(module, &roots.iter().copied().collect::<Vec<_>>());
+    let profitable_dependencies = spirv_profitable_helper_dependency_closure(
+        module,
+        &roots.iter().copied().collect::<Vec<_>>(),
+        &call_counts,
+    );
     let root_callees = roots
         .iter()
         .flat_map(|&root| {
@@ -906,6 +977,7 @@ fn spirv_helper_candidates(
             &roots,
             callee,
             &call_counts,
+            &profitable_dependencies,
             &mut states,
             &mut accepted,
         );
@@ -921,6 +993,8 @@ fn trace_spirv_helper_classification(
     use sonatina_ir::inst::control_flow;
 
     let call_counts = spirv_root_expansion_counts(module, roots);
+    let profitable_dependencies =
+        spirv_profitable_helper_dependency_closure(module, roots, &call_counts);
     let root_set = roots
         .iter()
         .copied()
@@ -1052,6 +1126,7 @@ fn trace_spirv_helper_classification(
                     call_counts.get(&function_ref).copied().unwrap_or_default(),
                     instruction_count,
                 )
+                && !profitable_dependencies.contains(&function_ref)
             {
                 reasons.insert("resource_passthrough_only");
             }
