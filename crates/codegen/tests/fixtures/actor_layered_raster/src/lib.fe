@@ -7,6 +7,9 @@ use std::webgpu::{
     FragmentStage,
     FragmentSurface,
     GpuProgram,
+    Depth24LessEqualMsaa4,
+    RasterConfiguration,
+    RasterPlan,
     RasterVertex,
     SurfaceBackingExtent,
     SurfaceQuality,
@@ -14,6 +17,7 @@ use std::webgpu::{
     TriangleList,
     VertexStage,
     WebGpuBackend,
+    raster_plan,
 }
 
 struct OverlayVarying { heat: f32 }
@@ -43,6 +47,10 @@ actor LayeredSurface uses (
 ) {
     tint: f32,
     geometry: OverlayGeometry,
+
+    const fn raster_fixture() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
 
     fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         if px + py > 0 && self.tint + self.geometry.lower.x >= 0.0 {

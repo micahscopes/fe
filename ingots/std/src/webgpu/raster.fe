@@ -1,0 +1,232 @@
+//! Fe-owned raster-pipeline and attachment policy.
+//!
+//! A render actor supplies one compile-time behavior using
+//! `RasterConfiguration` and returns a `RasterPlan`. The plan is composed from
+//! ordinary Fe traits and zero-sized policy types. The compiler evaluates that
+//! Fe value and transports the resulting physical plan; neither the compiler
+//! nor the browser host chooses depth, multisampling, or culling policy.
+
+/// Marks the actor behavior which denotes its compile-time raster plan.
+#[gpu_control(raster_pipeline)]
+pub struct RasterConfiguration {}
+
+/// The physical value projected from Fe into a render bundle.
+#[web_raster_plan]
+pub struct RasterPlan {
+    pub sample_count: u32,
+    pub cull: FaceCull,
+    pub depth: DepthAttachment,
+}
+
+pub enum FaceCull {
+    None,
+    Front,
+    Back,
+}
+
+pub enum DepthFormat {
+    Depth24Plus,
+    Depth32Float,
+}
+
+pub enum DepthCompare {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Always,
+}
+
+pub struct DepthPlan {
+    pub format: DepthFormat,
+    pub compare: DepthCompare,
+    pub write_enabled: bool,
+    pub clear: f32,
+}
+
+pub enum DepthAttachment {
+    Disabled,
+    Enabled(DepthPlan),
+}
+
+impl Copy for FaceCull {}
+impl Copy for DepthFormat {}
+impl Copy for DepthCompare {}
+impl Copy for DepthPlan {}
+impl Copy for DepthAttachment {}
+impl Copy for RasterPlan {}
+
+/// A policy denotes one complete physical raster plan at compile time.
+pub trait RasterPolicy {
+    const fn plan() -> RasterPlan
+}
+
+pub trait RasterDepthPolicy {
+    const fn depth() -> DepthAttachment
+}
+
+pub trait EnabledDepthFormat {
+    const fn format() -> DepthFormat
+}
+
+pub trait RasterDepthCompare {
+    const fn compare() -> DepthCompare
+    const fn clear() -> f32
+}
+
+pub trait RasterDepthWrite {
+    const fn enabled() -> bool
+}
+
+pub trait RasterSamples {
+    const fn sample_count() -> u32
+}
+
+pub trait RasterFaceCull {
+    const fn cull() -> FaceCull
+}
+
+/// Orthogonal type-level raster state. Its implementation below is the sole
+/// composition rule: each axis contributes only its own denotation.
+pub struct RasterState<Depth, Samples, Cull> {}
+
+pub struct NoDepth {}
+
+impl RasterDepthPolicy for NoDepth {
+    const fn depth() -> DepthAttachment {
+        DepthAttachment::Disabled
+    }
+}
+
+pub struct DepthTest<Format, Compare, Write> {}
+
+impl<Format, Compare, Write> RasterDepthPolicy for DepthTest<Format, Compare, Write>
+    where Format: EnabledDepthFormat,
+          Compare: RasterDepthCompare,
+          Write: RasterDepthWrite
+{
+    const fn depth() -> DepthAttachment {
+        DepthAttachment::Enabled(DepthPlan {
+            format: Format::format(),
+            compare: Compare::compare(),
+            write_enabled: Write::enabled(),
+            clear: Compare::clear(),
+        })
+    }
+}
+
+pub struct Depth24Plus {}
+pub struct Depth32Float {}
+
+impl EnabledDepthFormat for Depth24Plus {
+    const fn format() -> DepthFormat { DepthFormat::Depth24Plus }
+}
+
+impl EnabledDepthFormat for Depth32Float {
+    const fn format() -> DepthFormat { DepthFormat::Depth32Float }
+}
+
+pub struct CompareLess {}
+pub struct CompareLessEqual {}
+pub struct CompareGreater {}
+pub struct CompareGreaterEqual {}
+pub struct CompareAlways {}
+
+impl RasterDepthCompare for CompareLess {
+    const fn compare() -> DepthCompare { DepthCompare::Less }
+    const fn clear() -> f32 { 1.0 }
+}
+
+impl RasterDepthCompare for CompareLessEqual {
+    const fn compare() -> DepthCompare { DepthCompare::LessEqual }
+    const fn clear() -> f32 { 1.0 }
+}
+
+impl RasterDepthCompare for CompareGreater {
+    const fn compare() -> DepthCompare { DepthCompare::Greater }
+    const fn clear() -> f32 { 0.0 }
+}
+
+impl RasterDepthCompare for CompareGreaterEqual {
+    const fn compare() -> DepthCompare { DepthCompare::GreaterEqual }
+    const fn clear() -> f32 { 0.0 }
+}
+
+impl RasterDepthCompare for CompareAlways {
+    const fn compare() -> DepthCompare { DepthCompare::Always }
+    const fn clear() -> f32 { 1.0 }
+}
+
+pub struct DepthReadOnly {}
+pub struct DepthWrite {}
+
+impl RasterDepthWrite for DepthReadOnly {
+    const fn enabled() -> bool { false }
+}
+
+impl RasterDepthWrite for DepthWrite {
+    const fn enabled() -> bool { true }
+}
+
+pub struct Samples1 {}
+pub struct Samples4 {}
+
+impl RasterSamples for Samples1 {
+    const fn sample_count() -> u32 { 1 }
+}
+
+impl RasterSamples for Samples4 {
+    const fn sample_count() -> u32 { 4 }
+}
+
+pub struct CullNone {}
+pub struct CullFront {}
+pub struct CullBack {}
+
+impl RasterFaceCull for CullNone {
+    const fn cull() -> FaceCull { FaceCull::None }
+}
+
+impl RasterFaceCull for CullFront {
+    const fn cull() -> FaceCull { FaceCull::Front }
+}
+
+impl RasterFaceCull for CullBack {
+    const fn cull() -> FaceCull { FaceCull::Back }
+}
+
+impl<Depth, Samples, Cull> RasterPolicy for RasterState<Depth, Samples, Cull>
+    where Depth: RasterDepthPolicy,
+          Samples: RasterSamples,
+          Cull: RasterFaceCull
+{
+    const fn plan() -> RasterPlan {
+        RasterPlan {
+            sample_count: Samples::sample_count(),
+            cull: Cull::cull(),
+            depth: Depth::depth(),
+        }
+    }
+}
+
+/// Evaluate any well-typed raster policy into its physical Fe value.
+pub const fn raster_plan<P: RasterPolicy>() -> RasterPlan {
+    P::plan()
+}
+
+/// Conventional forward-Z, double-sided, four-sample surface rendering.
+pub type Depth24LessEqualMsaa4 = RasterState<
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite>,
+    Samples4,
+    CullNone,
+>
+
+/// Conventional forward-Z, double-sided, single-sample surface rendering.
+pub type Depth24LessEqual = RasterState<
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite>,
+    Samples1,
+    CullNone,
+>
+
+/// Explicit color-only raster state.
+pub type ColorOnly = RasterState<NoDepth, Samples1, CullNone>

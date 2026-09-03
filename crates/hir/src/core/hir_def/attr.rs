@@ -109,6 +109,8 @@ pub enum GpuControl {
     SurfaceSchedule,
     SurfaceQuality,
     SurfaceRecovery,
+    /// Compile-time Fe behavior returning the actor's raster plan.
+    RasterPipeline,
     /// Opt a surface into uncaptured primary-pointer motion in addition to
     /// the default captured-drag lifecycle.
     SurfacePointerMotion,
@@ -644,6 +646,7 @@ impl<'db> AttrListId<'db> {
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             "surface_quality" => Some(GpuControl::SurfaceQuality),
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
+            "raster_pipeline" => Some(GpuControl::RasterPipeline),
             "surface_pointer_motion" => Some(GpuControl::SurfacePointerMotion),
             "readback" => Some(GpuControl::Readback),
             _ => None,
@@ -767,6 +770,13 @@ impl<'db> AttrListId<'db> {
 
     pub fn is_web_surface_recovery_step(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_surface_recovery_step")
+    }
+
+    /// Marks the Fe record returned by a raster-configuration behavior. The
+    /// record's enum vocabulary is authored in Fe; the compiler only projects
+    /// its evaluated physical value into a render bundle.
+    pub fn is_web_raster_plan(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_raster_plan")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {
