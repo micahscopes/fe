@@ -169,7 +169,7 @@ try {
   assert.deepEqual(surface.resources.map(resource => resource.name), resourceNames);
   for (const resource of surface.resources) {
     const name = JSON.stringify(resource.name);
-    const encoded = await evaluate(`(async () => {
+    const prepared = await evaluate(`(async () => {
       const name = ${name};
       const surface = document.querySelector("fe-surface");
       const gpu = surface?._gpu;
@@ -183,26 +183,58 @@ try {
         size: byteLength,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-      try {
-        const encoder = gpu.device.createCommandEncoder();
-        encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);
-        gpu.device.queue.submit([encoder.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const bytes = new Uint8Array(staging.getMappedRange());
-        let binary = "";
-        const chunkBytes = 32 * 1024;
-        for (let offset = 0; offset < bytes.length; offset += chunkBytes) {
-          binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkBytes));
-        }
-        return { base64: btoa(binary), bytes: byteLength };
-      } finally {
-        if (staging.mapState === "mapped") staging.unmap();
-        staging.destroy();
-      }
+      const encoder = gpu.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);
+      gpu.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      globalThis.__feResourceSnapshot = {
+        name,
+        staging,
+        bytes: new Uint8Array(staging.getMappedRange()),
+      };
+      return { bytes: byteLength };
     })()`, 600_000);
-    const bytes = Buffer.from(encoded.base64, "base64");
-    assert.equal(bytes.length, encoded.bytes);
-    assert.equal(bytes.length, resource.words * Uint32Array.BYTES_PER_ELEMENT);
+    assert.equal(prepared.bytes, resource.words * Uint32Array.BYTES_PER_ELEMENT);
+
+    const transferBytes = 512 * 1024;
+    const chunks = [];
+    try {
+      for (let offset = 0; offset < prepared.bytes; offset += transferBytes) {
+        const length = Math.min(transferBytes, prepared.bytes - offset);
+        const encoded = await evaluate(`(() => {
+          const snapshot = globalThis.__feResourceSnapshot;
+          const offset = ${offset};
+          const length = ${length};
+          if (!snapshot || snapshot.name !== ${name}) {
+            throw new Error("the mapped resource snapshot is unavailable");
+          }
+          const bytes = snapshot.bytes.subarray(offset, offset + length);
+          let binary = "";
+          const stringChunkBytes = 32 * 1024;
+          for (let start = 0; start < bytes.length; start += stringChunkBytes) {
+            binary += String.fromCharCode(
+              ...bytes.subarray(start, start + stringChunkBytes),
+            );
+          }
+          return { base64: btoa(binary), bytes: bytes.length };
+        })()`, 60_000);
+        const bytes = Buffer.from(encoded.base64, "base64");
+        assert.equal(bytes.length, encoded.bytes);
+        assert.equal(bytes.length, length);
+        chunks.push(bytes);
+      }
+    } finally {
+      await evaluate(`(() => {
+        const snapshot = globalThis.__feResourceSnapshot;
+        if (snapshot) {
+          snapshot.staging.unmap();
+          snapshot.staging.destroy();
+          delete globalThis.__feResourceSnapshot;
+        }
+      })()`).catch(() => {});
+    }
+    const bytes = Buffer.concat(chunks);
+    assert.equal(bytes.length, prepared.bytes);
     await writeFile(resolve(receiptDir, `${resource.name}.u32le`), bytes);
   }
   assert.deepEqual(browserErrors, []);

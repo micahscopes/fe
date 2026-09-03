@@ -1802,10 +1802,14 @@ All four are focused ingots and may remain so permanently.
   The old 48-pass Chrome receipt matches the independently derived base LDE,
   then fails immediately at interaction-LDE column 0, row 0
   (`153447882` versus `1210667320`). A portable factor-derived additive scan
-  is active work: it gathers all four quartic bus deltas, performs twelve
+  now gathers all four quartic bus deltas, performs twelve
   queue-synchronized stages over 4,096 rows, rewrites the sixteen accumulator
-  limbs to exclusive prefixes, and requires terminal closure. Its positive
-  physical Chrome receipt, interaction-trace commitment, and complete proof
+  limbs to exclusive prefixes, and requires terminal closure. The resulting
+  51-pass artifact executes on physical AMD RDNA 3 Chrome with no validation,
+  uncaptured, or device-loss errors. Its 2,129,920 base-LDE words and 1,245,184
+  interaction-LDE words all match an independent Plonky3 model; that model
+  reconstructs the four quartic accumulators independently and requires each
+  terminal sum to be zero. Interaction-trace commitment and complete proof
   continuation remain open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
@@ -1856,12 +1860,17 @@ All four are focused ingots and may remain so permanently.
   and final phase-validity word. That gate proved browser execution and the
   base codeword, not the missing exclusive interaction accumulators. The
   independent Plonky3 production-LDE gate now rejects the old receipt at the
-  first interaction column while accepting its complete base LDE. A new
-  51-pass candidate adds the Fe-authored accumulator scan without another
-  actor resource; full lowering, physical Chrome execution, and all-word
-  Plonky3 equality remain its acceptance gates. Interactive point and disk
-  selection, complete proof receipt encoding, Wasm verification, and
-  revm-Wasm verification remain.
+  first interaction column while accepting its complete base LDE. The new
+  51-pass graph adds the Fe-authored accumulator scan without another actor
+  resource and closes those acceptance gates. All 50 compute pipelines compile
+  in 652.5 ms from the warmed Chrome cache, all dispatches complete in 289.6
+  ms, and the complete manifest-derived prefix takes 1,678.7 ms. The ordinary
+  Fe surface then emits a typed browser receipt whose 3,375,104 codeword words
+  match Plonky3 exactly. The generic CDP observer now transports mapped
+  resources in bounded 512 KiB chunks, avoiding the single 8.5 MiB DevTools
+  payload that previously timed out without changing proof semantics.
+  Interactive point and disk selection, interaction commitment, complete proof
+  receipt encoding, Wasm verification, and revm-Wasm verification remain.
 - **G-BROWSER shader materialization boundary, active.** The detailed boundary
   audit is recorded at
   `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.
