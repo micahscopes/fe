@@ -1,0 +1,6 @@
+[ingot]
+name = "actor_content_addressed_dependency"
+version = "0.1.0"
+
+[dependencies]
+actor_content_addressed_resource = { path = "../actor_content_addressed_resource" }
