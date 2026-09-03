@@ -3868,12 +3868,12 @@ where
     private_place_materialization: PrivatePlaceMaterialization,
     typed_private_type_cache: FxHashMap<LayoutId<'db>, Type>,
     typed_private_layout_names: FxHashMap<LayoutId<'db>, String>,
-    /// Private shader helper parameters whose ordinary Fe aggregate borrow is
-    /// preserved as a typed function-local pointer. The selection is derived
-    /// from the parameter class and target-representable layout before
-    /// Sonatina signatures are declared. Wasm never populates this map.
+    /// Private shader helper parameters whose ordinary Fe borrow is preserved
+    /// as a typed function-local pointer. The selection is derived from the
+    /// pointee class before Sonatina signatures are declared. Aggregate and
+    /// scalar field borrows use the same proof. Wasm never populates this map.
     typed_private_borrow_params:
-        FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>>,
+        FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>>,
     /// By-value aggregate parameters selected for the private indirect ABI.
     /// Selection is derived from the complete flattened signature and the
     /// validated core-Wasm arity limit. The caller materializes a fresh arena
@@ -3957,18 +3957,18 @@ enum GpuResourceElementType {
     Record { ty: Type, fields: Box<[Type]> },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TypedPrivateLocal<'db> {
-    layout: LayoutId<'db>,
+    pointee: RuntimeClass<'db>,
     pointee_ty: Type,
     pointer_ty: Type,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TypedPrivateBorrowOrigin<'db> {
     Parameter {
         root: RLocalId,
-        layout: LayoutId<'db>,
+        pointee: RuntimeClass<'db>,
     },
     LocalStorage {
         root: RLocalId,
@@ -4343,7 +4343,7 @@ where
 
     fn derive_typed_private_borrow_params(
         &self,
-    ) -> FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>> {
+    ) -> FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>> {
         if self.private_place_materialization != PrivatePlaceMaterialization::ShaderTypedWhenLegal {
             return FxHashMap::default();
         }
@@ -4369,11 +4369,8 @@ where
                 else {
                     continue;
                 };
-                let Some(layout) = pointee.aggregate_layout() else {
-                    continue;
-                };
-                if self.typed_private_layout_size(layout).is_some() {
-                    params.insert(param.local, layout);
+                if self.typed_private_class_size(pointee).is_some() {
+                    params.insert(param.local, (**pointee).clone());
                 }
             }
             if !params.is_empty() {
@@ -4415,29 +4412,28 @@ where
                             .unwrap_or_else(|| callee.body(self.db));
                         for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
                         {
-                            let Some(&layout) = callee_params.get(&parameter.local) else {
+                            let Some(pointee) = callee_params.get(&parameter.local) else {
                                 continue;
                             };
                             let source_is_preserved = match self.typed_private_borrow_origin(
                                 &caller_body,
                                 *argument,
-                                layout,
+                                pointee,
                                 &mut HashSet::new(),
                             ) {
                                 TypedPrivateBorrowOrigin::Parameter {
                                     root,
-                                    layout: root_layout,
+                                    pointee: root_pointee,
                                 } => {
                                     selected
                                         .get(&caller_instance)
                                         .and_then(|params| params.get(&root))
-                                        .copied()
-                                        == Some(root_layout)
+                                        == Some(&root_pointee)
                                         && self
                                             .typed_private_component(
                                                 &caller_body,
                                                 root,
-                                                root_layout,
+                                                root_pointee,
                                                 TypedPrivateRootKind::Parameter,
                                                 &selected,
                                             )
@@ -4451,7 +4447,9 @@ where
                                     .typed_private_component(
                                         &caller_body,
                                         root,
-                                        root_layout,
+                                        RuntimeClass::AggregateValue {
+                                            layout: root_layout,
+                                        },
                                         kind,
                                         &selected,
                                     )
@@ -4462,7 +4460,7 @@ where
                                 round.push((
                                     *callee,
                                     parameter.local,
-                                    layout,
+                                    pointee.clone(),
                                     "uncertified-caller-borrow",
                                 ));
                             }
@@ -4476,22 +4474,22 @@ where
                     .get(&instance)
                     .cloned()
                     .unwrap_or_else(|| instance.body(self.db));
-                for (&parameter, &layout) in params {
+                for (&parameter, pointee) in params {
                     if let Err(reason) = self.typed_private_component(
                         &body,
                         parameter,
-                        layout,
+                        pointee.clone(),
                         TypedPrivateRootKind::Parameter,
                         &selected,
                     ) {
-                        round.push((instance, parameter, layout, reason));
+                        round.push((instance, parameter, pointee.clone(), reason));
                     }
                 }
             }
             if round.is_empty() {
                 break;
             }
-            for (instance, parameter, layout, reason) in round {
+            for (instance, parameter, pointee, reason) in round {
                 if selected
                     .get_mut(&instance)
                     .is_some_and(|params| params.remove(&parameter).is_some())
@@ -4499,9 +4497,8 @@ where
                     *rejected_by_use.entry(reason).or_default() += 1;
                     wasm_lower_trace_detail(|| {
                         format!(
-                            "shader typed-borrow ABI rejection, function={}, parameter={parameter:?}, layout={:?}, reason={reason}",
+                            "shader typed-borrow ABI rejection, function={}, parameter={parameter:?}, pointee={pointee:?}, reason={reason}",
                             self.function_symbol(instance),
-                            layout.data(self.db),
                         )
                     });
                 }
@@ -4524,18 +4521,18 @@ where
         &self,
         body: &RuntimeBody<'db>,
         local: RLocalId,
-        layout: LayoutId<'db>,
+        pointee: &RuntimeClass<'db>,
         visiting: &mut HashSet<RLocalId>,
     ) -> TypedPrivateBorrowOrigin<'db> {
-        let local_layout = match body.value_class(local) {
+        let local_pointee = match body.value_class(local) {
             Some(RuntimeClass::Ref {
                 pointee,
                 kind: RefKind::Const | RefKind::Object,
                 view: RefView::Whole,
-            }) => pointee.aggregate_layout(),
+            }) => Some(pointee.as_ref()),
             _ => None,
         };
-        if local_layout != Some(layout) || !visiting.insert(local) {
+        if local_pointee != Some(pointee) || !visiting.insert(local) {
             return TypedPrivateBorrowOrigin::Unsupported;
         }
         if body
@@ -4546,24 +4543,31 @@ where
         {
             return TypedPrivateBorrowOrigin::Parameter {
                 root: local,
-                layout,
+                pointee: pointee.clone(),
             };
         }
         let origin = match Self::unique_local_definition(body, local) {
-            Some(RExpr::AllocObject { layout: actual }) if *actual == layout => {
+            Some(RExpr::AllocObject { layout: actual })
+                if pointee.aggregate_layout() == Some(*actual) =>
+            {
                 TypedPrivateBorrowOrigin::LocalStorage {
                     root: local,
-                    layout,
+                    layout: *actual,
                     kind: TypedPrivateRootKind::Allocation,
                 }
             }
-            Some(RExpr::MaterializeToObject { .. }) => TypedPrivateBorrowOrigin::LocalStorage {
-                root: local,
-                layout,
-                kind: TypedPrivateRootKind::Materialized,
-            },
+            Some(RExpr::MaterializeToObject { .. }) => {
+                let Some(layout) = pointee.aggregate_layout() else {
+                    return TypedPrivateBorrowOrigin::Unsupported;
+                };
+                TypedPrivateBorrowOrigin::LocalStorage {
+                    root: local,
+                    layout,
+                    kind: TypedPrivateRootKind::Materialized,
+                }
+            }
             Some(RExpr::Use(source) | RExpr::RetagRef { value: source }) => {
-                self.typed_private_borrow_origin(body, *source, layout, visiting)
+                self.typed_private_borrow_origin(body, *source, pointee, visiting)
             }
             Some(RExpr::AddrOf { place } | RExpr::Load { place }) => {
                 let Some(source) = Self::arena_owned_place_source(body, place) else {
@@ -4572,19 +4576,20 @@ where
                 let source_members = HashSet::from([source]);
                 if self
                     .typed_private_candidate_place_class(body, place, &source_members)
-                    .is_some_and(|class| class.aggregate_layout() == Some(layout))
+                    .as_ref()
+                    == Some(pointee)
                 {
-                    let Some(source_layout) = (match body.value_class(source) {
+                    let Some(source_pointee) = (match body.value_class(source) {
                         Some(RuntimeClass::Ref {
                             pointee,
                             kind: RefKind::Const | RefKind::Object,
                             view: RefView::Whole,
-                        }) => pointee.aggregate_layout(),
+                        }) => Some(pointee.as_ref()),
                         _ => None,
                     }) else {
                         return TypedPrivateBorrowOrigin::Unsupported;
                     };
-                    self.typed_private_borrow_origin(body, source, source_layout, visiting)
+                    self.typed_private_borrow_origin(body, source, source_pointee, visiting)
                 } else {
                     TypedPrivateBorrowOrigin::Unsupported
                 }
@@ -4603,28 +4608,34 @@ where
         &self,
         body: &RuntimeBody<'db>,
         root: RLocalId,
-        layout: LayoutId<'db>,
+        pointee: RuntimeClass<'db>,
         root_kind: TypedPrivateRootKind,
-        selected: &FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>>,
-    ) -> Result<FxHashMap<RLocalId, LayoutId<'db>>, &'static str> {
-        fn object_layout<'db>(body: &RuntimeBody<'db>, local: RLocalId) -> Option<LayoutId<'db>> {
+        selected: &FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>>,
+    ) -> Result<FxHashMap<RLocalId, RuntimeClass<'db>>, &'static str> {
+        fn object_pointee<'db>(
+            body: &RuntimeBody<'db>,
+            local: RLocalId,
+        ) -> Option<RuntimeClass<'db>> {
             match body.value_class(local)? {
                 RuntimeClass::Ref {
                     pointee,
                     kind: RefKind::Const | RefKind::Object,
                     view: RefView::Whole,
-                } => pointee.aggregate_layout(),
+                } => Some((**pointee).clone()),
                 _ => None,
             }
         }
 
         let mut members = HashSet::from([root]);
-        let mut member_layouts = FxHashMap::from_iter([(root, layout)]);
+        let mut member_pointees = FxHashMap::from_iter([(root, pointee.clone())]);
         let mut borrow_aliases = HashSet::new();
         let mut allowed_alias_assignments = HashSet::new();
         if root_kind == TypedPrivateRootKind::Parameter {
             borrow_aliases.insert(root);
         } else {
+            let Some(layout) = pointee.aggregate_layout() else {
+                return Err("storage-root-is-not-aggregate");
+            };
             'first_move: for (block_index, block) in body.blocks.iter().enumerate() {
                 for (statement_index, stmt) in block.stmts.iter().enumerate() {
                     let RStmt::Assign {
@@ -4634,9 +4645,9 @@ where
                     else {
                         continue;
                     };
-                    if *source == root && object_layout(body, *dst) == Some(layout) {
+                    if *source == root && object_pointee(body, *dst) == Some(pointee.clone()) {
                         members.insert(*dst);
-                        member_layouts.insert(*dst, layout);
+                        member_pointees.insert(*dst, RuntimeClass::AggregateValue { layout });
                         allowed_alias_assignments.insert((block_index, statement_index));
                         break 'first_move;
                     }
@@ -4650,25 +4661,25 @@ where
                     let RStmt::Assign { dst, expr } = stmt else {
                         continue;
                     };
-                    if members.contains(dst) || object_layout(body, *dst).is_none() {
+                    if members.contains(dst) || object_pointee(body, *dst).is_none() {
                         continue;
                     }
-                    let destination_layout = object_layout(body, *dst);
-                    let alias_layout = match expr {
+                    let destination_pointee = object_pointee(body, *dst);
+                    let alias_pointee = match expr {
                         RExpr::RetagRef { value } if members.contains(value) => {
-                            member_layouts.get(value).copied()
+                            member_pointees.get(value).cloned()
                         }
                         RExpr::Use(source) if borrow_aliases.contains(source) => {
-                            member_layouts.get(source).copied()
+                            member_pointees.get(source).cloned()
                         }
                         RExpr::AddrOf { place } | RExpr::Load { place } => self
                             .typed_private_candidate_place_class(body, place, &members)
-                            .and_then(|class| class.aggregate_layout()),
+                            .filter(|class| self.typed_private_class_size(class).is_some()),
                         _ => None,
                     };
-                    if alias_layout.is_some() && alias_layout == destination_layout {
+                    if alias_pointee.is_some() && alias_pointee == destination_pointee {
                         members.insert(*dst);
-                        member_layouts.insert(*dst, alias_layout.expect("checked as present"));
+                        member_pointees.insert(*dst, alias_pointee.expect("checked as present"));
                         borrow_aliases.insert(*dst);
                         allowed_alias_assignments.insert((block_index, statement_index));
                         changed = true;
@@ -4696,7 +4707,7 @@ where
                         expr: RExpr::AllocObject { layout: actual },
                     } if root_kind == TypedPrivateRootKind::Allocation
                         && *dst == root
-                        && *actual == layout => {}
+                        && pointee.aggregate_layout() == Some(*actual) => {}
                     RStmt::Assign {
                         dst,
                         expr: RExpr::MaterializeToObject { .. },
@@ -4740,21 +4751,27 @@ where
                             .unwrap_or_else(|| callee.body(self.db));
                         for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
                         {
-                            if let Some(&argument_layout) = member_layouts.get(argument)
+                            if let Some(argument_pointee) = member_pointees.get(argument)
                                 && selected
                                     .get(callee)
                                     .and_then(|params| params.get(&parameter.local))
-                                    .copied()
-                                    != Some(argument_layout)
+                                    != Some(argument_pointee)
                             {
                                 return Err("uncertified-call-borrow");
                             }
                         }
                     }
-                    RStmt::Assign { expr, .. } => {
+                    RStmt::Assign { dst, expr } => {
                         let mut uses = FxHashMap::default();
                         collect_expr_uses(expr, &mut uses);
                         if members.iter().any(|member| uses.contains_key(member)) {
+                            wasm_lower_trace_detail(|| {
+                                format!(
+                                    "shader typed-private expression escape, function={}, block={block_index}, statement={statement_index}, destination={dst:?}, destination_class={:?}, expression={expr:?}",
+                                    self.function_symbol(body.owner),
+                                    body.value_class(*dst),
+                                )
+                            });
                             return Err("expression-escape");
                         }
                     }
@@ -4826,18 +4843,18 @@ where
                 return Err("terminator-escape");
             }
         }
-        Ok(member_layouts)
+        Ok(member_pointees)
     }
 
-    fn typed_private_borrow_layout(
+    fn typed_private_borrow_pointee(
         &self,
         instance: RuntimeInstance<'db>,
         local: RLocalId,
-    ) -> Option<LayoutId<'db>> {
+    ) -> Option<RuntimeClass<'db>> {
         self.typed_private_borrow_params
             .get(&instance)
             .and_then(|params| params.get(&local))
-            .copied()
+            .cloned()
     }
 
     fn typed_private_candidate_place_class(
@@ -4892,13 +4909,16 @@ where
             return Ok(FxHashMap::default());
         }
 
-        fn object_layout<'db>(body: &RuntimeBody<'db>, local: RLocalId) -> Option<LayoutId<'db>> {
+        fn object_pointee<'db>(
+            body: &RuntimeBody<'db>,
+            local: RLocalId,
+        ) -> Option<RuntimeClass<'db>> {
             match body.value_class(local)? {
                 RuntimeClass::Ref {
                     pointee,
                     kind: RefKind::Const | RefKind::Object,
                     view: RefView::Whole,
-                } => pointee.aggregate_layout(),
+                } => Some((**pointee).clone()),
                 _ => None,
             }
         }
@@ -4908,17 +4928,17 @@ where
             .get(&body.owner)
             .into_iter()
             .flat_map(|params| params.iter())
-            .map(|(&local, &layout)| (local, layout, TypedPrivateRootKind::Parameter))
+            .map(|(&local, pointee)| (local, pointee.clone(), TypedPrivateRootKind::Parameter))
             .collect::<Vec<_>>();
         let parameter_roots = roots.len();
         let mut storage_root_statements = 0usize;
         let mut rejected = HashMap::<&'static str, usize>::new();
         let mut rejection_details =
-            Vec::<(RLocalId, LayoutId<'db>, Option<usize>, &'static str)>::new();
+            Vec::<(RLocalId, RuntimeClass<'db>, Option<usize>, &'static str)>::new();
         macro_rules! reject_root {
-            ($root:expr, $layout:expr, $size:expr, $reason:literal) => {{
+            ($root:expr, $pointee:expr, $size:expr, $reason:literal) => {{
                 *rejected.entry($reason).or_default() += 1;
-                rejection_details.push(($root, $layout, $size, $reason));
+                rejection_details.push(($root, $pointee, $size, $reason));
             }};
         }
         for block in &body.blocks {
@@ -4929,16 +4949,17 @@ where
                 match expr {
                     RExpr::AllocObject { layout } => {
                         storage_root_statements += 1;
-                        if object_layout(body, *dst) == Some(*layout) {
-                            roots.push((*dst, *layout, TypedPrivateRootKind::Allocation));
+                        let pointee = RuntimeClass::AggregateValue { layout: *layout };
+                        if object_pointee(body, *dst) == Some(pointee.clone()) {
+                            roots.push((*dst, pointee, TypedPrivateRootKind::Allocation));
                         } else {
-                            reject_root!(*dst, *layout, None, "allocation-class-mismatch");
+                            reject_root!(*dst, pointee, None, "allocation-class-mismatch");
                         }
                     }
                     RExpr::MaterializeToObject { .. } => {
                         storage_root_statements += 1;
-                        if let Some(layout) = object_layout(body, *dst) {
-                            roots.push((*dst, layout, TypedPrivateRootKind::Materialized));
+                        if let Some(pointee) = object_pointee(body, *dst) {
+                            roots.push((*dst, pointee, TypedPrivateRootKind::Materialized));
                         }
                     }
                     _ => {}
@@ -4954,40 +4975,40 @@ where
         let mut selected = FxHashMap::default();
         let mut selected_roots = HashSet::new();
         let mut private_bytes = 0usize;
-        for (root, layout, root_kind) in roots {
+        for (root, pointee, root_kind) in roots {
             if selected.contains_key(&root) {
-                reject_root!(root, layout, None, "already-selected");
+                reject_root!(root, pointee, None, "already-selected");
                 continue;
             }
-            let Some(layout_size) = self.typed_private_layout_size(layout) else {
-                reject_root!(root, layout, None, "unsupported-layout");
+            let Some(pointee_size) = self.typed_private_class_size(&pointee) else {
+                reject_root!(root, pointee, None, "unsupported-pointee");
                 continue;
             };
             let next_private_bytes = if root_kind == TypedPrivateRootKind::Parameter {
                 Some(private_bytes)
             } else {
-                private_bytes.checked_add(layout_size)
+                private_bytes.checked_add(pointee_size)
             };
             let Some(next_private_bytes) = next_private_bytes else {
-                reject_root!(root, layout, Some(layout_size), "private-byte-overflow");
+                reject_root!(root, pointee, Some(pointee_size), "private-byte-overflow");
                 continue;
             };
             if next_private_bytes > MAX_SHADER_TYPED_PRIVATE_BYTES_PER_FUNCTION {
-                reject_root!(root, layout, Some(layout_size), "private-byte-budget");
+                reject_root!(root, pointee, Some(pointee_size), "private-byte-budget");
                 continue;
             }
 
             let members = match self.typed_private_component(
                 body,
                 root,
-                layout,
+                pointee.clone(),
                 root_kind,
                 &self.typed_private_borrow_params,
             ) {
                 Ok(members) => members,
                 Err(reason) => {
                     *rejected.entry(reason).or_default() += 1;
-                    rejection_details.push((root, layout, Some(layout_size), reason));
+                    rejection_details.push((root, pointee, Some(pointee_size), reason));
                     if root_kind == TypedPrivateRootKind::Parameter {
                         return Err(LowerError::Unsupported(format!(
                             "shader typed-borrow parameter {root:?} of `{}` failed its complete use closure: {reason}",
@@ -4999,29 +5020,29 @@ where
             };
 
             if members.keys().any(|member| selected.contains_key(member)) {
-                reject_root!(root, layout, Some(layout_size), "overlapping-selection");
+                reject_root!(root, pointee, Some(pointee_size), "overlapping-selection");
                 continue;
             }
 
             let mut realized_members = Vec::with_capacity(members.len());
             let mut realization_failed = false;
-            for (member, member_layout) in members {
-                let Some(pointee_ty) = self.typed_private_type_for_layout(member_layout)? else {
+            for (member, member_pointee) in members {
+                let Some(pointee_ty) = self.typed_private_type_for_class(&member_pointee)? else {
                     realization_failed = true;
                     break;
                 };
                 let pointer_ty = self.builder.ptr_type(pointee_ty);
-                realized_members.push((member, member_layout, pointee_ty, pointer_ty));
+                realized_members.push((member, member_pointee, pointee_ty, pointer_ty));
             }
             if realization_failed {
-                reject_root!(root, layout, Some(layout_size), "type-realization");
+                reject_root!(root, pointee, Some(pointee_size), "type-realization");
                 continue;
             }
-            for (member, member_layout, pointee_ty, pointer_ty) in realized_members {
+            for (member, member_pointee, pointee_ty, pointer_ty) in realized_members {
                 selected.insert(
                     member,
                     TypedPrivateLocal {
-                        layout: member_layout,
+                        pointee: member_pointee,
                         pointee_ty,
                         pointer_ty,
                     },
@@ -5034,11 +5055,10 @@ where
         rejection_summary.sort_by_key(|(reason, _)| *reason);
         rejection_details.sort_by_key(|(allocation, _, _, _)| allocation.as_u32());
         let function = self.function_symbol(body.owner);
-        for (root, layout, bytes, reason) in rejection_details {
+        for (root, pointee, bytes, reason) in rejection_details {
             wasm_lower_trace_detail(|| {
                 format!(
-                    "shader typed-private rejection, function={function}, root={root:?}, layout={:?}, bytes={bytes:?}, reason={reason}",
-                    layout.data(self.db),
+                    "shader typed-private rejection, function={function}, root={root:?}, pointee={pointee:?}, bytes={bytes:?}, reason={reason}",
                 )
             });
         }
@@ -5593,10 +5613,14 @@ where
             let semantic_ty = instantiated_runtime_local_ty(self.db, body.owner, semantic_ty);
             if semantic_gpu_resource(self.db, semantic_ty) {
                 args.push(self.gpu_resource_type(semantic_ty)?);
-            } else if let Some(layout) = self.typed_private_borrow_layout(body.owner, param.local) {
-                let pointee = self.typed_private_type_for_layout(layout)?.ok_or_else(|| {
+            } else if let Some(pointee_class) =
+                self.typed_private_borrow_pointee(body.owner, param.local)
+            {
+                let pointee = self
+                    .typed_private_type_for_class(&pointee_class)?
+                    .ok_or_else(|| {
                     LowerError::Internal(format!(
-                        "shader typed-borrow parameter {:?} of `{symbol}` lost its representable layout",
+                        "shader typed-borrow parameter {:?} of `{symbol}` lost its representable pointee",
                         param.local,
                     ))
                 })?;
@@ -10774,9 +10798,9 @@ where
             let source = self.body.value_class(*arg).cloned().ok_or_else(|| {
                 LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
             })?;
-            let typed_borrow_layout = self
+            let typed_borrow_pointee = self
                 .module
-                .typed_private_borrow_layout(callee, prepared_param.local);
+                .typed_private_borrow_pointee(callee, prepared_param.local);
             let materialize_indirect_value = indirect_params.contains(&prepared_param.local);
             let materialize_read_borrow = matches!(
                 param,
@@ -10788,24 +10812,24 @@ where
                     && source.shares_runtime_rep_with(self.module.db, pointee)
                     && self.module.aggregate_is_memory_lowerable(&source)
             );
-            if let Some(layout) = typed_borrow_layout {
-                let source_layout = match &source {
+            if let Some(pointee) = typed_borrow_pointee {
+                let source_pointee = match &source {
                     RuntimeClass::Ref {
                         pointee,
                         kind: RefKind::Const | RefKind::Object,
                         view: RefView::Whole,
-                    } => pointee.aggregate_layout(),
+                    } => Some(pointee.as_ref()),
                     _ => None,
                 };
-                let local = self.typed_private_locals.get(arg).copied().ok_or_else(|| {
+                let local = self.typed_private_locals.get(arg).cloned().ok_or_else(|| {
                     LowerError::Internal(format!(
-                        "call to `{}` selected typed aggregate borrow {arg:?}, but the caller did not preserve its storage",
+                        "call to `{}` selected typed borrow {arg:?}, but the caller did not preserve its storage",
                         self.module.function_symbol(callee),
                     ))
                 })?;
-                if source_layout != Some(layout) || local.layout != layout {
+                if source_pointee != Some(&pointee) || local.pointee != pointee {
                     return Err(LowerError::Internal(format!(
-                        "call to `{}` selected incompatible typed aggregate borrow {arg:?}",
+                        "call to `{}` selected incompatible typed borrow {arg:?}",
                         self.module.function_symbol(callee),
                     )));
                 }
@@ -12314,8 +12338,8 @@ where
             // Sonatina storage. Every other target and every ineligible object
             // retains the canonical-arena representation.
             RExpr::AllocObject { layout } => {
-                if let Some(local) = self.typed_private_locals.get(&dst).copied() {
-                    if local.layout != *layout {
+                if let Some(local) = self.typed_private_locals.get(&dst).cloned() {
+                    if local.pointee.aggregate_layout() != Some(*layout) {
                         return Err(LowerError::Internal(format!(
                             "shader typed-private allocation {dst:?} changed layout"
                         )));
@@ -12329,7 +12353,7 @@ where
                 }
             }
             RExpr::MaterializeToObject { src } => {
-                if let Some(local) = self.typed_private_locals.get(&dst).copied() {
+                if let Some(local) = self.typed_private_locals.get(&dst).cloned() {
                     self.lower_materialize_to_typed_object(*src, local)
                 } else {
                     self.lower_materialize_to_object(*src)
@@ -12944,9 +12968,9 @@ where
                 "typed materialization source {src:?} has no runtime class"
             ))
         })?;
-        if class.aggregate_layout() != Some(local.layout) {
+        if class != local.pointee {
             return Err(LowerError::Internal(format!(
-                "typed materialization source {src:?} changed layouts"
+                "typed materialization source {src:?} changed pointee class"
             )));
         }
         let leaves = if self.is_address_carried_aggregate_value(src) {
@@ -13098,11 +13122,17 @@ where
     /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
     /// Load one Fe scalar from linear memory. Wasm narrow loads occupy an i32
     /// register even when the logical Fe carrier is i1/i8/i16, so truncate the
-    /// register before binding it to a narrow SSA local.
+    /// register before binding it to a narrow SSA local. A shader typed-local
+    /// pointer already carries its pointee type and therefore loads that type
+    /// directly instead of inheriting the Wasm register convention.
     fn load_memory_scalar(&mut self, address: ValueId, ty: Type) -> ValueId {
-        let register_ty = match ty {
-            Type::I1 | Type::I8 | Type::I16 => Type::I32,
-            _ => ty,
+        let register_ty = if self.fb.type_of(address).is_pointer(self.fb.ctx()) {
+            ty
+        } else {
+            match ty {
+                Type::I1 | Type::I8 | Type::I16 => Type::I32,
+                _ => ty,
+            }
         };
         let loaded = self
             .fb
@@ -13371,13 +13401,13 @@ where
         let local = self
             .typed_private_locals
             .get(&root)
-            .copied()
+            .cloned()
             .ok_or_else(|| {
                 LowerError::Internal("typed private root lost its materialization plan".to_owned())
             })?;
-        if current_class.aggregate_layout() != Some(local.layout) {
+        if current_class != local.pointee {
             return Err(LowerError::Internal(format!(
-                "typed private root {root:?} has a projected layout inconsistent with its allocation"
+                "typed private root {root:?} has a pointee inconsistent with its allocation"
             )));
         }
 
@@ -14939,10 +14969,14 @@ mod tests {
     }
 
     #[test]
-    fn shader_ir_preserves_proven_aggregate_borrows_as_typed_pointers() {
+    fn shader_ir_preserves_proven_nested_borrows_as_typed_pointers() {
         let source = r#"
 struct Cell { left: u32, right: u32 }
-struct Row { first: Cell, second: Cell }
+struct Row { enabled: bool, first: Cell, second: Cell }
+
+fn enable(_ value: mut bool) {
+    value = true
+}
 
 fn update(_ cell: mut Cell, _ delta: u32) {
     cell.left = cell.left + delta
@@ -14954,6 +14988,7 @@ fn sum(_ cell: ref Cell) -> u32 {
 }
 
 fn update_row(_ row: mut Row) {
+    enable(mut row.enabled)
     update(mut row.first, 3)
     update(mut row.second, 5)
 }
@@ -14964,11 +14999,12 @@ fn sum_row(_ row: ref Row) -> u32 {
 
 pub fn kernel(_ value: u32) -> u32 {
     let mut row = Row {
+        enabled: false,
         first: Cell { left: value, right: value + 1 },
         second: Cell { left: value + 2, right: value + 3 },
     }
     update_row(mut row)
-    sum_row(ref row)
+    if row.enabled { sum_row(ref row) } else { 0 }
 }
 "#;
         let mut db = DriverDataBase::default();
@@ -14998,8 +15034,8 @@ pub fn kernel(_ value: u32) -> u32 {
             })
             .count();
         assert_eq!(
-            typed_pointer_arguments, 4,
-            "whole-record and projected Fe aggregate borrows should retain typed pointer parameters"
+            typed_pointer_arguments, 5,
+            "whole-record, aggregate-field, and scalar-field Fe borrows should retain typed pointer parameters"
         );
 
         let arena_scope_ops = module
