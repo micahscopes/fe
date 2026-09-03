@@ -2848,6 +2848,19 @@ SSOT carries the architectural decisions and gates.
      when their boundary states match; fixed-size typed digests keep recursive
      receipts compact while independent gates cover rounding, carries,
      continuity, and mutated boundaries;
+   - keep the iteration axis runtime-indexed inside each leaf AIR: one local
+     recurrence relation repeats across a typed trace while CTFE derives its
+     layout and factor-tree schedule. Increasing the leaf iteration budget must
+     grow prover work and storage, not unroll more Fe control flow or inflate
+     the shader body;
+   - do not reduce recursive refinement to a longer certified iteration
+     interval. Reuse a committed high-precision reference orbit as an anchor
+     for the exact perturbation relation
+     `delta_(n+1) = 2 * Z_n * delta_n + delta_n^2 + delta_c`, including the
+     fixed-point rounding and explicit error envelope. This should support
+     spatial refinement around a proven anchor in the same denotational shape
+     as the perturbational renderer; adjacent chunk aggregation is necessary
+     substrate, not the whole refinement goal;
    - encode the proof as a canonical typed Fe value, transport/submit only its
      bytes through the fixed host, and run the same Fe verifier in browser
      Wasm, native differential tests, and the contract backend where supported;

@@ -24,6 +24,7 @@ pub struct MandelbrotAuxiliaryLdeRowBabyBearV1 {}
 pub struct MandelbrotMainLdeTranscriptBabyBearV1 {}
 pub struct MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {}
 pub struct MandelbrotSparseBaseLdeLeafBabyBearV1 {}
+pub struct MandelbrotSparseInteractionLdeLeafBabyBearV1 {}
 pub struct MandelbrotSparseLdeProductBetaBabyBearV1 {}
 pub struct MandelbrotSparseLdeProductGammaBabyBearV1 {}
 pub struct MandelbrotSparseLdeRoundBetaBabyBearV1 {}
@@ -77,6 +78,13 @@ impl Poseidon2FieldDomain for MandelbrotAuxiliaryLdeTranscriptBabyBearV1 {
 /// protocol identity without copying its numeric tag.
 impl Poseidon2FieldDomain for MandelbrotSparseBaseLdeLeafBabyBearV1 {
     const TAG: u32 = protocol_tag("LD01")
+}
+
+/// Production sparse interaction-LDE leaf domain. Keeping `LD02` beside
+/// `LD01` gives scalar and staged GPU interpreters one nominal protocol
+/// identity instead of independently reconstructing a numeric tag.
+impl Poseidon2FieldDomain for MandelbrotSparseInteractionLdeLeafBabyBearV1 {
+    const TAG: u32 = protocol_tag("LD02")
 }
 
 impl Poseidon2FieldDomain for MandelbrotSparseLdeProductBetaBabyBearV1 {

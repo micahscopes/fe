@@ -296,7 +296,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 51);
+    assert_eq!(bundle.manifest.passes.len(), 56);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -507,7 +507,30 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[48].dispatch, Some([3, 1, 1]));
     assert_eq!(bundle.manifest.passes[49].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[49].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[50].source_entry, "paint");
+    let interaction_commitment_names = [
+        "prepare_interaction_lde_commitments",
+        "advance_interaction_lde_commitments",
+        "prepare_interaction_lde_tree",
+        "advance_interaction_lde_tree",
+        "finish_interaction_lde_tree",
+    ];
+    assert_eq!(
+        bundle.manifest.passes[50..55]
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        interaction_commitment_names,
+    );
+    assert_eq!(bundle.manifest.passes[50].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[50].repeat, 1);
+    assert_eq!(bundle.manifest.passes[51].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[51].repeat, 21);
+    assert_eq!(bundle.manifest.passes[52].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[53].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[53].repeat, 13);
+    assert_eq!(bundle.manifest.passes[54].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[54].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[55].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle

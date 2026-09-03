@@ -2752,6 +2752,36 @@ fn expected_sparse_production_base_lde_root(lde: &[u32]) -> [u32; 8] {
     reference_merkle_root_with(&permutation, leaves)
 }
 
+fn expected_sparse_production_interaction_lde_root(
+    lde: &[u32],
+    base_lde_root: [u32; 8],
+) -> [u32; 8] {
+    const INTERACTION_FIELDS: usize = 152;
+    let permutation = default_babybear_poseidon2_16();
+    let lde_rows = PRODUCTION_TRACE_ROWS * 2;
+    assert_eq!(lde.len(), lde_rows * INTERACTION_FIELDS);
+    let mut leaves = Vec::with_capacity(lde_rows);
+    for row in 0..lde_rows {
+        let mut fields = Vec::with_capacity(4 + base_lde_root.len() + INTERACTION_FIELDS);
+        fields.extend([
+            LIMBS as u32,
+            PRODUCTION_TRACE_ROWS as u32,
+            lde_rows as u32,
+            row as u32,
+        ]);
+        fields.extend(base_lde_root);
+        for column in 0..INTERACTION_FIELDS {
+            fields.push(lde[column * lde_rows + row]);
+        }
+        leaves.push(reference_poseidon_digest_with(
+            &permutation,
+            b"LD02",
+            &fields,
+        ));
+    }
+    reference_merkle_root_with(&permutation, leaves)
+}
+
 fn expected_sparse_production_interaction_trace_words(
     point: &ComplexFx,
     current: &ComplexFx,
@@ -6539,4 +6569,72 @@ fn production_sparse_lde_browser_codewords_match_independent_plonky3() {
             "production interaction LDE differs at column {column}, row {row}: browser={actual}, Plonky3={expected}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires an explicit real-Chrome production interaction-root receipt"]
+fn production_sparse_lde_browser_roots_match_independent_reference() {
+    const INTERACTION_FIELDS: usize = 152;
+    const LDE_ROWS: usize = PRODUCTION_TRACE_ROWS * 2;
+    const TREE_NODES: usize = LDE_ROWS * 2 - 1;
+    const ROOT_NODE: usize = TREE_NODES - 1;
+    const ROOT_WORD: usize = ROOT_NODE * 8;
+
+    let receipt_dir = std::env::var_os(SPARSE_LDE_BROWSER_RECEIPT_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "set {SPARSE_LDE_BROWSER_RECEIPT_DIR} to the directory emitted by the generic browser resource snapshot"
+            )
+        });
+    let transition = read_u32le_file(&receipt_dir.join("transition_workspace.u32le"));
+    let interaction_tree = read_u32le_file(&receipt_dir.join("base_trace.u32le"));
+    let base_tree_and_interaction_validity =
+        read_u32le_file(&receipt_dir.join("lde_inverse_values.u32le"));
+
+    assert_eq!(
+        transition.len(),
+        218,
+        "production transition workspace words"
+    );
+    assert_eq!(transition[217], 1, "all commitment phases must be valid");
+    assert!(interaction_tree.len() >= ROOT_WORD + 8);
+    assert!(base_tree_and_interaction_validity.len() >= ROOT_WORD + 8);
+
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let base_trace = expected_sparse_production_base_trace_words(&point, &current);
+    let base_lde =
+        plonky3_coset_lde_column_major(&base_trace, PRODUCTION_TRACE_ROWS, SPARSE_BASE_FIELDS);
+    let base_root = expected_sparse_production_base_lde_root(&base_lde);
+    let interaction_trace =
+        expected_sparse_production_interaction_trace_words(&point, &current, base_root);
+    let interaction_lde = plonky3_coset_lde_column_major(
+        &interaction_trace,
+        PRODUCTION_TRACE_ROWS,
+        INTERACTION_FIELDS,
+    );
+    let interaction_root =
+        expected_sparse_production_interaction_lde_root(&interaction_lde, base_root);
+
+    assert_eq!(
+        &base_tree_and_interaction_validity[ROOT_WORD..ROOT_WORD + 8],
+        &base_root,
+        "retained browser LD01 root must match the independent reference",
+    );
+    assert_eq!(
+        base_tree_and_interaction_validity[ROOT_NODE], 1,
+        "browser LD02 root node must be valid",
+    );
+    assert_eq!(
+        &interaction_tree[ROOT_WORD..ROOT_WORD + 8],
+        &interaction_root,
+        "browser LD02 root must match the independent reference",
+    );
 }

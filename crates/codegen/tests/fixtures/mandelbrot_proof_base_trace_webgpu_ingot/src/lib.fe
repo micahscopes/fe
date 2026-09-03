@@ -41,6 +41,7 @@ use mandelbrot_proof_fixed_air_webgpu::{
 use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
 use mandelbrot_proof_baby_bear_domains::{
     MandelbrotSparseBaseLdeLeafBabyBearV1,
+    MandelbrotSparseInteractionLdeLeafBabyBearV1,
     SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
     sparse_lde_interaction_challenge_domain_tag,
 }
@@ -65,6 +66,7 @@ use parallel_ntt_webgpu::{
 }
 use parallel_scan_webgpu::advance_batched_additive_scan_row
 use parallel_structure::FactorTree
+use poseidon_baby_bear::DIGEST_FIELDS
 use poseidon_baby_bear_webgpu::{
     DIGEST_SQUEEZE_STEPS,
     POSEIDON2_LANES,
@@ -146,6 +148,14 @@ const BASE_COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
 const BASE_COMMITMENT_WORKSPACE_WORDS: usize = column_major_field_row_commitment_workspace_words(
     BASE_LDE_LENGTH,
 )
+const INTERACTION_LEAF_PREFIX_FIELDS: usize = 4 + DIGEST_FIELDS
+const INTERACTION_COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
+    INTERACTION_LEAF_PREFIX_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+)
+const INTERACTION_COMMITMENT_WORKSPACE_WORDS: usize = column_major_field_row_commitment_workspace_words(
+    BASE_LDE_LENGTH,
+)
 const CHALLENGE_GROUPS: usize = digest_squeeze_batch_workgroups(
     SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
     THREADS,
@@ -199,6 +209,10 @@ static_assert(BASE_TREE_LEAF_GROUPS == 128)
 static_assert(BASE_TREE_PARENT_GROUPS == 64)
 static_assert(BASE_COMMITMENT_STEPS == 34)
 static_assert(BASE_COMMITMENT_WORKSPACE_WORDS == 147456)
+static_assert(DIGEST_FIELDS == 8)
+static_assert(INTERACTION_LEAF_PREFIX_FIELDS == 12)
+static_assert(INTERACTION_COMMITMENT_STEPS == 21)
+static_assert(INTERACTION_COMMITMENT_WORKSPACE_WORDS == 147456)
 static_assert(SPARSE_LDE_INTERACTION_CHALLENGE_COUNT == 8)
 static_assert(POSEIDON2_LANES == 16)
 static_assert(DIGEST_SQUEEZE_STEPS == 89)
@@ -209,6 +223,7 @@ static_assert(BASE_TREE_WORDS <= BASE_TRACE_WORDS)
 static_assert(BASE_TREE_NODES <= BASE_TRACE_WORDS)
 static_assert(BASE_TREE_PARENT_TASKS <= PRODUCTION_TRACE_LENGTH)
 static_assert(BASE_COMMITMENT_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
+static_assert(INTERACTION_COMMITMENT_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(CHALLENGE_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(CHALLENGE_OUTPUT_WORDS <= PRODUCTION_TRACE_LENGTH)
 static_assert(INTERACTION_TRACE_WORDS <= BASE_TRACE_WORDS)
@@ -1200,6 +1215,154 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             valid = valid && self.validity.load(index: column) == 1
             column = column + 1
         }
+        store_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace, valid)
+    }
+
+    /// The interaction LDE is now immutable proof data. Reuse only buffers
+    /// whose previous phases are retired: the old base trace becomes the
+    /// interaction digest tree, the old inverse workspace carries staged
+    /// Poseidon state, and the old base digest arena's low words carry new
+    /// node-validity bits. Its base root remains live at the disjoint digest
+    /// offset selected by `load_poseidon2_digest`.
+    fn prepare_interaction_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_LEAF_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_column_major_field_row_commitments<
+            BASE_LDE_LENGTH,
+            LDE_INPUT_GRID_LANES,
+        >(self.lde_inverse_progress, invocation)
+    }
+
+    fn advance_interaction_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    BASE_TREE_LEAF_GROUPS,
+                    1,
+                    1,
+                    INTERACTION_COMMITMENT_STEPS,
+                >,
+            >
+        )
+    {
+        let row = invocation.global.x
+        if row >= BASE_LDE_LENGTH.downcast_truncate() { return }
+        let base_root_node: u32 = (BASE_TREE_NODES - 1).downcast_truncate()
+        let base_root = load_poseidon2_digest(
+            self.lde_inverse_values,
+            base_root_node,
+        )
+        let prefix = [
+            BabyBear::from_u32(PRODUCTION_LIMBS.downcast_truncate()),
+            BabyBear::from_u32(PRODUCTION_TRACE_LENGTH.downcast_truncate()),
+            BabyBear::from_u32(BASE_LDE_LENGTH.downcast_truncate()),
+            BabyBear::from_u32(row),
+            base_root.field(0),
+            base_root.field(1),
+            base_root.field(2),
+            base_root.field(3),
+            base_root.field(4),
+            base_root.field(5),
+            base_root.field(6),
+            base_root.field(7),
+        ]
+        let step = advance_column_major_field_row_commitments<
+            MandelbrotSparseInteractionLdeLeafBabyBearV1,
+            BASE_LDE_LENGTH,
+            SPARSE_INTERACTION_AIR_FIELDS,
+            INTERACTION_LDE_WORDS,
+            INTERACTION_LEAF_PREFIX_FIELDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.lde_progress,
+            self.lde_inverse_progress,
+            ref prefix,
+            invocation,
+        )
+        if step.complete {
+            write_ordered_binary_tree_leaf<
+                BASE_LDE_LENGTH,
+                BASE_TRACE_WORDS,
+                BASE_TRACE_WORDS,
+            >(
+                self.base_trace,
+                self.lde_inverse_values,
+                step.row,
+                step.commitment.require(
+                    load_transition_phase_receipt<
+                        PRODUCTION_LIMBS,
+                        TRANSITION_WORKSPACE_WORDS,
+                    >(self.transition_workspace),
+                ),
+            )
+        }
+    }
+
+    fn prepare_interaction_lde_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_PARENT_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            PRODUCTION_TRACE_LENGTH,
+        >(self.validity, invocation)
+    }
+
+    fn advance_interaction_lde_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    BASE_TREE_PARENT_GROUPS,
+                    1,
+                    1,
+                    BASE_TREE_LEVELS,
+                >,
+            >
+        )
+    {
+        advance_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            BASE_TREE_LEVELS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.base_trace,
+            self.lde_inverse_values,
+            self.validity,
+            invocation,
+        )
+    }
+
+    fn finish_interaction_lde_tree(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let root = finish_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            BASE_TREE_LEVELS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(self.base_trace, self.lde_inverse_values, self.validity)
+        let valid = load_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace) && root.valid
         store_transition_phase_receipt<
             PRODUCTION_LIMBS,
             TRANSITION_WORKSPACE_WORDS,

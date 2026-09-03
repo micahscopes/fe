@@ -13,6 +13,7 @@ mandelbrot_proof_recursive = "../../../../../demos/capstones/mandelbrot-proof/re
 parallel_ntt_webgpu = "../../../../../ingots/parallel_ntt_webgpu"
 parallel_scan_webgpu = "../../../../../ingots/parallel_scan_webgpu"
 parallel_structure = "../../../../../ingots/parallel_structure"
+poseidon_baby_bear = "../../../../../ingots/poseidon_baby_bear"
 poseidon_baby_bear_webgpu = "../../../../../ingots/poseidon_baby_bear_webgpu"
 poseidon_merkle_webgpu = "../../../../../ingots/poseidon_merkle_webgpu"
 precision = "../../../../../demos/sketches/precision"
