@@ -822,6 +822,35 @@ fn new_param_binding_actor_needs_only_fe_source() {
         );
     }
 
+    let params = &bundle
+        .manifest
+        .surface
+        .as_ref()
+        .expect("ParamBindingProbe surface")
+        .params;
+    assert_eq!(
+        params
+            .iter()
+            .map(|param| param.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["int", "angle", "range", "extent_x"],
+        "Fe enum variant names must project opaquely without a Rust kind mirror",
+    );
+    for param in &params[..3] {
+        assert!(
+            param.visible,
+            "Fe control constructor marks {} visible",
+            param.name
+        );
+        assert!(param.min.is_some() && param.max.is_some() && param.init.is_some());
+    }
+    let extent = &params[3];
+    assert!(
+        !extent.visible,
+        "Fe extent binding is not a browser control"
+    );
+    assert_eq!((extent.min, extent.max, extent.init), (None, None, None));
+
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [3.0, 0.0, 2.0, 256.0], 640.0,),
         [4.0, (-5.0f32 * 0.02) + 6.2831855, 2.0f32 * 0.75, 640.0,],

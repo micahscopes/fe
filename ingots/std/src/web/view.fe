@@ -261,6 +261,14 @@ pub struct Param {
     min: f32,
     max: f32,
     init: f32,
+    /// Whether this declaration carries an inclusive range. This is authored
+    /// by the Fe constructors and projected as data; the compiler does not
+    /// infer presentation policy from `ParamKind`.
+    bounded: bool,
+    /// Whether `init` participates in initial surface state.
+    initialized: bool,
+    /// Whether the browser presentation exposes an ordinary control.
+    visible: bool,
     drag_x_per_px: f32,
     drag_y_per_px: f32,
     wheel_per_notch: f32,
@@ -269,9 +277,23 @@ pub struct Param {
 }
 
 impl Param {
-    const fn new(_ kind: ParamKind, _ min: f32, _ max: f32, _ init: f32) -> Param {
+    const fn control(_ kind: ParamKind, _ min: f32, _ max: f32, _ init: f32) -> Param {
         Param {
             kind: kind, min: min, max: max, init: init,
+            bounded: true, initialized: true, visible: true,
+            drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
+            wheel_in_factor: 1.0, wheel_out_factor: 1.0,
+        }
+    }
+
+    const fn binding(
+        _ kind: ParamKind,
+        _ value: f32,
+        _ initialized: bool,
+    ) -> Param {
+        Param {
+            kind: kind, min: value, max: value, init: value,
+            bounded: false, initialized: initialized, visible: false,
             drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
             wheel_in_factor: 1.0, wheel_out_factor: 1.0,
         }
@@ -279,27 +301,27 @@ impl Param {
 
     /// A linear slider over `[min, max]`, starting at `init`.
     pub const fn range(min: f32, max: f32, init: f32) -> Param {
-        Param::new(ParamKind::Range, min, max, init)
+        Param::control(ParamKind::Range, min, max, init)
     }
 
     /// A linear slider over `[0, 1]`, starting at `init`.
     pub const fn unit(init: f32) -> Param {
-        Param::new(ParamKind::Unit, 0.0, 1.0, init)
+        Param::control(ParamKind::Unit, 0.0, 1.0, init)
     }
 
     /// An angle in radians over `[0, TAU]`, starting at `init`.
     pub const fn angle(init: f32) -> Param {
-        Param::new(ParamKind::Angle, 0.0, 6.2831855, init)
+        Param::control(ParamKind::Angle, 0.0, 6.2831855, init)
     }
 
     /// A logarithmic slider over `[min, max]`, starting at `init`.
     pub const fn log(min: f32, max: f32, init: f32) -> Param {
-        Param::new(ParamKind::Log, min, max, init)
+        Param::control(ParamKind::Log, min, max, init)
     }
 
     /// An integer slider over `[min, max]`, starting at `init`.
     pub const fn int(min: f32, max: f32, init: f32) -> Param {
-        Param::new(ParamKind::Int, min, max, init)
+        Param::control(ParamKind::Int, min, max, init)
     }
 
     /// A checkbox starting either unchecked or checked. Its scalar carrier is
@@ -307,31 +329,32 @@ impl Param {
     /// code can immediately interpret it as an enum or boolean policy.
     pub const fn toggle(init: bool) -> Param {
         let value: f32 = if init { 1.0 } else { 0.0 }
-        Param::new(ParamKind::Toggle, 0.0, 1.0, value)
+        Param::control(ParamKind::Toggle, 0.0, 1.0, value)
     }
 
     /// A constant value carried into the uniform record but not shown as a
     /// control.
     pub const fn fixed(_ value: f32) -> Param {
-        Param::new(ParamKind::Fixed, value, value, value)
+        Param::binding(ParamKind::Fixed, value, true)
     }
 
     /// Bound to the live canvas width in pixels. The runtime writes the actual
     /// backing-store width into this member each configure, so the kernel is
     /// resolution-exact with no `const RESOLUTION` and no ABI change.
     pub const fn extent_x() -> Param {
-        Param::new(ParamKind::ExtentX, 0.0, 0.0, 0.0)
+        Param::binding(ParamKind::ExtentX, 0.0, false)
     }
 
     /// Bound to the live canvas height in pixels.
     pub const fn extent_y() -> Param {
-        Param::new(ParamKind::ExtentY, 0.0, 0.0, 0.0)
+        Param::binding(ParamKind::ExtentY, 0.0, false)
     }
 
     /// Add `delta_x * per_px` to this value for each captured drag event.
     pub const fn drag_x(self, per_px: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized, visible: self.visible,
             drag_x_per_px: per_px, drag_y_per_px: self.drag_y_per_px,
             wheel_per_notch: self.wheel_per_notch,
             wheel_in_factor: self.wheel_in_factor,
@@ -343,6 +366,7 @@ impl Param {
     pub const fn drag_y(self, per_px: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized, visible: self.visible,
             drag_x_per_px: self.drag_x_per_px, drag_y_per_px: per_px,
             wheel_per_notch: self.wheel_per_notch,
             wheel_in_factor: self.wheel_in_factor,
@@ -357,6 +381,7 @@ impl Param {
     pub const fn wheel(self, per_notch: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized, visible: self.visible,
             drag_x_per_px: self.drag_x_per_px,
             drag_y_per_px: self.drag_y_per_px,
             wheel_per_notch: per_notch,
@@ -370,6 +395,7 @@ impl Param {
     pub const fn wheel_scale(self, in_factor: f32, out_factor: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized, visible: self.visible,
             drag_x_per_px: self.drag_x_per_px,
             drag_y_per_px: self.drag_y_per_px,
             wheel_per_notch: self.wheel_per_notch,
