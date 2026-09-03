@@ -14,7 +14,7 @@ use crate::{
     ArgumentDef, BindgenError, CallbackDef, CollectionKind, ConstructorDef, DefaultValueDef,
     ExtendedAttributesDef, HostAbiLowering, HostAbiOptions, InterfaceDef, IteratorItemBinding,
     Member, NamespaceDef, NamespaceMember, OperationDef, TypeRef, World, constructor_import_name,
-    lower_host_abi_with_metadata,
+    lower_host_abi_with_metadata, snake_case,
 };
 
 pub const HOST_RUNTIME_CONTRACT: &str = "fe:host-runtime/v1";
@@ -1706,23 +1706,6 @@ fn js_default_for_type(
         ));
     }
     Ok(js_default(value))
-}
-
-fn snake_case(name: &str) -> String {
-    let mut result = String::new();
-    for (index, ch) in name.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if index > 0 {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else if ch.is_ascii_alphanumeric() {
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push('_');
-        }
-    }
-    result
 }
 
 fn js_ident(name: &str) -> String {

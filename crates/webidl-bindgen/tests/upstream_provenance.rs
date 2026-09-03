@@ -1,5 +1,6 @@
 use fe_compiler_protocol::{InterfaceFunction, InterfaceManifest};
 use fe_webidl_bindgen::{
+    WEBGPU_QUEUE_IDLE_PROVENANCE, WEBGPU_QUEUE_IDLE_WEBIDL, WEBGPU_WEBIDL_MODULE,
     adapter_operation_metadata, build_adapter_plan, emit_fe_flat_host_imports,
     emit_js_canonical_adapter, parse, select_adapter_operations,
 };
@@ -17,6 +18,141 @@ fn import(name: &str) -> InterfaceFunction {
         params: Vec::new(),
         results: Vec::new(),
     }
+}
+
+#[test]
+fn pinned_webgpu_queue_idle_selection_has_exact_provenance_and_generated_names() {
+    let provenance: serde_json::Value = serde_json::from_str(WEBGPU_QUEUE_IDLE_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["revision"],
+        "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279"
+    );
+    assert_eq!(provenance["license"], "MIT");
+    assert_eq!(
+        provenance["sources"][0]["git_blob"],
+        "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6"
+    );
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!("{:x}", Sha256::digest(WEBGPU_QUEUE_IDLE_WEBIDL.as_bytes()))
+    );
+
+    let world = parse(WEBGPU_QUEUE_IDLE_WEBIDL).unwrap();
+    assert_eq!(
+        world
+            .interfaces
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["GPUQueue"]
+    );
+    let plan = build_adapter_plan(&world, "webgpu-queue-idle", WEBGPU_WEBIDL_MODULE).unwrap();
+    let functions = plan.resources[0]
+        .functions
+        .iter()
+        .map(|function| function.import_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        functions,
+        [
+            "gpu_queue_on_submitted_work_done",
+            "gpu_queue_resource_drop",
+        ]
+    );
+    let raw = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    assert!(
+        raw.contains(
+            "gpu_queue_on_submitted_work_done(self_: GPUQueue) -> Pending<WasmBackend, ()>"
+        )
+    );
+    assert!(!raw.contains("g_p_u_queue"), "{raw}");
+}
+
+#[test]
+fn generated_webgpu_queue_idle_adapter_scopes_the_borrow_through_settlement() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = parse(WEBGPU_QUEUE_IDLE_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-queue-idle", WEBGPU_WEBIDL_MODULE).unwrap();
+    let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "fe-webidl-webgpu-queue-idle-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let adapter_path = directory.join("adapter.mjs");
+    let test_path = directory.join("test.mjs");
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let runtime_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/browser-runtime/host-runtime.js")
+        .canonicalize()
+        .unwrap();
+    let script = format!(
+        r#"
+import {{ createFeHostAdapter }} from {adapter_url:?};
+import {{ createFeHostRuntime }} from {runtime_url:?};
+
+const runtime = createFeHostRuntime();
+const adapter = createFeHostAdapter({{}}, runtime);
+const queueOps = adapter.imports[{module:?}];
+let calls = 0;
+let resolveIdle;
+let borrowedHandle;
+const queue = {{
+  onSubmittedWorkDone() {{
+    calls += 1;
+    return new Promise(resolve => {{ resolveIdle = resolve; }});
+  }},
+}};
+const pending = runtime.resources.withBorrowed(queue, handle => {{
+  borrowedHandle = handle;
+  return queueOps.gpu_queue_on_submitted_work_done(handle);
+}});
+if (calls !== 1 || runtime.inventory().resources !== 1)
+  throw new Error("queue borrow was not retained through the pending promise");
+resolveIdle();
+await pending;
+if (runtime.inventory().resources !== 0)
+  throw new Error("resolved queue borrow was not retired");
+let stale = false;
+try {{ runtime.resources.borrow(borrowedHandle); }} catch (error) {{ stale = error.code === "stale_handle"; }}
+if (!stale) throw new Error("retired queue handle remained usable");
+
+const rejection = new Error("queue rejected");
+let observed;
+try {{
+  await runtime.resources.withBorrowed(
+    {{ onSubmittedWorkDone() {{ return Promise.reject(rejection); }} }},
+    handle => queueOps.gpu_queue_on_submitted_work_done(handle),
+  );
+}} catch (error) {{ observed = error; }}
+if (observed !== rejection || runtime.inventory().resources !== 0)
+  throw new Error("rejected queue promise did not preserve error and retire its borrow");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        runtime_url = format!("file://{}", runtime_path.display()),
+        module = WEBGPU_WEBIDL_MODULE,
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("node")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "generated WebGPU queue-idle adapter failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
