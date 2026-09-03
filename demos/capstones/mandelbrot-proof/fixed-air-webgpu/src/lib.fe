@@ -22,6 +22,7 @@ use canonical_words::{
     decode_canonical_words,
     encode_canonical_words,
 }
+use core::default::Default
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     sparse_base_air_control_at,
@@ -54,6 +55,7 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_carry_task_count,
     sparse_linear_row,
     sparse_linear_task_count,
+    sparse_padding_control_row,
     sparse_product_row,
     sparse_product_task_count,
     sparse_radix_row,
@@ -1390,6 +1392,25 @@ fn decode_column_major_value<
     WorkspaceDecoded { value: value, valid: reader.finish() }
 }
 
+fn decode_default_column_major_value<
+    T: CanonicalWords + core::marker::Copy + Default,
+    const ROWS: usize,
+    const INPUT_WORDS: usize,
+>(
+    _ input: StorageBuffer<u32, INPUT_WORDS>,
+    _ row: u32,
+    _ column_start: u32,
+) -> WorkspaceDecoded<T> {
+    let mut value = <T as Default>::default()
+    let reader = decode_canonical_words(
+        mut value,
+        ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(
+            input, row, column_start, T::WORDS,
+        ),
+    )
+    WorkspaceDecoded { value: value, valid: reader.finish() }
+}
+
 const CONTROL_WORDS: usize =
     <SparseControlRow<BabyBear> as CanonicalWords>::WORDS as usize
 const CONTROL_PLAN_WORDS: usize =
@@ -1432,14 +1453,15 @@ fn decode_stored_control<
 where
     L > 1,
 {
-    let initial = sparse_base_air_control_at<L>(row)
     if row >= TRACE.downcast_truncate() {
-        return WorkspaceDecoded { value: initial, valid: true }
+        return WorkspaceDecoded {
+            value: sparse_padding_control_row<BabyBear>(),
+            valid: true,
+        }
     }
-    decode_column_major_value<
+    decode_default_column_major_value<
         SparseControlRow<BabyBear>, TRACE, BASE_TRACE_WORDS,
     >(
-        initial,
         base_trace,
         row,
         CONTROL_START.downcast_truncate(),

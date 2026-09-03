@@ -5,6 +5,7 @@
 //! and no host integer operations.
 
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use core::default::Default
 use mandelbrot_proof_fixed_air::{
     BoundedU18Witness,
     FixedLinearWitness,
@@ -255,6 +256,7 @@ pub struct SparseControlSelectors<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseControlSelectors<F> {}
 derive Eq for SparseControlSelectors<F>
+derive Default for SparseControlSelectors<F>
 derive CanonicalWords for SparseControlSelectors<F> using CanonicalWordsProvider
 
 /// Low-degree role selectors for the four signed linear limb relations.
@@ -268,6 +270,7 @@ pub struct SparseLinearRoleSelectors<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseLinearRoleSelectors<F> {}
 derive Eq for SparseLinearRoleSelectors<F>
+derive Default for SparseLinearRoleSelectors<F>
 derive CanonicalWords for SparseLinearRoleSelectors<F> using CanonicalWordsProvider
 
 /// Semantic range roles shared by radix constraints and copy interactions.
@@ -290,6 +293,7 @@ pub struct SparseRangeRoleSelectors<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseRangeRoleSelectors<F> {}
 derive Eq for SparseRangeRoleSelectors<F>
+derive Default for SparseRangeRoleSelectors<F>
 derive CanonicalWords for SparseRangeRoleSelectors<F> using CanonicalWordsProvider
 
 /// Low-degree position selectors for the two radix limbs that define the
@@ -301,6 +305,7 @@ pub struct SparseLimbPositionSelectors<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseLimbPositionSelectors<F> {}
 derive Eq for SparseLimbPositionSelectors<F>
+derive Default for SparseLimbPositionSelectors<F>
 derive CanonicalWords for SparseLimbPositionSelectors<F> using CanonicalWordsProvider
 
 /// Polynomial control state paired with one sparse witness row.
@@ -323,6 +328,7 @@ pub struct SparseControlRow<F: Radix2Field> {
 }
 impl<F: Radix2Field> core::marker::Copy for SparseControlRow<F> {}
 derive Eq for SparseControlRow<F>
+derive Default for SparseControlRow<F>
 derive CanonicalWords for SparseControlRow<F> using CanonicalWordsProvider
 
 /// The three nonlinear coordinate-domain checks in one control row share a
@@ -3015,6 +3021,15 @@ fn empty_sparse_limb_position_selectors<F: Radix2Field>(
         penultimate: zero<F>(),
         last: zero<F>(),
     }
+}
+
+/// The unique off-domain control row. Keeping this semantic constructor
+/// separate from task decoding lets consumers name padding without retaining
+/// the full index-to-task schedule in kernels that only cross the trace edge.
+pub fn sparse_padding_control_row<F: Radix2Field + Default>() -> SparseControlRow<F> {
+    let mut control = <SparseControlRow<F> as Default>::default()
+    control.selectors.padding = one<F>()
+    control
 }
 
 fn sparse_range_roles_from_node<F: Radix2Field>(

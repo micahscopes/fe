@@ -7,6 +7,7 @@
 //! `2^31` can reuse this implementation by supplying one branded parameter
 //! block. BabyBear is the first instance, not a specialized arithmetic fork.
 
+use core::default::Default
 use core::marker::Copy
 use core::num::mul_mod_u256
 use core::ops::{Add, Eq, Mul, Neg, Sub}
@@ -152,6 +153,10 @@ impl<M> Copy for WordField<M> {}
 
 impl<M> Eq for WordField<M> {
     fn eq(self, _ other: Self) -> bool { self.value == other.value }
+}
+
+impl<M: WordPrime31> Default for WordField<M> {
+    fn default() -> Self { Self::zero() }
 }
 
 impl<M: WordPrime31> WordField<M> {
