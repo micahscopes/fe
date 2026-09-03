@@ -63,6 +63,16 @@ pub const WEBGPU_BUFFER_CREATE_WEBIDL: &str = include_str!("../assets/webgpu-buf
 pub const WEBGPU_BUFFER_CREATE_PROVENANCE: &str =
     include_str!("../assets/webgpu-buffer-create.provenance.json");
 
+/// Pinned Webref/Web IDL selection for `GPUQueue.writeBuffer`. Fe sees the
+/// standards operation, a borrowed byte view, and Web IDL's actual optional
+/// argument semantics; upload scheduling and resource policy remain in Fe.
+pub const WEBGPU_BUFFER_WRITE_WEBIDL: &str = include_str!("../assets/webgpu-buffer-write.webidl");
+
+/// Auditable origins and exact source ranges for
+/// [`WEBGPU_BUFFER_WRITE_WEBIDL`].
+pub const WEBGPU_BUFFER_WRITE_PROVENANCE: &str =
+    include_str!("../assets/webgpu-buffer-write.provenance.json");
+
 /// Private module identity of the generated standards adapter. This is not a
 /// second application-facing WebGPU API.
 pub const WEBGPU_WEBIDL_MODULE: &str = "fe:webgpu-webidl";
@@ -375,6 +385,11 @@ pub enum BufferKind {
     ArrayBuffer,
     ArrayBufferView,
     BufferSource,
+    /// Web IDL's common `AllowSharedBufferSource` input, represented in Fe as
+    /// one borrowed byte view. The generated adapter realizes that view as a
+    /// legal `Uint8Array` union member without exposing JavaScript union shape
+    /// to guest code.
+    AllowSharedBufferSource,
     DataView,
     I8,
     U8,
@@ -2304,10 +2319,16 @@ fn normalize_non_any(type_: NonAnyType<'_>) -> TypeRef {
             TypeRef::Record(Box::new(normalize_type(*type_.type_.generics.body.2))),
             type_.q_mark.is_some(),
         ),
-        NonAnyType::Identifier(type_) => nullable(
-            TypeRef::Named(type_.type_.0.to_owned()),
-            type_.q_mark.is_some(),
-        ),
+        NonAnyType::Identifier(type_) => {
+            let kind = match type_.type_.0 {
+                // `AllowSharedBufferSource` is a common Web IDL definition,
+                // not a definition repeated by every consuming specification.
+                // Older parser grammars surface it as an identifier.
+                "AllowSharedBufferSource" => TypeRef::Buffer(BufferKind::AllowSharedBufferSource),
+                name => TypeRef::Named(name.to_owned()),
+            };
+            nullable(kind, type_.q_mark.is_some())
+        }
         NonAnyType::Object(type_) => nullable(TypeRef::Object, type_.q_mark.is_some()),
         NonAnyType::Symbol(type_) => nullable(TypeRef::Symbol, type_.q_mark.is_some()),
         NonAnyType::Error(type_) => nullable(TypeRef::Error, type_.q_mark.is_some()),
@@ -2550,21 +2571,16 @@ fn emit_fe_import_layer(
                     let function = constructor_import_name(interface, constructor);
                     let mut args = Vec::new();
                     for argument in &constructor.arguments {
-                        if argument.optional || argument.variadic {
+                        if argument.variadic {
                             return Err(BindgenError::new(
                                 format!("constructor `{function}` argument `{}`", argument.name),
-                                "optional and variadic arguments need the rich adapter ABI",
+                                "variadic arguments need the rich adapter ABI",
                             ));
                         }
                         args.push(format!(
                             "{}: {}",
                             fe_ident(&argument.name),
-                            fe_import_param_type(
-                                world,
-                                &argument.type_,
-                                &function,
-                                rich_flat_values,
-                            )?
+                            fe_import_argument_type(world, argument, &function, rich_flat_values,)?
                         ));
                     }
                     output.push_str(&format!(
@@ -2644,21 +2660,16 @@ fn emit_fe_import_layer(
                         args.push(format!("self_: {}", fe_ident(&interface.name)));
                     }
                     for argument in &operation.arguments {
-                        if argument.optional || argument.variadic {
+                        if argument.variadic {
                             return Err(BindgenError::new(
                                 format!("operation `{function}` argument `{}`", argument.name),
-                                "optional and variadic arguments need the rich adapter ABI",
+                                "variadic arguments need the rich adapter ABI",
                             ));
                         }
                         args.push(format!(
                             "{}: {}",
                             fe_ident(&argument.name),
-                            fe_import_param_type(
-                                world,
-                                &argument.type_,
-                                &function,
-                                rich_flat_values,
-                            )?
+                            fe_import_argument_type(world, argument, &function, rich_flat_values,)?
                         ));
                     }
                     let (result, async_) = match resolve_typedef(world, &operation.result) {
@@ -2728,24 +2739,19 @@ fn emit_fe_import_layer(
                     );
                     let mut args = Vec::new();
                     for argument in &operation.arguments {
-                        if argument.optional || argument.variadic {
+                        if argument.variadic {
                             return Err(BindgenError::new(
                                 format!(
                                     "namespace operation `{function}` argument `{}`",
                                     argument.name
                                 ),
-                                "optional and variadic arguments need the rich adapter ABI",
+                                "variadic arguments need the rich adapter ABI",
                             ));
                         }
                         args.push(format!(
                             "{}: {}",
                             fe_ident(&argument.name),
-                            fe_import_param_type(
-                                world,
-                                &argument.type_,
-                                &function,
-                                rich_flat_values,
-                            )?
+                            fe_import_argument_type(world, argument, &function, rich_flat_values,)?
                         ));
                     }
                     let (result, async_) = match resolve_typedef(world, &operation.result) {
@@ -3088,11 +3094,12 @@ fn fe_import_type(
         TypeRef::String(StringKind::Byte) if rich_flat_values => "BrowserLatin1String",
         TypeRef::String(StringKind::Dom) if rich_flat_values => "BrowserUtf16String",
         TypeRef::String(StringKind::Usv) if rich_flat_values => "BrowserString",
-        TypeRef::Buffer(BufferKind::ArrayBuffer | BufferKind::U8 | BufferKind::U8Clamped)
-            if rich_flat_values =>
-        {
-            "BrowserBytes"
-        }
+        TypeRef::Buffer(
+            BufferKind::ArrayBuffer
+            | BufferKind::AllowSharedBufferSource
+            | BufferKind::U8
+            | BufferKind::U8Clamped,
+        ) if rich_flat_values => "BrowserBytes",
         TypeRef::Named(name) if world.interfaces.contains_key(name) => return Ok(fe_ident(name)),
         TypeRef::Named(name) if rich_flat_values && world.dictionaries.contains_key(name) => {
             return Ok(fe_ident(name));
@@ -3122,6 +3129,20 @@ fn fe_import_param_type(
         Ok(format!("own {value}"))
     } else {
         Ok(value)
+    }
+}
+
+fn fe_import_argument_type(
+    world: &World,
+    argument: &ArgumentDef,
+    context: &str,
+    rich_flat_values: bool,
+) -> Result<String, BindgenError> {
+    if argument.optional && argument.default_.is_none() {
+        let value = fe_import_type(world, &argument.type_, context, rich_flat_values)?;
+        Ok(format!("Option<{value}>"))
+    } else {
+        fe_import_param_type(world, &argument.type_, context, rich_flat_values)
     }
 }
 
@@ -3378,6 +3399,62 @@ mod tests {
         ));
         assert!(!fe.contains("wasm_import"));
         assert!(!fe.contains("WebAssembly"));
+    }
+
+    #[test]
+    fn emits_borrowed_common_buffer_sources_and_webidl_optional_arguments() {
+        let world = parse(
+            r#"
+                [Exposed=(Window, Worker), SecureContext]
+                interface GPUBuffer {};
+                [Exposed=(Window, Worker), SecureContext]
+                interface GPUQueue {
+                    undefined writeBuffer(
+                        GPUBuffer buffer,
+                        unsigned long long bufferOffset,
+                        AllowSharedBufferSource data,
+                        optional unsigned long long dataOffset = 0,
+                        optional unsigned long long size
+                    );
+                };
+            "#,
+        )
+        .unwrap();
+        let Member::Operation(write) = &world.interfaces["GPUQueue"].members[0] else {
+            panic!("expected writeBuffer operation")
+        };
+        assert_eq!(
+            write.arguments[2].type_,
+            TypeRef::Buffer(BufferKind::AllowSharedBufferSource)
+        );
+
+        let fe = emit_fe_flat_host_imports(&world, "fe:webgpu-webidl").unwrap();
+        assert!(
+            fe.contains("data: BrowserBytes, dataOffset: u64, size: Option<u64>"),
+            "{fe}"
+        );
+
+        let lowering =
+            lower_host_abi_with_metadata(&world, &HostAbiOptions::new("webgpu-write")).unwrap();
+        let queue = lowering
+            .world
+            .resources
+            .iter()
+            .find(|resource| resource.name == "GPUQueue")
+            .unwrap();
+        let write = queue
+            .methods
+            .iter()
+            .find(|method| method.name == "writeBuffer")
+            .unwrap();
+        assert!(matches!(
+            write.signature.params[3].type_,
+            fe_host_abi::Type::U64
+        ));
+        assert!(matches!(
+            write.signature.params[4].type_,
+            fe_host_abi::Type::Option(_)
+        ));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use fe_compiler_protocol::{InterfaceFunction, InterfaceManifest};
 use fe_webidl_bindgen::{
-    WEBGPU_BUFFER_CREATE_PROVENANCE, WEBGPU_BUFFER_CREATE_WEBIDL, WEBGPU_QUEUE_IDLE_PROVENANCE,
-    WEBGPU_QUEUE_IDLE_WEBIDL, WEBGPU_WEBIDL_MODULE, adapter_operation_metadata, build_adapter_plan,
+    WEBGPU_BUFFER_CREATE_PROVENANCE, WEBGPU_BUFFER_CREATE_WEBIDL, WEBGPU_BUFFER_WRITE_PROVENANCE,
+    WEBGPU_BUFFER_WRITE_WEBIDL, WEBGPU_QUEUE_IDLE_PROVENANCE, WEBGPU_QUEUE_IDLE_WEBIDL,
+    WEBGPU_WEBIDL_MODULE, adapter_operation_metadata, build_adapter_plan,
     emit_fe_flat_host_imports, emit_js_canonical_adapter, parse, select_adapter_operations,
 };
 use sha2::{Digest, Sha256};
@@ -153,6 +154,72 @@ fn pinned_webgpu_buffer_create_selection_has_exact_provenance_and_generated_shap
     let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
     assert!(adapter.contains("fromFeDictionary_GPUBufferDescriptor(desc"));
     assert!(adapter.contains("[\"createBuffer\"]("));
+}
+
+#[test]
+fn pinned_webgpu_buffer_write_selection_preserves_fe_argument_semantics() {
+    let provenance: serde_json::Value =
+        serde_json::from_str(WEBGPU_BUFFER_WRITE_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["revision"],
+        "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279"
+    );
+    assert_eq!(
+        provenance["sources"][0]["git_blob"],
+        "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6"
+    );
+    assert_eq!(
+        provenance["sources"][1]["revision"],
+        "8f182624f632a0ce485e236edbc1df18ca385b1d"
+    );
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(WEBGPU_BUFFER_WRITE_WEBIDL.as_bytes())
+        )
+    );
+
+    let world = parse(WEBGPU_BUFFER_WRITE_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-buffer-write", WEBGPU_WEBIDL_MODULE).unwrap();
+    let write = plan
+        .resources
+        .iter()
+        .find(|resource| resource.name == "GPUQueue")
+        .unwrap()
+        .functions
+        .iter()
+        .find(|function| function.member_name == "writeBuffer")
+        .unwrap();
+    assert_eq!(write.import_name, "gpu_queue_write_buffer");
+
+    let fe = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    assert!(fe.contains("data: BrowserBytes"), "{fe}");
+    assert!(fe.contains("dataOffset: u64"), "{fe}");
+    assert!(fe.contains("size: Option<u64>"), "{fe}");
+
+    let transport = fe_webidl_bindgen::build_transport_plan(&plan).unwrap();
+    let write = transport
+        .functions
+        .iter()
+        .find(|function| function.import_name == "gpu_queue_write_buffer")
+        .unwrap();
+    assert_eq!(
+        write.core,
+        Some(fe_webidl_bindgen::CoreSignature {
+            params: vec![
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+            ],
+            results: Vec::new(),
+        })
+    );
 }
 
 #[test]

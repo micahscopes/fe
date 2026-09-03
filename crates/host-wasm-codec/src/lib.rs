@@ -427,31 +427,37 @@ fn layout_validated(world: &World, type_: &Type, depth: u32) -> Result<Layout, C
                 "stream transport requires runtime polling mechanics".into(),
             ));
         }
-        Type::Option(payload) => variant_layout(vec![
-            ("none".into(), None),
-            (
-                "some".into(),
-                Some(layout_validated(world, payload, depth + 1)?),
-            ),
-        ])?,
-        Type::Result(result) => variant_layout(vec![
-            (
-                "ok".into(),
-                result
-                    .ok
-                    .as_deref()
-                    .map(|type_| layout_validated(world, type_, depth + 1))
-                    .transpose()?,
-            ),
-            (
-                "error".into(),
-                result
-                    .error
-                    .as_deref()
-                    .map(|type_| layout_validated(world, type_, depth + 1))
-                    .transpose()?,
-            ),
-        ])?,
+        Type::Option(payload) => variant_layout(
+            vec![
+                (
+                    "some".into(),
+                    Some(layout_validated(world, payload, depth + 1)?),
+                ),
+                ("none".into(), None),
+            ],
+            true,
+        )?,
+        Type::Result(result) => variant_layout(
+            vec![
+                (
+                    "ok".into(),
+                    result
+                        .ok
+                        .as_deref()
+                        .map(|type_| layout_validated(world, type_, depth + 1))
+                        .transpose()?,
+                ),
+                (
+                    "error".into(),
+                    result
+                        .error
+                        .as_deref()
+                        .map(|type_| layout_validated(world, type_, depth + 1))
+                        .transpose()?,
+                ),
+            ],
+            false,
+        )?,
         Type::Named(name) => {
             let definition = world
                 .types
@@ -521,6 +527,7 @@ fn layout_validated(world: &World, type_: &Type, depth: u32) -> Result<Layout, C
                             ))
                         })
                         .collect::<Result<Vec<_>, CodecError>>()?,
+                    false,
                 )?,
                 TypeDefKind::Callback { .. } => handle_layout(LayoutShape::Handle),
             }
@@ -592,7 +599,10 @@ fn aggregate_layout(
     })
 }
 
-fn variant_layout(cases: Vec<(String, Option<Layout>)>) -> Result<Layout, CodecError> {
+fn variant_layout(
+    cases: Vec<(String, Option<Layout>)>,
+    direct_fe_value_abi: bool,
+) -> Result<Layout, CodecError> {
     let payload_align = cases
         .iter()
         .filter_map(|(_, payload)| payload.as_ref().map(|layout| layout.align))
@@ -611,6 +621,25 @@ fn variant_layout(cases: Vec<(String, Option<Layout>)>) -> Result<Layout, CodecE
             .ok_or(CodecError::Overflow)?,
         align,
     )?;
+    let flat = if direct_fe_value_abi {
+        let mut flat = vec![CoreType::I32];
+        for (_, payload) in &cases {
+            let Some(payload) = payload else {
+                continue;
+            };
+            match &payload.flat {
+                Flattening::Direct(values) => flat.extend(values),
+                Flattening::Indirect => flat.resize(17, CoreType::I32),
+            }
+        }
+        if flat.len() <= 16 {
+            Flattening::Direct(flat)
+        } else {
+            Flattening::Indirect
+        }
+    } else {
+        Flattening::Indirect
+    };
     Ok(Layout {
         size,
         align,
@@ -623,9 +652,10 @@ fn variant_layout(cases: Vec<(String, Option<Layout>)>) -> Result<Layout, CodecE
             payload_size,
             payload_align,
         }),
-        // Variant lane joining belongs in a later direct-call ABI. Canonical
-        // memory is executable now and deliberately passes variants indirectly.
-        flat: Flattening::Indirect,
+        // Fe payload-enum values use `tag + every case payload lane`; Options
+        // adopt that exact direct input ABI when it remains bounded. General
+        // variants and Results retain their canonical-memory representation.
+        flat,
     })
 }
 
@@ -1390,7 +1420,9 @@ fn variant_cases<'a>(
     type_: &'a Type,
 ) -> Result<Vec<Option<&'a Type>>, CodecError> {
     Ok(match type_ {
-        Type::Option(payload) => vec![None, Some(payload)],
+        // Fe declares `Option<T>` as `Some(T), None`; both canonical memory
+        // and direct core calls must retain that source-level tag order.
+        Type::Option(payload) => vec![Some(payload), None],
         Type::Result(result) => vec![result.ok.as_deref(), result.error.as_deref()],
         Type::Named(name) => match &definition(world, name)?.kind {
             TypeDefKind::Variant { cases } => {
@@ -2051,6 +2083,22 @@ mod tests {
     }
 
     #[test]
+    fn option_uses_the_compiler_payload_enum_core_signature() {
+        let option = layout(&world(), &Type::Option(Box::new(Type::U64))).unwrap();
+        assert_eq!(
+            option.flat,
+            Flattening::Direct(vec![CoreType::I32, CoreType::I64])
+        );
+
+        let choice = layout(&world(), &Type::Named("choice".into())).unwrap();
+        assert_eq!(
+            choice.flat,
+            Flattening::Indirect,
+            "general variants stay on canonical memory until their Fe ABI is generalized",
+        );
+    }
+
+    #[test]
     fn nested_record_variant_and_list_roundtrip_is_deterministic() {
         let world = world();
         let type_ = Type::Named("packet".into());
@@ -2274,7 +2322,7 @@ mod tests {
                 24,
                 Type::Option(Box::new(Type::U32)),
                 Value::Variant {
-                    case: 1,
+                    case: 0,
                     payload: Some(Box::new(Value::U32(55))),
                 },
             ),
