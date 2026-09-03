@@ -1085,6 +1085,10 @@ fn trace_spirv_helper_classification(
                         .ctx
                         .func_sig(function_ref, |signature| signature.name().to_owned()),
                 );
+                eprintln!(
+                    "fe spirv rejected helper IR:\n{}",
+                    sonatina_ir::ir_writer::FuncWriter::new(function_ref, function).dump_string(),
+                );
             }
             for block in function.layout.iter_block() {
                 for instruction in function.layout.iter_inst(block) {
