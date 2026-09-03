@@ -266,6 +266,8 @@ pub enum ParamWidget {
     Hidden,
     Range,
     Checkbox,
+    /// A finite integral choice, realized by browser hosts as a native select.
+    Select,
 }
 
 /// Mapping between a range widget's normalized visual axis and its semantic
@@ -402,6 +404,18 @@ impl Param {
         Param::control(
             ParamKind::Int, min, max, init,
             ParamWidget::Range, ParamScale::Linear, ParamReadout::Integer,
+        )
+    }
+
+    /// A finite integral choice over the inclusive ordinal range `[min, max]`.
+    ///
+    /// The value remains the same GPU-friendly scalar carried by `int`; only
+    /// its target-neutral presentation differs. Browser hosts realize this as
+    /// a native `<select>` instead of a scrubber.
+    pub const fn choice(min: f32, max: f32, init: f32) -> Param {
+        Param::control(
+            ParamKind::Int, min, max, init,
+            ParamWidget::Select, ParamScale::Linear, ParamReadout::Integer,
         )
     }
 

@@ -896,7 +896,7 @@ export function surfaceParamPlan(param, protocolVersion) {
   const presentation = param.presentation;
   if (!presentation ||
       !["initial", "surface_width", "surface_height"].includes(source) ||
-      !["hidden", "range", "checkbox"].includes(presentation.widget) ||
+      !["hidden", "range", "checkbox", "select"].includes(presentation.widget) ||
       !["linear", "logarithmic"].includes(presentation.scale) ||
       !["scalar", "integer", "toggle"].includes(presentation.readout)) {
     throw new Error("fe render runtime: protocol v9 param is missing a supported Fe presentation plan");
@@ -910,6 +910,10 @@ export function surfaceParamPlan(param, protocolVersion) {
   }
   if (presentation.widget === "range" && presentation.readout === "toggle") {
     throw new Error("fe render runtime: range presentation cannot use a toggle readout");
+  }
+  if (presentation.widget === "select" &&
+      (presentation.scale !== "linear" || presentation.readout !== "integer")) {
+    throw new Error("fe render runtime: select presentation requires linear integer semantics");
   }
   return { source, ...presentation };
 }
@@ -1175,6 +1179,8 @@ const SHADOW_CSS = `
 .control label { display: flex; justify-content: space-between; color: #96a0b5; }
 .control b { color: #cfd6e4; font-weight: 600; }
 .control input[type=range] { width: 100%; accent-color: #5b8cff; }
+.control select { width: 100%; color: #cfd6e4; background: #151923; border: 1px solid #333a4b;
+  border-radius: 5px; padding: 5px 7px; font: inherit; }
 .control.notice { color: #d9a441; font-size: 12px; padding: 6px 8px; border: 1px dashed #4a3a1a;
                    border-radius: 6px; background: #221a0c; }
 .meta { font-size: 12px; color: #6b7688; }
@@ -3933,14 +3939,28 @@ export class FeSurfaceElement extends HTMLElement {
       const name = document.createElement("span");
       name.textContent = param.name;
       label.append(name, value);
-      const input = document.createElement("input");
-      input.type = presentation.widget;
-      if (presentation.widget === "checkbox") {
+      const input = document.createElement(
+        presentation.widget === "select" ? "select" : "input",
+      );
+      if (presentation.widget === "select") {
+        for (let optionValue = Math.ceil(min); optionValue <= Math.floor(max); optionValue += 1) {
+          const option = document.createElement("option");
+          option.value = String(optionValue);
+          option.textContent = String(optionValue);
+          input.append(option);
+        }
+        input.value = String(Math.round(this._uniforms[index]));
+        input.oninput = () => {
+          this._applyParamEdit(index, +input.value, paramIndex);
+        };
+      } else if (presentation.widget === "checkbox") {
+        input.type = "checkbox";
         input.checked = this._uniforms[index] >= 0.5;
         input.oninput = () => {
           this._applyParamEdit(index, input.checked ? 1 : 0, paramIndex);
         };
       } else {
+        input.type = "range";
         const inputMin = isLog ? Math.log10(min) : min;
         const inputMax = isLog ? Math.log10(max) : max;
         input.min = String(inputMin);

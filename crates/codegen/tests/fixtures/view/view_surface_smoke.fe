@@ -10,6 +10,7 @@ struct SmokeParams {
     theta: Param,
     scale: Param,
     steps: Param,
+    mode: Param,
     res: Param,
 }
 
@@ -23,6 +24,7 @@ pub const fn smoke_view() -> Surface<SmokeParams> {
             theta: Param::angle(init: 0.6),
             scale: Param::range(min: 0.5, max: 4.0, init: 1.6),
             steps: Param::int(min: 1.0, max: 8.0, init: 3.0),
+            mode: Param::choice(min: 0.0, max: 3.0, init: 1.0),
             res: Param::extent_x(),
         },
     }
