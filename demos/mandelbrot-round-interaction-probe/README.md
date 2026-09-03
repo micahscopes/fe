@@ -51,7 +51,10 @@ node demos/mandelbrot-round-interaction-probe/round_interaction.browser.mjs \
 Change `compile` to `one`, `full`, or `readback` to advance one gate at a time.
 These modes derive their shader, bindings, buffer sizes, entry point, and
 dispatch geometry from the compiler-emitted manifest. They do not duplicate
-proof logic.
+proof logic. `compile` also accepts a site with several compute passes and
+reports each Fe source entry as Chrome finishes its pipeline. Select one pass
+from a larger graph with `FE_BROWSER_COMPUTE_ENTRY=source_entry`; the execution
+modes deliberately require that single-pass selection.
 
 For a browser-level GPU trace that survives a GPU subprocess restart, add an
 output path under disk-backed workspace scratch:

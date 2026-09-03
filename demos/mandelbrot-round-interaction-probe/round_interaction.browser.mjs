@@ -11,6 +11,7 @@ const browserSiteHost = process.env.FE_BROWSER_HOST ?? "10.0.0.2";
 const browserSitePort = Number.parseInt(process.env.FE_BROWSER_PORT ?? "8000", 10);
 const healthOnly = process.env.FE_BROWSER_HEALTH_ONLY === "1";
 const computeStageOnly = process.env.FE_BROWSER_COMPUTE_STAGE ?? null;
+const computeEntry = process.env.FE_BROWSER_COMPUTE_ENTRY ?? null;
 const tracePath = process.env.FE_BROWSER_TRACE_PATH
   ? resolve(process.env.FE_BROWSER_TRACE_PATH)
   : null;
@@ -105,28 +106,39 @@ async function computeProbeConfiguration() {
     throw new Error(`expected one render manifest, found ${manifestNames.length}`);
   }
   const manifest = JSON.parse(await readFile(resolve(assetDirectory, manifestNames[0]), "utf8"));
-  const computePasses = manifest.passes.filter(pass => pass.layout?.mode === "compute");
-  if (computePasses.length !== 1) {
-    throw new Error(`expected one compute pass, found ${computePasses.length}`);
+  const computePasses = manifest.passes.filter(pass =>
+    pass.layout?.mode === "compute" &&
+    (computeEntry === null || pass.source_entry === computeEntry)
+  );
+  if (computePasses.length === 0) throw new Error("expected at least one compute pass");
+  if (computeEntry !== null && computePasses.length !== 1) {
+    throw new Error(`expected one compute pass named ${computeEntry}, found ${computePasses.length}`);
   }
-  const pass = computePasses[0];
+  if (computeStageOnly !== "compile" && computePasses.length !== 1) {
+    throw new Error(
+      `${computeStageOnly} isolates exactly one compute pass, found ${computePasses.length}`,
+    );
+  }
   const resources = new Map(manifest.resources.map(resource => [resource.name, resource]));
   return {
-    shaderUrl: `/assets/${pass.shader}`,
-    shaderBytes: pass.shader_bytes,
-    entryPoint: pass.layout.entry_point,
-    workgroup: pass.layout.workgroup_size,
-    dispatch: pass.dispatch,
-    bindings: pass.layout.bindings.map(binding => {
-      const resource = resources.get(binding.name);
-      return {
-        group: binding.group,
-        binding: binding.binding,
-        name: binding.name,
-        role: binding.role,
-        byteLength: resource ? resource.length * resource.stride : binding.span,
-      };
-    }),
+    passes: computePasses.map(pass => ({
+      sourceEntry: pass.source_entry,
+      shaderUrl: `/assets/${pass.shader}`,
+      shaderBytes: pass.shader_bytes,
+      entryPoint: pass.layout.entry_point,
+      workgroup: pass.layout.workgroup_size,
+      dispatch: pass.dispatch,
+      bindings: pass.layout.bindings.map(binding => {
+        const resource = resources.get(binding.name);
+        return {
+          group: binding.group,
+          binding: binding.binding,
+          name: binding.name,
+          role: binding.role,
+          byteLength: resource ? resource.length * resource.stride : binding.span,
+        };
+      }),
+    })),
   };
 }
 
@@ -223,6 +235,10 @@ try {
   page = await browser.newPage();
   page.setDefaultTimeout(600_000);
   page.on("console", message => {
+    if (message.type() === "info" && message.text().startsWith("[fe compile] ")) {
+      console.log(message.text());
+      return;
+    }
     if (message.type() === "error" || message.type() === "warn") {
       browserErrors.push(`console ${message.type()}: ${message.text()}`);
     }
@@ -342,37 +358,65 @@ try {
         return "lost";
       });
 
-      const shaderStarted = performance.now();
-      const shaderResponse = await fetch(probe.shaderUrl);
-      if (!shaderResponse.ok) {
-        throw new Error(`could not fetch ${probe.shaderUrl}: ${shaderResponse.status}`);
-      }
-      const shaderSource = await shaderResponse.text();
-      const module = device.createShaderModule({ code: shaderSource });
-      const compilation = await module.getCompilationInfo();
-      const compilationMessages = compilation.messages.map(message => ({
-        type: message.type,
-        line: message.lineNum,
-        column: message.linePos,
-        message: message.message,
-      }));
-      const shaderElapsedMs = performance.now() - shaderStarted;
-
       device.pushErrorScope("out-of-memory");
       device.pushErrorScope("internal");
       device.pushErrorScope("validation");
-      const pipelineStarted = performance.now();
-      const pipeline = await device.createComputePipelineAsync({
-        layout: "auto",
-        compute: { module, entryPoint: probe.entryPoint },
-      });
-      const pipelineElapsedMs = performance.now() - pipelineStarted;
+      let shaderElapsedMs = 0;
+      let pipelineElapsedMs = 0;
+      const compiled = [];
+      for (const candidate of probe.passes) {
+        const shaderStarted = performance.now();
+        const shaderResponse = await fetch(candidate.shaderUrl);
+        if (!shaderResponse.ok) {
+          throw new Error(
+            `could not fetch ${candidate.shaderUrl}: ${shaderResponse.status}`,
+          );
+        }
+        const shaderSource = await shaderResponse.text();
+        const module = device.createShaderModule({ code: shaderSource });
+        const compilation = await module.getCompilationInfo();
+        const compilationMessages = compilation.messages.map(message => ({
+          entry: candidate.sourceEntry,
+          type: message.type,
+          line: message.lineNum,
+          column: message.linePos,
+          message: message.message,
+        }));
+        shaderElapsedMs += performance.now() - shaderStarted;
+
+        const pipelineStarted = performance.now();
+        const pipeline = await device.createComputePipelineAsync({
+          layout: "auto",
+          compute: { module, entryPoint: candidate.entryPoint },
+        });
+        const candidatePipelineElapsedMs = performance.now() - pipelineStarted;
+        pipelineElapsedMs += candidatePipelineElapsedMs;
+        console.info(`[fe compile] ${JSON.stringify({
+          entry: candidate.sourceEntry,
+          shaderBytes: shaderSource.length,
+          pipelineMs: candidatePipelineElapsedMs,
+        })}`);
+        compiled.push({
+          candidate,
+          pipeline,
+          shaderBytes: shaderSource.length,
+          pipelineElapsedMs: candidatePipelineElapsedMs,
+          compilationMessages,
+        });
+      }
+      const compilationMessages = compiled.flatMap(result => result.compilationMessages);
+      const shaderBytes = compiled.reduce((sum, result) => sum + result.shaderBytes, 0);
+      const declaredShaderBytes = probe.passes.reduce(
+        (sum, pass) => sum + pass.shaderBytes,
+        0,
+      );
 
       let dispatchElapsedMs = null;
       let readbackElapsedMs = null;
       let readbackWord = null;
       if (stage !== "compile") {
-        const buffers = probe.bindings.map(binding => ({
+        const { candidate, pipeline } = compiled[0];
+        const buffers = candidate.bindings.map(binding => ({
           binding,
           buffer: device.createBuffer({
             size: Math.max(4, binding.byteLength),
@@ -386,7 +430,7 @@ try {
             resource: { buffer },
           })),
         });
-        const dispatch = stage === "one" ? [1, 1, 1] : probe.dispatch;
+        const dispatch = stage === "one" ? [1, 1, 1] : candidate.dispatch;
         const encoder = device.createCommandEncoder();
         const pass = encoder.beginComputePass();
         pass.setPipeline(pipeline);
@@ -410,7 +454,8 @@ try {
             lost,
             uncaptured,
             compilationMessages,
-            shaderBytes: shaderSource.length,
+            declaredShaderBytes,
+            shaderBytes,
             shaderElapsedMs,
             pipelineElapsedMs,
             dispatchElapsedMs,
@@ -451,9 +496,15 @@ try {
           device: adapter.info.device,
           description: adapter.info.description,
         } : null,
-        declaredShaderBytes: probe.shaderBytes,
-        shaderBytes: shaderSource.length,
+        shaderCount: compiled.length,
+        declaredShaderBytes,
+        shaderBytes,
         compilationMessages,
+        shaders: compiled.map(result => ({
+          entry: result.candidate.sourceEntry,
+          shaderBytes: result.shaderBytes,
+          pipelineMs: result.pipelineElapsedMs,
+        })),
         scopedErrors,
         uncaptured,
         lost,
