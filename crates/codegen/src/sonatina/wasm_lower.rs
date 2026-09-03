@@ -3965,10 +3965,14 @@ struct TypedPrivateLocal<'db> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TypedPrivateBorrowOrigin {
-    Parameter(RLocalId),
+enum TypedPrivateBorrowOrigin<'db> {
+    Parameter {
+        root: RLocalId,
+        layout: LayoutId<'db>,
+    },
     LocalStorage {
         root: RLocalId,
+        layout: LayoutId<'db>,
         kind: TypedPrivateRootKind,
     },
     Unsupported,
@@ -4420,18 +4424,34 @@ where
                                 layout,
                                 &mut HashSet::new(),
                             ) {
-                                TypedPrivateBorrowOrigin::Parameter(source) => {
+                                TypedPrivateBorrowOrigin::Parameter {
+                                    root,
+                                    layout: root_layout,
+                                } => {
                                     selected
                                         .get(&caller_instance)
-                                        .and_then(|params| params.get(&source))
+                                        .and_then(|params| params.get(&root))
                                         .copied()
-                                        == Some(layout)
+                                        == Some(root_layout)
+                                        && self
+                                            .typed_private_component(
+                                                &caller_body,
+                                                root,
+                                                root_layout,
+                                                TypedPrivateRootKind::Parameter,
+                                                &selected,
+                                            )
+                                            .is_ok()
                                 }
-                                TypedPrivateBorrowOrigin::LocalStorage { root, kind } => self
+                                TypedPrivateBorrowOrigin::LocalStorage {
+                                    root,
+                                    layout: root_layout,
+                                    kind,
+                                } => self
                                     .typed_private_component(
                                         &caller_body,
                                         root,
-                                        layout,
+                                        root_layout,
                                         kind,
                                         &selected,
                                     )
@@ -4506,7 +4526,7 @@ where
         local: RLocalId,
         layout: LayoutId<'db>,
         visiting: &mut HashSet<RLocalId>,
-    ) -> TypedPrivateBorrowOrigin {
+    ) -> TypedPrivateBorrowOrigin<'db> {
         let local_layout = match body.value_class(local) {
             Some(RuntimeClass::Ref {
                 pointee,
@@ -4524,17 +4544,22 @@ where
             .iter()
             .any(|parameter| parameter.local == local)
         {
-            return TypedPrivateBorrowOrigin::Parameter(local);
+            return TypedPrivateBorrowOrigin::Parameter {
+                root: local,
+                layout,
+            };
         }
         let origin = match Self::unique_local_definition(body, local) {
             Some(RExpr::AllocObject { layout: actual }) if *actual == layout => {
                 TypedPrivateBorrowOrigin::LocalStorage {
                     root: local,
+                    layout,
                     kind: TypedPrivateRootKind::Allocation,
                 }
             }
             Some(RExpr::MaterializeToObject { .. }) => TypedPrivateBorrowOrigin::LocalStorage {
                 root: local,
+                layout,
                 kind: TypedPrivateRootKind::Materialized,
             },
             Some(RExpr::Use(source) | RExpr::RetagRef { value: source }) => {
@@ -4549,7 +4574,17 @@ where
                     .typed_private_candidate_place_class(body, place, &source_members)
                     .is_some_and(|class| class.aggregate_layout() == Some(layout))
                 {
-                    self.typed_private_borrow_origin(body, source, layout, visiting)
+                    let Some(source_layout) = (match body.value_class(source) {
+                        Some(RuntimeClass::Ref {
+                            pointee,
+                            kind: RefKind::Const | RefKind::Object,
+                            view: RefView::Whole,
+                        }) => pointee.aggregate_layout(),
+                        _ => None,
+                    }) else {
+                        return TypedPrivateBorrowOrigin::Unsupported;
+                    };
+                    self.typed_private_borrow_origin(body, source, source_layout, visiting)
                 } else {
                     TypedPrivateBorrowOrigin::Unsupported
                 }
@@ -4571,7 +4606,7 @@ where
         layout: LayoutId<'db>,
         root_kind: TypedPrivateRootKind,
         selected: &FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, LayoutId<'db>>>,
-    ) -> Result<HashSet<RLocalId>, &'static str> {
+    ) -> Result<FxHashMap<RLocalId, LayoutId<'db>>, &'static str> {
         fn object_layout<'db>(body: &RuntimeBody<'db>, local: RLocalId) -> Option<LayoutId<'db>> {
             match body.value_class(local)? {
                 RuntimeClass::Ref {
@@ -4584,6 +4619,7 @@ where
         }
 
         let mut members = HashSet::from([root]);
+        let mut member_layouts = FxHashMap::from_iter([(root, layout)]);
         let mut borrow_aliases = HashSet::new();
         let mut allowed_alias_assignments = HashSet::new();
         if root_kind == TypedPrivateRootKind::Parameter {
@@ -4600,6 +4636,7 @@ where
                     };
                     if *source == root && object_layout(body, *dst) == Some(layout) {
                         members.insert(*dst);
+                        member_layouts.insert(*dst, layout);
                         allowed_alias_assignments.insert((block_index, statement_index));
                         break 'first_move;
                     }
@@ -4613,19 +4650,25 @@ where
                     let RStmt::Assign { dst, expr } = stmt else {
                         continue;
                     };
-                    if members.contains(dst) || object_layout(body, *dst) != Some(layout) {
+                    if members.contains(dst) || object_layout(body, *dst).is_none() {
                         continue;
                     }
-                    let is_borrow_alias = match expr {
-                        RExpr::RetagRef { value } => members.contains(value),
-                        RExpr::Use(source) => borrow_aliases.contains(source),
+                    let destination_layout = object_layout(body, *dst);
+                    let alias_layout = match expr {
+                        RExpr::RetagRef { value } if members.contains(value) => {
+                            member_layouts.get(value).copied()
+                        }
+                        RExpr::Use(source) if borrow_aliases.contains(source) => {
+                            member_layouts.get(source).copied()
+                        }
                         RExpr::AddrOf { place } | RExpr::Load { place } => self
                             .typed_private_candidate_place_class(body, place, &members)
-                            .is_some_and(|class| class.aggregate_layout() == Some(layout)),
-                        _ => false,
+                            .and_then(|class| class.aggregate_layout()),
+                        _ => None,
                     };
-                    if is_borrow_alias {
+                    if alias_layout.is_some() && alias_layout == destination_layout {
                         members.insert(*dst);
+                        member_layouts.insert(*dst, alias_layout.expect("checked as present"));
                         borrow_aliases.insert(*dst);
                         allowed_alias_assignments.insert((block_index, statement_index));
                         changed = true;
@@ -4697,12 +4740,12 @@ where
                             .unwrap_or_else(|| callee.body(self.db));
                         for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
                         {
-                            if members.contains(argument)
+                            if let Some(&argument_layout) = member_layouts.get(argument)
                                 && selected
                                     .get(callee)
                                     .and_then(|params| params.get(&parameter.local))
                                     .copied()
-                                    != Some(layout)
+                                    != Some(argument_layout)
                             {
                                 return Err("uncertified-call-borrow");
                             }
@@ -4783,7 +4826,7 @@ where
                 return Err("terminator-escape");
             }
         }
-        Ok(members)
+        Ok(member_layouts)
     }
 
     fn typed_private_borrow_layout(
@@ -4955,21 +4998,30 @@ where
                 }
             };
 
-            if members.iter().any(|member| selected.contains_key(member)) {
+            if members.keys().any(|member| selected.contains_key(member)) {
                 reject_root!(root, layout, Some(layout_size), "overlapping-selection");
                 continue;
             }
 
-            let Some(pointee_ty) = self.typed_private_type_for_layout(layout)? else {
+            let mut realized_members = Vec::with_capacity(members.len());
+            let mut realization_failed = false;
+            for (member, member_layout) in members {
+                let Some(pointee_ty) = self.typed_private_type_for_layout(member_layout)? else {
+                    realization_failed = true;
+                    break;
+                };
+                let pointer_ty = self.builder.ptr_type(pointee_ty);
+                realized_members.push((member, member_layout, pointee_ty, pointer_ty));
+            }
+            if realization_failed {
                 reject_root!(root, layout, Some(layout_size), "type-realization");
                 continue;
-            };
-            let pointer_ty = self.builder.ptr_type(pointee_ty);
-            for member in members {
+            }
+            for (member, member_layout, pointee_ty, pointer_ty) in realized_members {
                 selected.insert(
                     member,
                     TypedPrivateLocal {
-                        layout,
+                        layout: member_layout,
                         pointee_ty,
                         pointer_ty,
                     },
@@ -14890,6 +14942,7 @@ mod tests {
     fn shader_ir_preserves_proven_aggregate_borrows_as_typed_pointers() {
         let source = r#"
 struct Cell { left: u32, right: u32 }
+struct Row { first: Cell, second: Cell }
 
 fn update(_ cell: mut Cell, _ delta: u32) {
     cell.left = cell.left + delta
@@ -14900,10 +14953,22 @@ fn sum(_ cell: ref Cell) -> u32 {
     cell.left + cell.right
 }
 
+fn update_row(_ row: mut Row) {
+    update(mut row.first, 3)
+    update(mut row.second, 5)
+}
+
+fn sum_row(_ row: ref Row) -> u32 {
+    sum(ref row.first) + sum(ref row.second)
+}
+
 pub fn kernel(_ value: u32) -> u32 {
-    let mut cell = Cell { left: value, right: value + 1 }
-    update(mut cell, 3)
-    sum(ref cell)
+    let mut row = Row {
+        first: Cell { left: value, right: value + 1 },
+        second: Cell { left: value + 2, right: value + 3 },
+    }
+    update_row(mut row)
+    sum_row(ref row)
 }
 "#;
         let mut db = DriverDataBase::default();
@@ -14933,8 +14998,8 @@ pub fn kernel(_ value: u32) -> u32 {
             })
             .count();
         assert_eq!(
-            typed_pointer_arguments, 2,
-            "both ordinary Fe aggregate borrows should retain typed pointer parameters"
+            typed_pointer_arguments, 4,
+            "whole-record and projected Fe aggregate borrows should retain typed pointer parameters"
         );
 
         let arena_scope_ops = module
