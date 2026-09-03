@@ -982,8 +982,14 @@ fn trace_spirv_helper_classification(
         module.func_store.try_view(function_ref, |function| {
             let inst_set = function.inst_set();
             let mut accesses_resource = false;
-            if sonatina_codegen::structurize::structurize_function(function).is_err() {
+            if let Err(error) = sonatina_codegen::structurize::structurize_function(function) {
                 reasons.insert("unstructured_control");
+                eprintln!(
+                    "fe spirv helper structurize rejection: function={}, error={error}",
+                    module
+                        .ctx
+                        .func_sig(function_ref, |signature| signature.name().to_owned()),
+                );
             }
             for block in function.layout.iter_block() {
                 for instruction in function.layout.iter_inst(block) {
