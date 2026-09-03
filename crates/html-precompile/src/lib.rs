@@ -62,10 +62,10 @@ pub const SURFACE_ELEMENT_TAG: &str = "fe-surface";
 /// static import instead). Injected at most once per document, the same
 /// idempotent posture as [`BOOTSTRAP_MARKER`].
 pub const SURFACE_RUNTIME_MARKER: &str = "data-fe-surface-runtime";
-/// Transitional ordinary-asset publication marker. It lets authored pages
-/// name inspectable text assets (notably their Fe source) without a JSON asset
-/// manifest; production precompilation content-addresses the bytes and rewrites
-/// the standard `href` in place.
+/// Ordinary text-asset publication marker. It lets authored anchors and link
+/// elements name inspectable sources or shared stylesheets without a JSON
+/// asset manifest; precompilation content-addresses the bytes and rewrites the
+/// standard `href` in place.
 pub const PUBLISH_ASSET_MARKER: &str = "data-fe-publish";
 pub const PUBLISHED_ASSET_DIGEST_ATTR: &str = "data-fe-published-sha256";
 const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
@@ -735,12 +735,7 @@ pub fn discover_external_dependencies(
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     let mut published_links = Vec::new();
-    collect_elements_with_attr(
-        &dom.document,
-        "a",
-        PUBLISH_ASSET_MARKER,
-        &mut published_links,
-    );
+    collect_publishable_links(&dom.document, &mut published_links);
     for link in published_links {
         let href = attr(&link, "href").ok_or_else(|| PrecompileError::SourceLoad {
             url: document_url.to_string(),
@@ -908,12 +903,7 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
         verified.insert(path);
     }
     let mut published_assets = Vec::new();
-    collect_elements_with_attr(
-        &dom.document,
-        "a",
-        PUBLISHED_ASSET_DIGEST_ATTR,
-        &mut published_assets,
-    );
+    collect_published_asset_links(&dom.document, &mut published_assets);
     for (position, asset) in published_assets.iter().enumerate() {
         let context = format!("published text asset #{}", position + 1);
         let reference = required_attr(asset, "href", &context)?;
@@ -3325,7 +3315,7 @@ fn publish_linked_text_assets(
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PrecompileError> {
     let mut links = Vec::new();
-    collect_elements_with_attr(root, "a", PUBLISH_ASSET_MARKER, &mut links);
+    collect_publishable_links(root, &mut links);
     for link in links {
         let href = attr(&link, "href").ok_or_else(|| PrecompileError::SourceLoad {
             url: document_url.to_string(),
@@ -3374,6 +3364,16 @@ fn publish_linked_text_assets(
         set_attr(&link, PUBLISHED_ASSET_DIGEST_ATTR, &digest);
     }
     Ok(())
+}
+
+fn collect_publishable_links(root: &Handle, output: &mut Vec<Handle>) {
+    collect_elements_with_attr(root, "a", PUBLISH_ASSET_MARKER, output);
+    collect_elements_with_attr(root, "link", PUBLISH_ASSET_MARKER, output);
+}
+
+fn collect_published_asset_links(root: &Handle, output: &mut Vec<Handle>) {
+    collect_elements_with_attr(root, "a", PUBLISHED_ASSET_DIGEST_ATTR, output);
+    collect_elements_with_attr(root, "link", PUBLISHED_ASSET_DIGEST_ATTR, output);
 }
 
 fn publish_bootstrap(
@@ -5776,17 +5776,23 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
     #[test]
     fn inspectable_text_assets_publish_without_an_asset_manifest_and_verify_digest() {
         let document = "https://example.test/gallery.html";
-        let html = r#"<!doctype html><html><body>
+        let html = r#"<!doctype html><html><head>
+<link rel="stylesheet" href="./demo.css" data-fe-publish>
+</head><body>
 <script type="application/fe">pub fn main() {}</script>
 <a href="./demo.fe" data-fe-publish data-fe-action="100">source</a>
 </body></html>"#;
         assert_eq!(
             discover_external_dependencies(document, html).unwrap(),
-            ["https://example.test/demo.fe"]
+            [
+                "https://example.test/demo.css",
+                "https://example.test/demo.fe",
+            ]
         );
-        let output = precompile_html(document, html, |url| {
-            assert_eq!(url.as_str(), "https://example.test/demo.fe");
-            Ok("actor Demo {}\n".to_owned())
+        let output = precompile_html(document, html, |url| match url.as_str() {
+            "https://example.test/demo.css" => Ok("body { color: hotpink; }\n".to_owned()),
+            "https://example.test/demo.fe" => Ok("actor Demo {}\n".to_owned()),
+            other => panic!("unexpected published asset {other}"),
         })
         .unwrap();
         let source_path = output
@@ -5795,9 +5801,16 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
             .find(|path| path.starts_with("assets/fe-authored-") && path.ends_with(".fe"))
             .unwrap();
         assert_eq!(output.assets[source_path], b"actor Demo {}\n");
+        let style_path = output
+            .assets
+            .keys()
+            .find(|path| path.starts_with("assets/fe-authored-") && path.ends_with(".css"))
+            .unwrap();
+        assert_eq!(output.assets[style_path], b"body { color: hotpink; }\n");
         assert!(!output.html.contains("data-fe-publish=\"\""));
         assert!(output.html.contains(PUBLISHED_ASSET_DIGEST_ATTR));
         assert!(output.html.contains(source_path));
+        assert!(output.html.contains(style_path));
 
         let root = tempfile::tempdir().unwrap();
         write_publication(root.path(), &output);
