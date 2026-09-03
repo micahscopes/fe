@@ -67,7 +67,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 7;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 8;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
@@ -5023,6 +5023,11 @@ pub struct WebResource {
     pub stride: u32,
     pub span: u32,
     pub element: WebActorResourceElement,
+    /// Minimal physical WebGPU capabilities derived by the compiler from the
+    /// Fe resource plan and pass effects. These are target facts, not authored
+    /// policy knobs.
+    #[serde(default = "legacy_buffer_usage")]
+    pub buffer_usage: Vec<WebBufferUsage>,
     #[serde(
         default = "legacy_resource_policy",
         skip_serializing_if = "is_default_resource_policy"
@@ -5032,6 +5037,30 @@ pub struct WebResource {
     /// Absent for zeroed and GPU-derived storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<WebResourceArtifact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebBufferUsage {
+    Storage,
+    CopySrc,
+    CopyDst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebShaderStage {
+    Compute,
+    Vertex,
+    Fragment,
+}
+
+fn legacy_buffer_usage() -> Vec<WebBufferUsage> {
+    vec![
+        WebBufferUsage::Storage,
+        WebBufferUsage::CopyDst,
+        WebBufferUsage::CopySrc,
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5046,6 +5075,11 @@ pub struct WebPass {
     pub source_entry: String,
     pub shader: String,
     pub shader_bytes: u64,
+    /// Physical shader-stage demand derived from this Fe pass. The logical
+    /// resource visibility plan is validated as an upper bound before this
+    /// target fact reaches the browser.
+    #[serde(default)]
+    pub shader_stages: Vec<WebShaderStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<[u32; 3]>,
     /// Number of strictly ordered submissions of one compiled compute stage.
@@ -5288,7 +5322,7 @@ pub struct WebCanonicalStatus {
     pub omission_reason: Option<String>,
 }
 
-// `WebBundle` embeds the v7 manifest (which carries f32 surface ranges), so it
+// `WebBundle` embeds the current manifest (which carries f32 surface ranges), so it
 // is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebBundle {
@@ -5318,6 +5352,7 @@ pub struct WebPassShader {
 fn web_resource_manifest(
     resource: &WebActorResource,
     binding: u32,
+    copy_source: bool,
 ) -> Result<WebResource, WebBundleError> {
     let span = match &resource.element {
         WebActorResourceElement::U32 | WebActorResourceElement::F32 => 4,
@@ -5345,6 +5380,13 @@ fn web_resource_manifest(
             )));
         }
     };
+    let mut buffer_usage = vec![WebBufferUsage::Storage];
+    if artifact.is_some() {
+        buffer_usage.push(WebBufferUsage::CopyDst);
+    }
+    if copy_source {
+        buffer_usage.push(WebBufferUsage::CopySrc);
+    }
     Ok(WebResource {
         group: 0,
         binding,
@@ -5353,6 +5395,7 @@ fn web_resource_manifest(
         stride: span,
         span,
         element: resource.element.clone(),
+        buffer_usage,
         policy: resource.policy.clone(),
         artifact,
     })
@@ -5393,6 +5436,68 @@ fn select_resource_assets(
         }
     }
     Ok(selected)
+}
+
+fn resource_visibility_allows(
+    resource: &WebResource,
+    stage: WebShaderStage,
+) -> Result<bool, WebBundleError> {
+    let visibility =
+        normalized_resource_policy_field(&resource.policy, "visibility", &resource.name)?;
+    let allowed = match visibility {
+        "compute" => matches!(stage, WebShaderStage::Compute),
+        "vertex" => matches!(stage, WebShaderStage::Vertex),
+        "fragment" => matches!(stage, WebShaderStage::Fragment),
+        "compute_fragment" => {
+            matches!(stage, WebShaderStage::Compute | WebShaderStage::Fragment)
+        }
+        "vertex_fragment" => {
+            matches!(stage, WebShaderStage::Vertex | WebShaderStage::Fragment)
+        }
+        "all" => true,
+        unsupported => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{}` has unsupported Fe visibility `{unsupported}`",
+                resource.name
+            )));
+        }
+    };
+    Ok(allowed)
+}
+
+fn validate_resource_stage_visibility(
+    resources: &[WebResource],
+    passes: &[WebPass],
+) -> Result<(), WebBundleError> {
+    for pass in passes {
+        for binding in pass
+            .layout
+            .bindings
+            .iter()
+            .filter(|binding| binding.role == WebBindingRole::Resource)
+        {
+            let resource = resources
+                .iter()
+                .find(|resource| {
+                    resource.group == binding.group && resource.binding == binding.binding
+                })
+                .ok_or_else(|| {
+                    WebBundleError::EntryDerivation(format!(
+                        "pass `{}` binds undeclared resource `{}` at {}:{}",
+                        pass.source_entry, binding.name, binding.group, binding.binding
+                    ))
+                })?;
+            for stage in &pass.shader_stages {
+                if !resource_visibility_allows(resource, *stage)? {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "resource `{}` Fe visibility does not admit {:?} demand from pass `{}`",
+                        resource.name, stage, pass.source_entry
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn stage_external_resources(
@@ -5918,11 +6023,21 @@ impl WebBundle {
                 ));
             }
         }
+        let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
         let resources = program
             .resources
             .iter()
             .enumerate()
-            .map(|(binding, resource)| web_resource_manifest(resource, binding as u32))
+            .map(|(binding, resource)| {
+                let binding = binding as u32;
+                web_resource_manifest(
+                    resource,
+                    binding,
+                    readback
+                        .as_ref()
+                        .is_some_and(|contract| contract.binding == binding),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
         let resource_field_indices = program
@@ -5930,7 +6045,6 @@ impl WebBundle {
             .iter()
             .map(|resource| resource.field_index)
             .collect::<Vec<_>>();
-        let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
         let mut shader_artifacts = compile_actor_shader_artifacts(
             db,
             top_mod,
@@ -5982,6 +6096,7 @@ impl WebBundle {
                     source_entry: fragment_entry.clone(),
                     shader: path.clone(),
                     shader_bytes: shader.len() as u64,
+                    shader_stages: vec![WebShaderStage::Vertex, WebShaderStage::Fragment],
                     dispatch: None,
                     repeat: 1,
                     taper: None,
@@ -6069,6 +6184,11 @@ impl WebBundle {
                 source_entry: stage.source_entry.clone(),
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
+                shader_stages: if dispatch.is_some() {
+                    vec![WebShaderStage::Compute]
+                } else {
+                    vec![WebShaderStage::Fragment]
+                },
                 dispatch,
                 repeat,
                 taper,
@@ -6093,6 +6213,7 @@ impl WebBundle {
             }
             index += 1;
         }
+        validate_resource_stage_visibility(&resources, &passes)?;
         let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "GPU actor pass graph has no shader for its derived terminal entry".to_owned(),
@@ -6639,6 +6760,10 @@ impl WebBundle {
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,
+            shader_stages: match options.mode {
+                WebBundleMode::Compute | WebBundleMode::Grid => vec![WebShaderStage::Compute],
+                WebBundleMode::Render => vec![WebShaderStage::Fragment],
+            },
             dispatch: None,
             repeat: 1,
             taper: None,

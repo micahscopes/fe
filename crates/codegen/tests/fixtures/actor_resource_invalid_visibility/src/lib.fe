@@ -1,0 +1,38 @@
+use std::webgpu::{
+    ActorResident,
+    ComputeSurface,
+    FixedDispatch,
+    FragmentOnly,
+    FragmentSurface,
+    GpuBuffer,
+    GpuProgram,
+    ReadOnly,
+    ReplayRecipe,
+    StorageKind,
+    WebGpuBackend,
+    Workgroup,
+    Zeroed,
+}
+
+pub type FragmentWords = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    FragmentOnly,
+    1,
+    u32,
+>
+
+actor InvalidVisibility uses (GpuProgram<WebGpuBackend>) {
+    words: FragmentWords,
+
+    fn inspect(self) uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
+        let observed = self.words.load(index: 0)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        self.words.load(index: 0).downcast_truncate()
+    }
+}

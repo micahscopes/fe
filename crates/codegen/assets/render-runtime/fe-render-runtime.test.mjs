@@ -8,8 +8,54 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, passShaderVisibility, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, resourceBufferUsage, unpackCanvasReadback, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {
+  const constants = { STORAGE: 0x80, COPY_SRC: 0x04, COPY_DST: 0x08 };
+  assert.equal(resourceBufferUsage({ buffer_usage: ["storage"] }, constants), 0x80);
+  assert.equal(
+    resourceBufferUsage({ buffer_usage: ["storage", "copy_dst"] }, constants),
+    0x88,
+  );
+  assert.equal(
+    resourceBufferUsage({ buffer_usage: ["storage", "copy_src"] }, constants),
+    0x84,
+  );
+  assert.equal(resourceBufferUsage({}, constants, 7), 0x8c);
+  assert.throws(
+    () => resourceBufferUsage({}, constants, 8),
+    /v8 resource is missing compiler-derived buffer_usage/,
+  );
+  assert.throws(
+    () => resourceBufferUsage({ buffer_usage: ["storage", "storage"] }, constants),
+    /duplicate resource buffer usage/,
+  );
+  assert.throws(
+    () => resourceBufferUsage({ buffer_usage: ["storage", "map_read"] }, constants),
+    /unsupported resource buffer usage/,
+  );
+});
+
+test("compiler-derived pass stages map exactly and v8 omissions fail closed", () => {
+  const constants = { COMPUTE: 0x04, VERTEX: 0x01, FRAGMENT: 0x02 };
+  assert.equal(
+    passShaderVisibility({ shader_stages: ["compute"] }, constants, 8),
+    0x04,
+  );
+  assert.equal(
+    passShaderVisibility({ shader_stages: ["vertex", "fragment"] }, constants, 8),
+    0x03,
+  );
+  assert.equal(
+    passShaderVisibility({ layout: { mode: "render" }, draw_vertices: 3 }, constants, 7),
+    0x03,
+  );
+  assert.throws(
+    () => passShaderVisibility({ layout: { mode: "render" } }, constants, 8),
+    /v8 pass is missing compiler-derived shader_stages/,
+  );
+});
 
 test("immutable resource artifacts are authenticated on every realization", async () => {
   const expected = new TextEncoder().encode("0123456789abcde\n");
@@ -308,6 +354,7 @@ test("fixed host supplies raw capability facts and realizes Fe backing extent ex
     surface._surface = { extent: { width: 512, height: 256 } };
     surface._adoptedCanvas = null;
     surface._stage = {
+      style: {},
       getBoundingClientRect() { return { width: 200, height: 100 }; },
     };
     surface._runWasmArenaEpoch = call => call();
@@ -338,6 +385,7 @@ test("fixed host rejects malformed Fe backing decisions without choosing a repla
     surface._surface = { extent: { width: 512, height: 256 } };
     surface._adoptedCanvas = null;
     surface._stage = {
+      style: {},
       getBoundingClientRect() { return { width: 512, height: 256 }; },
     };
     surface._runWasmArenaEpoch = call => call();
@@ -591,6 +639,87 @@ test("poster-only surfaces destroy all retained GPU buffers exactly once", () =>
   surface._gpu = { uniformBuffer: { destroy: () => trace.push("uniform") } };
   surface._releaseGpuResources();
   assert.deepEqual(trace, ["shared", "output", "uniform"]);
+
+  const resource = { destroy: () => trace.push("owned-resource") };
+  const passInput = { destroy: () => trace.push("owned-input") };
+  const passOutput = { destroy: () => trace.push("owned-output") };
+  surface._gpu = {
+    resourceBuffers: new Map([["resource", resource]]),
+    ownedBuffers: new Set([resource, passInput, passOutput]),
+  };
+  surface._releaseGpuResources();
+  assert.deepEqual(trace, [
+    "shared",
+    "output",
+    "uniform",
+    "owned-resource",
+    "owned-input",
+    "owned-output",
+  ]);
+});
+
+test("failed graph construction destroys resources and pass-local buffers", async () => {
+  const oldBufferUsage = globalThis.GPUBufferUsage;
+  const oldShaderStage = globalThis.GPUShaderStage;
+  try {
+    globalThis.GPUBufferUsage = { STORAGE: 0x80, COPY_SRC: 0x04, COPY_DST: 0x08 };
+    globalThis.GPUShaderStage = { COMPUTE: 0x04, VERTEX: 0x01, FRAGMENT: 0x02 };
+    const descriptors = [];
+    const destroyed = [];
+    const device = {
+      createBuffer(descriptor) {
+        const index = descriptors.length;
+        descriptors.push(descriptor);
+        return { destroy() { destroyed.push(index); } };
+      },
+      createShaderModule() { return {}; },
+      createBindGroupLayout() { return {}; },
+      createBindGroup() { return {}; },
+      createPipelineLayout() { return {}; },
+      createComputePipeline() { throw new Error("deliberate pipeline failure"); },
+      queue: { writeBuffer() {} },
+    };
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._layout = { color_target_format: "rgba8unorm" };
+    surface._surface = null;
+    surface._manifest = { protocol_version: 8 };
+    surface._manifestUrl = new URL("https://example.test/manifest.json");
+    surface._passShaderUrls = [new URL("data:text/plain,@compute @workgroup_size(1) fn main() {}")];
+    surface._resources = [{
+      group: 0,
+      binding: 0,
+      name: "state",
+      stride: 4,
+      length: 1,
+      buffer_usage: ["storage"],
+    }];
+    surface._passes = [{
+      shader_stages: ["compute"],
+      layout: {
+        mode: "compute",
+        entry_point: "main",
+        bindings: [
+          { group: 0, binding: 0, name: "state", role: "resource", access: "read_write" },
+          { group: 0, binding: 1, name: "input", role: "input", access: "read", span: 4 },
+          { group: 0, binding: 2, name: "output", role: "output", access: "read_write", span: 4 },
+        ],
+      },
+    }];
+
+    await assert.rejects(
+      surface._buildPassGraph(device, 1),
+      /deliberate pipeline failure/,
+    );
+    assert.deepEqual(
+      descriptors.map(descriptor => descriptor.usage),
+      [0x80, 0x88, 0x80],
+      "resource, host input, and GPU-only output receive only required usage bits",
+    );
+    assert.deepEqual(destroyed, [0, 1, 2]);
+  } finally {
+    globalThis.GPUBufferUsage = oldBufferUsage;
+    globalThis.GPUShaderStage = oldShaderStage;
+  }
 });
 
 test("mobile pointer capture is single-owner and restores native touch scrolling", () => {
@@ -766,6 +895,17 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
   surface._graph = true;
   surface._gpu = {
     device,
+    raster: {
+      sampleCount: 1,
+      cullMode: "none",
+      color: {
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        firstLoad: "clear",
+        followingLoad: "load",
+        store: "store",
+      },
+      depth: null,
+    },
     passRecords: [
       { pass: { layout: { mode: "render" } }, pipeline: {}, bindGroup: null, inputs: [] },
       { pass: { layout: { mode: "render" }, draw_vertices: 54 }, pipeline: {}, bindGroup: null, inputs: [] },
