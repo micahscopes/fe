@@ -1,6 +1,6 @@
 //! WASM query module for browser-side SCIP symbol resolution
 //!
-//! Provides `ScipStore` — a WASM-friendly wrapper around a SCIP index
+//! Provides `ScipStore`, a WASM-friendly wrapper around a SCIP index
 //! that can be constructed from protobuf bytes and queried from JavaScript.
 //! Replaces the earlier `DocStore` which operated on `DocIndex` JSON.
 
@@ -10,9 +10,11 @@ use wasm_bindgen::prelude::*;
 
 /// A reference to an occurrence within the parsed SCIP index.
 struct OccRef {
-    file_idx: u32,
-    #[allow(dead_code)]
-    occ_idx: u32,
+    file: String,
+    line: u32,
+    col_start: u32,
+    col_end: u32,
+    roles: i32,
 }
 
 /// A single occurrence sorted by position within a file.
@@ -21,7 +23,6 @@ struct SortedOcc {
     col_start: u32,
     col_end: u32,
     symbol: String,
-    roles: i32,
 }
 
 /// Per-file index of sorted occurrences for position lookups.
@@ -105,9 +106,7 @@ impl ScipStore {
         }
 
         // Process each document
-        for (file_idx, doc) in index.documents.iter().enumerate() {
-            let file_idx = file_idx as u32;
-
+        for doc in &index.documents {
             // Index symbol information from this document
             for si in &doc.symbols {
                 if !si.symbol.is_empty() {
@@ -135,7 +134,7 @@ impl ScipStore {
 
             // Build sorted occurrence list for this file
             let mut sorted_occs = Vec::with_capacity(doc.occurrences.len());
-            for (occ_idx, occ) in doc.occurrences.iter().enumerate() {
+            for occ in &doc.occurrences {
                 let (line, col_start, col_end) = parse_range(&occ.range);
 
                 // Track symbol → occurrence mapping
@@ -144,8 +143,11 @@ impl ScipStore {
                         .entry(occ.symbol.clone())
                         .or_default()
                         .push(OccRef {
-                            file_idx,
-                            occ_idx: occ_idx as u32,
+                            file: doc.relative_path.clone(),
+                            line,
+                            col_start,
+                            col_end,
+                            roles: occ.symbol_roles,
                         });
                 }
 
@@ -154,7 +156,6 @@ impl ScipStore {
                     col_start,
                     col_end,
                     symbol: occ.symbol.clone(),
-                    roles: occ.symbol_roles,
                 });
             }
 
@@ -171,7 +172,19 @@ impl ScipStore {
         }
 
         // Collect all symbol strings for search
-        let all_symbols: Vec<String> = sym_info.keys().cloned().collect();
+        let mut all_symbols: Vec<String> = sym_info.keys().cloned().collect();
+        all_symbols.sort();
+
+        for occurrences in sym_occurrences.values_mut() {
+            occurrences.sort_by(|a, b| {
+                a.file
+                    .cmp(&b.file)
+                    .then(a.line.cmp(&b.line))
+                    .then(a.col_start.cmp(&b.col_start))
+                    .then(a.col_end.cmp(&b.col_end))
+                    .then(a.roles.cmp(&b.roles))
+            });
+        }
 
         Ok(ScipStore {
             sym_info,
@@ -216,31 +229,17 @@ impl ScipStore {
 
         let mut results = Vec::new();
 
-        for occ_ref in occs {
-            // Look up the file path by index (documents are inserted in order)
-            let file_path = self
-                .file_index
-                .iter()
-                .nth(occ_ref.file_idx as usize)
-                .map(|(k, _)| k.as_str())
-                .unwrap_or("");
-
-            if let Some(fi) = self.file_index.get(file_path)
-                && let Some(occ) = fi.occurrences.iter().find(|o| o.symbol == symbol)
-            {
-                let is_def = (occ.roles & (scip::types::SymbolRole::Definition as i32)) != 0;
-                results.push(format!(
-                    r#"{{"file":"{}","line":{},"col_start":{},"col_end":{},"is_def":{}}}"#,
-                    escape_json_string(file_path),
-                    occ.line,
-                    occ.col_start,
-                    occ.col_end,
-                    is_def
-                ));
-            }
+        for occurrence in occs {
+            let is_def = (occurrence.roles & (scip::types::SymbolRole::Definition as i32)) != 0;
+            results.push(format!(
+                r#"{{"file":"{}","line":{},"col_start":{},"col_end":{},"is_def":{}}}"#,
+                escape_json_string(&occurrence.file),
+                occurrence.line,
+                occurrence.col_start,
+                occurrence.col_end,
+                is_def
+            ));
         }
-        // Deduplicate since we may find the same occurrence multiple times
-        results.dedup();
 
         format!("[{}]", results.join(","))
     }
@@ -314,6 +313,24 @@ impl ScipStore {
             }
         }
 
+        let order = |left: &&str, right: &&str| {
+            let left_name = self
+                .sym_info
+                .get(*left)
+                .map(|info| info.display_name.as_str())
+                .unwrap_or("");
+            let right_name = self
+                .sym_info
+                .get(*right)
+                .map(|info| info.display_name.as_str())
+                .unwrap_or("");
+            left_name.cmp(right_name).then(left.cmp(right))
+        };
+        roots.sort_by(order);
+        for children in children_of.values_mut() {
+            children.sort_by(order);
+        }
+
         fn build_node(
             sym: &str,
             sym_info: &HashMap<String, SymInfo>,
@@ -382,6 +399,12 @@ impl ScipStore {
             }
         }
 
+        fields.sort();
+        methods.sort();
+        variants.sort();
+        types.sort();
+        other.sort();
+
         format!(
             r#"{{"fields":[{}],"methods":[{}],"variants":[{}],"types":[{}],"other":[{}]}}"#,
             fields.join(","),
@@ -410,6 +433,8 @@ impl ScipStore {
             }
         }
 
+        results.sort();
+
         format!("[{}]", results.join(","))
     }
 
@@ -423,11 +448,12 @@ impl ScipStore {
     ///
     /// Returns a JSON array of file paths.
     pub fn files(&self) -> String {
-        let paths: Vec<String> = self
+        let mut paths: Vec<String> = self
             .file_index
             .keys()
             .map(|p| format!("\"{}\"", escape_json_string(p)))
             .collect();
+        paths.sort();
         format!("[{}]", paths.join(","))
     }
 }
@@ -535,6 +561,17 @@ mod tests {
         });
 
         index.documents.push(doc);
+
+        let mut other = scip::types::Document::new();
+        other.relative_path = "other.fe".to_string();
+        other.language = "fe".to_string();
+        other.occurrences.push(scip::types::Occurrence {
+            range: vec![1, 4, 9],
+            symbol: "fe fe test 0.1 Point#".to_string(),
+            symbol_roles: 0,
+            ..Default::default()
+        });
+        index.documents.push(other);
         index.write_to_bytes().expect("serialize SCIP index")
     }
 
@@ -608,8 +645,33 @@ mod tests {
         let store = ScipStore::new(&bytes).expect("load scip");
 
         let refs = store.find_references("fe fe test 0.1 Point#");
-        assert!(refs.contains("test.fe"));
-        assert!(refs.contains("\"is_def\":true") || refs.contains("\"is_def\":false"));
+        let refs: serde_json::Value = serde_json::from_str(&refs).unwrap();
+        assert_eq!(
+            refs,
+            serde_json::json!([
+                {
+                    "file": "other.fe",
+                    "line": 1,
+                    "col_start": 4,
+                    "col_end": 9,
+                    "is_def": false
+                },
+                {
+                    "file": "test.fe",
+                    "line": 0,
+                    "col_start": 7,
+                    "col_end": 12,
+                    "is_def": true
+                },
+                {
+                    "file": "test.fe",
+                    "line": 5,
+                    "col_start": 20,
+                    "col_end": 25,
+                    "is_def": false
+                }
+            ])
+        );
     }
 
     #[test]
@@ -618,7 +680,7 @@ mod tests {
         let store = ScipStore::new(&bytes).expect("load scip");
 
         let files = store.files();
-        assert!(files.contains("test.fe"));
+        assert_eq!(files, r#"["other.fe","test.fe"]"#);
     }
 
     #[test]
