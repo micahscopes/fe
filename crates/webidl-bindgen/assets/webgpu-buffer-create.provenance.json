@@ -1,0 +1,29 @@
+{
+  "schema": "fe-webidl-upstream-provenance/v1",
+  "repository": "https://github.com/w3c/webref",
+  "revision": "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279",
+  "license": "MIT",
+  "sources": [
+    {
+      "path": "ed/idl/webgpu.idl",
+      "url": "https://github.com/w3c/webref/blob/f3b81966c45f34f62df20e7f8d6f66d5b5ba9279/ed/idl/webgpu.idl",
+      "git_blob": "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6",
+      "sha256": "7ec751c047d7098d8582ef28bc9b5f90be43d3cd80c929167c187f28cb738c2e"
+    }
+  ],
+  "selection": {
+    "path": "webgpu-buffer-create.webidl",
+    "sha256": "9617f1e045387f0465954e7b118ab5f0262e5c1b82267fa4de9c2f29873d583a",
+    "source_ranges": [
+      "webgpu.idl:10-12",
+      "webgpu.idl:142-143",
+      "webgpu.idl:152",
+      "webgpu.idl:171",
+      "webgpu.idl:174-175",
+      "webgpu.idl:186",
+      "webgpu.idl:195-200",
+      "webgpu.idl:202",
+      "webgpu.idl:1338"
+    ]
+  }
+}

@@ -136,40 +136,60 @@ const RENDER_SCOPED_TASK_OPTION_MARKER: &str = "/* FE_SCOPED_TASK_OPTION */";
 const RENDER_RUNTIME_JS_FILE: &str = "fe-render-runtime.js";
 const RENDER_RUNTIME_BASE_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
 static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
-    let world = fe_webidl_bindgen::parse(fe_webidl_bindgen::WEBGPU_QUEUE_IDLE_WEBIDL)
-        .expect("pinned WebGPU queue-idle Web IDL must parse");
+    let web_idl = format!(
+        "{}\n{}",
+        fe_webidl_bindgen::WEBGPU_QUEUE_IDLE_WEBIDL,
+        fe_webidl_bindgen::WEBGPU_BUFFER_CREATE_WEBIDL,
+    );
+    let world = fe_webidl_bindgen::parse(&web_idl)
+        .expect("pinned WebGPU runtime Web IDL selections must compose and parse");
     let plan = fe_webidl_bindgen::build_adapter_plan(
         &world,
-        "webgpu-queue-idle",
+        "webgpu-render-runtime",
         fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
     )
-    .expect("pinned WebGPU queue-idle adapter plan must lower");
-    let operation = plan
-        .resources
-        .iter()
-        .find(|resource| resource.name == "GPUQueue")
-        .and_then(|resource| {
-            resource
-                .functions
-                .iter()
-                .find(|function| function.member_name == "onSubmittedWorkDone")
-        })
-        .expect("pinned WebGPU queue-idle operation must remain selected");
+    .expect("pinned WebGPU runtime adapter plan must lower");
+    let operation = |resource_name: &str, member_name: &str| {
+        plan.resources
+            .iter()
+            .find(|resource| resource.name == resource_name)
+            .and_then(|resource| {
+                resource
+                    .functions
+                    .iter()
+                    .find(|function| function.member_name == member_name)
+            })
+            .unwrap_or_else(|| {
+                panic!("pinned WebGPU operation {resource_name}.{member_name} must remain selected")
+            })
+            .import_name
+            .clone()
+    };
+    let queue_idle = operation("GPUQueue", "onSubmittedWorkDone");
+    let create_buffer = operation("GPUDevice", "createBuffer");
     let semantic = fe_webidl_bindgen::emit_js_canonical_adapter(&world, &plan)
-        .expect("pinned WebGPU queue-idle semantic adapter must emit");
+        .expect("pinned WebGPU runtime semantic adapter must emit");
     format!(
         "{}\n{}\n{}\n\
          const feWebGpuWebIdlRuntime = createFeHostRuntime();\n\
          const feWebGpuWebIdlAdapter = createFeHostAdapter({{}}, feWebGpuWebIdlRuntime);\n\
-         const feWebGpuQueueOperations = feWebGpuWebIdlAdapter.imports[{module:?}];\n\
-         installGeneratedWebGpuQueueIdleAdapter(queue =>\n  \
-           feWebGpuWebIdlRuntime.resources.withBorrowed(queue, handle =>\n    \
-             feWebGpuQueueOperations[{operation:?}](handle)));\n",
+         const feWebGpuOperations = feWebGpuWebIdlAdapter.imports[{module:?}];\n\
+         installGeneratedWebGpuOperations(Object.freeze({{\n  \
+           queueIdle: queue =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(queue, handle =>\n      \
+               feWebGpuOperations[{queue_idle:?}](handle)),\n  \
+           bufferCreate: (device, descriptor) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(device, handle => {{\n      \
+               const bufferHandle = feWebGpuOperations[{create_buffer:?}](handle, descriptor);\n      \
+               return feWebGpuWebIdlRuntime.resources.take(bufferHandle);\n    \
+             }}),\n\
+         }}));\n",
         fe_webidl_bindgen::HOST_RUNTIME_JS,
         semantic,
         RENDER_RUNTIME_BASE_JS,
         module = plan.module,
-        operation = operation.import_name,
+        queue_idle = queue_idle,
+        create_buffer = create_buffer,
     )
 });
 
@@ -7723,14 +7743,25 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let runtime = render_runtime_js();
         assert!(runtime.contains(fe_webidl_bindgen::HOST_RUNTIME_JS));
         assert!(runtime.contains("gpu_queue_on_submitted_work_done"));
+        assert!(runtime.contains("gpu_device_create_buffer"));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.withBorrowed"));
+        assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.take(bufferHandle)"));
         assert_eq!(
             runtime.matches("[\"onSubmittedWorkDone\"]()").count(),
             1,
             "the sole standards call must come from generated Web IDL"
         );
+        assert_eq!(
+            runtime.matches("[\"createBuffer\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
         assert!(
             !RENDER_RUNTIME_BASE_JS.contains(".onSubmittedWorkDone("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".createBuffer("),
             "the handwritten fixed runtime must not retain a standards-call fallback"
         );
 

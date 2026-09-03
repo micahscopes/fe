@@ -174,7 +174,7 @@ export function unpackCanvasReadback(bytes, width, height, bytesPerRow, format) 
 function encodeCanvasReadback(device, encoder, texture, width, height, format) {
   const bytesPerRow = Math.ceil((width * 4) / GPU_BYTES_PER_ROW_ALIGNMENT) *
     GPU_BYTES_PER_ROW_ALIGNMENT;
-  const buffer = device.createBuffer({
+  const buffer = createGpuBuffer(device, {
     size: bytesPerRow * height,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
@@ -211,7 +211,7 @@ async function readCanvasReadback(readback) {
  * The compiler-selected binding and exact physical extent are resolved before
  * this helper is called. Message meaning remains in the receiving Fe type. */
 function encodeGpuBufferReadback(device, encoder, source, byteLength) {
-  const buffer = device.createBuffer({
+  const buffer = createGpuBuffer(device, {
     size: byteLength,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
@@ -508,27 +508,36 @@ function publishSharedGpuQueueIdle(gpu) {
   return sharedGpuQueueIdle.publish(gpu?.generation ?? sharedGpuGeneration);
 }
 
-let generatedWebGpuQueueIdleAdapter;
+let generatedWebGpuOperations;
 
-/** Install the compiler-assembled official-WebIDL transport for one browser
- * queue-idle observation. Fe owns the scheduling/effect semantics; this
- * dependency performs only the standards operation. */
-export function installGeneratedWebGpuQueueIdleAdapter(adapter) {
-  if (typeof adapter !== "function") {
-    throw new TypeError("fe render runtime: WebGPU queue-idle adapter must be a function");
+/** Install the compiler-assembled official-WebIDL transport used by this fixed
+ * host. Fe owns resource and scheduling semantics; these generated operations
+ * perform only browser standards calls. */
+export function installGeneratedWebGpuOperations(operations) {
+  if (!operations || typeof operations !== "object" ||
+      typeof operations.queueIdle !== "function" ||
+      typeof operations.bufferCreate !== "function") {
+    throw new TypeError("fe render runtime: generated WebGPU operations are incomplete");
   }
-  if (generatedWebGpuQueueIdleAdapter !== undefined) {
-    throw new Error("fe render runtime: WebGPU queue-idle adapter is already installed");
+  if (generatedWebGpuOperations !== undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are already installed");
   }
-  generatedWebGpuQueueIdleAdapter = adapter;
+  generatedWebGpuOperations = Object.freeze(operations);
 }
 
 async function awaitSharedGpuQueueIdle(gpu) {
-  if (generatedWebGpuQueueIdleAdapter === undefined) {
-    throw new Error("fe render runtime: generated WebGPU queue-idle adapter is unavailable");
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
   }
-  await generatedWebGpuQueueIdleAdapter(gpu.device.queue);
+  await generatedWebGpuOperations.queueIdle(gpu.device.queue);
   return publishSharedGpuQueueIdle(gpu);
+}
+
+function createGpuBuffer(device, descriptor) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  return generatedWebGpuOperations.bufferCreate(device, descriptor);
 }
 
 function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
@@ -1812,7 +1821,7 @@ export class FeSurfaceElement extends HTMLElement {
         if (resource.group !== 0) {
           throw new Error("fe render runtime: pass graphs currently require resource group 0");
         }
-        const buffer = device.createBuffer({
+        const buffer = createGpuBuffer(device, {
           size: Math.max(4, resource.stride * resource.length),
           usage: resourceBufferUsage(resource, undefined, this._manifest.protocol_version),
         });
@@ -1852,7 +1861,7 @@ export class FeSurfaceElement extends HTMLElement {
             });
             groupEntries.push({ binding: binding.binding, resource: { buffer } });
           } else if (binding.role === "input") {
-            const buffer = device.createBuffer({
+            const buffer = createGpuBuffer(device, {
               size: Math.max(16, binding.span),
               usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
@@ -1869,7 +1878,7 @@ export class FeSurfaceElement extends HTMLElement {
             // word, are pass-local. They are deliberately not graph resources:
             // external actor storage remains shared by resource identity while
             // these buffers are rebuilt with the pass on device recovery.
-            const buffer = device.createBuffer({
+            const buffer = createGpuBuffer(device, {
               size: Math.max(4, binding.span),
               usage: GPUBufferUsage.STORAGE,
             });
@@ -1953,7 +1962,7 @@ export class FeSurfaceElement extends HTMLElement {
       let uniformBuffer = null;
       let pipelineLayout = "auto";
       if (this._inputBinding) {
-        uniformBuffer = device.createBuffer({
+        uniformBuffer = createGpuBuffer(device, {
           size: Math.max(16, this._inputBinding.span),
           usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
