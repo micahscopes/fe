@@ -1,6 +1,10 @@
 //! Production-width WebGPU gate for the generated sparse base AIR trace.
 
-use mandelbrot_proof_fixed_air_baby_bear::SPARSE_BASE_AIR_FIELDS
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+    sparse_interaction_challenge_values,
+}
 use mandelbrot_proof_fixed_air_webgpu::{
     SparseBaseArithmeticLinkPartition,
     SparseBaseArithmeticPlanPartition,
@@ -18,17 +22,20 @@ use mandelbrot_proof_fixed_air_webgpu::{
     SparseRadixWitnessFamily,
     SparseRoundWitnessFamily,
     finish_transition_witness_workspace,
-    transition_witness_workspace_words,
+    load_transition_phase_receipt,
+    store_transition_phase_receipt,
+    transition_phase_workspace_words,
     write_sparse_base_air_partition_lane,
+    write_sparse_boundary_interaction_local_lane,
+    write_sparse_linear_interaction_local_lane,
+    write_sparse_product_interaction_local_lane,
+    write_sparse_round_interaction_local_lane,
     write_sparse_witness_family_lane,
     write_transition_final_linear_witness_lane,
     write_transition_primary_linear_witness_lane,
     write_transition_product_witness_lane,
 }
-use mandelbrot_proof_production_profile_baby_bear::{
-    PRODUCTION_LIMBS,
-    PRODUCTION_TRACE_LENGTH,
-}
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
 use mandelbrot_proof_baby_bear_domains::{
     MandelbrotSparseBaseLdeLeafBabyBearV1,
     SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
@@ -93,36 +100,31 @@ use std::webgpu::{
 }
 
 const THREADS: usize = 64
-const TRACE_GROUPS: usize =
-    (PRODUCTION_TRACE_LENGTH + THREADS - 1) / THREADS
-const BASE_TRACE_WORDS: usize =
-    PRODUCTION_TRACE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const TRACE_GROUPS: usize = (PRODUCTION_TRACE_LENGTH + THREADS - 1) / THREADS
+const BASE_TRACE_WORDS: usize = PRODUCTION_TRACE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const INTERACTION_TRACE_WORDS: usize = PRODUCTION_TRACE_LENGTH * SPARSE_INTERACTION_AIR_FIELDS
 const BASE_LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
 const BASE_LDE_WORDS: usize = BASE_LDE_LENGTH * SPARSE_BASE_AIR_FIELDS
 const LDE_INPUT_LANES: usize = PRODUCTION_TRACE_LENGTH / 2
 const LDE_OUTPUT_LANES: usize = BASE_LDE_LENGTH / 2
 const LDE_INPUT_GRID_LANES: usize = SPARSE_BASE_AIR_FIELDS * LDE_INPUT_LANES
 const LDE_OUTPUT_GRID_LANES: usize = SPARSE_BASE_AIR_FIELDS * LDE_OUTPUT_LANES
-const LDE_INPUT_GROUPS: usize =
-    (LDE_INPUT_GRID_LANES + THREADS - 1) / THREADS
-const LDE_OUTPUT_GROUPS: usize =
-    (LDE_OUTPUT_GRID_LANES + THREADS - 1) / THREADS
-const LDE_VALIDATION_GROUPS: usize =
-    (SPARSE_BASE_AIR_FIELDS + THREADS - 1) / THREADS
+const LDE_INPUT_GROUPS: usize = (LDE_INPUT_GRID_LANES + THREADS - 1) / THREADS
+const LDE_OUTPUT_GROUPS: usize = (LDE_OUTPUT_GRID_LANES + THREADS - 1) / THREADS
+const LDE_VALIDATION_GROUPS: usize = (SPARSE_BASE_AIR_FIELDS + THREADS - 1) / THREADS
 const BASE_TREE_NODES: usize = ordered_binary_tree_nodes(BASE_LDE_LENGTH)
 const BASE_TREE_WORDS: usize = ordered_binary_tree_digest_words(BASE_LDE_LENGTH)
 const BASE_TREE_PARENT_TASKS: usize = ordered_binary_tree_parent_tasks(BASE_LDE_LENGTH)
 const BASE_TREE_LEVELS: usize = ordered_binary_tree_levels(BASE_LDE_LENGTH)
-const BASE_TREE_LEAF_GROUPS: usize =
-    (BASE_LDE_LENGTH + THREADS - 1) / THREADS
-const BASE_TREE_PARENT_GROUPS: usize =
-    (BASE_TREE_PARENT_TASKS + THREADS - 1) / THREADS
+const BASE_TREE_LEAF_GROUPS: usize = (BASE_LDE_LENGTH + THREADS - 1) / THREADS
+const BASE_TREE_PARENT_GROUPS: usize = (BASE_TREE_PARENT_TASKS + THREADS - 1) / THREADS
 const BASE_COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
     4,
     SPARSE_BASE_AIR_FIELDS,
 )
-const BASE_COMMITMENT_WORKSPACE_WORDS: usize =
-    column_major_field_row_commitment_workspace_words(BASE_LDE_LENGTH)
+const BASE_COMMITMENT_WORKSPACE_WORDS: usize = column_major_field_row_commitment_workspace_words(
+    BASE_LDE_LENGTH,
+)
 const CHALLENGE_GROUPS: usize = digest_squeeze_batch_workgroups(
     SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
     THREADS,
@@ -137,14 +139,16 @@ type BaseLdeInputPlan = RBin<Pair, 12>
 type BaseLdeOutputPlan = RBin<Pair, 13>
 const LDE_INPUT_STAGES: usize = <BaseLdeInputPlan as FactorTree>::FACTORS
 const LDE_OUTPUT_STAGES: usize = <BaseLdeOutputPlan as FactorTree>::FACTORS
-const TRANSITION_WORKSPACE_WORDS: usize =
-    transition_witness_workspace_words<PRODUCTION_LIMBS>()
+const TRANSITION_WORKSPACE_WORDS: usize = transition_phase_workspace_words<PRODUCTION_LIMBS>()
 
 static_assert(PRODUCTION_LIMBS == 4)
 static_assert(PRODUCTION_TRACE_LENGTH == 4096)
 static_assert(SPARSE_BASE_AIR_FIELDS == 260)
+static_assert(SPARSE_INTERACTION_AIR_FIELDS == 152)
+static_assert(sparse_interaction_challenge_values() == 8)
 static_assert(TRACE_GROUPS == 64)
 static_assert(BASE_TRACE_WORDS == 1064960)
+static_assert(INTERACTION_TRACE_WORDS == 622592)
 static_assert(BASE_LDE_LENGTH == 8192)
 static_assert(BASE_LDE_WORDS == 2129920)
 static_assert(LDE_INPUT_GRID_LANES == 532480)
@@ -171,30 +175,29 @@ static_assert(BASE_TREE_NODES <= BASE_TRACE_WORDS)
 static_assert(BASE_TREE_PARENT_TASKS <= PRODUCTION_TRACE_LENGTH)
 static_assert(BASE_COMMITMENT_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(CHALLENGE_WORKSPACE_WORDS <= LDE_INPUT_GRID_LANES)
-static_assert(CHALLENGE_OUTPUT_WORDS <= TRANSITION_WORKSPACE_WORDS)
+static_assert(CHALLENGE_OUTPUT_WORDS <= PRODUCTION_TRACE_LENGTH)
+static_assert(INTERACTION_TRACE_WORDS <= BASE_TRACE_WORDS)
 static_assert(<BaseLdeInputPlan as FactorTree>::POINTS == PRODUCTION_TRACE_LENGTH)
 static_assert(<BaseLdeOutputPlan as FactorTree>::POINTS == BASE_LDE_LENGTH)
 static_assert(LDE_INPUT_STAGES == 12)
 static_assert(LDE_OUTPUT_STAGES == 13)
-static_assert(TRANSITION_WORKSPACE_WORDS == 217)
+static_assert(TRANSITION_WORKSPACE_WORDS == 218)
 
 const fn witness_groups(_ rows: usize) -> usize {
     (rows + THREADS - 1) / THREADS
 }
 
-const RADIX_GROUPS: usize =
-    witness_groups(sparse_radix_task_count<PRODUCTION_LIMBS>() as usize)
-const CARRY_GROUPS: usize =
-    witness_groups(sparse_carry_task_count<PRODUCTION_LIMBS>() as usize)
-const PRODUCT_GROUPS: usize =
-    witness_groups(sparse_product_task_count<PRODUCTION_LIMBS>() as usize)
-const ROUND_GROUPS: usize =
-    witness_groups(sparse_round_task_count<PRODUCTION_LIMBS>() as usize)
-const LINEAR_GROUPS: usize =
-    witness_groups(sparse_linear_task_count<PRODUCTION_LIMBS>() as usize)
-const BOUNDARY_GROUPS: usize =
-    witness_groups(sparse_boundary_task_count<PRODUCTION_LIMBS>() as usize)
-const PADDING_GROUPS: usize = witness_groups(PRODUCTION_TRACE_LENGTH - sparse_transition_task_count<PRODUCTION_LIMBS>() as usize)
+const RADIX_GROUPS: usize = witness_groups(sparse_radix_task_count<PRODUCTION_LIMBS>() as usize)
+const CARRY_GROUPS: usize = witness_groups(sparse_carry_task_count<PRODUCTION_LIMBS>() as usize)
+const PRODUCT_GROUPS: usize = witness_groups(sparse_product_task_count<PRODUCTION_LIMBS>() as usize)
+const ROUND_GROUPS: usize = witness_groups(sparse_round_task_count<PRODUCTION_LIMBS>() as usize)
+const LINEAR_GROUPS: usize = witness_groups(sparse_linear_task_count<PRODUCTION_LIMBS>() as usize)
+const BOUNDARY_GROUPS: usize = witness_groups(
+    sparse_boundary_task_count<PRODUCTION_LIMBS>() as usize,
+)
+const PADDING_GROUPS: usize = witness_groups(
+    PRODUCTION_TRACE_LENGTH - sparse_transition_task_count<PRODUCTION_LIMBS>() as usize,
+)
 
 fn directed_point() -> ComplexFixed<4> {
     ComplexFixed {
@@ -496,10 +499,10 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             valid = valid && self.validity.load(index: row) == 1
             row = row + 1
         }
-        self.transition_workspace.store(
-            index: 0,
-            value: if valid { 1 } else { 0 },
-        )
+        store_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace, valid)
     }
 
     fn prepare_lde_inverse(self, invocation: ComputeInvocation)
@@ -634,15 +637,18 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     {
         if invocation.global.x != 0 { return }
         let mut column: u32 = 0
-        let mut valid = self.transition_workspace.load(index: 0) == 1
+        let mut valid = load_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace)
         while column < SPARSE_BASE_AIR_FIELDS.downcast_truncate() {
             valid = valid && self.validity.load(index: column) == 1
             column = column + 1
         }
-        self.transition_workspace.store(
-            index: 0,
-            value: if valid { 1 } else { 0 },
-        )
+        store_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace, valid)
     }
 
     /// The completed LDE retires the base trace, inverse values, and row
@@ -702,11 +708,14 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
                 BASE_TRACE_WORDS,
                 BASE_TRACE_WORDS,
             >(
-                self.base_trace,
                 self.lde_inverse_values,
+                self.lde_progress,
                 step.row,
                 step.commitment.require(
-                    self.transition_workspace.load(index: 0) == 1,
+                    load_transition_phase_receipt<
+                        PRODUCTION_LIMBS,
+                        TRANSITION_WORKSPACE_WORDS,
+                    >(self.transition_workspace),
                 ),
             )
         }
@@ -746,8 +755,8 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
         >(
-            self.base_trace,
             self.lde_inverse_values,
+            self.lde_progress,
             self.validity,
             invocation,
         )
@@ -763,8 +772,8 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_TRACE_WORDS,
             BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
-        >(self.base_trace, self.lde_inverse_values, self.validity)
-        self.lde_inverse_values.store(
+        >(self.lde_inverse_values, self.lde_progress, self.validity)
+        self.lde_progress.store(
             index: (BASE_TREE_NODES - 1).downcast_truncate(),
             value: if root.valid { 1 } else { 0 },
         )
@@ -781,10 +790,10 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         prepare_digest_squeeze_batch<
             SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
             LDE_INPUT_GRID_LANES,
-            TRANSITION_WORKSPACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
         >(
             self.lde_inverse_progress,
-            self.transition_workspace,
+            self.validity,
             invocation,
         )
     }
@@ -811,14 +820,14 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         advance_digest_squeeze_batch_lane<
             SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
             LDE_INPUT_GRID_LANES,
-            TRANSITION_WORKSPACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
         >(
             self.lde_inverse_progress,
-            self.transition_workspace,
+            self.validity,
             invocation,
             sparse_lde_interaction_challenge_domain_tag(state),
-            load_poseidon2_digest(self.base_trace, root),
-            self.lde_inverse_values.load(index: root) == 1,
+            load_poseidon2_digest(self.lde_inverse_values, root),
+            self.lde_progress.load(index: root) == 1,
         )
     }
 
@@ -827,22 +836,107 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     {
         if invocation.global.x != 0 { return }
         let root: u32 = (BASE_TREE_NODES - 1).downcast_truncate()
-        let valid = self.lde_inverse_values.load(index: root) == 1
+        let valid = self.lde_progress.load(index: root) == 1
             && finish_digest_squeeze_batch<
                 SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
                 LDE_INPUT_GRID_LANES,
-                TRANSITION_WORKSPACE_WORDS,
-            >(self.lde_inverse_progress, self.transition_workspace)
-        self.lde_inverse_values.store(
+                PRODUCTION_TRACE_LENGTH,
+            >(self.lde_inverse_progress, self.validity)
+        self.lde_progress.store(
             index: root,
             value: if valid { 1 } else { 0 },
         )
     }
 
+    fn write_interaction_product_locals(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        write_sparse_product_interaction_local_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.base_trace, self.validity, self.lde_progress,
+            self.lde_inverse_progress, invocation,
+        )
+    }
+
+    fn write_interaction_round_locals(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        write_sparse_round_interaction_local_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.base_trace, self.validity, self.lde_progress,
+            self.lde_inverse_progress, invocation,
+        )
+    }
+
+    fn write_interaction_linear_locals(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_interaction_local_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.base_trace, self.validity, self.lde_progress,
+            self.lde_inverse_progress, invocation,
+        )
+    }
+
+    fn write_interaction_boundary_locals(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<TRACE_GROUPS, 1, 1>>)
+    {
+        write_sparse_boundary_interaction_local_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_TRACE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.base_trace, self.validity, self.lde_progress,
+            self.lde_inverse_progress, invocation,
+        )
+    }
+
+    fn finish_interaction_locals(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let mut row: u32 = 0
+        let mut valid = true
+        while row < PRODUCTION_TRACE_LENGTH.downcast_truncate() {
+            valid = valid && self.lde_inverse_progress.load(index: row) == 1
+            row = row + 1
+        }
+        store_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace, valid)
+    }
+
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        let color: u32 = if self.lde_inverse_values.load(
-            index: (BASE_TREE_NODES - 1).downcast_truncate(),
-        ) == 1 {
+        let color: u32 = if load_transition_phase_receipt<
+            PRODUCTION_LIMBS,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace) {
             4278255360
         } else {
             4294901760

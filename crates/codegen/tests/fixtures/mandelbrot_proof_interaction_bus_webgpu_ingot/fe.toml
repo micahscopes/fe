@@ -1,0 +1,10 @@
+[ingot]
+name = "mandelbrot_proof_interaction_bus_webgpu_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_fixed_air_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-baby-bear"
+mandelbrot_proof_fixed_air_webgpu = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-webgpu"
+mandelbrot_proof_production_profile_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/production-profile-baby-bear"
+poseidon_baby_bear_webgpu = "../../../../../ingots/poseidon_baby_bear_webgpu"

@@ -277,8 +277,7 @@ pub struct SparseBaseAirRow<F: Radix2Field> {
     pub linear_plan: SparseLinearPlanWitness<F>,
     pub boundary_plan: SparseBoundaryPlanWitness<F>,
 }
-impl<F: Radix2Field> core::marker::Copy
-    for SparseBaseAirRow<F> {}
+impl<F: Radix2Field> core::marker::Copy for SparseBaseAirRow<F> {}
 derive CanonicalWords for SparseBaseAirRow<F> using CanonicalWordsProvider
 
 /// Shared semantic inputs for one sparse base AIR row. Scalar construction and
@@ -307,10 +306,7 @@ impl<const L: usize> core::marker::Copy for SparseTraceLeaf<L> {}
 derive CanonicalWords for SparseTraceLeaf<L> using CanonicalWordsProvider
 
 /// Limb-branded root for one complete power-of-two sparse base trace.
-pub struct SparseTraceDigest<const L: usize> {
-    pub valid: bool,
-    pub value: Poseidon2Digest,
-}
+pub struct SparseTraceDigest<const L: usize> { pub valid: bool, pub value: Poseidon2Digest }
 impl<const L: usize> core::marker::Copy for SparseTraceDigest<L> {}
 derive CanonicalWords for SparseTraceDigest<L> using CanonicalWordsProvider
 
@@ -327,14 +323,19 @@ pub struct SparseInteractionChallenges {
 impl core::marker::Copy for SparseInteractionChallenges {}
 derive CanonicalWords for SparseInteractionChallenges using CanonicalWordsProvider
 
+/// Number of quartic values in the nominal challenge carrier. The codec, not
+/// a second protocol table, owns this count.
+pub const fn sparse_interaction_challenge_values() -> usize {
+    (<SparseInteractionChallenges as CanonicalWords>::WORDS as usize - 1)
+        / <BabyBearExt4 as CanonicalWords>::WORDS as usize
+}
+static_assert(<SparseInteractionChallenges as CanonicalWords>::WORDS as usize
+    == 1 + sparse_interaction_challenge_values() * <BabyBearExt4 as CanonicalWords>::WORDS as usize)
+
 /// Source-branded production challenges. Its payload is private so code
 /// outside this ingot cannot repackage raw-checkpoint challenges as though
 /// they followed the base-LDE commitment.
-pub struct SparseLdeInteractionChallenges<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseLdeInteractionChallenges<const L: usize, const TRACE: usize, const LDE: usize> {
     value: SparseInteractionChallenges,
 }
 impl<
@@ -353,22 +354,20 @@ pub struct SparseInteractionTraceRow<F: Radix2Field> {
     pub linear: SparseLinearInteractionRow<F>,
     pub boundary: SparseBoundaryInteractionRow<F>,
 }
-impl<F: Radix2Field> core::marker::Copy
-    for SparseInteractionTraceRow<F> {}
+impl<F: Radix2Field> core::marker::Copy for SparseInteractionTraceRow<F> {}
 derive CanonicalWords for SparseInteractionTraceRow<F> using CanonicalWordsProvider
 
 /// Polynomial column counts are derived from the nominal row codecs. They are
 /// public so LDE, commitment, query, and verifier carriers can share the exact
 /// schema without copying numeric column declarations.
-pub const SPARSE_BASE_AIR_FIELDS: usize =
-    <SparseBaseAirRow<BabyBear> as CanonicalWords>::WORDS as usize
-pub const SPARSE_INTERACTION_AIR_FIELDS: usize =
-    <SparseInteractionTraceRow<BabyBearExt4> as CanonicalWords>::WORDS as usize
+pub const SPARSE_BASE_AIR_FIELDS: usize = <SparseBaseAirRow<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
+pub const SPARSE_INTERACTION_AIR_FIELDS: usize = <SparseInteractionTraceRow<
+    BabyBearExt4,
+> as CanonicalWords>::WORDS as usize
 
-pub struct SparseBaseAirFields {
-    pub valid: bool,
-    pub values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
-}
+pub struct SparseBaseAirFields { pub valid: bool, pub values: [BabyBear; SPARSE_BASE_AIR_FIELDS] }
 impl core::marker::Copy for SparseBaseAirFields {}
 derive CanonicalWords for SparseBaseAirFields using CanonicalWordsProvider
 
@@ -379,15 +378,14 @@ pub struct SparseInteractionAirFields {
 impl core::marker::Copy for SparseInteractionAirFields {}
 derive CanonicalWords for SparseInteractionAirFields using CanonicalWordsProvider
 
-pub fn sparse_base_air_fields(
-    _ row: ref SparseBaseAirRow<BabyBear>,
-) -> SparseBaseAirFields {
-    let encoded = encode_canonical_word_array<
-        SparseBaseAirRow<BabyBear>,
-        SPARSE_BASE_AIR_FIELDS,
-    >(row)
+pub fn sparse_base_air_fields(_ row: ref SparseBaseAirRow<BabyBear>) -> SparseBaseAirFields {
+    let encoded = encode_canonical_word_array<SparseBaseAirRow<BabyBear>, SPARSE_BASE_AIR_FIELDS>(
+        row,
+    )
     let mut values = [BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]
-    if !encoded.valid { return SparseBaseAirFields { valid: false, values: values } }
+    if !encoded.valid {
+        return SparseBaseAirFields { valid: false, values: values }
+    }
     let mut index: usize = 0
     while index < SPARSE_BASE_AIR_FIELDS {
         values[index] = BabyBear::from_u32(encoded.words[index])
@@ -453,31 +451,23 @@ impl<const N: usize> core::marker::Copy for SparseBaseAirLdeCodeword<N> {}
 
 /// Nominal commitment leaf for one base-LDE evaluation. Trace and LDE sizes
 /// are part of every leaf, so roots cannot be replayed across proof shapes.
-pub struct SparseBaseLdeLeaf<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseBaseLdeLeaf<const L: usize, const TRACE: usize, const LDE: usize> {
     pub limb_count: BabyBear,
     pub trace_length: BabyBear,
     pub lde_length: BabyBear,
     pub index: BabyBear,
     pub values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
 }
-impl<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> core::marker::Copy for SparseBaseLdeLeaf<L, TRACE, LDE> {}
+impl<const L: usize, const TRACE: usize, const LDE: usize> core::marker::Copy for SparseBaseLdeLeaf<
+    L,
+    TRACE,
+    LDE,
+> {}
 derive CanonicalWords for SparseBaseLdeLeaf<L, TRACE, LDE> using CanonicalWordsProvider
 
 /// Shape- and limb-branded base-LDE root. This, not the raw `SL03`
 /// checkpoint, is the Fiat-Shamir source for production interaction columns.
-pub struct SparseBaseLdeDigest<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseBaseLdeDigest<const L: usize, const TRACE: usize, const LDE: usize> {
     pub valid: bool,
     pub value: Poseidon2Digest,
 }
@@ -494,21 +484,15 @@ pub struct SparseInteractionAirEvaluationTrace<const N: usize> {
     pub valid: bool,
     pub values: [[BabyBear; SPARSE_INTERACTION_AIR_FIELDS]; N],
 }
-impl<const N: usize> core::marker::Copy
-    for SparseInteractionAirEvaluationTrace<N> {}
+impl<const N: usize> core::marker::Copy for SparseInteractionAirEvaluationTrace<N> {}
 
 pub struct SparseInteractionAirLdeCodeword<const N: usize> {
     pub valid: bool,
     pub values: [[BabyBear; SPARSE_INTERACTION_AIR_FIELDS]; N],
 }
-impl<const N: usize> core::marker::Copy
-    for SparseInteractionAirLdeCodeword<N> {}
+impl<const N: usize> core::marker::Copy for SparseInteractionAirLdeCodeword<N> {}
 
-pub struct SparseInteractionLdeLeaf<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseInteractionLdeLeaf<const L: usize, const TRACE: usize, const LDE: usize> {
     pub limb_count: BabyBear,
     pub trace_length: BabyBear,
     pub lde_length: BabyBear,
@@ -523,11 +507,7 @@ impl<
 > core::marker::Copy for SparseInteractionLdeLeaf<L, TRACE, LDE> {}
 derive CanonicalWords for SparseInteractionLdeLeaf<L, TRACE, LDE> using CanonicalWordsProvider
 
-pub struct SparseInteractionLdeDigest<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseInteractionLdeDigest<const L: usize, const TRACE: usize, const LDE: usize> {
     pub valid: bool,
     pub base: SparseBaseLdeDigest<L, TRACE, LDE>,
     pub value: Poseidon2Digest,
@@ -543,11 +523,7 @@ derive CanonicalWords for SparseInteractionLdeDigest<L, TRACE, LDE> using Canoni
 /// The nested generic transcript is the established BabyBear input consumed by
 /// composition and FRI, while this wrapper retains enough nominal evidence to
 /// prevent swapping either sparse commitment at the application boundary.
-pub struct SparseAirLdeTranscriptDigest<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseAirLdeTranscriptDigest<const L: usize, const TRACE: usize, const LDE: usize> {
     pub valid: bool,
     pub statement: RecursiveCommittedInterval<L>,
     pub base: SparseBaseLdeDigest<L, TRACE, LDE>,
@@ -565,11 +541,7 @@ impl<
 /// while composition keeps the original statement and roots available for
 /// exact rebinding checks. Private fields prevent callers from presenting an
 /// arbitrary challenge digest as an authenticated extension.
-pub struct SparseCompositionTranscriptDigest<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseCompositionTranscriptDigest<const L: usize, const TRACE: usize, const LDE: usize> {
     valid: bool,
     air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     transcript: AirLdeTranscriptDigest,
@@ -580,15 +552,17 @@ impl<
     const LDE: usize,
 > core::marker::Copy for SparseCompositionTranscriptDigest<L, TRACE, LDE> {}
 
-impl<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
+impl<const L: usize, const TRACE: usize, const LDE: usize> SparseCompositionTranscriptDigest<
+    L,
+    TRACE,
+    LDE,
+> {
     pub fn is_valid(self) -> bool {
         self.valid && self.air.valid && self.transcript.valid
     }
-    pub fn transcript(self) -> AirLdeTranscriptDigest { self.transcript }
+    pub fn transcript(self) -> AirLdeTranscriptDigest {
+        self.transcript
+    }
 }
 
 /// One full quartic composition codeword. The values use the same canonical
@@ -613,11 +587,7 @@ impl core::marker::Copy for SparsePublicConstraintChallenges {}
 
 /// A composition root branded by the exact statement and pair of sparse LDE
 /// roots from which its codeword was generated.
-pub struct SparseCompositionLdeDigest<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {
+pub struct SparseCompositionLdeDigest<const L: usize, const TRACE: usize, const LDE: usize> {
     pub valid: bool,
     pub air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     pub value: CompositionDigest,
@@ -639,16 +609,8 @@ pub struct SparseOpenedAirRow {
 }
 impl core::marker::Copy for SparseOpenedAirRow {}
 
-pub struct SparseBaseLdeTreeRole<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {}
-pub struct SparseInteractionLdeTreeRole<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
-> {}
+pub struct SparseBaseLdeTreeRole<const L: usize, const TRACE: usize, const LDE: usize> {}
+pub struct SparseInteractionLdeTreeRole<const L: usize, const TRACE: usize, const LDE: usize> {}
 
 pub type SparseBaseLdeMultiOpening<
     const L: usize,
@@ -701,8 +663,7 @@ impl<const N: usize> SparseLdeWordReader<N> {
 
     fn complete(self) -> bool {
         let fields: u32 = N.downcast_truncate()
-        self.valid
-            && self.cursor == fields * self.coefficients
+        self.valid && self.cursor == fields * self.coefficients
     }
 }
 
@@ -755,15 +716,15 @@ pub fn sparse_opened_air_row(
     _ interaction_fields: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
 ) -> SparseOpenedAirRow {
     let mut base = zero_sparse_base_air_row_field<BabyBearExt4>()
-    let base_reader = base.decode(
-        SparseLdeWordReader<SPARSE_BASE_AIR_FIELDS>::embedded(base_fields),
-    )
+    let base_reader = base
+        .decode(
+            SparseLdeWordReader<SPARSE_BASE_AIR_FIELDS>::embedded(base_fields),
+        )
     let mut interaction = zero_sparse_interaction_trace_row_field<BabyBearExt4>()
-    let interaction_reader = interaction.decode(
-        SparseLdeWordReader<SPARSE_INTERACTION_AIR_FIELDS>::extension(
-            interaction_fields,
-        ),
-    )
+    let interaction_reader = interaction
+        .decode(
+            SparseLdeWordReader<SPARSE_INTERACTION_AIR_FIELDS>::extension(interaction_fields),
+        )
     SparseOpenedAirRow {
         valid: base_reader.complete() && interaction_reader.complete(),
         base: base,
@@ -796,19 +757,24 @@ impl core::marker::Copy for SparseConstraintFamily {}
 /// the larger bound and multiplication adds bounds, so the exact authored
 /// constraint body can be interpreted without lowering BabyBear arithmetic.
 /// Inversion is accepted only for constants and otherwise fails closed.
-struct AirPolynomialDegree {
-    valid: bool,
-    degree: u32,
-}
+struct AirPolynomialDegree { valid: bool, degree: u32 }
 impl core::marker::Copy for AirPolynomialDegree {}
 
 impl AirPolynomialDegree {
-    fn constant() -> Self { Self { valid: true, degree: 0 } }
-    fn variable() -> Self { Self { valid: true, degree: 1 } }
-    fn invalid() -> Self { Self { valid: false, degree: 0 } }
+    fn constant() -> Self {
+        Self { valid: true, degree: 0 }
+    }
+    fn variable() -> Self {
+        Self { valid: true, degree: 1 }
+    }
+    fn invalid() -> Self {
+        Self { valid: false, degree: 0 }
+    }
 
     fn maximum(self, _ other: Self) -> Self {
-        if !self.valid || !other.valid { return Self::invalid() }
+        if !self.valid || !other.valid {
+            return Self::invalid()
+        }
         Self {
             valid: true,
             degree: if self.degree > other.degree {
@@ -820,8 +786,7 @@ impl AirPolynomialDegree {
     }
 
     fn product(self, _ other: Self) -> Self {
-        if !self.valid || !other.valid
-            || self.degree > 2147483647 - other.degree {
+        if !self.valid || !other.valid || self.degree > 2147483647 - other.degree {
             return Self::invalid()
         }
         Self { valid: true, degree: self.degree + other.degree }
@@ -831,11 +796,21 @@ impl AirPolynomialDegree {
 impl Radix2Field for AirPolynomialDegree {
     const TWO_ADICITY: u32 = 0
 
-    fn radix2_zero() -> Self { Self::constant() }
-    fn radix2_is_zero(self) -> bool { false }
-    fn radix2_add(self, _ other: Self) -> Self { self.maximum(other) }
-    fn radix2_sub(self, _ other: Self) -> Self { self.maximum(other) }
-    fn radix2_mul(self, _ other: Self) -> Self { self.product(other) }
+    fn radix2_zero() -> Self {
+        Self::constant()
+    }
+    fn radix2_is_zero(self) -> bool {
+        false
+    }
+    fn radix2_add(self, _ other: Self) -> Self {
+        self.maximum(other)
+    }
+    fn radix2_sub(self, _ other: Self) -> Self {
+        self.maximum(other)
+    }
+    fn radix2_mul(self, _ other: Self) -> Self {
+        self.product(other)
+    }
     fn radix2_pow(self, _ exponent: u32) -> Self {
         if !self.valid || (exponent != 0 && self.degree > 2147483647 / exponent) {
             return Self::invalid()
@@ -849,7 +824,9 @@ impl Radix2Field for AirPolynomialDegree {
             Self::invalid()
         }
     }
-    fn radix2_root(_ log_order: u32) -> Self { Self::constant() }
+    fn radix2_root(_ log_order: u32) -> Self {
+        Self::constant()
+    }
 }
 
 /// Honest one-word schema used only to let the existing reflection traversal
@@ -878,22 +855,18 @@ impl CanonicalWords for AirPolynomialDegree {
     }
 }
 
-struct AirPolynomialVariableSource {
-    cursor: u32,
-    valid: bool,
-}
+struct AirPolynomialVariableSource { cursor: u32, valid: bool }
 impl core::marker::Copy for AirPolynomialVariableSource {}
 
 impl AirPolynomialVariableSource {
-    fn new() -> Self { Self { cursor: 0, valid: true } }
+    fn new() -> Self {
+        Self { cursor: 0, valid: true }
+    }
 }
 
 impl WordSource for AirPolynomialVariableSource {
     fn read(self) -> WordRead<Self> {
-        WordRead {
-            source: Self { cursor: self.cursor + 1, valid: self.valid },
-            value: 3,
-        }
+        WordRead { source: Self { cursor: self.cursor + 1, valid: self.valid }, value: 3 }
     }
 
     fn reject(self) -> Self {
@@ -1019,19 +992,19 @@ impl<F: Radix2Field> SparseCompositionFold<F> {
             SparseConstraintFamily::AllRows => {
                 self.all_rows = self.all_rows.radix2_add(contribution)
                 self.all_rows_constraints = self.all_rows_constraints + constraints
-            }
+            },
             SparseConstraintFamily::PairRows => {
                 self.pair_rows = self.pair_rows.radix2_add(contribution)
                 self.pair_rows_constraints = self.pair_rows_constraints + constraints
-            }
+            },
             SparseConstraintFamily::FirstRow => {
                 self.first_row = self.first_row.radix2_add(contribution)
                 self.first_row_constraints = self.first_row_constraints + constraints
-            }
+            },
             SparseConstraintFamily::LastRow => {
                 self.last_row = self.last_row.radix2_add(contribution)
                 self.last_row_constraints = self.last_row_constraints + constraints
-            }
+            },
         }
         self.power = self.power.radix2_mul(self.challenge.radix2_pow(constraints))
         self
@@ -1066,7 +1039,6 @@ impl<F: Radix2Field> SparseCompositionFold<F> {
             last_row: self.last_row,
         }
     }
-
 }
 
 fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
@@ -1089,20 +1061,20 @@ fn sparse_composition_fold_fields<F: Radix2Field, const L: usize>(
     _ interaction: SparseInteractionTraceRow<F>,
     _ next_interaction: SparseInteractionTraceRow<F>,
 ) -> SparseCompositionFold<F>
-where L > 1,
+where L > 1
 {
     let mut fold = SparseCompositionFold<F>::new(challenge)
 
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::AllRows,
-        evaluate_sparse_control_row(challenge, control, control_plan),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::AllRows,
-        evaluate_sparse_arithmetic_row<F, L>(
-            challenge, control, witness, arithmetic_plan,
-        ),
-    )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::AllRows,
+            evaluate_sparse_control_row(challenge, control, control_plan),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::AllRows,
+            evaluate_sparse_arithmetic_row<F, L>(challenge, control, witness, arithmetic_plan),
+        )
     let product = evaluate_sparse_product_interaction_row<F, L>(
         challenge,
         product_challenges,
@@ -1110,12 +1082,13 @@ where L > 1,
         witness,
         interaction.product,
     )
-    fold = fold.absorb(
-        SparseConstraintFamily::AllRows,
-        product.valid,
-        product.constraints,
-        product.folded,
-    )
+    fold = fold
+        .absorb(
+            SparseConstraintFamily::AllRows,
+            product.valid,
+            product.constraints,
+            product.folded,
+        )
     let round = evaluate_sparse_round_interaction_row<F, L>(
         challenge,
         round_challenges,
@@ -1125,12 +1098,13 @@ where L > 1,
         round_plan,
         interaction.round,
     )
-    fold = fold.absorb(
-        SparseConstraintFamily::AllRows,
-        round.valid,
-        round.constraints,
-        round.folded,
-    )
+    fold = fold
+        .absorb(
+            SparseConstraintFamily::AllRows,
+            round.valid,
+            round.constraints,
+            round.folded,
+        )
     let linear = evaluate_sparse_linear_interaction_row<F, L>(
         challenge,
         linear_challenges,
@@ -1141,12 +1115,13 @@ where L > 1,
         linear_plan,
         interaction.linear,
     )
-    fold = fold.absorb(
-        SparseConstraintFamily::AllRows,
-        linear.valid,
-        linear.constraints,
-        linear.folded,
-    )
+    fold = fold
+        .absorb(
+            SparseConstraintFamily::AllRows,
+            linear.valid,
+            linear.constraints,
+            linear.folded,
+        )
     let boundary = evaluate_sparse_boundary_interaction_row<F, L>(
         challenge,
         boundary_challenges,
@@ -1155,153 +1130,164 @@ where L > 1,
         boundary_plan,
         interaction.boundary,
     )
-    fold = fold.absorb(
-        SparseConstraintFamily::AllRows,
-        boundary.valid,
-        boundary.constraints,
-        boundary.folded,
-    )
+    fold = fold
+        .absorb(
+            SparseConstraintFamily::AllRows,
+            boundary.valid,
+            boundary.constraints,
+            boundary.folded,
+        )
 
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::PairRows,
-        evaluate_sparse_control_link<F, L>(
-            challenge, control, next_control, control_link_plan,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::PairRows,
-        evaluate_sparse_arithmetic_link(
-            challenge,
-            control,
-            witness,
-            next_control,
-            next_witness,
-            arithmetic_link_plan,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::PairRows,
-        evaluate_sparse_product_interaction_link<F, L>(
-            challenge,
-            control,
-            witness,
-            interaction.product,
-            next_interaction.product,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::PairRows,
-        evaluate_sparse_round_interaction_link<F, L>(
-            challenge,
-            control,
-            next_control,
-            witness,
-            round_plan,
-            interaction.round,
-            next_interaction.round,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::PairRows,
-        evaluate_sparse_linear_interaction_link<F, L>(
-            challenge,
-            control,
-            next_control,
-            witness,
-            arithmetic_plan,
-            linear_plan,
-            interaction.linear,
-            next_interaction.linear,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::PairRows,
-        evaluate_sparse_boundary_interaction_link<F, L>(
-            challenge,
-            control,
-            witness,
-            boundary_plan,
-            interaction.boundary,
-            next_interaction.boundary,
-        ),
-    )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::PairRows,
+            evaluate_sparse_control_link<F, L>(challenge, control, next_control, control_link_plan),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::PairRows,
+            evaluate_sparse_arithmetic_link(
+                challenge,
+                control,
+                witness,
+                next_control,
+                next_witness,
+                arithmetic_link_plan,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::PairRows,
+            evaluate_sparse_product_interaction_link<F, L>(
+                challenge,
+                control,
+                witness,
+                interaction.product,
+                next_interaction.product,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::PairRows,
+            evaluate_sparse_round_interaction_link<F, L>(
+                challenge,
+                control,
+                next_control,
+                witness,
+                round_plan,
+                interaction.round,
+                next_interaction.round,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::PairRows,
+            evaluate_sparse_linear_interaction_link<F, L>(
+                challenge,
+                control,
+                next_control,
+                witness,
+                arithmetic_plan,
+                linear_plan,
+                interaction.linear,
+                next_interaction.linear,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::PairRows,
+            evaluate_sparse_boundary_interaction_link<F, L>(
+                challenge,
+                control,
+                witness,
+                boundary_plan,
+                interaction.boundary,
+                next_interaction.boundary,
+            ),
+        )
 
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::FirstRow,
-        evaluate_sparse_control_initial<F, L>(challenge, control),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::FirstRow,
-        evaluate_sparse_arithmetic_initial(challenge, witness),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::FirstRow,
-        evaluate_sparse_product_interaction_initial(
-            challenge, interaction.product,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::FirstRow,
-        evaluate_sparse_round_interaction_initial(
-            challenge, interaction.round,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::FirstRow,
-        evaluate_sparse_linear_interaction_initial(
-            challenge, interaction.linear,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::FirstRow,
-        evaluate_sparse_boundary_interaction_initial(
-            challenge, interaction.boundary,
-        ),
-    )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::FirstRow,
+            evaluate_sparse_control_initial<F, L>(challenge, control),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::FirstRow,
+            evaluate_sparse_arithmetic_initial(challenge, witness),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::FirstRow,
+            evaluate_sparse_product_interaction_initial(challenge, interaction.product),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::FirstRow,
+            evaluate_sparse_round_interaction_initial(challenge, interaction.round),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::FirstRow,
+            evaluate_sparse_linear_interaction_initial(challenge, interaction.linear),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::FirstRow,
+            evaluate_sparse_boundary_interaction_initial(challenge, interaction.boundary),
+        )
 
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::LastRow,
-        evaluate_sparse_control_terminal(challenge, control),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::LastRow,
-        evaluate_sparse_product_interaction_terminal<F, L>(
-            challenge, control, witness, interaction.product,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::LastRow,
-        evaluate_sparse_round_interaction_terminal<F, L>(
-            challenge,
-            control,
-            next_control,
-            witness,
-            round_plan,
-            interaction.round,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::LastRow,
-        evaluate_sparse_linear_interaction_terminal<F, L>(
-            challenge,
-            control,
-            next_control,
-            witness,
-            arithmetic_plan,
-            linear_plan,
-            interaction.linear,
-        ),
-    )
-    fold = fold.absorb_fixed(
-        SparseConstraintFamily::LastRow,
-        evaluate_sparse_boundary_interaction_terminal<F, L>(
-            challenge,
-            control,
-            witness,
-            boundary_plan,
-            interaction.boundary,
-        ),
-    )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::LastRow,
+            evaluate_sparse_control_terminal(challenge, control),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::LastRow,
+            evaluate_sparse_product_interaction_terminal<F, L>(
+                challenge,
+                control,
+                witness,
+                interaction.product,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::LastRow,
+            evaluate_sparse_round_interaction_terminal<F, L>(
+                challenge,
+                control,
+                next_control,
+                witness,
+                round_plan,
+                interaction.round,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::LastRow,
+            evaluate_sparse_linear_interaction_terminal<F, L>(
+                challenge,
+                control,
+                next_control,
+                witness,
+                arithmetic_plan,
+                linear_plan,
+                interaction.linear,
+            ),
+        )
+    fold = fold
+        .absorb_fixed(
+            SparseConstraintFamily::LastRow,
+            evaluate_sparse_boundary_interaction_terminal<F, L>(
+                challenge,
+                control,
+                witness,
+                boundary_plan,
+                interaction.boundary,
+            ),
+        )
     fold
 }
 
@@ -1311,7 +1297,7 @@ fn sparse_composition_fold_opened<const L: usize>(
     _ row: ref SparseOpenedAirRow,
     _ next: ref SparseOpenedAirRow,
 ) -> SparseCompositionFold<BabyBearExt4>
-where L > 1,
+where L > 1
 {
     sparse_composition_fold_fields<BabyBearExt4, L>(
         challenge,
@@ -1341,14 +1327,9 @@ pub fn sparse_constraint_numerators_opened<const L: usize>(
     _ row: ref SparseOpenedAirRow,
     _ next: ref SparseOpenedAirRow,
 ) -> AirConstraintNumerators<BabyBearExt4>
-where L > 1,
+where L > 1
 {
-    sparse_composition_fold_opened<L>(
-        challenge,
-        interaction_challenges,
-        row,
-        next,
-    ).numerators()
+    sparse_composition_fold_opened<L>(challenge, interaction_challenges, row, next).numerators()
 }
 
 fn maximum_degree(_ left: u32, _ right: u32) -> u32 {
@@ -1360,9 +1341,13 @@ fn quotient_degree_bound(
     _ expression_degree: u32,
     _ zerofier_degree: u32,
 ) -> u32 {
-    if trace_length <= 1 || expression_degree == 0 { return 0 }
+    if trace_length <= 1 || expression_degree == 0 {
+        return 0
+    }
     let trace_degree = trace_length - 1
-    if expression_degree > 4294967295 / trace_degree { return 4294967295 }
+    if expression_degree > 4294967295 / trace_degree {
+        return 4294967295
+    }
     let numerator = expression_degree * trace_degree
     if numerator > zerofier_degree {
         numerator - zerofier_degree
@@ -1379,27 +1364,13 @@ pub fn sparse_composition_degree_bound(
     _ shape: SparseAirConstraintShape,
     _ trace_length: u32,
 ) -> u32 {
-    if !shape.valid || trace_length <= 1 { return 4294967295 }
-    let all_rows = quotient_degree_bound(
-        trace_length,
-        shape.all_rows_degree,
-        trace_length,
-    )
-    let pair_rows = quotient_degree_bound(
-        trace_length,
-        shape.pair_rows_degree,
-        trace_length - 1,
-    )
-    let first_row = quotient_degree_bound(
-        trace_length,
-        shape.first_row_degree,
-        1,
-    )
-    let last_row = quotient_degree_bound(
-        trace_length,
-        shape.last_row_degree,
-        1,
-    )
+    if !shape.valid || trace_length <= 1 {
+        return 4294967295
+    }
+    let all_rows = quotient_degree_bound(trace_length, shape.all_rows_degree, trace_length)
+    let pair_rows = quotient_degree_bound(trace_length, shape.pair_rows_degree, trace_length - 1)
+    let first_row = quotient_degree_bound(trace_length, shape.first_row_degree, 1)
+    let last_row = quotient_degree_bound(trace_length, shape.last_row_degree, 1)
     maximum_degree(
         maximum_degree(all_rows, pair_rows),
         maximum_degree(first_row, last_row),
@@ -1412,15 +1383,12 @@ pub fn sparse_composition_degree_bound(
 /// constants. The evaluator sequence is shared with ordinary BabyBear
 /// execution, so no copied constraint table or field list is involved.
 pub fn sparse_constraint_shape<const L: usize>() -> SparseAirConstraintShape
-where L > 1,
+where L > 1
 {
     let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let base_source = base.decode(AirPolynomialVariableSource::new())
-    let mut interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
-    let interaction_source = interaction.decode(
-        AirPolynomialVariableSource::new(),
-    )
+    let mut interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(AirPolynomialVariableSource::new())
     let challenges = SparseCopyChallenges {
         beta: AirPolynomialDegree::constant(),
         gamma: AirPolynomialDegree::constant(),
@@ -1454,11 +1422,9 @@ where L > 1,
             && base_source.valid
             && interaction_source.valid
             && base_source.cursor
-                == <SparseBaseAirRow<AirPolynomialDegree>
-                    as CanonicalWords>::WORDS
+                == <SparseBaseAirRow<AirPolynomialDegree> as CanonicalWords>::WORDS
             && interaction_source.cursor
-                == <SparseInteractionTraceRow<AirPolynomialDegree>
-                    as CanonicalWords>::WORDS
+                == <SparseInteractionTraceRow<AirPolynomialDegree> as CanonicalWords>::WORDS
             && fold.all_rows.valid
             && fold.pair_rows.valid
             && fold.first_row.valid
@@ -1486,47 +1452,33 @@ where L > 1,
 /// composition fold intentionally retains only the family maximum; this
 /// companion keeps enough provenance to choose and gate the next lowering
 /// target without maintaining a second constraint implementation.
-pub fn sparse_all_rows_degree_shape<const L: usize>()
-    -> SparseAirAllRowsDegreeShape
-where L > 1,
+pub fn sparse_all_rows_degree_shape<const L: usize>() -> SparseAirAllRowsDegreeShape
+where L > 1
 {
     let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let base_source = base.decode(AirPolynomialVariableSource::new())
-    let mut interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
-    let interaction_source = interaction.decode(
-        AirPolynomialVariableSource::new(),
-    )
+    let mut interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(AirPolynomialVariableSource::new())
     let challenge = AirPolynomialDegree::constant()
     let challenges = SparseCopyChallenges {
         beta: AirPolynomialDegree::constant(),
         gamma: AirPolynomialDegree::constant(),
     }
-    let control = evaluate_sparse_control_row(
-        challenge,
-        base.control,
-        base.control_plan,
-    )
+    let control = evaluate_sparse_control_row(challenge, base.control, base.control_plan)
     let arithmetic = evaluate_sparse_arithmetic_row<AirPolynomialDegree, L>(
         challenge,
         base.control,
         base.witness,
         base.arithmetic_plan,
     )
-    let product = evaluate_sparse_product_interaction_row<
-        AirPolynomialDegree,
-        L,
-    >(
+    let product = evaluate_sparse_product_interaction_row<AirPolynomialDegree, L>(
         challenge,
         challenges,
         base.control,
         base.witness,
         interaction.product,
     )
-    let round = evaluate_sparse_round_interaction_row<
-        AirPolynomialDegree,
-        L,
-    >(
+    let round = evaluate_sparse_round_interaction_row<AirPolynomialDegree, L>(
         challenge,
         challenges,
         base.control,
@@ -1535,10 +1487,7 @@ where L > 1,
         base.round_plan,
         interaction.round,
     )
-    let linear = evaluate_sparse_linear_interaction_row<
-        AirPolynomialDegree,
-        L,
-    >(
+    let linear = evaluate_sparse_linear_interaction_row<AirPolynomialDegree, L>(
         challenge,
         challenges,
         base.control,
@@ -1548,10 +1497,7 @@ where L > 1,
         base.linear_plan,
         interaction.linear,
     )
-    let boundary = evaluate_sparse_boundary_interaction_row<
-        AirPolynomialDegree,
-        L,
-    >(
+    let boundary = evaluate_sparse_boundary_interaction_row<AirPolynomialDegree, L>(
         challenge,
         challenges,
         base.control,
@@ -1570,17 +1516,21 @@ where L > 1,
         valid: base_source.valid
             && interaction_source.valid
             && base_source.cursor
-                == <SparseBaseAirRow<AirPolynomialDegree>
-                    as CanonicalWords>::WORDS
+                == <SparseBaseAirRow<AirPolynomialDegree> as CanonicalWords>::WORDS
             && interaction_source.cursor
-                == <SparseInteractionTraceRow<AirPolynomialDegree>
-                    as CanonicalWords>::WORDS
-            && control.valid && control.folded.valid
-            && arithmetic.valid && arithmetic.folded.valid
-            && product.valid && product.folded.valid
-            && round.valid && round.folded.valid
-            && linear.valid && linear.folded.valid
-            && boundary.valid && boundary.folded.valid,
+                == <SparseInteractionTraceRow<AirPolynomialDegree> as CanonicalWords>::WORDS
+            && control.valid
+            && control.folded.valid
+            && arithmetic.valid
+            && arithmetic.folded.valid
+            && product.valid
+            && product.folded.valid
+            && round.valid
+            && round.folded.valid
+            && linear.valid
+            && linear.folded.valid
+            && boundary.valid
+            && boundary.folded.valid,
         control: control.folded.degree,
         arithmetic: arithmetic.folded.degree,
         product: product.folded.degree,
@@ -1594,19 +1544,16 @@ where L > 1,
 /// Interpret each production pair-row evaluator separately. The same symbolic
 /// current and next rows are decoded from the reflection-derived schemas, so
 /// this report cannot drift into a parallel transition implementation.
-pub fn sparse_pair_rows_degree_shape<const L: usize>()
-    -> SparseAirPairRowsDegreeShape
-where L > 1,
+pub fn sparse_pair_rows_degree_shape<const L: usize>() -> SparseAirPairRowsDegreeShape
+where L > 1
 {
     let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let base_source = base.decode(AirPolynomialVariableSource::new())
     let mut next_base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let next_base_source = next_base.decode(base_source)
-    let mut interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let mut interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
     let interaction_source = interaction.decode(next_base_source)
-    let mut next_interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let mut next_interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
     let next_interaction_source = next_interaction.decode(interaction_source)
     let challenge = AirPolynomialDegree::constant()
     let control = evaluate_sparse_control_link<AirPolynomialDegree, L>(
@@ -1623,20 +1570,14 @@ where L > 1,
         next_base.witness,
         base.arithmetic_link_plan,
     )
-    let product = evaluate_sparse_product_interaction_link<
-        AirPolynomialDegree,
-        L,
-    >(
+    let product = evaluate_sparse_product_interaction_link<AirPolynomialDegree, L>(
         challenge,
         base.control,
         base.witness,
         interaction.product,
         next_interaction.product,
     )
-    let round = evaluate_sparse_round_interaction_link<
-        AirPolynomialDegree,
-        L,
-    >(
+    let round = evaluate_sparse_round_interaction_link<AirPolynomialDegree, L>(
         challenge,
         base.control,
         next_base.control,
@@ -1645,10 +1586,7 @@ where L > 1,
         interaction.round,
         next_interaction.round,
     )
-    let linear = evaluate_sparse_linear_interaction_link<
-        AirPolynomialDegree,
-        L,
-    >(
+    let linear = evaluate_sparse_linear_interaction_link<AirPolynomialDegree, L>(
         challenge,
         base.control,
         next_base.control,
@@ -1658,10 +1596,7 @@ where L > 1,
         interaction.linear,
         next_interaction.linear,
     )
-    let boundary = evaluate_sparse_boundary_interaction_link<
-        AirPolynomialDegree,
-        L,
-    >(
+    let boundary = evaluate_sparse_boundary_interaction_link<AirPolynomialDegree, L>(
         challenge,
         base.control,
         base.witness,
@@ -1679,16 +1614,20 @@ where L > 1,
     SparseAirPairRowsDegreeShape {
         valid: next_interaction_source.valid
             && next_interaction_source.cursor
-                == <SparseBaseAirRow<AirPolynomialDegree>
-                    as CanonicalWords>::WORDS * 2
-                    + <SparseInteractionTraceRow<AirPolynomialDegree>
-                        as CanonicalWords>::WORDS * 2
-            && control.valid && control.folded.valid
-            && arithmetic.valid && arithmetic.folded.valid
-            && product.valid && product.folded.valid
-            && round.valid && round.folded.valid
-            && linear.valid && linear.folded.valid
-            && boundary.valid && boundary.folded.valid,
+                == <SparseBaseAirRow<AirPolynomialDegree> as CanonicalWords>::WORDS * 2
+                    + <SparseInteractionTraceRow<AirPolynomialDegree> as CanonicalWords>::WORDS * 2
+            && control.valid
+            && control.folded.valid
+            && arithmetic.valid
+            && arithmetic.folded.valid
+            && product.valid
+            && product.folded.valid
+            && round.valid
+            && round.folded.valid
+            && linear.valid
+            && linear.folded.valid
+            && boundary.valid
+            && boundary.folded.valid,
         control: control.folded.degree,
         arithmetic: arithmetic.folded.degree,
         product: product.folded.degree,
@@ -1715,12 +1654,7 @@ fn invalid_sparse_copy_port_degree_shape() -> SparseCopyPortDegreeShape {
 
 fn sparse_degree_copy_port() -> SparseCopyPort<AirPolynomialDegree> {
     let constant = AirPolynomialDegree::constant()
-    SparseCopyPort {
-        selector: constant,
-        coefficient: constant,
-        address: constant,
-        value: constant,
-    }
+    SparseCopyPort { selector: constant, coefficient: constant, address: constant, value: constant }
 }
 
 fn sparse_copy_port_degree_shape(
@@ -1729,16 +1663,13 @@ fn sparse_copy_port_degree_shape(
     _ schema_valid: bool,
 ) -> SparseCopyPortDegreeShape {
     let constant = AirPolynomialDegree::constant()
-    let compressed = constant.radix2_add(
-        port.address.radix2_add(constant.radix2_mul(port.value)),
-    )
-    let selected_inverse = compressed.radix2_mul(inverse).radix2_sub(
-        port.selector,
-    )
+    let compressed = constant.radix2_add(port.address.radix2_add(constant.radix2_mul(port.value)))
+    let selected_inverse = compressed.radix2_mul(inverse).radix2_sub(port.selector)
     let zero_inverse = constant.radix2_sub(port.selector).radix2_mul(inverse)
     let inverse_relation = selected_inverse.maximum(zero_inverse)
     let delta = port.coefficient.radix2_mul(inverse)
-    let maximum = port.selector
+    let maximum = port
+        .selector
         .maximum(port.coefficient)
         .maximum(port.address)
         .maximum(port.value)
@@ -1764,29 +1695,23 @@ fn sparse_degree_rows_valid(
 ) -> bool {
     base_source.valid
         && interaction_source.valid
-        && base_source.cursor
-            == <SparseBaseAirRow<AirPolynomialDegree>
-                as CanonicalWords>::WORDS
+        && base_source.cursor == <SparseBaseAirRow<AirPolynomialDegree> as CanonicalWords>::WORDS
         && interaction_source.cursor
-            == <SparseInteractionTraceRow<AirPolynomialDegree>
-                as CanonicalWords>::WORDS
+            == <SparseInteractionTraceRow<AirPolynomialDegree> as CanonicalWords>::WORDS
 }
 
 /// Attribute one of the five exact round copy ports by interpreting the
 /// production port writer over the degree semiring.
-pub fn sparse_round_port_degree_shape<const L: usize>(
-    _ index: u32,
-) -> SparseCopyPortDegreeShape
-where L > 1,
+pub fn sparse_round_port_degree_shape<const L: usize>(_ index: u32) -> SparseCopyPortDegreeShape
+where L > 1
 {
-    if index >= 5 { return invalid_sparse_copy_port_degree_shape() }
+    if index >= 5 {
+        return invalid_sparse_copy_port_degree_shape()
+    }
     let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let base_source = base.decode(AirPolynomialVariableSource::new())
-    let mut interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
-    let interaction_source = interaction.decode(
-        AirPolynomialVariableSource::new(),
-    )
+    let mut interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(AirPolynomialVariableSource::new())
     let mut ports = [sparse_degree_copy_port(); 5]
     write_sparse_round_interaction_ports<AirPolynomialDegree, L>(
         base.control,
@@ -1803,19 +1728,16 @@ where L > 1,
 
 /// Attribute one of the eight exact signed-linear copy ports by interpreting
 /// the production port writer over the degree semiring.
-pub fn sparse_linear_port_degree_shape<const L: usize>(
-    _ index: u32,
-) -> SparseCopyPortDegreeShape
-where L > 1,
+pub fn sparse_linear_port_degree_shape<const L: usize>(_ index: u32) -> SparseCopyPortDegreeShape
+where L > 1
 {
-    if index >= 8 { return invalid_sparse_copy_port_degree_shape() }
+    if index >= 8 {
+        return invalid_sparse_copy_port_degree_shape()
+    }
     let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let base_source = base.decode(AirPolynomialVariableSource::new())
-    let mut interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
-    let interaction_source = interaction.decode(
-        AirPolynomialVariableSource::new(),
-    )
+    let mut interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(AirPolynomialVariableSource::new())
     let mut ports = [sparse_degree_copy_port(); 8]
     write_sparse_linear_interaction_ports<AirPolynomialDegree, L>(
         base.control,
@@ -1833,19 +1755,16 @@ where L > 1,
 
 /// Attribute one of the two exact public-boundary copy ports by interpreting
 /// the production port writer over the degree semiring.
-pub fn sparse_boundary_port_degree_shape<const L: usize>(
-    _ index: u32,
-) -> SparseCopyPortDegreeShape
-where L > 1,
+pub fn sparse_boundary_port_degree_shape<const L: usize>(_ index: u32) -> SparseCopyPortDegreeShape
+where L > 1
 {
-    if index >= 2 { return invalid_sparse_copy_port_degree_shape() }
+    if index >= 2 {
+        return invalid_sparse_copy_port_degree_shape()
+    }
     let mut base = zero_sparse_base_air_row_field<AirPolynomialDegree>()
     let base_source = base.decode(AirPolynomialVariableSource::new())
-    let mut interaction =
-        zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
-    let interaction_source = interaction.decode(
-        AirPolynomialVariableSource::new(),
-    )
+    let mut interaction = zero_sparse_interaction_trace_row_field<AirPolynomialDegree>()
+    let interaction_source = interaction.decode(AirPolynomialVariableSource::new())
     let mut ports = [sparse_degree_copy_port(); 2]
     write_sparse_boundary_interaction_ports<AirPolynomialDegree, L>(
         base.control,
@@ -1862,33 +1781,21 @@ where L > 1,
 /// Evaluate the complete sparse high-precision AIR composition at one opened
 /// LDE point. All record traversal is derived from the nominal Fe types, and
 /// all constraint arithmetic remains in the shared field-generic AIR core.
-pub fn evaluate_sparse_composition_opened<
-    const L: usize,
-    const TRACE: usize,
->(
+pub fn evaluate_sparse_composition_opened<const L: usize, const TRACE: usize>(
     _ point: BabyBearExt4,
     _ challenge: BabyBearExt4,
     _ interaction_challenges: SparseInteractionChallenges,
     _ row: ref SparseOpenedAirRow,
     _ next: ref SparseOpenedAirRow,
 ) -> AirCompositionValue<BabyBearExt4>
-where
-    L > 1,
-    TRACE > 0,
-    TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
+where L > 1, TRACE > 0, TRACE > 1, { (TRACE & (TRACE - 1)) == 0 }
 {
     if !interaction_challenges.valid || !row.valid || !next.valid {
-        return AirCompositionValue {
-            valid: false,
-            value: BabyBearExt4::zero(),
-        }
+        return AirCompositionValue { valid: false, value: BabyBearExt4::zero() }
     }
     air_composition_value<BabyBearExt4, TRACE>(
         point,
-        sparse_constraint_numerators_opened<L>(
-            challenge, interaction_challenges, row, next,
-        ),
+        sparse_constraint_numerators_opened<L>(challenge, interaction_challenges, row, next),
     )
 }
 
@@ -1896,13 +1803,15 @@ pub fn write_sparse_base_air_evaluation_trace<const N: usize>(
     _ rows: ref [SparseBaseAirRow<BabyBear>; N],
     _ output: mut SparseBaseAirEvaluationTrace<N>,
 ) -> bool
-where N > 0,
+where N > 0
 {
     output.valid = false
     let mut row: usize = 0
     while row < N {
         let fields = sparse_base_air_fields(ref rows[row])
-        if !fields.valid { return false }
+        if !fields.valid {
+            return false
+        }
         output.values[row] = fields.values
         row = row + 1
     }
@@ -1913,26 +1822,35 @@ where N > 0,
 /// Place the base LDE before any interaction challenge is available. This is
 /// intentionally separate from `write_sparse_air_lde`, whose combined form is
 /// retained only for semantic checkpoint and small differential gates.
-pub fn write_sparse_base_air_lde<
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn write_sparse_base_air_lde<const TRACE: usize, const LDE: usize>(
     _ trace: ref SparseBaseAirEvaluationTrace<TRACE>,
     _ shift: BabyBear,
     _ output: mut SparseBaseAirLdeCodeword<LDE>,
 ) -> bool
 where
     TRACE > 0,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > TRACE,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     output.valid = false
-    if !trace.valid { return false }
+    if !trace.valid {
+        return false
+    }
     let zero = BabyBear::zero()
     let mut source = [zero; TRACE]
     let mut extended = [zero; LDE]
@@ -1943,11 +1861,7 @@ where
             source[row] = trace.values[row][column]
             row = row + 1
         }
-        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
-            ref source,
-            shift,
-            mut extended,
-        ) {
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(ref source, shift, mut extended) {
             return false
         }
         row = 0
@@ -1966,14 +1880,16 @@ pub fn write_sparse_air_evaluation_trace<const N: usize>(
     _ interaction_rows: ref [SparseInteractionTraceRow<BabyBearExt4>; N],
     _ output: mut SparseAirEvaluationTrace<N>,
 ) -> bool
-where N > 0,
+where N > 0
 {
     output.valid = false
     let mut row: usize = 0
     while row < N {
         let base = sparse_base_air_fields(ref base_rows[row])
         let interaction = sparse_interaction_air_fields(ref interaction_rows[row])
-        if !base.valid || !interaction.valid { return false }
+        if !base.valid || !interaction.valid {
+            return false
+        }
         output.base[row] = base.values
         output.interaction[row] = interaction.values
         row = row + 1
@@ -1982,17 +1898,10 @@ where N > 0,
     true
 }
 
-pub fn sparse_base_lde_leaf_commitment<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn sparse_base_lde_leaf_commitment<const L: usize, const TRACE: usize, const LDE: usize>(
     _ leaf: SparseBaseLdeLeaf<L, TRACE, LDE>,
 ) -> Poseidon2Digest {
-    sparse_base_lde_leaf_commitment_plan(
-        QuadraticValueInterpreter::new(),
-        leaf,
-    ).digest()
+    sparse_base_lde_leaf_commitment_plan(QuadraticValueInterpreter::new(), leaf).digest()
 }
 
 pub const fn sparse_base_lde_leaf_commitment_permutations<
@@ -2010,10 +1919,9 @@ pub fn sparse_base_lde_leaf_commitment_plan<
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
->(
-    _ interpreter: I,
-    _ leaf: SparseBaseLdeLeaf<L, TRACE, LDE>,
-) -> Poseidon2CanonicalCommitmentPlan<I> {
+>(_ interpreter: I, _ leaf: SparseBaseLdeLeaf<L, TRACE, LDE>) -> Poseidon2CanonicalCommitmentPlan<
+    I,
+> {
     commit_canonical_plan<
         I,
         MandelbrotSparseBaseLdeLeafBabyBearV1,
@@ -2021,11 +1929,7 @@ pub fn sparse_base_lde_leaf_commitment_plan<
     >(interpreter, ref leaf)
 }
 
-fn sparse_base_lde_leaf_at<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn sparse_base_lde_leaf_at<const L: usize, const TRACE: usize, const LDE: usize>(
     _ index: u32,
     _ values: [BabyBear; SPARSE_BASE_AIR_FIELDS],
 ) -> SparseBaseLdeLeaf<L, TRACE, LDE> {
@@ -2049,23 +1953,25 @@ fn invalid_sparse_base_lde_digest<
 /// Commit a complete base LDE before deriving any interaction challenge.
 /// Every leaf absorbs its proof shape and position through one nominal Fe
 /// record, while `merkle_core` supplies the backend-neutral tree reduction.
-pub fn sparse_base_lde_root_power_of_two<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn sparse_base_lde_root_power_of_two<const L: usize, const TRACE: usize, const LDE: usize>(
     _ codeword: ref SparseBaseAirLdeCodeword<LDE>,
 ) -> SparseBaseLdeDigest<L, TRACE, LDE>
 where
     L > 1,
     TRACE > 0,
-    { (TRACE & (TRACE - 1)) == 0 },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     if !codeword.valid {
         return invalid_sparse_base_lde_digest<L, TRACE, LDE>()
@@ -2081,11 +1987,10 @@ where
             index.downcast_truncate(),
             codeword.values[index],
         )
-        frontier = push_frontier<
-            Poseidon2Digest,
-            SparseDigestHasher,
-            SPARSE_LDE_FRONTIER_LEVELS,
-        >(frontier, sparse_base_lde_leaf_commitment(leaf))
+        frontier = push_frontier<Poseidon2Digest, SparseDigestHasher, SPARSE_LDE_FRONTIER_LEVELS>(
+            frontier,
+            sparse_base_lde_leaf_commitment(leaf),
+        )
         index = index + 1
     }
     let root = complete_frontier_root<
@@ -2098,26 +2003,35 @@ where
 
 /// Interpret the same field-generic radix-2 plan once per FCO-derived column.
 /// There is no authored column identifier or copied semantic field table.
-pub fn write_sparse_air_lde<
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn write_sparse_air_lde<const TRACE: usize, const LDE: usize>(
     _ trace: ref SparseAirEvaluationTrace<TRACE>,
     _ shift: BabyBear,
     _ output: mut SparseAirLdeCodeword<LDE>,
 ) -> bool
 where
     TRACE > 0,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > TRACE,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     output.valid = false
-    if !trace.valid { return false }
+    if !trace.valid {
+        return false
+    }
     let zero = BabyBear::zero()
     let mut source = [zero; TRACE]
     let mut extended = [zero; LDE]
@@ -2129,11 +2043,7 @@ where
             source[row] = trace.base[row][column]
             row = row + 1
         }
-        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
-            ref source,
-            shift,
-            mut extended,
-        ) {
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(ref source, shift, mut extended) {
             return false
         }
         row = 0
@@ -2151,11 +2061,7 @@ where
             source[row] = trace.interaction[row][column]
             row = row + 1
         }
-        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
-            ref source,
-            shift,
-            mut extended,
-        ) {
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(ref source, shift, mut extended) {
             return false
         }
         row = 0
@@ -2173,13 +2079,15 @@ pub fn write_sparse_interaction_air_evaluation_trace<const N: usize>(
     _ rows: ref [SparseInteractionTraceRow<BabyBearExt4>; N],
     _ output: mut SparseInteractionAirEvaluationTrace<N>,
 ) -> bool
-where N > 0,
+where N > 0
 {
     output.valid = false
     let mut row: usize = 0
     while row < N {
         let fields = sparse_interaction_air_fields(ref rows[row])
-        if !fields.valid { return false }
+        if !fields.valid {
+            return false
+        }
         output.values[row] = fields.values
         row = row + 1
     }
@@ -2187,26 +2095,35 @@ where N > 0,
     true
 }
 
-pub fn write_sparse_interaction_air_lde<
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn write_sparse_interaction_air_lde<const TRACE: usize, const LDE: usize>(
     _ trace: ref SparseInteractionAirEvaluationTrace<TRACE>,
     _ shift: BabyBear,
     _ output: mut SparseInteractionAirLdeCodeword<LDE>,
 ) -> bool
 where
     TRACE > 0,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > TRACE,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     output.valid = false
-    if !trace.valid { return false }
+    if !trace.valid {
+        return false
+    }
     let zero = BabyBear::zero()
     let mut source = [zero; TRACE]
     let mut extended = [zero; LDE]
@@ -2217,11 +2134,7 @@ where
             source[row] = trace.values[row][column]
             row = row + 1
         }
-        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(
-            ref source,
-            shift,
-            mut extended,
-        ) {
+        if !write_radix2_coset_lde<TRACE, LDE, BabyBear>(ref source, shift, mut extended) {
             return false
         }
         row = 0
@@ -2235,17 +2148,10 @@ where
     true
 }
 
-pub fn sparse_interaction_lde_leaf_commitment<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn sparse_interaction_lde_leaf_commitment<const L: usize, const TRACE: usize, const LDE: usize>(
     _ leaf: SparseInteractionLdeLeaf<L, TRACE, LDE>,
 ) -> Poseidon2Digest {
-    sparse_interaction_lde_leaf_commitment_plan(
-        QuadraticValueInterpreter::new(),
-        leaf,
-    ).digest()
+    sparse_interaction_lde_leaf_commitment_plan(QuadraticValueInterpreter::new(), leaf).digest()
 }
 
 pub const fn sparse_interaction_lde_leaf_commitment_permutations<
@@ -2274,11 +2180,7 @@ pub fn sparse_interaction_lde_leaf_commitment_plan<
     >(interpreter, ref leaf)
 }
 
-fn sparse_interaction_lde_leaf_at<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn sparse_interaction_lde_leaf_at<const L: usize, const TRACE: usize, const LDE: usize>(
     _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
     _ index: u32,
     _ values: [BabyBear; SPARSE_INTERACTION_AIR_FIELDS],
@@ -2293,18 +2195,10 @@ fn sparse_interaction_lde_leaf_at<
     }
 }
 
-fn invalid_sparse_interaction_lde_digest<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn invalid_sparse_interaction_lde_digest<const L: usize, const TRACE: usize, const LDE: usize>(
     _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
 ) -> SparseInteractionLdeDigest<L, TRACE, LDE> {
-    SparseInteractionLdeDigest {
-        valid: false,
-        base: base,
-        value: Poseidon2Digest::zero(),
-    }
+    SparseInteractionLdeDigest { valid: false, base: base, value: Poseidon2Digest::zero() }
 }
 
 pub fn sparse_interaction_lde_root_power_of_two<
@@ -2318,13 +2212,19 @@ pub fn sparse_interaction_lde_root_power_of_two<
 where
     L > 1,
     TRACE > 0,
-    { (TRACE & (TRACE - 1)) == 0 },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     if !base.valid || !codeword.valid {
         return invalid_sparse_interaction_lde_digest(base)
@@ -2341,11 +2241,10 @@ where
             index.downcast_truncate(),
             codeword.values[index],
         )
-        frontier = push_frontier<
-            Poseidon2Digest,
-            SparseDigestHasher,
-            SPARSE_LDE_FRONTIER_LEVELS,
-        >(frontier, sparse_interaction_lde_leaf_commitment(leaf))
+        frontier = push_frontier<Poseidon2Digest, SparseDigestHasher, SPARSE_LDE_FRONTIER_LEVELS>(
+            frontier,
+            sparse_interaction_lde_leaf_commitment(leaf),
+        )
         index = index + 1
     }
     let root = complete_frontier_root<
@@ -2353,18 +2252,10 @@ where
         SparseDigestHasher,
         SPARSE_LDE_FRONTIER_LEVELS,
     >(frontier)
-    SparseInteractionLdeDigest {
-        valid: root.valid,
-        base: base,
-        value: root.value,
-    }
+    SparseInteractionLdeDigest { valid: root.valid, base: base, value: root.value }
 }
 
-fn invalid_sparse_air_lde_transcript<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn invalid_sparse_air_lde_transcript<const L: usize, const TRACE: usize, const LDE: usize>(
     _ statement: RecursiveCommittedInterval<L>,
     _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
     _ interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
@@ -2374,10 +2265,7 @@ fn invalid_sparse_air_lde_transcript<
         statement: statement,
         base: base,
         interaction: interaction,
-        transcript: AirLdeTranscriptDigest {
-            valid: false,
-            value: Poseidon2Digest::zero(),
-        },
+        transcript: AirLdeTranscriptDigest { valid: false, value: Poseidon2Digest::zero() },
     }
 }
 
@@ -2389,10 +2277,7 @@ pub struct SparseAirLdeTranscriptPlan<
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
-> {
-    pub interpreter: I,
-    pub value: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
-}
+> { pub interpreter: I, pub value: SparseAirLdeTranscriptDigest<L, TRACE, LDE> }
 impl<
     I: QuadraticPlanInterpreter<BabyBear>,
     const L: usize,
@@ -2401,9 +2286,9 @@ impl<
 > core::marker::Copy for SparseAirLdeTranscriptPlan<I, L, TRACE, LDE> {}
 
 pub const fn sparse_air_lde_transcript_permutations<const L: usize>() -> usize {
-    canonical_commitment_permutations(
-        <RecursiveCommittedInterval<L> as CanonicalWords>::WORDS,
-    ) + BINDING_PERMUTATIONS + BINDING_PERMUTATIONS
+    canonical_commitment_permutations(<RecursiveCommittedInterval<L> as CanonicalWords>::WORDS)
+        + BINDING_PERMUTATIONS
+        + BINDING_PERMUTATIONS
 }
 
 pub fn bind_sparse_air_lde_transcript_plan<
@@ -2433,18 +2318,12 @@ pub fn bind_sparse_air_lde_transcript_plan<
         MandelbrotSparseLeafStatementBabyBearV1,
         RecursiveCommittedInterval<L>,
     >(interpreter, ref statement)
-    let roots = poseidon_bind_plan<
-        I,
-        MandelbrotSparseAirRootsBabyBearV1,
-    >(
+    let roots = poseidon_bind_plan<I, MandelbrotSparseAirRootsBabyBearV1>(
         statement_commitment.interpreter,
         base.value,
         interaction.value,
     )
-    let transcript = poseidon_bind_plan<
-        I,
-        MandelbrotSparseAirTranscriptBabyBearV1,
-    >(
+    let transcript = poseidon_bind_plan<I, MandelbrotSparseAirTranscriptBabyBearV1>(
         roots.interpreter,
         statement_commitment.digest(),
         roots.value,
@@ -2462,19 +2341,12 @@ pub fn bind_sparse_air_lde_transcript_plan<
             statement: statement,
             base: base,
             interaction: interaction,
-            transcript: AirLdeTranscriptDigest {
-                valid: true,
-                value: transcript.value,
-            },
+            transcript: AirLdeTranscriptDigest { valid: true, value: transcript.value },
         },
     }
 }
 
-pub fn bind_sparse_air_lde_transcript<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn bind_sparse_air_lde_transcript<const L: usize, const TRACE: usize, const LDE: usize>(
     _ statement: RecursiveCommittedInterval<L>,
     _ base: SparseBaseLdeDigest<L, TRACE, LDE>,
     _ interaction: SparseInteractionLdeDigest<L, TRACE, LDE>,
@@ -2484,7 +2356,8 @@ pub fn bind_sparse_air_lde_transcript<
         base,
         interaction,
         QuadraticValueInterpreter::new(),
-    ).value
+    )
+        .value
 }
 
 fn recursive_committed_interval_equals<const L: usize>(
@@ -2503,11 +2376,7 @@ fn recursive_committed_interval_equals<const L: usize>(
         && left.end.value.equals(right.end.value)
 }
 
-fn sparse_air_lde_transcript_equals<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn sparse_air_lde_transcript_equals<const L: usize, const TRACE: usize, const LDE: usize>(
     _ left: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ right: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
 ) -> bool {
@@ -2523,56 +2392,35 @@ fn sparse_air_lde_transcript_equals<
         && left.transcript.value.equals(right.transcript.value)
 }
 
-fn sparse_air_lde_transcript_is_canonical<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn sparse_air_lde_transcript_is_canonical<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
 ) -> bool {
-    let rebound = bind_sparse_air_lde_transcript(
-        air.statement,
-        air.base,
-        air.interaction,
-    )
-    air.valid && air.transcript.valid && rebound.valid
+    let rebound = bind_sparse_air_lde_transcript(air.statement, air.base, air.interaction)
+    air.valid
+        && air.transcript.valid
+        && rebound.valid
         && sparse_air_lde_transcript_equals(air, rebound)
 }
 
-fn invalid_sparse_composition_transcript<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn invalid_sparse_composition_transcript<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
     SparseCompositionTranscriptDigest {
         valid: false,
         air: air,
-        transcript: AirLdeTranscriptDigest {
-            valid: false,
-            value: Poseidon2Digest::zero(),
-        },
+        transcript: AirLdeTranscriptDigest { valid: false, value: Poseidon2Digest::zero() },
     }
 }
 
 /// Lift the canonical AIR transcript into the composition stage without an
 /// extension. Existing scalar checkpoints use this identity interpretation.
-pub fn sparse_composition_transcript<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn sparse_composition_transcript<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
     if !sparse_air_lde_transcript_is_canonical(air) {
         return invalid_sparse_composition_transcript(air)
     }
-    SparseCompositionTranscriptDigest {
-        valid: true,
-        air: air,
-        transcript: air.transcript,
-    }
+    SparseCompositionTranscriptDigest { valid: true, air: air, transcript: air.transcript }
 }
 
 /// Extend a canonical AIR transcript with one valid typed commitment. The
@@ -2583,10 +2431,7 @@ pub struct SparseCompositionTranscriptPlan<
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
-> {
-    pub interpreter: I,
-    pub value: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
-}
+> { pub interpreter: I, pub value: SparseCompositionTranscriptDigest<L, TRACE, LDE> }
 impl<
     I: QuadraticPlanInterpreter<BabyBear>,
     const L: usize,
@@ -2605,13 +2450,8 @@ pub fn bind_sparse_composition_extension_plan<
     _ extension: PackedCommitment,
     _ interpreter: I,
 ) -> SparseCompositionTranscriptPlan<I, L, TRACE, LDE> {
-    let valid = sparse_air_lde_transcript_is_canonical(air)
-        && extension.is_valid()
-    let transcript = poseidon_bind_plan<I, D>(
-        interpreter,
-        air.transcript.value,
-        extension.digest(),
-    )
+    let valid = sparse_air_lde_transcript_is_canonical(air) && extension.is_valid()
+    let transcript = poseidon_bind_plan<I, D>(interpreter, air.transcript.value, extension.digest())
     if !valid {
         return SparseCompositionTranscriptPlan {
             interpreter: transcript.interpreter,
@@ -2623,10 +2463,7 @@ pub fn bind_sparse_composition_extension_plan<
         value: SparseCompositionTranscriptDigest {
             valid: true,
             air: air,
-            transcript: AirLdeTranscriptDigest {
-                valid: true,
-                value: transcript.value,
-            },
+            transcript: AirLdeTranscriptDigest { valid: true, value: transcript.value },
         },
     }
 }
@@ -2640,13 +2477,12 @@ pub fn bind_sparse_composition_extension<
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ extension: PackedCommitment,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
-    bind_sparse_composition_extension_plan<
-        QuadraticValueInterpreter,
-        D,
-        L,
-        TRACE,
-        LDE,
-    >(air, extension, QuadraticValueInterpreter::new()).value
+    bind_sparse_composition_extension_plan<QuadraticValueInterpreter, D, L, TRACE, LDE>(
+        air,
+        extension,
+        QuadraticValueInterpreter::new(),
+    )
+        .value
 }
 
 fn sparse_public_fixed_at<const L: usize>(
@@ -2678,12 +2514,8 @@ fn sparse_public_constraint_challenges_from_transcript(
             mix: BabyBearExt4::zero(),
         }
     }
-    let fold = squeeze_ext4<MandelbrotSparsePublicConstraintBabyBearV1>(
-        transcript.value,
-    )
-    let mix = squeeze_ext4<MandelbrotSparsePublicMixBabyBearV1>(
-        transcript.value,
-    )
+    let fold = squeeze_ext4<MandelbrotSparsePublicConstraintBabyBearV1>(transcript.value)
+    let mix = squeeze_ext4<MandelbrotSparsePublicMixBabyBearV1>(transcript.value)
     SparsePublicConstraintChallenges {
         valid: !fold.is_zero() && !mix.is_zero(),
         fold: fold,
@@ -2691,11 +2523,7 @@ fn sparse_public_constraint_challenges_from_transcript(
     }
 }
 
-pub fn sparse_public_constraint_challenges<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn sparse_public_constraint_challenges<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
 ) -> SparsePublicConstraintChallenges {
     if !air.valid {
@@ -2708,28 +2536,21 @@ pub fn sparse_public_constraint_challenges<
     sparse_public_constraint_challenges_from_transcript(air.transcript)
 }
 
-fn sparse_public_inputs_match_air<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn sparse_public_inputs_match_air<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ interval: OrbitInterval<L>,
 ) -> bool
 where
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     let statement = commit_recursive_leaf_statement(interval)
     sparse_air_lde_transcript_is_canonical(air)
         && recursive_committed_interval_equals(statement, air.statement)
 }
 
-fn sparse_public_composition_at<
-    const L: usize,
-    const TRACE: usize,
->(
+fn sparse_public_composition_at<const L: usize, const TRACE: usize>(
     _ interval: OrbitInterval<L>,
     _ challenges: SparsePublicConstraintChallenges,
     _ point: BabyBearExt4,
@@ -2739,8 +2560,12 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    }
 {
     let zero: BabyBearExt4 = BabyBearExt4::zero()
     let trace_length: u32 = TRACE.downcast_truncate()
@@ -2749,8 +2574,7 @@ where
         || !row.valid
         || trace_length != sparse_transition_trace_length<L>()
         || !sparse_public_positions_follow_task_plan<L>()
-        || point.pow_u32(trace_length).equals(BabyBearExt4::one())
-    {
+        || point.pow_u32(trace_length).equals(BabyBearExt4::one()) {
         return AirCompositionValue { valid: false, value: zero }
     }
     let trace_root: BabyBear = BabyBear::two_adic_root(radix2_log<TRACE>())
@@ -2759,8 +2583,7 @@ where
     let mut absorbed: u32 = 0
     let mut coordinate_index: u32 = 0
     while coordinate_index < sparse_public_coordinate_count() {
-        let coordinate: SparsePublicCoordinate =
-            sparse_public_coordinate_at(coordinate_index)
+        let coordinate: SparsePublicCoordinate = sparse_public_coordinate_at(coordinate_index)
         let public_value: Fixed<L> = sparse_public_fixed_at(interval, coordinate)
         let mut limb: u32 = 0
         while limb < limb_count {
@@ -2768,9 +2591,7 @@ where
             if trace_row >= trace_length {
                 return AirCompositionValue { valid: false, value: zero }
             }
-            let trace_point: BabyBearExt4 = BabyBearExt4::from_base(
-                trace_root.pow_u32(trace_row),
-            )
+            let trace_point: BabyBearExt4 = BabyBearExt4::from_base(trace_root.pow_u32(trace_row))
             let denominator: BabyBearExt4 = point - trace_point
             if denominator.is_zero() {
                 return AirCompositionValue { valid: false, value: zero }
@@ -2779,9 +2600,7 @@ where
                 BabyBear::from_u32(public_value.limbs[limb as usize]),
             )
             folded = folded
-                + power
-                    * (row.base.witness.value - expected)
-                    * denominator.inverse_or_zero()
+                + power * (row.base.witness.value - expected) * denominator.inverse_or_zero()
             power = power * challenges.fold
             absorbed = absorbed + 1
             limb = limb + 1
@@ -2790,9 +2609,7 @@ where
         if sign_row >= trace_length {
             return AirCompositionValue { valid: false, value: zero }
         }
-        let sign_point: BabyBearExt4 = BabyBearExt4::from_base(
-            trace_root.pow_u32(sign_row),
-        )
+        let sign_point: BabyBearExt4 = BabyBearExt4::from_base(trace_root.pow_u32(sign_row))
         let sign_denominator: BabyBearExt4 = point - sign_point
         if sign_denominator.is_zero() {
             return AirCompositionValue { valid: false, value: zero }
@@ -2802,8 +2619,7 @@ where
         } else {
             BabyBear::zero()
         }
-        let expected_sign: BabyBearExt4 =
-            BabyBearExt4::from_base(expected_sign_base)
+        let expected_sign: BabyBearExt4 = BabyBearExt4::from_base(expected_sign_base)
         folded = folded
             + power
                 * (row.base.witness.auxiliary - expected_sign)
@@ -2835,19 +2651,22 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > TRACE,
-    { (LDE & (LDE - 1)) == 0 },
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     if !sparse_public_inputs_match_air(air, interval) {
-        return AirCompositionValue {
-            valid: false,
-            value: BabyBearExt4::zero(),
-        }
+        return AirCompositionValue { valid: false, value: BabyBearExt4::zero() }
     }
     sparse_public_composition_at<L, TRACE>(
         interval,
@@ -2871,26 +2690,26 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > TRACE,
-    { (LDE & (LDE - 1)) == 0 },
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
-    if !composition.is_valid()
-        || !sparse_public_inputs_match_air(composition.air, interval) {
-        return AirCompositionValue {
-            valid: false,
-            value: BabyBearExt4::zero(),
-        }
+    if !composition.is_valid() || !sparse_public_inputs_match_air(composition.air, interval) {
+        return AirCompositionValue { valid: false, value: BabyBearExt4::zero() }
     }
     sparse_public_composition_at<L, TRACE>(
         interval,
-        sparse_public_constraint_challenges_from_transcript(
-            composition.transcript,
-        ),
+        sparse_public_constraint_challenges_from_transcript(composition.transcript),
         point,
         row,
     )
@@ -2915,14 +2734,20 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 1,
     LDE > TRACE,
-    { (LDE & (LDE - 1)) == 0 },
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     let challenge = composition_challenge(composition.transcript)
     let interactions = sparse_lde_interaction_challenges(composition.air.base)
@@ -2958,7 +2783,7 @@ pub fn sparse_lde_constraint_numerators_opened<
     _ row: ref SparseOpenedAirRow,
     _ next: ref SparseOpenedAirRow,
 ) -> AirConstraintNumerators<BabyBearExt4>
-where L > 1, TRACE > 0, LDE > TRACE,
+where L > 1, TRACE > 0, LDE > TRACE
 {
     let zero = BabyBearExt4::zero()
     if !base.valid {
@@ -2995,37 +2820,48 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     output.valid = false
     if !composition.is_valid()
         || !base_codeword.valid
         || !interaction_codeword.valid
         || shift.is_zero()
-        || shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
-    {
+        || shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one()) {
         return false
     }
-    let challenge: CompositionChallenge =
-        composition_challenge(composition.transcript)
-    if !challenge.valid { return false }
-    let interaction_challenges =
-        sparse_lde_interaction_challenges(composition.air.base).value
+    let challenge: CompositionChallenge = composition_challenge(composition.transcript)
+    if !challenge.valid {
+        return false
+    }
+    let interaction_challenges = sparse_lde_interaction_challenges(composition.air.base).value
     let root = BabyBear::two_adic_root(radix2_log<LDE>())
     let stride: usize = LDE / TRACE
     let mut index: usize = 0
     while index < LDE {
         let mut next_index = index + stride
-        if next_index >= LDE { next_index = next_index - LDE }
+        if next_index >= LDE {
+            next_index = next_index - LDE
+        }
         let row = sparse_opened_air_row(
             base_codeword.values[index],
             interaction_codeword.values[index],
@@ -3034,9 +2870,7 @@ where
             base_codeword.values[next_index],
             interaction_codeword.values[next_index],
         )
-        let point = BabyBearExt4::from_base(
-            shift * root.pow_u32(index.downcast_truncate()),
-        )
+        let point = BabyBearExt4::from_base(shift * root.pow_u32(index.downcast_truncate()))
         let value = evaluate_sparse_composition_opened<L, TRACE>(
             point,
             challenge.value,
@@ -3044,7 +2878,9 @@ where
             ref row,
             ref next,
         )
-        if !value.valid { return false }
+        if !value.valid {
+            return false
+        }
         output.values[index] = value.value
         index = index + 1
     }
@@ -3067,16 +2903,26 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     output.valid = false
     let base = sparse_base_lde_root_power_of_two<L, TRACE, LDE>(base_codeword)
@@ -3084,17 +2930,9 @@ where
         base,
         interaction_codeword,
     )
-    let transcript = bind_sparse_air_lde_transcript(
-        statement,
-        base,
-        interaction,
-    )
+    let transcript = bind_sparse_air_lde_transcript(statement, base, interaction)
     let composition = sparse_composition_transcript(transcript)
-    if !write_sparse_bound_internal_composition_air_codeword<
-        L,
-        TRACE,
-        LDE,
-    >(
+    if !write_sparse_bound_internal_composition_air_codeword<L, TRACE, LDE>(
         composition,
         base_codeword,
         interaction_codeword,
@@ -3125,16 +2963,26 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    }
 {
     write_sparse_internal_composition_air_codeword<L, TRACE, LDE>(
         statement,
@@ -3145,11 +2993,7 @@ where
     )
 }
 
-fn add_sparse_bound_public_composition<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn add_sparse_bound_public_composition<const L: usize, const TRACE: usize, const LDE: usize>(
     _ interval: OrbitInterval<L>,
     _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
     _ base_codeword: ref SparseBaseAirLdeCodeword<LDE>,
@@ -3161,30 +3005,37 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
-    let challenges = sparse_public_constraint_challenges_from_transcript(
-        composition.transcript,
-    )
+    let challenges = sparse_public_constraint_challenges_from_transcript(composition.transcript)
     let trace_length: u32 = TRACE.downcast_truncate()
     if !composition.is_valid()
         || !sparse_public_inputs_match_air(composition.air, interval)
         || !challenges.valid
         || trace_length != sparse_transition_trace_length<L>()
-        || !sparse_public_positions_follow_task_plan<L>()
-    {
+        || !sparse_public_positions_follow_task_plan<L>() {
         output.valid = false
         return false
     }
@@ -3195,15 +3046,8 @@ where
             base_codeword.values[index],
             interaction_codeword.values[index],
         )
-        let point = BabyBearExt4::from_base(
-            shift * root.pow_u32(index.downcast_truncate()),
-        )
-        let public = sparse_public_composition_at<L, TRACE>(
-            interval,
-            challenges,
-            point,
-            ref row,
-        )
+        let point = BabyBearExt4::from_base(shift * root.pow_u32(index.downcast_truncate()))
+        let public = sparse_public_composition_at<L, TRACE>(interval, challenges, point, ref row)
         if !public.valid {
             output.valid = false
             return false
@@ -3234,19 +3078,29 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     output.valid = false
     let base = sparse_base_lde_root_power_of_two<L, TRACE, LDE>(base_codeword)
@@ -3254,19 +3108,11 @@ where
         base,
         interaction_codeword,
     )
-    let actual = bind_sparse_air_lde_transcript(
-        composition.air.statement,
-        base,
-        interaction,
-    )
+    let actual = bind_sparse_air_lde_transcript(composition.air.statement, base, interaction)
     if !composition.is_valid()
         || !actual.valid
         || !sparse_air_lde_transcript_equals(composition.air, actual)
-        || !write_sparse_bound_internal_composition_air_codeword<
-            L,
-            TRACE,
-            LDE,
-        >(
+        || !write_sparse_bound_internal_composition_air_codeword<L, TRACE, LDE>(
             composition,
             base_codeword,
             interaction_codeword,
@@ -3280,8 +3126,7 @@ where
             interaction_codeword,
             shift,
             mut output,
-        )
-    {
+        ) {
         output.valid = false
         return invalid_sparse_composition_transcript(composition.air)
     }
@@ -3293,11 +3138,7 @@ where
 /// the transcript and every fixed-point limb and sign is constrained at the
 /// semantic row derived by the sparse task plan. The internal AIR and public
 /// rational terms then share one BC02 codeword and one FRI path.
-pub fn write_sparse_composition_air_codeword<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn write_sparse_composition_air_codeword<const L: usize, const TRACE: usize, const LDE: usize>(
     _ interval: OrbitInterval<L>,
     _ base_codeword: ref SparseBaseAirLdeCodeword<LDE>,
     _ interaction_codeword: ref SparseInteractionAirLdeCodeword<LDE>,
@@ -3308,19 +3149,29 @@ where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
-    { radix2_field_domain_supported<TRACE, BabyBear>() },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
     LDE > 0,
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { radix2_field_domain_supported<LDE, BabyBear>() },
-    { (LDE % TRACE) == 0 },
-    Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry
-              + Zero + SubBorrow + Select + Top + OrLower
-              + core::marker::Copy,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     let statement = commit_recursive_leaf_statement(interval)
     let air = write_sparse_internal_composition_air_codeword<L, TRACE, LDE>(
@@ -3339,21 +3190,13 @@ where
         shift,
         mut output,
     ) {
-        return invalid_sparse_air_lde_transcript(
-            statement,
-            air.base,
-            air.interaction,
-        )
+        return invalid_sparse_air_lde_transcript(statement, air.base, air.interaction)
     }
     output.valid = true
     air
 }
 
-fn sparse_composition_lde_root_for_air<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+fn sparse_composition_lde_root_for_air<const L: usize, const TRACE: usize, const LDE: usize>(
     _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
     _ codeword: ref SparseCompositionAirCodeword<LDE>,
 ) -> SparseCompositionLdeDigest<L, TRACE, LDE>
@@ -3365,18 +3208,13 @@ where
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
-    { (LDE & (LDE - 1)) == 0 },
-{
-    let invalid = CompositionDigest {
-        valid: false,
-        value: Poseidon2Digest::zero(),
+    {
+        (LDE & (LDE - 1)) == 0
     }
+{
+    let invalid = CompositionDigest { valid: false, value: Poseidon2Digest::zero() }
     if !air.valid || !codeword.valid {
-        return SparseCompositionLdeDigest {
-            valid: false,
-            air: air,
-            value: invalid,
-        }
+        return SparseCompositionLdeDigest { valid: false, air: air, value: invalid }
     }
     let mut frontier = empty_frontier<
         Poseidon2Digest,
@@ -3387,17 +3225,12 @@ where
     while index < LDE {
         let leaf = composition_row_commitment(codeword.values[index])
         if !leaf.valid {
-            return SparseCompositionLdeDigest {
-                valid: false,
-                air: air,
-                value: invalid,
-            }
+            return SparseCompositionLdeDigest { valid: false, air: air, value: invalid }
         }
-        frontier = push_frontier<
-            Poseidon2Digest,
-            SparseDigestHasher,
-            SPARSE_LDE_FRONTIER_LEVELS,
-        >(frontier, leaf.value)
+        frontier = push_frontier<Poseidon2Digest, SparseDigestHasher, SPARSE_LDE_FRONTIER_LEVELS>(
+            frontier,
+            leaf.value,
+        )
         index = index + 1
     }
     let committed = complete_frontier_root<
@@ -3405,15 +3238,8 @@ where
         SparseDigestHasher,
         SPARSE_LDE_FRONTIER_LEVELS,
     >(frontier)
-    let root = CompositionDigest {
-        valid: committed.valid,
-        value: committed.value,
-    }
-    SparseCompositionLdeDigest {
-        valid: root.valid,
-        air: air,
-        value: root,
-    }
+    let root = CompositionDigest { valid: committed.valid, value: committed.value }
+    SparseCompositionLdeDigest { valid: root.valid, air: air, value: root }
 }
 
 pub fn sparse_composition_lde_root_power_of_two<
@@ -3432,7 +3258,9 @@ where
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
-    { (LDE & (LDE - 1)) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    }
 {
     sparse_composition_lde_root_for_air<L, TRACE, LDE>(air, codeword)
 }
@@ -3456,22 +3284,18 @@ where
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
-    { (LDE & (LDE - 1)) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    }
 {
     if !composition.is_valid() {
         return SparseCompositionLdeDigest {
             valid: false,
             air: composition.air,
-            value: CompositionDigest {
-                valid: false,
-                value: Poseidon2Digest::zero(),
-            },
+            value: CompositionDigest { valid: false, value: Poseidon2Digest::zero() },
         }
     }
-    sparse_composition_lde_root_for_air<L, TRACE, LDE>(
-        composition.air,
-        codeword,
-    )
+    sparse_composition_lde_root_for_air<L, TRACE, LDE>(composition.air, codeword)
 }
 
 /// Sequential state of the four log-derivative copy buses.
@@ -3493,37 +3317,143 @@ pub struct SparseInteractionScratch {
 }
 impl core::marker::Copy for SparseInteractionScratch {}
 
-pub fn zero_sparse_interaction_trace_row()
-    -> SparseInteractionTraceRow<BabyBearExt4> {
+pub fn zero_sparse_interaction_trace_row() -> SparseInteractionTraceRow<BabyBearExt4> {
     zero_sparse_interaction_trace_row_field<BabyBearExt4>()
 }
 
 pub fn zero_sparse_interaction_accumulators() -> SparseInteractionAccumulators {
     let zero = BabyBearExt4::zero()
-    SparseInteractionAccumulators {
-        product: zero,
-        round: zero,
-        linear: zero,
-        boundary: zero,
-    }
+    SparseInteractionAccumulators { product: zero, round: zero, linear: zero, boundary: zero }
 }
 
 pub fn zero_sparse_interaction_scratch() -> SparseInteractionScratch {
     let zero = BabyBearExt4::zero()
     SparseInteractionScratch {
         product: zero_sparse_product_interaction_row<BabyBearExt4>(),
-        round: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 5],
-        },
-        linear: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 8],
-        },
-        boundary: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 2],
-        },
+        round: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 5] },
+        linear: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 8] },
+        boundary: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 2] },
+    }
+}
+
+pub fn zero_sparse_interaction_challenges() -> SparseInteractionChallenges {
+    let zero = BabyBearExt4::zero()
+    let challenges = SparseCopyChallenges { beta: zero, gamma: zero }
+    SparseInteractionChallenges {
+        valid: false,
+        product: challenges,
+        round: challenges,
+        linear: challenges,
+        boundary: challenges,
+    }
+}
+
+/// Embed one generated base-field witness row into the quartic challenge
+/// field. Named fields keep this conversion independent of canonical column
+/// positions while preserving the nominal row type on both sides.
+pub fn sparse_task_row_extension(_ row: SparseTaskRow<BabyBear>) -> SparseTaskRow<BabyBearExt4> {
+    SparseTaskRow {
+        value: BabyBearExt4::from_base(row.value),
+        auxiliary: BabyBearExt4::from_base(row.auxiliary),
+        accumulator_before: BabyBearExt4::from_base(row.accumulator_before),
+        accumulator_after: BabyBearExt4::from_base(row.accumulator_after),
+        state_before: BabyBearExt4::from_base(row.state_before),
+        state_after: BabyBearExt4::from_base(row.state_after),
+    }
+}
+
+/// Embed one base-field copy port into the quartic challenge field. Address
+/// plans and selectors are derived from committed base columns, so interaction
+/// placements need extension arithmetic only when a transcript challenge is
+/// actually applied.
+pub fn sparse_copy_port_extension(_ port: SparseCopyPort<BabyBear>) -> SparseCopyPort<
+    BabyBearExt4,
+> {
+    SparseCopyPort {
+        selector: BabyBearExt4::from_base(port.selector),
+        coefficient: BabyBearExt4::from_base(port.coefficient),
+        address: BabyBearExt4::from_base(port.address),
+        value: BabyBearExt4::from_base(port.value),
+    }
+}
+
+fn sparse_control_selectors_extension(
+    _ value: SparseControlSelectors<BabyBear>,
+) -> SparseControlSelectors<BabyBearExt4> {
+    SparseControlSelectors {
+        radix_bit: BabyBearExt4::from_base(value.radix_bit),
+        radix_limb: BabyBearExt4::from_base(value.radix_limb),
+        radix_finish: BabyBearExt4::from_base(value.radix_finish),
+        carry_bit: BabyBearExt4::from_base(value.carry_bit),
+        carry_finish: BabyBearExt4::from_base(value.carry_finish),
+        product_term: BabyBearExt4::from_base(value.product_term),
+        product_coefficient: BabyBearExt4::from_base(value.product_coefficient),
+        product_round: BabyBearExt4::from_base(value.product_round),
+        product_finish: BabyBearExt4::from_base(value.product_finish),
+        linear_limb: BabyBearExt4::from_base(value.linear_limb),
+        linear_finish: BabyBearExt4::from_base(value.linear_finish),
+        boundary_sign: BabyBearExt4::from_base(value.boundary_sign),
+        boundary_limb: BabyBearExt4::from_base(value.boundary_limb),
+        transition_finish: BabyBearExt4::from_base(value.transition_finish),
+        padding: BabyBearExt4::from_base(value.padding),
+    }
+}
+
+fn sparse_linear_roles_extension(
+    _ value: SparseLinearRoleSelectors<BabyBear>,
+) -> SparseLinearRoleSelectors<BabyBearExt4> {
+    SparseLinearRoleSelectors {
+        sum: BabyBearExt4::from_base(value.sum),
+        left_difference: BabyBearExt4::from_base(value.left_difference),
+        right_difference: BabyBearExt4::from_base(value.right_difference),
+        select: BabyBearExt4::from_base(value.select),
+    }
+}
+
+fn sparse_range_roles_extension(
+    _ value: SparseRangeRoleSelectors<BabyBear>,
+) -> SparseRangeRoleSelectors<BabyBearExt4> {
+    SparseRangeRoleSelectors {
+        coordinate: BabyBearExt4::from_base(value.coordinate),
+        point_coordinate: BabyBearExt4::from_base(value.point_coordinate),
+        current_coordinate: BabyBearExt4::from_base(value.current_coordinate),
+        next_coordinate: BabyBearExt4::from_base(value.next_coordinate),
+        product_low: BabyBearExt4::from_base(value.product_low),
+        product_high: BabyBearExt4::from_base(value.product_high),
+        product_output: BabyBearExt4::from_base(value.product_output),
+        linear_sum: BabyBearExt4::from_base(value.linear_sum),
+        linear_left_difference: BabyBearExt4::from_base(value.linear_left_difference),
+        linear_right_difference: BabyBearExt4::from_base(value.linear_right_difference),
+        linear_output: BabyBearExt4::from_base(value.linear_output),
+    }
+}
+
+fn sparse_limb_positions_extension(
+    _ value: SparseLimbPositionSelectors<BabyBear>,
+) -> SparseLimbPositionSelectors<BabyBearExt4> {
+    SparseLimbPositionSelectors {
+        penultimate: BabyBearExt4::from_base(value.penultimate),
+        last: BabyBearExt4::from_base(value.last),
+    }
+}
+
+/// Embed the already-committed base control row into the challenge field.
+/// GPU interaction kernels use this path instead of reconstructing the static
+/// task schedule inside every invocation.
+pub fn sparse_control_row_extension(_ row: SparseControlRow<BabyBear>) -> SparseControlRow<
+    BabyBearExt4,
+> {
+    SparseControlRow {
+        selectors: sparse_control_selectors_extension(row.selectors),
+        linear_roles: sparse_linear_roles_extension(row.linear_roles),
+        range_roles: sparse_range_roles_extension(row.range_roles),
+        limb_positions: sparse_limb_positions_extension(row.limb_positions),
+        major: BabyBearExt4::from_base(row.major),
+        minor: BabyBearExt4::from_base(row.minor),
+        step: BabyBearExt4::from_base(row.step),
+        flag: BabyBearExt4::from_base(row.flag),
+        width: BabyBearExt4::from_base(row.width),
+        weight: BabyBearExt4::from_base(row.weight),
     }
 }
 
@@ -3600,11 +3530,7 @@ pub fn sparse_interaction_challenges<const L: usize>(
 /// Production interaction challenges are sampled only after the base LDE
 /// commitment is fixed. The distinct `*02` domains prevent a raw-trace
 /// checkpoint from being substituted at this protocol boundary.
-pub fn sparse_lde_interaction_challenges<
-    const L: usize,
-    const TRACE: usize,
-    const LDE: usize,
->(
+pub fn sparse_lde_interaction_challenges<const L: usize, const TRACE: usize, const LDE: usize>(
     _ root: SparseBaseLdeDigest<L, TRACE, LDE>,
 ) -> SparseLdeInteractionChallenges<L, TRACE, LDE> {
     if !root.valid {
@@ -3624,36 +3550,20 @@ pub fn sparse_lde_interaction_challenges<
         value: SparseInteractionChallenges {
             valid: true,
             product: SparseCopyChallenges {
-                beta: squeeze_ext4<MandelbrotSparseLdeProductBetaBabyBearV1>(
-                    root.value,
-                ),
-                gamma: squeeze_ext4<MandelbrotSparseLdeProductGammaBabyBearV1>(
-                    root.value,
-                ),
+                beta: squeeze_ext4<MandelbrotSparseLdeProductBetaBabyBearV1>(root.value),
+                gamma: squeeze_ext4<MandelbrotSparseLdeProductGammaBabyBearV1>(root.value),
             },
             round: SparseCopyChallenges {
-                beta: squeeze_ext4<MandelbrotSparseLdeRoundBetaBabyBearV1>(
-                    root.value,
-                ),
-                gamma: squeeze_ext4<MandelbrotSparseLdeRoundGammaBabyBearV1>(
-                    root.value,
-                ),
+                beta: squeeze_ext4<MandelbrotSparseLdeRoundBetaBabyBearV1>(root.value),
+                gamma: squeeze_ext4<MandelbrotSparseLdeRoundGammaBabyBearV1>(root.value),
             },
             linear: SparseCopyChallenges {
-                beta: squeeze_ext4<MandelbrotSparseLdeLinearBetaBabyBearV1>(
-                    root.value,
-                ),
-                gamma: squeeze_ext4<MandelbrotSparseLdeLinearGammaBabyBearV1>(
-                    root.value,
-                ),
+                beta: squeeze_ext4<MandelbrotSparseLdeLinearBetaBabyBearV1>(root.value),
+                gamma: squeeze_ext4<MandelbrotSparseLdeLinearGammaBabyBearV1>(root.value),
             },
             boundary: SparseCopyChallenges {
-                beta: squeeze_ext4<MandelbrotSparseLdeBoundaryBetaBabyBearV1>(
-                    root.value,
-                ),
-                gamma: squeeze_ext4<MandelbrotSparseLdeBoundaryGammaBabyBearV1>(
-                    root.value,
-                ),
+                beta: squeeze_ext4<MandelbrotSparseLdeBoundaryBetaBabyBearV1>(root.value),
+                gamma: squeeze_ext4<MandelbrotSparseLdeBoundaryGammaBabyBearV1>(root.value),
             },
         },
     }
@@ -3662,49 +3572,32 @@ pub fn sparse_lde_interaction_challenges<
 pub fn sparse_interaction_trace_leaf_commitment<const L: usize>(
     _ leaf: SparseInteractionTraceLeaf<L>,
 ) -> Poseidon2Digest {
-    commit_canonical<
-        MandelbrotSparseInteractionLeafBabyBearV1,
-        SparseInteractionTraceLeaf<L>,
-    >(ref leaf).digest()
+    commit_canonical<MandelbrotSparseInteractionLeafBabyBearV1, SparseInteractionTraceLeaf<L>>(
+        ref leaf,
+    )
+        .digest()
 }
 
 fn invalid_sparse_interaction_trace_digest<const L: usize>(
     _ base: SparseTraceDigest<L>,
 ) -> SparseInteractionTraceDigest<L> {
-    SparseInteractionTraceDigest {
-        valid: false,
-        base: base,
-        value: Poseidon2Digest::zero(),
-    }
+    SparseInteractionTraceDigest { valid: false, base: base, value: Poseidon2Digest::zero() }
 }
 
-/// Interpret one row of the interaction dependency plan into caller-owned
-/// state. Keeping this boundary row-local lets scalar Wasm reclaim all
-/// temporary quartic values after the step, while packed and GPU placements
-/// can interpret the same control and port expressions.
-pub fn write_sparse_interaction_air_row<const L: usize>(
-    _ point: ComplexFixed<L>,
-    _ current: ComplexFixed<L>,
-    _ next: ComplexFixed<L>,
-    _ witness: FixedMandelbrotTransitionWitness<L>,
+/// Interpret one already-generated base AIR row into its four interaction
+/// buses. Scalar and placed backends share this boundary: only the producer
+/// of the base row and the placement of the resulting record differ.
+pub fn write_sparse_interaction_air_row_fields<const L: usize>(
+    _ control: SparseControlRow<BabyBearExt4>,
+    _ next_control: SparseControlRow<BabyBearExt4>,
+    _ row: SparseTaskRow<BabyBearExt4>,
     _ challenges: SparseInteractionChallenges,
-    _ position: u32,
     _ accumulators: mut SparseInteractionAccumulators,
     _ scratch: mut SparseInteractionScratch,
     _ interaction: mut SparseInteractionTraceRow<BabyBearExt4>,
 ) -> bool
-where L > 1,
+where L > 1
 {
-    let control = sparse_control_row_at<BabyBearExt4, L>(position)
-    let next_control = sparse_control_row_at<BabyBearExt4, L>(position + 1)
-    let row = sparse_transition_row_from_witness<BabyBearExt4, L>(
-        position,
-        point,
-        current,
-        next,
-        witness,
-    )
-
     write_sparse_product_interaction_row<BabyBearExt4, L>(
         challenges.product,
         control,
@@ -3744,30 +3637,23 @@ where L > 1,
         row,
         local_arithmetic_plan,
     )
-    let product_evaluation = evaluate_sparse_product_interaction_row<
-        BabyBearExt4,
-        L,
-    >(local_challenge, challenges.product, control, row, scratch.product)
-    let round_evaluation = evaluate_sparse_round_interaction_row<
-        BabyBearExt4,
-        L,
-    >(
+    let product_evaluation = evaluate_sparse_product_interaction_row<BabyBearExt4, L>(
+        local_challenge,
+        challenges.product,
+        control,
+        row,
+        scratch.product,
+    )
+    let round_evaluation = evaluate_sparse_round_interaction_row<BabyBearExt4, L>(
         local_challenge,
         challenges.round,
         control,
         next_control,
         row,
-        sparse_round_plan_witness<BabyBearExt4, L>(
-            control,
-            next_control,
-            row,
-        ),
+        sparse_round_plan_witness<BabyBearExt4, L>(control, next_control, row),
         scratch.round,
     )
-    let linear_evaluation = evaluate_sparse_linear_interaction_row<
-        BabyBearExt4,
-        L,
-    >(
+    let linear_evaluation = evaluate_sparse_linear_interaction_row<BabyBearExt4, L>(
         local_challenge,
         challenges.linear,
         control,
@@ -3777,10 +3663,7 @@ where L > 1,
         local_linear_plan,
         scratch.linear,
     )
-    let boundary_evaluation = evaluate_sparse_boundary_interaction_row<
-        BabyBearExt4,
-        L,
-    >(
+    let boundary_evaluation = evaluate_sparse_boundary_interaction_row<BabyBearExt4, L>(
         local_challenge,
         challenges.boundary,
         control,
@@ -3788,10 +3671,14 @@ where L > 1,
         sparse_boundary_plan_witness<BabyBearExt4, L>(control, row),
         scratch.boundary,
     )
-    if !product_evaluation.valid || !product_evaluation.folded.is_zero()
-        || !round_evaluation.valid || !round_evaluation.folded.is_zero()
-        || !linear_evaluation.valid || !linear_evaluation.folded.is_zero()
-        || !boundary_evaluation.valid || !boundary_evaluation.folded.is_zero() {
+    if !product_evaluation.valid
+        || !product_evaluation.folded.is_zero()
+        || !round_evaluation.valid
+        || !round_evaluation.folded.is_zero()
+        || !linear_evaluation.valid
+        || !linear_evaluation.folded.is_zero()
+        || !boundary_evaluation.valid
+        || !boundary_evaluation.folded.is_zero() {
         return false
     }
 
@@ -3808,10 +3695,40 @@ where L > 1,
     true
 }
 
-fn write_sparse_interaction_air_rows_with_challenges<
-    const L: usize,
-    const N: usize,
->(
+pub fn write_sparse_interaction_air_row<const L: usize>(
+    _ point: ComplexFixed<L>,
+    _ current: ComplexFixed<L>,
+    _ next: ComplexFixed<L>,
+    _ witness: FixedMandelbrotTransitionWitness<L>,
+    _ challenges: SparseInteractionChallenges,
+    _ position: u32,
+    _ accumulators: mut SparseInteractionAccumulators,
+    _ scratch: mut SparseInteractionScratch,
+    _ interaction: mut SparseInteractionTraceRow<BabyBearExt4>,
+) -> bool
+where L > 1
+{
+    let control = sparse_control_row_at<BabyBearExt4, L>(position)
+    let next_control = sparse_control_row_at<BabyBearExt4, L>(position + 1)
+    let row = sparse_transition_row_from_witness<BabyBearExt4, L>(
+        position,
+        point,
+        current,
+        next,
+        witness,
+    )
+    write_sparse_interaction_air_row_fields<L>(
+        control,
+        next_control,
+        row,
+        challenges,
+        mut accumulators,
+        mut scratch,
+        mut interaction,
+    )
+}
+
+fn write_sparse_interaction_air_rows_with_challenges<const L: usize, const N: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
@@ -3821,16 +3738,11 @@ fn write_sparse_interaction_air_rows_with_challenges<
     _ accumulators: mut SparseInteractionAccumulators,
     _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
 ) -> bool
-where
-    L > 1,
-    N > 0,
-    N <= MAX_SPARSE_TRACE_LENGTH,
+where L > 1, N > 0, N <= MAX_SPARSE_TRACE_LENGTH
 {
     let trace_length = sparse_transition_trace_length<L>()
     let count: u32 = N.downcast_truncate()
-    if !challenges.valid
-        || start > trace_length
-        || count > trace_length - start {
+    if !challenges.valid || start > trace_length || count > trace_length - start {
         return false
     }
     let mut scratch = zero_sparse_interaction_scratch()
@@ -3858,10 +3770,7 @@ where
 
 /// Place a semantic-checkpoint interaction tile derived from the raw `SL03`
 /// root. Production proof code must use the LDE-branded entry below.
-pub fn write_sparse_interaction_air_rows<
-    const L: usize,
-    const N: usize,
->(
+pub fn write_sparse_interaction_air_rows<const L: usize, const N: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
@@ -3871,10 +3780,7 @@ pub fn write_sparse_interaction_air_rows<
     _ accumulators: mut SparseInteractionAccumulators,
     _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
 ) -> bool
-where
-    L > 1,
-    N > 0,
-    N <= MAX_SPARSE_TRACE_LENGTH,
+where L > 1, N > 0, N <= MAX_SPARSE_TRACE_LENGTH
 {
     write_sparse_interaction_air_rows_with_challenges<L, N>(
         point,
@@ -3906,13 +3812,7 @@ pub fn write_sparse_lde_interaction_air_rows<
     _ accumulators: mut SparseInteractionAccumulators,
     _ rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
 ) -> bool
-where
-    L > 1,
-    TRACE > 0,
-    LDE > 1,
-    LDE > TRACE,
-    N > 0,
-    N <= MAX_SPARSE_TRACE_LENGTH,
+where L > 1, TRACE > 0, LDE > 1, LDE > TRACE, N > 0, N <= MAX_SPARSE_TRACE_LENGTH
 {
     write_sparse_interaction_air_rows_with_challenges<L, N>(
         point,
@@ -3941,7 +3841,7 @@ fn write_sparse_interaction_trace_step<const L: usize>(
     _ interaction: mut SparseInteractionTraceRow<BabyBearExt4>,
     _ commitment: mut Poseidon2Digest,
 ) -> bool
-where L > 1,
+where L > 1
 {
     if !write_sparse_interaction_air_row<L>(
         point,
@@ -3973,28 +3873,18 @@ where L > 1,
 /// committed sparse base trace. The base root alone supplies all copy-bus
 /// challenges. Each row is produced by the same Fe port expressions consumed
 /// by the AIR, checked locally, and accumulated before the next row is built.
-pub fn sparse_interaction_trace_root_power_of_two<
-    const L: usize,
-    const N: usize,
->(
+pub fn sparse_interaction_trace_root_power_of_two<const L: usize, const N: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
     _ base: SparseTraceDigest<L>,
 ) -> SparseInteractionTraceDigest<L>
-where
-    L > 1,
-    N > 1,
-    N <= MAX_SPARSE_TRACE_LENGTH,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
+where L > 1, N > 1, N <= MAX_SPARSE_TRACE_LENGTH, N <= 2147483648, { (N & (N - 1)) == 0 }
 {
     let trace_length: u32 = N.downcast_truncate()
     let challenges = sparse_interaction_challenges(base)
-    if trace_length != sparse_transition_trace_length<L>()
-        || !base.valid
-        || !challenges.valid {
+    if trace_length != sparse_transition_trace_length<L>() || !base.valid || !challenges.valid {
         return invalid_sparse_interaction_trace_digest(base)
     }
 
@@ -4029,11 +3919,10 @@ where
         ) {
             return invalid_sparse_interaction_trace_digest(base)
         }
-        frontier = push_frontier<
-            Poseidon2Digest,
-            SparseDigestHasher,
-            SPARSE_TRACE_FRONTIER_LEVELS,
-        >(frontier, commitment)
+        frontier = push_frontier<Poseidon2Digest, SparseDigestHasher, SPARSE_TRACE_FRONTIER_LEVELS>(
+            frontier,
+            commitment,
+        )
         index = index + 1
     }
 
@@ -4048,21 +3937,14 @@ where
         SparseDigestHasher,
         SPARSE_TRACE_FRONTIER_LEVELS,
     >(frontier)
-    SparseInteractionTraceDigest {
-        valid: root.valid,
-        base: base,
-        value: root.value,
-    }
+    SparseInteractionTraceDigest { valid: root.valid, base: base, value: root.value }
 }
 
 /// Materialize both authenticated trace tables in caller-owned storage. The
 /// base pass must precede the interaction pass because its `SL03` root is the
 /// Fiat-Shamir source for every quartic copy challenge. No host witness or
 /// column-number vocabulary enters this boundary.
-pub fn write_sparse_air_trace_power_of_two<
-    const L: usize,
-    const N: usize,
->(
+pub fn write_sparse_air_trace_power_of_two<const L: usize, const N: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
@@ -4071,17 +3953,13 @@ pub fn write_sparse_air_trace_power_of_two<
     _ interaction_rows: mut [SparseInteractionTraceRow<BabyBearExt4>; N],
     _ output: mut SparseAirTraceDigest<L>,
 ) -> bool
-where
-    L > 1,
-    N > 0,
-    N > 1,
-    N <= MAX_SPARSE_TRACE_LENGTH,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
+where L > 1, N > 0, N > 1, N <= MAX_SPARSE_TRACE_LENGTH, N <= 2147483648, { (N & (N - 1)) == 0 }
 {
     output = empty_sparse_air_trace_digest<L>()
     let trace_length: u32 = N.downcast_truncate()
-    if trace_length != sparse_transition_trace_length<L>() { return false }
+    if trace_length != sparse_transition_trace_length<L>() {
+        return false
+    }
     let tasks = sparse_transition_task_count<L>()
 
     let mut base_frontier = empty_frontier<
@@ -4092,14 +3970,9 @@ where
     let mut index: usize = 0
     while index < N {
         let position: u32 = index.downcast_truncate()
-        let leaf = sparse_trace_leaf_from_witness<L>(
-            position, point, current, next, witness,
-        )
+        let leaf = sparse_trace_leaf_from_witness<L>(position, point, current, next, witness)
         let next_control = sparse_control_row_at<BabyBear, L>(position + 1)
-        let arithmetic_plan = sparse_arithmetic_plan_witness(
-            leaf.control,
-            leaf.row,
-        )
+        let arithmetic_plan = sparse_arithmetic_plan_witness(leaf.control, leaf.row)
         let next_row = sparse_transition_row_from_witness<BabyBear, L>(
             position + 1,
             point,
@@ -4110,10 +3983,7 @@ where
         base_rows[index] = SparseBaseAirRow {
             control: leaf.control,
             control_plan: sparse_control_plan_witness(leaf.control),
-            control_link_plan: sparse_control_link_plan_witness(
-                leaf.control,
-                next_control,
-            ),
+            control_link_plan: sparse_control_link_plan_witness(leaf.control, next_control),
             witness: leaf.row,
             arithmetic_plan: arithmetic_plan,
             arithmetic_link_plan: sparse_arithmetic_link_plan_witness(
@@ -4133,10 +4003,7 @@ where
                 leaf.row,
                 arithmetic_plan,
             ),
-            boundary_plan: sparse_boundary_plan_witness<
-                BabyBear,
-                L,
-            >(leaf.control, leaf.row),
+            boundary_plan: sparse_boundary_plan_witness<BabyBear, L>(leaf.control, leaf.row),
         }
         base_frontier = push_frontier<
             Poseidon2Digest,
@@ -4150,11 +4017,10 @@ where
         SparseDigestHasher,
         SPARSE_TRACE_FRONTIER_LEVELS,
     >(base_frontier)
-    if !base_root.valid { return false }
-    let base = SparseTraceDigest<L> {
-        valid: true,
-        value: base_root.value,
+    if !base_root.valid {
+        return false
     }
+    let base = SparseTraceDigest<L> { valid: true, value: base_root.value }
     let mut interaction_frontier = empty_frontier<
         Poseidon2Digest,
         SparseDigestHasher,
@@ -4189,7 +4055,10 @@ where
             Poseidon2Digest,
             SparseDigestHasher,
             SPARSE_TRACE_FRONTIER_LEVELS,
-        >(interaction_frontier, sparse_interaction_trace_leaf_commitment(leaf))
+        >(
+            interaction_frontier,
+            sparse_interaction_trace_leaf_commitment(leaf),
+        )
         index = index + 1
     }
     if !accumulators.product.is_zero()
@@ -4203,7 +4072,9 @@ where
         SparseDigestHasher,
         SPARSE_TRACE_FRONTIER_LEVELS,
     >(interaction_frontier)
-    if !interaction_root.valid { return false }
+    if !interaction_root.valid {
+        return false
+    }
     output.base = base
     output.interaction = SparseInteractionTraceDigest {
         valid: true,
@@ -4255,7 +4126,9 @@ derive CanonicalWordStream for SparseTraceAuthentication<
 struct SparseDigestHasher {}
 
 impl TwoToOneHasher<Poseidon2Digest> for SparseDigestHasher {
-    fn zero() -> Poseidon2Digest { Poseidon2Digest::zero() }
+    fn zero() -> Poseidon2Digest {
+        Poseidon2Digest::zero()
+    }
 
     fn equal(_ left: Poseidon2Digest, _ right: Poseidon2Digest) -> bool {
         left.equals(right)
@@ -4317,10 +4190,7 @@ fn zero_sparse_trace_control_field<F: Radix2Field>() -> SparseControlRow<F> {
             linear_right_difference: zero,
             linear_output: zero,
         },
-        limb_positions: SparseLimbPositionSelectors {
-            penultimate: zero,
-            last: zero,
-        },
+        limb_positions: SparseLimbPositionSelectors { penultimate: zero, last: zero },
         major: zero,
         minor: zero,
         step: zero,
@@ -4344,23 +4214,13 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
     }
 }
 
-fn zero_sparse_interaction_trace_row_field<F: Radix2Field>()
-    -> SparseInteractionTraceRow<F> {
+fn zero_sparse_interaction_trace_row_field<F: Radix2Field>() -> SparseInteractionTraceRow<F> {
     let zero = F::radix2_zero()
     SparseInteractionTraceRow {
         product: zero_sparse_product_interaction_row<F>(),
-        round: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 5],
-        },
-        linear: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 8],
-        },
-        boundary: SparseCopyInteractionRow {
-            accumulator: zero,
-            inverses: [zero; 2],
-        },
+        round: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 5] },
+        linear: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 8] },
+        boundary: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 2] },
     }
 }
 
@@ -4499,14 +4359,10 @@ pub fn sparse_trace_leaf_from_witness<const L: usize>(
 ) -> SparseTraceLeaf<L> {
     let tasks = sparse_transition_task_count<L>()
     let trace = sparse_transition_trace_length<L>()
-    if L < 2 || index >= trace { return zero_sparse_trace_leaf<L>() }
-    let row = sparse_transition_row_from_witness<BabyBear, L>(
-        index,
-        point,
-        current,
-        next,
-        witness,
-    )
+    if L < 2 || index >= trace {
+        return zero_sparse_trace_leaf<L>()
+    }
+    let row = sparse_transition_row_from_witness<BabyBear, L>(index, point, current, next, witness)
     SparseTraceLeaf {
         limb_count: BabyBear::from_u32(L.downcast_truncate()),
         task_count: BabyBear::from_u32(tasks),
@@ -4540,9 +4396,7 @@ pub fn sparse_base_air_control<const L: usize>(
     sparse_base_air_control_at<L>(input.index)
 }
 
-pub fn sparse_base_air_control_at<const L: usize>(
-    _ index: u32,
-) -> SparseControlRow<BabyBear> {
+pub fn sparse_base_air_control_at<const L: usize>(_ index: u32) -> SparseControlRow<BabyBear> {
     sparse_control_row_at<BabyBear, L>(index)
 }
 
@@ -4552,9 +4406,9 @@ pub fn sparse_base_air_control_plan<const L: usize>(
     sparse_base_air_control_plan_at<L>(input.index)
 }
 
-pub fn sparse_base_air_control_plan_at<const L: usize>(
-    _ index: u32,
-) -> SparseControlPlanWitness<BabyBear> {
+pub fn sparse_base_air_control_plan_at<const L: usize>(_ index: u32) -> SparseControlPlanWitness<
+    BabyBear,
+> {
     sparse_control_plan_witness(sparse_base_air_control_at<L>(index))
 }
 
@@ -4614,7 +4468,7 @@ pub fn sparse_base_air_arithmetic_link_plan<const L: usize>(
 pub fn sparse_base_air_round_plan<const L: usize>(
     _ input: ref SparseBaseAirInputs<L>,
 ) -> SparseRoundPlanWitness<BabyBear>
-where L > 1,
+where L > 1
 {
     let control = sparse_base_air_control(input)
     sparse_round_plan_witness<BabyBear, L>(
@@ -4627,7 +4481,7 @@ where L > 1,
 pub fn sparse_base_air_linear_plan<const L: usize>(
     _ input: ref SparseBaseAirInputs<L>,
 ) -> SparseLinearPlanWitness<BabyBear>
-where L > 1,
+where L > 1
 {
     let control = sparse_base_air_control(input)
     let row = sparse_base_air_witness(input)
@@ -4642,7 +4496,7 @@ where L > 1,
 pub fn sparse_base_air_boundary_plan<const L: usize>(
     _ input: ref SparseBaseAirInputs<L>,
 ) -> SparseBoundaryPlanWitness<BabyBear>
-where L > 1,
+where L > 1
 {
     sparse_boundary_plan_witness<BabyBear, L>(
         sparse_base_air_control(input),
@@ -4657,16 +4511,11 @@ pub fn sparse_base_air_row_from_witness<const L: usize>(
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseBaseAirRow<BabyBear>
-where L > 1,
+where L > 1
 {
-    let leaf = sparse_trace_leaf_from_witness<L>(
-        index, point, current, next, witness,
-    )
+    let leaf = sparse_trace_leaf_from_witness<L>(index, point, current, next, witness)
     let next_control = sparse_control_row_at<BabyBear, L>(index + 1)
-    let arithmetic_plan = sparse_arithmetic_plan_witness(
-        leaf.control,
-        leaf.row,
-    )
+    let arithmetic_plan = sparse_arithmetic_plan_witness(leaf.control, leaf.row)
     let next_row = sparse_transition_row_from_witness<BabyBear, L>(
         index + 1,
         point,
@@ -4677,10 +4526,7 @@ where L > 1,
     SparseBaseAirRow {
         control: leaf.control,
         control_plan: sparse_control_plan_witness(leaf.control),
-        control_link_plan: sparse_control_link_plan_witness(
-            leaf.control,
-            next_control,
-        ),
+        control_link_plan: sparse_control_link_plan_witness(leaf.control, next_control),
         witness: leaf.row,
         arithmetic_plan: arithmetic_plan,
         arithmetic_link_plan: sparse_arithmetic_link_plan_witness(
@@ -4689,31 +4535,19 @@ where L > 1,
             next_control,
             next_row,
         ),
-        round_plan: sparse_round_plan_witness<BabyBear, L>(
-            leaf.control,
-            next_control,
-            leaf.row,
-        ),
+        round_plan: sparse_round_plan_witness<BabyBear, L>(leaf.control, next_control, leaf.row),
         linear_plan: sparse_linear_plan_witness<BabyBear, L>(
             leaf.control,
             next_control,
             leaf.row,
             arithmetic_plan,
         ),
-        boundary_plan: sparse_boundary_plan_witness<BabyBear, L>(
-            leaf.control,
-            leaf.row,
-        ),
+        boundary_plan: sparse_boundary_plan_witness<BabyBear, L>(leaf.control, leaf.row),
     }
 }
 
-pub fn sparse_trace_leaf_commitment<const L: usize>(
-    _ leaf: SparseTraceLeaf<L>,
-) -> Poseidon2Digest {
-    commit_canonical<
-        MandelbrotSparseTraceLeafBabyBearV3,
-        SparseTraceLeaf<L>,
-    >(ref leaf).digest()
+pub fn sparse_trace_leaf_commitment<const L: usize>(_ leaf: SparseTraceLeaf<L>) -> Poseidon2Digest {
+    commit_canonical<MandelbrotSparseTraceLeafBabyBearV3, SparseTraceLeaf<L>>(ref leaf).digest()
 }
 
 fn sparse_trace_row_is_zero(_ row: SparseTraceRow) -> bool {
@@ -4738,7 +4572,8 @@ pub fn sparse_trace_leaf_is_canonical<const L: usize>(
 ) -> bool {
     let tasks = sparse_transition_task_count<L>()
     let trace = sparse_transition_trace_length<L>()
-    if L < 2 || position >= trace
+    if L < 2
+        || position >= trace
         || leaf.limb_count.to_u32() != L.downcast_truncate()
         || leaf.task_count.to_u32() != tasks
         || leaf.trace_length.to_u32() != trace
@@ -4753,21 +4588,13 @@ pub fn sparse_trace_leaf_is_canonical<const L: usize>(
     expected_active || sparse_trace_row_is_zero(leaf.row)
 }
 
-pub fn sparse_trace_root_power_of_two<
-    const L: usize,
-    const N: usize,
->(
+pub fn sparse_trace_root_power_of_two<const L: usize, const N: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
 ) -> SparseTraceDigest<L>
-where
-    L > 1,
-    N > 1,
-    N <= MAX_SPARSE_TRACE_LENGTH,
-    N <= 2147483648,
-    { (N & (N - 1)) == 0 },
+where L > 1, N > 1, N <= MAX_SPARSE_TRACE_LENGTH, N <= 2147483648, { (N & (N - 1)) == 0 }
 {
     let trace_length: u32 = N.downcast_truncate()
     if trace_length != sparse_transition_trace_length<L>() {
@@ -4787,11 +4614,10 @@ where
             next,
             witness,
         )
-        frontier = push_frontier<
-            Poseidon2Digest,
-            SparseDigestHasher,
-            SPARSE_TRACE_FRONTIER_LEVELS,
-        >(frontier, sparse_trace_leaf_commitment(leaf))
+        frontier = push_frontier<Poseidon2Digest, SparseDigestHasher, SPARSE_TRACE_FRONTIER_LEVELS>(
+            frontier,
+            sparse_trace_leaf_commitment(leaf),
+        )
         index = index + 1
     }
     let root = complete_frontier_root<
@@ -4806,14 +4632,8 @@ fn reset_sparse_trace_authentication<
     const L: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->(
-    _ authentication: mut SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS>,
-) {
-    authentication = empty_sparse_trace_authentication<
-        L,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >()
+>(_ authentication: mut SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS>) {
+    authentication = empty_sparse_trace_authentication<L, MAX_LEAVES, MAX_SIBLINGS>()
 }
 
 /// Authenticate requested base rows with the shared zk-kit-derived sparse
@@ -4831,20 +4651,18 @@ pub fn write_sparse_trace_authentication_power_of_two<
     _ next: ComplexFixed<L>,
     _ witness: FixedMandelbrotTransitionWitness<L>,
     _ requested: own [u32; REQUESTS],
-    _ authentication: mut SparseTraceAuthentication<
-        L,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    _ authentication: mut SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS>,
 ) -> bool
 where
     L > 1,
     N > 1,
     N <= MAX_SPARSE_TRACE_LENGTH,
     N <= 2147483648,
-    { (N & (N - 1)) == 0 },
+    {
+        (N & (N - 1)) == 0
+    },
     REQUESTS > 0,
-    MAX_LEAVES > 0,
+    MAX_LEAVES > 0
 {
     reset_sparse_trace_authentication(mut authentication)
     let trace_length: u32 = N.downcast_truncate()
@@ -4865,10 +4683,7 @@ where
         index = index + 1
     }
     let mut path = invalid_sparse_multi_path<MAX_LEAVES, MAX_SIBLINGS>()
-    let mut root = MerkleRoot {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
+    let mut root = MerkleRoot { valid: false, value: Poseidon2Digest::zero() }
     if !write_multi_path_and_root_from_leaves<
         Poseidon2Digest,
         SparseDigestHasher,
@@ -4879,10 +4694,7 @@ where
     >(ref commitments, ref requested, mut path, mut root) {
         return false
     }
-    authentication.root = SparseTraceDigest {
-        valid: root.valid,
-        value: root.value,
-    }
+    authentication.root = SparseTraceDigest { valid: root.valid, value: root.value }
     authentication.opening.path = path
     index = 0
     while index < path.leaf_count as usize {
@@ -4914,16 +4726,19 @@ where
     N > 1,
     N <= MAX_SPARSE_TRACE_LENGTH,
     N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    MAX_LEAVES > 0,
+    {
+        (N & (N - 1)) == 0
+    },
+    MAX_LEAVES > 0
 {
     let trace_length: u32 = N.downcast_truncate()
-    if !opening.valid || !root.valid
-        || trace_length != sparse_transition_trace_length<L>() {
+    if !opening.valid || !root.valid || trace_length != sparse_transition_trace_length<L>() {
         return false
     }
     let count: usize = opening.path.leaf_count as usize
-    if count == 0 || count > MAX_LEAVES { return false }
+    if count == 0 || count > MAX_LEAVES {
+        return false
+    }
     let mut commitments = [Poseidon2Digest::zero(); MAX_LEAVES]
     let mut index: usize = 0
     while index < count {
@@ -4948,13 +4763,11 @@ where
         }
         index = index + 1
     }
-    multi_verify<
-        Poseidon2Digest,
-        SparseDigestHasher,
-        N,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(root.value, commitments, opening.path)
+    multi_verify<Poseidon2Digest, SparseDigestHasher, N, MAX_LEAVES, MAX_SIBLINGS>(
+        root.value,
+        commitments,
+        opening.path,
+    )
 }
 
 pub fn verify_sparse_trace_authentication<
@@ -4962,27 +4775,22 @@ pub fn verify_sparse_trace_authentication<
     const N: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->(
-    _ authentication: ref SparseTraceAuthentication<
-        L,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
-) -> bool
+>(_ authentication: ref SparseTraceAuthentication<L, MAX_LEAVES, MAX_SIBLINGS>) -> bool
 where
     L > 1,
     N > 1,
     N <= MAX_SPARSE_TRACE_LENGTH,
     N <= 2147483648,
-    { (N & (N - 1)) == 0 },
-    MAX_LEAVES > 0,
+    {
+        (N & (N - 1)) == 0
+    },
+    MAX_LEAVES > 0
 {
-    authentication.valid && verify_sparse_trace_multi_opening<
-        L,
-        N,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(ref authentication.opening, authentication.root)
+    authentication.valid
+        && verify_sparse_trace_multi_opening<L, N, MAX_LEAVES, MAX_SIBLINGS>(
+            ref authentication.opening,
+            authentication.root,
+        )
 }
 
 pub fn empty_sparse_base_lde_multi_opening<
@@ -4991,13 +4799,7 @@ pub fn empty_sparse_base_lde_multi_opening<
     const LDE: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->() -> SparseBaseLdeMultiOpening<
-    L,
-    TRACE,
-    LDE,
-    MAX_LEAVES,
-    MAX_SIBLINGS,
-> {
+>() -> SparseBaseLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS> {
     MerkleMultiOpening {
         valid: false,
         values: [[BabyBear::zero(); SPARSE_BASE_AIR_FIELDS]; MAX_LEAVES],
@@ -5011,13 +4813,7 @@ pub fn empty_sparse_interaction_lde_multi_opening<
     const LDE: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->() -> SparseInteractionLdeMultiOpening<
-    L,
-    TRACE,
-    LDE,
-    MAX_LEAVES,
-    MAX_SIBLINGS,
-> {
+>() -> SparseInteractionLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS> {
     MerkleMultiOpening {
         valid: false,
         values: [[BabyBear::zero(); SPARSE_INTERACTION_AIR_FIELDS]; MAX_LEAVES],
@@ -5031,15 +4827,7 @@ fn reset_sparse_base_lde_multi_opening<
     const LDE: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->(
-    _ opening: mut SparseBaseLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
-) {
+>(_ opening: mut SparseBaseLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>) {
     opening.valid = false
     let mut leaf: usize = 0
     while leaf < MAX_LEAVES {
@@ -5059,15 +4847,7 @@ fn reset_sparse_interaction_lde_multi_opening<
     const LDE: usize,
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
->(
-    _ opening: mut SparseInteractionLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
-) {
+>(_ opening: mut SparseInteractionLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>) {
     opening.valid = false
     let mut leaf: usize = 0
     while leaf < MAX_LEAVES {
@@ -5146,48 +4926,50 @@ pub fn write_sparse_base_lde_multi_opening_power_of_two<
     _ codeword: ref SparseBaseAirLdeCodeword<LDE>,
     _ expected: SparseBaseLdeDigest<L, TRACE, LDE>,
     _ requested: own [u32; REQUESTS],
-    _ opening: mut SparseBaseLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    _ opening: mut SparseBaseLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>,
 ) -> bool
 where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        (LDE % TRACE) == 0
+    },
     REQUESTS > 0,
-    MAX_LEAVES > 0,
+    MAX_LEAVES > 0
 {
     reset_sparse_base_lde_multi_opening(mut opening)
-    if !codeword.valid || !expected.valid { return false }
+    if !codeword.valid || !expected.valid {
+        return false
+    }
     let commitments: BrowserPtr<MerkleLeafArena<Poseidon2Digest, LDE>> = alloc_browser_object<
         MerkleLeafArena<Poseidon2Digest, LDE>,
     >()
     if commitments.address() == 0
         || !with (commitments) {
             write_sparse_base_lde_commitment_leaves<L, TRACE, LDE>(codeword)
-        }
-    {
+        } {
         return false
     }
     if !with (commitments) {
-        write_sparse_multi_path_from_browser_leaves<LDE, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
-            ref requested,
-            mut opening.path,
-        )
-    }
-        || !with (commitments) { sparse_browser_root_matches<LDE>(expected.value) }
-    {
+            write_sparse_multi_path_from_browser_leaves<LDE, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+                ref requested,
+                mut opening.path,
+            )
+        }
+        || !with (commitments) {
+            sparse_browser_root_matches<LDE>(expected.value)
+        } {
         return false
     }
     let mut index: usize = 0
@@ -5213,27 +4995,27 @@ pub fn write_sparse_interaction_lde_multi_opening_power_of_two<
     _ codeword: ref SparseInteractionAirLdeCodeword<LDE>,
     _ expected: SparseInteractionLdeDigest<L, TRACE, LDE>,
     _ requested: own [u32; REQUESTS],
-    _ opening: mut SparseInteractionLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    _ opening: mut SparseInteractionLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>,
 ) -> bool
 where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { (LDE % TRACE) == 0 },
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        (LDE % TRACE) == 0
+    },
     REQUESTS > 0,
-    MAX_LEAVES > 0,
+    MAX_LEAVES > 0
 {
     reset_sparse_interaction_lde_multi_opening(mut opening)
     if !codeword.valid || !expected.valid || !expected.base.valid {
@@ -5245,18 +5027,18 @@ where
     if commitments.address() == 0
         || !with (commitments) {
             write_sparse_interaction_lde_commitment_leaves<L, TRACE, LDE>(codeword, expected)
-        }
-    {
+        } {
         return false
     }
     if !with (commitments) {
-        write_sparse_multi_path_from_browser_leaves<LDE, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
-            ref requested,
-            mut opening.path,
-        )
-    }
-        || !with (commitments) { sparse_browser_root_matches<LDE>(expected.value) }
-    {
+            write_sparse_multi_path_from_browser_leaves<LDE, REQUESTS, MAX_LEAVES, MAX_SIBLINGS>(
+                ref requested,
+                mut opening.path,
+            )
+        }
+        || !with (commitments) {
+            sparse_browser_root_matches<LDE>(expected.value)
+        } {
         return false
     }
     let mut index: usize = 0
@@ -5275,31 +5057,35 @@ pub fn verify_sparse_base_lde_multi_opening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >(
-    _ opening: ref SparseBaseLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    _ opening: ref SparseBaseLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>,
     _ root: SparseBaseLdeDigest<L, TRACE, LDE>,
 ) -> bool
 where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { (LDE % TRACE) == 0 },
-    MAX_LEAVES > 0,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    MAX_LEAVES > 0
 {
-    if !opening.valid || !opening.path.valid || !root.valid { return false }
+    if !opening.valid || !opening.path.valid || !root.valid {
+        return false
+    }
     let count: usize = opening.path.leaf_count as usize
-    if count == 0 || count > MAX_LEAVES { return false }
+    if count == 0 || count > MAX_LEAVES {
+        return false
+    }
     let mut commitments = [Poseidon2Digest::zero(); MAX_LEAVES]
     let mut index: usize = 0
     while index < count {
@@ -5314,18 +5100,18 @@ where
     while index < MAX_LEAVES {
         let mut field: usize = 0
         while field < SPARSE_BASE_AIR_FIELDS {
-            if !opening.values[index][field].is_zero() { return false }
+            if !opening.values[index][field].is_zero() {
+                return false
+            }
             field = field + 1
         }
         index = index + 1
     }
-    multi_verify<
-        Poseidon2Digest,
-        SparseDigestHasher,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(root.value, commitments, opening.path)
+    multi_verify<Poseidon2Digest, SparseDigestHasher, LDE, MAX_LEAVES, MAX_SIBLINGS>(
+        root.value,
+        commitments,
+        opening.path,
+    )
 }
 
 pub fn verify_sparse_interaction_lde_multi_opening<
@@ -5335,33 +5121,35 @@ pub fn verify_sparse_interaction_lde_multi_opening<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >(
-    _ opening: ref SparseInteractionLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    _ opening: ref SparseInteractionLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>,
     _ root: SparseInteractionLdeDigest<L, TRACE, LDE>,
 ) -> bool
 where
     L > 1,
     TRACE > 0,
     TRACE > 1,
-    { (TRACE & (TRACE - 1)) == 0 },
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
     LDE > 1,
     LDE > TRACE,
     LDE <= MAX_SPARSE_LDE_LENGTH,
     LDE <= 2147483648,
-    { (LDE & (LDE - 1)) == 0 },
-    { (LDE % TRACE) == 0 },
-    MAX_LEAVES > 0,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    MAX_LEAVES > 0
 {
     if !opening.valid || !opening.path.valid || !root.valid || !root.base.valid {
         return false
     }
     let count: usize = opening.path.leaf_count as usize
-    if count == 0 || count > MAX_LEAVES { return false }
+    if count == 0 || count > MAX_LEAVES {
+        return false
+    }
     let mut commitments = [Poseidon2Digest::zero(); MAX_LEAVES]
     let mut index: usize = 0
     while index < count {
@@ -5377,34 +5165,32 @@ where
     while index < MAX_LEAVES {
         let mut field: usize = 0
         while field < SPARSE_INTERACTION_AIR_FIELDS {
-            if !opening.values[index][field].is_zero() { return false }
+            if !opening.values[index][field].is_zero() {
+                return false
+            }
             field = field + 1
         }
         index = index + 1
     }
-    multi_verify<
-        Poseidon2Digest,
-        SparseDigestHasher,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >(root.value, commitments, opening.path)
+    multi_verify<Poseidon2Digest, SparseDigestHasher, LDE, MAX_LEAVES, MAX_SIBLINGS>(
+        root.value,
+        commitments,
+        opening.path,
+    )
 }
 
-fn sparse_multi_path_position<
-    const MAX_LEAVES: usize,
-    const MAX_SIBLINGS: usize,
->(
+fn sparse_multi_path_position<const MAX_LEAVES: usize, const MAX_SIBLINGS: usize>(
     _ path: ref MerkleMultiPath<Poseidon2Digest, MAX_LEAVES, MAX_SIBLINGS>,
     _ index: u32,
 ) -> usize {
-    if !path.valid || path.leaf_count == 0
-        || path.leaf_count > MAX_LEAVES.downcast_truncate() {
+    if !path.valid || path.leaf_count == 0 || path.leaf_count > MAX_LEAVES.downcast_truncate() {
         return MAX_LEAVES
     }
     let mut cursor: usize = 0
     while cursor < path.leaf_count as usize {
-        if path.leaf_indices[cursor] == index { return cursor }
+        if path.leaf_indices[cursor] == index {
+            return cursor
+        }
         cursor = cursor + 1
     }
     MAX_LEAVES
@@ -5419,23 +5205,11 @@ pub fn sparse_lde_opened_air_row<
     const MAX_LEAVES: usize,
     const MAX_SIBLINGS: usize,
 >(
-    _ base: ref SparseBaseLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
-    _ interaction: ref SparseInteractionLdeMultiOpening<
-        L,
-        TRACE,
-        LDE,
-        MAX_LEAVES,
-        MAX_SIBLINGS,
-    >,
+    _ base: ref SparseBaseLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>,
+    _ interaction: ref SparseInteractionLdeMultiOpening<L, TRACE, LDE, MAX_LEAVES, MAX_SIBLINGS>,
     _ index: u32,
 ) -> (bool, SparseOpenedAirRow)
-where MAX_LEAVES > 0,
+where MAX_LEAVES > 0
 {
     if !base.valid || !interaction.valid {
         return (false, zero_sparse_opened_air_row())

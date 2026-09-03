@@ -25,9 +25,18 @@ use canonical_words::{
 use core::default::Default
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+    SparseInteractionChallenges,
+    SparseInteractionTraceRow,
     sparse_base_air_control_at,
     sparse_base_air_control_link_plan_at,
     sparse_base_air_control_plan_at,
+    sparse_copy_port_extension,
+    sparse_interaction_challenge_values,
+    sparse_control_row_extension,
+    sparse_task_row_extension,
+    zero_sparse_interaction_challenges,
+    zero_sparse_interaction_trace_row,
 }
 use mandelbrot_proof_fixed_air_core::{
     CoordinateNode,
@@ -37,14 +46,21 @@ use mandelbrot_proof_fixed_air_core::{
     SparseArithmeticLinkPlanWitness,
     SparseArithmeticPlanWitness,
     SparseBoundaryPlanWitness,
+    SparseBoundaryInteractionRow,
     SparseControlLinkPlanWitness,
     SparseControlPlanWitness,
     SparseControlRow,
+    SparseCopyPort,
     SparseLinearPlanWitness,
+    SparseLinearInteractionRow,
+    SparseProductInteractionRow,
     SparseRoundPlanWitness,
+    SparseRoundInteractionRow,
     SparseTaskRow,
     SparseTransitionTask,
     empty_sparse_row,
+    evaluate_sparse_boundary_interaction_row,
+    evaluate_sparse_product_interaction_row,
     interpret_sparse_linear_plan,
     sparse_arithmetic_link_plan_witness,
     sparse_arithmetic_plan_witness,
@@ -53,31 +69,51 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_boundary_task_count,
     sparse_carry_row,
     sparse_carry_task_count,
+    sparse_copy_interaction_delta,
+    sparse_copy_interaction_witness_valid,
     sparse_linear_row,
+    sparse_linear_copy_plan,
     sparse_linear_task_count,
     sparse_padding_control_row,
     sparse_product_row,
+    sparse_product_copy_plan,
     sparse_product_task_count,
     sparse_radix_row,
     sparse_radix_task_count,
     sparse_round_row,
-    sparse_round_plan_witness,
+    sparse_round_copy_plan,
     sparse_round_task_count,
     sparse_transition_task_at,
     sparse_transition_task_count,
     sparse_transition_trace_length,
+    write_sparse_boundary_interaction_row,
+    write_sparse_copy_interaction_inverses,
+    write_sparse_copy_interaction_batch_denominators,
+    write_sparse_product_interaction_row,
+    sparse_control_row_at,
     SPARSE_LINEAR_PORT_MULTIPLICATIONS,
+    SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+    SPARSE_ROUND_PORT_MULTIPLICATIONS,
     zero_sparse_arithmetic_plan_witness,
 }
 use mandelbrot_proof_recursive::ComplexFixed
-use precision::baby_bear::BabyBear
+use poseidon_baby_bear_webgpu::{
+    digest_squeeze_batch_output_valid_start,
+    digest_squeeze_batch_output_words,
+}
+use precision::baby_bear::{BabyBear, BabyBearExt4}
 use precision::fixed::Fixed
-use quadratic_plan::QuadraticWordWitnessInterpreter
+use quadratic_plan::{
+    QuadraticPlanWitness,
+    QuadraticWordConstraintInterpreter,
+    QuadraticWordWitnessInterpreter,
+}
 use region_layout::{
     Region,
     RegionSchema,
     RegionSchemaProvider,
     load_region_word,
+    region_bounds,
     storage_word_capacity,
     store_region_word,
 }
@@ -99,13 +135,45 @@ struct TransitionWitnessRegions<const L: usize> {
 impl<const L: usize> core::marker::Copy for TransitionWitnessRegions<L> {}
 derive RegionSchema for TransitionWitnessRegions<L> using RegionSchemaProvider
 
-const fn transition_witness_regions<const L: usize>()
-    -> TransitionWitnessRegions<L> {
+const fn transition_witness_regions<const L: usize>() -> TransitionWitnessRegions<L> {
     <TransitionWitnessRegions<L> as RegionSchema>::regions()
 }
 
 pub const fn transition_witness_workspace_words<const L: usize>() -> usize {
     <TransitionWitnessRegions<L> as RegionSchema>::WORDS as usize
+}
+
+/// Preserve the generated transition witness while later phases carry one
+/// independent validity receipt in the trailing word.
+pub const fn transition_phase_workspace_words<const L: usize>() -> usize {
+    transition_witness_workspace_words<L>() + 1
+}
+
+pub const fn transition_phase_receipt_word<const L: usize>() -> usize {
+    transition_witness_workspace_words<L>()
+}
+
+pub fn store_transition_phase_receipt<const L: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ valid: bool,
+)
+where L > 1, { WORKSPACE_WORDS >= transition_phase_workspace_words<L>() }
+{
+    workspace
+        .store(
+            index: transition_phase_receipt_word<L>().downcast_truncate(),
+            value: if valid { 1 } else { 0 },
+        )
+}
+
+pub fn load_transition_phase_receipt<const L: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+) -> bool
+where L > 1, { WORKSPACE_WORDS >= transition_phase_workspace_words<L>() }
+{
+    workspace.load(
+                index: transition_phase_receipt_word<L>().downcast_truncate(),
+            ) == 1
 }
 
 /// Canonical-word interpreter into one compiler-derived GPU region.
@@ -115,19 +183,18 @@ struct WorkspaceWordWriter<Space, T, const STORAGE_WORDS: usize> {
     cursor: u32,
     valid: bool,
 }
-impl<Space, T, const STORAGE_WORDS: usize> core::marker::Copy
-    for WorkspaceWordWriter<Space, T, STORAGE_WORDS> {}
+impl<Space, T, const STORAGE_WORDS: usize> core::marker::Copy for WorkspaceWordWriter<
+    Space,
+    T,
+    STORAGE_WORDS,
+> {}
 
-impl<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize>
-    WorkspaceWordWriter<Space, T, STORAGE_WORDS>
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
-{
-    fn new(
-        _ storage: StorageBuffer<u32, STORAGE_WORDS>,
-        _ region: Region<Space, T>,
-    ) -> Self {
+impl<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize> WorkspaceWordWriter<
+    Space,
+    T,
+    STORAGE_WORDS,
+> where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>() {
+    fn new(_ storage: StorageBuffer<u32, STORAGE_WORDS>, _ region: Region<Space, T>) -> Self {
         Self { storage: storage, region: region, cursor: 0, valid: true }
     }
 
@@ -136,34 +203,19 @@ where
     }
 }
 
-impl<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize>
-    WordSink for WorkspaceWordWriter<Space, T, STORAGE_WORDS>
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
-{
+impl<
+    Space: RegionSchema,
+    T: CanonicalWords,
+    const STORAGE_WORDS: usize,
+> WordSink for WorkspaceWordWriter<Space, T, STORAGE_WORDS>
+where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>() {
     fn write(self, _ value: u32) -> Self {
-        let valid = self.valid && store_region_word(
-            self.storage,
-            self.region,
-            self.cursor,
-            value,
-        )
-        Self {
-            storage: self.storage,
-            region: self.region,
-            cursor: self.cursor + 1,
-            valid: valid,
-        }
+        let valid = self.valid && store_region_word(self.storage, self.region, self.cursor, value)
+        Self { storage: self.storage, region: self.region, cursor: self.cursor + 1, valid: valid }
     }
 
     fn reject(self) -> Self {
-        Self {
-            storage: self.storage,
-            region: self.region,
-            cursor: self.cursor,
-            valid: false,
-        }
+        Self { storage: self.storage, region: self.region, cursor: self.cursor, valid: false }
     }
 }
 
@@ -174,19 +226,18 @@ struct WorkspaceWordReader<Space, T, const STORAGE_WORDS: usize> {
     cursor: u32,
     valid: bool,
 }
-impl<Space, T, const STORAGE_WORDS: usize> core::marker::Copy
-    for WorkspaceWordReader<Space, T, STORAGE_WORDS> {}
+impl<Space, T, const STORAGE_WORDS: usize> core::marker::Copy for WorkspaceWordReader<
+    Space,
+    T,
+    STORAGE_WORDS,
+> {}
 
-impl<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize>
-    WorkspaceWordReader<Space, T, STORAGE_WORDS>
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
-{
-    fn new(
-        _ storage: StorageBuffer<u32, STORAGE_WORDS>,
-        _ region: Region<Space, T>,
-    ) -> Self {
+impl<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize> WorkspaceWordReader<
+    Space,
+    T,
+    STORAGE_WORDS,
+> where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>() {
+    fn new(_ storage: StorageBuffer<u32, STORAGE_WORDS>, _ region: Region<Space, T>) -> Self {
         Self { storage: storage, region: region, cursor: 0, valid: true }
     }
 
@@ -195,12 +246,12 @@ where
     }
 }
 
-impl<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize>
-    WordSource for WorkspaceWordReader<Space, T, STORAGE_WORDS>
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
-{
+impl<
+    Space: RegionSchema,
+    T: CanonicalWords,
+    const STORAGE_WORDS: usize,
+> WordSource for WorkspaceWordReader<Space, T, STORAGE_WORDS>
+where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>() {
     fn read(self) -> WordRead<Self> {
         let read = load_region_word(self.storage, self.region, self.cursor)
         WordRead {
@@ -215,17 +266,117 @@ where
     }
 
     fn reject(self) -> Self {
-        Self {
-            storage: self.storage,
-            region: self.region,
-            cursor: self.cursor,
-            valid: false,
-        }
+        Self { storage: self.storage, region: self.region, cursor: self.cursor, valid: false }
     }
 }
 
 struct WorkspaceDecoded<T> { value: T, valid: bool }
 impl<T: core::marker::Copy> core::marker::Copy for WorkspaceDecoded<T> {}
+
+/// Read the generic squeeze batch as one nominal interaction-challenge
+/// record. The derived codec owns field grouping and order. This placement
+/// contributes only the leading validity word and skips the batch's trailing
+/// per-value receipts.
+struct SparseChallengeBatchReader<const OUTPUT_WORDS: usize> {
+    output: StorageBuffer<u32, OUTPUT_WORDS>,
+    cursor: u32,
+    valid: bool,
+}
+impl<const OUTPUT_WORDS: usize> core::marker::Copy for SparseChallengeBatchReader<OUTPUT_WORDS> {}
+
+impl<const OUTPUT_WORDS: usize> SparseChallengeBatchReader<OUTPUT_WORDS>
+where { OUTPUT_WORDS >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values()) } {
+    fn new(_ output: StorageBuffer<u32, OUTPUT_WORDS>) -> Self {
+        Self { output: output, cursor: 0, valid: true }
+    }
+
+    fn finish(self) -> bool {
+        self.valid && self.cursor == <SparseInteractionChallenges as CanonicalWords>::WORDS
+    }
+}
+
+impl<const OUTPUT_WORDS: usize> WordSource for SparseChallengeBatchReader<OUTPUT_WORDS>
+where { OUTPUT_WORDS >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values()) } {
+    fn read(self) -> WordRead<Self> {
+        let words = <SparseInteractionChallenges as CanonicalWords>::WORDS
+        if !self.valid || self.cursor >= words {
+            return WordRead {
+                source: Self { output: self.output, cursor: self.cursor, valid: false },
+                value: 0,
+            }
+        }
+        if self.cursor == 0 {
+            return WordRead {
+                source: Self { output: self.output, cursor: 1, valid: true },
+                value: 1,
+            }
+        }
+        let coefficient_word = self.cursor - 1
+        let coefficient_words = <BabyBearExt4 as CanonicalWords>::WORDS
+        let state = coefficient_word / coefficient_words
+        let valid_start: u32 = digest_squeeze_batch_output_valid_start(
+            sparse_interaction_challenge_values(),
+        )
+            .downcast_truncate()
+        WordRead {
+            source: Self {
+                output: self.output,
+                cursor: self.cursor + 1,
+                valid: state < sparse_interaction_challenge_values().downcast_truncate()
+                    && self.output.load(index: valid_start + state) == 1,
+            },
+            value: self.output.load(index: coefficient_word),
+        }
+    }
+
+    fn reject(self) -> Self {
+        Self { output: self.output, cursor: self.cursor, valid: false }
+    }
+}
+
+/// Production-domain authority decoded from the root-derived squeeze batch.
+/// The payload stays private so later placement APIs cannot accept a raw
+/// array of quartic values as an equivalent transcript source.
+pub struct SparseLdeInteractionChallengeBatch<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> { valid: bool, value: SparseInteractionChallenges }
+impl<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+> core::marker::Copy for SparseLdeInteractionChallengeBatch<L, TRACE, LDE> {}
+
+pub fn load_sparse_lde_interaction_challenge_batch<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const OUTPUT_WORDS: usize,
+>(_ output: StorageBuffer<u32, OUTPUT_WORDS>) -> SparseLdeInteractionChallengeBatch<L, TRACE, LDE>
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    {
+        OUTPUT_WORDS >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values())
+    }
+{
+    let mut value = zero_sparse_interaction_challenges()
+    let reader = decode_canonical_words(
+        mut value,
+        SparseChallengeBatchReader<OUTPUT_WORDS>::new(output),
+    )
+    SparseLdeInteractionChallengeBatch { valid: reader.finish() && value.valid, value: value }
+}
+
+pub fn sparse_lde_interaction_challenge_batch_is_valid<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(_ batch: SparseLdeInteractionChallengeBatch<L, TRACE, LDE>) -> bool {
+    batch.valid && batch.value.valid
+}
 
 fn decode_workspace_value<
     Space: RegionSchema,
@@ -236,9 +387,7 @@ fn decode_workspace_value<
     _ storage: StorageBuffer<u32, STORAGE_WORDS>,
     _ region: Region<Space, T>,
 ) -> WorkspaceDecoded<T>
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
+where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>()
 {
     let mut value = initial
     let reader = decode_canonical_words(
@@ -248,23 +397,18 @@ where
     WorkspaceDecoded { value: value, valid: reader.finish() }
 }
 
-fn encode_workspace_value<
-    Space: RegionSchema,
-    T: CanonicalWords,
-    const STORAGE_WORDS: usize,
->(
+fn encode_workspace_value<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize>(
     _ value: ref T,
     _ storage: StorageBuffer<u32, STORAGE_WORDS>,
     _ region: Region<Space, T>,
 ) -> bool
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
+where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>()
 {
     encode_canonical_words(
         ref value,
         WorkspaceWordWriter<Space, T, STORAGE_WORDS>::new(storage, region),
-    ).finish()
+    )
+        .finish()
 }
 
 fn product_workspace_region<const L: usize>(
@@ -299,8 +443,7 @@ fn decode_product_node<const L: usize, const WORKSPACE_WORDS: usize>(
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node_valid = match node {
         ProductNode::Invalid => false,
@@ -311,10 +454,7 @@ where
         workspace,
         product_workspace_region(node, transition_witness_regions<L>()),
     )
-    WorkspaceDecoded {
-        value: decoded.value,
-        valid: node_valid && decoded.valid,
-    }
+    WorkspaceDecoded { value: decoded.value, valid: node_valid && decoded.valid }
 }
 
 fn decode_linear_node<const L: usize, const WORKSPACE_WORDS: usize>(
@@ -324,8 +464,7 @@ fn decode_linear_node<const L: usize, const WORKSPACE_WORDS: usize>(
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node_valid = match node {
         LinearNode::Invalid => false,
@@ -336,26 +475,16 @@ where
         workspace,
         linear_workspace_region(node, transition_witness_regions<L>()),
     )
-    WorkspaceDecoded {
-        value: decoded.value,
-        valid: node_valid && decoded.valid,
-    }
+    WorkspaceDecoded { value: decoded.value, valid: node_valid && decoded.valid }
 }
 
 struct DecodedFixed<const L: usize> { value: Fixed<L>, valid: bool }
 impl<const L: usize> core::marker::Copy for DecodedFixed<L> {}
 
-struct DecodedDigits<const L: usize> {
-    digits: [u32; L],
-    negative: bool,
-    valid: bool,
-}
+struct DecodedDigits<const L: usize> { digits: [u32; L], negative: bool, valid: bool }
 impl<const L: usize> core::marker::Copy for DecodedDigits<L> {}
 
-fn product_left<const L: usize>(
-    _ node: ProductNode,
-    _ current: ComplexFixed<L>,
-) -> Fixed<L> {
+fn product_left<const L: usize>(_ node: ProductNode, _ current: ComplexFixed<L>) -> Fixed<L> {
     match node {
         ProductNode::Xx => current.real,
         ProductNode::Yy => current.imaginary,
@@ -364,10 +493,7 @@ fn product_left<const L: usize>(
     }
 }
 
-fn product_right<const L: usize>(
-    _ node: ProductNode,
-    _ current: ComplexFixed<L>,
-) -> Fixed<L> {
+fn product_right<const L: usize>(_ node: ProductNode, _ current: ComplexFixed<L>) -> Fixed<L> {
     match node {
         ProductNode::Xx => current.real,
         ProductNode::Yy => current.imaginary,
@@ -383,8 +509,7 @@ fn decode_next_coordinate<const L: usize, const WORKSPACE_WORDS: usize>(
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node = match coordinate {
         CoordinateNode::Real => LinearNode::NextReal,
@@ -402,26 +527,25 @@ fn decode_linear_left<const L: usize, const WORKSPACE_WORDS: usize>(
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     match node {
         LinearNode::RealDifference => {
             let product = decode_product_node(ProductNode::Xx, workspace)
             DecodedFixed { value: product.value.output, valid: product.valid }
-        }
+        },
         LinearNode::NextReal => {
             let linear = decode_linear_node(LinearNode::RealDifference, workspace)
             DecodedFixed { value: linear.value.output, valid: linear.valid }
-        }
+        },
         LinearNode::DoubleXy => {
             let product = decode_product_node(ProductNode::Xy, workspace)
             DecodedFixed { value: product.value.output, valid: product.valid }
-        }
+        },
         LinearNode::NextImaginary => {
             let linear = decode_linear_node(LinearNode::DoubleXy, workspace)
             DecodedFixed { value: linear.value.output, valid: linear.valid }
-        }
+        },
         LinearNode::Invalid => DecodedFixed {
             value: Fixed { negative: false, limbs: [0; L] },
             valid: false,
@@ -437,23 +561,19 @@ fn decode_linear_right<const L: usize, const WORKSPACE_WORDS: usize>(
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     match node {
         LinearNode::RealDifference => {
             let product = decode_product_node(ProductNode::Yy, workspace)
             DecodedFixed { value: product.value.output, valid: product.valid }
-        }
+        },
         LinearNode::NextReal => DecodedFixed { value: point.real, valid: true },
         LinearNode::DoubleXy => {
             let product = decode_product_node(ProductNode::Xy, workspace)
             DecodedFixed { value: product.value.output, valid: product.valid }
-        }
-        LinearNode::NextImaginary => DecodedFixed {
-            value: point.imaginary,
-            valid: true,
         },
+        LinearNode::NextImaginary => DecodedFixed { value: point.imaginary, valid: true },
         LinearNode::Invalid => DecodedFixed {
             value: Fixed { negative: false, limbs: [0; L] },
             valid: false,
@@ -464,10 +584,7 @@ where
 /// First parallel layer of the recurrence DAG. Three invocations derive
 /// `x*x`, `y*y`, and `x*y` independently and write the same canonical witness
 /// records consumed by the scalar AIR.
-pub fn write_transition_product_witness_lane<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+pub fn write_transition_product_witness_lane<const L: usize, const WORKSPACE_WORDS: usize>(
     _ current: ComplexFixed<L>,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ invocation: ComputeInvocation,
@@ -475,8 +592,7 @@ pub fn write_transition_product_witness_lane<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let lane = invocation.global.x
     if lane >= 3 { return }
@@ -492,47 +608,25 @@ where
 
 /// Second parallel layer. The real difference depends on `x*x` and `y*y`;
 /// doubled `x*y` is independent and occupies the sibling lane.
-pub fn write_transition_primary_linear_witness_lane<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+pub fn write_transition_primary_linear_witness_lane<const L: usize, const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ invocation: ComputeInvocation,
 )
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let lane = invocation.global.x
     if lane >= 2 { return }
     let regions = transition_witness_regions<L>()
-    let xx = decode_workspace_value(
-        empty_product_witness<L>(), workspace, regions.xx,
-    )
-    let yy = decode_workspace_value(
-        empty_product_witness<L>(), workspace, regions.yy,
-    )
-    let xy = decode_workspace_value(
-        empty_product_witness<L>(), workspace, regions.xy,
-    )
+    let xx = decode_workspace_value(empty_product_witness<L>(), workspace, regions.xx)
+    let yy = decode_workspace_value(empty_product_witness<L>(), workspace, regions.yy)
+    let xy = decode_workspace_value(empty_product_witness<L>(), workspace, regions.xy)
     let (left, right, subtract_right, region, dependencies_valid) = if lane == 0 {
-        (
-            xx.value.output,
-            yy.value.output,
-            true,
-            regions.real_difference,
-            xx.valid && yy.valid,
-        )
+        (xx.value.output, yy.value.output, true, regions.real_difference, xx.valid && yy.valid)
     } else {
-        (
-            xy.value.output,
-            xy.value.output,
-            false,
-            regions.double_xy,
-            xy.valid,
-        )
+        (xy.value.output, xy.value.output, false, regions.double_xy, xy.valid)
     }
     let witness = derive_fixed_linear_witness(left, right, subtract_right)
     if dependencies_valid {
@@ -542,10 +636,7 @@ where
 
 /// Third parallel layer. The two public-coordinate additions depend on
 /// disjoint primary linear nodes and therefore share one two-lane dispatch.
-pub fn write_transition_final_linear_witness_lane<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+pub fn write_transition_final_linear_witness_lane<const L: usize, const WORKSPACE_WORDS: usize>(
     _ point: ComplexFixed<L>,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ invocation: ComputeInvocation,
@@ -553,32 +644,21 @@ pub fn write_transition_final_linear_witness_lane<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let lane = invocation.global.x
     if lane >= 2 { return }
     let regions = transition_witness_regions<L>()
     let difference = decode_workspace_value(
-        empty_linear_witness<L>(), workspace, regions.real_difference,
+        empty_linear_witness<L>(),
+        workspace,
+        regions.real_difference,
     )
-    let doubled = decode_workspace_value(
-        empty_linear_witness<L>(), workspace, regions.double_xy,
-    )
+    let doubled = decode_workspace_value(empty_linear_witness<L>(), workspace, regions.double_xy)
     let (left, right, region, dependency_valid) = if lane == 0 {
-        (
-            difference.value.output,
-            point.real,
-            regions.next_real,
-            difference.valid,
-        )
+        (difference.value.output, point.real, regions.next_real, difference.valid)
     } else {
-        (
-            doubled.value.output,
-            point.imaginary,
-            regions.next_imaginary,
-            doubled.valid,
-        )
+        (doubled.value.output, point.imaginary, regions.next_imaginary, doubled.valid)
     }
     let witness = derive_fixed_sum_witness(left, right)
     if dependency_valid {
@@ -586,17 +666,11 @@ where
     }
 }
 
-fn workspace_region_is_valid<
-    Space: RegionSchema,
-    T: CanonicalWords,
-    const STORAGE_WORDS: usize,
->(
+fn workspace_region_is_valid<Space: RegionSchema, T: CanonicalWords, const STORAGE_WORDS: usize>(
     _ storage: StorageBuffer<u32, STORAGE_WORDS>,
     _ region: Region<Space, T>,
 ) -> bool
-where
-    STORAGE_WORDS > 0,
-    Space::WORDS <= storage_word_capacity<STORAGE_WORDS>(),
+where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>()
 {
     let word = load_region_word(storage, region, 0)
     word.valid && word.value == 1
@@ -605,20 +679,18 @@ where
 /// Close the recurrence DAG after all seven arithmetic records have been
 /// produced. Canonical witness codecs place their validity word first, so this
 /// pass reads one word per dependency instead of reconstructing the aggregate.
-pub fn finish_transition_witness_workspace<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+pub fn finish_transition_witness_workspace<const L: usize, const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ invocation: ComputeInvocation,
 )
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
-    if invocation.global.x != 0 { return }
+    if invocation.global.x != 0 {
+        return
+    }
     let regions = transition_witness_regions<L>()
     let valid = workspace_region_is_valid(workspace, regions.xx)
         && workspace_region_is_valid(workspace, regions.yy)
@@ -627,30 +699,18 @@ where
         && workspace_region_is_valid(workspace, regions.next_real)
         && workspace_region_is_valid(workspace, regions.double_xy)
         && workspace_region_is_valid(workspace, regions.next_imaginary)
-    store_region_word(
-        workspace,
-        regions.valid,
-        0,
-        if valid { 1 } else { 0 },
-    )
+    store_region_word(workspace, regions.valid, 0, if valid { 1 } else { 0 })
 }
 
-fn transition_workspace_is_valid<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn transition_workspace_is_valid<const L: usize, const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
 ) -> bool
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
-    workspace_region_is_valid(
-        workspace,
-        transition_witness_regions<L>().valid,
-    )
+    workspace_region_is_valid(workspace, transition_witness_regions<L>().valid)
 }
 
 fn decode_range_node<const L: usize, const WORKSPACE_WORDS: usize>(
@@ -662,8 +722,7 @@ fn decode_range_node<const L: usize, const WORKSPACE_WORDS: usize>(
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     match node {
         RangeNode::PointReal => DecodedDigits {
@@ -693,89 +752,79 @@ where
                 negative: decoded.value.negative,
                 valid: decoded.valid,
             }
-        }
+        },
         RangeNode::NextImaginary => {
-            let decoded = decode_next_coordinate(
-                CoordinateNode::Imaginary,
-                workspace,
-            )
+            let decoded = decode_next_coordinate(CoordinateNode::Imaginary, workspace)
             DecodedDigits {
                 digits: decoded.value.limbs,
                 negative: decoded.value.negative,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::ProductLow(product) => {
+        },
+        RangeNode::ProductLow(product,) => {
             let decoded = decode_product_node(product, workspace)
             DecodedDigits {
                 digits: decoded.value.low_digits,
                 negative: false,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::ProductHigh(product) => {
+        },
+        RangeNode::ProductHigh(product,) => {
             let decoded = decode_product_node(product, workspace)
             DecodedDigits {
                 digits: decoded.value.high_digits,
                 negative: false,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::ProductOutput(product) => {
+        },
+        RangeNode::ProductOutput(product,) => {
             let decoded = decode_product_node(product, workspace)
             DecodedDigits {
                 digits: decoded.value.output.limbs,
                 negative: decoded.value.output.negative,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::LinearSum(linear) => {
+        },
+        RangeNode::LinearSum(linear,) => {
             let decoded = decode_linear_node(linear, workspace)
             DecodedDigits {
                 digits: decoded.value.sum_digits,
                 negative: false,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::LinearLeftDifference(linear) => {
+        },
+        RangeNode::LinearLeftDifference(linear,) => {
             let decoded = decode_linear_node(linear, workspace)
             DecodedDigits {
                 digits: decoded.value.left_difference_digits,
                 negative: false,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::LinearRightDifference(linear) => {
+        },
+        RangeNode::LinearRightDifference(linear,) => {
             let decoded = decode_linear_node(linear, workspace)
             DecodedDigits {
                 digits: decoded.value.right_difference_digits,
                 negative: false,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::LinearOutput(linear) => {
+        },
+        RangeNode::LinearOutput(linear,) => {
             let decoded = decode_linear_node(linear, workspace)
             DecodedDigits {
                 digits: decoded.value.output.limbs,
                 negative: decoded.value.output.negative,
                 valid: decoded.valid,
             }
-        }
-        RangeNode::Invalid => DecodedDigits {
-            digits: [0; L],
-            negative: false,
-            valid: false,
         },
+        RangeNode::Invalid => DecodedDigits { digits: [0; L], negative: false, valid: false },
     }
 }
 
 pub struct SparseWitnessRow { value: SparseTaskRow<BabyBear>, valid: bool }
 impl core::marker::Copy for SparseWitnessRow {}
 
-fn complete_sparse_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn complete_sparse_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ value: SparseTaskRow<BabyBear>,
     _ local_valid: bool,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
@@ -783,20 +832,15 @@ fn complete_sparse_witness_row<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     SparseWitnessRow {
         value: value,
-        valid: local_valid
-            && transition_workspace_is_valid<L, WORKSPACE_WORDS>(workspace),
+        valid: local_valid && transition_workspace_is_valid<L, WORKSPACE_WORDS>(workspace),
     }
 }
 
-fn decode_sparse_radix_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn decode_sparse_radix_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ point: ComplexFixed<L>,
     _ current: ComplexFixed<L>,
     _ task: SparseTransitionTask,
@@ -805,13 +849,12 @@ fn decode_sparse_radix_witness_row<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node = match task {
         SparseTransitionTask::RadixBit(node, _, _) => node,
         SparseTransitionTask::RadixLimb(node, _) => node,
-        SparseTransitionTask::RadixFinish(node) => node,
+        SparseTransitionTask::RadixFinish(node,) => node,
         _ => RangeNode::Invalid,
     }
     let range = decode_range_node(node, point, current, workspace)
@@ -822,18 +865,14 @@ where
     )
 }
 
-fn decode_sparse_carry_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn decode_sparse_carry_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ task: SparseTransitionTask,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
 ) -> SparseWitnessRow
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node = match task {
         SparseTransitionTask::CarryBit(node, _, _, _) => node,
@@ -848,10 +887,7 @@ where
     )
 }
 
-fn decode_sparse_product_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn decode_sparse_product_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ current: ComplexFixed<L>,
     _ task: SparseTransitionTask,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
@@ -859,8 +895,7 @@ fn decode_sparse_product_witness_row<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node = match task {
         SparseTransitionTask::ProductTerm(node, _, _) => node,
@@ -880,10 +915,7 @@ where
     )
 }
 
-fn decode_sparse_round_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn decode_sparse_round_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ current: ComplexFixed<L>,
     _ task: SparseTransitionTask,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
@@ -891,12 +923,11 @@ fn decode_sparse_round_witness_row<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node = match task {
         SparseTransitionTask::ProductRound(node, _) => node,
-        SparseTransitionTask::ProductFinish(node) => node,
+        SparseTransitionTask::ProductFinish(node,) => node,
         _ => ProductNode::Invalid,
     }
     let product = decode_product_node(node, workspace)
@@ -912,10 +943,7 @@ where
     )
 }
 
-fn decode_sparse_linear_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn decode_sparse_linear_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ point: ComplexFixed<L>,
     _ task: SparseTransitionTask,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
@@ -923,30 +951,24 @@ fn decode_sparse_linear_witness_row<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let node = match task {
         SparseTransitionTask::LinearLimb(node, _, _) => node,
-        SparseTransitionTask::LinearFinish(node) => node,
+        SparseTransitionTask::LinearFinish(node,) => node,
         _ => LinearNode::Invalid,
     }
     let linear = decode_linear_node(node, workspace)
     let left = decode_linear_left(node, workspace)
     let right = decode_linear_right(node, point, workspace)
     complete_sparse_witness_row<L, WORKSPACE_WORDS>(
-        sparse_linear_row<BabyBear, L>(
-            task, left.value, right.value, linear.value,
-        ),
+        sparse_linear_row<BabyBear, L>(task, left.value, right.value, linear.value),
         linear.valid && left.valid && right.valid,
         workspace,
     )
 }
 
-fn decode_sparse_boundary_witness_row<
-    const L: usize,
-    const WORKSPACE_WORDS: usize,
->(
+fn decode_sparse_boundary_witness_row<const L: usize, const WORKSPACE_WORDS: usize>(
     _ current: ComplexFixed<L>,
     _ task: SparseTransitionTask,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
@@ -954,11 +976,10 @@ fn decode_sparse_boundary_witness_row<
 where
     L > 1,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 {
     let coordinate = match task {
-        SparseTransitionTask::BoundarySign(coordinate) => coordinate,
+        SparseTransitionTask::BoundarySign(coordinate,) => coordinate,
         SparseTransitionTask::BoundaryLimb(coordinate, _) => coordinate,
         _ => CoordinateNode::Invalid,
     }
@@ -998,8 +1019,7 @@ pub trait SparseWitnessFamily<const L: usize> {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 }
 
 pub struct SparseRadixWitnessFamily {}
@@ -1014,20 +1034,21 @@ impl<const L: usize> SparseWitnessFamily<L> for SparseRadixWitnessFamily {
     const START: u32 = 0
     const ROWS: u32 = sparse_radix_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         decode_sparse_radix_witness_row<L, WORKSPACE_WORDS>(
             point,
             current,
             sparse_transition_task_at<L>(
-                <SparseRadixWitnessFamily as SparseWitnessFamily<L>>::START
-                    + local_row,
+                <SparseRadixWitnessFamily as SparseWitnessFamily<L>>::START + local_row,
             ),
             workspace,
         )
@@ -1038,18 +1059,19 @@ impl<const L: usize> SparseWitnessFamily<L> for SparseCarryWitnessFamily {
     const START: u32 = sparse_radix_task_count<L>()
     const ROWS: u32 = sparse_carry_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         decode_sparse_carry_witness_row<L, WORKSPACE_WORDS>(
             sparse_transition_task_at<L>(
-                <SparseCarryWitnessFamily as SparseWitnessFamily<L>>::START
-                    + local_row,
+                <SparseCarryWitnessFamily as SparseWitnessFamily<L>>::START + local_row,
             ),
             workspace,
         )
@@ -1057,23 +1079,23 @@ impl<const L: usize> SparseWitnessFamily<L> for SparseCarryWitnessFamily {
 }
 
 impl<const L: usize> SparseWitnessFamily<L> for SparseProductWitnessFamily {
-    const START: u32 = sparse_radix_task_count<L>()
-        + sparse_carry_task_count<L>()
+    const START: u32 = sparse_radix_task_count<L>() + sparse_carry_task_count<L>()
     const ROWS: u32 = sparse_product_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         decode_sparse_product_witness_row<L, WORKSPACE_WORDS>(
             current,
             sparse_transition_task_at<L>(
-                <SparseProductWitnessFamily as SparseWitnessFamily<L>>::START
-                    + local_row,
+                <SparseProductWitnessFamily as SparseWitnessFamily<L>>::START + local_row,
             ),
             workspace,
         )
@@ -1086,19 +1108,20 @@ impl<const L: usize> SparseWitnessFamily<L> for SparseRoundWitnessFamily {
         + sparse_product_task_count<L>()
     const ROWS: u32 = sparse_round_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         decode_sparse_round_witness_row<L, WORKSPACE_WORDS>(
             current,
             sparse_transition_task_at<L>(
-                <SparseRoundWitnessFamily as SparseWitnessFamily<L>>::START
-                    + local_row,
+                <SparseRoundWitnessFamily as SparseWitnessFamily<L>>::START + local_row,
             ),
             workspace,
         )
@@ -1112,19 +1135,20 @@ impl<const L: usize> SparseWitnessFamily<L> for SparseLinearWitnessFamily {
         + sparse_round_task_count<L>()
     const ROWS: u32 = sparse_linear_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         decode_sparse_linear_witness_row<L, WORKSPACE_WORDS>(
             point,
             sparse_transition_task_at<L>(
-                <SparseLinearWitnessFamily as SparseWitnessFamily<L>>::START
-                    + local_row,
+                <SparseLinearWitnessFamily as SparseWitnessFamily<L>>::START + local_row,
             ),
             workspace,
         )
@@ -1139,19 +1163,20 @@ impl<const L: usize> SparseWitnessFamily<L> for SparseBoundaryWitnessFamily {
         + sparse_linear_task_count<L>()
     const ROWS: u32 = sparse_boundary_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         decode_sparse_boundary_witness_row<L, WORKSPACE_WORDS>(
             current,
             sparse_transition_task_at<L>(
-                <SparseBoundaryWitnessFamily as SparseWitnessFamily<L>>::START
-                    + local_row,
+                <SparseBoundaryWitnessFamily as SparseWitnessFamily<L>>::START + local_row,
             ),
             workspace,
         )
@@ -1162,16 +1187,20 @@ impl<const L: usize> SparseWitnessFamily<L> for SparsePaddingWitnessFamily {
     const START: u32 = sparse_transition_task_count<L>()
     const ROWS: u32 = sparse_transition_trace_length<L>() - sparse_transition_task_count<L>()
     fn decode<const WORKSPACE_WORDS: usize>(
-        _ point: ComplexFixed<L>, _ current: ComplexFixed<L>, _ local_row: u32,
+        _ point: ComplexFixed<L>,
+        _ current: ComplexFixed<L>,
+        _ local_row: u32,
         _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     ) -> SparseWitnessRow
     where
-        L > 1, WORKSPACE_WORDS > 0,
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        L > 1,
+        WORKSPACE_WORDS > 0,
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         complete_sparse_witness_row<L, WORKSPACE_WORDS>(
-            empty_sparse_row<BabyBear>(), true, workspace,
+            empty_sparse_row<BabyBear>(),
+            true,
+            workspace,
         )
     }
 }
@@ -1179,10 +1208,7 @@ impl<const L: usize> SparseWitnessFamily<L> for SparsePaddingWitnessFamily {
 /// Streaming interpretation of a canonical Fe record into one row of a
 /// column-major GPU matrix. The derived `CanonicalWords` implementation owns
 /// field order; this writer owns only physical placement.
-struct ColumnMajorWordWriter<
-    const ROWS: usize,
-    const OUTPUT_WORDS: usize,
-> {
+struct ColumnMajorWordWriter<const ROWS: usize, const OUTPUT_WORDS: usize> {
     output: StorageBuffer<u32, OUTPUT_WORDS>,
     row: u32,
     column_start: u32,
@@ -1190,15 +1216,12 @@ struct ColumnMajorWordWriter<
     width: u32,
     valid: bool,
 }
-impl<
-    const ROWS: usize,
-    const OUTPUT_WORDS: usize,
-> core::marker::Copy for ColumnMajorWordWriter<ROWS, OUTPUT_WORDS> {}
+impl<const ROWS: usize, const OUTPUT_WORDS: usize> core::marker::Copy for ColumnMajorWordWriter<
+    ROWS,
+    OUTPUT_WORDS,
+> {}
 
-impl<
-    const ROWS: usize,
-    const OUTPUT_WORDS: usize,
-> ColumnMajorWordWriter<ROWS, OUTPUT_WORDS> {
+impl<const ROWS: usize, const OUTPUT_WORDS: usize> ColumnMajorWordWriter<ROWS, OUTPUT_WORDS> {
     fn new(
         _ output: StorageBuffer<u32, OUTPUT_WORDS>,
         _ row: u32,
@@ -1220,10 +1243,10 @@ impl<
     }
 }
 
-impl<
-    const ROWS: usize,
-    const OUTPUT_WORDS: usize,
-> WordSink for ColumnMajorWordWriter<ROWS, OUTPUT_WORDS> {
+impl<const ROWS: usize, const OUTPUT_WORDS: usize> WordSink for ColumnMajorWordWriter<
+    ROWS,
+    OUTPUT_WORDS,
+> {
     fn write(self, _ value: u32) -> Self {
         if !self.valid || self.cursor >= self.width {
             return Self {
@@ -1270,13 +1293,37 @@ impl<
     }
 }
 
+/// Canonical base-field embedding into `BabyBearExt4` storage. A caller emits
+/// one BabyBear word, while the underlying sink receives the four canonical
+/// extension coefficients `(value, 0, 0, 0)`. This lets deterministic plans
+/// execute in the base field without constructing an extension-field array.
+struct BabyBearExt4EmbeddingSink<W: WordSink> { writer: W }
+impl<W: WordSink> core::marker::Copy for BabyBearExt4EmbeddingSink<W> {}
+
+impl<W: WordSink> BabyBearExt4EmbeddingSink<W> {
+    fn new(_ writer: W) -> Self {
+        Self { writer: writer }
+    }
+
+    fn finish(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: WordSink> WordSink for BabyBearExt4EmbeddingSink<W> {
+    fn write(self, _ value: u32) -> Self {
+        Self { writer: self.writer.write(value).write(0).write(0).write(0) }
+    }
+
+    fn reject(self) -> Self {
+        Self { writer: self.writer.reject() }
+    }
+}
+
 /// Streaming interpretation from one row of a column-major GPU matrix. It is
 /// the read-side dual of `ColumnMajorWordWriter`, so later actor passes consume
 /// the exact nominal records emitted by earlier passes.
-struct ColumnMajorWordReader<
-    const ROWS: usize,
-    const INPUT_WORDS: usize,
-> {
+struct ColumnMajorWordReader<const ROWS: usize, const INPUT_WORDS: usize> {
     input: StorageBuffer<u32, INPUT_WORDS>,
     row: u32,
     column_start: u32,
@@ -1284,15 +1331,12 @@ struct ColumnMajorWordReader<
     width: u32,
     valid: bool,
 }
-impl<
-    const ROWS: usize,
-    const INPUT_WORDS: usize,
-> core::marker::Copy for ColumnMajorWordReader<ROWS, INPUT_WORDS> {}
+impl<const ROWS: usize, const INPUT_WORDS: usize> core::marker::Copy for ColumnMajorWordReader<
+    ROWS,
+    INPUT_WORDS,
+> {}
 
-impl<
-    const ROWS: usize,
-    const INPUT_WORDS: usize,
-> ColumnMajorWordReader<ROWS, INPUT_WORDS> {
+impl<const ROWS: usize, const INPUT_WORDS: usize> ColumnMajorWordReader<ROWS, INPUT_WORDS> {
     fn new(
         _ input: StorageBuffer<u32, INPUT_WORDS>,
         _ row: u32,
@@ -1314,10 +1358,10 @@ impl<
     }
 }
 
-impl<
-    const ROWS: usize,
-    const INPUT_WORDS: usize,
-> WordSource for ColumnMajorWordReader<ROWS, INPUT_WORDS> {
+impl<const ROWS: usize, const INPUT_WORDS: usize> WordSource for ColumnMajorWordReader<
+    ROWS,
+    INPUT_WORDS,
+> {
     fn read(self) -> WordRead<Self> {
         if !self.valid || self.cursor >= self.width {
             return WordRead {
@@ -1385,9 +1429,7 @@ fn decode_column_major_value<
     let mut value = initial
     let reader = decode_canonical_words(
         mut value,
-        ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(
-            input, row, column_start, T::WORDS,
-        ),
+        ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(input, row, column_start, T::WORDS),
     )
     WorkspaceDecoded { value: value, valid: reader.finish() }
 }
@@ -1404,74 +1446,61 @@ fn decode_default_column_major_value<
     let mut value = <T as Default>::default()
     let reader = decode_canonical_words(
         mut value,
-        ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(
-            input, row, column_start, T::WORDS,
-        ),
+        ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(input, row, column_start, T::WORDS),
     )
     WorkspaceDecoded { value: value, valid: reader.finish() }
 }
 
-const CONTROL_WORDS: usize =
-    <SparseControlRow<BabyBear> as CanonicalWords>::WORDS as usize
-const CONTROL_PLAN_WORDS: usize =
-    <SparseControlPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
-const CONTROL_LINK_WORDS: usize =
-    <SparseControlLinkPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
-const WITNESS_WORDS: usize =
-    <SparseTaskRow<BabyBear> as CanonicalWords>::WORDS as usize
-const ARITHMETIC_PLAN_WORDS: usize =
-    <SparseArithmeticPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
-const ARITHMETIC_LINK_WORDS: usize =
-    <SparseArithmeticLinkPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
-const ROUND_PLAN_WORDS: usize =
-    <SparseRoundPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
-const LINEAR_PLAN_WORDS: usize =
-    <SparseLinearPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
-const BOUNDARY_PLAN_WORDS: usize =
-    <SparseBoundaryPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
+const CONTROL_WORDS: usize = <SparseControlRow<BabyBear> as CanonicalWords>::WORDS as usize
+const CONTROL_PLAN_WORDS: usize = <SparseControlPlanWitness<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
+const CONTROL_LINK_WORDS: usize = <SparseControlLinkPlanWitness<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
+const WITNESS_WORDS: usize = <SparseTaskRow<BabyBear> as CanonicalWords>::WORDS as usize
+const ARITHMETIC_PLAN_WORDS: usize = <SparseArithmeticPlanWitness<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
+const ARITHMETIC_LINK_WORDS: usize = <SparseArithmeticLinkPlanWitness<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
+const ROUND_PLAN_WORDS: usize = <SparseRoundPlanWitness<BabyBear> as CanonicalWords>::WORDS as usize
+const LINEAR_PLAN_WORDS: usize = <SparseLinearPlanWitness<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
+const BOUNDARY_PLAN_WORDS: usize = <SparseBoundaryPlanWitness<
+    BabyBear,
+> as CanonicalWords>::WORDS as usize
 
 const CONTROL_START: usize = 0
 const CONTROL_PLAN_START: usize = CONTROL_START + CONTROL_WORDS
 const CONTROL_LINK_START: usize = CONTROL_PLAN_START + CONTROL_PLAN_WORDS
 const WITNESS_START: usize = CONTROL_LINK_START + CONTROL_LINK_WORDS
 const ARITHMETIC_PLAN_START: usize = WITNESS_START + WITNESS_WORDS
-const ARITHMETIC_LINK_START: usize =
-    ARITHMETIC_PLAN_START + ARITHMETIC_PLAN_WORDS
+const ARITHMETIC_LINK_START: usize = ARITHMETIC_PLAN_START + ARITHMETIC_PLAN_WORDS
 const ROUND_PLAN_START: usize = ARITHMETIC_LINK_START + ARITHMETIC_LINK_WORDS
 const LINEAR_PLAN_START: usize = ROUND_PLAN_START + ROUND_PLAN_WORDS
 const BOUNDARY_PLAN_START: usize = LINEAR_PLAN_START + LINEAR_PLAN_WORDS
 static_assert(BOUNDARY_PLAN_START + BOUNDARY_PLAN_WORDS == SPARSE_BASE_AIR_FIELDS)
 
-fn decode_stored_control<
-    const L: usize,
-    const TRACE: usize,
-    const BASE_TRACE_WORDS: usize,
->(
+fn decode_stored_control<const L: usize, const TRACE: usize, const BASE_TRACE_WORDS: usize>(
     _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
     _ row: u32,
 ) -> WorkspaceDecoded<SparseControlRow<BabyBear>>
-where
-    L > 1,
+where L > 1
 {
     if row >= TRACE.downcast_truncate() {
-        return WorkspaceDecoded {
-            value: sparse_padding_control_row<BabyBear>(),
-            valid: true,
-        }
+        return WorkspaceDecoded { value: sparse_padding_control_row<BabyBear>(), valid: true }
     }
-    decode_default_column_major_value<
-        SparseControlRow<BabyBear>, TRACE, BASE_TRACE_WORDS,
-    >(
+    decode_default_column_major_value<SparseControlRow<BabyBear>, TRACE, BASE_TRACE_WORDS>(
         base_trace,
         row,
         CONTROL_START.downcast_truncate(),
     )
 }
 
-fn decode_stored_witness<
-    const TRACE: usize,
-    const BASE_TRACE_WORDS: usize,
->(
+fn decode_stored_witness<const TRACE: usize, const BASE_TRACE_WORDS: usize>(
     _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
     _ row: u32,
 ) -> WorkspaceDecoded<SparseTaskRow<BabyBear>> {
@@ -1479,9 +1508,7 @@ fn decode_stored_witness<
     if row >= TRACE.downcast_truncate() {
         return WorkspaceDecoded { value: initial, valid: true }
     }
-    decode_column_major_value<
-        SparseTaskRow<BabyBear>, TRACE, BASE_TRACE_WORDS,
-    >(
+    decode_column_major_value<SparseTaskRow<BabyBear>, TRACE, BASE_TRACE_WORDS>(
         initial,
         base_trace,
         row,
@@ -1489,10 +1516,7 @@ fn decode_stored_witness<
     )
 }
 
-fn decode_stored_arithmetic_plan<
-    const TRACE: usize,
-    const BASE_TRACE_WORDS: usize,
->(
+fn decode_stored_arithmetic_plan<const TRACE: usize, const BASE_TRACE_WORDS: usize>(
     _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
     _ row: u32,
 ) -> WorkspaceDecoded<SparseArithmeticPlanWitness<BabyBear>> {
@@ -1500,9 +1524,7 @@ fn decode_stored_arithmetic_plan<
     if row >= TRACE.downcast_truncate() {
         return WorkspaceDecoded { value: initial, valid: true }
     }
-    decode_column_major_value<
-        SparseArithmeticPlanWitness<BabyBear>, TRACE, BASE_TRACE_WORDS,
-    >(
+    decode_column_major_value<SparseArithmeticPlanWitness<BabyBear>, TRACE, BASE_TRACE_WORDS>(
         initial,
         base_trace,
         row,
@@ -1527,23 +1549,29 @@ pub fn write_sparse_witness_family_lane<
     _ output: StorageBuffer<u32, OUTPUT_WORDS>,
     _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
     _ invocation: ComputeInvocation,
-) where
+)
+where
     L > 1,
     TRACE > 0,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
-    { OUTPUT_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-    { VALIDITY_WORDS == TRACE },
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    {
+        OUTPUT_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS == TRACE
+    }
 {
     let local_row = invocation.global.x
-    if local_row >= F::ROWS { return }
+    if local_row >= F::ROWS {
+        return
+    }
     let row = F::START + local_row
-    if row >= TRACE.downcast_truncate() { return }
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
 
-    let decoded = F::decode<WORKSPACE_WORDS>(
-        point, current, local_row, workspace,
-    )
+    let decoded = F::decode<WORKSPACE_WORDS>(point, current, local_row, workspace)
     let writer = encode_canonical_words(
         ref decoded.value,
         ColumnMajorWordWriter<TRACE, OUTPUT_WORDS>::new(
@@ -1553,9 +1581,581 @@ pub fn write_sparse_witness_family_lane<
             WITNESS_WORDS.downcast_truncate(),
         ),
     )
-    let valid = validity.load(index: row) == 1
+    let valid = validity.load(index: row) == 1 && decoded.valid && writer.finish()
+    validity.store(index: row, value: if valid { 1 } else { 0 })
+}
+
+const PRODUCT_INTERACTION_WORDS: usize = <SparseProductInteractionRow<
+    BabyBearExt4,
+> as CanonicalWords>::WORDS as usize
+const ROUND_INTERACTION_WORDS: usize = <SparseRoundInteractionRow<
+    BabyBearExt4,
+> as CanonicalWords>::WORDS as usize
+const LINEAR_INTERACTION_WORDS: usize = <SparseLinearInteractionRow<
+    BabyBearExt4,
+> as CanonicalWords>::WORDS as usize
+const BOUNDARY_INTERACTION_WORDS: usize = <SparseBoundaryInteractionRow<
+    BabyBearExt4,
+> as CanonicalWords>::WORDS as usize
+const PRODUCT_INTERACTION_START: usize = 0
+const ROUND_INTERACTION_START: usize = PRODUCT_INTERACTION_START + PRODUCT_INTERACTION_WORDS
+const LINEAR_INTERACTION_START: usize = ROUND_INTERACTION_START + ROUND_INTERACTION_WORDS
+const BOUNDARY_INTERACTION_START: usize = LINEAR_INTERACTION_START + LINEAR_INTERACTION_WORDS
+static_assert(BOUNDARY_INTERACTION_START + BOUNDARY_INTERACTION_WORDS
+    == SPARSE_INTERACTION_AIR_FIELDS)
+
+/// Compiler-derived field coordinates for the product interaction segment.
+/// The storage interpreter streams the address plan into its nominal field
+/// instead of materializing the plan as a private array.
+struct ProductInteractionRegions {
+    accumulator: Region<ProductInteractionRegions, BabyBearExt4>,
+    inverses: Region<ProductInteractionRegions, [BabyBearExt4; 2]>,
+    address_plan: Region<
+        ProductInteractionRegions,
+        QuadraticPlanWitness<BabyBearExt4, SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS>,
+    >,
+}
+impl core::marker::Copy for ProductInteractionRegions {}
+derive RegionSchema for ProductInteractionRegions using RegionSchemaProvider
+
+const fn product_interaction_regions() -> ProductInteractionRegions {
+    <ProductInteractionRegions as RegionSchema>::regions()
+}
+
+static_assert(<ProductInteractionRegions as RegionSchema>::WORDS as usize
+    == PRODUCT_INTERACTION_WORDS)
+
+fn encode_interaction_bus<T: CanonicalWords, const TRACE: usize, const INTERACTION_WORDS: usize>(
+    _ value: ref T,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ row: u32,
+    _ start: u32,
+) -> bool {
+    encode_canonical_words(
+        ref value,
+        ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(interaction, row, start, T::WORDS),
+    )
+        .finish()
+}
+
+/// Stream the product address plan and its two batch-inversion denominators
+/// from one committed base row. The nominal inverse fields are deliberate
+/// phase-local scratch until the shared scan replaces every denominator with
+/// its inverse. No field inversion occurs in this per-row kernel.
+pub fn prepare_sparse_product_interaction_denominator_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const BASE_TRACE_WORDS: usize,
+    const CHALLENGE_OUTPUT_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const VALIDITY_WORDS: usize,
+>(
+    _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
+    _ challenge_output: StorageBuffer<u32, CHALLENGE_OUTPUT_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    {
+        BASE_TRACE_WORDS >= TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        CHALLENGE_OUTPUT_WORDS
+            >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values())
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS >= TRACE
+    }
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
+    let batch = load_sparse_lde_interaction_challenge_batch<L, TRACE, LDE, CHALLENGE_OUTPUT_WORDS>(
+        challenge_output,
+    )
+    let decoded_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let decoded = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let control = decoded_control.value
+    let row_value = decoded.value
+    let regions = product_interaction_regions()
+    let product_start: u32 = PRODUCT_INTERACTION_START.downcast_truncate()
+    let plan_bounds = region_bounds(regions.address_plan)
+    let plan_writer = ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(
+        interaction,
+        row,
+        product_start + plan_bounds.start,
+        plan_bounds.words,
+    )
+    let planned = sparse_product_copy_plan<
+        QuadraticWordWitnessInterpreter<
+            BabyBearExt4EmbeddingSink<ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>>,
+            SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+        >,
+        BabyBear,
+        L,
+    >(
+        control,
+        row_value,
+        QuadraticWordWitnessInterpreter::new(BabyBearExt4EmbeddingSink::new(plan_writer)),
+    )
+    let ports: [SparseCopyPort<BabyBearExt4>; 2] = [
+        sparse_copy_port_extension(planned.first),
+        sparse_copy_port_extension(planned.second),
+    ]
+    let mut denominators = [BabyBearExt4::one(); 2]
+    write_sparse_copy_interaction_batch_denominators<BabyBearExt4, 2>(
+        batch.value.product,
+        ref ports,
+        mut denominators,
+    )
+    let zero = BabyBearExt4::zero()
+    let accumulator_bounds = region_bounds(regions.accumulator)
+    let accumulator_writer = encode_canonical_words(
+        ref zero,
+        ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(
+            interaction,
+            row,
+            product_start + accumulator_bounds.start,
+            accumulator_bounds.words,
+        ),
+    )
+    let inverse_bounds = region_bounds(regions.inverses)
+    let denominator_writer = encode_canonical_words(
+        ref denominators,
+        ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(
+            interaction,
+            row,
+            product_start + inverse_bounds.start,
+            inverse_bounds.words,
+        ),
+    )
+    let plan_writer = planned.interpreter.finish().finish()
+    let valid = batch.valid
+        && decoded_control.valid
         && decoded.valid
-        && writer.finish()
+        && accumulator_writer.finish()
+        && denominator_writer.finish()
+        && plan_writer.finish()
+    validity.store(index: row, value: if valid { 1 } else { 0 })
+}
+
+/// Derive product-bus inverses and deltas from the committed base row. This
+/// scalar-shaped placement remains only as a compile-scale regression while
+/// the production actor moves to global batch inversion.
+pub fn write_sparse_product_interaction_local_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const BASE_TRACE_WORDS: usize,
+    const CHALLENGE_OUTPUT_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const VALIDITY_WORDS: usize,
+>(
+    _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
+    _ challenge_output: StorageBuffer<u32, CHALLENGE_OUTPUT_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    {
+        BASE_TRACE_WORDS >= TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        CHALLENGE_OUTPUT_WORDS
+            >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values())
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS >= TRACE
+    }
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
+    let batch = load_sparse_lde_interaction_challenge_batch<L, TRACE, LDE, CHALLENGE_OUTPUT_WORDS>(
+        challenge_output,
+    )
+    let decoded = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let control = sparse_control_row_at<BabyBearExt4, L>(row)
+    let row_value = sparse_task_row_extension(decoded.value)
+    let regions = product_interaction_regions()
+    let product_start: u32 = PRODUCT_INTERACTION_START.downcast_truncate()
+    let plan_bounds = region_bounds(regions.address_plan)
+    let plan_writer = ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(
+        interaction,
+        row,
+        product_start + plan_bounds.start,
+        plan_bounds.words,
+    )
+    let planned = sparse_product_copy_plan<
+        QuadraticWordWitnessInterpreter<
+            ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>,
+            SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
+        >,
+        BabyBearExt4,
+        L,
+    >(
+        control,
+        row_value,
+        QuadraticWordWitnessInterpreter::new(plan_writer),
+    )
+    let ports: [SparseCopyPort<BabyBearExt4>; 2] = [planned.first, planned.second]
+    let mut inverses = [BabyBearExt4::zero(); 2]
+    write_sparse_copy_interaction_inverses<BabyBearExt4, 2>(
+        batch.value.product,
+        ref ports,
+        mut inverses,
+    )
+    let delta = sparse_copy_interaction_delta<BabyBearExt4, 2>(ports, inverses)
+    let accumulator_bounds = region_bounds(regions.accumulator)
+    let accumulator_writer = encode_canonical_words(
+        ref delta,
+        ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(
+            interaction,
+            row,
+            product_start + accumulator_bounds.start,
+            accumulator_bounds.words,
+        ),
+    )
+    let inverse_bounds = region_bounds(regions.inverses)
+    let inverse_writer = encode_canonical_words(
+        ref inverses,
+        ColumnMajorWordWriter<TRACE, INTERACTION_WORDS>::new(
+            interaction,
+            row,
+            product_start + inverse_bounds.start,
+            inverse_bounds.words,
+        ),
+    )
+    let plan_writer = planned.interpreter.finish()
+    let valid = batch.valid
+        && decoded.valid
+        && sparse_copy_interaction_witness_valid<BabyBearExt4, 2>(
+            batch.value.product,
+            ports,
+            inverses,
+        )
+        && accumulator_writer.finish()
+        && inverse_writer.finish()
+        && plan_writer.finish()
+    validity.store(index: row, value: if valid { 1 } else { 0 })
+}
+
+/// Reinterpret the committed base-field round plan directly from trace
+/// storage, then lift only its five ports into the extension-field interaction
+/// bus. The authored plan executes once and no private plan or residual array
+/// exists in this kernel.
+pub fn write_sparse_round_interaction_local_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const BASE_TRACE_WORDS: usize,
+    const CHALLENGE_OUTPUT_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const VALIDITY_WORDS: usize,
+>(
+    _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
+    _ challenge_output: StorageBuffer<u32, CHALLENGE_OUTPUT_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    {
+        BASE_TRACE_WORDS >= TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        CHALLENGE_OUTPUT_WORDS
+            >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values())
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS >= TRACE
+    }
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
+    let batch = load_sparse_lde_interaction_challenge_batch<L, TRACE, LDE, CHALLENGE_OUTPUT_WORDS>(
+        challenge_output,
+    )
+    let decoded_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let decoded_next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
+        base_trace,
+        row + 1,
+    )
+    let decoded = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let plan_reader = ColumnMajorWordReader<TRACE, BASE_TRACE_WORDS>::new(
+        base_trace,
+        row,
+        ROUND_PLAN_START.downcast_truncate(),
+        ROUND_PLAN_WORDS.downcast_truncate(),
+    )
+    let planned = sparse_round_copy_plan<
+        QuadraticWordConstraintInterpreter<
+            ColumnMajorWordReader<TRACE, BASE_TRACE_WORDS>,
+            SPARSE_ROUND_PORT_MULTIPLICATIONS,
+        >,
+        BabyBear,
+        L,
+    >(
+        decoded_control.value,
+        decoded_next_control.value,
+        decoded.value,
+        QuadraticWordConstraintInterpreter::new(plan_reader),
+    )
+    let checked = planned.interpreter.finish()
+    let ports: [SparseCopyPort<BabyBearExt4>; 5] = [
+        sparse_copy_port_extension(planned.ports[0]),
+        sparse_copy_port_extension(planned.ports[1]),
+        sparse_copy_port_extension(planned.ports[2]),
+        sparse_copy_port_extension(planned.ports[3]),
+        sparse_copy_port_extension(planned.ports[4]),
+    ]
+    let mut inverses = [BabyBearExt4::zero(); 5]
+    write_sparse_copy_interaction_inverses<BabyBearExt4, 5>(
+        batch.value.round,
+        ref ports,
+        mut inverses,
+    )
+    let mut value = zero_sparse_interaction_trace_row().round
+    value.accumulator = sparse_copy_interaction_delta<BabyBearExt4, 5>(ports, inverses)
+    value.inverses = inverses
+    let valid = validity.load(index: row) == 1
+        && batch.valid
+        && decoded_control.valid
+        && decoded_next_control.valid
+        && decoded.valid
+        && checked.valid
+        && checked.reader.finish()
+        && sparse_copy_interaction_witness_valid<BabyBearExt4, 5>(
+            batch.value.round,
+            ports,
+            inverses,
+        )
+        && encode_interaction_bus<
+            SparseRoundInteractionRow<BabyBearExt4>,
+            TRACE,
+            INTERACTION_WORDS,
+        >(
+            ref value,
+            interaction,
+            row,
+            ROUND_INTERACTION_START.downcast_truncate(),
+        )
+    validity.store(index: row, value: if valid { 1 } else { 0 })
+}
+
+pub fn write_sparse_linear_interaction_local_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const BASE_TRACE_WORDS: usize,
+    const CHALLENGE_OUTPUT_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const VALIDITY_WORDS: usize,
+>(
+    _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
+    _ challenge_output: StorageBuffer<u32, CHALLENGE_OUTPUT_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    {
+        BASE_TRACE_WORDS >= TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        CHALLENGE_OUTPUT_WORDS
+            >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values())
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS >= TRACE
+    }
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
+    let batch = load_sparse_lde_interaction_challenge_batch<L, TRACE, LDE, CHALLENGE_OUTPUT_WORDS>(
+        challenge_output,
+    )
+    let decoded_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let decoded_next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
+        base_trace,
+        row + 1,
+    )
+    let decoded = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let arithmetic = decode_stored_arithmetic_plan<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let plan_reader = ColumnMajorWordReader<TRACE, BASE_TRACE_WORDS>::new(
+        base_trace,
+        row,
+        LINEAR_PLAN_START.downcast_truncate(),
+        LINEAR_PLAN_WORDS.downcast_truncate(),
+    )
+    let planned = sparse_linear_copy_plan<
+        QuadraticWordConstraintInterpreter<
+            ColumnMajorWordReader<TRACE, BASE_TRACE_WORDS>,
+            SPARSE_LINEAR_PORT_MULTIPLICATIONS,
+        >,
+        BabyBear,
+        L,
+    >(
+        decoded_control.value,
+        decoded_next_control.value,
+        decoded.value,
+        arithmetic.value,
+        QuadraticWordConstraintInterpreter::new(plan_reader),
+    )
+    let checked = planned.interpreter.finish()
+    let ports: [SparseCopyPort<BabyBearExt4>; 8] = [
+        sparse_copy_port_extension(planned.ports[0]),
+        sparse_copy_port_extension(planned.ports[1]),
+        sparse_copy_port_extension(planned.ports[2]),
+        sparse_copy_port_extension(planned.ports[3]),
+        sparse_copy_port_extension(planned.ports[4]),
+        sparse_copy_port_extension(planned.ports[5]),
+        sparse_copy_port_extension(planned.ports[6]),
+        sparse_copy_port_extension(planned.ports[7]),
+    ]
+    let mut inverses = [BabyBearExt4::zero(); 8]
+    write_sparse_copy_interaction_inverses<BabyBearExt4, 8>(
+        batch.value.linear,
+        ref ports,
+        mut inverses,
+    )
+    let mut value = zero_sparse_interaction_trace_row().linear
+    value.accumulator = sparse_copy_interaction_delta<BabyBearExt4, 8>(ports, inverses)
+    value.inverses = inverses
+    let valid = validity.load(index: row) == 1
+        && batch.valid
+        && decoded_control.valid
+        && decoded_next_control.valid
+        && decoded.valid
+        && arithmetic.valid
+        && checked.valid
+        && checked.reader.finish()
+        && sparse_copy_interaction_witness_valid<BabyBearExt4, 8>(
+            batch.value.linear,
+            ports,
+            inverses,
+        )
+        && encode_interaction_bus<
+            SparseLinearInteractionRow<BabyBearExt4>,
+            TRACE,
+            INTERACTION_WORDS,
+        >(
+            ref value,
+            interaction,
+            row,
+            LINEAR_INTERACTION_START.downcast_truncate(),
+        )
+    validity.store(index: row, value: if valid { 1 } else { 0 })
+}
+
+pub fn write_sparse_boundary_interaction_local_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const BASE_TRACE_WORDS: usize,
+    const CHALLENGE_OUTPUT_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const VALIDITY_WORDS: usize,
+>(
+    _ base_trace: StorageBuffer<u32, BASE_TRACE_WORDS>,
+    _ challenge_output: StorageBuffer<u32, CHALLENGE_OUTPUT_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    {
+        BASE_TRACE_WORDS >= TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        CHALLENGE_OUTPUT_WORDS
+            >= digest_squeeze_batch_output_words(sparse_interaction_challenge_values())
+    },
+    {
+        INTERACTION_WORDS >= TRACE * SPARSE_INTERACTION_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS >= TRACE
+    }
+{
+    let row = invocation.global.x
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
+    let batch = load_sparse_lde_interaction_challenge_batch<L, TRACE, LDE, CHALLENGE_OUTPUT_WORDS>(
+        challenge_output,
+    )
+    let decoded = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+    let control = sparse_control_row_at<BabyBearExt4, L>(row)
+    let row_value = sparse_task_row_extension(decoded.value)
+    let mut value = zero_sparse_interaction_trace_row().boundary
+    write_sparse_boundary_interaction_row<BabyBearExt4, L>(
+        batch.value.boundary,
+        control,
+        row_value,
+        BabyBearExt4::zero(),
+        mut value,
+    )
+    let evaluated = evaluate_sparse_boundary_interaction_row<BabyBearExt4, L>(
+        BabyBearExt4::one(),
+        batch.value.boundary,
+        control,
+        row_value,
+        sparse_boundary_plan_witness<BabyBearExt4, L>(control, row_value),
+        value,
+    )
+    value.accumulator = evaluated.delta
+    let valid = validity.load(index: row) == 1
+        && batch.valid
+        && decoded.valid
+        && evaluated.valid
+        && evaluated.folded.is_zero()
+        && encode_interaction_bus<
+            SparseBoundaryInteractionRow<BabyBearExt4>,
+            TRACE,
+            INTERACTION_WORDS,
+        >(
+            ref value,
+            interaction,
+            row,
+            BOUNDARY_INTERACTION_START.downcast_truncate(),
+        )
     validity.store(index: row, value: if valid { 1 } else { 0 })
 }
 
@@ -1584,15 +2184,13 @@ pub trait SparseBaseAirPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
 }
 
-struct PartitionEncoding<W: WordSink> {
-    writer: W,
-    valid: bool,
-}
+struct PartitionEncoding<W: WordSink> { writer: W, valid: bool }
 
 pub struct SparseBaseControlPartition {}
 impl SparseBaseAirPartition for SparseBaseControlPartition {
@@ -1600,8 +2198,10 @@ impl SparseBaseAirPartition for SparseBaseControlPartition {
     const START: usize = CONTROL_START
     const WORDS: usize = CONTROL_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1614,15 +2214,13 @@ impl SparseBaseAirPartition for SparseBaseControlPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         let value = sparse_base_air_control_at<L>(row)
-        PartitionEncoding {
-            writer: encode_canonical_words(ref value, writer),
-            valid: true,
-        }
+        PartitionEncoding { writer: encode_canonical_words(ref value, writer), valid: true }
     }
 }
 
@@ -1632,8 +2230,10 @@ impl SparseBaseAirPartition for SparseBaseControlPlanPartition {
     const START: usize = CONTROL_PLAN_START
     const WORDS: usize = CONTROL_PLAN_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1646,15 +2246,13 @@ impl SparseBaseAirPartition for SparseBaseControlPlanPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         let value = sparse_base_air_control_plan_at<L>(row)
-        PartitionEncoding {
-            writer: encode_canonical_words(ref value, writer),
-            valid: true,
-        }
+        PartitionEncoding { writer: encode_canonical_words(ref value, writer), valid: true }
     }
 }
 
@@ -1664,8 +2262,10 @@ impl SparseBaseAirPartition for SparseBaseControlLinkPartition {
     const START: usize = CONTROL_LINK_START
     const WORDS: usize = CONTROL_LINK_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1678,15 +2278,13 @@ impl SparseBaseAirPartition for SparseBaseControlLinkPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
         let value = sparse_base_air_control_link_plan_at<L>(row)
-        PartitionEncoding {
-            writer: encode_canonical_words(ref value, writer),
-            valid: true,
-        }
+        PartitionEncoding { writer: encode_canonical_words(ref value, writer), valid: true }
     }
 }
 
@@ -1696,8 +2294,10 @@ impl SparseBaseAirPartition for SparseBaseArithmeticPlanPartition {
     const START: usize = ARITHMETIC_PLAN_START
     const WORDS: usize = ARITHMETIC_PLAN_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1710,19 +2310,14 @@ impl SparseBaseAirPartition for SparseBaseArithmeticPlanPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
-        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let value = sparse_arithmetic_plan_witness(
-            control.value, witness.value,
-        )
+        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let value = sparse_arithmetic_plan_witness(control.value, witness.value)
         PartitionEncoding {
             writer: encode_canonical_words(ref value, writer),
             valid: control.valid && witness.valid,
@@ -1736,8 +2331,10 @@ impl SparseBaseAirPartition for SparseBaseArithmeticLinkPartition {
     const START: usize = ARITHMETIC_LINK_START
     const WORDS: usize = ARITHMETIC_LINK_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1750,22 +2347,15 @@ impl SparseBaseAirPartition for SparseBaseArithmeticLinkPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
-        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row + 1,
-        )
-        let next_witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(
-            base_trace, row + 1,
-        )
+        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row + 1)
+        let next_witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row + 1)
         let value = sparse_arithmetic_link_plan_witness(
             control.value,
             witness.value,
@@ -1774,8 +2364,7 @@ impl SparseBaseAirPartition for SparseBaseArithmeticLinkPartition {
         )
         PartitionEncoding {
             writer: encode_canonical_words(ref value, writer),
-            valid: control.valid && witness.valid
-                && next_control.valid && next_witness.valid,
+            valid: control.valid && witness.valid && next_control.valid && next_witness.valid,
         }
     }
 }
@@ -1786,8 +2375,10 @@ impl SparseBaseAirPartition for SparseBaseRoundPlanPartition {
     const START: usize = ROUND_PLAN_START
     const WORDS: usize = ROUND_PLAN_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1800,24 +2391,26 @@ impl SparseBaseAirPartition for SparseBaseRoundPlanPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
-        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row + 1,
-        )
-        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let value = sparse_round_plan_witness<BabyBear, L>(
-            control.value, next_control.value, witness.value,
+        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row + 1)
+        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let planned = sparse_round_copy_plan<
+            QuadraticWordWitnessInterpreter<W, SPARSE_ROUND_PORT_MULTIPLICATIONS>,
+            BabyBear,
+            L,
+        >(
+            control.value,
+            next_control.value,
+            witness.value,
+            QuadraticWordWitnessInterpreter::new(writer),
         )
         PartitionEncoding {
-            writer: encode_canonical_words(ref value, writer),
+            writer: planned.interpreter.finish(),
             valid: control.valid && next_control.valid && witness.valid,
         }
     }
@@ -1829,8 +2422,10 @@ impl SparseBaseAirPartition for SparseBaseLinearPlanPartition {
     const START: usize = LINEAR_PLAN_START
     const WORDS: usize = LINEAR_PLAN_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1843,29 +2438,17 @@ impl SparseBaseAirPartition for SparseBaseLinearPlanPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
-        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row + 1,
-        )
-        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let arithmetic = decode_stored_arithmetic_plan<
-            TRACE, BASE_TRACE_WORDS,
-        >(
-            base_trace, row,
-        )
+        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let next_control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row + 1)
+        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let arithmetic = decode_stored_arithmetic_plan<TRACE, BASE_TRACE_WORDS>(base_trace, row)
         let interpreter = interpret_sparse_linear_plan<
-            QuadraticWordWitnessInterpreter<
-                W,
-                SPARSE_LINEAR_PORT_MULTIPLICATIONS,
-            >,
+            QuadraticWordWitnessInterpreter<W, SPARSE_LINEAR_PORT_MULTIPLICATIONS>,
             BabyBear,
             L,
         >(
@@ -1877,8 +2460,7 @@ impl SparseBaseAirPartition for SparseBaseLinearPlanPartition {
         )
         PartitionEncoding {
             writer: interpreter.finish(),
-            valid: control.valid && next_control.valid && witness.valid
-                && arithmetic.valid,
+            valid: control.valid && next_control.valid && witness.valid && arithmetic.valid,
         }
     }
 }
@@ -1889,8 +2471,10 @@ impl SparseBaseAirPartition for SparseBaseBoundaryPlanPartition {
     const START: usize = BOUNDARY_PLAN_START
     const WORDS: usize = BOUNDARY_PLAN_WORDS
     fn encode<
-        const L: usize, const TRACE: usize,
-        const WORKSPACE_WORDS: usize, const BASE_TRACE_WORDS: usize,
+        const L: usize,
+        const TRACE: usize,
+        const WORKSPACE_WORDS: usize,
+        const BASE_TRACE_WORDS: usize,
         W: WordSink,
     >(
         _ point: ComplexFixed<L>,
@@ -1903,19 +2487,14 @@ impl SparseBaseAirPartition for SparseBaseBoundaryPlanPartition {
     where
         L > 1,
         WORKSPACE_WORDS > 0,
-        { BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-        TransitionWitnessRegions<L>::WORDS
-            <= storage_word_capacity<WORKSPACE_WORDS>(),
+        {
+            BASE_TRACE_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+        },
+        TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
     {
-        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(
-            base_trace, row,
-        )
-        let value = sparse_boundary_plan_witness<BabyBear, L>(
-            control.value, witness.value,
-        )
+        let control = decode_stored_control<L, TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let witness = decode_stored_witness<TRACE, BASE_TRACE_WORDS>(base_trace, row)
+        let value = sparse_boundary_plan_witness<BabyBear, L>(control.value, witness.value)
         PartitionEncoding {
             writer: encode_canonical_words(ref value, writer),
             valid: control.valid && witness.valid,
@@ -1947,17 +2526,23 @@ pub fn write_sparse_base_air_partition_lane<
     _ output: StorageBuffer<u32, OUTPUT_WORDS>,
     _ validity: StorageBuffer<u32, VALIDITY_WORDS>,
     _ invocation: ComputeInvocation,
-) where
+)
+where
     L > 1,
     TRACE > 0,
     WORKSPACE_WORDS > 0,
-    TransitionWitnessRegions<L>::WORDS
-        <= storage_word_capacity<WORKSPACE_WORDS>(),
-    { OUTPUT_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS },
-    { VALIDITY_WORDS == TRACE },
+    TransitionWitnessRegions<L>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    {
+        OUTPUT_WORDS == TRACE * SPARSE_BASE_AIR_FIELDS
+    },
+    {
+        VALIDITY_WORDS == TRACE
+    }
 {
     let row = invocation.global.x
-    if row >= TRACE.downcast_truncate() { return }
+    if row >= TRACE.downcast_truncate() {
+        return
+    }
 
     let trace: u32 = TRACE.downcast_truncate()
     let trace_shape_valid = trace == sparse_transition_trace_length<L>()
@@ -1973,14 +2558,7 @@ pub fn write_sparse_base_air_partition_lane<
         WORKSPACE_WORDS,
         OUTPUT_WORDS,
         ColumnMajorWordWriter<TRACE, OUTPUT_WORDS>,
-    >(
-        point,
-        current,
-        row,
-        workspace,
-        output,
-        writer,
-    )
+    >(point, current, row, workspace, output, writer)
     let writer_valid = encoded.writer.finish()
     let prior_valid = if P::INDEX == 0 {
         true
