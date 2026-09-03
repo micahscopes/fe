@@ -775,15 +775,48 @@ function writeUniformBuffer(device, uniformBuffer, span, members, uniforms) {
 /** Validate and translate the compiler-derived Fe raster policy into the
  * corresponding WebGPU descriptor vocabulary. No application state or
  * rendering choice is made here. */
+function attachmentOps(policy, label) {
+  if (!policy || !["clear", "load"].includes(policy.first_load) ||
+      !["clear", "load"].includes(policy.following_load) ||
+      !["store", "discard"].includes(policy.store)) {
+    throw new Error(`fe render runtime: invalid derived ${label} attachment operations`);
+  }
+  return {
+    firstLoad: policy.first_load,
+    followingLoad: policy.following_load,
+    store: policy.store,
+  };
+}
+
 function rasterPlan(surface) {
   const policy = surface?.pipeline?.raster;
-  if (!policy) return { sampleCount: 1, cullMode: "none", depth: null };
+  if (!policy) {
+    return {
+      sampleCount: 1,
+      cullMode: "none",
+      color: {
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        firstLoad: "clear",
+        followingLoad: "load",
+        store: "store",
+      },
+      depth: null,
+    };
+  }
   if (policy.sample_count !== 1 && policy.sample_count !== 4) {
     throw new Error("fe render runtime: invalid derived raster sample count");
   }
   if (!["none", "front", "back"].includes(policy.cull_mode)) {
     throw new Error("fe render runtime: invalid derived raster cull mode");
   }
+  const clear = policy.color?.clear;
+  if (!clear || ![clear.r, clear.g, clear.b, clear.a].every(Number.isFinite)) {
+    throw new Error("fe render runtime: invalid derived color clear value");
+  }
+  const color = {
+    clearValue: { r: clear.r, g: clear.g, b: clear.b, a: clear.a },
+    ...attachmentOps(policy.color.ops, "color"),
+  };
   const format = {
     depth24_plus: "depth24plus",
     depth32_float: "depth32float",
@@ -801,6 +834,7 @@ function rasterPlan(surface) {
         compare,
         writeEnabled: policy.depth.write_enabled === true,
         clearValue: policy.depth.clear,
+        ...attachmentOps(policy.depth.ops, "depth"),
       }
     : null;
   if (depth && (
@@ -809,7 +843,7 @@ function rasterPlan(surface) {
   )) {
     throw new Error("fe render runtime: invalid derived depth policy");
   }
-  return { sampleCount: policy.sample_count, cullMode: policy.cull_mode, depth };
+  return { sampleCount: policy.sample_count, cullMode: policy.cull_mode, color, depth };
 }
 
 function releaseRasterAttachments(gpu) {
@@ -1945,9 +1979,11 @@ export class FeSurfaceElement extends HTMLElement {
           const multisampleView = gpu.multisampleTexture?.createView() ?? null;
           const colorAttachment = {
             view: multisampleView ?? targetView,
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            loadOp: rendered ? "load" : "clear",
-            storeOp: "store",
+            clearValue: gpu.raster.color.clearValue,
+            loadOp: rendered
+              ? gpu.raster.color.followingLoad
+              : gpu.raster.color.firstLoad,
+            storeOp: gpu.raster.color.store,
           };
           if (multisampleView) colorAttachment.resolveTarget = targetView;
           const usesDepth = Boolean(record.pass.draw_vertices && gpu.depthTexture);
@@ -1955,8 +1991,10 @@ export class FeSurfaceElement extends HTMLElement {
             ? {
                 view: gpu.depthTexture.createView(),
                 depthClearValue: gpu.raster.depth.clearValue,
-                depthLoadOp: depthRendered ? "load" : "clear",
-                depthStoreOp: "store",
+                depthLoadOp: depthRendered
+                  ? gpu.raster.depth.followingLoad
+                  : gpu.raster.depth.firstLoad,
+                depthStoreOp: gpu.raster.depth.store,
               }
             : undefined;
           const render = encoder.beginRenderPass({

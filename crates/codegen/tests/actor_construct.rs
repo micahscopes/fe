@@ -325,11 +325,24 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
         &serde_json::json!({
             "sample_count": 4,
             "cull_mode": "none",
+            "color": {
+                "clear": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
+                "ops": {
+                    "first_load": "clear",
+                    "following_load": "load",
+                    "store": "store",
+                },
+            },
             "depth": {
                 "format": "depth24_plus",
                 "compare": "less_equal",
                 "write_enabled": true,
                 "clear": 1.0,
+                "ops": {
+                    "first_load": "clear",
+                    "following_load": "load",
+                    "store": "store",
+                },
             },
         }),
         "the manifest plan is the generic projection of the Fe CTFE value",

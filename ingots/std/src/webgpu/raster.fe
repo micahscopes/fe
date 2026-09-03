@@ -15,7 +15,39 @@ pub struct RasterConfiguration {}
 pub struct RasterPlan {
     sample_count: u32,
     cull_mode: FaceCull,
+    color: ColorAttachmentPlan,
     depth: DepthAttachment,
+}
+
+pub enum AttachmentLoad {
+    Clear,
+    Load,
+}
+
+pub enum AttachmentStore {
+    Store,
+    Discard,
+}
+
+/// Attachment operations for the first and following render passes in one
+/// ordered Fe actor graph. The fixed host realizes these values; it does not
+/// choose clear/preserve/discard behavior from local booleans.
+pub struct AttachmentOps {
+    first_load: AttachmentLoad,
+    following_load: AttachmentLoad,
+    store: AttachmentStore,
+}
+
+pub struct ClearColor {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+pub struct ColorAttachmentPlan {
+    clear: ClearColor,
+    ops: AttachmentOps,
 }
 
 pub enum FaceCull {
@@ -42,6 +74,7 @@ pub struct DepthPlan {
     compare: DepthCompare,
     write_enabled: bool,
     clear: f32,
+    ops: AttachmentOps,
 }
 
 /// Optional depth attachment in the physical plan. Keeping this as the
@@ -49,6 +82,11 @@ pub struct DepthPlan {
 /// null/value transport instead of teaching the compiler a raster-only enum.
 pub type DepthAttachment = Option<DepthPlan>
 
+impl Copy for AttachmentLoad {}
+impl Copy for AttachmentStore {}
+impl Copy for AttachmentOps {}
+impl Copy for ClearColor {}
+impl Copy for ColorAttachmentPlan {}
 impl Copy for FaceCull {}
 impl Copy for DepthFormat {}
 impl Copy for DepthCompare {}
@@ -62,6 +100,14 @@ pub trait RasterPolicy {
 
 pub trait RasterDepthPolicy {
     const fn depth() -> DepthAttachment
+}
+
+pub trait RasterColorPolicy {
+    const fn color() -> ColorAttachmentPlan
+}
+
+pub trait RasterAttachmentPolicy {
+    const fn ops() -> AttachmentOps
 }
 
 pub trait EnabledDepthFormat {
@@ -87,7 +133,34 @@ pub trait RasterFaceCull {
 
 /// Orthogonal type-level raster state. Its implementation below is the sole
 /// composition rule: each axis contributes only its own denotation.
-pub struct RasterState<Depth, Samples, Cull> {}
+pub struct RasterState<Depth, Samples, Cull, Color> {}
+
+/// Clear an attachment on the first raster pass, preserve it between
+/// following passes, and retain its final contents.
+pub struct ClearThenLoadStore {}
+
+impl RasterAttachmentPolicy for ClearThenLoadStore {
+    const fn ops() -> AttachmentOps {
+        AttachmentOps {
+            first_load: AttachmentLoad::Clear,
+            following_load: AttachmentLoad::Load,
+            store: AttachmentStore::Store,
+        }
+    }
+}
+
+/// Opaque black presentation target with independently selected attachment
+/// lifecycle. Additional clear-color policies remain ordinary Fe types.
+pub struct OpaqueBlack<Ops> {}
+
+impl<Ops: RasterAttachmentPolicy> RasterColorPolicy for OpaqueBlack<Ops> {
+    const fn color() -> ColorAttachmentPlan {
+        ColorAttachmentPlan {
+            clear: ClearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            ops: Ops::ops(),
+        }
+    }
+}
 
 pub struct NoDepth {}
 
@@ -97,12 +170,13 @@ impl RasterDepthPolicy for NoDepth {
     }
 }
 
-pub struct DepthTest<Format, Compare, Write> {}
+pub struct DepthTest<Format, Compare, Write, Ops> {}
 
-impl<Format, Compare, Write> RasterDepthPolicy for DepthTest<Format, Compare, Write>
+impl<Format, Compare, Write, Ops> RasterDepthPolicy for DepthTest<Format, Compare, Write, Ops>
     where Format: EnabledDepthFormat,
           Compare: RasterDepthCompare,
-          Write: RasterDepthWrite
+          Write: RasterDepthWrite,
+          Ops: RasterAttachmentPolicy
 {
     const fn depth() -> DepthAttachment {
         Option::Some(DepthPlan {
@@ -110,6 +184,7 @@ impl<Format, Compare, Write> RasterDepthPolicy for DepthTest<Format, Compare, Wr
             compare: Compare::compare(),
             write_enabled: Write::enabled(),
             clear: Compare::clear(),
+            ops: Ops::ops(),
         })
     }
 }
@@ -194,15 +269,17 @@ impl RasterFaceCull for CullBack {
     const fn cull() -> FaceCull { FaceCull::Back }
 }
 
-impl<Depth, Samples, Cull> RasterPolicy for RasterState<Depth, Samples, Cull>
+impl<Depth, Samples, Cull, Color> RasterPolicy for RasterState<Depth, Samples, Cull, Color>
     where Depth: RasterDepthPolicy,
           Samples: RasterSamples,
-          Cull: RasterFaceCull
+          Cull: RasterFaceCull,
+          Color: RasterColorPolicy
 {
     const fn plan() -> RasterPlan {
         RasterPlan {
             sample_count: Samples::sample_count(),
             cull_mode: Cull::cull(),
+            color: Color::color(),
             depth: Depth::depth(),
         }
     }
@@ -215,17 +292,24 @@ pub const fn raster_plan<P: RasterPolicy>() -> RasterPlan {
 
 /// Conventional forward-Z, double-sided, four-sample surface rendering.
 pub type Depth24LessEqualMsaa4 = RasterState<
-    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite>,
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite, ClearThenLoadStore>,
     Samples4,
     CullNone,
+    OpaqueBlack<ClearThenLoadStore>,
 >
 
 /// Conventional forward-Z, double-sided, single-sample surface rendering.
 pub type Depth24LessEqual = RasterState<
-    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite>,
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite, ClearThenLoadStore>,
     Samples1,
     CullNone,
+    OpaqueBlack<ClearThenLoadStore>,
 >
 
 /// Explicit color-only raster state.
-pub type ColorOnly = RasterState<NoDepth, Samples1, CullNone>
+pub type ColorOnly = RasterState<
+    NoDepth,
+    Samples1,
+    CullNone,
+    OpaqueBlack<ClearThenLoadStore>,
+>
