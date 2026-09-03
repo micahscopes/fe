@@ -1742,9 +1742,13 @@ All four are focused ingots and may remain so permanently.
   15:29.37 wall-clock
   including the Cargo harness, and every emitted shader parsed and validated
   under the browser WGSL profile. A preceding identical lowering peaked at
-  1,023,620 KiB RSS. The production-sized graph has not yet executed
-  numerically on WebGPU, so this evidence does not replace the existing
-  direct-DFT and llvmpipe oracles or close G-NTT.
+  1,023,620 KiB RSS. The complete 40-stage production compute graph now
+  executes on physical AMD RDNA 3 through Chrome 149, with the five repeated NTT,
+  commitment, tree, and transcript stages preserving their exact authored
+  repetition counts. An instrumented run completed all compute work in 248.6
+  ms without validation errors or device loss. The independent production
+  receipt comparison below preserves the direct-DFT and bigint oracles rather
+  than treating execution alone as G-NTT closure.
 - **G-LAYOUT, partial.** Commits `5400eff03` and `36f52db3b` make region
   coordinates schema-branded, require nested layouts to fit through const
   predicates, and make reusable cyclic lane indices unforgeable. The
@@ -1788,9 +1792,12 @@ All four are focused ingots and may remain so permanently.
   browser WGSL validated and every actor resource plus compiler state within
   the eight-storage-buffer limit. The standalone status resource is gone;
   phase validity travels through retired Fe-owned storage and the ordered root
-  node. The production-sized graph has not yet executed numerically on WebGPU
-  or in Chrome. Loading the challenge carrier into the generated interaction
-  trace, its LDE, and its ordered commitment remain open.
+  node. The production-sized graph now executes numerically in Chrome through
+  its generated challenge carrier and interaction trace. All 1,064,960
+  committed base-trace words match the independent bigint model, all 4,096
+  final interaction-row validity words accept, and the trailing Fe phase
+  receipt accepts. Interaction-trace LDE and its ordered commitment remain
+  open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
   Fiat-Shamir sampling, and canonical encoding exist. The four-query regression
@@ -1830,8 +1837,15 @@ All four are focused ingots and may remain so permanently.
   mutation and recovery resubmissions took about 51 ms and 79 ms on the test
   browser, with no console, validation, device-loss, or pipeline errors. These
   are end-to-end checkpoint timings, not a complete proof or Wasm comparison.
-  Interactive point and disk selection, full browser proof generation, Wasm
-  verification, and revm-Wasm verification remain.
+  The complete production sparse AIR surface now also executes 40 compute
+  stages plus paint on physical AMD RDNA 3 through Chrome 149. Every stage
+  carries an Fe-authored `CooperativeDispatch` boundary, while repeated work
+  stays batched within the stage. This eliminates the device loss caused by
+  one protocol-sized command buffer without a demo-specific host branch. A
+  typed browser readback matches all 1,064,960 base-trace words against the
+  independent bigint oracle and confirms every interaction-row and final phase
+  validity word. Interactive point and disk selection, complete proof receipt
+  encoding, Wasm verification, and revm-Wasm verification remain.
 - **G-BROWSER shader materialization boundary, active.** The detailed boundary
   audit is recorded at
   `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.
@@ -1889,9 +1903,9 @@ All four are focused ingots and may remain so permanently.
     newly legal ABI cannot create a late backend failure. The production shader
     falls from 639,232 to 599,015 WGSL bytes, from 17,487 to 16,461 Naga
     expressions, and from 91,217 to 87,502 SPIR-V words. Its real 1,147-byte
-    private heap is unchanged. Release compilation, Naga validation, WGSL, and
-    SPIR-V emission are green; external Chrome execution of this exact artifact
-    remains the next hardware gate.
+    private heap is unchanged. Release compilation, Naga validation, WGSL,
+    SPIR-V emission, and external Chrome execution of this exact artifact are
+    green.
   - [ ] Separate statically bounded scratch from genuinely dynamic arena
     allocation, then choose private, workgroup, or storage placement through
     explicit target capabilities and size limits.
@@ -1917,6 +1931,13 @@ All four are focused ingots and may remain so permanently.
     non-overlapping single-block lifetimes, with an independent one-allocation,
     no-byte-arena, SPIR-V regression. Commit `dd2f73554` lands the Fe streaming
     interpretation and focused production gates.
+  - [x] Stream the boundary interaction from its already committed base-field
+    plan as well. The focused boundary shader falls from 464,428 to 74,673
+    WGSL bytes, an 83.9 percent reduction. The complete production bundle falls
+    from 2,398,461 to 2,008,916 compiler-reported WGSL bytes, with 2,007,801
+    unique emitted shader bytes. The 41-pass release lowering is clean, and the
+    shader assets remain byte-identical when only actor scheduling metadata
+    changes.
   - [x] Execute the focused production round-interaction actor on physical AMD
     RDNA 3 WebGPU through Chrome 149 before returning to the full page. The
     one-word health control returned 42 without device loss. The exact
@@ -1928,6 +1949,16 @@ All four are focused ingots and may remain so permanently.
     no console, scoped, uncaptured, or device-loss error. This is a physical
     execution and transport gate over zero-initialized inputs, not the pending
     independent numerical comparison for the complete 41-pass graph.
+  - [x] Execute and independently check the complete 41-pass production graph
+    in physical Chrome. A manifest-derived prefix observer first proved that
+    all 40 compute stages complete against one shared resource set. The normal
+    render runtime then reached `live` after the actor wrapped each fixed stage
+    in `CooperativeDispatch<_, 1>` and each repeated stage in one full-repeat
+    cooperative batch. Typed readback compares 1,064,960 base-trace words with
+    the independent bigint model, checks 4,096 interaction validity words, and
+    checks the final phase receipt. That comparison also found and corrected a
+    stale oracle index which read `step` at word 34 instead of nominal `weight`
+    at word 37.
   - [ ] Remeasure each rung using rooted Sonatina instructions, surviving
     inlined instructions, Naga expressions, arena bytes, WGSL/SPIR-V bytes,
     release compile time, and browser execution. Do not retain an optimization
