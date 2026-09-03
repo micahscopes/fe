@@ -88,16 +88,27 @@ use poseidon_merkle_webgpu::{
 }
 use std::conal::{Pair, RBin}
 use std::webgpu::{
+    CooperativeDispatch as Cooperate,
     ComputeInvocation,
     ComputeSurface as Kernel,
-    FixedDispatch as Grid,
+    FixedDispatch,
     FragmentSurface as Pixel,
     GpuProgram as Program,
-    RepeatedDispatch as Repeat,
+    RepeatedDispatch,
     StorageBuffer as Shared,
     Workgroup as Threads,
     WebGpuBackend,
 }
+
+/// Keep every authored proof stage at one queue-ordered submission boundary.
+/// Some browser GPU processes lose the device when the entire protocol graph
+/// is encoded into one command buffer. This Fe-owned physical policy preserves
+/// the dependency graph while letting the fixed host yield between stages.
+type Grid<const X: usize, const Y: usize, const Z: usize> = Cooperate<FixedDispatch<X, Y, Z>, 1>
+type Repeat<const X: usize, const Y: usize, const Z: usize, const N: usize> = Cooperate<
+    RepeatedDispatch<X, Y, Z, N>,
+    N,
+>
 
 const THREADS: usize = 64
 const TRACE_GROUPS: usize = (PRODUCTION_TRACE_LENGTH + THREADS - 1) / THREADS
