@@ -14,7 +14,7 @@ use crate::{
     ArgumentDef, BindgenError, CallbackDef, CollectionKind, ConstructorDef, DefaultValueDef,
     ExtendedAttributesDef, HostAbiLowering, HostAbiOptions, InterfaceDef, IteratorItemBinding,
     Member, NamespaceDef, NamespaceMember, OperationDef, TypeRef, World, constructor_import_name,
-    lower_host_abi_with_metadata, snake_case,
+    inherited_dictionary_members, lower_host_abi_with_metadata, snake_case,
 };
 
 pub const HOST_RUNTIME_CONTRACT: &str = "fe:host-runtime/v1";
@@ -580,6 +580,23 @@ pub fn emit_js_canonical_adapter(
         "  const sameObjectCache = new WeakMap();\n\
          \x20 const requireLegacyUnforgeable = (target, name) => { const descriptor = Object.getOwnPropertyDescriptor(target, name); if (!descriptor || descriptor.configurable) throw new TypeError(`LegacyUnforgeable property ${name} must be own and non-configurable`); };\n",
     );
+    let mut has_wide_integer = false;
+    visit_world_types(world, &mut |type_| {
+        has_wide_integer |= matches!(type_, TypeRef::I64 | TypeRef::U64);
+    });
+    if has_wide_integer {
+        output.push_str(
+            "  const fromFeSafeInteger = (value, unsigned) => {\n\
+             \x20   if (typeof value === \"number\") {\n\
+             \x20     if (!Number.isSafeInteger(value) || (unsigned && value < 0)) throw new RangeError(\"Web IDL integer is outside JavaScript's exact integer range\");\n\
+             \x20     return value;\n\
+             \x20   }\n\
+             \x20   const integer = BigInt(value);\n\
+             \x20   if (integer < (unsigned ? 0n : -9007199254740991n) || integer > 9007199254740991n) throw new RangeError(\"Web IDL integer is outside JavaScript's exact integer range\");\n\
+             \x20   return Number(integer);\n\
+             \x20 };\n",
+        );
+    }
     if has_callbacks {
         output.push_str(
             "  const callbackFunctions = new Map();\n\
@@ -771,7 +788,23 @@ pub fn slice_adapter_plan(
 
     let mut sliced_world = world.clone();
     let resources = selection.resources.iter().collect::<BTreeSet<_>>();
-    let types = selection.types.iter().collect::<BTreeSet<_>>();
+    let mut types = selection.types.iter().cloned().collect::<BTreeSet<_>>();
+    // The flattened host ABI intentionally erases dictionary inheritance, but
+    // semantic adapter generation still needs each ancestor to reconstruct
+    // inherited Web IDL fields and defaults. Retain that semantic closure in
+    // the sliced world rather than teaching the transport a second dictionary
+    // model.
+    let mut pending = types.iter().cloned().collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        let Some(dictionary) = world.dictionaries.get(&name) else {
+            continue;
+        };
+        if let Some(parent) = &dictionary.inherits
+            && types.insert(parent.clone())
+        {
+            pending.push(parent.clone());
+        }
+    }
     sliced_world
         .interfaces
         .retain(|name, _| resources.contains(name));
@@ -1179,7 +1212,7 @@ fn scope_dictionary_to_fe(
     body: &str,
 ) -> Result<String, BindgenError> {
     let dictionary = &world.dictionaries[name];
-    let members = dictionary_members(world, dictionary);
+    let members = inherited_dictionary_members(world, dictionary)?;
     let mut converted = body.to_owned();
     let object = members
         .iter()
@@ -1350,7 +1383,10 @@ fn emit_function(
 }
 
 fn from_fe(world: &World, type_: &TypeRef, expression: &str) -> Result<String, BindgenError> {
+    let type_ = crate::resolve_typedef(world, type_);
     Ok(match type_ {
+        TypeRef::I64 => format!("fromFeSafeInteger({expression}, false)"),
+        TypeRef::U64 => format!("fromFeSafeInteger({expression}, true)"),
         TypeRef::Named(name) if world.interfaces.contains_key(name) => {
             format!("runtime.resources.borrow({expression})")
         }
@@ -1383,8 +1419,11 @@ fn from_fe(world: &World, type_: &TypeRef, expression: &str) -> Result<String, B
 }
 
 fn from_fe_owned(world: &World, type_: &TypeRef, expression: &str) -> Result<String, BindgenError> {
+    let type_ = crate::resolve_typedef(world, type_);
     Ok(match type_ {
         TypeRef::Unit => "undefined".to_owned(),
+        TypeRef::I64 => format!("fromFeSafeInteger({expression}, false)"),
+        TypeRef::U64 => format!("fromFeSafeInteger({expression}, true)"),
         TypeRef::Named(name) if world.interfaces.contains_key(name) => {
             format!("runtime.resources.take({expression})")
         }
@@ -1454,7 +1493,7 @@ fn to_fe(world: &World, type_: &TypeRef, expression: &str) -> Result<String, Bin
 
 fn emit_dictionary_helpers(world: &World, output: &mut String) -> Result<(), BindgenError> {
     for dictionary in world.dictionaries.values() {
-        let members = dictionary_members(world, dictionary);
+        let members = inherited_dictionary_members(world, dictionary)?;
         output.push_str(&format!(
             "  const fromFeDictionary_{} = value => ({{",
             dictionary.name
@@ -1502,26 +1541,6 @@ fn emit_dictionary_helpers(world: &World, output: &mut String) -> Result<(), Bin
         output.push_str("});\n");
     }
     Ok(())
-}
-
-fn dictionary_members<'a>(
-    world: &'a World,
-    dictionary: &'a crate::DictionaryDef,
-) -> Vec<&'a crate::DictionaryMemberDef> {
-    let mut lineage = Vec::new();
-    let mut cursor = Some(dictionary);
-    while let Some(current) = cursor {
-        lineage.push(current);
-        cursor = current
-            .inherits
-            .as_ref()
-            .and_then(|parent| world.dictionaries.get(parent));
-    }
-    lineage.reverse();
-    lineage
-        .into_iter()
-        .flat_map(|definition| definition.members.iter())
-        .collect()
 }
 
 fn emit_union_helpers(
