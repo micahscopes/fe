@@ -112,6 +112,9 @@ const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
 /// Prefix for compiler-owned pure Fe predicates that select the active GPU
 /// pass subgraph. The manifest carries only the dense ordinal suffix.
 const TYPED_PASS_ACTIVATION_EXPORT_PREFIX: &str = "fe_pass_activation_v1_";
+/// Prefix for compiler-owned pure Fe decisions that select ahead-of-demand
+/// pipeline preparation. The manifest carries only the dense ordinal suffix.
+const TYPED_PASS_PREPARATION_EXPORT_PREFIX: &str = "fe_pass_preparation_v1_";
 /// Fixed delivery point for one compiler-derived GPU result message. The
 /// authored behavior and message type remain Fe vocabulary; the browser sees
 /// only the canonical `(pointer, length)` transport plus inert resource
@@ -1984,6 +1987,33 @@ fn validate_pass_activation_cycles(passes: &[WebPass]) -> Result<(), WebBundleEr
     Ok(())
 }
 
+fn validate_pass_preparation_cycles(passes: &[WebPass]) -> Result<(), WebBundleError> {
+    let mut index = 0;
+    while index < passes.len() {
+        let Some(cycle) = passes[index].cycle else {
+            index += 1;
+            continue;
+        };
+        let preparation = passes[index].preparation;
+        let mut end = index + 1;
+        while end < passes.len()
+            && passes[end]
+                .cycle
+                .is_some_and(|next| next.group == cycle.group)
+        {
+            if passes[end].preparation != preparation {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor pass cycle {} mixes preparation policies; every member of one ordered cycle must share one policy",
+                    cycle.group
+                )));
+            }
+            end += 1;
+        }
+        index = end;
+    }
+    Ok(())
+}
+
 fn behavior_surface_control_kind(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
@@ -2027,9 +2057,11 @@ fn behavior_surface_policy_ty<'db>(
         })
 }
 
-fn behavior_pass_activation_policy_ty<'db>(
+fn behavior_pass_policy_ty<'db>(
     db: &'db DriverDataBase,
     behavior: Func<'db>,
+    control: GpuControl,
+    effect_name: &str,
 ) -> Result<Option<TyId<'db>>, WebBundleError> {
     let policies = behavior
         .actor_roles(db)
@@ -2039,13 +2071,13 @@ fn behavior_pass_activation_policy_ty<'db>(
         .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
         .filter_map(|ty| {
             let attrs = nominal_attrs(db, ty)?;
-            (attrs.gpu_control(db) == Some(GpuControl::PassActivation)).then_some(ty)
+            (attrs.gpu_control(db) == Some(control)).then_some(ty)
         })
         .map(|ty| {
             let [policy_ty] = ty.generic_args(db) else {
-                return Err(WebBundleError::SurfaceProjection(
-                    "PassActivation must carry exactly one policy type".to_owned(),
-                ));
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "{effect_name} must carry exactly one policy type"
+                )));
             };
             Ok(*policy_ty)
         })
@@ -2054,8 +2086,8 @@ fn behavior_pass_activation_policy_ty<'db>(
         [] => Ok(None),
         [policy] => Ok(Some(*policy)),
         _ => Err(WebBundleError::SurfaceProjection(format!(
-            "one GPU stage declares {} PassActivation policies; at most one is allowed",
-            policies.len()
+            "one GPU stage declares {} {effect_name} policies; at most one is allowed",
+            policies.len(),
         ))),
     }
 }
@@ -3107,6 +3139,17 @@ struct ResolvedPassActivationPolicy<'db> {
     contract: TypedPassActivationContract,
 }
 
+/// A pure Fe residency decision selected by `PassPreparation<P>`. Its ABI is
+/// the same complete-state input shape as activation, but the single i32
+/// result is the nominal `PassPreparationMode` tag rather than a boolean.
+#[derive(Debug, Clone)]
+struct ResolvedPassPreparationPolicy<'db> {
+    policy_ty: TyId<'db>,
+    func: Func<'db>,
+    contract: TypedPassActivationContract,
+    mode_variants: u32,
+}
+
 fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
     if contract.scheduled {
         TYPED_SURFACE_SCHEDULED_EXPORT
@@ -4101,16 +4144,28 @@ fn resolve_surface_schedule_policy<'db>(
     }))
 }
 
-/// Resolve the pure policy selected by `PassActivation<P>` on one authored GPU
-/// stage. Exactly one public inherent function on `P` must consume the owning
-/// actor's complete non-resource state record and return `bool`. This makes
-/// activation a typed Fe effect while leaving the browser as a blind executor.
-fn resolve_pass_activation_policy<'db>(
+/// Common semantic projection for pass-local policies. Both activation and
+/// preparation consume the same complete actor-state value; only their
+/// nominal result type differs. Keeping that traversal here prevents the two
+/// physical concerns from acquiring subtly different actor semantics.
+fn resolve_pass_state_policy<'db>(
     db: &'db DriverDataBase,
     top_mod: TopLevelMod<'db>,
     source_entry: &str,
     resource_field_indices: &[u32],
-) -> Result<Option<ResolvedPassActivationPolicy<'db>>, WebBundleError> {
+    control: GpuControl,
+    effect_name: &str,
+    result_description: &str,
+    result_matches: impl Fn(TyId<'db>, &CanonicalType) -> bool,
+) -> Result<
+    Option<(
+        TyId<'db>,
+        Func<'db>,
+        TypedPassActivationContract,
+        CanonicalType,
+    )>,
+    WebBundleError,
+> {
     let actors = semantic_actors(db, top_mod);
     let actor = actors
         .iter()
@@ -4139,20 +4194,20 @@ fn resolve_pass_activation_policy<'db>(
                 .is_some_and(|name| name.data(db) == source_entry)
         })
         .expect("containing actor lookup proved the stage behavior");
-    let Some(policy_ty) = behavior_pass_activation_policy_ty(db, behavior)? else {
+    let Some(policy_ty) = behavior_pass_policy_ty(db, behavior, control, effect_name)? else {
         return Ok(None);
     };
     let expected_state = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
         .map(|(state, _)| state)
         .ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(
-                "PassActivation on `{source_entry}` has no complete actor state"
+                "{effect_name} on `{source_entry}` has no complete actor state"
             ))
         })?;
     let policy_name = policy_ty.pretty_print(db);
     let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
         WebBundleError::SurfaceProjection(format!(
-            "PassActivation policy `{policy_name}` is not owned by a resolvable Fe ingot"
+            "{effect_name} policy `{policy_name}` is not owned by a resolvable Fe ingot"
         ))
     })?;
     let candidates = policy_ingot
@@ -4172,20 +4227,20 @@ fn resolve_pass_activation_policy<'db>(
                     "pass_activation_state",
                 )
                 .is_ok_and(|state| state == expected_state)
-                && canonical_type_from_semantic(db, func.return_ty(db), "pass_activation_result")
-                    .is_ok_and(|result| result == CanonicalType::Bool)
+                && canonical_type_from_semantic(db, func.return_ty(db), "pass_policy_result")
+                    .is_ok_and(|result| result_matches(func.return_ty(db), &result))
         })
         .collect::<Vec<_>>();
     let func = match candidates.as_slice() {
         [func] => *func,
         [] => {
             return Err(WebBundleError::SurfaceProjection(format!(
-                "PassActivation policy `{policy_name}` has no public Fe implementation with complete actor state -> bool shape"
+                "{effect_name} policy `{policy_name}` has no public Fe implementation with complete actor state -> {result_description} shape"
             )));
         }
         _ => {
             return Err(WebBundleError::SurfaceProjection(format!(
-                "PassActivation policy `{policy_name}` has {} implementations with complete actor state -> bool shape; exactly one is required",
+                "{effect_name} policy `{policy_name}` has {} implementations with complete actor state -> {result_description} shape; exactly one is required",
                 candidates.len()
             )));
         }
@@ -4205,14 +4260,95 @@ fn resolve_pass_activation_policy<'db>(
             params.len()
         )));
     }
-    Ok(Some(ResolvedPassActivationPolicy {
+    let result = canonical_type_from_semantic(db, func.return_ty(db), "pass_policy_result")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    Ok(Some((
         policy_ty,
         func,
-        contract: TypedPassActivationContract {
+        TypedPassActivationContract {
             params,
             state_fields,
             state_tag_limits,
         },
+        result,
+    )))
+}
+
+/// Resolve the pure policy selected by `PassActivation<P>` on one authored GPU
+/// stage. Exactly one public inherent function on `P` must consume the owning
+/// actor's complete non-resource state record and return `bool`. This makes
+/// activation a typed Fe effect while leaving the browser as a blind executor.
+fn resolve_pass_activation_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<ResolvedPassActivationPolicy<'db>>, WebBundleError> {
+    Ok(resolve_pass_state_policy(
+        db,
+        top_mod,
+        source_entry,
+        resource_field_indices,
+        GpuControl::PassActivation,
+        "PassActivation",
+        "bool",
+        |_ty, result| *result == CanonicalType::Bool,
+    )?
+    .map(
+        |(policy_ty, func, contract, _)| ResolvedPassActivationPolicy {
+            policy_ty,
+            func,
+            contract,
+        },
+    ))
+}
+
+/// Resolve the pure policy selected by `PassPreparation<P>`. Its result must
+/// be the nominal fieldless `PassPreparationMode` enum marked by the standard
+/// library, so numeric residency tags never leak into application source.
+fn resolve_pass_preparation_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<ResolvedPassPreparationPolicy<'db>>, WebBundleError> {
+    let Some((policy_ty, func, contract, result)) = resolve_pass_state_policy(
+        db,
+        top_mod,
+        source_entry,
+        resource_field_indices,
+        GpuControl::PassPreparation,
+        "PassPreparation",
+        "nominal PassPreparationMode",
+        |ty, _| {
+            nominal_attrs(db, normalized_semantic_ty(db, ty))
+                .is_some_and(|attrs| attrs.is_web_pass_preparation_mode(db))
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    let CanonicalType::Variant(variants) = result else {
+        return Err(WebBundleError::SurfaceProjection(
+            "PassPreparationMode must be a fieldless enum".to_owned(),
+        ));
+    };
+    let names = variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+    if names != ["lazy", "visible_idle", "eager"]
+        || variants.iter().any(|variant| !variant.fields.is_empty())
+    {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "PassPreparationMode must define exactly Lazy, VisibleIdle, and Eager as ordered fieldless variants; found {names:?}",
+        )));
+    }
+    Ok(Some(ResolvedPassPreparationPolicy {
+        policy_ty,
+        func,
+        contract,
+        mode_variants: u32::try_from(variants.len()).expect("three preparation modes fit u32"),
     }))
 }
 
@@ -4737,6 +4873,28 @@ fn typed_pass_activation_export(index: u32) -> String {
     format!("{TYPED_PASS_ACTIVATION_EXPORT_PREFIX}{index}")
 }
 
+fn typed_pass_preparation_export(index: u32) -> String {
+    format!("{TYPED_PASS_PREPARATION_EXPORT_PREFIX}{index}")
+}
+
+fn with_typed_pass_state_policy(
+    options: WasmCompileOptions,
+    source: &str,
+    export: String,
+    contract: &TypedPassActivationContract,
+) -> WasmCompileOptions {
+    options.with_resident_policy(
+        source,
+        export,
+        true,
+        contract.state_fields,
+        0,
+        1,
+        contract.state_tag_limits.clone(),
+        Vec::new(),
+    )
+}
+
 fn with_typed_pass_activation(
     options: WasmCompileOptions,
     source: &str,
@@ -4747,16 +4905,47 @@ fn with_typed_pass_activation(
     // existing pure resident-policy lowerer: complete actor state is supplied
     // as the fact record, no private policy state is retained, and one bool is
     // returned. The authored function and policy type stay private.
-    options.with_resident_policy(
+    with_typed_pass_state_policy(
+        options,
         source,
         typed_pass_activation_export(index),
-        true,
-        contract.state_fields,
-        0,
-        1,
-        contract.state_tag_limits.clone(),
-        Vec::new(),
+        contract,
     )
+}
+
+fn with_typed_pass_preparation(
+    options: WasmCompileOptions,
+    source: &str,
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> WasmCompileOptions {
+    with_typed_pass_state_policy(
+        options,
+        source,
+        typed_pass_preparation_export(index),
+        contract,
+    )
+}
+
+fn verify_typed_pass_state_policy_export(
+    wasm: &[u8],
+    export: &str,
+    policy_kind: &str,
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> Result<(), WebBundleError> {
+    let (params, results) = wasm_export_signature(wasm, export).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "{policy_kind} policy {index} has no fixed Wasm export `{export}`"
+        ))
+    })?;
+    if params != contract.params || results != [WebControlWasmType::I32] {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "{policy_kind} policy {index} has measured Wasm signature {params:?} -> {results:?}; expected {:?} -> [I32] from the complete Fe actor state",
+            contract.params
+        )));
+    }
+    Ok(())
 }
 
 fn verify_typed_pass_activation_export(
@@ -4765,18 +4954,21 @@ fn verify_typed_pass_activation_export(
     contract: &TypedPassActivationContract,
 ) -> Result<(), WebBundleError> {
     let export = typed_pass_activation_export(index);
-    let (params, results) = wasm_export_signature(wasm, &export).ok_or_else(|| {
-        WebBundleError::SurfaceProjection(format!(
-            "PassActivation policy {index} has no fixed Wasm export `{export}`"
-        ))
-    })?;
-    if params != contract.params || results != [WebControlWasmType::I32] {
-        return Err(WebBundleError::SurfaceProjection(format!(
-            "PassActivation policy {index} has measured Wasm signature {params:?} -> {results:?}; expected {:?} -> [I32] from the complete Fe actor state",
-            contract.params
-        )));
+    verify_typed_pass_state_policy_export(wasm, &export, "PassActivation", index, contract)
+}
+
+fn verify_typed_pass_preparation_export(
+    wasm: &[u8],
+    index: u32,
+    policy: &ResolvedPassPreparationPolicy<'_>,
+) -> Result<(), WebBundleError> {
+    if policy.mode_variants != 3 {
+        return Err(WebBundleError::SurfaceProjection(
+            "PassPreparation policy has an invalid mode cardinality".to_owned(),
+        ));
     }
-    Ok(())
+    let export = typed_pass_preparation_export(index);
+    verify_typed_pass_state_policy_export(wasm, &export, "PassPreparation", index, &policy.contract)
 }
 
 fn validate_surface_schedule_pair(
@@ -5502,6 +5694,11 @@ pub struct WebPass {
     /// presentation and omits this pass when it returns false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<u32>,
+    /// Dense compiler-assigned identity of a pure Fe preparation policy. The
+    /// fixed host invokes the corresponding versioned Wasm decision when it
+    /// plans physical pipeline residency; this never grants execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<u32>,
     /// Physical shader-stage demand derived from this Fe pass. The logical
     /// resource visibility plan is validated as an upper bound before this
     /// target fact reaches the browser.
@@ -6579,6 +6776,8 @@ impl WebBundle {
             .collect::<Vec<_>>();
         let mut pass_activation_policies = Vec::<ResolvedPassActivationPolicy<'_>>::new();
         let mut stage_activation_indices = Vec::with_capacity(program.stages.len());
+        let mut pass_preparation_policies = Vec::<ResolvedPassPreparationPolicy<'_>>::new();
+        let mut stage_preparation_indices = Vec::with_capacity(program.stages.len());
         for stage in &program.stages {
             let activation = resolve_pass_activation_policy(
                 db,
@@ -6599,6 +6798,25 @@ impl WebBundle {
                 }
             });
             stage_activation_indices.push(index);
+            let preparation = resolve_pass_preparation_policy(
+                db,
+                top_mod,
+                &stage.source_entry,
+                &resource_field_indices,
+            )?;
+            let index = preparation.map(|policy| {
+                if let Some(index) = pass_preparation_policies
+                    .iter()
+                    .position(|existing| existing.policy_ty == policy.policy_ty)
+                {
+                    index as u32
+                } else {
+                    let index = pass_preparation_policies.len();
+                    pass_preparation_policies.push(policy);
+                    u32::try_from(index).expect("pass preparation policy count fits in u32")
+                }
+            });
+            stage_preparation_indices.push(index);
         }
         let mut shader_artifacts = compile_actor_shader_artifacts(
             db,
@@ -6665,11 +6883,24 @@ impl WebBundle {
                     (Some(activation), _) | (_, Some(activation)) => Some(activation),
                     (None, None) => None,
                 };
+                let vertex_preparation = stage_preparation_indices[index];
+                let fragment_preparation = stage_preparation_indices[index + 1];
+                let preparation = match (vertex_preparation, fragment_preparation) {
+                    (Some(vertex), Some(fragment)) if vertex != fragment => {
+                        return Err(WebBundleError::SurfaceProjection(format!(
+                            "raster pair `{}` / `{fragment_entry}` selects two different PassPreparation policies",
+                            stage.source_entry
+                        )));
+                    }
+                    (Some(preparation), _) | (_, Some(preparation)) => Some(preparation),
+                    (None, None) => None,
+                };
                 passes.push(WebPass {
                     source_entry: fragment_entry.clone(),
                     shader: path.clone(),
                     shader_bytes: shader.len() as u64,
                     activation,
+                    preparation,
                     shader_stages: vec![WebShaderStage::Vertex, WebShaderStage::Fragment],
                     dispatch: None,
                     repeat: 1,
@@ -6760,6 +6991,7 @@ impl WebBundle {
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
                 activation: stage_activation_indices[index],
+                preparation: stage_preparation_indices[index],
                 shader_stages: if dispatch.is_some() {
                     vec![WebShaderStage::Compute]
                 } else {
@@ -6793,6 +7025,7 @@ impl WebBundle {
         validate_resource_stage_visibility(&resources, &passes)?;
         validate_portable_pass_bindings(&passes)?;
         validate_pass_activation_cycles(&passes)?;
+        validate_pass_preparation_cycles(&passes)?;
         let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "GPU actor pass graph has no shader for its derived terminal entry".to_owned(),
@@ -6811,6 +7044,7 @@ impl WebBundle {
             || recovery_policy.is_some()
             || readback.is_some()
             || !pass_activation_policies.is_empty()
+            || !pass_preparation_policies.is_empty()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -6874,6 +7108,11 @@ impl WebBundle {
                 .chain(recovery_policy.as_ref().map(|policy| policy.func))
                 .collect::<Vec<_>>();
             for policy in &pass_activation_policies {
+                if !internal_funcs.contains(&policy.func) {
+                    internal_funcs.push(policy.func);
+                }
+            }
+            for policy in &pass_preparation_policies {
                 if !internal_funcs.contains(&policy.func) {
                     internal_funcs.push(policy.func);
                 }
@@ -6945,6 +7184,17 @@ impl WebBundle {
                     &policy.contract,
                 );
             }
+            for (index, policy) in pass_preparation_policies.iter().enumerate() {
+                let policy_instance_key =
+                    mir::runtime_package_instance_key_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_pass_preparation(
+                    wasm_options,
+                    &policy_instance_key,
+                    u32::try_from(index).expect("pass preparation policy count fits in u32"),
+                    &policy.contract,
+                );
+            }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?
@@ -6962,6 +7212,13 @@ impl WebBundle {
                     &wasm,
                     u32::try_from(index).expect("pass activation policy count fits in u32"),
                     &policy.contract,
+                )?;
+            }
+            for (index, policy) in pass_preparation_policies.iter().enumerate() {
+                verify_typed_pass_preparation_export(
+                    &wasm,
+                    u32::try_from(index).expect("pass preparation policy count fits in u32"),
+                    policy,
                 )?;
             }
             let control = control_export
@@ -7364,6 +7621,7 @@ impl WebBundle {
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,
             activation: None,
+            preparation: None,
             shader_stages: match options.mode {
                 WebBundleMode::Compute | WebBundleMode::Grid => vec![WebShaderStage::Compute],
                 WebBundleMode::Render => vec![WebShaderStage::Fragment],

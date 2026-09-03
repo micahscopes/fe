@@ -12,6 +12,38 @@ use fe_hir::{
 };
 
 #[test]
+fn pass_preparation_mode_marker_is_enum_only() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "pass_preparation_mode_enum.fe".into(),
+        r#"#[web_pass_preparation_mode]
+enum PreparationMode {
+    Lazy,
+    VisibleIdle,
+    Eager,
+}"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        !rendered.contains("web_pass_preparation_mode"),
+        "enum marker should be accepted:\n{rendered}"
+    );
+
+    let file = db.new_stand_alone(
+        "pass_preparation_mode_struct.fe".into(),
+        r#"#[web_pass_preparation_mode]
+struct NotAMode {}"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("unsupported `#[web_pass_preparation_mode]` attribute on struct"),
+        "struct marker should fail closed:\n{rendered}"
+    );
+}
+
+#[test]
 fn indirect_host_result_protocol_is_exact_and_versioned() {
     for rejected in ["canonical-memory@1", "fe:host-wasm-codec/v2"] {
         let mut db = HirAnalysisTestDb::default();

@@ -403,6 +403,27 @@ pub struct SurfaceRecovery<P> {}
 #[gpu_control(pass_activation)]
 pub struct PassActivation<P> {}
 
+/// Decide when one compiled pass should become resident. `Lazy` preserves
+/// first-use realization, `VisibleIdle` prepares without blocking readiness
+/// once the surface is visible, and `Eager` completes preparation before the
+/// first presentation. The enum is returned by an ordinary pure Fe policy;
+/// the browser never infers preparation from an application mode or name.
+#[web_pass_preparation_mode]
+pub enum PassPreparationMode {
+    Lazy,
+    VisibleIdle,
+    Eager,
+}
+
+impl Copy for PassPreparationMode {}
+
+/// Select a pure Fe pass-preparation policy. `P` must provide exactly one
+/// public inherent function from the owning actor's complete non-resource
+/// state to `PassPreparationMode`. Preparation changes only physical pipeline
+/// residency; `PassActivation` remains the sole authority over execution.
+#[gpu_control(pass_preparation)]
+pub struct PassPreparation<P> {}
+
 /// Request raw uncaptured primary-pointer motion for this GPU actor while
 /// retaining the standard captured primary drag lifecycle. Without this
 /// capability, surfaces receive pointer down, captured move, and pointer up
