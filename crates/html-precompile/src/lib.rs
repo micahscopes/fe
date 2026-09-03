@@ -1092,7 +1092,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=9).contains(&version) {
+    if !(4..=10).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),
@@ -1220,30 +1220,76 @@ fn verify_render_deployment(
         }
     }
 
-    if let Some(passes) = value.get("passes").and_then(serde_json::Value::as_array) {
+    let passes = value.get("passes").and_then(serde_json::Value::as_array);
+    if version >= 10 && passes.is_none() {
+        return Err(VerificationError {
+            context: format!("{context} manifest passes"),
+            detail: "protocol v10 requires an explicit passes array".to_owned(),
+        });
+    }
+    if let Some(passes) = passes {
         for (index, pass) in passes.iter().enumerate() {
             let pass_context = format!("{context} pass #{}", index + 1);
-            if version >= 8 {
-                let stages = pass["shader_stages"].as_array().ok_or_else(|| {
-                    VerificationError {
+            let pass_stages = if version >= 8 {
+                let stages = pass["shader_stages"]
+                    .as_array()
+                    .ok_or_else(|| VerificationError {
                         context: pass_context.clone(),
                         detail: "protocol v8 pass has no shader_stages array".to_owned(),
-                    }
-                })?;
+                    })?;
                 let mut seen = BTreeSet::new();
                 if stages.is_empty()
                     || stages.iter().any(|stage| {
                         let Some(stage) = stage.as_str() else {
                             return true;
                         };
-                        !matches!(stage, "compute" | "vertex" | "fragment")
-                            || !seen.insert(stage)
+                        !matches!(stage, "compute" | "vertex" | "fragment") || !seen.insert(stage)
                     })
                 {
                     return Err(VerificationError {
                         context: pass_context.clone(),
                         detail: "protocol v8 pass has invalid shader_stages".to_owned(),
                     });
+                }
+                Some(seen)
+            } else {
+                None
+            };
+            if version >= 10 {
+                let bindings = pass
+                    .get("layout")
+                    .and_then(|layout| layout.get("bindings"))
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| VerificationError {
+                        context: pass_context.clone(),
+                        detail: "protocol v10 pass has no layout bindings array".to_owned(),
+                    })?;
+                for (binding_index, binding) in bindings.iter().enumerate() {
+                    let binding_context = format!("{pass_context} binding #{}", binding_index + 1);
+                    let stages = binding["shader_stages"]
+                        .as_array()
+                        .ok_or_else(|| VerificationError {
+                            context: binding_context.clone(),
+                            detail: "protocol v10 binding has no shader_stages array".to_owned(),
+                        })?;
+                    let mut seen = BTreeSet::new();
+                    let invalid = stages.is_empty()
+                        || stages.iter().any(|stage| {
+                            let Some(stage) = stage.as_str() else {
+                                return true;
+                            };
+                            !matches!(stage, "compute" | "vertex" | "fragment")
+                                || !seen.insert(stage)
+                                || !pass_stages
+                                    .as_ref()
+                                    .is_some_and(|pass_stages| pass_stages.contains(stage))
+                        });
+                    if invalid {
+                        return Err(VerificationError {
+                            context: binding_context,
+                            detail: "protocol v10 binding has invalid shader_stages".to_owned(),
+                        });
+                    }
                 }
             }
             let shader_ref = pass["shader"].as_str().ok_or_else(|| VerificationError {
@@ -4273,6 +4319,24 @@ mod tests {
         bundle
     }
 
+    fn fake_v10_binding_stage_bundle() -> RenderBundleArtifact {
+        let mut bundle = fake_render_graph_bundle();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(10);
+        manifest["resources"] = serde_json::json!([]);
+        manifest["passes"][0]["shader_stages"] = serde_json::json!(["compute"]);
+        manifest["passes"][0]["layout"] = serde_json::json!({
+            "bindings": [{ "shader_stages": ["compute"] }]
+        });
+        manifest["passes"][1]["shader_stages"] = serde_json::json!(["fragment"]);
+        manifest["passes"][1]["layout"] = serde_json::json!({
+            "bindings": [{ "shader_stages": ["fragment"] }]
+        });
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        bundle
+    }
+
     #[test]
     fn canonical_gallery_rejects_authored_browser_javascript() {
         for authored_javascript in [
@@ -4681,6 +4745,52 @@ mod tests {
         let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
         assert_eq!(report.modules, 1);
         assert_eq!(report.files, output.assets.len());
+    }
+
+    #[test]
+    fn protocol_v10_deployment_requires_exact_binding_stage_sets() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(fake_v10_binding_stage_bundle())),
+        )
+        .unwrap();
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html"))
+            .expect("compiler-derived binding stages must verify");
+
+        let manifest_path = output
+            .assets
+            .keys()
+            .find(|path| path.ends_with(".json"))
+            .map(|path| deployment.path().join(path))
+            .unwrap();
+        let mut published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        published["passes"][0]["layout"]["bindings"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("shader_stages");
+        let bytes = serde_json::to_vec(&published).unwrap();
+        let old_name = manifest_path.file_name().unwrap().to_str().unwrap();
+        let new_name = format!("fe-render-{}.json", &sha256_hex(&bytes)[..16]);
+        let new_manifest_path = manifest_path.with_file_name(&new_name);
+        std::fs::write(&new_manifest_path, bytes).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        let index_path = deployment.path().join("index.html");
+        let html = std::fs::read_to_string(&index_path)
+            .unwrap()
+            .replace(old_name, &new_name);
+        std::fs::write(&index_path, html).unwrap();
+        let error = verify_precompiled_site(&index_path).unwrap_err();
+        assert!(
+            error.detail.contains("binding has no shader_stages"),
+            "unexpected v10 verification error: {error}"
+        );
     }
 
     #[test]

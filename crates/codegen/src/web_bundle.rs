@@ -41,7 +41,7 @@ use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvArtifact, SpirvBuiltinArgument, SpirvBuiltinSource,
     SpirvExternalResource, SpirvLayout, SpirvResourceElement, SpirvResourceField, SpirvScalarKind,
-    WordKind,
+    SpirvShaderStage, WordKind,
 };
 
 use crate::actor_semantics::{
@@ -67,7 +67,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 9;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 10;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
@@ -5068,6 +5068,11 @@ pub struct WebBinding {
     pub name: String,
     pub access: WebBindingAccess,
     pub role: WebBindingRole,
+    /// Exact entry-point stages that can reach this physical binding. Added in
+    /// protocol v10 so the browser realizes compiler-derived visibility rather
+    /// than widening every binding to the enclosing pass's stage union.
+    #[serde(default)]
+    pub shader_stages: Vec<WebShaderStage>,
     pub stride: u32,
     pub span: u32,
     pub members: Vec<WebBindingMember>,
@@ -5650,7 +5655,7 @@ fn validate_resource_stage_visibility(
                     pass.source_entry, binding.name
                 )));
             }
-            for stage in &pass.shader_stages {
+            for stage in &binding.shader_stages {
                 if !resource_visibility_allows(resource, *stage)? {
                     return Err(WebBundleError::EntryDerivation(format!(
                         "resource `{}` Fe visibility does not admit {:?} demand from pass `{}`",
@@ -5667,26 +5672,57 @@ const PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE: usize = 8;
 
 fn validate_portable_pass_bindings(passes: &[WebPass]) -> Result<(), WebBundleError> {
     for pass in passes {
-        let count = pass.layout.bindings.len();
-        if count <= PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE {
-            continue;
+        for binding in &pass.layout.bindings {
+            if binding.shader_stages.is_empty() {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "pass `{}` binding `{}` has no compiler-derived shader stages",
+                    pass.source_entry, binding.name
+                )));
+            }
+            for (index, stage) in binding.shader_stages.iter().enumerate() {
+                if binding.shader_stages[..index].contains(stage) {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "pass `{}` binding `{}` repeats {:?} shader-stage demand",
+                        pass.source_entry, binding.name, stage
+                    )));
+                }
+                if !pass.shader_stages.contains(stage) {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "pass `{}` binding `{}` demands {:?} outside the pass stage set",
+                        pass.source_entry, binding.name, stage
+                    )));
+                }
+            }
         }
-        let role_count = |role| {
-            pass.layout
+
+        for stage in &pass.shader_stages {
+            let stage_bindings = pass
+                .layout
                 .bindings
                 .iter()
-                .filter(|binding| binding.role == role)
-                .count()
-        };
-        return Err(WebBundleError::EntryDerivation(format!(
-            "pass `{}` ({:?}) requires {count} storage-buffer bindings per shader stage: {} resource, {} input, {} output; the portable WebGPU limit is {}",
-            pass.source_entry,
-            pass.layout.mode,
-            role_count(WebBindingRole::Resource),
-            role_count(WebBindingRole::Input),
-            role_count(WebBindingRole::Output),
-            PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE,
-        )));
+                .filter(|binding| binding.shader_stages.contains(stage))
+                .collect::<Vec<_>>();
+            let count = stage_bindings.len();
+            if count <= PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE {
+                continue;
+            }
+            let role_count = |role| {
+                stage_bindings
+                    .iter()
+                    .filter(|binding| binding.role == role)
+                    .count()
+            };
+            return Err(WebBundleError::EntryDerivation(format!(
+                "pass `{}` ({:?}) requires {count} storage-buffer bindings in its {:?} shader stage: {} resource, {} input, {} output; the portable WebGPU limit is {}",
+                pass.source_entry,
+                pass.layout.mode,
+                stage,
+                role_count(WebBindingRole::Resource),
+                role_count(WebBindingRole::Input),
+                role_count(WebBindingRole::Output),
+                PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE,
+            )));
+        }
     }
     Ok(())
 }
@@ -7626,6 +7662,15 @@ impl WebLayout {
                         Role::Output => WebBindingRole::Output,
                         Role::Resource => WebBindingRole::Resource,
                     },
+                    shader_stages: binding
+                        .stages
+                        .iter()
+                        .map(|stage| match stage {
+                            SpirvShaderStage::Compute => WebShaderStage::Compute,
+                            SpirvShaderStage::Vertex => WebShaderStage::Vertex,
+                            SpirvShaderStage::Fragment => WebShaderStage::Fragment,
+                        })
+                        .collect(),
                     stride: binding.stride,
                     span: binding.span,
                     members: binding
