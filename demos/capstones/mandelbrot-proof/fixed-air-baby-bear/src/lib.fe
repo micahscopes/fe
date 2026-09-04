@@ -4068,7 +4068,11 @@ pub fn sparse_composition_transcript_from_committed_roots<
     _ interaction_root: Poseidon2Digest,
     _ roots_valid: bool,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE>
-where L > 1, Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+where
+    L > 1,
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     sparse_composition_transcript_from_committed_statement(
         commit_recursive_leaf_statement(interval),
@@ -4138,6 +4142,54 @@ pub fn bind_sparse_composition_extension<
         QuadraticValueInterpreter::new(),
     )
         .value
+}
+
+/// Bind a previously validated identity transcript to a digest transported
+/// between placement phases. The caller supplies the validation receipt from
+/// the immediately preceding phase; this function preserves the nominal AIR
+/// carrier while avoiding a second statement-and-roots commitment.
+pub fn bind_sparse_composition_extension_digest_from_validated_phase<
+    D: Poseidon2FieldDomain,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ identity: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ extension: Poseidon2Digest,
+    _ extension_valid: bool,
+    _ phase_valid: bool,
+) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
+    let identity_valid = identity.is_valid()
+        && identity.transcript.value.equals(identity.air.transcript.value)
+    let transcript = poseidon_bind<D>(identity.air.transcript.value, extension)
+    if !phase_valid || !identity_valid || !extension_valid {
+        return invalid_sparse_composition_transcript(identity.air)
+    }
+    SparseCompositionTranscriptDigest {
+        valid: true,
+        air: identity.air,
+        transcript: AirLdeTranscriptDigest { valid: true, value: transcript },
+    }
+}
+
+/// Check one transported extension against the original canonical AIR
+/// transcript retained by the nominal composition carrier. Canonical AIR and
+/// public-input validation remain independent queue phases.
+pub fn sparse_composition_extension_digest_matches<
+    D: Poseidon2FieldDomain,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ extension: Poseidon2Digest,
+    _ extension_valid: bool,
+) -> bool {
+    if !composition.is_valid() || !extension_valid {
+        return false
+    }
+    let expected = poseidon_bind<D>(composition.air.transcript.value, extension)
+    composition.transcript.value.equals(expected)
 }
 
 fn sparse_public_fixed_at<const L: usize>(

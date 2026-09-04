@@ -27,6 +27,7 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     SPARSE_SECURITY_PROFILE_FIELDS,
     SPARSE_SECURITY_PROFILE_WORDS,
     SparseDirectFriTranscriptProfile,
+    commit_production_recursive_security_profile_words,
     commit_sparse_direct_fri_transcript_profile,
     production_checkpoint_security_profile,
     production_recursive_security_profile,
@@ -393,37 +394,58 @@ pub fn production_recursive_profile_words() -> [u32; 22] {
     production_profile_words(production_recursive_security_profile())
 }
 
+pub fn production_recursive_profile_projection_matches() -> bool {
+    let profile = production_recursive_security_profile()
+    let nominal = commit_sparse_direct_fri_transcript_profile(ref profile)
+    let projected = commit_production_recursive_security_profile_words()
+    nominal.is_valid() && projected.is_valid() && nominal.digest().equals(projected.digest())
+}
+
 /// Mutate the typed profile before committing it. Only the clean profile may
 /// produce a nonzero domain-separated digest.
-pub fn production_checkpoint_profile_commitment(
-    _ mutation: u32,
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+pub fn production_checkpoint_profile_commitment(_ mutation: u32) -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     let mut profile = production_checkpoint_security_profile()
     match mutation {
-        0 => {}
-        1 => { profile.executed_queries = profile.executed_queries + 1 }
-        2 => { profile.policy.query_count = profile.policy.query_count + 1 }
-        3 => { profile.air_shape.total = profile.air_shape.total + 1 }
+        0 => {},
+        1 => {
+            profile.executed_queries = profile.executed_queries + 1
+        },
+        2 => {
+            profile.policy.query_count = profile.policy.query_count + 1
+        },
+        3 => {
+            profile.air_shape.total = profile.air_shape.total + 1
+        },
         4 => {
-            profile.air_shape.maximum_degree =
-                profile.air_shape.maximum_degree + 1
-        }
+            profile.air_shape.maximum_degree = profile.air_shape.maximum_degree + 1
+        },
         5 => {
-            profile.policy.composition_degree_bound =
-                profile.policy.composition_degree_bound + 1
-        }
-        _ => { profile.valid = false }
+            profile.policy.composition_degree_bound = profile.policy.composition_degree_bound + 1
+        },
+        _ => {
+            profile.valid = false
+        },
     }
     let commitment = commit_sparse_direct_fri_transcript_profile(ref profile)
     (
-        if commitment.valid { 1 } else { 0 },
-        commitment.value.field(0).to_u32(),
-        commitment.value.field(1).to_u32(),
-        commitment.value.field(2).to_u32(),
-        commitment.value.field(3).to_u32(),
-        commitment.value.field(4).to_u32(),
-        commitment.value.field(5).to_u32(),
-        commitment.value.field(6).to_u32(),
-        commitment.value.field(7).to_u32(),
+        if commitment.is_valid() { 1 } else { 0 },
+        commitment.digest().field(0).to_u32(),
+        commitment.digest().field(1).to_u32(),
+        commitment.digest().field(2).to_u32(),
+        commitment.digest().field(3).to_u32(),
+        commitment.digest().field(4).to_u32(),
+        commitment.digest().field(5).to_u32(),
+        commitment.digest().field(6).to_u32(),
+        commitment.digest().field(7).to_u32(),
     )
 }

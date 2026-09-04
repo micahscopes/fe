@@ -1,12 +1,15 @@
 //! Focused compile gate for composition transcript binding and challenge setup.
 
 use mandelbrot_proof_fixed_air_webgpu::{
+    ProductionSecurityProfileDigestBuffer,
+    bind_sparse_composition_security_profile,
     bind_sparse_composition_phase_transcript,
     bind_sparse_composition_phase_seed,
     finish_sparse_composition_phase_context,
     sparse_composition_phase_workspace_words,
     stage_sparse_composition_phase_roots,
     stage_sparse_composition_phase_statement,
+    validate_sparse_composition_security_profile,
     validate_sparse_composition_phase_statement,
     validate_sparse_composition_phase_transcript,
 }
@@ -67,6 +70,7 @@ fn directed_interval() -> OrbitInterval<4> {
 
 actor CompositionBindingProbe uses (Program<WebGpuBackend>) {
     workspace: Shared<u32, WORKSPACE_WORDS>,
+    security_profile: ProductionSecurityProfileDigestBuffer,
 
     fn stage_roots(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
@@ -131,6 +135,30 @@ actor CompositionBindingProbe uses (Program<WebGpuBackend>) {
             LDE_LENGTH,
             WORKSPACE_WORDS,
         >(directed_interval(), self.workspace)
+    }
+
+    fn bind_security_profile(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        bind_sparse_composition_security_profile<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(self.security_profile, self.workspace)
+    }
+
+    fn validate_security_profile(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        validate_sparse_composition_security_profile<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(self.workspace)
     }
 
     fn bind_seed(self, invocation: ComputeInvocation)

@@ -62,6 +62,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     SparseCompositionTranscriptDigest,
     bind_sparse_air_lde_transcript,
     bind_sparse_composition_extension_plan,
+    bind_sparse_composition_extension_digest_from_validated_phase,
     evaluate_sparse_bound_composition_opened,
     sparse_lde_opened_air_row,
     sparse_base_lde_root_power_of_two,
@@ -69,6 +70,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_bound_composition_lde_root_power_of_two,
     sparse_interaction_lde_root_power_of_two,
     sparse_constraint_shape,
+    sparse_composition_extension_digest_matches,
     empty_sparse_base_lde_multi_opening,
     empty_sparse_interaction_lde_multi_opening,
     verify_sparse_base_lde_multi_opening,
@@ -203,16 +205,50 @@ pub struct SparseDirectFriTranscriptProfile {
 impl core::marker::Copy for SparseDirectFriTranscriptProfile {}
 derive CanonicalWords for SparseDirectFriTranscriptProfile using CanonicalWordsProvider
 
-pub const SPARSE_SECURITY_PROFILE_WORDS: usize =
-    <SparseDirectFriTranscriptProfile as CanonicalWords>::WORDS as usize
-pub const SPARSE_SECURITY_PROFILE_FIELDS: usize =
-    (SPARSE_SECURITY_PROFILE_WORDS * 32 + 29) / 30
+pub const SPARSE_SECURITY_PROFILE_WORDS: usize = <SparseDirectFriTranscriptProfile as CanonicalWords>::WORDS as usize
+pub const SPARSE_SECURITY_PROFILE_FIELDS: usize = (SPARSE_SECURITY_PROFILE_WORDS * 32 + 29) / 30
 
-pub struct SparseDirectFriProfileDigest {
-    pub valid: bool,
-    pub value: Poseidon2Digest,
-}
+pub struct SparseDirectFriProfileDigest { valid: bool, value: Poseidon2Digest }
 impl core::marker::Copy for SparseDirectFriProfileDigest {}
+derive CanonicalWords for SparseDirectFriProfileDigest using CanonicalWordsProvider
+
+impl SparseDirectFriProfileDigest {
+    pub fn is_valid(self) -> bool {
+        self.valid
+    }
+    pub fn digest(self) -> Poseidon2Digest {
+        if !self.valid {
+            return Poseidon2Digest::zero()
+        }
+        self.value
+    }
+}
+
+pub fn zero_sparse_direct_fri_profile_digest() -> SparseDirectFriProfileDigest {
+    SparseDirectFriProfileDigest { valid: false, value: Poseidon2Digest::zero() }
+}
+
+/// Decode the canonical nine-word transport used by immutable GPU resources.
+/// Every digest lane remains a canonical BabyBear value, and the validity word
+/// is exact rather than truthy, so malformed deployment bytes fail closed.
+pub fn sparse_direct_fri_profile_digest_from_words(
+    _ words: [u32; 9],
+) -> SparseDirectFriProfileDigest {
+    let mut valid = words[0] == 1
+    let mut index: usize = 1
+    while index < 9 {
+        if words[index] >= BABY_BEAR_MODULUS {
+            valid = false
+        }
+        index = index + 1
+    }
+    SparseDirectFriProfileDigest {
+        valid: valid,
+        value: Poseidon2Digest::from_u32s(
+            [words[1], words[2], words[3], words[4], words[5], words[6], words[7], words[8]],
+        ),
+    }
+}
 
 const fn production_security_policy_for_bound(
     _ target_bits: u32,
@@ -323,51 +359,195 @@ fn sparse_direct_fri_transcript_profile_is_consistent(
         && sparse_air_shape_is_consistent(profile.air_shape, profile.policy)
 }
 
-pub fn production_checkpoint_security_profile()
-    -> SparseDirectFriTranscriptProfile {
+pub fn production_checkpoint_security_profile() -> SparseDirectFriTranscriptProfile {
     sparse_direct_fri_transcript_profile(
         production_checkpoint_security_policy(),
-        sparse_constraint_shape<{PRODUCTION_LIMBS}>(),
+        sparse_constraint_shape<{ PRODUCTION_LIMBS }>(),
         PRODUCTION_QUERY_COUNT.downcast_truncate(),
     )
 }
 
-pub fn production_recursive_security_profile()
-    -> SparseDirectFriTranscriptProfile {
+pub fn production_recursive_security_profile() -> SparseDirectFriTranscriptProfile {
     let policy = production_recursive_security_policy()
     sparse_direct_fri_transcript_profile(
         policy,
-        sparse_constraint_shape<{PRODUCTION_LIMBS}>(),
+        sparse_constraint_shape<{ PRODUCTION_LIMBS }>(),
         policy.query_count,
     )
+}
+
+const fn low_u64_word(_ value: u64) -> u32 {
+    value.downcast_truncate()
+}
+
+const fn high_u64_word(_ value: u64) -> u32 {
+    (value >> (32 as u64)).downcast_truncate()
+}
+
+const PRODUCTION_FIELD_BITS_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.field_bits_q16,
+)
+const PRODUCTION_FIELD_BITS_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.field_bits_q16,
+)
+const PRODUCTION_BITS_PER_QUERY_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.bits_per_query_q16,
+)
+const PRODUCTION_BITS_PER_QUERY_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.bits_per_query_q16,
+)
+const PRODUCTION_LOCAL_TARGET_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.local_target_bits_q16,
+)
+const PRODUCTION_LOCAL_TARGET_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.local_target_bits_q16,
+)
+const PRODUCTION_QUERY_BITS_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.query_bits_q16,
+)
+const PRODUCTION_QUERY_BITS_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.query_bits_q16,
+)
+const PRODUCTION_AIR_BITS_LOW: u32 = low_u64_word(PRODUCTION_RECURSIVE_SECURITY_POLICY.air_bits_q16)
+const PRODUCTION_AIR_BITS_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.air_bits_q16,
+)
+const PRODUCTION_COMMIT_BITS_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.commit_bits_q16,
+)
+const PRODUCTION_COMMIT_BITS_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.commit_bits_q16,
+)
+const PRODUCTION_LOCAL_ATTAINED_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.local_attained_bits_q16,
+)
+const PRODUCTION_LOCAL_ATTAINED_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.local_attained_bits_q16,
+)
+const PRODUCTION_GLOBAL_ATTAINED_LOW: u32 = low_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.global_attained_bits_q16,
+)
+const PRODUCTION_GLOBAL_ATTAINED_HIGH: u32 = high_u64_word(
+    PRODUCTION_RECURSIVE_SECURITY_POLICY.global_attained_bits_q16,
+)
+
+fn production_recursive_security_shape_is_consistent(_ shape: SparseAirConstraintShape) -> bool {
+    shape.valid
+        && shape.total == shape.all_rows + shape.pair_rows + shape.first_row + shape.last_row
+        && shape.all_rows > 0
+        && shape.pair_rows > 0
+        && shape.first_row > 0
+        && shape.last_row > 0
+        && shape.maximum_degree
+            == maximum_u32(
+                maximum_u32(shape.all_rows_degree, shape.pair_rows_degree),
+                maximum_u32(shape.first_row_degree, shape.last_row_degree),
+            )
+        && shape.total <= PRODUCTION_SECURITY_AIR_CONSTRAINT_CAP
+        && sparse_composition_degree_bound(shape, PRODUCTION_TRACE_LENGTH_U32)
+            == PRODUCTION_RECURSIVE_SECURITY_POLICY.composition_degree_bound
+}
+
+/// Project the Fe-derived recursive security policy and AIR shape into their
+/// exact canonical u32 stream. The u64 security estimates are split at CTFE,
+/// so GPU placement never needs an i64 value or a copied numeric table.
+pub fn production_recursive_security_profile_words() -> [u32; SPARSE_SECURITY_PROFILE_WORDS] {
+    let shape = sparse_constraint_shape<{ PRODUCTION_LIMBS }>()
+    let profile_valid = PRODUCTION_RECURSIVE_SECURITY_POLICY.valid
+        && production_recursive_security_shape_is_consistent(shape)
+        && PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count
+            == PRODUCTION_SECURITY_QUERY_COUNT.downcast_truncate()
+    [
+        if profile_valid { 1 } else { 0 },
+        if PRODUCTION_RECURSIVE_SECURITY_POLICY.valid {
+            1
+        } else {
+            0
+        },
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.target_bits,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.max_composed_proofs,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.base_modulus,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.extension_degree,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.trace_length,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.lde_length,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.composition_degree_bound,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.log_blowup,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.folding_arity,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.max_air_constraints,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.hash_collision_bits,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.query_pow_bits,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.commit_pow_bits,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count,
+        PRODUCTION_FIELD_BITS_LOW,
+        PRODUCTION_FIELD_BITS_HIGH,
+        PRODUCTION_BITS_PER_QUERY_LOW,
+        PRODUCTION_BITS_PER_QUERY_HIGH,
+        PRODUCTION_LOCAL_TARGET_LOW,
+        PRODUCTION_LOCAL_TARGET_HIGH,
+        PRODUCTION_QUERY_BITS_LOW,
+        PRODUCTION_QUERY_BITS_HIGH,
+        PRODUCTION_AIR_BITS_LOW,
+        PRODUCTION_AIR_BITS_HIGH,
+        PRODUCTION_COMMIT_BITS_LOW,
+        PRODUCTION_COMMIT_BITS_HIGH,
+        PRODUCTION_LOCAL_ATTAINED_LOW,
+        PRODUCTION_LOCAL_ATTAINED_HIGH,
+        PRODUCTION_GLOBAL_ATTAINED_LOW,
+        PRODUCTION_GLOBAL_ATTAINED_HIGH,
+        if shape.valid { 1 } else { 0 },
+        shape.all_rows,
+        shape.pair_rows,
+        shape.first_row,
+        shape.last_row,
+        shape.total,
+        shape.all_rows_degree,
+        shape.pair_rows_degree,
+        shape.first_row_degree,
+        shape.last_row_degree,
+        shape.maximum_degree,
+        PRODUCTION_RECURSIVE_SECURITY_POLICY.query_count,
+    ]
+}
+
+/// Commit the same nominal SP01 message as the full policy carrier through a
+/// u32-only placement projection. Scalar and independent oracles require
+/// exact equality with `commit_sparse_direct_fri_transcript_profile`.
+pub fn commit_production_recursive_security_profile_words() -> SparseDirectFriProfileDigest {
+    let words = production_recursive_security_profile_words()
+    let commitment = commit_canonical_packed_plan<
+        QuadraticValueInterpreter,
+        MandelbrotSparseSecurityProfileBabyBearV1,
+        [u32; SPARSE_SECURITY_PROFILE_WORDS],
+        {
+            SPARSE_SECURITY_PROFILE_WORDS
+        },
+        {
+            SPARSE_SECURITY_PROFILE_FIELDS
+        },
+    >(QuadraticValueInterpreter::new(), ref words)
+        .require(words[0] == 1)
+    SparseDirectFriProfileDigest { valid: commitment.is_valid(), value: commitment.digest() }
 }
 
 pub fn commit_sparse_direct_fri_transcript_profile(
     _ profile: ref SparseDirectFriTranscriptProfile,
 ) -> SparseDirectFriProfileDigest {
     let commitment = sparse_direct_fri_profile_commitment(profile)
-    SparseDirectFriProfileDigest {
-        valid: commitment.is_valid(),
-        value: commitment.digest(),
-    }
+    SparseDirectFriProfileDigest { valid: commitment.is_valid(), value: commitment.digest() }
 }
 
 fn sparse_direct_fri_profile_commitment(
     _ profile: ref SparseDirectFriTranscriptProfile,
 ) -> PackedCommitment {
-    sparse_direct_fri_profile_commitment_plan(
-        profile,
-        QuadraticValueInterpreter::new(),
-    ).commitment()
+    sparse_direct_fri_profile_commitment_plan(profile, QuadraticValueInterpreter::new())
+        .commitment()
 }
 
 pub const fn sparse_direct_fri_profile_commitment_permutations() -> usize {
     fixed_length_sponge_permutations(SPARSE_SECURITY_PROFILE_FIELDS)
 }
 
-pub fn sparse_direct_fri_profile_commitment_plan<
-    I: QuadraticPlanInterpreter<BabyBear>,
->(
+pub fn sparse_direct_fri_profile_commitment_plan<I: QuadraticPlanInterpreter<BabyBear>>(
     _ profile: ref SparseDirectFriTranscriptProfile,
     _ interpreter: I,
 ) -> Poseidon2CanonicalCommitmentPlan<I> {
@@ -414,55 +594,91 @@ pub fn bind_sparse_air_security_profile_plan<
     >(air, commitment.commitment(), commitment.interpreter)
 }
 
-pub fn bind_sparse_air_security_profile<
+pub fn bind_sparse_air_security_profile<const L: usize, const TRACE: usize, const LDE: usize>(
+    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
+    _ profile: SparseDirectFriTranscriptProfile,
+) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
+    bind_sparse_air_security_profile_plan(air, profile, QuadraticValueInterpreter::new()).value
+}
+
+/// Extend one queue-validated identity transcript with a profile commitment
+/// produced by an earlier placement phase. The nominal profile carrier keeps
+/// raw digest words out of the WebGPU orchestration API.
+pub fn bind_sparse_air_security_profile_digest_from_validated_phase<
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
 >(
-    _ air: SparseAirLdeTranscriptDigest<L, TRACE, LDE>,
-    _ profile: SparseDirectFriTranscriptProfile,
+    _ identity: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ profile: SparseDirectFriProfileDigest,
+    _ phase_valid: bool,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
-    bind_sparse_air_security_profile_plan(
-        air,
-        profile,
-        QuadraticValueInterpreter::new(),
-    ).value
+    bind_sparse_composition_extension_digest_from_validated_phase<
+        MandelbrotSparseSecurityTranscriptBabyBearV1,
+        L,
+        TRACE,
+        LDE,
+    >(
+        identity,
+        profile.digest(),
+        profile.is_valid(),
+        phase_valid,
+    )
 }
 
-pub const PRODUCTION_AIR_MAX_LEAVES: usize =
-    air_lde_request_capacity(PRODUCTION_QUERY_COUNT)
-pub const PRODUCTION_AIR_MAX_SIBLINGS: usize =
-    merkle_multi_path_sibling_capacity(
-        PRODUCTION_AIR_MAX_LEAVES,
-        PRODUCTION_LDE_LOG,
-    )
-pub const PRODUCTION_COMPOSITION_MAX_LEAVES: usize =
-    fri_multi_leaf_capacity(PRODUCTION_QUERY_COUNT)
-pub const PRODUCTION_COMPOSITION_MAX_SIBLINGS: usize =
-    fri_multi_sibling_capacity(
-        fri_composition_query_depth(PRODUCTION_LDE_LOG),
-        PRODUCTION_QUERY_COUNT,
-    )
+/// Recompute only the SP02 binding permutation at a placement boundary. The
+/// preceding phases separately prove AIR canonicality, public inputs, and the
+/// SP01 profile commitment.
+pub fn sparse_air_security_profile_binding_matches<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ profile: SparseDirectFriProfileDigest,
+) -> bool {
+    sparse_composition_extension_digest_matches<
+        MandelbrotSparseSecurityTranscriptBabyBearV1,
+        L,
+        TRACE,
+        LDE,
+    >(composition, profile.digest(), profile.is_valid())
+}
 
-pub type ProductionSparseFriSchedule = FriSchedule<1, {PRODUCTION_LDE_LOG}>
-pub type ProductionSparseFriLayers =
-    <ProductionSparseFriSchedule as BabyBearFriMultiQueryShape<
-        {PRODUCTION_QUERY_COUNT},
-    >>::Query
+pub const PRODUCTION_AIR_MAX_LEAVES: usize = air_lde_request_capacity(PRODUCTION_QUERY_COUNT)
+pub const PRODUCTION_AIR_MAX_SIBLINGS: usize = merkle_multi_path_sibling_capacity(
+    PRODUCTION_AIR_MAX_LEAVES,
+    PRODUCTION_LDE_LOG,
+)
+pub const PRODUCTION_COMPOSITION_MAX_LEAVES: usize = fri_multi_leaf_capacity(PRODUCTION_QUERY_COUNT)
+pub const PRODUCTION_COMPOSITION_MAX_SIBLINGS: usize = fri_multi_sibling_capacity(
+    fri_composition_query_depth(PRODUCTION_LDE_LOG),
+    PRODUCTION_QUERY_COUNT,
+)
+
+pub type ProductionSparseFriSchedule = FriSchedule<1, { PRODUCTION_LDE_LOG }>
+pub type ProductionSparseFriLayers = <ProductionSparseFriSchedule as BabyBearFriMultiQueryShape<
+    {
+        PRODUCTION_QUERY_COUNT
+    },
+>>::Query
 pub type ProductionSparseFriQuery = FriMultiCommitmentQuery<
-    {PRODUCTION_COMPOSITION_MAX_LEAVES},
-    {PRODUCTION_COMPOSITION_MAX_SIBLINGS},
+    {
+        PRODUCTION_COMPOSITION_MAX_LEAVES
+    },
+    {
+        PRODUCTION_COMPOSITION_MAX_SIBLINGS
+    },
     ProductionSparseFriLayers,
 >
-pub type ProductionSparseFriQueryPlan = FriQueryPlan<1, {PRODUCTION_QUERY_COUNT}>
-pub type ProductionSparseFriQuerySamples =
-    <ProductionSparseFriQueryPlan as BabyBearFriQueryPlanShape>::Samples
-pub type ProductionSparseFriChallenges =
-    <ProductionSparseFriSchedule as BabyBearFriMultiChallengeShape>::Challenges
-pub type ProductionSparseFriProof =
-    <ProductionSparseFriSchedule as BabyBearFriFirst<
-        {PRODUCTION_LDE_LENGTH},
-    >>::Proof
+pub type ProductionSparseFriQueryPlan = FriQueryPlan<1, { PRODUCTION_QUERY_COUNT }>
+pub type ProductionSparseFriQuerySamples = <ProductionSparseFriQueryPlan as BabyBearFriQueryPlanShape>::Samples
+pub type ProductionSparseFriChallenges = <ProductionSparseFriSchedule as BabyBearFriMultiChallengeShape>::Challenges
+pub type ProductionSparseFriProof = <ProductionSparseFriSchedule as BabyBearFriFirst<
+    {
+        PRODUCTION_LDE_LENGTH
+    },
+>>::Proof
 
 fn write_production_sparse_fri(
     _ evaluations: ref [BabyBearExt4; PRODUCTION_LDE_LENGTH],

@@ -300,6 +300,19 @@ fn production_profiles_bind_executed_queries_and_air_shape() {
         );
     }
 
+    let projection_matches = instance
+        .get_typed_func::<(), i32>(
+            &mut store,
+            "production_recursive_profile_projection_matches",
+        )
+        .expect("recursive profile projection parity export")
+        .call(&mut store, ())
+        .expect("recursive profile projection parity should execute");
+    assert_eq!(
+        projection_matches, 1,
+        "u32 placement projection changed SP01"
+    );
+
     let clean = instance
         .get_typed_func::<i32, (i32, i32, i32, i32, i32, i32, i32, i32, i32)>(
             &mut store,

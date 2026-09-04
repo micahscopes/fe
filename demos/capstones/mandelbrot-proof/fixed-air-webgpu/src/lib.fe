@@ -81,6 +81,13 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     zero_sparse_trace_control_field,
     zero_sparse_trace_row_field,
 }
+use mandelbrot_proof_fixed_air_receipt_baby_bear::{
+    SparseDirectFriProfileDigest,
+    bind_sparse_air_security_profile_digest_from_validated_phase,
+    sparse_direct_fri_profile_digest_from_words,
+    sparse_air_security_profile_binding_matches,
+    zero_sparse_direct_fri_profile_digest,
+}
 use mandelbrot_proof_fixed_air_core::{
     CoordinateNode,
     LinearNode,
@@ -178,7 +185,47 @@ use region_layout::{
     storage_word_capacity,
     store_region_word,
 }
-use std::webgpu::{ComputeInvocation, StorageBuffer}
+use std::webgpu::{ComputeInvocation, ContentAddressed, ImmutableStorageBuffer, StorageBuffer}
+
+pub const PRODUCTION_SECURITY_PROFILE_DIGEST_WORDS: usize = 9
+
+/// Content identity of the exact Fe-derived recursive security-profile digest.
+/// An independent Plonky3/BigUint oracle checks the words before this artifact
+/// is admitted to a browser bundle.
+pub type ProductionSecurityProfileDigestIdentity = ContentAddressed<
+    0x3ec28891,
+    0x664ccf5c,
+    0x1158abc0,
+    0x53b56958,
+    0x1000e04f,
+    0xdf764210,
+    0x2b83f846,
+    0x98456906,
+>
+
+pub type ProductionSecurityProfileDigestBuffer = ImmutableStorageBuffer<
+    ProductionSecurityProfileDigestIdentity,
+    PRODUCTION_SECURITY_PROFILE_DIGEST_WORDS,
+    u32,
+>
+
+fn load_production_security_profile_digest(
+    _ resource: ProductionSecurityProfileDigestBuffer,
+) -> SparseDirectFriProfileDigest {
+    sparse_direct_fri_profile_digest_from_words(
+        [
+            resource.load(index: 0),
+            resource.load(index: 1),
+            resource.load(index: 2),
+            resource.load(index: 3),
+            resource.load(index: 4),
+            resource.load(index: 5),
+            resource.load(index: 6),
+            resource.load(index: 7),
+            resource.load(index: 8),
+        ],
+    )
+}
 
 /// Compiler-derived storage layout for the seven arithmetic nodes of one
 /// exact Mandelbrot transition. The record is the semantic dependency DAG;
@@ -233,6 +280,10 @@ struct SparseCompositionPhaseRegions<const L: usize, const TRACE: usize, const L
         SparseCompositionPhaseRegions<L, TRACE, LDE>,
         CompositionTranscriptDigest,
     >,
+    security_profile: Region<
+        SparseCompositionPhaseRegions<L, TRACE, LDE>,
+        SparseDirectFriProfileDigest,
+    >,
     valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
     commitment_valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
 }
@@ -272,7 +323,9 @@ pub const fn sparse_composition_commitment_validity_word<
     const TRACE: usize,
     const LDE: usize,
 >() -> usize {
-    region_bounds(sparse_composition_phase_regions<L, TRACE, LDE>().commitment_valid).start as usize
+    region_bounds(
+        sparse_composition_phase_regions<L, TRACE, LDE>().commitment_valid,
+    ).start as usize
 }
 
 pub const fn sparse_composition_codeword_words<const LDE: usize>() -> usize {
@@ -581,10 +634,7 @@ where
 {
     let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
     let root = CompositionDigest { valid: false, value: Poseidon2Digest::zero() }
-    let transcript = CompositionTranscriptDigest {
-        valid: false,
-        value: Poseidon2Digest::zero(),
-    }
+    let transcript = CompositionTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
     encode_workspace_value(ref root, workspace, regions.composition_root)
         && encode_workspace_value(ref transcript, workspace, regions.fri_transcript)
         && store_region_word(workspace, regions.commitment_valid, 0, 0)
@@ -623,8 +673,7 @@ where
     valid = encode_workspace_value(ref interaction, workspace, regions.interaction_root) && valid
     valid = encode_workspace_value(ref seed, workspace, regions.seed) && valid
     valid = encode_workspace_value(ref challenges, workspace, regions.challenges) && valid
-    valid = clear_sparse_composition_commitment<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
-        && valid
+    valid = clear_sparse_composition_commitment<L, TRACE, LDE, WORKSPACE_WORDS>(workspace) && valid
     let valid_word: u32 = if valid { 1 } else { 0 }
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
 }
@@ -691,8 +740,7 @@ where
     valid = encode_workspace_value(ref base_root, workspace, regions.base_root) && valid
     valid = encode_workspace_value(ref interaction_root, workspace, regions.interaction_root)
         && valid
-    valid = clear_sparse_composition_commitment<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
-        && valid
+    valid = clear_sparse_composition_commitment<L, TRACE, LDE, WORKSPACE_WORDS>(workspace) && valid
     let valid_word: u32 = if valid { 1 } else { 0 }
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
 }
@@ -719,51 +767,58 @@ where
     let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
     let staged_valid = load_region_word(workspace, regions.valid, 0)
     let statement = commit_recursive_leaf_statement(interval)
-    let mut valid = staged_valid.valid
-        && staged_valid.value == 1
-        && statement.valid
+    let mut valid = staged_valid.valid && staged_valid.value == 1 && statement.valid
     valid = encode_workspace_value(ref statement.valid, workspace, regions.statement_valid) && valid
-    valid = encode_workspace_value(ref statement.leaves, workspace, regions.statement_leaves) && valid
+    valid = encode_workspace_value(ref statement.leaves, workspace, regions.statement_leaves)
+        && valid
     valid = encode_workspace_value(
-        ref statement.statement.valid,
-        workspace,
-        regions.statement_domain_valid,
-    ) && valid
+            ref statement.statement.valid,
+            workspace,
+            regions.statement_domain_valid,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.statement.value,
-        workspace,
-        regions.statement_digest,
-    ) && valid
+            ref statement.statement.value,
+            workspace,
+            regions.statement_digest,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.start_iteration,
-        workspace,
-        regions.statement_start_iteration,
-    ) && valid
+            ref statement.start_iteration,
+            workspace,
+            regions.statement_start_iteration,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.end_iteration,
-        workspace,
-        regions.statement_end_iteration,
-    ) && valid
+            ref statement.end_iteration,
+            workspace,
+            regions.statement_end_iteration,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.start.valid,
-        workspace,
-        regions.statement_start_valid,
-    ) && valid
+            ref statement.start.valid,
+            workspace,
+            regions.statement_start_valid,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.start.value,
-        workspace,
-        regions.statement_start_digest,
-    ) && valid
+            ref statement.start.value,
+            workspace,
+            regions.statement_start_digest,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.end.valid,
-        workspace,
-        regions.statement_end_valid,
-    ) && valid
+            ref statement.end.valid,
+            workspace,
+            regions.statement_end_valid,
+        )
+        && valid
     valid = encode_workspace_value(
-        ref statement.end.value,
-        workspace,
-        regions.statement_end_digest,
-    ) && valid
+            ref statement.end.value,
+            workspace,
+            regions.statement_end_digest,
+        )
+        && valid
     let valid_word: u32 = if valid { 1 } else { 0 }
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
 }
@@ -823,11 +878,7 @@ where
         workspace,
         regions.statement_start_digest,
     )
-    let statement_end_valid = decode_workspace_value(
-        false,
-        workspace,
-        regions.statement_end_valid,
-    )
+    let statement_end_valid = decode_workspace_value(false, workspace, regions.statement_end_valid)
     let statement_end_digest = decode_workspace_value(
         Poseidon2Digest::zero(),
         workspace,
@@ -941,6 +992,88 @@ where
         && staged_valid.value == 1
         && composition.valid
         && sparse_composition_phase_public_inputs_match(composition.value, interval)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Replace the validated identity transcript with its SP02 security-profile
+/// extension. The SP01 digest is a compiler-verified immutable protocol
+/// resource derived from Fe and checked by an independent oracle. This pass
+/// transports it into the nominal workspace carrier before binding it.
+pub fn bind_sparse_composition_security_profile<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ profile_resource: ProductionSecurityProfileDigestBuffer,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let identity = decode_workspace_value(
+        zero_sparse_composition_transcript<L, TRACE, LDE>(),
+        workspace,
+        regions.composition,
+    )
+    let profile = load_production_security_profile_digest(profile_resource)
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let phase_valid = staged_valid.valid
+        && staged_valid.value == 1
+        && identity.valid
+        && profile.is_valid()
+        && encode_workspace_value(ref profile, workspace, regions.security_profile)
+    let composition = bind_sparse_air_security_profile_digest_from_validated_phase(
+        identity.value,
+        profile,
+        phase_valid,
+    )
+    let valid = phase_valid
+        && composition.is_valid()
+        && encode_workspace_value(ref composition, workspace, regions.composition)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Validate the stored SP02 extension before deriving any composition or
+/// public-input challenge from it.
+pub fn validate_sparse_composition_security_profile<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let composition = decode_workspace_value(
+        zero_sparse_composition_transcript<L, TRACE, LDE>(),
+        workspace,
+        regions.composition,
+    )
+    let profile = decode_workspace_value(
+        zero_sparse_direct_fri_profile_digest(),
+        workspace,
+        regions.security_profile,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let valid = staged_valid.valid
+        && staged_valid.value == 1
+        && composition.valid
+        && profile.valid
+        && profile.value.is_valid()
+        && sparse_air_security_profile_binding_matches(composition.value, profile.value)
     let valid_word: u32 = if valid { 1 } else { 0 }
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
 }
