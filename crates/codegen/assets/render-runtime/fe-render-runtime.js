@@ -901,6 +901,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._passes = [];
     this._resources = [];
     this._graph = false;
+    this._hasRenderPass = false;
     this._posterAttemptedDevice = null;
     this._posterRecoveryActive = false;
     this._recoveryObservedLoss = false;
@@ -1098,6 +1099,7 @@ export class FeSurfaceElement extends HTMLElement {
         : [{ source_entry: manifest.source_entry, shader: manifest.artifacts.wgsl, layout: manifest.layout }];
       this._resources = manifest.resources || [];
       this._graph = requiresGpuPassGraph(this._passes, this._resources);
+      this._hasRenderPass = this._passes.some((pass) => pass.layout.mode === "render");
       const fragmentPass = [...this._passes].reverse().find((pass) => pass.layout.mode === "render");
       this._layout = fragmentPass?.layout ?? manifest.layout;
       this._surface = manifest.surface || null;
@@ -1300,7 +1302,7 @@ export class FeSurfaceElement extends HTMLElement {
       // view. Materialize them before GPU acquisition so an unavailable
       // adapter cannot erase that authored interface (or its diagnostics).
       this._renderControls();
-      await this._renderPosterWithRecovery();
+      await this._prepareReadyFrame();
       this._renderControls();
       this._updateMeta();
 
@@ -2051,6 +2053,14 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
+  /** A compute-only graph has no presentation image to capture. Keep it cold
+   * until Fe activation or an explicit `.live()` request, then execute it
+   * without allocating a canvas swap chain. */
+  async _prepareReadyFrame() {
+    if (this._graph && !this._hasRenderPass) return;
+    await this._renderPosterWithRecovery();
+  }
+
   /** Render ONE frame at the current (initial) uniforms, capture it as a
    * static poster, and release GPU presentation: the durable fix for a
    * gallery of N tiles costing zero configured swap chains until a tile goes
@@ -2159,6 +2169,14 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   async _capturePosterFromLive() {
+    if (this._graph && !this._hasRenderPass) {
+      const gpu = this._gpu;
+      if (gpu) {
+        await awaitSharedGpuQueueIdle(gpu);
+        this._releaseGpuResources();
+      }
+      return;
+    }
     if (this._adoptedCanvas || this._mode !== "webgpu" || !this._liveContext) return;
     const context = this._liveContext;
     const gpu = this._gpu;
@@ -2213,6 +2231,20 @@ export class FeSurfaceElement extends HTMLElement {
     // Lifecycle policy may alter resident Fe state before the first live
     // presentation. The host contributes only the standards-derived fact.
     this._deliverSurfaceLifecycle(SurfaceEventKind.Visible);
+
+    if (this._graph && !this._hasRenderPass) {
+      const gpu = await this._ensurePipeline();
+      if (!gpu) {
+        this._fail(sharedGpuFailure ?? new Error(
+          "fe render runtime: WebGPU is required for this resource pass graph",
+        ));
+        return;
+      }
+      this._mode = "webgpu";
+      await this._presentOn(null, this._uniforms);
+      this._enterLive();
+      return;
+    }
 
     if (this._adoptedCanvas) {
       // Already presenting (webgpu, kept configured) or cheap to re-run
@@ -2342,7 +2374,8 @@ export class FeSurfaceElement extends HTMLElement {
       if (this._mode === "webgpu") await this._presentOn(this._adoptedContext, presentationUniforms);
       else this._renderWasmInto(this._adoptedCanvas, this._backingWidth, this._backingHeight, presentationUniforms);
     } else if (this._mode === "webgpu") {
-      await this._presentOn(this._liveContext, presentationUniforms);
+      const context = this._graph && !this._hasRenderPass ? null : this._liveContext;
+      await this._presentOn(context, presentationUniforms);
     } else {
       this._renderWasmInto(this._posterCanvas, this._backingWidth, this._backingHeight, presentationUniforms);
     }
@@ -3401,14 +3434,21 @@ export class FeSurfaceElement extends HTMLElement {
       : "";
     this._badge.textContent = this._mode === "webgpu"
       ? `Fe WGSL${wasmRoles} · fixed JS host`
-      : "Fe Wasm renderer · fixed JS host";
+      : this._mode === "wasm-2d"
+        ? "Fe Wasm renderer · fixed JS host"
+        : "Fe renderer · fixed JS host";
     const hostArtifact = provenance.fixed_host?.artifact;
     const runtimeIdentity = hostArtifact?.sha256
       ? `${hostArtifact.path} · sha256:${hostArtifact.sha256}`
       : "fe-render-runtime · unpinned build artifact";
     const hostResponsibilities = provenance.fixed_host?.responsibilities || [];
     this._badge.title = `Fe owns: ${feResponsibilities.join(", ") || "GPU program"}. Host owns: ${hostResponsibilities.join(", ") || "browser API realization"}. ${runtimeIdentity}`;
-    this._badge.className = `badge ${this._mode === "webgpu" ? "webgpu" : "wasm-2d"}`;
+    const modeClass = this._mode === "webgpu"
+      ? "webgpu"
+      : this._mode === "wasm-2d"
+        ? "wasm-2d"
+        : "ready";
+    this._badge.className = `badge ${modeClass}`;
   }
 
   /**

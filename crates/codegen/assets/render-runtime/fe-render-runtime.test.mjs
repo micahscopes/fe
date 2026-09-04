@@ -292,6 +292,47 @@ test("ordinary poster failures preserve the original error outside device recove
   assert.equal(surface._posterRecoveryActive, false);
 });
 
+test("compute-only pass graphs defer work until live and require no canvas", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = true;
+  surface._hasRenderPass = false;
+  let posters = 0;
+  surface._renderPosterWithRecovery = async () => { posters += 1; };
+  await surface._prepareReadyFrame();
+  assert.equal(posters, 0);
+
+  const gpu = { device: {} };
+  surface._fsm = "ready";
+  surface._mode = null;
+  surface._uniforms = [3, 5, 8];
+  surface._deliverSurfaceLifecycle = () => {};
+  surface._ensurePipeline = async () => gpu;
+  const presentations = [];
+  surface._presentOn = async (context, uniforms) => {
+    presentations.push([context, uniforms]);
+  };
+  let entered = 0;
+  surface._enterLive = () => { entered += 1; };
+
+  await surface._goLive();
+
+  assert.equal(surface._mode, "webgpu");
+  assert.deepEqual(presentations, [[null, [3, 5, 8]]]);
+  assert.equal(entered, 1);
+});
+
+test("a backend-pending surface does not claim to be a Wasm renderer", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._mode = null;
+  surface._manifest = { provenance: {} };
+  surface._badge = { textContent: "", title: "", className: "" };
+
+  surface._updateBadge();
+
+  assert.equal(surface._badge.textContent, "Fe renderer · fixed JS host");
+  assert.equal(surface._badge.className, "badge ready");
+});
+
 test("legacy CPU backing ceiling preserves aspect instead of cropping work", () => {
   assert.deepEqual(fitBackingExtent(512, 256, 128), { width: 128, height: 64 });
   assert.deepEqual(fitBackingExtent(96, 64, 128), { width: 96, height: 64 });
