@@ -81,6 +81,7 @@ use mandelbrot_proof_fixed_air_webgpu::{
     SparseRadixWitnessFamily,
     SparseRoundWitnessFamily,
     SPARSE_INTERACTION_ACCUMULATOR_FIELDS,
+    bind_sparse_composition_phase_transcript,
     bind_sparse_composition_phase_seed,
     finish_sparse_composition_phase_context,
     finish_sparse_interaction_accumulator_scan_lane,
@@ -99,8 +100,11 @@ use mandelbrot_proof_fixed_air_webgpu::{
     sparse_composition_phase_validity_word,
     sparse_composition_phase_workspace_words,
     stage_sparse_composition_phase_roots,
+    stage_sparse_composition_phase_statement,
     store_transition_phase_receipt,
     transition_phase_workspace_words,
+    validate_sparse_composition_phase_statement,
+    validate_sparse_composition_phase_transcript,
     write_sparse_base_air_partition_lane,
     write_sparse_arithmetic_composition_lane,
     write_sparse_boundary_interaction_local_lane,
@@ -502,8 +506,8 @@ static_assert(LDE_OUTPUT_STAGES == 13)
 static_assert(TRANSITION_WORKSPACE_WORDS == 218)
 static_assert(TRANSITION_WORKSPACE_WORDS >= DIGEST_FIELDS)
 static_assert(COMPOSITION_WORKSPACE_WORDS <= TRANSITION_WORKSPACE_WORDS)
-static_assert(COMPOSITION_VALIDITY_WORD == 99)
-static_assert(COMPOSITION_COMMITMENT_VALIDITY_WORD == 100)
+static_assert(COMPOSITION_VALIDITY_WORD == 208)
+static_assert(COMPOSITION_COMMITMENT_VALIDITY_WORD == 209)
 static_assert(COMPOSITION_CODEWORD_WORDS == 40960)
 static_assert(COMPOSITION_STAGING_WORDS == 319488)
 static_assert(COMPOSITION_STAGING_WORDS <= LDE_INPUT_GRID_LANES)
@@ -1723,7 +1727,55 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         )
     }
 
-    fn bind_composition_context(self, invocation: ComputeInvocation)
+    fn stage_composition_statement(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        stage_sparse_composition_phase_statement<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(directed_interval(), self.transition_workspace)
+    }
+
+    fn bind_composition_transcript(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        bind_sparse_composition_phase_transcript<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace)
+    }
+
+    fn validate_composition_transcript(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        validate_sparse_composition_phase_transcript<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace)
+    }
+
+    fn validate_composition_statement(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        validate_sparse_composition_phase_statement<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(directed_interval(), self.transition_workspace)
+    }
+
+    fn bind_composition_seed(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
     {
         if invocation.global.x != 0 { return }
@@ -1732,7 +1784,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             PRODUCTION_TRACE_LENGTH,
             BASE_LDE_LENGTH,
             TRANSITION_WORKSPACE_WORDS,
-        >(directed_interval(), self.transition_workspace)
+        >(self.transition_workspace)
     }
 
     fn derive_composition_challenges(self, invocation: ComputeInvocation)

@@ -363,7 +363,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 100);
+    assert_eq!(bundle.manifest.passes.len(), 104);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -597,20 +597,23 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[53].repeat, 13);
     assert_eq!(bundle.manifest.passes[54].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[54].dispatch, Some([1, 1, 1]));
-    assert_eq!(
-        bundle.manifest.passes[55].source_entry,
-        "bind_composition_context",
-    );
-    assert_eq!(bundle.manifest.passes[55].layout.workgroup_size, [1, 1, 1]);
-    assert_eq!(bundle.manifest.passes[55].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[55].repeat, 1);
-    assert_eq!(
-        bundle.manifest.passes[56].source_entry,
+    let composition_binding_names = [
+        "stage_composition_statement",
+        "bind_composition_transcript",
+        "validate_composition_transcript",
+        "validate_composition_statement",
+        "bind_composition_seed",
         "derive_composition_challenges",
-    );
-    assert_eq!(bundle.manifest.passes[56].layout.workgroup_size, [1, 1, 1]);
-    assert_eq!(bundle.manifest.passes[56].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[56].repeat, 1);
+    ];
+    for (pass, name) in bundle.manifest.passes[55..61]
+        .iter()
+        .zip(composition_binding_names)
+    {
+        assert_eq!(pass.source_entry, name);
+        assert_eq!(pass.layout.workgroup_size, [1, 1, 1]);
+        assert_eq!(pass.dispatch, Some([1, 1, 1]));
+        assert_eq!(pass.repeat, 1);
+    }
     let composition_names = [
         "write_composition_control_all_rows",
         "write_composition_control_phase_plan",
@@ -632,7 +635,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         "write_composition_boundary",
         "reduce_composition",
     ];
-    for (pass, name) in bundle.manifest.passes[57..76].iter().zip(composition_names) {
+    for (pass, name) in bundle.manifest.passes[61..80].iter().zip(composition_names) {
         assert_eq!(pass.source_entry, name);
         assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
         assert_eq!(pass.dispatch, Some([LDE_ROWS / THREADS, 1, 1]));
@@ -643,14 +646,14 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         );
     }
     assert_eq!(
-        bundle.manifest.passes[76].source_entry,
+        bundle.manifest.passes[80].source_entry,
         "finish_composition"
     );
-    assert_eq!(bundle.manifest.passes[76].layout.workgroup_size, [1, 1, 1]);
-    assert_eq!(bundle.manifest.passes[76].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[76].repeat, 1);
+    assert_eq!(bundle.manifest.passes[80].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[80].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[80].repeat, 1);
     assert_eq!(
-        bundle.manifest.passes[76].cooperation,
+        bundle.manifest.passes[80].cooperation,
         Some(fe_codegen::WebDispatchCooperation { repeat_batch: 1 }),
     );
     let composition_commitment_names = [
@@ -661,29 +664,29 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         "finish_composition_lde_tree",
     ];
     assert_eq!(
-        bundle.manifest.passes[77..82]
+        bundle.manifest.passes[81..86]
             .iter()
             .map(|pass| pass.source_entry.as_str())
             .collect::<Vec<_>>(),
         composition_commitment_names,
     );
-    assert_eq!(bundle.manifest.passes[77].dispatch, Some([128, 1, 1]));
-    assert_eq!(bundle.manifest.passes[77].repeat, 1);
-    assert_eq!(bundle.manifest.passes[78].dispatch, Some([128, 1, 1]));
-    assert_eq!(bundle.manifest.passes[78].repeat, 1);
-    assert_eq!(bundle.manifest.passes[79].dispatch, Some([64, 1, 1]));
-    assert_eq!(bundle.manifest.passes[79].repeat, 1);
-    assert_eq!(bundle.manifest.passes[80].dispatch, Some([64, 1, 1]));
-    assert_eq!(bundle.manifest.passes[80].repeat, 13);
-    assert_eq!(bundle.manifest.passes[81].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[81].dispatch, Some([128, 1, 1]));
     assert_eq!(bundle.manifest.passes[81].repeat, 1);
+    assert_eq!(bundle.manifest.passes[82].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[82].repeat, 1);
+    assert_eq!(bundle.manifest.passes[83].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[83].repeat, 1);
+    assert_eq!(bundle.manifest.passes[84].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[84].repeat, 13);
+    assert_eq!(bundle.manifest.passes[85].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[85].repeat, 1);
     let fri_setup = [
         ("seed_fri_input", [128, 1, 1]),
         ("prepare_fri_rounds", [1, 1, 1]),
         ("initialize_fri_prover", [FRI_PROVER_GROUPS, 1, 1]),
     ];
     for (index, (entry, dispatch)) in fri_setup.iter().copied().enumerate() {
-        let pass = &bundle.manifest.passes[82 + index];
+        let pass = &bundle.manifest.passes[86 + index];
         assert_eq!(pass.source_entry, entry);
         assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
         assert_eq!(pass.dispatch, Some(dispatch));
@@ -752,7 +755,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         ("finish_fri_round", 1, [1, 1, 1], None),
     ];
     for (index, (entry, repeat, dispatch, taper)) in fri_round_phases.iter().copied().enumerate() {
-        let pass = &bundle.manifest.passes[85 + index];
+        let pass = &bundle.manifest.passes[89 + index];
         assert_eq!(pass.source_entry, entry);
         assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
         assert_eq!(pass.dispatch, Some(dispatch));
@@ -779,7 +782,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         ("compact_fri_openings", 1, [1, 1, 1]),
     ];
     for (index, (entry, repeat, dispatch)) in fri_query_phases.iter().copied().enumerate() {
-        let pass = &bundle.manifest.passes[95 + index];
+        let pass = &bundle.manifest.passes[99 + index];
         assert_eq!(pass.source_entry, entry);
         assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
         assert_eq!(pass.dispatch, Some(dispatch));
@@ -787,7 +790,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         assert_eq!(pass.taper, None);
         assert_eq!(pass.cycle, None);
     }
-    assert_eq!(bundle.manifest.passes[99].source_entry, "paint");
+    assert_eq!(bundle.manifest.passes[103].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle

@@ -137,6 +137,7 @@ use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
 use mandelbrot_proof_recursive_baby_bear::{
     RecursiveCommittedInterval,
     commit_recursive_leaf_statement,
+    invalid_recursive_committed_interval,
 }
 use mandelbrot_proof_baby_bear_domains::{
     MandelbrotSparseBaseLdeLeafBabyBearV1,
@@ -557,6 +558,7 @@ impl<
     const TRACE: usize,
     const LDE: usize,
 > core::marker::Copy for SparseAirLdeTranscriptDigest<L, TRACE, LDE> {}
+derive CanonicalWords for SparseAirLdeTranscriptDigest<L, TRACE, LDE> using CanonicalWordsProvider
 
 /// One authenticated extension of the canonical statement-and-root AIR
 /// transcript. Protocol layers may append a nominally separated commitment,
@@ -573,6 +575,11 @@ impl<
     const TRACE: usize,
     const LDE: usize,
 > core::marker::Copy for SparseCompositionTranscriptDigest<L, TRACE, LDE> {}
+derive CanonicalWords for SparseCompositionTranscriptDigest<
+    L,
+    TRACE,
+    LDE,
+> using CanonicalWordsProvider
 
 impl<const L: usize, const TRACE: usize, const LDE: usize> SparseCompositionTranscriptDigest<
     L,
@@ -3989,6 +3996,28 @@ fn invalid_sparse_composition_transcript<const L: usize, const TRACE: usize, con
     }
 }
 
+/// Invalid canonical carrier used only as the destination for checked storage
+/// decoding. The private transcript fields remain unavailable to callers.
+pub fn zero_sparse_composition_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
+    let base = SparseBaseLdeDigest { valid: false, value: Poseidon2Digest::zero() }
+    let air = SparseAirLdeTranscriptDigest {
+        valid: false,
+        statement: invalid_recursive_committed_interval<L>(),
+        base: base,
+        interaction: SparseInteractionLdeDigest {
+            valid: false,
+            base: base,
+            value: Poseidon2Digest::zero(),
+        },
+        transcript: AirLdeTranscriptDigest { valid: false, value: Poseidon2Digest::zero() },
+    }
+    invalid_sparse_composition_transcript(air)
+}
+
 /// Lift the canonical AIR transcript into the composition stage without an
 /// extension. Existing scalar checkpoints use this identity interpretation.
 pub fn sparse_composition_transcript<const L: usize, const TRACE: usize, const LDE: usize>(
@@ -4000,10 +4029,35 @@ pub fn sparse_composition_transcript<const L: usize, const TRACE: usize, const L
     SparseCompositionTranscriptDigest { valid: true, air: air, transcript: air.transcript }
 }
 
+/// Bind one already committed recursive statement to the two sparse AIR roots.
+/// GPU placement uses this boundary after committing the statement in its own
+/// queue-ordered phase.
+pub fn sparse_composition_transcript_from_committed_statement<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ statement: RecursiveCommittedInterval<L>,
+    _ base_root: Poseidon2Digest,
+    _ interaction_root: Poseidon2Digest,
+    _ roots_valid: bool,
+) -> SparseCompositionTranscriptDigest<L, TRACE, LDE> {
+    let base = SparseBaseLdeDigest { valid: roots_valid, value: base_root }
+    let interaction = SparseInteractionLdeDigest {
+        valid: roots_valid,
+        base: base,
+        value: interaction_root,
+    }
+    let air = bind_sparse_air_lde_transcript(statement, base, interaction)
+    if !air.valid {
+        return invalid_sparse_composition_transcript(air)
+    }
+    SparseCompositionTranscriptDigest { valid: true, air: air, transcript: air.transcript }
+}
+
 /// Recover the nominal composition authority at the storage boundary where
-/// WebGPU returns two raw tree roots. The exact statement and the base-root
-/// dependency of the interaction tree are rebound here before either root may
-/// influence a composition challenge.
+/// WebGPU returns two raw tree roots. Scalar placement may commit and bind the
+/// recursive statement in one call.
 pub fn sparse_composition_transcript_from_committed_roots<
     const L: usize,
     const TRACE: usize,
@@ -4014,27 +4068,14 @@ pub fn sparse_composition_transcript_from_committed_roots<
     _ interaction_root: Poseidon2Digest,
     _ roots_valid: bool,
 ) -> SparseCompositionTranscriptDigest<L, TRACE, LDE>
-where
-    L > 1,
-    Limbs<L>: TruncRows<
-        Limbs<L>,
-    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+where L > 1, Limbs<L>: TruncRows<Limbs<L>> + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
-    let base = SparseBaseLdeDigest { valid: roots_valid, value: base_root }
-    let interaction = SparseInteractionLdeDigest {
-        valid: roots_valid,
-        base: base,
-        value: interaction_root,
-    }
-    let air = bind_sparse_air_lde_transcript(
+    sparse_composition_transcript_from_committed_statement(
         commit_recursive_leaf_statement(interval),
-        base,
-        interaction,
+        base_root,
+        interaction_root,
+        roots_valid,
     )
-    if !air.valid {
-        return invalid_sparse_composition_transcript(air)
-    }
-    SparseCompositionTranscriptDigest { valid: true, air: air, transcript: air.transcript }
 }
 
 /// Extend a canonical AIR transcript with one valid typed commitment. The
@@ -4190,8 +4231,59 @@ where
         Limbs<L>,
     > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
+    sparse_composition_challenge_seed_from_validated_phase(
+        composition,
+        composition.is_valid() && sparse_public_inputs_match_air(composition.air, interval),
+    )
+}
+
+/// Check the identity composition transcript reconstructed from committed AIR
+/// roots. This is deliberately narrower than extension transcripts, whose
+/// outer digest is expected to differ from the AIR transcript.
+pub fn sparse_composition_phase_transcript_is_canonical<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(_ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>) -> bool {
+    composition.is_valid()
+        && sparse_air_lde_transcript_is_canonical(composition.air)
+        && composition.transcript.value.equals(composition.air.transcript.value)
+}
+
+/// Check that the public interval commits to the exact statement retained by
+/// a stored composition transcript. Transcript canonicality is an independent
+/// phase so placement interpreters can schedule both proofs separately.
+pub fn sparse_composition_phase_public_inputs_match<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ interval: OrbitInterval<L>,
+) -> bool
+where
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    let statement = commit_recursive_leaf_statement(interval)
+    composition.is_valid()
+        && recursive_committed_interval_equals(statement, composition.air.statement)
+}
+
+/// Materialize the compact seed only after a placement interpreter has run
+/// the canonicality and public-input checks. The boolean is a phase receipt,
+/// not a substitute for verifier-side transcript reconstruction.
+pub fn sparse_composition_challenge_seed_from_validated_phase<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>(
+    _ composition: SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    _ phase_valid: bool,
+) -> SparseCompositionChallengeSeed<L, TRACE, LDE> {
     SparseCompositionChallengeSeed {
-        valid: composition.is_valid() && sparse_public_inputs_match_air(composition.air, interval),
+        valid: phase_valid && composition.is_valid(),
         base: composition.air.base,
         transcript: composition.transcript.value,
     }

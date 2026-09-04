@@ -37,6 +37,7 @@ pub const fn composition_transcript_domain_tag() -> u32 {
 
 pub struct AirLdeTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for AirLdeTranscriptDigest {}
+derive CanonicalWords for AirLdeTranscriptDigest using CanonicalWordsProvider
 
 pub struct CompositionChallenge { pub valid: bool, pub value: BabyBearExt4 }
 impl core::marker::Copy for CompositionChallenge {}

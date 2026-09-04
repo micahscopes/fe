@@ -39,6 +39,8 @@ const PRODUCTION_TRACE_ROWS: usize = 4_096;
 const SPARSE_BASE_FIELDS: usize = 260;
 const SPARSE_BASE_BROWSER_RECEIPT_DIR: &str = "MB2_SPARSE_BASE_BROWSER_RECEIPT_DIR";
 const SPARSE_LDE_BROWSER_RECEIPT_DIR: &str = "MB2_SPARSE_LDE_BROWSER_RECEIPT_DIR";
+const SPARSE_COMPOSITION_BIND_BROWSER_RECEIPT_DIR: &str =
+    "MB2_SPARSE_COMPOSITION_BIND_BROWSER_RECEIPT_DIR";
 
 fn expected_fixed_air_constraint_count(limbs: u32) -> u32 {
     let radix_range = 40 * limbs + 2;
@@ -6432,6 +6434,79 @@ fn sparse_lde_multipaths_authenticate_production_codewords() {
         [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         "one generated opening must accept cleanly and reject every directed or unknown mutation",
     );
+}
+
+#[test]
+#[ignore = "requires an explicit real-Chrome composition-binding receipt"]
+fn production_sparse_composition_binding_browser_workspace_matches_independent_reference() {
+    let receipt_dir = std::env::var_os(SPARSE_COMPOSITION_BIND_BROWSER_RECEIPT_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "set {SPARSE_COMPOSITION_BIND_BROWSER_RECEIPT_DIR} to the directory emitted by the generic browser resource snapshot"
+            )
+        });
+    let actual = read_u32le_file(&receipt_dir.join("workspace.u32le"));
+
+    let base_root = [1, 2, 3, 4, 5, 6, 7, 8];
+    let interaction_root = [9, 10, 11, 12, 13, 14, 15, 16];
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let claim = Claim { point, bound: 16 };
+    let start = Boundary {
+        iteration: 0,
+        z: current,
+        escaped: false,
+    };
+    let end = advance(&claim, &start);
+    let statement = expected_committed_words(&claim, &start, &end, 1);
+    let transcript = expected_sparse_air_lde_transcript(
+        &statement,
+        base_root,
+        interaction_root,
+    );
+
+    let mut expected = Vec::with_capacity(210);
+    expected.extend(base_root);
+    expected.extend(interaction_root);
+    expected.extend(&statement);
+
+    expected.push(1);
+    expected.push(1);
+    expected.extend(&statement);
+    expected.push(1);
+    expected.extend(base_root);
+    expected.push(1);
+    expected.push(1);
+    expected.extend(base_root);
+    expected.extend(interaction_root);
+    expected.push(1);
+    expected.extend(transcript);
+    expected.push(1);
+    expected.extend(transcript);
+
+    expected.push(1);
+    expected.push(1);
+    expected.extend(base_root);
+    expected.extend(transcript);
+
+    expected.push(1);
+    expected.extend(&reference_poseidon_digest(b"BC01", &transcript)[..4]);
+    expected.extend(expected_sparse_lde_interaction_challenges(base_root));
+    expected.push(1);
+    expected.extend(&reference_poseidon_digest(b"PC01", &transcript)[..4]);
+    expected.extend(&reference_poseidon_digest(b"PM01", &transcript)[..4]);
+
+    expected.extend([0; 18]);
+    expected.extend([1, 0]);
+    assert_eq!(expected.len(), 210, "independent composition workspace width");
+    assert_eq!(actual, expected, "real-Chrome composition workspace");
 }
 
 #[test]

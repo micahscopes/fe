@@ -45,16 +45,24 @@ fn production_composition_binding_lowers_in_isolation() {
     )
     .expect("composition binding fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 3);
+    assert_eq!(bundle.manifest.passes.len(), 7);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.passes[0].source_entry, "stage_roots");
-    assert_eq!(bundle.manifest.passes[1].source_entry, "bind_seed");
-    assert_eq!(bundle.manifest.passes[2].source_entry, "derive_challenges");
+    assert_eq!(bundle.manifest.passes[1].source_entry, "stage_statement");
+    assert_eq!(bundle.manifest.passes[2].source_entry, "bind_transcript");
+    assert_eq!(bundle.manifest.passes[3].source_entry, "validate_transcript");
+    assert_eq!(bundle.manifest.passes[4].source_entry, "validate_statement");
+    assert_eq!(bundle.manifest.passes[5].source_entry, "bind_seed");
+    assert_eq!(bundle.manifest.passes[6].source_entry, "derive_challenges");
     for (pass, shader) in bundle.manifest.passes.iter().zip(&bundle.pass_wgsl) {
         let maximum_wgsl_bytes = match pass.source_entry.as_str() {
-            "stage_roots" => 25_000,
-            "bind_seed" => 350_000,
-            "derive_challenges" => 200_000,
+            "stage_roots" => 30_000,
+            "stage_statement" => 175_000,
+            "bind_transcript" => 205_000,
+            "validate_transcript" => 225_000,
+            "validate_statement" => 225_000,
+            "bind_seed" => 75_000,
+            "derive_challenges" => 185_000,
             other => panic!("unexpected composition binding pass `{other}`"),
         };
         eprintln!(
@@ -77,5 +85,10 @@ fn production_composition_binding_lowers_in_isolation() {
         )
         .validate(&module)
         .unwrap_or_else(|error| panic!("{} WGSL validation failed: {error:?}", pass.source_entry));
+    }
+    if let Ok(destination) = std::env::var("MB2_COMPOSITION_BIND_BUNDLE_OUT") {
+        bundle
+            .write_atomic(destination)
+            .expect("the explicitly requested composition bundle should persist atomically");
     }
 }

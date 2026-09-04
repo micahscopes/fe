@@ -60,7 +60,11 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     guard_sparse_composition_accumulator,
     sparse_bound_composition_evaluation_challenges,
     sparse_composition_challenge_seed,
+    sparse_composition_challenge_seed_from_validated_phase,
     sparse_composition_evaluation_challenges_from_seed,
+    sparse_composition_phase_public_inputs_match,
+    sparse_composition_phase_transcript_is_canonical,
+    sparse_composition_transcript_from_committed_statement,
     sparse_composition_transcript_from_committed_roots,
     sparse_base_air_control_at,
     sparse_base_air_control_link_plan_at,
@@ -71,6 +75,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_task_row_extension,
     zero_sparse_composition_evaluation_challenges,
     zero_sparse_composition_challenge_seed,
+    zero_sparse_composition_transcript,
     zero_sparse_interaction_challenges,
     zero_sparse_interaction_trace_row,
     zero_sparse_trace_control_field,
@@ -143,6 +148,12 @@ use mandelbrot_proof_fixed_air_core::{
     zero_sparse_linear_plan_witness,
 }
 use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
+use mandelbrot_proof_recursive_baby_bear::{
+    RecursiveBoundaryDigest,
+    RecursiveCommittedInterval,
+    RecursiveStatementDigest,
+    commit_recursive_leaf_statement,
+}
 use poseidon_baby_bear::Poseidon2Digest
 use poseidon_baby_bear_webgpu::{
     digest_squeeze_batch_output_valid_start,
@@ -195,6 +206,20 @@ const fn transition_witness_regions<const L: usize>() -> TransitionWitnessRegion
 struct SparseCompositionPhaseRegions<const L: usize, const TRACE: usize, const LDE: usize> {
     base_root: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
     interaction_root: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
+    statement_valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, bool>,
+    statement_leaves: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
+    statement_domain_valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, bool>,
+    statement_digest: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
+    statement_start_iteration: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
+    statement_end_iteration: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
+    statement_start_valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, bool>,
+    statement_start_digest: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
+    statement_end_valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, bool>,
+    statement_end_digest: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, Poseidon2Digest>,
+    composition: Region<
+        SparseCompositionPhaseRegions<L, TRACE, LDE>,
+        SparseCompositionTranscriptDigest<L, TRACE, LDE>,
+    >,
     seed: Region<
         SparseCompositionPhaseRegions<L, TRACE, LDE>,
         SparseCompositionChallengeSeed<L, TRACE, LDE>,
@@ -672,10 +697,10 @@ where
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
 }
 
-/// Bind the statement and staged roots into one opaque challenge seed. The
-/// following pass derives challenges from this compact authority, keeping the
-/// two transcript operations in disjoint private-memory frames.
-pub fn bind_sparse_composition_phase_seed<
+/// Commit the recursive leaf statement in a queue phase independent from AIR
+/// transcript binding. This keeps fixed-point statement hashing below one GPU
+/// invocation boundary while retaining the exact nominal commitment.
+pub fn stage_sparse_composition_phase_statement<
     const L: usize,
     const TRACE: usize,
     const LDE: usize,
@@ -692,25 +717,262 @@ where
     > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
 {
     let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let statement = commit_recursive_leaf_statement(interval)
+    let mut valid = staged_valid.valid
+        && staged_valid.value == 1
+        && statement.valid
+    valid = encode_workspace_value(ref statement.valid, workspace, regions.statement_valid) && valid
+    valid = encode_workspace_value(ref statement.leaves, workspace, regions.statement_leaves) && valid
+    valid = encode_workspace_value(
+        ref statement.statement.valid,
+        workspace,
+        regions.statement_domain_valid,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.statement.value,
+        workspace,
+        regions.statement_digest,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.start_iteration,
+        workspace,
+        regions.statement_start_iteration,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.end_iteration,
+        workspace,
+        regions.statement_end_iteration,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.start.valid,
+        workspace,
+        regions.statement_start_valid,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.start.value,
+        workspace,
+        regions.statement_start_digest,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.end.valid,
+        workspace,
+        regions.statement_end_valid,
+    ) && valid
+    valid = encode_workspace_value(
+        ref statement.end.value,
+        workspace,
+        regions.statement_end_digest,
+    ) && valid
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Bind the statement and staged roots into one canonical transcript. The
+/// queue boundary after this function keeps statement commitment and seed
+/// validation in disjoint GPU private-memory frames.
+pub fn bind_sparse_composition_phase_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
     let base_root = decode_workspace_value(Poseidon2Digest::zero(), workspace, regions.base_root)
     let interaction_root = decode_workspace_value(
         Poseidon2Digest::zero(),
         workspace,
         regions.interaction_root,
     )
+    let statement_valid = decode_workspace_value(false, workspace, regions.statement_valid)
+    let statement_leaves = decode_workspace_value(0, workspace, regions.statement_leaves)
+    let statement_domain_valid = decode_workspace_value(
+        false,
+        workspace,
+        regions.statement_domain_valid,
+    )
+    let statement_digest = decode_workspace_value(
+        Poseidon2Digest::zero(),
+        workspace,
+        regions.statement_digest,
+    )
+    let statement_start_iteration = decode_workspace_value(
+        0,
+        workspace,
+        regions.statement_start_iteration,
+    )
+    let statement_end_iteration = decode_workspace_value(
+        0,
+        workspace,
+        regions.statement_end_iteration,
+    )
+    let statement_start_valid = decode_workspace_value(
+        false,
+        workspace,
+        regions.statement_start_valid,
+    )
+    let statement_start_digest = decode_workspace_value(
+        Poseidon2Digest::zero(),
+        workspace,
+        regions.statement_start_digest,
+    )
+    let statement_end_valid = decode_workspace_value(
+        false,
+        workspace,
+        regions.statement_end_valid,
+    )
+    let statement_end_digest = decode_workspace_value(
+        Poseidon2Digest::zero(),
+        workspace,
+        regions.statement_end_digest,
+    )
     let staged_valid = load_region_word(workspace, regions.valid, 0)
     let roots_valid = staged_valid.valid
         && staged_valid.value == 1
         && base_root.valid
         && interaction_root.valid
-    let composition = sparse_composition_transcript_from_committed_roots<L, TRACE, LDE>(
-        interval,
+        && statement_valid.valid
+        && statement_leaves.valid
+        && statement_domain_valid.valid
+        && statement_digest.valid
+        && statement_start_iteration.valid
+        && statement_end_iteration.valid
+        && statement_start_valid.valid
+        && statement_start_digest.valid
+        && statement_end_valid.valid
+        && statement_end_digest.valid
+        && statement_valid.value
+        && statement_domain_valid.value
+        && statement_start_valid.value
+        && statement_end_valid.value
+    let statement = RecursiveCommittedInterval {
+        valid: statement_valid.value,
+        leaves: statement_leaves.value,
+        statement: RecursiveStatementDigest {
+            valid: statement_domain_valid.value,
+            value: statement_digest.value,
+        },
+        start_iteration: statement_start_iteration.value,
+        end_iteration: statement_end_iteration.value,
+        start: RecursiveBoundaryDigest {
+            valid: statement_start_valid.value,
+            value: statement_start_digest.value,
+        },
+        end: RecursiveBoundaryDigest {
+            valid: statement_end_valid.value,
+            value: statement_end_digest.value,
+        },
+    }
+    let composition = sparse_composition_transcript_from_committed_statement<L, TRACE, LDE>(
+        statement,
         base_root.value,
         interaction_root.value,
         roots_valid,
     )
-    let seed = sparse_composition_challenge_seed(composition, interval)
     let valid = composition.is_valid()
+        && encode_workspace_value(ref composition, workspace, regions.composition)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Reconstruct and check the exact AIR transcript represented by the stored
+/// phase carrier. The result advances the same fail-closed validity receipt.
+pub fn validate_sparse_composition_phase_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let composition = decode_workspace_value(
+        zero_sparse_composition_transcript<L, TRACE, LDE>(),
+        workspace,
+        regions.composition,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let valid = staged_valid.valid
+        && staged_valid.value == 1
+        && composition.valid
+        && sparse_composition_phase_transcript_is_canonical(composition.value)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Match the public interval against the statement retained by the canonical
+/// transcript. Keeping this proof in its own pass bounds one GPU invocation.
+pub fn validate_sparse_composition_phase_statement<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ interval: OrbitInterval<L>, _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    Limbs<L>: TruncRows<
+        Limbs<L>,
+    > + Mac + ShiftAppend + Head + Carry + Zero + SubBorrow + Select + Top + OrLower + core::marker::Copy
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let composition = decode_workspace_value(
+        zero_sparse_composition_transcript<L, TRACE, LDE>(),
+        workspace,
+        regions.composition,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let valid = staged_valid.valid
+        && staged_valid.value == 1
+        && composition.valid
+        && sparse_composition_phase_public_inputs_match(composition.value, interval)
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
+}
+
+/// Reduce a validated phase transcript to the compact authority consumed by
+/// parallel composition lanes.
+pub fn bind_sparse_composition_phase_seed<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let composition = decode_workspace_value(
+        zero_sparse_composition_transcript<L, TRACE, LDE>(),
+        workspace,
+        regions.composition,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let phase_valid = staged_valid.valid && staged_valid.value == 1 && composition.valid
+    let seed = sparse_composition_challenge_seed_from_validated_phase(
+        composition.value,
+        phase_valid,
+    )
+    let valid = phase_valid
         && seed.is_valid()
         && encode_workspace_value(ref seed, workspace, regions.seed)
     let valid_word: u32 = if valid { 1 } else { 0 }

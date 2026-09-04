@@ -1,10 +1,14 @@
 //! Focused compile gate for composition transcript binding and challenge setup.
 
 use mandelbrot_proof_fixed_air_webgpu::{
+    bind_sparse_composition_phase_transcript,
     bind_sparse_composition_phase_seed,
     finish_sparse_composition_phase_context,
     sparse_composition_phase_workspace_words,
     stage_sparse_composition_phase_roots,
+    stage_sparse_composition_phase_statement,
+    validate_sparse_composition_phase_statement,
+    validate_sparse_composition_phase_transcript,
 }
 use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
 use mandelbrot_proof_recursive::{
@@ -81,6 +85,54 @@ actor CompositionBindingProbe uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn stage_statement(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        stage_sparse_composition_phase_statement<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(directed_interval(), self.workspace)
+    }
+
+    fn bind_transcript(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        bind_sparse_composition_phase_transcript<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(self.workspace)
+    }
+
+    fn validate_transcript(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        validate_sparse_composition_phase_transcript<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(self.workspace)
+    }
+
+    fn validate_statement(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        validate_sparse_composition_phase_statement<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(directed_interval(), self.workspace)
+    }
+
     fn bind_seed(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>)
     {
@@ -90,7 +142,7 @@ actor CompositionBindingProbe uses (Program<WebGpuBackend>) {
             PRODUCTION_TRACE_LENGTH,
             LDE_LENGTH,
             WORKSPACE_WORDS,
-        >(directed_interval(), self.workspace)
+        >(self.workspace)
     }
 
     fn derive_challenges(self, invocation: ComputeInvocation)
