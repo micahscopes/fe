@@ -1920,13 +1920,28 @@ All four are focused ingots and may remain so permanently.
   also remain.
   The independent proof-stack audit is retained at
   `/workspace/scratch/mb2-mandelbrot-prover-independent-review-2026-09-04.md`.
-  It identifies one protocol-coherence gate before receipt assembly: the GPU
-  composition path currently derives its challenge from the identity AIR
-  transcript without the SP01/SP02 security-profile binding required by the
-  scalar 114-query verifier. Treat the split composition passes as the
-  device-loss checkpoint until the GPU BC01 root matches the scalar security
-  receipt's BC01 under the same profile.
-  The current 104-pass release gate parses and Naga-validates every emitted
+  It identified one protocol-coherence gate before receipt assembly: the GPU
+  composition path derived its challenge from the identity AIR transcript
+  without the SP01/SP02 security-profile binding required by the scalar
+  114-query verifier. Commit `1a9cabfe1` closes that gap in a focused physical
+  browser slice. Fe derives the exact 44-word recursive security profile and
+  its SP01 digest, an independent Plonky3/BigUint oracle proves exact digest
+  equality, and a content-addressed 36-byte resource transports only the
+  canonical validity word plus eight BabyBear digest lanes to WebGPU. Two
+  Fe-authored phases bind and independently validate SP02 before deriving any
+  composition or public-input challenge. The nine-pass Chrome 149 execution
+  returns a 219-word workspace which matches the independent reference word
+  for word across SP01, SP02, BC01, PC01, PM01, and every phase-validity slot.
+  The focused artifact contains zero Wasm and 1,407,088 aggregate WGSL bytes.
+  It replaces the previous 2,719,889-byte runtime profile-derivation shader;
+  the protocol step is about 2.57 MB smaller while retaining independent
+  derivation and mutation gates. Its first cold browser attempt did not become
+  ready within ten minutes, while the retry completed in roughly five minutes
+  with Chrome's shader cache warmed, so persistent pipeline caching remains a
+  product gate. The current 106-pass production actor passes its exact
+  release-profile Fe source check with the same binding, but complete lowering,
+  physical execution, and BC01 comparison for that full graph remain open.
+  The previous 104-pass release gate parses and Naga-validates every emitted
   module and reports 16,805,768 aggregate WGSL bytes. It completed in 3,035.35
   seconds, substantially slower than the 1,456.51-second 100-pass checkpoint;
   retain that regression as a cold-lowering optimization target rather than a
