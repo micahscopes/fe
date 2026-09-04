@@ -308,6 +308,7 @@ test("fixed host supplies raw capability facts and realizes Fe backing extent ex
     surface._surface = { extent: { width: 512, height: 256 } };
     surface._adoptedCanvas = null;
     surface._stage = {
+      style: {},
       getBoundingClientRect() { return { width: 200, height: 100 }; },
     };
     surface._runWasmArenaEpoch = call => call();
@@ -338,6 +339,7 @@ test("fixed host rejects malformed Fe backing decisions without choosing a repla
     surface._surface = { extent: { width: 512, height: 256 } };
     surface._adoptedCanvas = null;
     surface._stage = {
+      style: {},
       getBoundingClientRect() { return { width: 512, height: 256 }; },
     };
     surface._runWasmArenaEpoch = call => call();
@@ -736,6 +738,103 @@ test("one authored raster pass takes the GPU pass-graph path", () => {
     false,
     "legacy fullscreen rendering keeps its established path",
   );
+});
+
+test("pass graphs fetch and realize pipelines sequentially through async WebGPU", async () => {
+  globalThis.GPUShaderStage = { COMPUTE: 1, VERTEX: 2, FRAGMENT: 4 };
+  const previousFetch = globalThis.fetch;
+  const trace = [];
+  let activeFetches = 0;
+  let activePipelines = 0;
+  let maximumFetches = 0;
+  let maximumPipelines = 0;
+  globalThis.fetch = async url => {
+    activeFetches += 1;
+    maximumFetches = Math.max(maximumFetches, activeFetches);
+    trace.push(["fetch", String(url)]);
+    await Promise.resolve();
+    activeFetches -= 1;
+    return {
+      ok: true,
+      status: 200,
+      async text() { return `// ${String(url)}`; },
+    };
+  };
+  const realize = async (kind, descriptor) => {
+    activePipelines += 1;
+    maximumPipelines = Math.max(maximumPipelines, activePipelines);
+    trace.push(["pipeline", kind, descriptor.compute?.entryPoint
+      ?? descriptor.fragment?.entryPoint]);
+    await Promise.resolve();
+    activePipelines -= 1;
+    return { kind };
+  };
+  const device = {
+    createShaderModule({ code }) {
+      trace.push(["module", code]);
+      return { code };
+    },
+    createComputePipeline() {
+      assert.fail("pass graphs must not synchronously create compute pipelines");
+    },
+    createRenderPipeline() {
+      assert.fail("pass graphs must not synchronously create render pipelines");
+    },
+    createComputePipelineAsync(descriptor) {
+      return realize("compute", descriptor);
+    },
+    createRenderPipelineAsync(descriptor) {
+      return realize("render", descriptor);
+    },
+  };
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._layout = { color_target_format: "rgba8unorm" };
+  surface._manifestUrl = new URL("https://example.test/proof/manifest.json");
+  surface._passShaderUrls = [
+    new URL("https://example.test/proof/first.wgsl"),
+    new URL("https://example.test/proof/second.wgsl"),
+  ];
+  surface._resources = [];
+  surface._passes = [
+    {
+      layout: {
+        mode: "compute",
+        bindings: [],
+        entry_point: "first",
+      },
+    },
+    {
+      draw_vertices: 3,
+      layout: {
+        mode: "render",
+        bindings: [],
+        vertex_entry: "vertex",
+        fragment_entry: "second",
+      },
+    },
+  ];
+
+  try {
+    const graph = await surface._buildPassGraph(device, 7);
+    assert.equal(graph.generation, 7);
+    assert.deepEqual(graph.passRecords.map(record => record.pipeline.kind), [
+      "compute",
+      "render",
+    ]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+
+  assert.equal(maximumFetches, 1, "shader source fetches must remain bounded");
+  assert.equal(maximumPipelines, 1, "pipeline creation must remain bounded");
+  assert.deepEqual(trace.map(event => event.slice(0, 2)), [
+    ["fetch", "https://example.test/proof/first.wgsl"],
+    ["module", "// https://example.test/proof/first.wgsl"],
+    ["pipeline", "compute"],
+    ["fetch", "https://example.test/proof/second.wgsl"],
+    ["module", "// https://example.test/proof/second.wgsl"],
+    ["pipeline", "render"],
+  ]);
 });
 
 test("ordered render passes clear once and preserve earlier Fe-authored color", async () => {

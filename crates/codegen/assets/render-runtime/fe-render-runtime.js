@@ -1572,17 +1572,12 @@ export class FeSurfaceElement extends HTMLElement {
 
   async _buildPassGraph(device, generation) {
     const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
-    const [shaderSources, resourceInitialBytes] = await Promise.all([
-      Promise.all(
-        this._passShaderUrls.map(async (url) => (await fetchOrThrow(url, "WGSL pass shader")).text()),
-      ),
-      Promise.all(
-        this._resources.map(async resource => [
-          resource.name,
-          await fetchVerifiedResourceArtifact(resource, this._manifestUrl),
-        ]),
-      ).then(entries => new Map(entries)),
-    ]);
+    const resourceInitialBytes = await Promise.all(
+      this._resources.map(async resource => [
+        resource.name,
+        await fetchVerifiedResourceArtifact(resource, this._manifestUrl),
+      ]),
+    ).then(entries => new Map(entries));
     const resourceBuffers = new Map();
     for (const resource of this._resources) {
       if (resource.group !== 0) {
@@ -1600,7 +1595,16 @@ export class FeSurfaceElement extends HTMLElement {
     const passRecords = [];
     for (let index = 0; index < this._passes.length; index++) {
       const pass = this._passes[index];
-      const module = device.createShaderModule({ code: shaderSources[index] });
+      // Fetch and realize one shader at a time. A proof graph may contain many
+      // independently scheduled passes, and retaining every source while
+      // synchronously constructing every pipeline can monopolize the page
+      // thread and overwhelm the browser GPU process. Async pipeline creation
+      // gives the browser an explicit scheduling boundary after each pass and
+      // bounds live source text without changing the Fe-authored pass order.
+      const shaderSource = await (
+        await fetchOrThrow(this._passShaderUrls[index], "WGSL pass shader")
+      ).text();
+      const module = device.createShaderModule({ code: shaderSource });
       const visibility = pass.layout.mode === "compute"
         ? GPUShaderStage.COMPUTE
         : pass.draw_vertices
@@ -1663,11 +1667,11 @@ export class FeSurfaceElement extends HTMLElement {
         ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
         : "auto";
       const pipeline = pass.layout.mode === "compute"
-        ? device.createComputePipeline({
+        ? await device.createComputePipelineAsync({
             layout: pipelineLayout,
             compute: { module, entryPoint: pass.layout.entry_point },
           })
-        : device.createRenderPipeline({
+        : await device.createRenderPipelineAsync({
             layout: pipelineLayout,
             vertex: { module, entryPoint: pass.layout.vertex_entry },
             fragment: {
