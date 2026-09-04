@@ -10329,6 +10329,18 @@ where
                             module.ty_for_class(class)?
                         };
                         vars.insert(local_id, fb.declare_var(ty));
+                    } else if matches!(
+                        class,
+                        RuntimeClass::AggregateValue { layout }
+                            if module.single_scalar_field(*layout).is_some()
+                                || module.fieldless_enum_tag(*layout).is_some()
+                    ) {
+                        // One-word nominal values retain their canonical scalar
+                        // carrier across conditional and multi-exit joins. They
+                        // are aggregates semantically, but do not require an
+                        // aggregate place merely because MIR selected a Slot.
+                        let ty = module.ty_for_class(class)?;
+                        vars.insert(local_id, fb.declare_var(ty));
                     } else if let Some(elem_tys) =
                         module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
                     {
