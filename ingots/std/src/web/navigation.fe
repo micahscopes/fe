@@ -16,7 +16,7 @@ pub struct RouteSegmentParse<T> { value: T, valid: bool }
 
 impl<T: Copy> Copy for RouteSegmentParse<T> {}
 
-impl<T> RouteSegmentParse<T> {
+impl<T: Copy> RouteSegmentParse<T> {
     /// Begin an exact parse with a nominal fallback that remains unselected.
     /// Generated route implementations call this ordinary Fe constructor
     /// instead of embedding record construction in a quote body.
@@ -165,7 +165,7 @@ impl RouteQuery {
             }
             index = index + 1
         }
-        if separator != N as u32 {
+        if separator == self.value.len() {
             return RouteQueryValue { value: Utf8View::empty(), present: false, valid: false }
         }
         let name = self.value.slice(start: 0, end: separator)
