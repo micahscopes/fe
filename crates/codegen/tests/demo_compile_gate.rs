@@ -2797,11 +2797,11 @@ fn qcga_pencil_de_compiles_as_a_fe_owned_iterative_fragment_surface() {
     assert_eq!(marker_pass.draw_vertices, Some(54));
     assert_eq!(
         marker_pass.layout.vertex_entry.as_deref(),
-        Some("marker_vertices")
+        Some("fe_vertex_main")
     );
     assert_eq!(
         marker_pass.layout.fragment_entry.as_deref(),
-        Some("marker_fragment")
+        Some("fe_fragment_main")
     );
     assert!(
         marker_wgsl.len() < 18_000,
