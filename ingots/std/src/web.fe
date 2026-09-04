@@ -26,6 +26,7 @@ pub use document_events::{self, *}
 pub use gpu_device_events::{self, *}
 pub use gpu_queue_events::{self, *}
 pub use message_port_events::{self, *}
+pub use navigation::{self, *}
 pub use page::{self, *}
 pub use surface_task::{self, *}
 pub use view::{self, *}

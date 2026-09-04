@@ -81,6 +81,8 @@
   /* Unobtrusive source link. */
   figcaption a { color: #6b7688; text-decoration: underline dotted; font-size: 11.5px; }
   figcaption a:hover { color: #b7c2d8; }
+  figcaption a.demo-route { color: inherit; font-size: inherit; text-decoration: none; }
+  figcaption a.demo-route:hover b { text-decoration: underline; }
   /* The element already defaults to a vertical (canvas-atop-controls) layout
      that fills its box, so a gallery tile needs only ordinary box-model CSS
      on the host, no shadow-piercing `!important` hack. `::part(canvas)` is

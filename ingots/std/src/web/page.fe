@@ -98,6 +98,7 @@ pub enum PageAttributeKind {
     Template,
     ClassToken,
     Publish,
+    ObserveLocation,
 }
 
 impl Copy for PageAttributeKind {}
@@ -164,6 +165,16 @@ impl PageAttribute {
     }
     pub const fn publish() -> Self {
         Self { kind: PageAttributeKind::Publish, text: PageText::empty(), number: 0, enabled: true }
+    }
+    /// Subscribe the owning resident component to typed Location observations.
+    /// Route interpretation remains application Fe code.
+    pub const fn observe_location() -> Self {
+        Self {
+            kind: PageAttributeKind::ObserveLocation,
+            text: PageText::empty(),
+            number: 0,
+            enabled: true,
+        }
     }
 }
 

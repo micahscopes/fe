@@ -406,6 +406,15 @@ test("retired component resource opcodes fail closed", () => {
     bytes.set(text, 9);
     return bytes;
   };
+  const textCommand = (opcode, value) => {
+    const text = encoder.encode(value);
+    const bytes = new Uint8Array(5 + text.length);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = opcode;
+    view.setUint32(1, text.length, true);
+    bytes.set(text, 5);
+    return bytes;
+  };
   assert.deepEqual(
     decodeComponentCommands(command(11, 9, "https://example.test/a.fe")),
     [{ opcode: 11, target: 9, value: "https://example.test/a.fe" }],
@@ -419,6 +428,10 @@ test("retired component resource opcodes fail closed", () => {
     decodeComponentCommands(activation),
     [{ opcode: 14, sequence: 7, timeout: 30_000 }],
   );
+  assert.deepEqual(
+    decodeComponentCommands(textCommand(15, "?demo=Mandelbrot#Selection")),
+    [{ opcode: 15, value: "?demo=Mandelbrot#Selection" }],
+  );
   assert.throws(
     () => decodeComponentCommands(command(12, 41, "https://example.test/a.fe")),
     /unknown command opcode 12/,
@@ -427,6 +440,103 @@ test("retired component resource opcodes fail closed", () => {
     () => decodeComponentCommands(command(13, 42, "https://example.test/a.wasm")),
     /unknown command opcode 13/,
   );
+});
+
+test("component navigation adapter realizes only Fe-selected same-origin history", () => {
+  const priorLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const priorHistory = Object.getOwnPropertyDescriptor(globalThis, "history");
+  const pushed = [];
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { href: "https://example.test/gallery.html#Top" },
+  });
+  Object.defineProperty(globalThis, "history", {
+    configurable: true,
+    value: { pushState: (...args) => pushed.push(args) },
+  });
+  try {
+    const component = new FeComponentElement();
+    component._applyCommands([{ opcode: 15, value: "?demo=Mandelbrot#Selection" }]);
+    assert.deepEqual(pushed, [[
+      null,
+      "",
+      "https://example.test/gallery.html?demo=Mandelbrot#Selection",
+    ]]);
+    assert.throws(
+      () => component._applyCommands([{ opcode: 15, value: "https://other.test/" }]),
+      /same-origin/,
+    );
+  } finally {
+    if (priorLocation) Object.defineProperty(globalThis, "location", priorLocation);
+    else delete globalThis.location;
+    if (priorHistory) Object.defineProperty(globalThis, "history", priorHistory);
+    else delete globalThis.history;
+  }
+});
+
+test("component navigation observations end with their actor listener scope", () => {
+  const priorLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const priorAdd = Object.getOwnPropertyDescriptor(globalThis, "addEventListener");
+  const events = new EventTarget();
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { href: "https://example.test/gallery.html?demo=Qcga#Selection" },
+  });
+  Object.defineProperty(globalThis, "addEventListener", {
+    configurable: true,
+    value: events.addEventListener.bind(events),
+  });
+  try {
+    const component = new FeComponentElement();
+    component._observesLocation = () => true;
+    const received = [];
+    component.addEventListener = () => {};
+    component._send = (...values) => {
+      received.push(values);
+      return [0, 0, 0];
+    };
+    component._installListeners();
+    events.dispatchEvent(new Event("popstate"));
+    component._listeners.abort();
+    globalThis.location.href = "https://example.test/gallery.html#Top";
+    events.dispatchEvent(new Event("popstate"));
+    assert.equal(received.length, 1);
+    assert.equal(received[0][0], 14);
+    assert.equal(received[0][7], "https://example.test/gallery.html?demo=Qcga#Selection");
+  } finally {
+    if (priorLocation) Object.defineProperty(globalThis, "location", priorLocation);
+    else delete globalThis.location;
+    if (priorAdd) Object.defineProperty(globalThis, "addEventListener", priorAdd);
+    else delete globalThis.addEventListener;
+  }
+});
+
+test("components do not receive Location events without Fe opt-in", () => {
+  const priorLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const priorAdd = Object.getOwnPropertyDescriptor(globalThis, "addEventListener");
+  const events = new EventTarget();
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { href: "https://example.test/gallery.html?demo=Qcga#Selection" },
+  });
+  Object.defineProperty(globalThis, "addEventListener", {
+    configurable: true,
+    value: events.addEventListener.bind(events),
+  });
+  try {
+    const component = new FeComponentElement();
+    const received = [];
+    component.addEventListener = () => {};
+    component._send = (...values) => received.push(values);
+    component._installListeners();
+    events.dispatchEvent(new Event("popstate"));
+    assert.deepEqual(received, []);
+  } finally {
+    if (priorLocation) Object.defineProperty(globalThis, "location", priorLocation);
+    else delete globalThis.location;
+    if (priorAdd) Object.defineProperty(globalThis, "addEventListener", priorAdd);
+    else delete globalThis.addEventListener;
+  }
 });
 
 test("component scoped tasks start per connection and cancel with their actor scope", async () => {

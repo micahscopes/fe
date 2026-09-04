@@ -1,18 +1,19 @@
-//! The gallery's resident Fe shell: source inspector plus surface activation.
+//! The gallery's resident Fe shell: typed routes, source inspection, and
+//! surface activation.
 //!
 //! Anchors provide untouched same-origin URLs. Fe owns which artifact kinds
 //! are inspectable, modal state, stale response rejection, loading/error
-//! policy, binary-vs-text presentation, focus, navigation cancellation, and
-//! sequential surface scheduling. Generated standards bindings realize fetch;
-//! the fixed browser host only holds ABI lifetimes and realizes DOM/surface
-//! mechanics.
+//! policy, binary-vs-text presentation, route recovery, focus, cancellation,
+//! and sequential surface scheduling. Generated standards bindings realize
+//! fetch; the fixed browser host only holds ABI lifetimes and realizes
+//! History, DOM, and surface mechanics.
 
 use std::web::component::{
     BrowserBytes, BrowserPtr, BrowserString, ComponentEvent, ComponentEventKind,
     ComponentPatch, ComponentWriter, InitialState, KeyboardKey, ProjectState, ResidentTransition,
     VisibleParts, allocate_component_buffer,
 }
-use std::text::Utf8Buffer
+use std::text::{Utf8Buffer, Utf8Write}
 use core::actor::{ActorSink, ScopedTask}
 use core::pending::{
     Pending, PendingCancellation, Race, RaceOutcome, Select, SelectOutcome, Suspend,
@@ -26,7 +27,8 @@ use std::host::{HostTimer, Resumable}
 use std::wasm::WasmBackend
 use std::web::{
     AnimationFrame, BrowserAnimationFrames, BrowserSurfaceEvents, BrowserSurfaceLoader,
-    BrowserVisibilityEvents, DocumentVisibility, SurfaceLoader, SurfaceToken,
+    BrowserVisibilityEvents, DocumentVisibility, RouteSegment, RouteSegmentParse,
+    RouteSegmentProvider, SurfaceLoader, SurfaceToken, parse_location,
 }
 use std::web::page::{
     ComponentComposition, ComponentView, PageAttribute, PageBuilder, PageElement, PageText,
@@ -49,6 +51,7 @@ pub enum InspectorAction {
     SurfaceFailed,
     ResourceComplete,
     ResourceFailed,
+    Navigate,
 }
 
 impl Copy for InspectorAction {}
@@ -70,7 +73,7 @@ impl InspectorAction {
             Self::Manifest => ArtifactKind::Manifest,
             Self::Source | Self::Unknown | Self::Close |
             Self::SurfaceProgress | Self::SurfaceComplete | Self::SurfaceFailed |
-            Self::ResourceComplete | Self::ResourceFailed => {
+            Self::ResourceComplete | Self::ResourceFailed | Self::Navigate => {
                 ArtifactKind::Source
             }
         }
@@ -96,7 +99,7 @@ impl ArtifactKind {
 /// One reflected schema owns every DOM/view correlation identity. The source
 /// never spells a numeric node/view table; FCO assigns opaque handles once and
 /// their role types constrain both page construction and projection effects.
-struct InspectorParts {
+pub struct GalleryParts {
     overlay: Part<Visibility>,
     text: Part<Visibility>,
     binary: Part<Visibility>,
@@ -110,9 +113,205 @@ struct InspectorParts {
     bytes: Part<Text>,
     raw: Part<Link>,
     error_text: Part<Text>,
+    pub gradient: Part<Visibility>,
+    pub classic_quilting: Part<Visibility>,
+    pub quilting_lod: Part<Visibility>,
+    pub todo_mvc: Part<Visibility>,
+    pub event_studio: Part<Visibility>,
+    pub cga3d: Part<Visibility>,
+    pub qcga: Part<Visibility>,
+    pub qcga_pencil: Part<Visibility>,
+    pub desargues: Part<Visibility>,
+    pub plasma: Part<Visibility>,
+    pub raymarch: Part<Visibility>,
+    pub mandelbrot: Part<Visibility>,
+    pub perturbation_mandelbrot: Part<Visibility>,
+    pub mandelbrot_proof: Part<Visibility>,
+    pub dec: Part<Visibility>,
+    pub known_color: Part<Visibility>,
+    pub rollcall: Part<Visibility>,
 }
 
-derive ComponentSchema for InspectorParts using ComponentSchemaProvider
+impl Copy for GalleryParts {}
+derive ComponentSchema for GalleryParts using ComponentSchemaProvider
+
+/// Route identity is the authored Fe enum. The provider derives both URL
+/// directions from these variant names, so no numeric table or registry can
+/// drift away from the page actor.
+pub enum GalleryDestination {
+    Gradient,
+    ClassicQuilting,
+    QuiltingLod,
+    TodoMvc,
+    EventStudio,
+    Cga3d,
+    Qcga,
+    QcgaPencil,
+    Desargues,
+    Plasma,
+    Raymarch,
+    Mandelbrot,
+    PerturbationMandelbrot,
+    MandelbrotProof,
+    Dec,
+    KnownColor,
+    Rollcall,
+}
+
+impl Copy for GalleryDestination {}
+derive Eq for GalleryDestination
+derive RouteSegment for GalleryDestination using RouteSegmentProvider
+
+impl GalleryDestination {
+    /// Relate one semantic route to its typed DOM capability. This is the only
+    /// route-to-view join; const page construction and runtime projection both
+    /// consume it rather than maintaining parallel ID tables.
+    pub const fn tile(self, ui: GalleryParts) -> Part<Visibility> {
+        match self {
+            Self::Gradient => ui.gradient,
+            Self::ClassicQuilting => ui.classic_quilting,
+            Self::QuiltingLod => ui.quilting_lod,
+            Self::TodoMvc => ui.todo_mvc,
+            Self::EventStudio => ui.event_studio,
+            Self::Cga3d => ui.cga3d,
+            Self::Qcga => ui.qcga,
+            Self::QcgaPencil => ui.qcga_pencil,
+            Self::Desargues => ui.desargues,
+            Self::Plasma => ui.plasma,
+            Self::Raymarch => ui.raymarch,
+            Self::Mandelbrot => ui.mandelbrot,
+            Self::PerturbationMandelbrot => ui.perturbation_mandelbrot,
+            Self::MandelbrotProof => ui.mandelbrot_proof,
+            Self::Dec => ui.dec,
+            Self::KnownColor => ui.known_color,
+            Self::Rollcall => ui.rollcall,
+        }
+    }
+}
+
+/// Whether a route denotes the complete gallery or one typed destination.
+/// Keeping this state nominal avoids assigning a fake destination identity to
+/// the whole gallery just to make the transport convenient.
+pub enum GalleryScope {
+    All,
+    Selection,
+}
+
+impl Copy for GalleryScope {}
+derive Eq for GalleryScope
+
+impl GalleryScope {
+    pub fn show_destination(
+        self,
+        destination: GalleryDestination,
+        visible: VisibleParts,
+        ui: GalleryParts,
+    ) -> VisibleParts {
+        match self {
+            Self::All => visible
+                .show(target: ui.gradient)
+                .show(target: ui.classic_quilting)
+                .show(target: ui.quilting_lod)
+                .show(target: ui.todo_mvc)
+                .show(target: ui.event_studio)
+                .show(target: ui.cga3d)
+                .show(target: ui.qcga)
+                .show(target: ui.qcga_pencil)
+                .show(target: ui.desargues)
+                .show(target: ui.plasma)
+                .show(target: ui.raymarch)
+                .show(target: ui.mandelbrot)
+                .show(target: ui.perturbation_mandelbrot)
+                .show(target: ui.mandelbrot_proof)
+                .show(target: ui.dec)
+                .show(target: ui.known_color)
+                .show(target: ui.rollcall),
+            Self::Selection => visible.show(target: destination.tile(ui)),
+        }
+    }
+}
+
+pub enum GalleryAnchor {
+    Top,
+    Selection,
+}
+
+impl Copy for GalleryAnchor {}
+derive Eq for GalleryAnchor
+derive RouteSegment for GalleryAnchor using RouteSegmentProvider
+
+pub struct GalleryRoute {
+    pub scope: GalleryScope,
+    pub destination: GalleryDestination,
+    pub anchor: GalleryAnchor,
+    pub valid: bool,
+}
+
+impl Copy for GalleryRoute {}
+derive Eq for GalleryRoute
+
+impl GalleryRoute {
+    pub fn all() -> Self {
+        Self {
+            scope: GalleryScope::All,
+            destination: GalleryDestination::Gradient,
+            anchor: GalleryAnchor::Top,
+            valid: true,
+        }
+    }
+
+    pub fn parse(_ value: own BrowserString) -> Self {
+        let location = parse_location(value)
+        let selection = location.query.single("demo")
+        let mut destination = RouteSegmentParse::matched(GalleryDestination::Gradient)
+        let mut scope = GalleryScope::All
+        if selection.present {
+            scope = GalleryScope::Selection
+            destination = GalleryDestination::parse_route_segment(selection.value)
+        }
+        let mut anchor = RouteSegmentParse::matched(GalleryAnchor::Top)
+        if !location.hash.view().is_empty() {
+            anchor = GalleryAnchor::parse_route_segment(location.hash.view())
+        }
+        let valid = location.valid && selection.valid && destination.is_valid() && anchor.is_valid()
+        if !valid {
+            return Self {
+                scope: GalleryScope::All,
+                destination: GalleryDestination::Gradient,
+                anchor: GalleryAnchor::Top,
+                valid: false,
+            }
+        }
+        Self { scope: scope, destination: destination.value(), anchor: anchor.value(), valid: true }
+    }
+
+    pub fn write(self, destination: Utf8Buffer) -> Utf8Write {
+        let mut route = Utf8Write {
+            buffer: destination,
+            truncated: false,
+            valid: true,
+        }
+        match self.scope {
+            GalleryScope::All => {}
+            GalleryScope::Selection => {
+                let prefix = destination.replace_literal("?demo=")
+                let segment = self.destination.write_route_segment(prefix.buffer)
+                route = Utf8Write {
+                    buffer: segment.buffer,
+                    truncated: prefix.truncated || segment.truncated,
+                    valid: prefix.valid && segment.valid,
+                }
+            }
+        }
+        let hash = route.buffer.append_literal("#")
+        let anchor = self.anchor.write_route_segment(hash.buffer)
+        Utf8Write {
+            buffer: anchor.buffer,
+            truncated: route.truncated || hash.truncated || anchor.truncated,
+            valid: route.valid && hash.valid && anchor.valid,
+        }
+    }
+}
 
 enum InspectorStatus {
     Loading,
@@ -129,6 +328,7 @@ impl InspectorStatus {
 }
 
 const URL_CAPACITY: u32 = 2048
+const ROUTE_CAPACITY: u32 = 128
 const PATCH_CAPACITY: u32 = 1048576
 const CONTENT_CAPACITY: u32 = 1044480
 const CONTROL_CAPACITY: u32 = 20
@@ -150,6 +350,12 @@ pub struct InspectorState {
     pub control_ptr: u32,
     pub url_ptr: u32,
     pub url_len: u32,
+    pub route_ptr: u32,
+    pub route_len: u32,
+    pub scope: GalleryScope,
+    pub destination: GalleryDestination,
+    pub anchor: GalleryAnchor,
+    pub push_route: bool,
     pub selected: ArtifactKind,
     pub pending: u32,
     pub status: InspectorStatus,
@@ -838,6 +1044,12 @@ actor SourceInspector {
     control_ptr: u32,
     url_ptr: u32,
     url_len: u32,
+    route_ptr: u32,
+    route_len: u32,
+    scope: GalleryScope,
+    destination: GalleryDestination,
+    anchor: GalleryAnchor,
+    push_route: bool,
     selected: ArtifactKind,
     pending: u32,
     status: InspectorStatus,
@@ -854,10 +1066,11 @@ actor SourceInspector {
     surface_sequence_failed: bool,
 
     const fn view() -> ComponentView<VIEW_CAPACITY> uses (ComponentComposition) {
-        let ui = <InspectorParts as ComponentSchema>::component_parts()
+        let ui = <GalleryParts as ComponentSchema>::component_parts()
         PageBuilder::new()
             .open(element: PageElement::Section)
             .attribute(value: PageAttribute::class(value: "inspector source-inspector"))
+            .attribute(value: PageAttribute::observe_location())
             .attribute(value: PageAttribute::view(value: ui.overlay))
             .attribute(value: PageAttribute::hidden())
             .attribute(value: PageAttribute::role(value: "dialog"))
@@ -934,6 +1147,7 @@ actor SourceInspector {
         let patch = allocate_component_buffer(capacity: PATCH_CAPACITY)
         let control = allocate_component_buffer(capacity: CONTROL_CAPACITY)
         let url = allocate_component_buffer(capacity: URL_CAPACITY)
+        let route_buffer = allocate_component_buffer(capacity: ROUTE_CAPACITY)
         let content = allocate_component_buffer(capacity: CONTENT_CAPACITY)
         publish_load_command(
             control: control.ptr,
@@ -948,6 +1162,12 @@ actor SourceInspector {
             control_ptr: control.ptr,
             url_ptr: url.ptr,
             url_len: 0,
+            route_ptr: route_buffer.ptr,
+            route_len: 0,
+            scope: GalleryScope::All,
+            destination: GalleryDestination::Gradient,
+            anchor: GalleryAnchor::Top,
+            push_route: false,
             selected: ArtifactKind::Source,
             pending: 0,
             status: InspectorStatus::Loading,
@@ -1004,6 +1224,12 @@ actor SourceInspector {
         let control_ptr = self.control_ptr
         let url_ptr = self.url_ptr
         let mut url_len = self.url_len
+        let route_ptr = self.route_ptr
+        let mut route_len = self.route_len
+        let mut scope = self.scope
+        let mut destination = self.destination
+        let mut anchor = self.anchor
+        let mut push_route = false
         let mut selected = self.selected
         let mut pending = self.pending
         let mut status = self.status
@@ -1043,47 +1269,85 @@ actor SourceInspector {
             }
             ComponentEventKind::Activate => {
                 if connected {
-                    if event.target.opens_artifact() && event.text.len > 0 {
-                        selected = event.target.artifact()
-                        url_len = copy_url(destination: url_ptr, value: event.text)
-                        revision = next_revision(value: revision)
-                        pending = revision
-                        status = InspectorStatus::Loading
-                        byte_len = 0
-                        content_len = 0
-                        open = true
-                        prevent_default = true
-                        focus_close = true
-                        publish_load_command(
-                            control: control_ptr,
-                            revision: revision,
-                            request: pending,
-                            url_len: url_len,
-                            binary: selected.is_wasm(),
-                            active: true,
-                        )
-                        BrowserActorNotifications::new().notify()
-                    } else {
-                        match event.target {
-                            InspectorAction::Close => {
-                                if open {
-                                    open = false
-                                    prevent_default = true
-                                    revision = next_revision(value: revision)
-                                    publish_load_command(
-                                        control: control_ptr,
-                                        revision: revision,
-                                        request: pending,
-                                        url_len: url_len,
-                                        binary: selected.is_wasm(),
-                                        active: false,
+                    match event.target {
+                        InspectorAction::Navigate => {
+                            if event.text.len > 0 {
+                                let requested = GalleryRoute::parse(event.text)
+                                if requested.valid {
+                                    let written = requested.write(
+                                        destination: Utf8Buffer::empty(
+                                            ptr: route_ptr,
+                                            capacity: ROUTE_CAPACITY,
+                                        ),
                                     )
-                                    BrowserActorNotifications::new().notify()
+                                    if written.valid && !written.truncated {
+                                        let changed = requested.scope != scope
+                                            || requested.destination != destination
+                                            || requested.anchor != anchor
+                                        scope = requested.scope
+                                        destination = requested.destination
+                                        anchor = requested.anchor
+                                        route_len = written.buffer.len()
+                                        push_route = changed
+                                        prevent_default = true
+                                    }
                                 }
                             }
-                            _ => {}
+                        }
+                        _ => {
+                            if event.target.opens_artifact() && event.text.len > 0 {
+                                selected = event.target.artifact()
+                                url_len = copy_url(destination: url_ptr, value: event.text)
+                                revision = next_revision(value: revision)
+                                pending = revision
+                                status = InspectorStatus::Loading
+                                byte_len = 0
+                                content_len = 0
+                                open = true
+                                prevent_default = true
+                                focus_close = true
+                                publish_load_command(
+                                    control: control_ptr,
+                                    revision: revision,
+                                    request: pending,
+                                    url_len: url_len,
+                                    binary: selected.is_wasm(),
+                                    active: true,
+                                )
+                                BrowserActorNotifications::new().notify()
+                            } else {
+                                match event.target {
+                                    InspectorAction::Close => {
+                                        if open {
+                                            open = false
+                                            prevent_default = true
+                                            revision = next_revision(value: revision)
+                                            publish_load_command(
+                                                control: control_ptr,
+                                                revision: revision,
+                                                request: pending,
+                                                url_len: url_len,
+                                                binary: selected.is_wasm(),
+                                                active: false,
+                                            )
+                                            BrowserActorNotifications::new().notify()
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
+                }
+            }
+            ComponentEventKind::Navigation => {
+                if connected && event.text.len > 0 {
+                    let observed = GalleryRoute::parse(event.text)
+                    scope = observed.scope
+                    destination = observed.destination
+                    anchor = observed.anchor
+                    route_len = 0
+                    push_route = false
                 }
             }
             ComponentEventKind::KeyDown => {
@@ -1160,6 +1424,12 @@ actor SourceInspector {
             control_ptr: control_ptr,
             url_ptr: url_ptr,
             url_len: url_len,
+            route_ptr: route_ptr,
+            route_len: route_len,
+            scope: scope,
+            destination: destination,
+            anchor: anchor,
+            push_route: push_route,
             selected: selected,
             pending: pending,
             status: status,
@@ -1178,12 +1448,15 @@ actor SourceInspector {
     }
 
     fn project(self) -> ComponentPatch uses (ProjectState) {
-        let ui = <InspectorParts as ComponentSchema>::component_parts()
+        let ui = <GalleryParts as ComponentSchema>::component_parts()
         let url = Utf8Buffer::with_len(
             ptr: self.url_ptr, len: self.url_len, capacity: URL_CAPACITY,
         ).browser_string()
         let content = Utf8Buffer::with_len(
             ptr: self.content_ptr, len: self.content_len, capacity: CONTENT_CAPACITY,
+        ).browser_string()
+        let route_location = Utf8Buffer::with_len(
+            ptr: self.route_ptr, len: self.route_len, capacity: ROUTE_CAPACITY,
         ).browser_string()
         let active = self.connected && self.open
         let content_visible = active && !self.status.is_loading() && !self.status.is_error()
@@ -1203,12 +1476,20 @@ actor SourceInspector {
                 target: ui.text,
                 visible: content_visible && !self.selected.is_wasm(),
             )
+        let visible = self.scope.show_destination(
+            destination: self.destination,
+            visible: visible,
+            ui: ui,
+        )
 
         let mut writer = ComponentWriter::new(
             buffer: BrowserBytes { ptr: self.patch_ptr, len: PATCH_CAPACITY },
         )
         if self.open && self.url_len > 0 {
             writer = writer.set_href(target: ui.raw, value: url)
+        }
+        if self.push_route && self.route_len > 0 {
+            writer = writer.push_location(value: route_location)
         }
         if self.status.is_ready() {
             if self.selected.is_wasm() {

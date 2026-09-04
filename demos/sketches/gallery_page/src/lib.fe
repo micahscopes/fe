@@ -7,7 +7,9 @@
 //! structure, Todo markup, or SourceInspector policy.
 
 use std::web::page::{Page, PageAttribute, PageBuilder, PageComposition, PageElement, PageText}
-use source_inspector::InspectorAction
+use std::web::RouteSegment
+use std::web::identity::ComponentSchema
+use source_inspector::{GalleryDestination, GalleryParts, InspectorAction}
 
 const CAPACITY: usize = 512
 
@@ -21,6 +23,14 @@ const fn t2(_ first: String<31>, _ second: String<31>) -> PageText {
 
 const fn t3(_ first: String<31>, _ second: String<31>, _ third: String<31>) -> PageText {
     PageText::three(first: first, second: second, third: third)
+}
+
+const fn gallery_route(destination: GalleryDestination) -> PageText {
+    t3("?demo=", destination.route_segment(), "#Selection")
+}
+
+const fn gallery_top_route() -> PageText {
+    t("#Top")
 }
 
 struct GalleryBuilder { page: PageBuilder<CAPACITY> }
@@ -62,18 +72,35 @@ impl GalleryBuilder {
             )
             .text(value: t("page source"))
             .close()
+            .text(value: t(" · "))
+            .open(element: PageElement::Anchor)
+            .attribute(value: PageAttribute::href(value: gallery_top_route()))
+            .attribute(value: PageAttribute::action(value: InspectorAction::Navigate))
+            .text(value: t("all demos"))
+            .close()
             .close()
             .open(element: PageElement::Div)
             .attribute(value: PageAttribute::class(value: "grid"))
         Self { page: page }
     }
 
-    const fn caption(self, title: PageText, description: PageText, source: PageText) -> Self {
+    const fn caption(
+        self,
+        destination: GalleryDestination,
+        title: PageText,
+        description: PageText,
+        source: PageText,
+    ) -> Self {
         let page = self
             .page
             .open(element: PageElement::Figcaption)
+            .open(element: PageElement::Anchor)
+            .attribute(value: PageAttribute::class(value: "demo-route"))
+            .attribute(value: PageAttribute::href(value: gallery_route(destination)))
+            .attribute(value: PageAttribute::action(value: InspectorAction::Navigate))
             .open(element: PageElement::Bold)
             .text(value: title)
+            .close()
             .close()
             .open(element: PageElement::Span)
             .attribute(value: PageAttribute::class(value: "desc"))
@@ -97,9 +124,19 @@ impl GalleryBuilder {
         description: PageText,
         source: PageText,
         program: PageText,
+        destination: GalleryDestination,
     ) -> Self {
-        let builder = Self { page: self.page.open(element: PageElement::Figure) }
-            .caption(title: title, description: description, source: source)
+        let ui = <GalleryParts as ComponentSchema>::component_parts()
+        let builder = Self {
+            page: self.page
+                .open(element: PageElement::Figure)
+                .attribute(value: PageAttribute::view(value: destination.tile(ui))),
+        }.caption(
+            destination: destination,
+            title: title,
+            description: description,
+            source: source,
+        )
         // Compatibility workaround for browser WebGPU implementations which
         // can crash or lose their shared device when a gallery initializes
         // many surfaces in one burst. This is not a WebGPU or Fe semantic
@@ -120,8 +157,16 @@ impl GalleryBuilder {
     /// The component module owns its initial DOM; the page owns only placement
     /// and presentation classes around that resident actor.
     const fn todo_mount(self) -> Self {
-        let builder = Self { page: self.page.open(element: PageElement::Figure) }
+        let ui = <GalleryParts as ComponentSchema>::component_parts()
+        let builder = Self {
+            page: self.page
+                .open(element: PageElement::Figure)
+                .attribute(
+                    value: PageAttribute::view(value: GalleryDestination::TodoMvc.tile(ui)),
+                ),
+        }
             .caption(
+                destination: GalleryDestination::TodoMvc,
                 title: t("TodoMVC"),
                 description: t2("resident Fe state → keyed ", "DOM effects"),
                 source: t("sketches/todomvc/src/lib.fe"),
@@ -144,8 +189,16 @@ impl GalleryBuilder {
     /// viewport, Pointer Event, wheel, visibility, frame, and timer sources;
     /// the host contributes only standards observations and abort signals.
     const fn event_studio_mount(self) -> Self {
-        let builder = Self { page: self.page.open(element: PageElement::Figure) }
+        let ui = <GalleryParts as ComponentSchema>::component_parts()
+        let builder = Self {
+            page: self.page
+                .open(element: PageElement::Figure)
+                .attribute(
+                    value: PageAttribute::view(value: GalleryDestination::EventStudio.tile(ui)),
+                ),
+        }
             .caption(
+                destination: GalleryDestination::EventStudio,
                 title: t("Event Studio"),
                 description: t2("typed browser streams → ", "resident Fe actor"),
                 source: t2("sketches/event_studio/", "src/lib.fe"),
@@ -179,18 +232,21 @@ actor GalleryPage {
     const fn compose() -> Page<CAPACITY> uses (PageComposition) {
         GalleryBuilder::new()
             .render_tile(
+                destination: GalleryDestination::Gradient,
                 title: t("gradient"),
                 description: t2("Fe-owned colour field → ", "typed controls"),
                 source: t("sketches/gradient/src/lib.fe"),
                 program: t("sketches/gradient"),
             )
             .render_tile(
+                destination: GalleryDestination::ClassicQuilting,
                 title: t("classic quilting"),
                 description: t("atlas: samples → CDT → QB"),
                 source: t2("sketches/classic_quilting_", "atlas/src/lib.fe"),
                 program: t2("sketches/", "classic_quilting_atlas"),
             )
             .render_tile(
+                destination: GalleryDestination::QuiltingLod,
                 title: t("quilting LoD"),
                 description: t("barycentric focus → atlas permutation"),
                 source: t2("sketches/classic_quilting_", "lod/src/lib.fe"),
@@ -199,72 +255,84 @@ actor GalleryPage {
             .todo_mount()
             .event_studio_mount()
             .render_tile(
+                destination: GalleryDestination::Cga3d,
                 title: t("cga3d"),
                 description: t("sparse Clifford sphere pencil"),
                 source: t("sketches/cga3d/src/lib.fe"),
                 program: t("sketches/cga3d"),
             )
             .render_tile(
+                destination: GalleryDestination::Qcga,
                 title: t("qcga"),
                 description: t("quadric conformal surface"),
                 source: t("sketches/qcga/src/lib.fe"),
                 program: t("sketches/qcga"),
             )
             .render_tile(
+                destination: GalleryDestination::QcgaPencil,
                 title: t("qcga pencil"),
                 description: t2("solved QCGA pencil → ", "iterative DE"),
                 source: t2("sketches/qcga_pencil_de/", "src/lib.fe"),
                 program: t("sketches/qcga_pencil_de"),
             )
             .render_tile(
+                destination: GalleryDestination::Desargues,
                 title: t("desargues"),
                 description: t("projective incidence"),
                 source: t("sketches/desargues/src/lib.fe"),
                 program: t("sketches/desargues"),
             )
             .render_tile(
+                destination: GalleryDestination::Plasma,
                 title: t("plasma"),
                 description: t("branch-free field"),
                 source: t("sketches/plasma/src/lib.fe"),
                 program: t("sketches/plasma"),
             )
             .render_tile(
+                destination: GalleryDestination::Raymarch,
                 title: t("distance field"),
                 description: t2("3D Fe raymarch + soft ", "shadows"),
                 source: t("sketches/raymarch/src/lib.fe"),
                 program: t("sketches/raymarch"),
             )
             .render_tile(
+                destination: GalleryDestination::Mandelbrot,
                 title: t("mandelbrot"),
                 description: t("escape-time set"),
                 source: t("sketches/mandelbrot/src/lib.fe"),
                 program: t("sketches/mandelbrot"),
             )
             .render_tile(
+                destination: GalleryDestination::PerturbationMandelbrot,
                 title: t("perturbation mandelbrot"),
                 description: t2("Fixed reference → f32 delta ", "pixels"),
                 source: t3("sketches/", "perturbational_mandelbrot/", "src/lib.fe"),
                 program: t2("sketches/", "perturbational_mandelbrot"),
             )
             .render_tile(
+                destination: GalleryDestination::MandelbrotProof,
                 title: t2("Mandelbrot prover GPU ", "checkpoint"),
                 description: t2("fixed Fe trace → BabyBear ", "LDE → Poseidon commitment"),
                 source: t2("sketches/mandelbrot_proof_gpu/", "src/lib.fe"),
                 program: t("sketches/mandelbrot_proof_gpu"),
             )
             .render_tile(
+                destination: GalleryDestination::Dec,
                 title: t("dec"),
                 description: t("discrete exterior calculus"),
                 source: t("sketches/dec/src/lib.fe"),
                 program: t("sketches/dec"),
             )
             .render_tile(
+                destination: GalleryDestination::KnownColor,
                 title: t("known color"),
                 description: t2("typed compute → fragment ", "resource"),
                 source: t2("sketches/known_color/", "src/lib.fe"),
                 program: t("sketches/known_color"),
             )
             .render_tile(
+                destination: GalleryDestination::Rollcall,
                 title: t("rollcall pipeline"),
                 description: t2("compute → private tree fold ", "→ fragment"),
                 source: t2("sketches/rollcall_pipeline/", "src/lib.fe"),

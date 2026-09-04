@@ -478,6 +478,7 @@ const COMPONENT_EVENT = Object.freeze({
   surfaceLive: 10,
   surfaceError: 11,
   surfaceTimeout: 12,
+  navigation: 14,
 });
 
 function values(value) {
@@ -622,6 +623,9 @@ export function decodeComponentCommands(bytes) {
         operations.push({ opcode, target, value: text() });
         break;
       }
+      case 15:
+        operations.push({ opcode, value: text() });
+        break;
       case 6:
       case 7:
       case 10: {
@@ -767,10 +771,27 @@ export class FeComponentElement extends FeHTMLElement {
     this._active = true;
     this._installListeners();
     this._send(COMPONENT_EVENT.connected, 0, 0, 0, 0, 0, performance.now());
+    if (this._observesLocation() && typeof globalThis.location?.href === "string") {
+      this._send(
+        COMPONENT_EVENT.navigation,
+        0,
+        0,
+        0,
+        0,
+        0,
+        performance.now(),
+        globalThis.location.href,
+      );
+    }
     if (!this._typedSurfaceTasks) this._discoverSurfaces();
     this._startScopedTasks();
     this._resolveReady(this);
     this.dispatchEvent(new CustomEvent("fe-ready", { detail: this }));
+  }
+
+  _observesLocation() {
+    return typeof this.querySelectorAll === "function" &&
+      componentElements(this, this, "[data-fe-observe-location]").length !== 0;
   }
 
   _startScopedTasks() {
@@ -849,6 +870,25 @@ export class FeComponentElement extends FeHTMLElement {
     on("change", COMPONENT_EVENT.change);
     on("submit", COMPONENT_EVENT.submit);
     on("keydown", COMPONENT_EVENT.keyDown);
+    if (this._observesLocation() && typeof globalThis.addEventListener === "function" &&
+        typeof globalThis.location?.href === "string") {
+      globalThis.addEventListener("popstate", event => {
+        try {
+          this._send(
+            COMPONENT_EVENT.navigation,
+            0,
+            0,
+            0,
+            0,
+            0,
+            event.timeStamp,
+            globalThis.location.href,
+          );
+        } catch (error) {
+          this._fail(error);
+        }
+      }, { signal: controller.signal });
+    }
     if (!this._typedSurfaceTasks) {
       const onSurface = (type, kind) => this.addEventListener(type, event => {
         try {
@@ -1195,6 +1235,19 @@ export class FeComponentElement extends FeHTMLElement {
       if (operation.opcode === 14) {
         // Legacy artifacts only; the canonical gallery cannot reach this path.
         this._loadSurface(operation);
+        continue;
+      }
+      if (operation.opcode === 15) {
+        if (typeof globalThis.history?.pushState !== "function" ||
+            typeof globalThis.location?.href !== "string") {
+          throw new Error("fe-component navigation requires History and Location");
+        }
+        const current = new URL(globalThis.location.href);
+        const destination = new URL(operation.value, current);
+        if (destination.origin !== current.origin) {
+          throw new Error("fe-component navigation requires a same-origin URL");
+        }
+        globalThis.history.pushState(null, "", destination.href);
         continue;
       }
       const target = this._node(scope, operation.target);

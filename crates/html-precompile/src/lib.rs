@@ -2506,6 +2506,19 @@ fn set_projected_attribute(
             }
             (PUBLISH_ASSET_MARKER.to_owned(), String::new())
         }
+        PageAttributeKind::ObserveLocation => {
+            if component_scope.is_none() {
+                return Err(PrecompileError::Serialize(
+                    "Fe page uses ObserveLocation outside a component view".to_owned(),
+                ));
+            }
+            if !value.enabled {
+                return Err(PrecompileError::Serialize(
+                    "Fe page ObserveLocation attribute must be enabled".to_owned(),
+                ));
+            }
+            ("data-fe-observe-location".to_owned(), String::new())
+        }
     };
     if attr(node, &name).is_some() {
         return Err(PrecompileError::Serialize(format!(
@@ -4791,7 +4804,7 @@ actor ExamplePage {
     }
 
     #[test]
-    fn component_projection_rejects_nested_programs_and_unscoped_local_ids() {
+    fn component_projection_rejects_nested_programs_and_unscoped_capabilities() {
         let nested = vec![fe_compiler_facade::PageProjectionOp::Render(
             fe_compiler_facade::ProjectedPageRender {
                 source: "sketches/gradient".to_owned(),
@@ -4828,6 +4841,26 @@ actor ExamplePage {
         let error = realize_page_projection(&page).unwrap_err();
         assert!(error.to_string().contains("outside a component view"));
 
+        let page = fe_compiler_facade::PageProjection {
+            actor: "Broken".to_owned(),
+            source_entry: "compose".to_owned(),
+            title: "broken".to_owned(),
+            body: vec![
+                fe_compiler_facade::PageProjectionOp::Open(fe_compiler_facade::PageElement::Main),
+                fe_compiler_facade::PageProjectionOp::Attribute(
+                    fe_compiler_facade::ProjectedPageAttribute {
+                        kind: fe_compiler_facade::PageAttributeKind::ObserveLocation,
+                        text: String::new(),
+                        number: 0,
+                        enabled: true,
+                    },
+                ),
+                fe_compiler_facade::PageProjectionOp::Close,
+            ],
+        };
+        let error = realize_page_projection(&page).unwrap_err();
+        assert!(error.to_string().contains("outside a component view"));
+
         let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(
             r##"<script data-fe-mount="#fixture"></script><fe-component id="fixture"></fe-component>"##,
         );
@@ -4845,10 +4878,23 @@ actor ExamplePage {
                         enabled: false,
                     },
                 ),
+                fe_compiler_facade::PageProjectionOp::Attribute(
+                    fe_compiler_facade::ProjectedPageAttribute {
+                        kind: fe_compiler_facade::PageAttributeKind::ObserveLocation,
+                        text: String::new(),
+                        number: 0,
+                        enabled: true,
+                    },
+                ),
                 fe_compiler_facade::PageProjectionOp::Close,
             ],
         };
         project_component_view_into_mount(&dom.document, &script, &component).unwrap();
+        let input = find_first_element(&dom.document, "input").unwrap();
+        assert_eq!(
+            attr(&input, "data-fe-observe-location").as_deref(),
+            Some("")
+        );
         let error =
             project_component_view_into_mount(&dom.document, &script, &component).unwrap_err();
         assert!(error.to_string().contains("duplicate document id"));

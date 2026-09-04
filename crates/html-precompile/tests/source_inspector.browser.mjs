@@ -185,7 +185,7 @@ try {
       const script = document.querySelector('script[data-fe-mount="#source-inspector"], script[data-fe-mount="#gallery-shell"]');
       const component = document.querySelector("#source-inspector, #gallery-shell");
       const surfaces = Array.from(document.querySelectorAll("fe-surface"));
-      const expectedSurfaces = document.querySelector(".gallery-head") ? 12 : 1;
+      const expectedSurfaces = document.querySelector(".gallery-head") ? 15 : 1;
       if (script?.dataset.feState === "error") return true;
       return script?.dataset.feState === "complete" && component?._active === true &&
         surfaces.length === expectedSurfaces &&
@@ -219,13 +219,16 @@ try {
     const artifactAction = suffix => action(Array.from(document.querySelectorAll("fe-surface"))
       .map(surface => surface.shadowRoot?.querySelector(`a[href$="${suffix}"]`))
       .find(Boolean));
-    return [
+    const actions = [
       action(document.querySelector(".gallery-head a[href$='.fe'], .source[href$='.fe']")),
       artifactAction(".wgsl"),
       artifactAction(".wasm"),
       artifactAction(".json"),
       action(document.querySelector(".source-inspector .close")),
     ];
+    const navigation = action(document.querySelector(".grid > figure figcaption > a"));
+    if (navigation !== undefined && navigation !== null) actions.push(navigation);
+    return actions;
   });
   assert.ok(semanticActions.every(action => action !== null));
   assert.equal(new Set(semanticActions).size, semanticActions.length,
@@ -235,18 +238,19 @@ try {
   if (isGallery) {
     assert.deepEqual(
       await page.evaluate(() => globalThis.__feInspectorE2E.states.map(
-        state => state.slice(14, 18),
+        state => state.slice(20, 24),
       )),
       [
         [1, 0, 0, 0],
-        ...Array.from({ length: 12 }, (_, index) => [index + 2, index + 1, 0, 0]),
-        [14, 12, 1, 0],
+        [1, 0, 0, 0],
+        ...Array.from({ length: 15 }, (_, index) => [index + 2, index + 1, 0, 0]),
+        [17, 15, 1, 0],
       ],
       "scoped Fe task did not deliver exact progress/completion states to its resident actor",
     );
     assert.deepEqual(
       await page.evaluate(() => globalThis.__feInspectorE2E.surfaceSettled),
-      Array.from({ length: 12 }, (_, index) => index),
+      Array.from({ length: 15 }, (_, index) => index),
       "Fe did not load every gallery poster exactly in compiler-derived order",
     );
     assert.deepEqual(await page.evaluate(() => ({
@@ -255,16 +259,18 @@ try {
       figures: document.querySelectorAll(".grid > figure").length,
       surfaces: document.querySelectorAll("fe-surface").length,
       components: document.querySelectorAll("fe-component").length,
-      captions: Array.from(document.querySelectorAll(".grid > figure > figcaption > b"),
+      captions: Array.from(document.querySelectorAll(".grid > figure > figcaption > a > b"),
         node => node.textContent),
     })), {
       title: "Fe · GPU gallery",
       pageMarker: false,
-      figures: 14,
-      surfaces: 12,
+      figures: 17,
+      surfaces: 15,
       components: 3,
       captions: [
         "gradient",
+        "classic quilting",
+        "quilting LoD",
         "TodoMVC",
         "Event Studio",
         "cga3d",
@@ -275,11 +281,30 @@ try {
         "distance field",
         "mandelbrot",
         "perturbation mandelbrot",
+        "Mandelbrot prover GPU checkpoint",
         "dec",
         "known color",
         "rollcall pipeline",
       ],
     });
+
+    const historyLength = await page.evaluate(() => history.length);
+    await page.evaluate(() => {
+      const link = Array.from(document.querySelectorAll(".grid > figure figcaption > a"))
+        .find(anchor => anchor.textContent === "mandelbrot");
+      link.click();
+    });
+    await page.waitForFunction(() =>
+      location.search === "?demo=Mandelbrot" &&
+      Array.from(document.querySelectorAll(".grid > figure")).filter(figure => !figure.hidden)
+        .map(figure => figure.querySelector("figcaption b")?.textContent).join() === "mandelbrot"
+    );
+    assert.equal(await page.evaluate(() => history.length), historyLength + 1);
+    await page.goBack();
+    await page.waitForFunction(() =>
+      location.search === "" &&
+      Array.from(document.querySelectorAll(".grid > figure")).every(figure => !figure.hidden)
+    );
 
     // Event Studio is the browser-event acceptance tile: real standards
     // resize/pointer/wheel facts cross fixed adapters, typed Fe EventSources,
