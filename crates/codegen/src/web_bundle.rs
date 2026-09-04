@@ -6751,9 +6751,14 @@ fn compile_actor_shader_artifacts(
     for (batch_index, batch) in units.chunks(jobs).enumerate() {
         let started = std::time::Instant::now();
         if trace {
+            let labels = batch
+                .iter()
+                .map(|unit| format!("{}:{}", unit.kind.label(), unit.source_entry))
+                .collect::<Vec<_>>()
+                .join(",");
             eprintln!(
-                "[fe web compiler batch] begin batch={batch_index}, units={}, jobs={jobs}",
-                batch.len()
+                "[fe web compiler batch] begin batch={batch_index}, units={}, jobs={jobs}, stages={labels}",
+                batch.len(),
             );
         }
         let batch_db = source_db.replicate_inputs();
@@ -6793,6 +6798,13 @@ fn compile_actor_shader_artifacts(
         reclaim_completed_compiler_database();
         compiled.sort_by_key(|(stage_index, _)| *stage_index);
         for (stage_index, artifact) in compiled {
+            if trace && let Ok(artifact) = &artifact {
+                eprintln!(
+                    "[fe web compiler artifact] stage_index={stage_index}, wgsl_bytes={}, spirv_words={}",
+                    artifact.wgsl.as_ref().map_or(0, String::len),
+                    artifact.words.len(),
+                );
+            }
             artifacts[stage_index] = Some(artifact?);
         }
         if trace {
@@ -6825,6 +6837,9 @@ impl WebBundle {
         options: WebBuildOptions,
         program: WebActorProgram,
     ) -> Result<Self, WebBundleError> {
+        let trace = std::env::var_os("FE_WEB_STAGE_TRACE").is_some()
+            || std::env::var_os("FE_WASM_LOWER_TRACE").is_some();
+        let started = std::time::Instant::now();
         if options.canonical_policy != WebCanonicalPolicy::Disabled
             || !options.canonical_entries.is_empty()
         {
@@ -6961,6 +6976,12 @@ impl WebBundle {
             &resources,
             options.stage_compile_jobs,
         )?;
+        if trace {
+            eprintln!(
+                "[fe web actor graph] shader artifacts complete, elapsed_ms={}",
+                started.elapsed().as_millis(),
+            );
+        }
         let mut passes = Vec::with_capacity(program.stages.len());
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
         // The top-level compatibility artifact/layout follows the derived
@@ -7191,6 +7212,13 @@ impl WebBundle {
             }
             index += 1;
         }
+        if trace {
+            eprintln!(
+                "[fe web actor graph] pass manifests complete, passes={}, elapsed_ms={}",
+                passes.len(),
+                started.elapsed().as_millis(),
+            );
+        }
         validate_resource_stage_visibility(&resources, &passes)?;
         validate_portable_pass_bindings(&passes)?;
         validate_pass_activation_cycles(&passes)?;
@@ -7286,6 +7314,14 @@ impl WebBundle {
                     internal_funcs.push(policy.func);
                 }
             }
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] building control package, entries={}, internal_funcs={}, elapsed_ms={}",
+                    control_entries.len(),
+                    internal_funcs.len(),
+                    started.elapsed().as_millis(),
+                );
+            }
             let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
                 db,
                 top_mod,
@@ -7293,6 +7329,12 @@ impl WebBundle {
                 &internal_funcs,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] control package complete, elapsed_ms={}",
+                    started.elapsed().as_millis(),
+                );
+            }
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
             if let Some(contract) = typed_transition.as_ref() {
                 wasm_options = with_typed_surface_export(
@@ -7364,10 +7406,23 @@ impl WebBundle {
                     &policy.contract,
                 );
             }
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] compiling control wasm, elapsed_ms={}",
+                    started.elapsed().as_millis(),
+                );
+            }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?
                     .bytes;
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] control wasm complete, bytes={}, elapsed_ms={}",
+                    wasm.len(),
+                    started.elapsed().as_millis(),
+                );
+            }
             wasmparser::validate(&wasm)
                 .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
             if let Some(initializer) = initializer.as_ref() {
