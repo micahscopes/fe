@@ -342,8 +342,13 @@ pub fn compile_runtime_package_spirv_authored_raster_with_interface(
     builtin_arguments: &[SpirvBuiltinArgument],
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
-    ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
+    let preserved_helpers =
+        inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
+    ensure_spirv_named_entry_calls_lowerable(
+        &module,
+        &[vertex_entry, fragment_entry],
+        &preserved_helpers,
+    )?;
 
     let mut backend = SpirvBackend::new().with_authored_raster(vertex_entry, fragment_entry);
     for resource in resources {
@@ -386,10 +391,13 @@ fn inline_spirv_calls(
     module: &mut sonatina_ir::Module,
 ) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
     let roots = module.funcs().into_iter().take(1).collect::<Vec<_>>();
-    inline_spirv_calls_from_roots(module, &roots, true)
+    inline_spirv_calls_from_roots(module, &roots, true, false)
 }
 
-fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&str]) {
+fn inline_spirv_named_calls(
+    module: &mut sonatina_ir::Module,
+    entry_names: &[&str],
+) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
     let roots = module
         .funcs()
         .into_iter()
@@ -399,16 +407,17 @@ fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&st
             })
         })
         .collect::<Vec<_>>();
-    let preserved = inline_spirv_calls_from_roots(module, &roots, false);
-    debug_assert!(preserved.is_empty());
+    inline_spirv_calls_from_roots(module, &roots, true, true)
 }
 
 fn inline_spirv_calls_from_roots(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
     preserve_helpers: bool,
+    scalar_helpers_only: bool,
 ) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
+    let trace_clones = std::env::var_os("FE_SPIRV_INLINE_TRACE_CLONES").is_some();
     let functions_before_merge = module.funcs().len();
     let instructions_before_merge = spirv_module_instruction_count(module);
     let merge_stats = run_exact_private_func_merge(module, roots);
@@ -443,7 +452,7 @@ fn inline_spirv_calls_from_roots(
     // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
     let mut inliner_config = spirv_inliner_config();
-    inliner_config.record_full_clone_ids = trace;
+    inliner_config.record_full_clone_ids = trace_clones;
     // GVN's sparse predicated solver can require many GiB on one generated
     // proof entry after only a few frontiers. It is not a legality pass, and
     // the local CFG/SCCP sequence already removes the dead structure exposed
@@ -461,12 +470,15 @@ fn inline_spirv_calls_from_roots(
     if let Some((directory, sequence)) = &snapshot {
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "pre");
     }
-    let preserved_helpers = if preserve_helpers {
+    let mut preserved_helpers = if preserve_helpers {
         normalize_spirv_helper_graph(module);
         spirv_helper_candidates(module, roots)
     } else {
         std::collections::HashSet::new()
     };
+    if scalar_helpers_only {
+        retain_scalar_raster_helper_closure(module, &mut preserved_helpers);
+    }
     if !preserved_helpers.is_empty() {
         let helpers = preserved_helpers.iter().copied().collect::<Vec<_>>();
         run_function_passes_on(
@@ -515,6 +527,8 @@ fn inline_spirv_calls_from_roots(
                 changed,
                 spirv_root_instruction_count(module, roots)
             );
+        }
+        if trace_clones {
             trace_spirv_full_inline_clone_survival(
                 module,
                 &clone_records,
@@ -535,12 +549,14 @@ fn inline_spirv_calls_from_roots(
                     pass.as_str(),
                     spirv_root_instruction_count(module, roots)
                 );
-                trace_spirv_full_inline_clone_survival(
-                    module,
-                    &clone_records,
-                    frontier,
-                    pass.as_str(),
-                );
+                if trace_clones {
+                    trace_spirv_full_inline_clone_survival(
+                        module,
+                        &clone_records,
+                        frontier,
+                        pass.as_str(),
+                    );
+                }
             }
         } else {
             run_function_passes_on(module, roots, &cleanup);
@@ -569,12 +585,14 @@ fn inline_spirv_calls_from_roots(
                 pass.as_str(),
                 spirv_root_instruction_count(module, roots)
             );
-            trace_spirv_full_inline_clone_survival(
-                module,
-                &clone_records,
-                MAX_FRONTIERS,
-                pass.as_str(),
-            );
+            if trace_clones {
+                trace_spirv_full_inline_clone_survival(
+                    module,
+                    &clone_records,
+                    MAX_FRONTIERS,
+                    pass.as_str(),
+                );
+            }
         }
     } else {
         run_function_passes_on(module, roots, &final_cleanup);
@@ -727,6 +745,88 @@ fn spirv_helper_body_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -
                     | sonatina_ir::types::CompoundType::Ptr(_)
             )
         )
+}
+
+/// Restrict the paired raster ABI to helpers that need no implicit capability
+/// or private-memory transport. Sonatina represents flattened scalar
+/// multi-results directly as WGSL result structs, so retaining this closed
+/// subgraph avoids exponentially repeating ordinary GA, color and vector math
+/// while resource-bearing and pointer-bearing wrappers continue to inline into
+/// the stage roots.
+fn retain_scalar_raster_helper_closure(
+    module: &sonatina_ir::Module,
+    helpers: &mut std::collections::HashSet<sonatina_ir::module::FuncRef>,
+) {
+    use sonatina_ir::inst::control_flow;
+
+    let scalar = |ty| spirv_helper_scalar_type(ty);
+    helpers.retain(|&function_ref| {
+        let Some(signature) = module.ctx.get_sig(function_ref) else {
+            return false;
+        };
+        if !signature.args().iter().copied().all(scalar)
+            || !signature.ret_tys().iter().copied().all(scalar)
+        {
+            return false;
+        }
+        module
+            .func_store
+            .try_view(function_ref, |function| {
+                let inst_set = function.inst_set();
+                function.layout.iter_block().all(|block| {
+                    function.layout.iter_inst(block).all(|instruction| {
+                        let data = function.dfg.inst(instruction);
+                        let direct_call = function.dfg.call_info(instruction).is_some();
+                        let indirect_call =
+                            <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
+                                inst_set, data,
+                            )
+                            .is_some();
+                        !indirect_call
+                            && (!data.declared_effect_hint().has_memory_effect() || direct_call)
+                            && function
+                                .dfg
+                                .inst_results(instruction)
+                                .iter()
+                                .copied()
+                                .all(|value| scalar(function.dfg.value_ty(value)))
+                            && data
+                                .collect_values()
+                                .into_iter()
+                                .all(|value| scalar(function.dfg.value_ty(value)))
+                    })
+                })
+            })
+            .unwrap_or(false)
+    });
+
+    // Keep the retained set closed: a helper is independently lowerable only
+    // when every direct callee is retained under the same scalar ABI.
+    loop {
+        let rejected = helpers
+            .iter()
+            .copied()
+            .filter(|&function_ref| {
+                module
+                    .func_store
+                    .try_view(function_ref, |function| {
+                        function
+                            .layout
+                            .iter_block()
+                            .flat_map(|block| function.layout.iter_inst(block))
+                            .filter_map(|instruction| function.dfg.call_info(instruction))
+                            .any(|call| !helpers.contains(&call.callee()))
+                    })
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            break;
+        }
+        for function in rejected {
+            helpers.remove(&function);
+        }
+    }
 }
 
 fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
@@ -1426,9 +1526,10 @@ fn ensure_spirv_entry_calls_lowerable(
     }
 }
 
-fn ensure_spirv_entries_call_free(
+fn ensure_spirv_named_entry_calls_lowerable(
     module: &sonatina_ir::Module,
     entry_names: &[&str],
+    preserved_helpers: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
 ) -> Result<(), LowerError> {
     for entry_name in entry_names {
         let entry = module
@@ -1451,6 +1552,9 @@ fn ensure_spirv_entries_call_free(
                 function.layout.iter_inst(block).find_map(|inst| {
                     let call = function.dfg.call_info(inst)?;
                     let callee = call.callee();
+                    if preserved_helpers.contains(&callee) {
+                        return None;
+                    }
                     Some({
                         let name = module
                             .ctx
@@ -1466,7 +1570,7 @@ fn ensure_spirv_entries_call_free(
         });
         if let Some(callee) = residual {
             return Err(LowerError::Spirv(format!(
-                "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
+                "SPIR-V entry `{entry_name}` retains a call outside the automatically lowerable raster helper graph after bounded inlining: {callee}"
             )));
         }
     }

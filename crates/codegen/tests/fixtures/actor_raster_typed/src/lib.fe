@@ -14,6 +14,14 @@ impl Copy for Normal {}
 struct MeshVarying { normal: Normal, heat: f32 }
 impl Copy for MeshVarying {}
 
+fn tinted_heat(_ heat: f32, _ tint: f32) -> f32 {
+    heat + tint
+}
+
+fn shade_color(_ heat: f32, _ tint: f32) -> u32 {
+    if tinted_heat(heat, tint) > 1.0 { 4294901760 } else { 4278190335 }
+}
+
 actor TypedMesh uses (GpuProgram<WebGpuBackend>) {
     tint: f32,
 
@@ -37,6 +45,6 @@ actor TypedMesh uses (GpuProgram<WebGpuBackend>) {
     fn shade(self, varying: MeshVarying) -> u32
         uses (FragmentStage<MeshVarying>)
     {
-        if varying.heat + self.tint > 1.0 { 4294901760 } else { 4278190335 }
+        shade_color(varying.heat, self.tint)
     }
 }

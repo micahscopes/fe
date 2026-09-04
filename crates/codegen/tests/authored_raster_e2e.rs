@@ -28,7 +28,15 @@ fn compile_bundle() -> WebBundle {
         .root_mod(&db);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(diagnostics.is_empty(), "{diagnostics}");
-    WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None)).unwrap()
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None)).unwrap();
+    assert!(
+        bundle.wgsl.contains("fn tinted_heat")
+            && bundle.wgsl.contains("fn shade_color")
+            && bundle.wgsl.matches("shade_color").count() >= 2,
+        "paired authored raster stages must retain the closed scalar helper graph:\n{}",
+        bundle.wgsl,
+    );
+    bundle
 }
 
 fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
