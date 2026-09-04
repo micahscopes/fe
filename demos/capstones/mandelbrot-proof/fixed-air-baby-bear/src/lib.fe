@@ -59,6 +59,7 @@ use mandelbrot_proof_fixed_air_core::{
     SparseLinearInteractionRow,
     SparseLinearPlanWitness,
     SparseLinearRoleSelectors,
+    SparseInteractionEvaluation,
     SparseProductInteractionRow,
     SparsePublicCoordinate,
     SparseRangeRoleSelectors,
@@ -74,11 +75,18 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_boundary_interaction_terminal,
     evaluate_sparse_control_initial,
     evaluate_sparse_control_link,
+    evaluate_sparse_control_link_relation,
+    evaluate_sparse_control_middle_link_plan,
+    evaluate_sparse_control_phase_link_plan,
     evaluate_sparse_control_row,
+    evaluate_sparse_control_tail_link_plan,
     evaluate_sparse_control_terminal,
     evaluate_sparse_linear_interaction_initial,
     evaluate_sparse_linear_interaction_link,
+    evaluate_sparse_linear_interaction_link_replayed,
+    evaluate_sparse_linear_interaction_ports,
     evaluate_sparse_linear_interaction_row,
+    evaluate_sparse_linear_plan_window,
     evaluate_sparse_linear_interaction_terminal,
     evaluate_sparse_product_interaction_initial,
     evaluate_sparse_product_interaction_link,
@@ -86,7 +94,10 @@ use mandelbrot_proof_fixed_air_core::{
     evaluate_sparse_product_interaction_terminal,
     evaluate_sparse_round_interaction_initial,
     evaluate_sparse_round_interaction_link,
+    evaluate_sparse_round_interaction_link_replayed,
+    evaluate_sparse_round_interaction_ports,
     evaluate_sparse_round_interaction_row,
+    evaluate_sparse_round_plan_window,
     evaluate_sparse_round_interaction_terminal,
     sparse_control_row_at,
     sparse_control_link_plan_witness,
@@ -117,6 +128,7 @@ use mandelbrot_proof_fixed_air_core::{
     zero_sparse_boundary_plan_witness,
     zero_sparse_control_link_plan_witness,
     zero_sparse_control_plan_witness,
+    zero_sparse_copy_interaction_row,
     zero_sparse_linear_plan_witness,
     zero_sparse_round_plan_witness,
     zero_sparse_product_interaction_row,
@@ -619,6 +631,16 @@ impl SparseCompositionEvaluationChallenges {
     pub fn is_valid(self) -> bool {
         self.valid && self.interaction.valid && self.public.valid
     }
+
+    /// The ordered affine-fold challenge for AIR component evaluation.
+    pub fn composition(self) -> BabyBearExt4 {
+        self.composition
+    }
+
+    /// Challenges for the four committed copy-interaction buses.
+    pub fn interaction(self) -> SparseInteractionChallenges {
+        self.interaction
+    }
 }
 
 pub fn zero_sparse_composition_evaluation_challenges() -> SparseCompositionEvaluationChallenges {
@@ -971,6 +993,1286 @@ enum SparseConstraintFamily {
     LastRow,
 }
 impl core::marker::Copy for SparseConstraintFamily {}
+
+/// One semantic component of the ordered sparse AIR composition.
+///
+/// Component types choose physical placement only. Every implementation
+/// evaluates the same all-row, adjacent-row, first-row, and last-row
+/// relations consumed by the scalar prover. `INDEX` makes a storage-backed
+/// interpreter reject skipped or reordered component passes.
+pub trait SparseCompositionComponent {
+    const INDEX: u32
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+}
+
+pub struct SparseControlAllRowsComposition {}
+pub struct SparseControlPhasePlanComposition {}
+pub struct SparseControlMiddlePlanComposition {}
+pub struct SparseControlTailPlanComposition {}
+pub struct SparseControlRelationComposition {}
+pub struct SparseArithmeticComposition {}
+pub struct SparseProductComposition {}
+pub struct SparseRoundPlanFirstComposition {}
+pub struct SparseRoundPlanSecondComposition {}
+pub struct SparseRoundPortsComposition {}
+pub struct SparseRoundBoundaryComposition {}
+pub struct SparseLinearPlanFirstComposition {}
+pub struct SparseLinearPlanSecondComposition {}
+pub struct SparseLinearPlanThirdComposition {}
+pub struct SparseLinearPlanFourthComposition {}
+pub struct SparseLinearPortsComposition {}
+pub struct SparseLinearBoundaryComposition {}
+pub struct SparseBoundaryComposition {}
+
+/// Components that consume the adjacent control rows and their shared
+/// committed link plan. This semantic family lets storage interpreters load
+/// exactly that projection while each marker retains its own ordered index
+/// and constraint denotation.
+pub trait SparseControlLinkCompositionComponent: SparseCompositionComponent {
+    fn evaluate_control_link<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseControlLinkPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+}
+
+/// Components that constrain one ordered window of the shared rounding-port
+/// multiplication plan.
+pub trait SparseRoundPlanCompositionComponent: SparseCompositionComponent {
+    fn evaluate_round_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ plan: SparseRoundPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+}
+
+/// Components that constrain one ordered window of the shared linear-port
+/// multiplication plan.
+pub trait SparseLinearPlanCompositionComponent: SparseCompositionComponent {
+    fn evaluate_linear_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+}
+
+/// Components that consume the committed rounding copy bus. Both variants
+/// share one exact storage projection while retaining distinct all-row and
+/// boundary denotations.
+pub trait SparseRoundInteractionCompositionComponent: SparseCompositionComponent {
+    fn evaluate_round_interaction<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ plan: SparseRoundPlanWitness<BabyBearExt4>,
+        _ interaction: SparseRoundInteractionRow<BabyBearExt4>,
+        _ next_interaction: SparseRoundInteractionRow<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+}
+
+/// Components that consume the committed signed-linear copy bus. The marker
+/// chooses ports or accumulator-boundary constraints, not a second schema.
+pub trait SparseLinearInteractionCompositionComponent: SparseCompositionComponent {
+    fn evaluate_linear_interaction<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+        _ interaction: SparseLinearInteractionRow<BabyBearExt4>,
+        _ next_interaction: SparseLinearInteractionRow<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+}
+
+const SPARSE_ROUND_PLAN_SPLIT: usize = SPARSE_ROUND_PORT_MULTIPLICATIONS / 2
+const SPARSE_LINEAR_PLAN_QUARTER: usize = SPARSE_LINEAR_PORT_MULTIPLICATIONS / 4
+const SPARSE_LINEAR_PLAN_HALF: usize = SPARSE_LINEAR_PLAN_QUARTER * 2
+const SPARSE_LINEAR_PLAN_THREE_QUARTERS: usize = SPARSE_LINEAR_PLAN_QUARTER * 3
+
+/// The four zerofier families emitted by one semantic AIR component.
+pub struct SparseCompositionComponentEvaluation {
+    all_rows: SparseCompositionComponentValue,
+    pair_rows: SparseCompositionComponentValue,
+    first_row: SparseCompositionComponentValue,
+    last_row: SparseCompositionComponentValue,
+}
+impl core::marker::Copy for SparseCompositionComponentEvaluation {}
+
+pub struct SparseCompositionComponentValue { valid: bool, constraints: u32, folded: BabyBearExt4 }
+impl core::marker::Copy for SparseCompositionComponentValue {}
+
+fn fixed_sparse_composition_component_value(
+    _ evaluation: FixedAirConstraintEvaluation<BabyBearExt4>,
+) -> SparseCompositionComponentValue {
+    SparseCompositionComponentValue {
+        valid: evaluation.valid,
+        constraints: evaluation.constraints,
+        folded: evaluation.folded,
+    }
+}
+
+fn interaction_sparse_composition_component_value(
+    _ evaluation: SparseInteractionEvaluation<BabyBearExt4>,
+) -> SparseCompositionComponentValue {
+    SparseCompositionComponentValue {
+        valid: evaluation.valid,
+        constraints: evaluation.constraints,
+        folded: evaluation.folded,
+    }
+}
+
+fn neutral_sparse_constraint_evaluation() -> SparseCompositionComponentValue {
+    SparseCompositionComponentValue { valid: true, constraints: 0, folded: BabyBearExt4::zero() }
+}
+
+/// Evaluate the all-row control component from its exact semantic inputs.
+/// Storage interpreters use this boundary to avoid materializing unrelated AIR
+/// columns, while the opened-row interpreter below preserves the scalar API.
+pub fn evaluate_sparse_control_all_rows_component(
+    _ challenge: BabyBearExt4,
+    _ control: SparseControlRow<BabyBearExt4>,
+    _ control_plan: SparseControlPlanWitness<BabyBearExt4>,
+) -> SparseCompositionComponentEvaluation {
+    SparseCompositionComponentEvaluation {
+        all_rows: fixed_sparse_composition_component_value(
+            evaluate_sparse_control_row(challenge, control, control_plan),
+        ),
+        pair_rows: neutral_sparse_constraint_evaluation(),
+        first_row: neutral_sparse_constraint_evaluation(),
+        last_row: neutral_sparse_constraint_evaluation(),
+    }
+}
+
+impl SparseCompositionComponent for SparseControlAllRowsComposition {
+    const INDEX: u32 = 0
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        evaluate_sparse_control_all_rows_component(
+            challenge,
+            row.base.control,
+            row.base.control_plan,
+        )
+    }
+}
+
+impl SparseCompositionComponent for SparseControlPhasePlanComposition {
+    const INDEX: u32 = <SparseControlAllRowsComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseControlPhasePlanComposition as SparseControlLinkCompositionComponent>::evaluate_control_link<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.control_link_plan,
+        )
+    }
+}
+
+impl SparseControlLinkCompositionComponent for SparseControlPhasePlanComposition {
+    fn evaluate_control_link<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseControlLinkPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: neutral_sparse_constraint_evaluation(),
+            pair_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_control_phase_link_plan(challenge, current, next, witness),
+            ),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseControlMiddlePlanComposition {
+    const INDEX: u32 = <SparseControlPhasePlanComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseControlMiddlePlanComposition as SparseControlLinkCompositionComponent>::evaluate_control_link<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.control_link_plan,
+        )
+    }
+}
+
+impl SparseControlLinkCompositionComponent for SparseControlMiddlePlanComposition {
+    fn evaluate_control_link<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseControlLinkPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: neutral_sparse_constraint_evaluation(),
+            pair_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_control_middle_link_plan(challenge, current, next, witness),
+            ),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseControlTailPlanComposition {
+    const INDEX: u32 = <SparseControlMiddlePlanComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseControlTailPlanComposition as SparseControlLinkCompositionComponent>::evaluate_control_link<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.control_link_plan,
+        )
+    }
+}
+
+impl SparseControlLinkCompositionComponent for SparseControlTailPlanComposition {
+    fn evaluate_control_link<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseControlLinkPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: neutral_sparse_constraint_evaluation(),
+            pair_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_control_tail_link_plan(challenge, current, next, witness),
+            ),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseControlRelationComposition {
+    const INDEX: u32 = <SparseControlTailPlanComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseControlRelationComposition as SparseControlLinkCompositionComponent>::evaluate_control_link<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.control_link_plan,
+        )
+    }
+}
+
+impl SparseControlLinkCompositionComponent for SparseControlRelationComposition {
+    fn evaluate_control_link<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseControlLinkPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: neutral_sparse_constraint_evaluation(),
+            pair_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_control_link_relation<BabyBearExt4, L>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                ),
+            ),
+            first_row: fixed_sparse_composition_component_value(
+                evaluate_sparse_control_initial<BabyBearExt4, L>(challenge, current),
+            ),
+            last_row: fixed_sparse_composition_component_value(
+                evaluate_sparse_control_terminal(challenge, current),
+            ),
+        }
+    }
+}
+
+/// Evaluate the arithmetic component from the exact current and adjacent-row
+/// records it constrains. Storage placement may reconstruct this projection
+/// without materializing either complete opened AIR row.
+pub fn evaluate_sparse_arithmetic_component<const L: usize>(
+    _ challenge: BabyBearExt4,
+    _ control: SparseControlRow<BabyBearExt4>,
+    _ witness: SparseTaskRow<BabyBearExt4>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+    _ next_control: SparseControlRow<BabyBearExt4>,
+    _ next_witness: SparseTaskRow<BabyBearExt4>,
+    _ arithmetic_link_plan: SparseArithmeticLinkPlanWitness<BabyBearExt4>,
+) -> SparseCompositionComponentEvaluation
+where L > 1
+{
+    SparseCompositionComponentEvaluation {
+        all_rows: fixed_sparse_composition_component_value(
+            evaluate_sparse_arithmetic_row<BabyBearExt4, L>(
+                challenge,
+                control,
+                witness,
+                arithmetic_plan,
+            ),
+        ),
+        pair_rows: fixed_sparse_composition_component_value(
+            evaluate_sparse_arithmetic_link(
+                challenge,
+                control,
+                witness,
+                next_control,
+                next_witness,
+                arithmetic_link_plan,
+            ),
+        ),
+        first_row: fixed_sparse_composition_component_value(
+            evaluate_sparse_arithmetic_initial(challenge, witness),
+        ),
+        last_row: neutral_sparse_constraint_evaluation(),
+    }
+}
+
+impl SparseCompositionComponent for SparseArithmeticComposition {
+    const INDEX: u32 = <SparseControlRelationComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        evaluate_sparse_arithmetic_component<L>(
+            challenge,
+            row.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            next.base.control,
+            next.base.witness,
+            row.base.arithmetic_link_plan,
+        )
+    }
+}
+
+/// Evaluate the product copy bus from only its committed base inputs and the
+/// adjacent product interaction records.
+pub fn evaluate_sparse_product_component<const L: usize>(
+    _ challenge: BabyBearExt4,
+    _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+    _ control: SparseControlRow<BabyBearExt4>,
+    _ witness: SparseTaskRow<BabyBearExt4>,
+    _ interaction: SparseProductInteractionRow<BabyBearExt4>,
+    _ next_interaction: SparseProductInteractionRow<BabyBearExt4>,
+) -> SparseCompositionComponentEvaluation
+where L > 1
+{
+    SparseCompositionComponentEvaluation {
+        all_rows: interaction_sparse_composition_component_value(
+            evaluate_sparse_product_interaction_row<BabyBearExt4, L>(
+                challenge,
+                interaction_challenges,
+                control,
+                witness,
+                interaction,
+            ),
+        ),
+        pair_rows: fixed_sparse_composition_component_value(
+            evaluate_sparse_product_interaction_link<BabyBearExt4, L>(
+                challenge,
+                control,
+                witness,
+                interaction,
+                next_interaction,
+            ),
+        ),
+        first_row: fixed_sparse_composition_component_value(
+            evaluate_sparse_product_interaction_initial(challenge, interaction),
+        ),
+        last_row: fixed_sparse_composition_component_value(
+            evaluate_sparse_product_interaction_terminal<BabyBearExt4, L>(
+                challenge,
+                control,
+                witness,
+                interaction,
+            ),
+        ),
+    }
+}
+
+impl SparseCompositionComponent for SparseProductComposition {
+    const INDEX: u32 = <SparseArithmeticComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        evaluate_sparse_product_component<L>(
+            challenge,
+            interaction_challenges.product,
+            row.base.control,
+            row.base.witness,
+            row.interaction.product,
+            next.interaction.product,
+        )
+    }
+}
+
+impl SparseCompositionComponent for SparseRoundPlanFirstComposition {
+    const INDEX: u32 = <SparseProductComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseRoundPlanFirstComposition as SparseRoundPlanCompositionComponent>::evaluate_round_plan<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.round_plan,
+        )
+    }
+}
+
+impl SparseRoundPlanCompositionComponent for SparseRoundPlanFirstComposition {
+    fn evaluate_round_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ plan: SparseRoundPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_round_plan_window<BabyBearExt4, L, 0, SPARSE_ROUND_PLAN_SPLIT>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    plan,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseRoundPlanSecondComposition {
+    const INDEX: u32 = <SparseRoundPlanFirstComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseRoundPlanSecondComposition as SparseRoundPlanCompositionComponent>::evaluate_round_plan<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.round_plan,
+        )
+    }
+}
+
+impl SparseRoundPlanCompositionComponent for SparseRoundPlanSecondComposition {
+    fn evaluate_round_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ plan: SparseRoundPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_round_plan_window<
+                    BabyBearExt4,
+                    L,
+                    SPARSE_ROUND_PLAN_SPLIT,
+                    SPARSE_ROUND_PORT_MULTIPLICATIONS,
+                >(challenge, current, next, witness, plan),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseRoundPortsComposition {
+    const INDEX: u32 = <SparseRoundPlanSecondComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseRoundPortsComposition as SparseRoundInteractionCompositionComponent>::evaluate_round_interaction<
+            L,
+        >(
+            challenge,
+            interaction_challenges.round,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.round_plan,
+            row.interaction.round,
+            next.interaction.round,
+        )
+    }
+}
+
+impl SparseRoundInteractionCompositionComponent for SparseRoundPortsComposition {
+    fn evaluate_round_interaction<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ plan: SparseRoundPlanWitness<BabyBearExt4>,
+        _ interaction: SparseRoundInteractionRow<BabyBearExt4>,
+        _ next_interaction: SparseRoundInteractionRow<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: interaction_sparse_composition_component_value(
+                evaluate_sparse_round_interaction_ports<BabyBearExt4, L>(
+                    challenge,
+                    interaction_challenges,
+                    current,
+                    next,
+                    witness,
+                    plan,
+                    interaction,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseRoundBoundaryComposition {
+    const INDEX: u32 = <SparseRoundPortsComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseRoundBoundaryComposition as SparseRoundInteractionCompositionComponent>::evaluate_round_interaction<
+            L,
+        >(
+            challenge,
+            interaction_challenges.round,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.round_plan,
+            row.interaction.round,
+            next.interaction.round,
+        )
+    }
+}
+
+impl SparseRoundInteractionCompositionComponent for SparseRoundBoundaryComposition {
+    fn evaluate_round_interaction<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ plan: SparseRoundPlanWitness<BabyBearExt4>,
+        _ interaction: SparseRoundInteractionRow<BabyBearExt4>,
+        _ next_interaction: SparseRoundInteractionRow<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: neutral_sparse_constraint_evaluation(),
+            pair_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_round_interaction_link_replayed<BabyBearExt4, L>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    plan,
+                    interaction,
+                    next_interaction,
+                ),
+            ),
+            first_row: fixed_sparse_composition_component_value(
+                evaluate_sparse_round_interaction_initial(challenge, interaction),
+            ),
+            last_row: fixed_sparse_composition_component_value(
+                evaluate_sparse_round_interaction_terminal<BabyBearExt4, L>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    plan,
+                    interaction,
+                ),
+            ),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseLinearPlanFirstComposition {
+    const INDEX: u32 = <SparseRoundBoundaryComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseLinearPlanFirstComposition as SparseLinearPlanCompositionComponent>::evaluate_linear_plan<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            row.base.linear_plan,
+        )
+    }
+}
+
+impl SparseLinearPlanCompositionComponent for SparseLinearPlanFirstComposition {
+    fn evaluate_linear_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_plan_window<BabyBearExt4, L, 0, SPARSE_LINEAR_PLAN_QUARTER>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseLinearPlanSecondComposition {
+    const INDEX: u32 = <SparseLinearPlanFirstComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseLinearPlanSecondComposition as SparseLinearPlanCompositionComponent>::evaluate_linear_plan<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            row.base.linear_plan,
+        )
+    }
+}
+
+impl SparseLinearPlanCompositionComponent for SparseLinearPlanSecondComposition {
+    fn evaluate_linear_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_plan_window<
+                    BabyBearExt4,
+                    L,
+                    SPARSE_LINEAR_PLAN_QUARTER,
+                    SPARSE_LINEAR_PLAN_HALF,
+                >(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseLinearPlanThirdComposition {
+    const INDEX: u32 = <SparseLinearPlanSecondComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseLinearPlanThirdComposition as SparseLinearPlanCompositionComponent>::evaluate_linear_plan<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            row.base.linear_plan,
+        )
+    }
+}
+
+impl SparseLinearPlanCompositionComponent for SparseLinearPlanThirdComposition {
+    fn evaluate_linear_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_plan_window<
+                    BabyBearExt4,
+                    L,
+                    SPARSE_LINEAR_PLAN_HALF,
+                    SPARSE_LINEAR_PLAN_THREE_QUARTERS,
+                >(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseLinearPlanFourthComposition {
+    const INDEX: u32 = <SparseLinearPlanThirdComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseLinearPlanFourthComposition as SparseLinearPlanCompositionComponent>::evaluate_linear_plan<
+            L,
+        >(
+            challenge,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            row.base.linear_plan,
+        )
+    }
+}
+
+impl SparseLinearPlanCompositionComponent for SparseLinearPlanFourthComposition {
+    fn evaluate_linear_plan<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_plan_window<
+                    BabyBearExt4,
+                    L,
+                    SPARSE_LINEAR_PLAN_THREE_QUARTERS,
+                    SPARSE_LINEAR_PORT_MULTIPLICATIONS,
+                >(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseLinearPortsComposition {
+    const INDEX: u32 = <SparseLinearPlanFourthComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseLinearPortsComposition as SparseLinearInteractionCompositionComponent>::evaluate_linear_interaction<
+            L,
+        >(
+            challenge,
+            interaction_challenges.linear,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            row.base.linear_plan,
+            row.interaction.linear,
+            next.interaction.linear,
+        )
+    }
+}
+
+impl SparseLinearInteractionCompositionComponent for SparseLinearPortsComposition {
+    fn evaluate_linear_interaction<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+        _ interaction: SparseLinearInteractionRow<BabyBearExt4>,
+        _ next_interaction: SparseLinearInteractionRow<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: interaction_sparse_composition_component_value(
+                evaluate_sparse_linear_interaction_ports<BabyBearExt4, L>(
+                    challenge,
+                    interaction_challenges,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                    interaction,
+                ),
+            ),
+            pair_rows: neutral_sparse_constraint_evaluation(),
+            first_row: neutral_sparse_constraint_evaluation(),
+            last_row: neutral_sparse_constraint_evaluation(),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseLinearBoundaryComposition {
+    const INDEX: u32 = <SparseLinearPortsComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        <SparseLinearBoundaryComposition as SparseLinearInteractionCompositionComponent>::evaluate_linear_interaction<
+            L,
+        >(
+            challenge,
+            interaction_challenges.linear,
+            row.base.control,
+            next.base.control,
+            row.base.witness,
+            row.base.arithmetic_plan,
+            row.base.linear_plan,
+            row.interaction.linear,
+            next.interaction.linear,
+        )
+    }
+}
+
+impl SparseLinearInteractionCompositionComponent for SparseLinearBoundaryComposition {
+    fn evaluate_linear_interaction<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+        _ current: SparseControlRow<BabyBearExt4>,
+        _ next: SparseControlRow<BabyBearExt4>,
+        _ witness: SparseTaskRow<BabyBearExt4>,
+        _ arithmetic_plan: SparseArithmeticPlanWitness<BabyBearExt4>,
+        _ linear_plan: SparseLinearPlanWitness<BabyBearExt4>,
+        _ interaction: SparseLinearInteractionRow<BabyBearExt4>,
+        _ next_interaction: SparseLinearInteractionRow<BabyBearExt4>,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        SparseCompositionComponentEvaluation {
+            all_rows: neutral_sparse_constraint_evaluation(),
+            pair_rows: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_interaction_link_replayed<BabyBearExt4, L>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                    interaction,
+                    next_interaction,
+                ),
+            ),
+            first_row: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_interaction_initial(challenge, interaction),
+            ),
+            last_row: fixed_sparse_composition_component_value(
+                evaluate_sparse_linear_interaction_terminal<BabyBearExt4, L>(
+                    challenge,
+                    current,
+                    next,
+                    witness,
+                    arithmetic_plan,
+                    linear_plan,
+                    interaction,
+                ),
+            ),
+        }
+    }
+}
+
+impl SparseCompositionComponent for SparseBoundaryComposition {
+    const INDEX: u32 = <SparseLinearBoundaryComposition as SparseCompositionComponent>::INDEX + 1
+
+    fn evaluate<const L: usize>(
+        _ challenge: BabyBearExt4,
+        _ interaction_challenges: SparseInteractionChallenges,
+        _ row: ref SparseOpenedAirRow,
+        _ next: ref SparseOpenedAirRow,
+    ) -> SparseCompositionComponentEvaluation
+    where L > 1
+    {
+        evaluate_sparse_boundary_component<L>(
+            challenge,
+            interaction_challenges.boundary,
+            row.base.control,
+            row.base.witness,
+            row.base.boundary_plan,
+            row.interaction.boundary,
+            next.interaction.boundary,
+        )
+    }
+}
+
+pub fn evaluate_sparse_boundary_component<const L: usize>(
+    _ challenge: BabyBearExt4,
+    _ interaction_challenges: SparseCopyChallenges<BabyBearExt4>,
+    _ control: SparseControlRow<BabyBearExt4>,
+    _ witness: SparseTaskRow<BabyBearExt4>,
+    _ plan: SparseBoundaryPlanWitness<BabyBearExt4>,
+    _ interaction: SparseBoundaryInteractionRow<BabyBearExt4>,
+    _ next_interaction: SparseBoundaryInteractionRow<BabyBearExt4>,
+) -> SparseCompositionComponentEvaluation
+where L > 1
+{
+    SparseCompositionComponentEvaluation {
+        all_rows: interaction_sparse_composition_component_value(
+            evaluate_sparse_boundary_interaction_row<BabyBearExt4, L>(
+                challenge,
+                interaction_challenges,
+                control,
+                witness,
+                plan,
+                interaction,
+            ),
+        ),
+        pair_rows: fixed_sparse_composition_component_value(
+            evaluate_sparse_boundary_interaction_link<BabyBearExt4, L>(
+                challenge,
+                control,
+                witness,
+                plan,
+                interaction,
+                next_interaction,
+            ),
+        ),
+        first_row: fixed_sparse_composition_component_value(
+            evaluate_sparse_boundary_interaction_initial(challenge, interaction),
+        ),
+        last_row: fixed_sparse_composition_component_value(
+            evaluate_sparse_boundary_interaction_terminal<BabyBearExt4, L>(
+                challenge,
+                control,
+                witness,
+                plan,
+                interaction,
+            ),
+        ),
+    }
+}
+
+pub const SPARSE_COMPOSITION_COMPONENTS: u32 = <SparseBoundaryComposition as SparseCompositionComponent>::INDEX
+    + 1
+
+/// One associative affine fold for a single zerofier family. `power` is the
+/// scale applied to the next component and `value` is the ordered offset.
+pub struct SparseCompositionFamilyAccumulator { power: BabyBearExt4, value: BabyBearExt4 }
+impl core::marker::Copy for SparseCompositionFamilyAccumulator {}
+derive CanonicalWords for SparseCompositionFamilyAccumulator using CanonicalWordsProvider
+
+/// Storage-safe checkpoint between component placements. It is a physical
+/// interpretation of the same ordered fold used by the scalar evaluator.
+pub struct SparseCompositionAccumulator {
+    valid: bool,
+    next_component: u32,
+    all_rows: SparseCompositionFamilyAccumulator,
+    pair_rows: SparseCompositionFamilyAccumulator,
+    first_row: SparseCompositionFamilyAccumulator,
+    last_row: SparseCompositionFamilyAccumulator,
+}
+impl core::marker::Copy for SparseCompositionAccumulator {}
+derive CanonicalWords for SparseCompositionAccumulator using CanonicalWordsProvider
+
+fn empty_sparse_composition_family_accumulator() -> SparseCompositionFamilyAccumulator {
+    SparseCompositionFamilyAccumulator { power: BabyBearExt4::one(), value: BabyBearExt4::zero() }
+}
+
+pub fn begin_sparse_composition_accumulator(_ valid: bool) -> SparseCompositionAccumulator {
+    let family = empty_sparse_composition_family_accumulator()
+    SparseCompositionAccumulator {
+        valid: valid,
+        next_component: 0,
+        all_rows: family,
+        pair_rows: family,
+        first_row: family,
+        last_row: family,
+    }
+}
+
+pub fn guard_sparse_composition_accumulator(
+    _ accumulator: SparseCompositionAccumulator,
+    _ valid: bool,
+) -> SparseCompositionAccumulator {
+    let mut accumulator = accumulator
+    accumulator.valid = accumulator.valid && valid
+    accumulator
+}
+
+fn absorb_sparse_composition_family(
+    _ accumulator: SparseCompositionFamilyAccumulator,
+    _ challenge: BabyBearExt4,
+    _ evaluation: SparseCompositionComponentValue,
+) -> SparseCompositionFamilyAccumulator {
+    let mut accumulator = accumulator
+    accumulator.value = accumulator.value + accumulator.power * evaluation.folded
+    accumulator.power = accumulator.power * challenge.pow_u32(evaluation.constraints)
+    accumulator
+}
+
+pub fn accumulate_sparse_composition_component<C: SparseCompositionComponent>(
+    _ accumulator: SparseCompositionAccumulator,
+    _ challenge: BabyBearExt4,
+    _ evaluation: SparseCompositionComponentEvaluation,
+) -> SparseCompositionAccumulator {
+    let mut accumulator = accumulator
+    accumulator.valid = accumulator.valid
+        && accumulator.next_component == C::INDEX
+        && evaluation.all_rows.valid
+        && evaluation.pair_rows.valid
+        && evaluation.first_row.valid
+        && evaluation.last_row.valid
+    accumulator.all_rows = absorb_sparse_composition_family(
+        accumulator.all_rows,
+        challenge,
+        evaluation.all_rows,
+    )
+    accumulator.pair_rows = absorb_sparse_composition_family(
+        accumulator.pair_rows,
+        challenge,
+        evaluation.pair_rows,
+    )
+    accumulator.first_row = absorb_sparse_composition_family(
+        accumulator.first_row,
+        challenge,
+        evaluation.first_row,
+    )
+    accumulator.last_row = absorb_sparse_composition_family(
+        accumulator.last_row,
+        challenge,
+        evaluation.last_row,
+    )
+    accumulator.next_component = accumulator.next_component + 1
+    accumulator
+}
+
+pub fn evaluate_and_accumulate_sparse_composition_component<
+    C: SparseCompositionComponent,
+    const L: usize,
+>(
+    _ accumulator: SparseCompositionAccumulator,
+    _ challenges: SparseCompositionEvaluationChallenges,
+    _ row: ref SparseOpenedAirRow,
+    _ next: ref SparseOpenedAirRow,
+) -> SparseCompositionAccumulator
+where L > 1
+{
+    accumulate_sparse_composition_component<C>(
+        accumulator,
+        challenges.composition,
+        C::evaluate<L>(challenges.composition, challenges.interaction, row, next),
+    )
+}
+
+fn sparse_composition_accumulator_numerators(
+    _ accumulator: SparseCompositionAccumulator,
+) -> AirConstraintNumerators<BabyBearExt4> {
+    let pair_prefix = accumulator.all_rows.power
+    let first_prefix = pair_prefix * accumulator.pair_rows.power
+    let last_prefix = first_prefix * accumulator.first_row.power
+    AirConstraintNumerators {
+        all_rows: accumulator.all_rows.value,
+        pair_rows: pair_prefix * accumulator.pair_rows.value,
+        first_row: first_prefix * accumulator.first_row.value,
+        last_row: last_prefix * accumulator.last_row.value,
+    }
+}
 
 /// Lightweight interpretation of one AIR expression as a polynomial-degree
 /// upper bound. Trace columns enter as degree-one variables; transcript
@@ -1488,33 +2790,102 @@ where L > 1
     fold
 }
 
-fn sparse_composition_fold_opened<const L: usize>(
+fn sparse_composition_accumulator_opened<const L: usize>(
     _ challenge: BabyBearExt4,
     _ interaction_challenges: SparseInteractionChallenges,
     _ row: ref SparseOpenedAirRow,
     _ next: ref SparseOpenedAirRow,
-) -> SparseCompositionFold<BabyBearExt4>
+) -> SparseCompositionAccumulator
 where L > 1
 {
-    sparse_composition_fold_fields<BabyBearExt4, L>(
-        challenge,
-        interaction_challenges.product,
-        interaction_challenges.round,
-        interaction_challenges.linear,
-        interaction_challenges.boundary,
-        row.base.control,
-        next.base.control,
-        row.base.control_plan,
-        row.base.control_link_plan,
-        row.base.witness,
-        next.base.witness,
-        row.base.arithmetic_plan,
-        row.base.arithmetic_link_plan,
-        row.base.round_plan,
-        row.base.linear_plan,
-        row.base.boundary_plan,
-        row.interaction,
-        next.interaction,
+    let mut accumulator = begin_sparse_composition_accumulator(
+        interaction_challenges.valid && row.valid && next.valid,
+    )
+    let internal_challenges = SparseCompositionEvaluationChallenges {
+        valid: interaction_challenges.valid,
+        composition: challenge,
+        interaction: interaction_challenges,
+        public: SparsePublicConstraintChallenges {
+            valid: false,
+            fold: BabyBearExt4::zero(),
+            mix: BabyBearExt4::zero(),
+        },
+    }
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseControlAllRowsComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseControlPhasePlanComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseControlMiddlePlanComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseControlTailPlanComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseControlRelationComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseArithmeticComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<SparseProductComposition, L>(
+        accumulator,
+        internal_challenges,
+        row,
+        next,
+    )
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseRoundPlanFirstComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseRoundPlanSecondComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseRoundPortsComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseRoundBoundaryComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseLinearPlanFirstComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseLinearPlanSecondComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseLinearPlanThirdComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseLinearPlanFourthComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseLinearPortsComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    accumulator = evaluate_and_accumulate_sparse_composition_component<
+        SparseLinearBoundaryComposition,
+        L,
+    >(accumulator, internal_challenges, row, next)
+    evaluate_and_accumulate_sparse_composition_component<SparseBoundaryComposition, L>(
+        accumulator,
+        internal_challenges,
+        row,
+        next,
     )
 }
 
@@ -1526,7 +2897,9 @@ pub fn sparse_constraint_numerators_opened<const L: usize>(
 ) -> AirConstraintNumerators<BabyBearExt4>
 where L > 1
 {
-    sparse_composition_fold_opened<L>(challenge, interaction_challenges, row, next).numerators()
+    sparse_composition_accumulator_numerators(
+        sparse_composition_accumulator_opened<L>(challenge, interaction_challenges, row, next),
+    )
 }
 
 fn maximum_degree(_ left: u32, _ right: u32) -> u32 {
@@ -2980,6 +4353,43 @@ where
     }
 }
 
+/// Complete a storage-backed component schedule with the same zerofiers and
+/// public-input contribution as the scalar composition evaluator.
+pub fn evaluate_sparse_bound_composition_accumulator_opened<const L: usize, const TRACE: usize>(
+    _ interval: OrbitInterval<L>,
+    _ challenges: SparseCompositionEvaluationChallenges,
+    _ point: BabyBearExt4,
+    _ row: ref SparseOpenedAirRow,
+    _ accumulator: SparseCompositionAccumulator,
+) -> AirCompositionValue<BabyBearExt4>
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    }
+{
+    if !challenges.is_valid()
+        || !row.valid
+        || !accumulator.valid
+        || accumulator.next_component != SPARSE_COMPOSITION_COMPONENTS {
+        return AirCompositionValue { valid: false, value: BabyBearExt4::zero() }
+    }
+    let internal = air_composition_value<BabyBearExt4, TRACE>(
+        point,
+        sparse_composition_accumulator_numerators(accumulator),
+    )
+    let public = sparse_public_composition_at<L, TRACE>(interval, challenges.public, point, row)
+    AirCompositionValue {
+        valid: internal.valid && public.valid,
+        value: internal.value + public.value,
+    }
+}
+
 /// Evaluate the fixed-position public-input contribution at one authenticated
 /// LDE opening. The raw interval is recommitted and compared with the exact
 /// transcript statement before any rational constraint is accepted.
@@ -3673,12 +5083,11 @@ pub fn zero_sparse_interaction_accumulators() -> SparseInteractionAccumulators {
 }
 
 pub fn zero_sparse_interaction_scratch() -> SparseInteractionScratch {
-    let zero = BabyBearExt4::zero()
     SparseInteractionScratch {
         product: zero_sparse_product_interaction_row<BabyBearExt4>(),
-        round: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 5] },
-        linear: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 8] },
-        boundary: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 2] },
+        round: zero_sparse_copy_interaction_row<BabyBearExt4, 5>(),
+        linear: zero_sparse_copy_interaction_row<BabyBearExt4, 8>(),
+        boundary: zero_sparse_copy_interaction_row<BabyBearExt4, 2>(),
     }
 }
 
@@ -4485,7 +5894,7 @@ impl TwoToOneHasher<Poseidon2Digest> for SparseDigestHasher {
     }
 }
 
-fn zero_sparse_trace_row_field<F: Radix2Field>() -> SparseTaskRow<F> {
+pub fn zero_sparse_trace_row_field<F: Radix2Field>() -> SparseTaskRow<F> {
     let zero = F::radix2_zero()
     SparseTaskRow {
         value: zero,
@@ -4497,7 +5906,7 @@ fn zero_sparse_trace_row_field<F: Radix2Field>() -> SparseTaskRow<F> {
     }
 }
 
-fn zero_sparse_trace_control_field<F: Radix2Field>() -> SparseControlRow<F> {
+pub fn zero_sparse_trace_control_field<F: Radix2Field>() -> SparseControlRow<F> {
     let zero = F::radix2_zero()
     SparseControlRow {
         selectors: SparseControlSelectors {
@@ -4561,12 +5970,11 @@ fn zero_sparse_base_air_row_field<F: Radix2Field>() -> SparseBaseAirRow<F> {
 }
 
 fn zero_sparse_interaction_trace_row_field<F: Radix2Field>() -> SparseInteractionTraceRow<F> {
-    let zero = F::radix2_zero()
     SparseInteractionTraceRow {
         product: zero_sparse_product_interaction_row<F>(),
-        round: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 5] },
-        linear: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 8] },
-        boundary: SparseCopyInteractionRow { accumulator: zero, inverses: [zero; 2] },
+        round: zero_sparse_copy_interaction_row<F, 5>(),
+        linear: zero_sparse_copy_interaction_row<F, 8>(),
+        boundary: zero_sparse_copy_interaction_row<F, 2>(),
     }
 }
 

@@ -1,0 +1,56 @@
+//! Browser discriminator for one production composition component with one
+//! invocation per workgroup.
+
+use mandelbrot_proof_fixed_air_baby_bear::SPARSE_BASE_AIR_FIELDS
+use mandelbrot_proof_fixed_air_webgpu::{
+    sparse_composition_phase_workspace_words,
+    sparse_composition_staging_words,
+    write_sparse_control_all_rows_composition_lane,
+}
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use precision::baby_bear::BabyBear
+use std::webgpu::{
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch as Grid,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+const THREADS: usize = 1
+const LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
+const GROUPS: usize = LDE_LENGTH
+const WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    LDE_LENGTH,
+>()
+const BASE_WORDS: usize = LDE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const OUTPUT_WORDS: usize = sparse_composition_staging_words<LDE_LENGTH>()
+
+actor CompositionComponentSingleThreadProbe uses (Program<WebGpuBackend>) {
+    workspace: Shared<u32, WORKSPACE_WORDS>,
+    base: Shared<u32, BASE_WORDS>,
+    output: Shared<u32, OUTPUT_WORDS>,
+
+    fn control_all_rows(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_control_all_rows_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+}

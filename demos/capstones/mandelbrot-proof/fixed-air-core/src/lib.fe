@@ -26,7 +26,9 @@ use precision::fixed::Fixed
 use precision::polynomial::{Radix2Field, write_batch_inverse_or_zero}
 use quadratic_plan::{
     QuadraticConstraintInterpreter,
+    QuadraticConstraintWindowFoldInterpreter,
     QuadraticPlanInterpreter,
+    QuadraticPlanReplayInterpreter,
     QuadraticPlanResiduals,
     QuadraticPlanWitness,
     QuadraticValueInterpreter,
@@ -428,6 +430,14 @@ impl<F: Radix2Field, const PORTS: usize> core::marker::Copy for SparseCopyIntera
     PORTS,
 > {}
 derive CanonicalWords for SparseCopyInteractionRow<F, PORTS> using CanonicalWordsProvider
+
+pub fn zero_sparse_copy_interaction_row<
+    F: Radix2Field,
+    const PORTS: usize,
+>() -> SparseCopyInteractionRow<F, PORTS> {
+    let zero = F::radix2_zero()
+    SparseCopyInteractionRow { accumulator: zero, inverses: [zero; PORTS] }
+}
 
 /// The authored product-address plan contains exactly this many multiplication
 /// nodes. Both plan interpreters verify the capacity against the executed
@@ -3891,6 +3901,152 @@ fn absorb_sparse_plan_residuals<F: Radix2Field, const N: usize>(
     }
 }
 
+fn evaluate_sparse_plan_residual_window<
+    F: Radix2Field,
+    const N: usize,
+    const START: usize,
+    const END: usize,
+>(_ challenge: F, _ residuals: QuadraticPlanResiduals<F, N>) -> FixedAirConstraintEvaluation<F> {
+    let mut fold = ConstraintFold<F>::new(challenge)
+    let mut index: usize = START
+    while index < END {
+        fold.absorb(residuals.values[index])
+        index = index + 1
+    }
+    FixedAirConstraintEvaluation {
+        valid: residuals.valid && START <= END && END <= N,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+/// First contiguous segment of the control-link multiplication plan.
+pub fn evaluate_sparse_control_phase_link_plan<F: Radix2Field>(
+    _ challenge: F,
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ witness: SparseControlLinkPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let phase = sparse_control_phase_link_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        QuadraticConstraintInterpreter::new(witness.phase),
+    )
+    let residuals = phase.interpreter.finish()
+    evaluate_sparse_plan_residual_window<
+        F,
+        SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+        0,
+        SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS,
+    >(challenge, residuals)
+}
+
+/// Middle contiguous segment of the control-link multiplication plan.
+pub fn evaluate_sparse_control_middle_link_plan<F: Radix2Field>(
+    _ challenge: F,
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ witness: SparseControlLinkPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let phase = sparse_control_phase_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        QuadraticPlanReplayInterpreter::new(witness.phase),
+    )
+    let boundary = sparse_control_boundary_link_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        QuadraticConstraintInterpreter::new(witness.boundary),
+    )
+    let range = sparse_control_range_link_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.range),
+    )
+    let carry = sparse_control_carry_link_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.carry),
+    )
+    let boundary_residuals = boundary.interpreter.finish()
+    let range_residuals = range.interpreter.finish()
+    let carry_residuals = carry.interpreter.finish()
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_plan_residuals(mut fold, boundary_residuals)
+    absorb_sparse_plan_residuals(mut fold, range_residuals)
+    absorb_sparse_plan_residuals(mut fold, carry_residuals)
+    FixedAirConstraintEvaluation {
+        valid: phase.interpreter.finish()
+            && boundary_residuals.valid
+            && range_residuals.valid
+            && carry_residuals.valid,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+/// Final contiguous segment of the control-link multiplication plan.
+pub fn evaluate_sparse_control_tail_link_plan<F: Radix2Field>(
+    _ challenge: F,
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ witness: SparseControlLinkPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F> {
+    let phase = sparse_control_phase_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        QuadraticPlanReplayInterpreter::new(witness.phase),
+    )
+    let product = sparse_control_product_link_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.product),
+    )
+    let linear = sparse_control_linear_link_plan<
+        QuadraticConstraintInterpreter<F, SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticConstraintInterpreter::new(witness.linear),
+    )
+    let product_residuals = product.interpreter.finish()
+    let linear_residuals = linear.interpreter.finish()
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_plan_residuals(mut fold, product_residuals)
+    absorb_sparse_plan_residuals(mut fold, linear_residuals)
+    FixedAirConstraintEvaluation {
+        valid: phase.interpreter.finish() && product_residuals.valid && linear_residuals.valid,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
 fn absorb_sparse_control_edge<F: Radix2Field>(
     _ fold: mut ConstraintFold<F>,
     _ gate: F,
@@ -4581,6 +4737,90 @@ where L > 1
         zero,
         zero,
     )
+}
+
+/// Control-link constraints projected from the already constrained plan
+/// witness. This keeps relation placement distinct from plan validation while
+/// preserving the exact authored dependency graph.
+pub fn evaluate_sparse_control_link_relation<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ current: SparseControlRow<F>,
+    _ next: SparseControlRow<F>,
+    _ witness: SparseControlLinkPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1
+{
+    let phase = sparse_control_phase_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_PHASE_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        QuadraticPlanReplayInterpreter::new(witness.phase),
+    )
+    let boundary = sparse_control_boundary_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_BOUNDARY_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        QuadraticPlanReplayInterpreter::new(witness.boundary),
+    )
+    let range = sparse_control_range_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_RANGE_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticPlanReplayInterpreter::new(witness.range),
+    )
+    let carry = sparse_control_carry_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_CARRY_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticPlanReplayInterpreter::new(witness.carry),
+    )
+    let product = sparse_control_product_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_PRODUCT_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticPlanReplayInterpreter::new(witness.product),
+    )
+    let linear = sparse_control_linear_link_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_CONTROL_LINEAR_LINK_MULTIPLICATIONS>,
+        F,
+    >(
+        current,
+        next,
+        phase.links,
+        QuadraticPlanReplayInterpreter::new(witness.linear),
+    )
+    let valid = phase.interpreter.finish()
+        && boundary.interpreter.finish()
+        && range.interpreter.finish()
+        && carry.interpreter.finish()
+        && product.interpreter.finish()
+        && linear.interpreter.finish()
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_control_link<F, L>(
+        mut fold,
+        current,
+        next,
+        phase.links,
+        boundary.links,
+        range.links,
+        carry.links,
+        product.links,
+        linear.links,
+    )
+    FixedAirConstraintEvaluation { valid: valid, constraints: fold.constraints, folded: fold.value }
 }
 
 /// Constrain one adjacent pair in the deterministic sparse schedule. Every
@@ -6993,6 +7233,89 @@ where L > 1
     }
 }
 
+/// Validate one contiguous window of the rounding-port multiplication plan.
+/// Ordered windows together constrain the same witness as the monolithic
+/// evaluator while remaining independently placeable GPU work.
+pub fn evaluate_sparse_round_plan_window<
+    F: Radix2Field,
+    const L: usize,
+    const START: usize,
+    const END: usize,
+>(
+    _ challenge: F,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ witness: SparseRoundPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1
+{
+    let planned = sparse_round_copy_plan<
+        QuadraticConstraintWindowFoldInterpreter<F, SPARSE_ROUND_PORT_MULTIPLICATIONS, START, END>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticConstraintWindowFoldInterpreter::new(witness, challenge),
+    )
+    let folded = planned.interpreter.finish()
+    FixedAirConstraintEvaluation {
+        valid: folded.valid,
+        constraints: folded.constraints,
+        folded: folded.folded,
+    }
+}
+
+struct SparseRoundReplayedPorts<F: Radix2Field> { valid: bool, ports: [SparseCopyPort<F>; 5] }
+impl<F: Radix2Field> core::marker::Copy for SparseRoundReplayedPorts<F> {}
+
+fn sparse_round_replayed_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ witness: SparseRoundPlanWitness<F>,
+) -> SparseRoundReplayedPorts<F>
+where L > 1
+{
+    let planned = sparse_round_copy_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_ROUND_PORT_MULTIPLICATIONS>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        QuadraticPlanReplayInterpreter::new(witness),
+    )
+    SparseRoundReplayedPorts { valid: planned.interpreter.finish(), ports: planned.ports }
+}
+
+/// Copy-interaction constraints over multiplication nodes validated by the
+/// preceding plan windows.
+pub fn evaluate_sparse_round_interaction_ports<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ plan: SparseRoundPlanWitness<F>,
+    _ interaction: SparseRoundInteractionRow<F>,
+) -> SparseInteractionEvaluation<F>
+where L > 1
+{
+    let replayed = sparse_round_replayed_ports<F, L>(control, next_control, row, plan)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_copy_interaction<F, 5>(mut fold, challenges, replayed.ports, interaction.inverses)
+    SparseInteractionEvaluation {
+        valid: replayed.valid,
+        constraints: fold.constraints,
+        folded: fold.value,
+        delta: sparse_copy_interaction_delta<F, 5>(replayed.ports, interaction.inverses),
+    }
+}
+
 /// Derive the five-port rounding interaction witness from adjacent committed
 /// control rows and the current committed arithmetic row.
 pub fn sparse_round_interaction_row<F: Radix2Field, const L: usize>(
@@ -7116,6 +7439,35 @@ where L > 1
     )
     FixedAirConstraintEvaluation {
         valid: constrained.valid,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+/// Accumulator adjacency over multiplication nodes validated by the ordered
+/// plan-window components.
+pub fn evaluate_sparse_round_interaction_link_replayed<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ current_control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ plan: SparseRoundPlanWitness<F>,
+    _ current_interaction: SparseRoundInteractionRow<F>,
+    _ next_interaction: SparseRoundInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1
+{
+    let replayed = sparse_round_replayed_ports<F, L>(current_control, next_control, current, plan)
+    let delta = sparse_copy_interaction_delta<F, 5>(replayed.ports, current_interaction.inverses)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(
+        sub(
+            next_interaction.accumulator,
+            add(current_interaction.accumulator, delta),
+        ),
+    )
+    FixedAirConstraintEvaluation {
+        valid: replayed.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }
@@ -7689,6 +8041,97 @@ where L > 1
     }
 }
 
+/// Validate one contiguous window of the signed-linear port plan.
+pub fn evaluate_sparse_linear_plan_window<
+    F: Radix2Field,
+    const L: usize,
+    const START: usize,
+    const END: usize,
+>(
+    _ challenge: F,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ witness: SparseLinearPlanWitness<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1
+{
+    let planned = sparse_linear_copy_plan<
+        QuadraticConstraintWindowFoldInterpreter<F, SPARSE_LINEAR_PORT_MULTIPLICATIONS, START, END>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        arithmetic_plan,
+        QuadraticConstraintWindowFoldInterpreter::new(witness, challenge),
+    )
+    let folded = planned.interpreter.finish()
+    FixedAirConstraintEvaluation {
+        valid: folded.valid,
+        constraints: folded.constraints,
+        folded: folded.folded,
+    }
+}
+
+struct SparseLinearReplayedPorts<F: Radix2Field> { valid: bool, ports: [SparseCopyPort<F>; 8] }
+impl<F: Radix2Field> core::marker::Copy for SparseLinearReplayedPorts<F> {}
+
+fn sparse_linear_replayed_ports<F: Radix2Field, const L: usize>(
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ witness: SparseLinearPlanWitness<F>,
+) -> SparseLinearReplayedPorts<F>
+where L > 1
+{
+    let planned = sparse_linear_copy_plan<
+        QuadraticPlanReplayInterpreter<F, SPARSE_LINEAR_PORT_MULTIPLICATIONS>,
+        F,
+        L,
+    >(
+        control,
+        next_control,
+        row,
+        arithmetic_plan,
+        QuadraticPlanReplayInterpreter::new(witness),
+    )
+    SparseLinearReplayedPorts { valid: planned.interpreter.finish(), ports: planned.ports }
+}
+
+/// Signed-linear copy constraints over an already constrained plan witness.
+pub fn evaluate_sparse_linear_interaction_ports<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ challenges: SparseCopyChallenges<F>,
+    _ control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ row: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ plan: SparseLinearPlanWitness<F>,
+    _ interaction: SparseLinearInteractionRow<F>,
+) -> SparseInteractionEvaluation<F>
+where L > 1
+{
+    let replayed = sparse_linear_replayed_ports<F, L>(
+        control,
+        next_control,
+        row,
+        arithmetic_plan,
+        plan,
+    )
+    let mut fold = ConstraintFold<F>::new(challenge)
+    absorb_sparse_copy_interaction<F, 8>(mut fold, challenges, replayed.ports, interaction.inverses)
+    SparseInteractionEvaluation {
+        valid: replayed.valid,
+        constraints: fold.constraints,
+        folded: fold.value,
+        delta: sparse_copy_interaction_delta<F, 8>(replayed.ports, interaction.inverses),
+    }
+}
+
 pub fn sparse_linear_interaction_row<F: Radix2Field, const L: usize>(
     _ challenges: SparseCopyChallenges<F>,
     _ control: SparseControlRow<F>,
@@ -7823,6 +8266,42 @@ where L > 1
     )
     FixedAirConstraintEvaluation {
         valid: constrained.valid,
+        constraints: fold.constraints,
+        folded: fold.value,
+    }
+}
+
+/// Signed-linear accumulator adjacency over multiplication nodes validated by
+/// the ordered plan-window components.
+pub fn evaluate_sparse_linear_interaction_link_replayed<F: Radix2Field, const L: usize>(
+    _ challenge: F,
+    _ current_control: SparseControlRow<F>,
+    _ next_control: SparseControlRow<F>,
+    _ current: SparseTaskRow<F>,
+    _ arithmetic_plan: SparseArithmeticPlanWitness<F>,
+    _ plan: SparseLinearPlanWitness<F>,
+    _ current_interaction: SparseLinearInteractionRow<F>,
+    _ next_interaction: SparseLinearInteractionRow<F>,
+) -> FixedAirConstraintEvaluation<F>
+where L > 1
+{
+    let replayed = sparse_linear_replayed_ports<F, L>(
+        current_control,
+        next_control,
+        current,
+        arithmetic_plan,
+        plan,
+    )
+    let delta = sparse_copy_interaction_delta<F, 8>(replayed.ports, current_interaction.inverses)
+    let mut fold = ConstraintFold<F>::new(challenge)
+    fold.absorb(
+        sub(
+            next_interaction.accumulator,
+            add(current_interaction.accumulator, delta),
+        ),
+    )
+    FixedAirConstraintEvaluation {
+        valid: replayed.valid,
         constraints: fold.constraints,
         folded: fold.value,
     }

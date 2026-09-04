@@ -3,6 +3,20 @@
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
+    SparseControlMiddlePlanComposition,
+    SparseControlPhasePlanComposition,
+    SparseControlRelationComposition,
+    SparseControlTailPlanComposition,
+    SparseLinearBoundaryComposition,
+    SparseLinearPlanFirstComposition,
+    SparseLinearPlanFourthComposition,
+    SparseLinearPlanSecondComposition,
+    SparseLinearPlanThirdComposition,
+    SparseLinearPortsComposition,
+    SparseRoundBoundaryComposition,
+    SparseRoundPlanFirstComposition,
+    SparseRoundPlanSecondComposition,
+    SparseRoundPortsComposition,
     sparse_interaction_challenge_values,
 }
 use mandelbrot_proof_fixed_air_webgpu::{
@@ -26,10 +40,12 @@ use mandelbrot_proof_fixed_air_webgpu::{
     finish_sparse_composition_phase_context,
     finish_sparse_interaction_accumulator_scan_lane,
     finish_sparse_bound_composition_codeword,
+    finish_sparse_composition_component_lane,
     finish_transition_witness_workspace,
     load_transition_phase_receipt,
     prepare_sparse_interaction_accumulator_scan_lane,
     sparse_composition_codeword_words,
+    sparse_composition_staging_words,
     sparse_composition_phase_is_valid,
     sparse_composition_phase_validity_word,
     sparse_composition_phase_workspace_words,
@@ -37,8 +53,16 @@ use mandelbrot_proof_fixed_air_webgpu::{
     store_transition_phase_receipt,
     transition_phase_workspace_words,
     write_sparse_base_air_partition_lane,
+    write_sparse_arithmetic_composition_lane,
     write_sparse_boundary_interaction_local_lane,
-    write_sparse_bound_composition_lane,
+    write_sparse_boundary_composition_lane,
+    write_sparse_control_all_rows_composition_lane,
+    write_sparse_control_link_composition_lane,
+    write_sparse_linear_plan_composition_lane,
+    write_sparse_linear_interaction_composition_lane,
+    write_sparse_product_composition_lane,
+    write_sparse_round_plan_composition_lane,
+    write_sparse_round_interaction_composition_lane,
     write_sparse_linear_interaction_local_lane,
     write_sparse_product_interaction_local_lane,
     write_sparse_round_interaction_local_lane,
@@ -196,6 +220,7 @@ const COMPOSITION_WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_wo
     BASE_LDE_LENGTH,
 >()
 const COMPOSITION_CODEWORD_WORDS: usize = sparse_composition_codeword_words<BASE_LDE_LENGTH>()
+const COMPOSITION_STAGING_WORDS: usize = sparse_composition_staging_words<BASE_LDE_LENGTH>()
 const COMPOSITION_GROUPS: usize = (BASE_LDE_LENGTH + THREADS - 1) / THREADS
 const COMPOSITION_VALIDITY_WORD: usize = sparse_composition_phase_validity_word<
     PRODUCTION_LIMBS,
@@ -266,7 +291,8 @@ static_assert(TRANSITION_WORKSPACE_WORDS >= DIGEST_FIELDS)
 static_assert(COMPOSITION_WORKSPACE_WORDS <= TRANSITION_WORKSPACE_WORDS)
 static_assert(COMPOSITION_VALIDITY_WORD == 81)
 static_assert(COMPOSITION_CODEWORD_WORDS == 40960)
-static_assert(COMPOSITION_CODEWORD_WORDS <= LDE_INPUT_GRID_LANES)
+static_assert(COMPOSITION_STAGING_WORDS == 319488)
+static_assert(COMPOSITION_STAGING_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(COMPOSITION_GROUPS == 128)
 
 const fn witness_groups(_ rows: usize) -> usize {
@@ -1458,7 +1484,7 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         >(self.transition_workspace)
     }
 
-    fn write_composition(self, invocation: ComputeInvocation)
+    fn write_composition_control_all_rows(self, invocation: ComputeInvocation)
         uses (
             Kernel<
                 Threads<THREADS, 1, 1>,
@@ -1466,7 +1492,125 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             >
         )
     {
-        write_sparse_bound_composition_lane<
+        write_sparse_control_all_rows_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_control_phase_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlPhasePlanComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_control_middle_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlMiddlePlanComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_control_tail_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlTailPlanComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_control_relation(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlRelationComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_arithmetic(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_arithmetic_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_product(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_product_composition_lane<
             PRODUCTION_LIMBS,
             PRODUCTION_TRACE_LENGTH,
             BASE_LDE_LENGTH,
@@ -1475,11 +1619,259 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             INTERACTION_LDE_WORDS,
             LDE_INPUT_GRID_LANES,
         >(
-            directed_interval(),
             BabyBear::from_u32(7),
             self.transition_workspace,
             self.lde_values,
             self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_round_plan_first(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_round_plan_composition_lane<
+            SparseRoundPlanFirstComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_round_plan_second(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_round_plan_composition_lane<
+            SparseRoundPlanSecondComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_round_ports(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_round_interaction_composition_lane<
+            SparseRoundPortsComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_round_boundary(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_round_interaction_composition_lane<
+            SparseRoundBoundaryComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_linear_plan_first(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanFirstComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_linear_plan_second(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanSecondComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_linear_plan_third(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanThirdComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_linear_plan_fourth(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanFourthComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_linear_ports(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_interaction_composition_lane<
+            SparseLinearPortsComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_linear_boundary(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_interaction_composition_lane<
+            SparseLinearBoundaryComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn write_composition_boundary(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        write_sparse_boundary_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
+            self.lde_progress,
+            self.lde_inverse_progress,
+            invocation,
+        )
+    }
+
+    fn reduce_composition(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<COMPOSITION_GROUPS, 1, 1>>)
+    {
+        finish_sparse_composition_component_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            directed_interval(),
+            BabyBear::from_u32(7),
+            self.transition_workspace,
+            self.lde_values,
             self.lde_inverse_progress,
             invocation,
         )

@@ -26,15 +26,33 @@ use core::default::Default
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
+    SparseCompositionAccumulator,
     SparseCompositionChallengeSeed,
     SparseCompositionEvaluationChallenges,
+    SparseArithmeticComposition,
+    SparseBoundaryComposition,
+    SparseControlAllRowsComposition,
+    SparseControlLinkCompositionComponent,
+    SparseLinearInteractionCompositionComponent,
+    SparseLinearPlanCompositionComponent,
+    SparseProductComposition,
+    SparseRoundInteractionCompositionComponent,
+    SparseRoundPlanCompositionComponent,
     SparseInteractionAccumulators,
     SparseInteractionChallenges,
     SparseInteractionTraceRow,
     SparseOpenedAirRow,
     ZERO_SPARSE_OPENED_AIR_ROW,
     SparseCompositionTranscriptDigest,
+    begin_sparse_composition_accumulator,
+    accumulate_sparse_composition_component,
+    evaluate_sparse_arithmetic_component,
+    evaluate_sparse_boundary_component,
+    evaluate_sparse_control_all_rows_component,
+    evaluate_sparse_product_component,
+    evaluate_sparse_bound_composition_accumulator_opened,
     evaluate_sparse_bound_composition_challenge_values_opened,
+    guard_sparse_composition_accumulator,
     sparse_bound_composition_evaluation_challenges,
     sparse_composition_challenge_seed,
     sparse_composition_evaluation_challenges_from_seed,
@@ -50,6 +68,8 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     zero_sparse_composition_challenge_seed,
     zero_sparse_interaction_challenges,
     zero_sparse_interaction_trace_row,
+    zero_sparse_trace_control_field,
+    zero_sparse_trace_row_field,
 }
 use mandelbrot_proof_fixed_air_core::{
     CoordinateNode,
@@ -87,10 +107,10 @@ use mandelbrot_proof_fixed_air_core::{
     sparse_linear_row,
     sparse_linear_copy_plan,
     sparse_linear_task_count,
-    sparse_padding_control_row,
     sparse_product_row,
     sparse_product_copy_plan,
     sparse_product_task_count,
+    sparse_padding_control_row,
     sparse_radix_row,
     sparse_radix_task_count,
     sparse_round_row,
@@ -108,6 +128,14 @@ use mandelbrot_proof_fixed_air_core::{
     SPARSE_PRODUCT_ADDRESS_MULTIPLICATIONS,
     SPARSE_ROUND_PORT_MULTIPLICATIONS,
     zero_sparse_arithmetic_plan_witness,
+    zero_sparse_arithmetic_link_plan_witness,
+    zero_sparse_boundary_plan_witness,
+    zero_sparse_control_plan_witness,
+    zero_sparse_control_link_plan_witness,
+    zero_sparse_copy_interaction_row,
+    zero_sparse_product_interaction_row,
+    zero_sparse_round_plan_witness,
+    zero_sparse_linear_plan_witness,
 }
 use mandelbrot_proof_recursive::{ComplexFixed, OrbitInterval}
 use poseidon_baby_bear::Poseidon2Digest
@@ -205,6 +233,21 @@ pub const fn sparse_composition_phase_validity_word<
 
 pub const fn sparse_composition_codeword_words<const LDE: usize>() -> usize {
     LDE * (<BabyBearExt4 as CanonicalWords>::WORDS as usize + 1)
+}
+
+const fn sparse_composition_accumulator_column() -> usize {
+    <BabyBearExt4 as CanonicalWords>::WORDS as usize + 1
+}
+
+pub const fn sparse_composition_accumulator_words<const LDE: usize>() -> usize {
+    LDE * <SparseCompositionAccumulator as CanonicalWords>::WORDS as usize
+}
+
+/// One buffer carries both the final column-major composition codeword and
+/// the storage-backed affine folds used to derive it. Their column regions are
+/// disjoint, so the final reduction never races another row's checkpoint.
+pub const fn sparse_composition_staging_words<const LDE: usize>() -> usize {
+    sparse_composition_codeword_words<LDE>() + sparse_composition_accumulator_words<LDE>()
 }
 
 pub const fn transition_witness_workspace_words<const L: usize>() -> usize {
@@ -1746,6 +1789,44 @@ impl<R: WordSource> WordSource for BabyBearExt4EmbeddingSource<R> {
     }
 }
 
+fn load_sparse_composition_accumulator<const LDE: usize, const OUTPUT_WORDS: usize>(
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ row: u32,
+) -> SparseCompositionAccumulator
+where LDE > 0, OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let mut accumulator = begin_sparse_composition_accumulator(false)
+    let reader = decode_canonical_words(
+        mut accumulator,
+        ColumnMajorWordReader<LDE, OUTPUT_WORDS>::new(
+            output,
+            row,
+            sparse_composition_accumulator_column().downcast_truncate(),
+            <SparseCompositionAccumulator as CanonicalWords>::WORDS,
+        ),
+    )
+    guard_sparse_composition_accumulator(accumulator, reader.finish())
+}
+
+fn store_sparse_composition_accumulator<const LDE: usize, const OUTPUT_WORDS: usize>(
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ row: u32,
+    _ accumulator: ref SparseCompositionAccumulator,
+) -> bool
+where LDE > 0, OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    encode_canonical_words(
+        accumulator,
+        ColumnMajorWordWriter<LDE, OUTPUT_WORDS>::new(
+            output,
+            row,
+            sparse_composition_accumulator_column().downcast_truncate(),
+            <SparseCompositionAccumulator as CanonicalWords>::WORDS,
+        ),
+    )
+        .finish()
+}
+
 fn store_sparse_composition_value<const LDE: usize, const OUTPUT_WORDS: usize>(
     _ output: StorageBuffer<u32, OUTPUT_WORDS>,
     _ row: u32,
@@ -1758,15 +1839,1217 @@ where LDE > 0, OUTPUT_WORDS >= sparse_composition_codeword_words<LDE>()
     output.store(index: row, value: value.coefficient_0().to_u32())
     output.store(index: rows + row, value: value.coefficient_1().to_u32())
     output.store(
-        index: rows + rows + row,
-        value: value.coefficient_2().to_u32(),
-    )
+            index: rows + rows + row,
+            value: value.coefficient_2().to_u32(),
+        )
     output.store(
-        index: rows + rows + rows + row,
-        value: value.coefficient_3().to_u32(),
-    )
+            index: rows + rows + rows + row,
+            value: value.coefficient_3().to_u32(),
+        )
     let validity = rows * <BabyBearExt4 as CanonicalWords>::WORDS + row
     output.store(index: validity, value: if valid { 1 } else { 0 })
+}
+
+/// Evaluate the all-row control component from only the columns it denotes.
+/// The canonical codecs derive both field offsets and widths. This is the
+/// storage interpretation of `SparseControlAllRowsComposition`, not a second
+/// constraint implementation.
+pub fn write_sparse_control_all_rows_composition_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+
+    let control = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let control_plan = decode_embedded_column_major_value<
+        SparseControlPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_control_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_PLAN_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && control.valid
+        && control_plan.valid
+    let evaluation = evaluate_sparse_control_all_rows_component(
+        context.challenges.composition(),
+        control.value,
+        control_plan.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<SparseControlAllRowsComposition>(
+        begin_sparse_composition_accumulator(lane_valid),
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate one adjacent-row control component from the canonical control and
+/// link-plan projection. The component marker selects the denotation and its
+/// position in the ordered fold; this interpreter owns only storage placement.
+pub fn write_sparse_control_link_composition_lane<
+    C: SparseControlLinkCompositionComponent,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let current = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let next = decode_embedded_column_major_value<SparseControlRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        next_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<
+        SparseControlLinkPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_control_link_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_LINK_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && current.valid
+        && next.valid
+        && witness.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = C::evaluate_control_link<L>(
+        context.challenges.composition(),
+        current.value,
+        next.value,
+        witness.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<C>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate arithmetic constraints from their exact canonical base-row
+/// projection. No interaction record or unrelated multiplication plan enters
+/// this shader placement.
+pub fn write_sparse_arithmetic_composition_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let control = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let arithmetic_plan = decode_embedded_column_major_value<
+        SparseArithmeticPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_arithmetic_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        ARITHMETIC_PLAN_START.downcast_truncate(),
+    )
+    let arithmetic_link_plan = decode_embedded_column_major_value<
+        SparseArithmeticLinkPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_arithmetic_link_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        ARITHMETIC_LINK_START.downcast_truncate(),
+    )
+    let next_control = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        next_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let next_witness = decode_embedded_column_major_value<
+        SparseTaskRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        next_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && control.valid
+        && witness.valid
+        && arithmetic_plan.valid
+        && arithmetic_link_plan.valid
+        && next_control.valid
+        && next_witness.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = evaluate_sparse_arithmetic_component<L>(
+        context.challenges.composition(),
+        control.value,
+        witness.value,
+        arithmetic_plan.value,
+        next_control.value,
+        next_witness.value,
+        arithmetic_link_plan.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<SparseArithmeticComposition>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate the product copy-bus component from its exact base and
+/// interaction projections. The transcript challenge remains inside the
+/// authenticated composition context.
+pub fn write_sparse_product_composition_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    INTERACTION_WORDS >= LDE * SPARSE_INTERACTION_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let control = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let product = decode_column_major_value<
+        SparseProductInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_product_interaction_row<BabyBearExt4>(),
+        interaction,
+        row_index,
+        PRODUCT_INTERACTION_START.downcast_truncate(),
+    )
+    let next_product = decode_column_major_value<
+        SparseProductInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_product_interaction_row<BabyBearExt4>(),
+        interaction,
+        next_index,
+        PRODUCT_INTERACTION_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && control.valid
+        && witness.valid
+        && product.valid
+        && next_product.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = evaluate_sparse_product_component<L>(
+        context.challenges.composition(),
+        context.challenges.interaction().product,
+        control.value,
+        witness.value,
+        product.value,
+        next_product.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<SparseProductComposition>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate one rounding-plan window from the exact base-row projection shared
+/// by both window markers.
+pub fn write_sparse_round_plan_composition_lane<
+    C: SparseRoundPlanCompositionComponent,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let current = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let next = decode_embedded_column_major_value<SparseControlRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        next_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let plan = decode_embedded_column_major_value<
+        SparseRoundPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_round_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        ROUND_PLAN_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && current.valid
+        && next.valid
+        && witness.valid
+        && plan.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = C::evaluate_round_plan<L>(
+        context.challenges.composition(),
+        current.value,
+        next.value,
+        witness.value,
+        plan.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<C>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate one rounding interaction component from the exact committed
+/// control, witness, plan, and rounding-bus projection.
+pub fn write_sparse_round_interaction_composition_lane<
+    C: SparseRoundInteractionCompositionComponent,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    INTERACTION_WORDS >= LDE * SPARSE_INTERACTION_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let current = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let next = decode_embedded_column_major_value<SparseControlRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        next_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let plan = decode_embedded_column_major_value<
+        SparseRoundPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_round_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        ROUND_PLAN_START.downcast_truncate(),
+    )
+    let current_interaction = decode_column_major_value<
+        SparseRoundInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_copy_interaction_row<BabyBearExt4, 5>(),
+        interaction,
+        row_index,
+        ROUND_INTERACTION_START.downcast_truncate(),
+    )
+    let next_interaction = decode_column_major_value<
+        SparseRoundInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_copy_interaction_row<BabyBearExt4, 5>(),
+        interaction,
+        next_index,
+        ROUND_INTERACTION_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && current.valid
+        && next.valid
+        && witness.valid
+        && plan.valid
+        && current_interaction.valid
+        && next_interaction.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = C::evaluate_round_interaction<L>(
+        context.challenges.composition(),
+        context.challenges.interaction().round,
+        current.value,
+        next.value,
+        witness.value,
+        plan.value,
+        current_interaction.value,
+        next_interaction.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<C>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate one linear-plan window from the exact base-row projection shared
+/// by all four window markers.
+pub fn write_sparse_linear_plan_composition_lane<
+    C: SparseLinearPlanCompositionComponent,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let current = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let next = decode_embedded_column_major_value<SparseControlRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        next_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let arithmetic_plan = decode_embedded_column_major_value<
+        SparseArithmeticPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_arithmetic_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        ARITHMETIC_PLAN_START.downcast_truncate(),
+    )
+    let linear_plan = decode_embedded_column_major_value<
+        SparseLinearPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_linear_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        LINEAR_PLAN_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && current.valid
+        && next.valid
+        && witness.valid
+        && arithmetic_plan.valid
+        && linear_plan.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = C::evaluate_linear_plan<L>(
+        context.challenges.composition(),
+        current.value,
+        next.value,
+        witness.value,
+        arithmetic_plan.value,
+        linear_plan.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<C>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate one signed-linear interaction component from its exact committed
+/// base fields and copy-bus rows.
+pub fn write_sparse_linear_interaction_composition_lane<
+    C: SparseLinearInteractionCompositionComponent,
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    INTERACTION_WORDS >= LDE * SPARSE_INTERACTION_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let current = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let next = decode_embedded_column_major_value<SparseControlRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        next_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let arithmetic_plan = decode_embedded_column_major_value<
+        SparseArithmeticPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_arithmetic_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        ARITHMETIC_PLAN_START.downcast_truncate(),
+    )
+    let linear_plan = decode_embedded_column_major_value<
+        SparseLinearPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_linear_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        LINEAR_PLAN_START.downcast_truncate(),
+    )
+    let current_interaction = decode_column_major_value<
+        SparseLinearInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_copy_interaction_row<BabyBearExt4, 8>(),
+        interaction,
+        row_index,
+        LINEAR_INTERACTION_START.downcast_truncate(),
+    )
+    let next_interaction = decode_column_major_value<
+        SparseLinearInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_copy_interaction_row<BabyBearExt4, 8>(),
+        interaction,
+        next_index,
+        LINEAR_INTERACTION_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && current.valid
+        && next.valid
+        && witness.valid
+        && arithmetic_plan.valid
+        && linear_plan.valid
+        && current_interaction.valid
+        && next_interaction.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = C::evaluate_linear_interaction<L>(
+        context.challenges.composition(),
+        context.challenges.interaction().linear,
+        current.value,
+        next.value,
+        witness.value,
+        arithmetic_plan.value,
+        linear_plan.value,
+        current_interaction.value,
+        next_interaction.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<C>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Evaluate the public-boundary copy bus from its exact base and interaction
+/// projection. The next row contributes only the adjacent accumulator.
+pub fn write_sparse_boundary_composition_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const INTERACTION_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ interaction: StorageBuffer<u32, INTERACTION_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    INTERACTION_WORDS >= LDE * SPARSE_INTERACTION_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let stride: u32 = (LDE / TRACE).downcast_truncate()
+    let mut next_index = row_index + stride
+    if next_index >= LDE.downcast_truncate() {
+        next_index = next_index - LDE.downcast_truncate()
+    }
+    let control = decode_embedded_column_major_value<
+        SparseControlRow<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_trace_control_field<BabyBearExt4>(),
+        base,
+        row_index,
+        CONTROL_START.downcast_truncate(),
+    )
+    let witness = decode_embedded_column_major_value<SparseTaskRow<BabyBearExt4>, LDE, BASE_WORDS>(
+        zero_sparse_trace_row_field<BabyBearExt4>(),
+        base,
+        row_index,
+        WITNESS_START.downcast_truncate(),
+    )
+    let plan = decode_embedded_column_major_value<
+        SparseBoundaryPlanWitness<BabyBearExt4>,
+        LDE,
+        BASE_WORDS,
+    >(
+        zero_sparse_boundary_plan_witness<BabyBearExt4>(),
+        base,
+        row_index,
+        BOUNDARY_PLAN_START.downcast_truncate(),
+    )
+    let current_interaction = decode_column_major_value<
+        SparseBoundaryInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_copy_interaction_row<BabyBearExt4, 2>(),
+        interaction,
+        row_index,
+        BOUNDARY_INTERACTION_START.downcast_truncate(),
+    )
+    let next_interaction = decode_column_major_value<
+        SparseBoundaryInteractionRow<BabyBearExt4>,
+        LDE,
+        INTERACTION_WORDS,
+    >(
+        zero_sparse_copy_interaction_row<BabyBearExt4, 2>(),
+        interaction,
+        next_index,
+        BOUNDARY_INTERACTION_START.downcast_truncate(),
+    )
+    let lane_valid = context.valid
+        && context.challenges.is_valid()
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && control.valid
+        && witness.valid
+        && plan.valid
+        && current_interaction.valid
+        && next_interaction.valid
+    let accumulator = guard_sparse_composition_accumulator(
+        load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index),
+        lane_valid,
+    )
+    let evaluation = evaluate_sparse_boundary_component<L>(
+        context.challenges.composition(),
+        context.challenges.interaction().boundary,
+        control.value,
+        witness.value,
+        plan.value,
+        current_interaction.value,
+        next_interaction.value,
+    )
+    let accumulator = accumulate_sparse_composition_component<SparseBoundaryComposition>(
+        accumulator,
+        context.challenges.composition(),
+        evaluation,
+    )
+    store_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index, ref accumulator)
+}
+
+/// Reduce the completed component folds, apply the four AIR zerofiers, and
+/// add the transcript-bound public constraints for one LDE position.
+pub fn finish_sparse_composition_component_lane<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+    const BASE_WORDS: usize,
+    const OUTPUT_WORDS: usize,
+>(
+    _ interval: OrbitInterval<L>,
+    _ shift: BabyBear,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ base: StorageBuffer<u32, BASE_WORDS>,
+    _ output: StorageBuffer<u32, OUTPUT_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    {
+        (TRACE & (TRACE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<TRACE, BabyBear>()
+    },
+    LDE > 0,
+    LDE > TRACE,
+    {
+        (LDE & (LDE - 1)) == 0
+    },
+    {
+        radix2_field_domain_supported<LDE, BabyBear>()
+    },
+    {
+        (LDE % TRACE) == 0
+    },
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0,
+    BASE_WORDS >= LDE * SPARSE_BASE_AIR_FIELDS,
+    OUTPUT_WORDS >= sparse_composition_codeword_words<LDE>(),
+    OUTPUT_WORDS >= sparse_composition_staging_words<LDE>()
+{
+    let row_index = invocation.global.x
+    if row_index >= LDE.downcast_truncate() {
+        return
+    }
+    let context = load_sparse_composition_phase_context<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+    let mut row = ZERO_SPARSE_OPENED_AIR_ROW
+    let row_base_reader = decode_canonical_words(
+        mut row.base,
+        BabyBearExt4EmbeddingSource::new(
+            ColumnMajorWordReader<LDE, BASE_WORDS>::new(
+                base,
+                row_index,
+                0,
+                SPARSE_BASE_AIR_FIELDS.downcast_truncate(),
+            ),
+        ),
+    )
+    row.valid = row_base_reader.finish().finish()
+    let root = BabyBear::two_adic_root(radix2_log<LDE>())
+    let point = BabyBearExt4::from_base(shift * root.pow_u32(row_index))
+    let accumulator = load_sparse_composition_accumulator<LDE, OUTPUT_WORDS>(output, row_index)
+    let evaluated = evaluate_sparse_bound_composition_accumulator_opened<L, TRACE>(
+        interval,
+        context.challenges,
+        point,
+        ref row,
+        accumulator,
+    )
+    let valid = context.valid
+        && !shift.is_zero()
+        && !shift.pow_u32(TRACE.downcast_truncate()).equals(BabyBear::one())
+        && row.valid
+        && evaluated.valid
+    store_sparse_composition_value<LDE, OUTPUT_WORDS>(
+        output,
+        row_index,
+        if valid {
+            evaluated.value
+        } else {
+            BabyBearExt4::zero()
+        },
+        valid,
+    )
 }
 
 /// Evaluate one position of the real production sparse composition. The
@@ -1967,6 +3250,35 @@ fn decode_column_major_value<
         mut value,
         ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(input, row, column_start, T::WORDS),
     )
+    WorkspaceDecoded { value: value, valid: reader.finish() }
+}
+
+/// Decode one base-field record directly into its extension-field view. The
+/// target codec derives the source width, so callers name only the semantic
+/// field start and cannot maintain a parallel column count.
+fn decode_embedded_column_major_value<
+    T: CanonicalWords + core::marker::Copy,
+    const ROWS: usize,
+    const INPUT_WORDS: usize,
+>(
+    _ initial: T,
+    _ input: StorageBuffer<u32, INPUT_WORDS>,
+    _ row: u32,
+    _ column_start: u32,
+) -> WorkspaceDecoded<T> {
+    let mut value = initial
+    let reader = decode_canonical_words(
+        mut value,
+        BabyBearExt4EmbeddingSource::new(
+            ColumnMajorWordReader<ROWS, INPUT_WORDS>::new(
+                input,
+                row,
+                column_start,
+                T::WORDS / <BabyBearExt4 as CanonicalWords>::WORDS,
+            ),
+        ),
+    )
+        .finish()
     WorkspaceDecoded { value: value, valid: reader.finish() }
 }
 

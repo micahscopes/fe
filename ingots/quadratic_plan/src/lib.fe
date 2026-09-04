@@ -938,6 +938,149 @@ impl<F: Radix2Field, const N: usize> QuadraticPlanInterpreter<F>
     }
 }
 
+/// Constraint interpretation of one contiguous window of an authored plan.
+///
+/// Every multiplication still advances through the same plan and projects the
+/// same committed witness value. Only nodes in `[START, END)` evaluate their
+/// quadratic residual. Multiple ordered windows can therefore place one large
+/// relation across GPU passes without copying or re-authoring its expression
+/// graph.
+pub struct QuadraticPlanFold<F: Radix2Field> {
+    pub valid: bool,
+    pub constraints: u32,
+    pub folded: F,
+}
+impl<F: Radix2Field> core::marker::Copy for QuadraticPlanFold<F> {}
+
+pub struct QuadraticConstraintWindowFoldInterpreter<
+    F: Radix2Field,
+    const N: usize,
+    const START: usize,
+    const END: usize,
+> {
+    witness: QuadraticPlanWitness<F, N>,
+    challenge: F,
+    power: F,
+    folded: F,
+    constraints: u32,
+    cursor: u32,
+    valid: bool,
+}
+impl<
+    F: Radix2Field,
+    const N: usize,
+    const START: usize,
+    const END: usize,
+> core::marker::Copy for QuadraticConstraintWindowFoldInterpreter<F, N, START, END> {}
+
+impl<
+    F: Radix2Field,
+    const N: usize,
+    const START: usize,
+    const END: usize,
+> QuadraticConstraintWindowFoldInterpreter<F, N, START, END> {
+    pub fn new(_ witness: QuadraticPlanWitness<F, N>, _ challenge: F) -> Self {
+        Self {
+            witness: witness,
+            challenge: challenge,
+            power: challenge.radix2_pow(0),
+            folded: F::radix2_zero(),
+            constraints: 0,
+            cursor: 0,
+            valid: START <= END && END <= N,
+        }
+    }
+    pub fn finish(self) -> QuadraticPlanFold<F> {
+        let valid = self.valid && self.cursor == N.downcast_truncate()
+        QuadraticPlanFold {
+            valid: valid,
+            constraints: self.constraints,
+            folded: if valid { self.folded } else { F::radix2_zero() },
+        }
+    }
+}
+
+impl<F: Radix2Field, const N: usize, const START: usize, const END: usize> QuadraticPlanInterpreter<
+    F,
+> for QuadraticConstraintWindowFoldInterpreter<F, N, START, END> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        if !self.valid || self.cursor >= N.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self {
+                    witness: self.witness,
+                    challenge: self.challenge,
+                    power: self.power,
+                    folded: self.folded,
+                    constraints: self.constraints,
+                    cursor: self.cursor,
+                    valid: false,
+                },
+                value: F::radix2_zero(),
+            }
+        }
+        let value = self.witness.nodes[self.cursor as usize]
+        let mut power = self.power
+        let mut folded = self.folded
+        let mut constraints = self.constraints
+        if self.cursor >= START.downcast_truncate() && self.cursor < END.downcast_truncate() {
+            let residual = value.radix2_sub(left.radix2_mul(right))
+            folded = folded.radix2_add(power.radix2_mul(residual))
+            power = power.radix2_mul(self.challenge)
+            constraints = constraints + 1
+        }
+        QuadraticPlanStep {
+            interpreter: Self {
+                witness: self.witness,
+                challenge: self.challenge,
+                power: power,
+                folded: folded,
+                constraints: constraints,
+                cursor: self.cursor + 1,
+                valid: true,
+            },
+            value: value,
+        }
+    }
+}
+
+/// Read-only projection of committed multiplication nodes through the same
+/// authored plan. A preceding constraint interpretation proves the nodes;
+/// replay then derives dependent values, ports, and addresses without paying
+/// for those multiplications again in each physical consumer pass.
+pub struct QuadraticPlanReplayInterpreter<F: Radix2Field, const N: usize> {
+    witness: QuadraticPlanWitness<F, N>,
+    cursor: u32,
+    valid: bool,
+}
+impl<F: Radix2Field, const N: usize> core::marker::Copy for QuadraticPlanReplayInterpreter<F, N> {}
+
+impl<F: Radix2Field, const N: usize> QuadraticPlanReplayInterpreter<F, N> {
+    pub fn new(_ witness: QuadraticPlanWitness<F, N>) -> Self {
+        Self { witness: witness, cursor: 0, valid: true }
+    }
+    pub fn finish(self) -> bool {
+        self.valid && self.cursor == N.downcast_truncate()
+    }
+}
+
+impl<F: Radix2Field, const N: usize> QuadraticPlanInterpreter<F> for QuadraticPlanReplayInterpreter<
+    F,
+    N,
+> {
+    fn multiply(self, _ left: F, _ right: F) -> QuadraticPlanStep<Self, F> {
+        if !self.valid || self.cursor >= N.downcast_truncate() {
+            return QuadraticPlanStep {
+                interpreter: Self { witness: self.witness, cursor: self.cursor, valid: false },
+                value: F::radix2_zero(),
+            }
+        }
+        QuadraticPlanStep {
+            interpreter: Self { witness: self.witness, cursor: self.cursor + 1, valid: true },
+            value: self.witness.nodes[self.cursor as usize],
+        }
+    }
+}
+
 /// Direct interpretation of a complete quadratic relation.
 pub struct QuadraticRelationValueInterpreter {
     valid: bool,

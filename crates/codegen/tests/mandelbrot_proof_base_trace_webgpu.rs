@@ -296,7 +296,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 60);
+    assert_eq!(bundle.manifest.passes.len(), 78);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -544,15 +544,49 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[56].layout.workgroup_size, [1, 1, 1]);
     assert_eq!(bundle.manifest.passes[56].dispatch, Some([1, 1, 1]));
     assert_eq!(bundle.manifest.passes[56].repeat, 1);
-    assert_eq!(bundle.manifest.passes[57].source_entry, "write_composition");
-    assert_eq!(bundle.manifest.passes[57].layout.workgroup_size, [64, 1, 1]);
-    assert_eq!(bundle.manifest.passes[57].dispatch, Some([128, 1, 1]));
-    assert_eq!(bundle.manifest.passes[57].repeat, 1);
-    assert_eq!(bundle.manifest.passes[58].source_entry, "finish_composition");
-    assert_eq!(bundle.manifest.passes[58].layout.workgroup_size, [1, 1, 1]);
-    assert_eq!(bundle.manifest.passes[58].dispatch, Some([1, 1, 1]));
-    assert_eq!(bundle.manifest.passes[58].repeat, 1);
-    assert_eq!(bundle.manifest.passes[59].source_entry, "paint");
+    let composition_names = [
+        "write_composition_control_all_rows",
+        "write_composition_control_phase_plan",
+        "write_composition_control_middle_plan",
+        "write_composition_control_tail_plan",
+        "write_composition_control_relation",
+        "write_composition_arithmetic",
+        "write_composition_product",
+        "write_composition_round_plan_first",
+        "write_composition_round_plan_second",
+        "write_composition_round_ports",
+        "write_composition_round_boundary",
+        "write_composition_linear_plan_first",
+        "write_composition_linear_plan_second",
+        "write_composition_linear_plan_third",
+        "write_composition_linear_plan_fourth",
+        "write_composition_linear_ports",
+        "write_composition_linear_boundary",
+        "write_composition_boundary",
+        "reduce_composition",
+    ];
+    for (pass, name) in bundle.manifest.passes[57..76].iter().zip(composition_names) {
+        assert_eq!(pass.source_entry, name);
+        assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
+        assert_eq!(pass.dispatch, Some([LDE_ROWS / THREADS, 1, 1]));
+        assert_eq!(pass.repeat, 1);
+        assert_eq!(
+            pass.cooperation,
+            Some(fe_codegen::WebDispatchCooperation { repeat_batch: 1 }),
+        );
+    }
+    assert_eq!(
+        bundle.manifest.passes[76].source_entry,
+        "finish_composition"
+    );
+    assert_eq!(bundle.manifest.passes[76].layout.workgroup_size, [1, 1, 1]);
+    assert_eq!(bundle.manifest.passes[76].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[76].repeat, 1);
+    assert_eq!(
+        bundle.manifest.passes[76].cooperation,
+        Some(fe_codegen::WebDispatchCooperation { repeat_batch: 1 }),
+    );
+    assert_eq!(bundle.manifest.passes[77].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle

@@ -1,0 +1,494 @@
+//! Focused compile gate for the typed production composition schedule.
+
+use mandelbrot_proof_fixed_air_baby_bear::{
+    SPARSE_BASE_AIR_FIELDS,
+    SPARSE_INTERACTION_AIR_FIELDS,
+    SparseControlMiddlePlanComposition,
+    SparseControlPhasePlanComposition,
+    SparseControlRelationComposition,
+    SparseControlTailPlanComposition,
+    SparseLinearBoundaryComposition,
+    SparseLinearPlanFirstComposition,
+    SparseLinearPlanFourthComposition,
+    SparseLinearPlanSecondComposition,
+    SparseLinearPlanThirdComposition,
+    SparseLinearPortsComposition,
+    SparseRoundBoundaryComposition,
+    SparseRoundPlanFirstComposition,
+    SparseRoundPlanSecondComposition,
+    SparseRoundPortsComposition,
+}
+use mandelbrot_proof_fixed_air_webgpu::{
+    finish_sparse_composition_component_lane,
+    sparse_composition_phase_workspace_words,
+    sparse_composition_staging_words,
+    write_sparse_arithmetic_composition_lane,
+    write_sparse_boundary_composition_lane,
+    write_sparse_control_all_rows_composition_lane,
+    write_sparse_control_link_composition_lane,
+    write_sparse_linear_plan_composition_lane,
+    write_sparse_linear_interaction_composition_lane,
+    write_sparse_product_composition_lane,
+    write_sparse_round_plan_composition_lane,
+    write_sparse_round_interaction_composition_lane,
+}
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use mandelbrot_proof_recursive::{
+    ComplexFixed,
+    HighPrecisionEscapeClaim,
+    OrbitBoundary,
+    OrbitInterval,
+}
+use precision::baby_bear::BabyBear
+use precision::fixed::Fixed
+use std::webgpu::{
+    CooperativeDispatch as Cooperate,
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    FixedDispatch,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+/// Preserve every semantic component as one queue-ordered submission. Some
+/// browser GPU processes lose the device when the complete composition graph
+/// is encoded into one command buffer.
+type Grid<const X: usize, const Y: usize, const Z: usize> = Cooperate<FixedDispatch<X, Y, Z>, 1>
+
+const THREADS: usize = 64
+const LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
+const GROUPS: usize = (LDE_LENGTH + THREADS - 1) / THREADS
+const WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    LDE_LENGTH,
+>()
+const BASE_WORDS: usize = LDE_LENGTH * SPARSE_BASE_AIR_FIELDS
+const INTERACTION_WORDS: usize = LDE_LENGTH * SPARSE_INTERACTION_AIR_FIELDS
+const OUTPUT_WORDS: usize = sparse_composition_staging_words<LDE_LENGTH>()
+
+fn directed_point() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: true, limbs: [0, 0, 6144, 0] },
+        imaginary: Fixed { negative: false, limbs: [0, 0, 1024, 0] },
+    }
+}
+
+fn directed_current() -> ComplexFixed<4> {
+    ComplexFixed {
+        real: Fixed { negative: false, limbs: [0, 0, 2048, 1] },
+        imaginary: Fixed { negative: true, limbs: [0, 0, 3072, 0] },
+    }
+}
+
+fn directed_interval() -> OrbitInterval<4> {
+    OrbitInterval {
+        claim: HighPrecisionEscapeClaim { point: directed_point(), bound: 16 },
+        start: OrbitBoundary { iteration: 0, z: directed_current(), escaped: false },
+        end: OrbitBoundary {
+            iteration: 1,
+            z: ComplexFixed {
+                real: Fixed { negative: false, limbs: [0, 0, 5504, 0] },
+                imaginary: Fixed { negative: true, limbs: [0, 0, 6656, 0] },
+            },
+            escaped: false,
+        },
+    }
+}
+
+actor CompositionScheduleProbe uses (Program<WebGpuBackend>) {
+    workspace: Shared<u32, WORKSPACE_WORDS>,
+    base: Shared<u32, BASE_WORDS>,
+    interaction: Shared<u32, INTERACTION_WORDS>,
+    output: Shared<u32, OUTPUT_WORDS>,
+
+    fn control_all_rows(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_control_all_rows_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn control_phase_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlPhasePlanComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn control_middle_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlMiddlePlanComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn control_tail_plan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlTailPlanComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn control_relation(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_control_link_composition_lane<
+            SparseControlRelationComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn arithmetic(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_arithmetic_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn product(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_product_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn round_plan_first(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_round_plan_composition_lane<
+            SparseRoundPlanFirstComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn round_plan_second(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_round_plan_composition_lane<
+            SparseRoundPlanSecondComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn round_ports(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_round_interaction_composition_lane<
+            SparseRoundPortsComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn round_boundary(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_round_interaction_composition_lane<
+            SparseRoundBoundaryComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn linear_plan_first(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanFirstComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn linear_plan_second(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanSecondComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn linear_plan_third(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanThirdComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn linear_plan_fourth(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_plan_composition_lane<
+            SparseLinearPlanFourthComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn linear_ports(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_interaction_composition_lane<
+            SparseLinearPortsComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn linear_boundary(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_linear_interaction_composition_lane<
+            SparseLinearBoundaryComposition,
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn boundary(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        write_sparse_boundary_composition_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            INTERACTION_WORDS,
+            OUTPUT_WORDS,
+        >(
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.interaction,
+            self.output,
+            invocation,
+        )
+    }
+
+    fn reduce_composition(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<GROUPS, 1, 1>>)
+    {
+        finish_sparse_composition_component_lane<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+            BASE_WORDS,
+            OUTPUT_WORDS,
+        >(
+            directed_interval(),
+            BabyBear::from_u32(7),
+            self.workspace,
+            self.base,
+            self.output,
+            invocation,
+        )
+    }
+}
