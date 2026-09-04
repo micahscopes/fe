@@ -343,8 +343,11 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     let pass = &bundle.manifest.passes[0];
     assert_eq!(pass.draw_vertices, Some(3));
     assert_eq!(pass.draw_instances, None);
-    assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
-    assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
+    assert_eq!(pass.layout.vertex_entry.as_deref(), Some("fe_vertex_main"));
+    assert_eq!(
+        pass.layout.fragment_entry.as_deref(),
+        Some("fe_fragment_main")
+    );
     assert_eq!(pass.layout.bindings.len(), 1);
     assert_eq!(pass.layout.bindings[0].members[0].name, "tint");
     assert_eq!(
@@ -456,8 +459,11 @@ fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
         ],
         "one logical resource retains the exact union of stages that consume it"
     );
-    assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
-    assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
+    assert_eq!(pass.layout.vertex_entry.as_deref(), Some("fe_vertex_main"));
+    assert_eq!(
+        pass.layout.fragment_entry.as_deref(),
+        Some("fe_fragment_main")
+    );
     assert!(
         bundle.wgsl.contains("var<storage> fixture"),
         "{}",
@@ -647,11 +653,11 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
     assert_eq!(overlay.draw_vertices, Some(6));
     assert_eq!(
         overlay.layout.vertex_entry.as_deref(),
-        Some("overlay_vertices")
+        Some("fe_vertex_main")
     );
     assert_eq!(
         overlay.layout.fragment_entry.as_deref(),
-        Some("overlay_fragment")
+        Some("fe_fragment_main")
     );
     assert_eq!(
         base.layout.bindings[0].members[0].name, overlay.layout.bindings[0].members[0].name,
