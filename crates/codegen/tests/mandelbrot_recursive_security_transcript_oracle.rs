@@ -294,6 +294,14 @@ fn reference_transcript(seed: u32, air_counts: [u32; 4]) -> [u32; 8] {
     reference_field_commitment(b"SP02", &security)
 }
 
+fn reference_profile_digest(air_counts: [u32; 4]) -> [u32; 8] {
+    let profile_words = reference_profile_words(air_counts);
+    let profile_fields = reference_pack_32(&profile_words, 47);
+    let mut profile_message = vec![u32::from_be_bytes(*b"SP01"), 44 * 32];
+    profile_message.extend(profile_fields);
+    reference_sponge(&profile_message)
+}
+
 #[test]
 fn production_security_transcript_is_one_exact_mutation_gated_relation() {
     let (mut store, instance) = instance();
@@ -324,6 +332,20 @@ fn production_security_transcript_is_one_exact_mutation_gated_relation() {
     );
     let counts: [u32; 4] = counts.try_into().unwrap();
     assert_eq!(counts, [312, 352, 16, 11]);
+
+    let profile = call_u32s(
+        &mut store,
+        &instance,
+        "production_security_profile_digest",
+        &[],
+        9,
+    );
+    assert_eq!(profile[0], 1, "Fe profile projection must be valid");
+    assert_eq!(
+        &profile[1..],
+        reference_profile_digest(counts),
+        "Fe-derived SP01 profile digest diverged from the independent oracle",
+    );
 
     for seed in [0u32, 47, 1_000_003] {
         let clean = call_u32s(

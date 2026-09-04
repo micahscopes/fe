@@ -65,6 +65,7 @@ use mandelbrot_proof_fixed_air_baby_bear::{
     sparse_interaction_challenge_values,
 }
 use mandelbrot_proof_fixed_air_webgpu::{
+    ProductionSecurityProfileDigestBuffer,
     SparseBaseArithmeticLinkPartition,
     SparseBaseArithmeticPlanPartition,
     SparseBaseBoundaryPlanPartition,
@@ -81,6 +82,7 @@ use mandelbrot_proof_fixed_air_webgpu::{
     SparseRadixWitnessFamily,
     SparseRoundWitnessFamily,
     SPARSE_INTERACTION_ACCUMULATOR_FIELDS,
+    bind_sparse_composition_security_profile,
     bind_sparse_composition_phase_transcript,
     bind_sparse_composition_phase_seed,
     finish_sparse_composition_phase_context,
@@ -105,6 +107,7 @@ use mandelbrot_proof_fixed_air_webgpu::{
     transition_phase_workspace_words,
     validate_sparse_composition_phase_statement,
     validate_sparse_composition_phase_transcript,
+    validate_sparse_composition_security_profile,
     write_sparse_base_air_partition_lane,
     write_sparse_arithmetic_composition_lane,
     write_sparse_boundary_interaction_local_lane,
@@ -280,12 +283,17 @@ const LDE_OUTPUT_STAGES: usize = <BaseLdeOutputPlan as FactorTree>::FACTORS
 const INTERACTION_ACCUMULATOR_SCAN_STAGES: usize = <InteractionAccumulatorScanPlan as FactorTree>::FACTORS
 const INTERACTION_ACCUMULATOR_SCAN_WORDS: usize = PRODUCTION_TRACE_LENGTH
     * SPARSE_INTERACTION_ACCUMULATOR_FIELDS
-const TRANSITION_WORKSPACE_WORDS: usize = transition_phase_workspace_words<PRODUCTION_LIMBS>()
+const TRANSITION_PHASE_WORDS: usize = transition_phase_workspace_words<PRODUCTION_LIMBS>()
 const COMPOSITION_WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
     PRODUCTION_LIMBS,
     PRODUCTION_TRACE_LENGTH,
     BASE_LDE_LENGTH,
 >()
+const TRANSITION_WORKSPACE_WORDS: usize = if TRANSITION_PHASE_WORDS > COMPOSITION_WORKSPACE_WORDS {
+    TRANSITION_PHASE_WORDS
+} else {
+    COMPOSITION_WORKSPACE_WORDS
+}
 const COMPOSITION_CODEWORD_WORDS: usize = sparse_composition_codeword_words<BASE_LDE_LENGTH>()
 const COMPOSITION_STAGING_WORDS: usize = sparse_composition_staging_words<BASE_LDE_LENGTH>()
 const COMPOSITION_GROUPS: usize = (BASE_LDE_LENGTH + THREADS - 1) / THREADS
@@ -503,11 +511,12 @@ static_assert(<BaseLdeInputPlan as FactorTree>::POINTS == PRODUCTION_TRACE_LENGT
 static_assert(<BaseLdeOutputPlan as FactorTree>::POINTS == BASE_LDE_LENGTH)
 static_assert(LDE_INPUT_STAGES == 12)
 static_assert(LDE_OUTPUT_STAGES == 13)
-static_assert(TRANSITION_WORKSPACE_WORDS == 218)
+static_assert(TRANSITION_PHASE_WORDS == 218)
+static_assert(TRANSITION_WORKSPACE_WORDS == 219)
 static_assert(TRANSITION_WORKSPACE_WORDS >= DIGEST_FIELDS)
 static_assert(COMPOSITION_WORKSPACE_WORDS <= TRANSITION_WORKSPACE_WORDS)
-static_assert(COMPOSITION_VALIDITY_WORD == 208)
-static_assert(COMPOSITION_COMMITMENT_VALIDITY_WORD == 209)
+static_assert(COMPOSITION_VALIDITY_WORD == 217)
+static_assert(COMPOSITION_COMMITMENT_VALIDITY_WORD == 218)
 static_assert(COMPOSITION_CODEWORD_WORDS == 40960)
 static_assert(COMPOSITION_STAGING_WORDS == 319488)
 static_assert(COMPOSITION_STAGING_WORDS <= LDE_INPUT_GRID_LANES)
@@ -609,6 +618,7 @@ pub struct FriRoundCycle {}
 
 actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     transition_workspace: Shared<u32, TRANSITION_WORKSPACE_WORDS>,
+    security_profile: ProductionSecurityProfileDigestBuffer,
     base_trace: Shared<u32, BASE_TRACE_WORDS>,
     validity: Shared<u32, PRODUCTION_TRACE_LENGTH>,
     lde_inverse_values: Shared<u32, BASE_TRACE_WORDS>,
@@ -1773,6 +1783,30 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
             BASE_LDE_LENGTH,
             TRANSITION_WORKSPACE_WORDS,
         >(directed_interval(), self.transition_workspace)
+    }
+
+    fn bind_composition_security_profile(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        bind_sparse_composition_security_profile<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.security_profile, self.transition_workspace)
+    }
+
+    fn validate_composition_security_profile(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        validate_sparse_composition_security_profile<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace)
     }
 
     fn bind_composition_seed(self, invocation: ComputeInvocation)

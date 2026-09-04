@@ -11,6 +11,10 @@ const pageUrl = process.argv[2];
 const receiptDir = process.argv[3] ? resolve(process.argv[3]) : null;
 const resourceNames = process.argv.slice(4);
 const browserUrl = process.env.FE_BROWSER_URL ?? "http://10.0.0.1:9222";
+const readyTimeoutMilliseconds = Number.parseInt(
+  process.env.FE_BROWSER_READY_TIMEOUT_MS ?? "600000",
+  10,
+);
 
 if (!pageUrl || !receiptDir || resourceNames.length === 0) {
   throw new Error(
@@ -22,6 +26,9 @@ if (new Set(resourceNames).size !== resourceNames.length) {
 }
 if (resourceNames.some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
   throw new Error("resource names must be safe Fe identifiers");
+}
+if (!Number.isSafeInteger(readyTimeoutMilliseconds) || readyTimeoutMilliseconds <= 0) {
+  throw new Error("FE_BROWSER_READY_TIMEOUT_MS must be a positive integer");
 }
 
 function delay(milliseconds) {
@@ -107,11 +114,11 @@ try {
   await call("Page.navigate", { url: pageUrl }, 120_000);
 
   let state;
-  const readyDeadline = Date.now() + 600_000;
+  const readyDeadline = Date.now() + readyTimeoutMilliseconds;
   while (Date.now() < readyDeadline) {
     state = await evaluate(
       `document.querySelector("fe-surface")?.state ?? null`,
-      600_000,
+      readyTimeoutMilliseconds,
     );
     if (state === "ready" || state === "live" || state === "error") break;
     await delay(250);

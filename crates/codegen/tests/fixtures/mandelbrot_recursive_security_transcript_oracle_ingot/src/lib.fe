@@ -3,6 +3,7 @@ use mandelbrot_proof_fixed_air_receipt_baby_bear::{
     PRODUCTION_LDE_LENGTH,
     PRODUCTION_LIMBS,
     PRODUCTION_TRACE_LENGTH,
+    commit_production_recursive_security_profile_words,
     production_recursive_security_profile,
 }
 use mandelbrot_proof_recursive_baby_bear::{
@@ -170,6 +171,22 @@ pub fn production_security_transcript_air_counts() -> (u32, u32, u32, u32) {
         profile.air_shape.pair_rows,
         profile.air_shape.first_row,
         profile.air_shape.last_row,
+    )
+}
+
+pub fn production_security_profile_digest() -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let profile = commit_production_recursive_security_profile_words()
+    let value = profile.digest()
+    (
+        flag(profile.is_valid()),
+        value.field(0).to_u32(),
+        value.field(1).to_u32(),
+        value.field(2).to_u32(),
+        value.field(3).to_u32(),
+        value.field(4).to_u32(),
+        value.field(5).to_u32(),
+        value.field(6).to_u32(),
+        value.field(7).to_u32(),
     )
 }
 

@@ -6,6 +6,10 @@ use fe_codegen::{WebBuildOptions, WebBundleMode, resolve_web_entry};
 use hir::hir_def::HirIngot;
 use url::Url;
 
+const SECURITY_PROFILE_ASSET: &[u8] = include_bytes!(
+    "fixtures/mandelbrot_proof_composition_bind_webgpu_ingot/assets/sha256/3ec28891664ccf5c1158abc053b569581000e04fdf7642102b83f84698456906.bin"
+);
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -41,19 +45,32 @@ fn production_composition_binding_lowers_in_isolation() {
     let bundle = fe_codegen::WebBundle::compile(
         &db,
         top_mod,
-        WebBuildOptions::compute(entry, Some("mandelbrot_composition_binding".into())),
+        WebBuildOptions::compute(entry, Some("mandelbrot_composition_binding".into()))
+            .with_resource_asset(SECURITY_PROFILE_ASSET.to_vec()),
     )
     .expect("composition binding fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 7);
-    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.passes.len(), 9);
+    assert_eq!(bundle.manifest.resources.len(), 2);
     assert_eq!(bundle.manifest.passes[0].source_entry, "stage_roots");
     assert_eq!(bundle.manifest.passes[1].source_entry, "stage_statement");
     assert_eq!(bundle.manifest.passes[2].source_entry, "bind_transcript");
-    assert_eq!(bundle.manifest.passes[3].source_entry, "validate_transcript");
+    assert_eq!(
+        bundle.manifest.passes[3].source_entry,
+        "validate_transcript"
+    );
     assert_eq!(bundle.manifest.passes[4].source_entry, "validate_statement");
-    assert_eq!(bundle.manifest.passes[5].source_entry, "bind_seed");
-    assert_eq!(bundle.manifest.passes[6].source_entry, "derive_challenges");
+    assert_eq!(
+        bundle.manifest.passes[5].source_entry,
+        "bind_security_profile"
+    );
+    assert_eq!(
+        bundle.manifest.passes[6].source_entry,
+        "validate_security_profile"
+    );
+    assert_eq!(bundle.manifest.passes[7].source_entry, "bind_seed");
+    assert_eq!(bundle.manifest.passes[8].source_entry, "derive_challenges");
+    let mut measured_sizes = Vec::with_capacity(bundle.manifest.passes.len());
     for (pass, shader) in bundle.manifest.passes.iter().zip(&bundle.pass_wgsl) {
         let maximum_wgsl_bytes = match pass.source_entry.as_str() {
             "stage_roots" => 30_000,
@@ -61,6 +78,8 @@ fn production_composition_binding_lowers_in_isolation() {
             "bind_transcript" => 205_000,
             "validate_transcript" => 225_000,
             "validate_statement" => 225_000,
+            "bind_security_profile" => 170_000,
+            "validate_security_profile" => 120_000,
             "bind_seed" => 75_000,
             "derive_challenges" => 185_000,
             other => panic!("unexpected composition binding pass `{other}`"),
@@ -70,13 +89,6 @@ fn production_composition_binding_lowers_in_isolation() {
             pass.source_entry,
             shader.source.len(),
         );
-        assert!(
-            shader.source.len() <= maximum_wgsl_bytes,
-            "composition binding pass `{}` emitted {} WGSL bytes, exceeding its {}-byte regression budget",
-            pass.source_entry,
-            shader.source.len(),
-            maximum_wgsl_bytes,
-        );
         let module = naga::front::wgsl::parse_str(&shader.source)
             .unwrap_or_else(|error| panic!("{} WGSL parse failed: {error:?}", pass.source_entry));
         naga::valid::Validator::new(
@@ -85,6 +97,17 @@ fn production_composition_binding_lowers_in_isolation() {
         )
         .validate(&module)
         .unwrap_or_else(|error| panic!("{} WGSL validation failed: {error:?}", pass.source_entry));
+        measured_sizes.push((
+            pass.source_entry.as_str(),
+            shader.source.len(),
+            maximum_wgsl_bytes,
+        ));
+    }
+    for (source_entry, actual, maximum) in measured_sizes {
+        assert!(
+            actual <= maximum,
+            "composition binding pass `{source_entry}` emitted {actual} WGSL bytes, exceeding its {maximum}-byte regression budget",
+        );
     }
     if let Ok(destination) = std::env::var("MB2_COMPOSITION_BIND_BUNDLE_OUT") {
         bundle

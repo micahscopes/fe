@@ -1066,6 +1066,134 @@ fn reference_poseidon_digest(tag: &[u8; 4], fields: &[u32]) -> [u32; 8] {
     reference_poseidon_digest_with(&default_babybear_poseidon2_16(), tag, fields)
 }
 
+fn reference_packed_u32_commitment(tag: &[u8; 4], words: &[u32]) -> [u32; 8] {
+    let mut packed = BigUint::from(0u32);
+    for (index, word) in words.iter().copied().enumerate() {
+        packed |= BigUint::from(word) << (index * 32);
+    }
+    let field_count = (words.len() * 32).div_ceil(30);
+    let mask = (BigUint::from(1u32) << 30usize) - BigUint::from(1u32);
+    let fields = (0..field_count)
+        .map(|index| {
+            ((&packed >> (index * 30)) & &mask)
+                .to_u32_digits()
+                .first()
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let mut message = vec![u32::from_be_bytes(*tag), (words.len() * 32) as u32];
+    message.extend(fields);
+    let mut state = [0u32; POSEIDON_WIDTH];
+    let permutation = default_babybear_poseidon2_16();
+    for block in message.chunks(8) {
+        state[..block.len()].copy_from_slice(block);
+        state = reference_poseidon_permutation_with(&permutation, state);
+    }
+    state[..8].try_into().unwrap()
+}
+
+fn reference_security_floor_log2(value: u64) -> u64 {
+    assert_ne!(value, 0);
+    let integer_part = 63 - value.leading_zeros() as u64;
+    let mut result = integer_part << 16;
+    let mut mantissa = if integer_part >= 31 {
+        value >> (integer_part - 31)
+    } else {
+        value << (31 - integer_part)
+    };
+    for bit in 0..16 {
+        mantissa = (mantissa * mantissa) >> 31;
+        if mantissa >= 1u64 << 32 {
+            mantissa >>= 1;
+            result |= 1u64 << (15 - bit);
+        }
+    }
+    result
+}
+
+fn reference_security_ceil_log2(value: u64) -> u64 {
+    let floor = reference_security_floor_log2(value);
+    if value.is_power_of_two() {
+        floor
+    } else {
+        floor + 1
+    }
+}
+
+fn push_u64_words(words: &mut Vec<u32>, value: u64) {
+    words.push(value as u32);
+    words.push((value >> 32) as u32);
+}
+
+fn expected_recursive_security_profile_words() -> Vec<u32> {
+    let target_bits = 100u32;
+    let max_composed_proofs = 1_024u32;
+    let extension_degree = 4u32;
+    let trace_length = 4_096u32;
+    let lde_length = 8_192u32;
+    let composition_degree_bound = 4_095u32;
+    let log_blowup = 1u32;
+    let folding_arity = 2u32;
+    let max_air_constraints = 8_192u32;
+    let hash_collision_bits = 128u32;
+    let query_pow_bits = 0u32;
+    let commit_pow_bits = 0u32;
+    let field_bits =
+        reference_security_floor_log2(BABY_BEAR_MODULUS as u64) * extension_degree as u64;
+    let numerator = field_bits + 94_548 + ((log_blowup as u64) << 16);
+    let correction =
+        reference_security_ceil_log2(numerator) - reference_security_floor_log2(field_bits);
+    let bits_per_query = ((log_blowup as u64) << 16) - correction;
+    let union_bits = reference_security_ceil_log2(max_composed_proofs as u64);
+    let local_target = ((target_bits as u64) << 16) + union_bits;
+    let query_count = local_target.div_ceil(bits_per_query) as u32;
+    assert_eq!(query_count, 114);
+    let query_bits = bits_per_query * query_count as u64;
+    let air_bits = field_bits - reference_security_ceil_log2(max_air_constraints as u64);
+    let commit_factor = (folding_arity as u64 - 1) * (lde_length as u64 + 1);
+    let commit_bits = field_bits - reference_security_ceil_log2(commit_factor);
+    let local_attained = query_bits
+        .min(air_bits)
+        .min(commit_bits)
+        .min((hash_collision_bits as u64) << 16);
+    let global_attained = local_attained - union_bits;
+
+    let mut words = vec![
+        1,
+        1,
+        target_bits,
+        max_composed_proofs,
+        BABY_BEAR_MODULUS,
+        extension_degree,
+        trace_length,
+        lde_length,
+        composition_degree_bound,
+        log_blowup,
+        folding_arity,
+        max_air_constraints,
+        hash_collision_bits,
+        query_pow_bits,
+        commit_pow_bits,
+        query_count,
+    ];
+    for value in [
+        field_bits,
+        bits_per_query,
+        local_target,
+        query_bits,
+        air_bits,
+        commit_bits,
+        local_attained,
+        global_attained,
+    ] {
+        push_u64_words(&mut words, value);
+    }
+    words.extend([1, 312, 352, 16, 11, 691, 2, 2, 1, 1, 2, query_count]);
+    assert_eq!(words.len(), 44);
+    words
+}
+
 fn reference_digest_compress_with<P>(permutation: &P, left: [u32; 8], right: [u32; 8]) -> [u32; 8]
 where
     P: Permutation<[P3BabyBear; POSEIDON_WIDTH]>,
@@ -2685,10 +2813,7 @@ fn expected_sparse_base_evaluation_words(point: &ComplexFx, current: &ComplexFx)
     base_fields
 }
 
-fn expected_sparse_production_base_trace_words(
-    point: &ComplexFx,
-    current: &ComplexFx,
-) -> Vec<u32> {
+fn expected_sparse_production_base_trace_words(point: &ComplexFx, current: &ComplexFx) -> Vec<u32> {
     let controls = expected_sparse_control_rows();
     let rows = expected_sparse_rows(point, current);
     assert_eq!(controls.len(), PRODUCTION_TRACE_ROWS);
@@ -6466,13 +6591,16 @@ fn production_sparse_composition_binding_browser_workspace_matches_independent_r
     };
     let end = advance(&claim, &start);
     let statement = expected_committed_words(&claim, &start, &end, 1);
-    let transcript = expected_sparse_air_lde_transcript(
-        &statement,
-        base_root,
-        interaction_root,
-    );
+    let air_transcript =
+        expected_sparse_air_lde_transcript(&statement, base_root, interaction_root);
 
-    let mut expected = Vec::with_capacity(210);
+    let security_profile_words = expected_recursive_security_profile_words();
+    let security_profile = reference_packed_u32_commitment(b"SP01", &security_profile_words);
+    let mut security_binding = air_transcript.to_vec();
+    security_binding.extend(security_profile);
+    let security_transcript = reference_poseidon_digest(b"SP02", &security_binding);
+
+    let mut expected = Vec::with_capacity(219);
     expected.extend(base_root);
     expected.extend(interaction_root);
     expected.extend(&statement);
@@ -6487,25 +6615,31 @@ fn production_sparse_composition_binding_browser_workspace_matches_independent_r
     expected.extend(base_root);
     expected.extend(interaction_root);
     expected.push(1);
-    expected.extend(transcript);
+    expected.extend(air_transcript);
     expected.push(1);
-    expected.extend(transcript);
+    expected.extend(security_transcript);
 
     expected.push(1);
     expected.push(1);
     expected.extend(base_root);
-    expected.extend(transcript);
+    expected.extend(security_transcript);
 
     expected.push(1);
-    expected.extend(&reference_poseidon_digest(b"BC01", &transcript)[..4]);
+    expected.extend(&reference_poseidon_digest(b"BC01", &security_transcript)[..4]);
     expected.extend(expected_sparse_lde_interaction_challenges(base_root));
     expected.push(1);
-    expected.extend(&reference_poseidon_digest(b"PC01", &transcript)[..4]);
-    expected.extend(&reference_poseidon_digest(b"PM01", &transcript)[..4]);
+    expected.extend(&reference_poseidon_digest(b"PC01", &security_transcript)[..4]);
+    expected.extend(&reference_poseidon_digest(b"PM01", &security_transcript)[..4]);
 
     expected.extend([0; 18]);
+    expected.push(1);
+    expected.extend(security_profile);
     expected.extend([1, 0]);
-    assert_eq!(expected.len(), 210, "independent composition workspace width");
+    assert_eq!(
+        expected.len(),
+        219,
+        "independent composition workspace width"
+    );
     assert_eq!(actual, expected, "real-Chrome composition workspace");
 }
 
@@ -6521,15 +6655,21 @@ fn production_sparse_proof_browser_words_match_independent_model() {
         });
     let actual = read_u32le_file(&receipt_dir.join("base_trace.u32le"));
     let transition = read_u32le_file(&receipt_dir.join("transition_workspace.u32le"));
-    let interaction_validity =
-        read_u32le_file(&receipt_dir.join("lde_inverse_progress.u32le"));
+    let interaction_validity = read_u32le_file(&receipt_dir.join("lde_inverse_progress.u32le"));
     assert_eq!(
         actual.len(),
         PRODUCTION_TRACE_ROWS * SPARSE_BASE_FIELDS,
         "production base trace word count",
     );
-    assert_eq!(transition.len(), 218, "production transition workspace words");
-    assert_eq!(transition[217], 1, "all completed proof phases must be valid");
+    assert_eq!(
+        transition.len(),
+        218,
+        "production transition workspace words"
+    );
+    assert_eq!(
+        transition[217], 1,
+        "all completed proof phases must be valid"
+    );
     assert_eq!(
         &interaction_validity[..PRODUCTION_TRACE_ROWS],
         vec![1; PRODUCTION_TRACE_ROWS],
@@ -6557,8 +6697,7 @@ fn production_sparse_proof_browser_words_match_independent_model() {
         let rows = expected_sparse_rows(&point, &current);
         panic!(
             "production sparse base trace differs at column {column}, row {row}: browser={actual}, independent={expected}, control={:?}, witness={:?}",
-            controls[row],
-            rows[row],
+            controls[row], rows[row],
         );
     }
 }
@@ -6664,8 +6803,7 @@ fn production_sparse_lde_browser_roots_match_independent_reference() {
         });
     let transition = read_u32le_file(&receipt_dir.join("transition_workspace.u32le"));
     let interaction_tree = read_u32le_file(&receipt_dir.join("base_trace.u32le"));
-    let interaction_validity =
-        read_u32le_file(&receipt_dir.join("lde_inverse_values.u32le"));
+    let interaction_validity = read_u32le_file(&receipt_dir.join("lde_inverse_values.u32le"));
 
     assert_eq!(
         transition.len(),
