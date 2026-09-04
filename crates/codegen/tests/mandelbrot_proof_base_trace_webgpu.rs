@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{WebBindingRole, WebBuildOptions, WebBundleMode, resolve_web_entry};
+use fe_codegen::{
+    resolve_web_entry, WebBindingRole, WebBuildOptions, WebBundleMode, WebDispatchTaper,
+};
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -17,6 +19,18 @@ const BASE_LDE_WORDS: u32 = LDE_ROWS * BASE_FIELDS;
 const INTERACTION_FIELDS: u32 = 152;
 const INTERACTION_LDE_WORDS: u32 = LDE_ROWS * INTERACTION_FIELDS;
 const INPUT_GRID_LANES: u32 = BASE_FIELDS * TRACE_ROWS / 2;
+const FRI_ROUNDS: u32 = 13;
+const FRI_PROVER_GROUPS: u32 = 1_024;
+const FRI_PAIR_GROUPS: u32 = 64;
+const FRI_TREE_GROUPS: u32 = 512;
+const FRI_CHALLENGE_STEPS: u32 = 89;
+const FRI_LEAF_HASH_STEPS: u32 = 44;
+const FRI_TREE_STEPS: u32 = 540;
+const FRI_TREE_STEP_DECREMENT: u32 = 45;
+const FRI_BINDING_STEPS: u32 = 133;
+const FRI_QUERY_SAMPLE_GROUPS: u32 = 29;
+const FRI_EVALUATION_GROUPS: u32 = 45;
+const FRI_SIBLING_GROUPS: u32 = 236;
 
 #[test]
 fn production_composition_receipt_is_render_safe() {
@@ -349,7 +363,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 83);
+    assert_eq!(bundle.manifest.passes.len(), 100);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -663,7 +677,117 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     assert_eq!(bundle.manifest.passes[80].repeat, 13);
     assert_eq!(bundle.manifest.passes[81].dispatch, Some([1, 1, 1]));
     assert_eq!(bundle.manifest.passes[81].repeat, 1);
-    assert_eq!(bundle.manifest.passes[82].source_entry, "paint");
+    let fri_setup = [
+        ("seed_fri_input", [128, 1, 1]),
+        ("prepare_fri_rounds", [1, 1, 1]),
+        ("initialize_fri_prover", [FRI_PROVER_GROUPS, 1, 1]),
+    ];
+    for (index, (entry, dispatch)) in fri_setup.iter().copied().enumerate() {
+        let pass = &bundle.manifest.passes[82 + index];
+        assert_eq!(pass.source_entry, entry);
+        assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
+        assert_eq!(pass.dispatch, Some(dispatch));
+        assert_eq!(pass.repeat, 1);
+        assert_eq!(pass.cycle, None);
+    }
+
+    let fri_round_phases = [
+        (
+            "begin_fri_round",
+            1,
+            [FRI_PROVER_GROUPS, 1, 1],
+            Some(WebDispatchTaper {
+                shifts: [1, 0, 0],
+                repeat_decrement: 0,
+            }),
+        ),
+        ("derive_fri_challenge", FRI_CHALLENGE_STEPS, [1, 1, 1], None),
+        (
+            "fold_fri_round",
+            1,
+            [FRI_PAIR_GROUPS, 1, 1],
+            Some(WebDispatchTaper {
+                shifts: [1, 0, 0],
+                repeat_decrement: 0,
+            }),
+        ),
+        (
+            "initialize_fri_leaves",
+            1,
+            [FRI_PROVER_GROUPS, 1, 1],
+            Some(WebDispatchTaper {
+                shifts: [1, 0, 0],
+                repeat_decrement: 0,
+            }),
+        ),
+        (
+            "hash_fri_leaves",
+            FRI_LEAF_HASH_STEPS,
+            [FRI_PROVER_GROUPS, 1, 1],
+            Some(WebDispatchTaper {
+                shifts: [1, 0, 0],
+                repeat_decrement: 0,
+            }),
+        ),
+        (
+            "begin_fri_tree",
+            1,
+            [FRI_TREE_GROUPS, 1, 1],
+            Some(WebDispatchTaper {
+                shifts: [1, 0, 0],
+                repeat_decrement: 0,
+            }),
+        ),
+        (
+            "reduce_fri_tree",
+            FRI_TREE_STEPS,
+            [FRI_TREE_GROUPS, 1, 1],
+            Some(WebDispatchTaper {
+                shifts: [1, 0, 0],
+                repeat_decrement: FRI_TREE_STEP_DECREMENT,
+            }),
+        ),
+        ("begin_fri_binding", 1, [1, 1, 1], None),
+        ("bind_fri_transcript", FRI_BINDING_STEPS, [1, 1, 1], None),
+        ("finish_fri_round", 1, [1, 1, 1], None),
+    ];
+    for (index, (entry, repeat, dispatch, taper)) in fri_round_phases.iter().copied().enumerate() {
+        let pass = &bundle.manifest.passes[85 + index];
+        assert_eq!(pass.source_entry, entry);
+        assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
+        assert_eq!(pass.dispatch, Some(dispatch));
+        assert_eq!(pass.repeat, repeat);
+        assert_eq!(pass.taper, taper);
+        assert_eq!(
+            pass.cooperation,
+            matches!(entry, "hash_fri_leaves" | "reduce_fri_tree")
+                .then_some(fe_codegen::WebDispatchCooperation { repeat_batch: 8 }),
+        );
+        let cycle = pass.cycle.expect("every FRI round phase must be cycled");
+        assert_eq!(cycle.group, 0);
+        assert_eq!(cycle.repeat, FRI_ROUNDS);
+    }
+
+    let fri_query_phases = [
+        ("sample_fri_queries", 89, [FRI_QUERY_SAMPLE_GROUPS, 1, 1]),
+        (
+            "open_fri_evaluations",
+            FRI_ROUNDS,
+            [FRI_EVALUATION_GROUPS, 1, 1],
+        ),
+        ("open_fri_siblings", FRI_ROUNDS, [FRI_SIBLING_GROUPS, 1, 1]),
+        ("compact_fri_openings", 1, [1, 1, 1]),
+    ];
+    for (index, (entry, repeat, dispatch)) in fri_query_phases.iter().copied().enumerate() {
+        let pass = &bundle.manifest.passes[95 + index];
+        assert_eq!(pass.source_entry, entry);
+        assert_eq!(pass.layout.workgroup_size, [THREADS, 1, 1]);
+        assert_eq!(pass.dispatch, Some(dispatch));
+        assert_eq!(pass.repeat, repeat);
+        assert_eq!(pass.taper, None);
+        assert_eq!(pass.cycle, None);
+    }
+    assert_eq!(bundle.manifest.passes[99].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle
@@ -714,9 +838,11 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
             pass.source_entry,
             shader.source.len(),
         );
-        if composition_commitment_names.contains(&pass.source_entry.as_str()) {
+        if composition_commitment_names.contains(&pass.source_entry.as_str())
+            || pass.source_entry.contains("fri")
+        {
             eprintln!(
-                "composition commitment {}: {} WGSL bytes",
+                "production pass {}: {} WGSL bytes",
                 pass.source_entry,
                 shader.source.len(),
             );

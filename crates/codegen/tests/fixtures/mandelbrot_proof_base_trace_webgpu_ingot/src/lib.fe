@@ -1,5 +1,50 @@
 //! Production-width WebGPU gate for the generated sparse base AIR trace.
 
+use fri_baby_bear::fri_query_domain_tag
+use fri_opening_webgpu::compact_fri_round_openings
+use fri_prover_webgpu::{
+    FRI_BINDING_STEPS,
+    FRI_CHALLENGE_STEPS,
+    FRI_LEAF_HASH_STEPS,
+    FriProverArenaLayout,
+    FriProverControlLayout,
+    advance_fri_binding_lane,
+    advance_fri_challenge_lane,
+    advance_fri_leaf_lane,
+    advance_fri_tree_lane,
+    begin_fri_binding_lane,
+    begin_fri_round_lane,
+    begin_fri_tree_lane,
+    finish_fri_round_lane,
+    fold_fri_round_lane,
+    fri_prover_progress_words,
+    fri_prover_state_words,
+    fri_prover_states,
+    fri_prover_tail_words,
+    fri_prover_tree_steps,
+    fri_prover_valid_words,
+    fri_prover_workgroups,
+    initialize_fri_leaf_lane,
+    initialize_fri_prover_lane,
+}
+use fri_structure::{
+    FriQueryRangePlan,
+    FriSchedule,
+    FriSchedulePlacement,
+    FriScheduleShape,
+    fri_query_evaluation_work_item,
+    fri_query_grid_metadata,
+    fri_query_grid_workgroups,
+    fri_query_sample_work_item,
+    fri_query_sibling_work_item,
+}
+use fri_structure_webgpu::{
+    FRI_QUERY_CURSOR_FIELDS,
+    advance_fri_query_evaluation_storage,
+    advance_fri_query_sibling_storage,
+    fri_round_placement_storage_words,
+    store_fri_round_placement,
+}
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
@@ -48,6 +93,7 @@ use mandelbrot_proof_fixed_air_webgpu::{
     sparse_composition_codeword_words,
     sparse_composition_commitment_validity_word,
     sparse_composition_commitment_is_valid,
+    sparse_composition_fri_transcript,
     sparse_composition_staging_words,
     sparse_composition_phase_is_valid,
     sparse_composition_phase_validity_word,
@@ -74,7 +120,12 @@ use mandelbrot_proof_fixed_air_webgpu::{
     write_transition_primary_linear_witness_lane,
     write_transition_product_witness_lane,
 }
-use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use mandelbrot_proof_production_profile_baby_bear::{
+    PRODUCTION_LDE_LOG,
+    PRODUCTION_LIMBS,
+    PRODUCTION_SECURITY_QUERY_COUNT,
+    PRODUCTION_TRACE_LENGTH,
+}
 use mandelbrot_proof_baby_bear_domains::{
     MandelbrotCompositionRowBabyBearV1,
     MandelbrotSparseBaseLdeLeafBabyBearV1,
@@ -108,19 +159,23 @@ use parallel_ntt_webgpu::{
 }
 use parallel_scan_webgpu::advance_batched_additive_scan_row
 use parallel_structure::FactorTree
-use poseidon_baby_bear::DIGEST_FIELDS
+use poseidon_baby_bear::{DIGEST_FIELDS, Poseidon2Digest}
 use poseidon_baby_bear_webgpu::{
     DIGEST_SQUEEZE_STEPS,
+    INDEXED_DIGEST_SQUEEZE_STEPS,
     POSEIDON2_LANES,
     advance_digest_squeeze_batch_lane,
     advance_column_major_field_row_commitments,
     advance_column_major_field_row_commitments_at,
+    advance_indexed_digest_squeeze_lane_at,
     column_major_field_row_commitment_steps,
     column_major_field_row_commitment_workspace_words,
     digest_squeeze_batch_output_words,
     digest_squeeze_batch_workgroups,
     digest_squeeze_batch_workspace_words,
     finish_digest_squeeze_batch,
+    indexed_digest_squeeze_workgroups,
+    indexed_digest_squeeze_workspace_words,
     prepare_digest_squeeze_batch,
     prepare_column_major_field_row_commitments,
     prepare_column_major_field_row_commitments_at,
@@ -142,11 +197,13 @@ use std::webgpu::{
     CooperativeDispatch as Cooperate,
     ComputeInvocation,
     ComputeSurface as Kernel,
+    CycledDispatch as Cycle,
     FixedDispatch,
     FragmentSurface as Pixel,
     GpuProgram as Program,
     RepeatedDispatch,
     StorageBuffer as Shared,
+    TaperedDispatch as Taper,
     Workgroup as Threads,
     WebGpuBackend,
 }
@@ -246,6 +303,143 @@ const COMPOSITION_COMMITMENT_STEPS: usize = column_major_field_row_commitment_st
 const COMPOSITION_COMMITMENT_WORKSPACE_START: usize = BASE_TREE_NODES
 const COMPOSITION_COMMITMENT_WORKSPACE_END: usize = COMPOSITION_COMMITMENT_WORKSPACE_START
     + column_major_field_row_commitment_workspace_words(BASE_LDE_LENGTH)
+
+/// One semantic FRI schedule is interpreted directly over retired production
+/// resources. The composition codeword is transposed once from its commitment
+/// layout into the row-major fold arena; no host protocol table participates.
+type FoldSchedule = FriSchedule<1, { PRODUCTION_LDE_LOG }>
+type QueryPlan = FriQueryRangePlan<1, { PRODUCTION_SECURITY_QUERY_COUNT }>
+
+const EXTENSION_WORDS: usize = 4
+const FRI_ROUNDS: usize = <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+    .rounds as usize
+const FOLDED_EVALUATIONS: usize = <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+    .folded_evaluations as usize
+const LAYER_TREE_NODES: usize = <FoldSchedule as FriScheduleShape>::fri_schedule_metadata()
+    .layer_tree_nodes as usize
+const ROUND_PLACEMENT_WORDS: usize = fri_round_placement_storage_words(FRI_ROUNDS)
+const PROVER_STATES: usize = fri_prover_states<FoldSchedule>()
+const PROVER_GROUPS: usize = fri_prover_workgroups<FoldSchedule>(THREADS)
+const PROVER_LANES: usize = PROVER_GROUPS * THREADS
+const PAIR_GROUPS: usize = (PROVER_STATES + THREADS - 1) / THREADS
+const TREE_GROUPS: usize = PROVER_GROUPS / 2
+const PROVER_TREE_STEPS: usize = fri_prover_tree_steps<FoldSchedule>()
+
+const FRI_COMPOSITION_START: u32 = 0
+const FRI_COMPOSITION_WORDS: usize = BASE_LDE_LENGTH * EXTENSION_WORDS
+const FRI_COMPOSITION_VALID: u32 = FRI_COMPOSITION_WORDS.downcast_truncate()
+const FRI_EVALUATIONS_START: u32 = FRI_COMPOSITION_VALID + 1
+const FRI_EVALUATION_WORDS: usize = FOLDED_EVALUATIONS * EXTENSION_WORDS
+const FRI_EVALUATION_VALID_START: u32 = FRI_EVALUATIONS_START
+    + FRI_EVALUATION_WORDS.downcast_truncate()
+const FRI_TREE_START: u32 = FRI_EVALUATION_VALID_START + FOLDED_EVALUATIONS.downcast_truncate()
+const FRI_TREE_WORDS: usize = LAYER_TREE_NODES * DIGEST_FIELDS
+const FRI_NODE_VALID_START: u32 = FRI_TREE_START + FRI_TREE_WORDS.downcast_truncate()
+const FRI_STATE_START: u32 = FRI_NODE_VALID_START + LAYER_TREE_NODES.downcast_truncate()
+const FRI_STATE_WORDS: usize = fri_prover_state_words<FoldSchedule>()
+const FRI_STATE_VALID_START: u32 = FRI_STATE_START + FRI_STATE_WORDS.downcast_truncate()
+const FRI_STATE_VALID_WORDS: usize = fri_prover_valid_words<FoldSchedule>()
+const FRI_TAIL_START: u32 = FRI_STATE_VALID_START + FRI_STATE_VALID_WORDS.downcast_truncate()
+const FRI_TAIL_WORDS: usize = fri_prover_tail_words()
+const FRI_PROGRESS_START: u32 = FRI_TAIL_START + FRI_TAIL_WORDS.downcast_truncate()
+const FRI_PROGRESS_WORDS: usize = fri_prover_progress_words<FoldSchedule>(THREADS)
+const FRI_ARENA_WORDS: usize = FRI_PROGRESS_START as usize + FRI_PROGRESS_WORDS
+
+const FRI_TRANSCRIPTS_START: u32 = 0
+const FRI_TRANSCRIPT_WORDS: usize = (FRI_ROUNDS + 1) * DIGEST_FIELDS
+const FRI_TRANSCRIPT_VALID_START: u32 = FRI_TRANSCRIPT_WORDS.downcast_truncate()
+const FRI_CHALLENGES_START: u32 = FRI_TRANSCRIPT_VALID_START + (FRI_ROUNDS + 1).downcast_truncate()
+const FRI_CHALLENGE_WORDS: usize = FRI_ROUNDS * EXTENSION_WORDS
+const FRI_CHALLENGE_VALID_START: u32 = FRI_CHALLENGES_START
+    + FRI_CHALLENGE_WORDS.downcast_truncate()
+const FRI_ROOTS_START: u32 = FRI_CHALLENGE_VALID_START + FRI_ROUNDS.downcast_truncate()
+const FRI_ROOT_WORDS: usize = FRI_ROUNDS * DIGEST_FIELDS
+const FRI_ROOT_VALID_START: u32 = FRI_ROOTS_START + FRI_ROOT_WORDS.downcast_truncate()
+const FRI_ROUND_CURSOR: u32 = FRI_ROOT_VALID_START + FRI_ROUNDS.downcast_truncate()
+const FRI_ROUND_VALID: u32 = FRI_ROUND_CURSOR + 1
+const FRI_PROVER_COMPLETE: u32 = FRI_ROUND_VALID + 1
+const FRI_CONTROL_WORDS: usize = FRI_PROVER_COMPLETE as usize + 1
+
+const QUERY_COUNT: usize = fri_query_grid_metadata<QueryPlan, FoldSchedule>().query_count as usize
+const EVALUATIONS_PER_QUERY: usize = fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+    .evaluations_per_query as usize
+const SIBLINGS_PER_QUERY: usize = fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+    .siblings_per_query as usize
+const EVALUATION_ITEMS: usize = fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+    .evaluation_items as usize
+const SIBLING_ITEMS: usize = fri_query_grid_metadata<QueryPlan, FoldSchedule>()
+    .sibling_items as usize
+const EVALUATION_GROUPS: usize = fri_query_grid_workgroups(
+    EVALUATION_ITEMS.downcast_truncate(),
+    THREADS.downcast_truncate(),
+) as usize
+const SIBLING_GROUPS: usize = fri_query_grid_workgroups(
+    SIBLING_ITEMS.downcast_truncate(),
+    THREADS.downcast_truncate(),
+) as usize
+const EVALUATION_PADDING: usize = EVALUATION_GROUPS * THREADS - EVALUATION_ITEMS
+const SIBLING_PADDING: usize = SIBLING_GROUPS * THREADS - SIBLING_ITEMS
+const EVALUATION_OPENING_WORDS: usize = EVALUATION_ITEMS * EXTENSION_WORDS
+const SIBLING_OPENING_WORDS: usize = SIBLING_ITEMS * DIGEST_FIELDS
+
+const QUERY_WORKSPACE_WORDS: usize = indexed_digest_squeeze_workspace_words(QUERY_COUNT)
+const QUERY_SAMPLE_GROUPS: usize = indexed_digest_squeeze_workgroups(QUERY_COUNT, THREADS)
+const QUERY_SAMPLE_WORK_ITEMS: u32 = (QUERY_COUNT * POSEIDON2_LANES).downcast_truncate()
+const QUERY_SAMPLE_PADDING: usize = QUERY_SAMPLE_GROUPS * THREADS - QUERY_COUNT * POSEIDON2_LANES
+const QUERY_HALF_MASK: u32 = (BASE_LDE_LENGTH / 2 - 1).downcast_truncate()
+
+const EVALUATION_CURSOR_START: u32 = 0
+const EVALUATION_CURSOR_WORDS: usize = EVALUATION_ITEMS * FRI_QUERY_CURSOR_FIELDS
+const EVALUATION_PROGRESS_START: u32 = EVALUATION_CURSOR_WORDS.downcast_truncate()
+const SIBLING_CURSOR_START: u32 = EVALUATION_PROGRESS_START + EVALUATION_ITEMS.downcast_truncate()
+const SIBLING_CURSOR_WORDS: usize = SIBLING_ITEMS * FRI_QUERY_CURSOR_FIELDS
+const SIBLING_PROGRESS_START: u32 = SIBLING_CURSOR_START + SIBLING_CURSOR_WORDS.downcast_truncate()
+const OPENING_ACTIVITY_START: u32 = SIBLING_PROGRESS_START + SIBLING_ITEMS.downcast_truncate()
+const OPENING_STATE_WORDS: usize = OPENING_ACTIVITY_START as usize + LAYER_TREE_NODES
+
+const OPENING_METADATA_START: u32 = OPENING_STATE_WORDS.downcast_truncate()
+const COMPACT_VALID_START: u32 = OPENING_METADATA_START
+const COMPACT_LEAF_COUNT_START: u32 = COMPACT_VALID_START + FRI_ROUNDS.downcast_truncate()
+const COMPACT_SIBLING_COUNT_START: u32 = COMPACT_LEAF_COUNT_START + FRI_ROUNDS.downcast_truncate()
+const COMPACT_LEAF_INDEX_START: u32 = COMPACT_SIBLING_COUNT_START + FRI_ROUNDS.downcast_truncate()
+const COMPACT_METADATA_WORDS: usize = 3 * FRI_ROUNDS + EVALUATION_ITEMS
+const OPENING_PADDING_START: u32 = OPENING_METADATA_START
+    + COMPACT_METADATA_WORDS.downcast_truncate()
+const QUERY_INDICES_START: u32 = OPENING_PADDING_START
+    + (EVALUATION_PADDING + SIBLING_PADDING).downcast_truncate()
+const QUERY_VALIDITY_START: u32 = QUERY_INDICES_START + QUERY_COUNT.downcast_truncate()
+const QUERY_PADDING_START: u32 = QUERY_VALIDITY_START + QUERY_COUNT.downcast_truncate()
+const OPENING_WORKSPACE_WORDS: usize = QUERY_PADDING_START as usize + QUERY_SAMPLE_PADDING
+
+const fn fri_arena_layout() -> FriProverArenaLayout {
+    FriProverArenaLayout {
+        composition: FRI_COMPOSITION_START,
+        composition_valid: FRI_COMPOSITION_VALID,
+        evaluations: FRI_EVALUATIONS_START,
+        evaluation_valid: FRI_EVALUATION_VALID_START,
+        tree: FRI_TREE_START,
+        node_valid: FRI_NODE_VALID_START,
+        state: FRI_STATE_START,
+        state_valid: FRI_STATE_VALID_START,
+        tails: FRI_TAIL_START,
+        progress: FRI_PROGRESS_START,
+    }
+}
+
+const fn fri_control_layout() -> FriProverControlLayout {
+    FriProverControlLayout {
+        transcripts: FRI_TRANSCRIPTS_START,
+        transcript_valid: FRI_TRANSCRIPT_VALID_START,
+        challenges: FRI_CHALLENGES_START,
+        challenge_valid: FRI_CHALLENGE_VALID_START,
+        roots: FRI_ROOTS_START,
+        root_valid: FRI_ROOT_VALID_START,
+        round_cursor: FRI_ROUND_CURSOR,
+        round_valid: FRI_ROUND_VALID,
+        complete: FRI_PROVER_COMPLETE,
+    }
+}
+
 const RETAINED_BASE_ROOT_NODE: u32 = 0
 
 static_assert(PRODUCTION_LIMBS == 4)
@@ -319,6 +513,48 @@ static_assert(COMPOSITION_COMMITMENT_STEPS == 1)
 static_assert(COMPOSITION_COMMITMENT_WORKSPACE_START == 16383)
 static_assert(COMPOSITION_COMMITMENT_WORKSPACE_END == 163839)
 static_assert(COMPOSITION_COMMITMENT_WORKSPACE_END <= BASE_TRACE_WORDS)
+static_assert(PRODUCTION_LDE_LOG == 13)
+static_assert(FRI_ROUNDS == 13)
+static_assert(FOLDED_EVALUATIONS == 8191)
+static_assert(LAYER_TREE_NODES == 16369)
+static_assert(ROUND_PLACEMENT_WORDS == 169)
+static_assert(PROVER_STATES == 4096)
+static_assert(PROVER_GROUPS == 1024)
+static_assert(PROVER_LANES == 65536)
+static_assert(PAIR_GROUPS == 64)
+static_assert(TREE_GROUPS == 512)
+static_assert(FRI_CHALLENGE_STEPS == 89)
+static_assert(FRI_LEAF_HASH_STEPS == 44)
+static_assert(PROVER_TREE_STEPS == 540)
+static_assert(FRI_BINDING_STEPS == 133)
+static_assert(FRI_COMPOSITION_WORDS == 32768)
+static_assert(FRI_ARENA_WORDS == 421759)
+static_assert(FRI_CONTROL_WORDS == 311)
+static_assert(QUERY_COUNT == PRODUCTION_SECURITY_QUERY_COUNT)
+static_assert(QUERY_COUNT == 114)
+static_assert(EVALUATIONS_PER_QUERY == 25)
+static_assert(SIBLINGS_PER_QUERY == 132)
+static_assert(EVALUATION_ITEMS == 2850)
+static_assert(SIBLING_ITEMS == 15048)
+static_assert(EVALUATION_GROUPS == 45)
+static_assert(SIBLING_GROUPS == 236)
+static_assert(EVALUATION_PADDING == 30)
+static_assert(SIBLING_PADDING == 56)
+static_assert(EVALUATION_OPENING_WORDS == 11400)
+static_assert(SIBLING_OPENING_WORDS == 120384)
+static_assert(INDEXED_DIGEST_SQUEEZE_STEPS == 89)
+static_assert(QUERY_SAMPLE_GROUPS == 29)
+static_assert(QUERY_SAMPLE_PADDING == 32)
+static_assert(QUERY_WORKSPACE_WORDS == 5928)
+static_assert(FRI_QUERY_CURSOR_FIELDS == 8)
+static_assert(OPENING_WORKSPACE_WORDS == 180686)
+static_assert(ROUND_PLACEMENT_WORDS <= TRANSITION_WORKSPACE_WORDS)
+static_assert(FRI_ARENA_WORDS <= BASE_TRACE_WORDS)
+static_assert(FRI_CONTROL_WORDS <= PRODUCTION_TRACE_LENGTH)
+static_assert(QUERY_WORKSPACE_WORDS <= BASE_LDE_WORDS)
+static_assert(OPENING_WORKSPACE_WORDS <= BASE_LDE_WORDS)
+static_assert(EVALUATION_OPENING_WORDS <= INTERACTION_LDE_WORDS)
+static_assert(SIBLING_OPENING_WORDS <= LDE_INPUT_GRID_LANES)
 
 const fn witness_groups(_ rows: usize) -> usize {
     (rows + THREADS - 1) / THREADS
@@ -364,6 +600,8 @@ fn directed_interval() -> OrbitInterval<4> {
         },
     }
 }
+
+pub struct FriRoundCycle {}
 
 actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
     transition_workspace: Shared<u32, TRANSITION_WORKSPACE_WORDS>,
@@ -2050,13 +2288,629 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         >(self.transition_workspace, root.value, root.valid)
     }
 
-    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        let color: u32 = if sparse_composition_commitment_is_valid<
-            PRODUCTION_LIMBS,
+    /// Transpose the committed composition codeword into the FRI fold arena
+    /// and carry the exact BC03 transcript across the phase boundary. Both
+    /// source values were minted by the preceding Fe passes.
+    fn seed_fri_input(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_LEAF_GROUPS, 1, 1>,
+            >
+        )
+    {
+        let lane = invocation.global.x
+        if lane < BASE_LDE_LENGTH.downcast_truncate() {
+            let destination = FRI_COMPOSITION_START
+                + lane * EXTENSION_WORDS.downcast_truncate()
+            let mut coefficient: u32 = 0
+            while coefficient < EXTENSION_WORDS.downcast_truncate() {
+                self.base_trace.store(
+                    index: destination + coefficient,
+                    value: self.lde_inverse_progress.load(
+                        index: coefficient * BASE_LDE_LENGTH.downcast_truncate() + lane,
+                    ),
+                )
+                coefficient = coefficient + 1
+            }
+        }
+        if lane < DIGEST_FIELDS.downcast_truncate() {
+            let transcript = sparse_composition_fri_transcript<
+                PRODUCTION_LIMBS,
+                PRODUCTION_TRACE_LENGTH,
+                BASE_LDE_LENGTH,
+                TRANSITION_WORKSPACE_WORDS,
+            >(self.transition_workspace)
+            self.validity.store(
+                index: FRI_TRANSCRIPTS_START + lane,
+                value: transcript.value.field(lane).to_u32(),
+            )
+            if lane == 0 {
+                let valid = transcript.valid
+                    && sparse_composition_commitment_is_valid<
+                        PRODUCTION_LIMBS,
+                        PRODUCTION_TRACE_LENGTH,
+                        BASE_LDE_LENGTH,
+                        TRANSITION_WORKSPACE_WORDS,
+                    >(self.transition_workspace)
+                self.base_trace.store(
+                    index: FRI_COMPOSITION_VALID,
+                    value: if valid { 1 } else { 0 },
+                )
+                self.validity.store(
+                    index: FRI_TRANSCRIPT_VALID_START,
+                    value: if valid { 1 } else { 0 },
+                )
+            }
+        }
+    }
+
+    fn prepare_fri_rounds(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
+    {
+        let lane = invocation.global.x
+        if lane >= FRI_ROUNDS.downcast_truncate() { return }
+        store_fri_round_placement<TRANSITION_WORKSPACE_WORDS>(
+            self.transition_workspace,
+            lane,
+            <FoldSchedule as FriSchedulePlacement>::fri_round_placement(lane),
+        )
+    }
+
+    fn initialize_fri_prover(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<PROVER_GROUPS, 1, 1>,
+            >
+        )
+    {
+        initialize_fri_prover_lane<
+            FRI_ROUNDS,
+            FOLDED_EVALUATIONS,
+            LAYER_TREE_NODES,
+            PROVER_LANES,
+            BASE_TRACE_WORDS,
             PRODUCTION_TRACE_LENGTH,
-            BASE_LDE_LENGTH,
+        >(
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn begin_fri_round(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<FixedDispatch<PROVER_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        begin_fri_round_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
             TRANSITION_WORKSPACE_WORDS,
-        >(self.transition_workspace) {
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn derive_fri_challenge(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    RepeatedDispatch<1, 1, 1, FRI_CHALLENGE_STEPS>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_challenge_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn fold_fri_round(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<FixedDispatch<PAIR_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        fold_fri_round_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn initialize_fri_leaves(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<FixedDispatch<PROVER_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        initialize_fri_leaf_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn hash_fri_leaves(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Cooperate<
+                        Taper<
+                            RepeatedDispatch<PROVER_GROUPS, 1, 1, FRI_LEAF_HASH_STEPS>,
+                            1, 0, 0, 0,
+                        >,
+                        8,
+                    >,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_leaf_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn begin_fri_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Taper<FixedDispatch<TREE_GROUPS, 1, 1>, 1, 0, 0, 0>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        begin_fri_tree_lane<PROVER_LANES, BASE_TRACE_WORDS>(
+            self.base_trace,
+            fri_arena_layout(),
+            invocation,
+        )
+    }
+
+    fn reduce_fri_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    Cooperate<
+                        Taper<
+                            RepeatedDispatch<TREE_GROUPS, 1, 1, PROVER_TREE_STEPS>,
+                            1, 0, 0, {1 + FRI_LEAF_HASH_STEPS},
+                        >,
+                        8,
+                    >,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_tree_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn begin_fri_binding(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    FixedDispatch<1, 1, 1>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        begin_fri_binding_lane<PROVER_LANES, BASE_TRACE_WORDS>(
+            self.base_trace,
+            fri_arena_layout(),
+            invocation,
+        )
+    }
+
+    fn bind_fri_transcript(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<
+                    FriRoundCycle,
+                    RepeatedDispatch<1, 1, 1, FRI_BINDING_STEPS>,
+                    FRI_ROUNDS,
+                >,
+            >
+        )
+    {
+        advance_fri_binding_lane<
+            FRI_ROUNDS,
+            PROVER_LANES,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.base_trace,
+            fri_arena_layout(),
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn finish_fri_round(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<FriRoundCycle, FixedDispatch<1, 1, 1>, FRI_ROUNDS>,
+            >
+        )
+    {
+        finish_fri_round_lane<
+            FRI_ROUNDS,
+            TRANSITION_WORKSPACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.transition_workspace,
+            self.validity,
+            fri_control_layout(),
+            invocation,
+        )
+    }
+
+    fn sample_fri_queries(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    QUERY_SAMPLE_GROUPS,
+                    1,
+                    1,
+                    INDEXED_DIGEST_SQUEEZE_STEPS,
+                >,
+            >
+        )
+    {
+        let query_position = invocation.global.x
+            / POSEIDON2_LANES.downcast_truncate()
+        let item = fri_query_sample_work_item<QueryPlan>(query_position)
+        let rounds: u32 = FRI_ROUNDS.downcast_truncate()
+        let digest_fields: u32 = DIGEST_FIELDS.downcast_truncate()
+        let final_transcript = FRI_TRANSCRIPTS_START + rounds * digest_fields
+        let input_valid = item.valid
+            && self.validity.load(index: FRI_PROVER_COMPLETE) == 1
+            && self.validity.load(
+                index: FRI_TRANSCRIPT_VALID_START
+                    + FRI_ROUNDS.downcast_truncate(),
+            ) == 1
+        let transcript = Poseidon2Digest::from_u32s([
+            self.validity.load(index: final_transcript),
+            self.validity.load(index: final_transcript + 1),
+            self.validity.load(index: final_transcript + 2),
+            self.validity.load(index: final_transcript + 3),
+            self.validity.load(index: final_transcript + 4),
+            self.validity.load(index: final_transcript + 5),
+            self.validity.load(index: final_transcript + 6),
+            self.validity.load(index: final_transcript + 7),
+        ])
+        let step = advance_indexed_digest_squeeze_lane_at<
+            QUERY_COUNT,
+            BASE_LDE_WORDS,
+        >(
+            self.lde_values,
+            0,
+            invocation,
+            fri_query_domain_tag(),
+            transcript,
+            item.query_identity,
+            input_valid,
+        )
+        if !step.active {
+            self.lde_values.store(
+                index: QUERY_PADDING_START
+                    + invocation.global.x - QUERY_SAMPLE_WORK_ITEMS,
+                value: invocation.global.x + 1,
+            )
+        } else if !step.valid && step.field_lane == 0 {
+            self.lde_values.store(
+                index: QUERY_INDICES_START + step.state,
+                value: 0,
+            )
+            self.lde_values.store(
+                index: QUERY_VALIDITY_START + step.state,
+                value: 0,
+            )
+        } else if step.complete {
+            self.lde_values.store(
+                index: QUERY_INDICES_START + step.state,
+                value: step.value.coefficient(0).to_u32() & QUERY_HALF_MASK,
+            )
+            self.lde_values.store(
+                index: QUERY_VALIDITY_START + step.state,
+                value: 1,
+            )
+        }
+    }
+
+    fn open_fri_evaluations(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<EVALUATION_GROUPS, 1, 1, FRI_ROUNDS>,
+            >
+        )
+    {
+        let lane = invocation.global.x
+        let item = fri_query_evaluation_work_item<QueryPlan, FoldSchedule>(lane)
+        if !item.valid {
+            self.lde_values.store(
+                index: OPENING_PADDING_START
+                    + lane - EVALUATION_ITEMS.downcast_truncate(),
+                value: lane + 1,
+            )
+            return
+        }
+        let query = self.lde_values.load(
+            index: QUERY_INDICES_START + item.query_position,
+        )
+        let progress_index = EVALUATION_PROGRESS_START + lane
+        let round = self.lde_values.load(index: progress_index)
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let cursor_base = EVALUATION_CURSOR_START
+            + lane * FRI_QUERY_CURSOR_FIELDS.downcast_truncate()
+        let placement = advance_fri_query_evaluation_storage<
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+        >(
+            self.transition_workspace,
+            self.lde_values,
+            cursor_base,
+            round,
+            item.opening,
+            query,
+        )
+        self.lde_values.store(index: progress_index, value: round + 1)
+        if round + 1 != FRI_ROUNDS.downcast_truncate()
+            || !placement.valid
+            || self.validity.load(index: FRI_PROVER_COMPLETE) != 1
+            || self.base_trace.load(
+                index: FRI_EVALUATION_VALID_START + placement.evaluation_index,
+            ) != 1 {
+            return
+        }
+        let source = FRI_EVALUATIONS_START
+            + placement.evaluation_index
+                * EXTENSION_WORDS.downcast_truncate()
+        let destination = lane * EXTENSION_WORDS.downcast_truncate()
+        self.lde_progress.store(
+            index: destination,
+            value: self.base_trace.load(index: source),
+        )
+        self.lde_progress.store(
+            index: destination + 1,
+            value: self.base_trace.load(index: source + 1),
+        )
+        self.lde_progress.store(
+            index: destination + 2,
+            value: self.base_trace.load(index: source + 2),
+        )
+        self.lde_progress.store(
+            index: destination + 3,
+            value: self.base_trace.load(index: source + 3),
+        )
+    }
+
+    fn open_fri_siblings(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<SIBLING_GROUPS, 1, 1, FRI_ROUNDS>,
+            >
+        )
+    {
+        let lane = invocation.global.x
+        let item = fri_query_sibling_work_item<QueryPlan, FoldSchedule>(lane)
+        if !item.valid {
+            self.lde_values.store(
+                index: OPENING_PADDING_START
+                    + EVALUATION_PADDING.downcast_truncate()
+                    + lane - SIBLING_ITEMS.downcast_truncate(),
+                value: lane + 1,
+            )
+            return
+        }
+        let query = self.lde_values.load(
+            index: QUERY_INDICES_START + item.query_position,
+        )
+        let progress_index = SIBLING_PROGRESS_START + lane
+        let round = self.lde_values.load(index: progress_index)
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let cursor_base = SIBLING_CURSOR_START
+            + lane * FRI_QUERY_CURSOR_FIELDS.downcast_truncate()
+        let placement = advance_fri_query_sibling_storage<
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_LDE_WORDS,
+        >(
+            self.transition_workspace,
+            self.lde_values,
+            cursor_base,
+            round,
+            item.sibling,
+            query,
+        )
+        self.lde_values.store(index: progress_index, value: round + 1)
+        if round + 1 != FRI_ROUNDS.downcast_truncate()
+            || !placement.valid
+            || self.validity.load(index: FRI_PROVER_COMPLETE) != 1
+            || self.base_trace.load(
+                index: FRI_NODE_VALID_START + placement.tree_node,
+            ) != 1 {
+            return
+        }
+        let source = FRI_TREE_START
+            + placement.tree_node * DIGEST_FIELDS.downcast_truncate()
+        let destination = lane * DIGEST_FIELDS.downcast_truncate()
+        let mut field: u32 = 0
+        while field < DIGEST_FIELDS.downcast_truncate() {
+            self.lde_inverse_progress.store(
+                index: destination + field,
+                value: self.base_trace.load(index: source + field),
+            )
+            field = field + 1
+        }
+    }
+
+    fn compact_fri_openings(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Grid<1, 1, 1>>)
+    {
+        let round = invocation.global.x
+        if round >= FRI_ROUNDS.downcast_truncate() { return }
+        let mut query: u32 = 0
+        while query < QUERY_COUNT.downcast_truncate() {
+            if self.lde_values.load(
+                index: QUERY_VALIDITY_START + query,
+            ) != 1 {
+                self.lde_values.store(
+                    index: COMPACT_VALID_START + round,
+                    value: 0,
+                )
+                return
+            }
+            query = query + 1
+        }
+        let valid = compact_fri_round_openings<
+            QUERY_COUNT,
+            EXTENSION_WORDS,
+            DIGEST_FIELDS,
+            BASE_LDE_WORDS,
+            TRANSITION_WORKSPACE_WORDS,
+            BASE_TRACE_WORDS,
+            BASE_LDE_WORDS,
+            BASE_LDE_WORDS,
+            INTERACTION_LDE_WORDS,
+            LDE_INPUT_GRID_LANES,
+        >(
+            self.lde_values,
+            QUERY_INDICES_START,
+            self.transition_workspace,
+            self.base_trace,
+            FRI_EVALUATIONS_START,
+            FRI_TREE_START,
+            self.lde_values,
+            OPENING_ACTIVITY_START,
+            round,
+            self.lde_values,
+            COMPACT_LEAF_COUNT_START,
+            COMPACT_SIBLING_COUNT_START,
+            COMPACT_LEAF_INDEX_START,
+            self.lde_progress,
+            self.lde_inverse_progress,
+        )
+        self.lde_values.store(
+            index: COMPACT_VALID_START + round,
+            value: if valid { 1 } else { 0 },
+        )
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let mut openings_valid = true
+        let mut round: u32 = 0
+        while round < FRI_ROUNDS.downcast_truncate() {
+            openings_valid = openings_valid
+                && self.lde_values.load(index: COMPACT_VALID_START + round) == 1
+            round = round + 1
+        }
+        let color: u32 = if self.validity.load(index: FRI_PROVER_COMPLETE) == 1
+            && openings_valid {
             4278255360
         } else {
             4294901760

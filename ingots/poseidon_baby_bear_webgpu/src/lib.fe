@@ -438,10 +438,11 @@ fn load_storage_state_buffer<const WORKSPACE_WORDS: usize>(
 #[inline(always)]
 fn load_state_buffer<const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ state_start: u32,
     _ state: u32,
     _ secondary: bool,
 ) -> [u32; POSEIDON2_LANES] {
-    load_storage_state_buffer(workspace, 0, state, secondary)
+    load_storage_state_buffer(workspace, state_start, state, secondary)
 }
 
 /// Initialize one field lane of a storage-resident Poseidon2 permutation.
@@ -482,16 +483,17 @@ pub fn initialize_poseidon2_permutation_lane<
 #[inline(always)]
 fn initialize_lane<const STATES: usize, const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
     _ state: u32,
     _ field_lane: u32,
     _ permutation: ref Poseidon2FieldPermutation,
     _ input_valid: bool,
 ) {
-    let valid_start: u32 =
-        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    let valid_start: u32 = workspace_start
+        + indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
     initialize_poseidon2_permutation_lane(
         workspace,
-        0,
+        workspace_start,
         valid_start,
         state,
         field_lane,
@@ -576,15 +578,16 @@ fn advance_permutation_lane<
     const WORKSPACE_WORDS: usize,
 >(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
     _ state: u32,
     _ field_lane: u32,
     _ step: u32,
 ) -> bool {
-    let valid_start: u32 =
-        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    let valid_start: u32 = workspace_start
+        + indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
     advance_poseidon2_permutation_lane(
         workspace,
-        0,
+        workspace_start,
         valid_start,
         state,
         field_lane,
@@ -1065,9 +1068,10 @@ pub fn advance_digest_binding_storage_lane<
 #[inline(always)]
 fn output_value<const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
     _ state: u32,
 ) -> BabyBearExt4 {
-    let output = load_state_buffer(workspace, state, true)
+    let output = load_state_buffer(workspace, workspace_start, state, true)
     BabyBearExt4::from_coefficients([
         BabyBear::from_montgomery_word(output[0]),
         BabyBear::from_montgomery_word(output[1]),
@@ -1095,8 +1099,54 @@ pub fn advance_indexed_digest_squeeze_lane<
 ) -> IndexedDigestSqueezeStep
 where
     STATES > 0,
-    { WORKSPACE_WORDS == indexed_digest_squeeze_workspace_words(STATES) },
+    { WORKSPACE_WORDS >= indexed_digest_squeeze_workspace_words(STATES) },
 {
+    advance_indexed_digest_squeeze_lane_at<STATES, WORKSPACE_WORDS>(
+        workspace,
+        0,
+        invocation,
+        tag,
+        digest,
+        index_value,
+        input_valid,
+    )
+}
+
+/// Advance one lane of indexed digest squeezes inside a larger workspace.
+///
+/// The logical squeeze arena begins at `workspace_start`. Capacity is proven
+/// statically and the dynamic start is checked before any storage access, so a
+/// caller may safely recycle one region of a larger actor-owned buffer without
+/// weakening the exact Poseidon2 schedule.
+pub fn advance_indexed_digest_squeeze_lane_at<
+    const STATES: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
+    _ invocation: ComputeInvocation,
+    _ tag: u32,
+    _ digest: Poseidon2Digest,
+    _ index_value: u32,
+    _ input_valid: bool,
+) -> IndexedDigestSqueezeStep
+where
+    STATES > 0,
+    { WORKSPACE_WORDS >= indexed_digest_squeeze_workspace_words(STATES) },
+{
+    if (workspace_start as usize)
+        + indexed_digest_squeeze_workspace_words(STATES)
+        > WORKSPACE_WORDS
+    {
+        return IndexedDigestSqueezeStep {
+            active: true,
+            complete: false,
+            valid: false,
+            state: 0,
+            field_lane: 0,
+            value: BabyBearExt4::zero(),
+        }
+    }
     let global_lane = invocation.global.x
     if global_lane >= (STATES * POSEIDON2_LANES).downcast_truncate() {
         return inactive_step()
@@ -1104,8 +1154,8 @@ where
     let lanes: u32 = POSEIDON2_LANES.downcast_truncate()
     let state = global_lane / lanes
     let field_lane = global_lane % lanes
-    let progress_start: u32 =
-        indexed_digest_squeeze_progress_start(STATES).downcast_truncate()
+    let progress_start: u32 = workspace_start
+        + indexed_digest_squeeze_progress_start(STATES).downcast_truncate()
     let progress_index = progress_start + global_lane
     let step = workspace.load(index: progress_index)
     if step >= INDEXED_DIGEST_SQUEEZE_STEPS.downcast_truncate() {
@@ -1122,8 +1172,8 @@ where
     let hash_steps: u32 = POSEIDON2_STAGE_STEPS.downcast_truncate()
     let transition =
         <Poseidon2WorkgroupSchedule as Poseidon2WorkgroupPlan>::TRANSITION
-    let valid_start: u32 =
-        indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
+    let valid_start: u32 = workspace_start
+        + indexed_digest_squeeze_valid_start(STATES).downcast_truncate()
     let valid_index = valid_start + state
     let mut complete = false
     let mut state_valid = input_valid
@@ -1137,14 +1187,15 @@ where
         )
         initialize_lane<STATES, WORKSPACE_WORDS>(
             workspace,
+            workspace_start,
             state,
             field_lane,
             ref placed.permutation,
             input_valid,
         )
         if field_lane < 3 {
-            let tail_start: u32 =
-                indexed_digest_squeeze_tail_start(STATES).downcast_truncate()
+            let tail_start: u32 = workspace_start
+                + indexed_digest_squeeze_tail_start(STATES).downcast_truncate()
             workspace.store(
                 index: tail_start + state * 3 + field_lane,
                 value: placed.remaining[field_lane as usize].to_u32(),
@@ -1159,14 +1210,20 @@ where
         if hash_step < transition {
             state_valid = advance_permutation_lane<STATES, WORKSPACE_WORDS>(
                 workspace,
+                workspace_start,
                 state,
                 field_lane,
                 hash_step,
             )
         } else if block == 0 {
-            let output = load_state_buffer(workspace, state, true)
-            let tails_start: u32 =
-                indexed_digest_squeeze_tail_start(STATES).downcast_truncate()
+            let output = load_state_buffer(
+                workspace,
+                workspace_start,
+                state,
+                true,
+            )
+            let tails_start: u32 = workspace_start
+                + indexed_digest_squeeze_tail_start(STATES).downcast_truncate()
             let tail_start = tails_start + state * 3
             let tail = [
                 BabyBear::from_u32(workspace.load(index: tail_start)),
@@ -1184,6 +1241,7 @@ where
             )
             initialize_lane<STATES, WORKSPACE_WORDS>(
                 workspace,
+                workspace_start,
                 state,
                 field_lane,
                 ref permutation,
@@ -1193,7 +1251,9 @@ where
         } else if field_lane == 0 {
             complete = true
             state_valid = workspace.load(index: valid_index) == 1
-            if state_valid { value = output_value(workspace, state) }
+            if state_valid {
+                value = output_value(workspace, workspace_start, state)
+            }
         }
     }
 
