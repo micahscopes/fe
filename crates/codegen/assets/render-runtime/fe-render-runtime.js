@@ -1086,35 +1086,36 @@ export function selectPreparedPassRecords(passRecords, preparationKernels, unifo
 /** Realize one compiler-derived pass on first demand. A mode switch pays
  * shader fetch and asynchronous pipeline creation at most once while the graph
  * is resident; inactive policies retain neither source text nor GPU state. */
-export async function realizePassPipeline(device, record) {
-  if (record.pipeline) return record.pipeline;
+export function realizePassPipeline(device, record) {
+  if (record.pipeline) return Promise.resolve(record.pipeline);
   if (record.pipelinePromise) return record.pipelinePromise;
-  const pending = (async () => {
-    const shaderSource = record.shaderSource ?? (
-      await fetchOrThrow(record.shaderUrl, "WGSL pass shader")
-    ).text();
-    const module = record.shaderModule ?? device.createShaderModule({ code: await shaderSource });
-    record.shaderModule = module;
-    record.shaderSource = null;
-    const pipeline = record.pass.layout.mode === "compute"
-      ? await device.createComputePipelineAsync({
-          ...record.pipelineDescriptor,
-          compute: { ...record.pipelineDescriptor.compute, module },
-        })
-      : await device.createRenderPipelineAsync({
-          ...record.pipelineDescriptor,
-          vertex: { ...record.pipelineDescriptor.vertex, module },
-          fragment: { ...record.pipelineDescriptor.fragment, module },
-        });
-    record.pipeline = pipeline;
-    return pipeline;
+  let pending;
+  pending = (async () => {
+    try {
+      const shaderSource = record.shaderSource ?? await (
+        await fetchOrThrow(record.shaderUrl, "WGSL pass shader")
+      ).text();
+      const module = record.shaderModule ?? device.createShaderModule({ code: shaderSource });
+      record.shaderModule = module;
+      record.shaderSource = null;
+      const pipeline = record.pass.layout.mode === "compute"
+        ? await device.createComputePipelineAsync({
+            ...record.pipelineDescriptor,
+            compute: { ...record.pipelineDescriptor.compute, module },
+          })
+        : await device.createRenderPipelineAsync({
+            ...record.pipelineDescriptor,
+            vertex: { ...record.pipelineDescriptor.vertex, module },
+            fragment: { ...record.pipelineDescriptor.fragment, module },
+          });
+      record.pipeline = pipeline;
+      return pipeline;
+    } finally {
+      if (record.pipelinePromise === pending) record.pipelinePromise = null;
+    }
   })();
   record.pipelinePromise = pending;
-  try {
-    return await pending;
-  } finally {
-    if (record.pipelinePromise === pending) record.pipelinePromise = null;
-  }
+  return pending;
 }
 
 /** The initial uniform vector from the declared surface. Protocol v9 consumes
@@ -2319,7 +2320,11 @@ export class FeSurfaceElement extends HTMLElement {
       const run = () => {
         this._passPreparationIdle = null;
         if (this._gpu !== gpu) return;
-        Promise.all(records.map(record => realizePassPipeline(gpu.device, record)))
+        (async () => {
+          for (const record of records) {
+            await realizePassPipeline(gpu.device, record);
+          }
+        })()
           .catch((error) => {
             this._pipelineError = error;
             console.warn("[fe web] visible-idle pass preparation failed:", error);
@@ -2354,9 +2359,9 @@ export class FeSurfaceElement extends HTMLElement {
       this._passPreparationKernels,
       this._uniforms,
     );
-    await Promise.all(
-      plan.eager.map(record => realizePassPipeline(gpu.device, record)),
-    );
+    for (const record of plan.eager) {
+      await realizePassPipeline(gpu.device, record);
+    }
     this._scheduleVisibleIdlePreparation(gpu, plan.visibleIdle);
   }
 

@@ -8,7 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, realizePassPipelineAsync, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("Fe pass activation selects a memoized subgraph once per policy", () => {
@@ -37,19 +37,19 @@ test("Fe pass activation selects a memoized subgraph once per policy", () => {
   assert.deepEqual(calls, [1, 1], "one policy shared by two passes is evaluated once");
 });
 
-test("selected pass pipelines are realized lazily and memoized while resident", () => {
+test("selected pass pipelines are realized lazily and memoized while resident", async () => {
   const calls = { modules: 0, compute: 0, render: 0 };
   const device = {
     createShaderModule() {
       calls.modules += 1;
       return { kind: "module" };
     },
-    createComputePipeline(descriptor) {
+    async createComputePipelineAsync(descriptor) {
       calls.compute += 1;
       assert.equal(descriptor.compute.module.kind, "module");
       return { kind: "compute" };
     },
-    createRenderPipeline() {
+    async createRenderPipelineAsync() {
       calls.render += 1;
       return { kind: "render" };
     },
@@ -64,6 +64,7 @@ test("selected pass pipelines are realized lazily and memoized while resident", 
   const first = realizePassPipeline(device, record);
   const second = realizePassPipeline(device, record);
   assert.equal(first, second);
+  assert.deepEqual(await Promise.all([first, second]), [record.pipeline, record.pipeline]);
   assert.deepEqual(calls, { modules: 1, compute: 1, render: 0 });
 });
 
@@ -120,8 +121,8 @@ test("asynchronous pass preparation shares one resident pipeline promise", async
     shaderSource: "@compute @workgroup_size(1) fn sample() {}",
     pipelineDescriptor: { compute: { entryPoint: "sample" } },
   };
-  const first = realizePassPipelineAsync(device, record);
-  const second = realizePassPipelineAsync(device, record);
+  const first = realizePassPipeline(device, record);
+  const second = realizePassPipeline(device, record);
   assert.equal(first, second);
   assert.deepEqual(await Promise.all([first, second]), [record.pipeline, record.pipeline]);
   assert.deepEqual(calls, { modules: 1, pipelines: 1 });
@@ -968,7 +969,7 @@ test("failed lazy pipeline realization releases resources and pass-local buffers
       createBindGroupLayout() { return {}; },
       createBindGroup() { return {}; },
       createPipelineLayout() { return {}; },
-      createComputePipeline() { throw new Error("deliberate pipeline failure"); },
+      async createComputePipelineAsync() { throw new Error("deliberate pipeline failure"); },
       queue: { writeBuffer() {} },
     };
     const surface = Object.create(FeSurfaceElement.prototype);
@@ -999,8 +1000,8 @@ test("failed lazy pipeline realization releases resources and pass-local buffers
     }];
 
     const graph = await surface._buildPassGraph(device, 1);
-    assert.throws(
-      () => realizePassPipeline(device, graph.passRecords[0]),
+    await assert.rejects(
+      realizePassPipeline(device, graph.passRecords[0]),
       /deliberate pipeline failure/,
     );
     surface._gpu = graph;
@@ -1177,7 +1178,7 @@ test("one authored raster pass takes the GPU pass-graph path", () => {
   );
 });
 
-test("pass graphs fetch and realize pipelines sequentially through async WebGPU", async () => {
+test("selected pass graphs fetch and realize pipelines sequentially through async WebGPU", async () => {
   globalThis.GPUShaderStage = { COMPUTE: 1, VERTEX: 2, FRAGMENT: 4 };
   const previousFetch = globalThis.fetch;
   const trace = [];
@@ -1254,6 +1255,10 @@ test("pass graphs fetch and realize pipelines sequentially through async WebGPU"
   try {
     const graph = await surface._buildPassGraph(device, 7);
     assert.equal(graph.generation, 7);
+    assert.deepEqual(trace, [], "layout construction must not fetch inactive pass shaders");
+    for (const record of graph.passRecords) {
+      await realizePassPipeline(device, record);
+    }
     assert.deepEqual(graph.passRecords.map(record => record.pipeline.kind), [
       "compute",
       "render",
