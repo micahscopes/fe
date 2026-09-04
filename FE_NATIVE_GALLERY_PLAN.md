@@ -1890,24 +1890,63 @@ All four are focused ingots and may remain so permanently.
   2,274,793 WGSL bytes. Its cold production precompile took 1,513.6 seconds,
   exposing whole-actor invalidation as a compiler caching target rather than a
   browser-prover runtime cost. The production actor now continues through the
-  BC02 composition-row commitment, its exact ordered Merkle tree, and BC03
-  transcript binding in five additional Fe-authored passes. Offset-aware
+  BC02 composition-row commitment, its exact ordered Merkle tree, BC03
+  transcript binding, the complete thirteen-round FRI chain, and the
+  114-query security schedule in twenty-two additional Fe-authored passes.
+  Offset-aware
   Poseidon placement lets those passes reuse disjoint regions of retired typed
   resources, preserving the seven-resource actor and portable eight-binding
-  limit. A release gate compiled and Naga-validated the complete 83-pass graph
-  in 1,251.01 seconds. Every individual shader remains below 1,100,000 bytes;
+  limit. A release gate compiled and Naga-validated the complete 100-pass graph
+  in 1,456.51 seconds. Every individual shader remains below 1,100,000 bytes;
   the five new shaders are 2,174, 83,085, 1,457, 56,812, and 75,879 bytes. The
-  aggregate across all independently compiled pass shaders is 15,706,030 WGSL
-  bytes. A focused one-pass gate proves the poster reads only a derived,
+  aggregate across all independently compiled pass shaders is 16,286,405 WGSL
+  bytes. The final seventeen passes initialize and execute the FRI rounds,
+  derive their challenges, build and bind their ordered trees, sample all 114
+  queries, open evaluations and siblings, and compact those openings. A
+  focused one-pass gate proves the poster reads only a derived,
   trap-free completion receipt. The independent production Wasm oracle matches
   every composition evaluation and the BC02 root against its bigint/Plonky3
   reconstruction, and mutation of LD01, LD02, or the statement changes the
   transcript, composition codeword, and root. The generic row-commitment,
   ordered-tree, and root-derived challenge schedule also executes on llvmpipe
-  against Plonky3 with no GPU skip. Physical Chrome execution of the new
-  five-pass production continuation remains open. Interactive point and disk
-  selection, complete FRI/query receipt encoding, Wasm verification, and
-  revm-Wasm verification also remain.
+  against Plonky3 with no GPU skip. Browser pipeline realization now fetches
+  one shader and asynchronously creates one pipeline at a time, bounding live
+  compiler pressure without changing the Fe-authored pass order. The existing
+  56-pass production checkpoint physically reaches `ready` on AMD RDNA 3 in
+  2,574.58 ms through that path with no validation or device-loss error.
+  Physical Chrome execution and independent receipt comparison of the new
+  100-pass continuation remain open. Interactive point and disk selection,
+  final query receipt encoding, Wasm verification, and revm-Wasm verification
+  also remain.
+  The independent proof-stack audit is retained at
+  `/workspace/scratch/mb2-mandelbrot-prover-independent-review-2026-09-04.md`.
+  It identifies one protocol-coherence gate before receipt assembly: the GPU
+  composition path currently derives its challenge from the identity AIR
+  transcript without the SP01/SP02 security-profile binding required by the
+  scalar 114-query verifier. Treat the split composition passes as the
+  device-loss checkpoint until the GPU BC01 root matches the scalar security
+  receipt's BC01 under the same profile.
+  The current 104-pass release gate parses and Naga-validates every emitted
+  module and reports 16,805,768 aggregate WGSL bytes. It completed in 3,035.35
+  seconds, substantially slower than the 1,456.51-second 100-pass checkpoint;
+  retain that regression as a cold-lowering optimization target rather than a
+  browser runtime measurement. The formerly device-losing composition bind is
+  now a seven-pass Fe graph whose largest module is 204,183 WGSL bytes, 29.6
+  percent below the old 290,180-byte kernel. Its focused `fe web dev` page
+  executes all seven passes on physical AMD RDNA 3 through Chrome 149, reaches
+  live WebGPU without a validation error, device loss, or target crash, and
+  returns the complete 210-word workspace. The captured tape has SHA-256
+  `4c7fd5337baa7606b385ca78d76af3cff8211a7016c307625be84cb8f9047a14`;
+  every word matches the independent Plonky3/Poseidon reference, including the
+  recursive statement, AIR transcript, BC01 challenge, interaction and public
+  challenges, phase validity, and intentionally absent composition
+  commitment. Browser pipeline realization still takes roughly seven minutes
+  for the 1,157,700 aggregate WGSL bytes, so module size and persistent
+  compilation caching remain product gates. The fixed runtime now treats
+  compute-only graphs as having no poster phase: they stay cold at `ready`,
+  acquire no canvas swap chain, and dispatch only on Fe-selected activation or
+  explicit `live()`. A backend-pending surface no longer falsely labels itself
+  as a Wasm renderer.
 - **G-BROWSER shader materialization boundary, active.** The detailed boundary
   audit is recorded at
   `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.
@@ -2947,7 +2986,16 @@ SSOT carries the architectural decisions and gates.
 6. Evolve the Mandelbrot proof capstone into a **Proof Queue** consumer of
    structured scopes and Worker/MessagePort effects: Fe owns submission,
    progress, cancellation, retry, canonical proof values, and verification;
-   the host transports opaque bytes and browser facts only.
+   the host transports opaque bytes and browser facts only. Keep the prover
+   WebGPU-first: a Dedicated Worker owns the WebGPU device and executes the
+   Fe-derived pass graph, while Fe Wasm performs only lightweight control,
+   receipt assembly, and the verification work that does not belong on the
+   GPU. NTT, LDE, AIR evaluation, Poseidon, Merkle construction, and FRI remain
+   GPU-resident. A physical Chrome 149 probe on AMD RDNA 3 has already proven
+   that a Dedicated Worker can acquire `navigator.gpu`, asynchronously compile
+   a compute pipeline, dispatch it, and read back the expected value. The next
+   runtime slice must reuse one shared pass-graph executor across surfaces and
+   Workers rather than introduce a second WebGPU host path.
 7. Once the Phase 6 primitives execute, add a CPU-oracle-checked **GPU Kernel
    Lab** over reusable NTT/MSM/GA kernels. It must exercise workgroup memory,
    barriers, capability-gated subgroups, dispatch/await, and device recovery
