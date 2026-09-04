@@ -33,6 +33,9 @@ pub struct MandelbrotSparseLdeLinearBetaBabyBearV1 {}
 pub struct MandelbrotSparseLdeLinearGammaBabyBearV1 {}
 pub struct MandelbrotSparseLdeBoundaryBetaBabyBearV1 {}
 pub struct MandelbrotSparseLdeBoundaryGammaBabyBearV1 {}
+pub struct MandelbrotCompositionChallengeBabyBearV1 {}
+pub struct MandelbrotCompositionRowBabyBearV1 {}
+pub struct MandelbrotCompositionTranscriptBabyBearV1 {}
 
 pub const SPARSE_LDE_INTERACTION_CHALLENGE_COUNT: usize = 8
 const INVALID_PROTOCOL_TAG: u32 = 4294967295
@@ -117,6 +120,18 @@ impl Poseidon2FieldDomain for MandelbrotSparseLdeBoundaryBetaBabyBearV1 {
 
 impl Poseidon2FieldDomain for MandelbrotSparseLdeBoundaryGammaBabyBearV1 {
     const TAG: u32 = protocol_tag("BG02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC01")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionRowBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC02")
+}
+
+impl Poseidon2FieldDomain for MandelbrotCompositionTranscriptBabyBearV1 {
+    const TAG: u32 = protocol_tag("BC03")
 }
 
 const SPARSE_LDE_INTERACTION_CHALLENGE_TAGS: [u32; SPARSE_LDE_INTERACTION_CHALLENGE_COUNT] = [

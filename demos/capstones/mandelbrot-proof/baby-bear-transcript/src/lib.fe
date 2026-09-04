@@ -6,6 +6,11 @@
 //! proof-specific copy of these operations.
 
 use canonical_words::{CanonicalWords, CanonicalWordsProvider}
+use mandelbrot_proof_baby_bear_domains::{
+    MandelbrotCompositionChallengeBabyBearV1,
+    MandelbrotCompositionRowBabyBearV1,
+    MandelbrotCompositionTranscriptBabyBearV1,
+}
 use poseidon_baby_bear::{
     Poseidon2Digest,
     Poseidon2FieldDomain,
@@ -15,30 +20,6 @@ use poseidon_baby_bear::{
 }
 use precision::baby_bear::{BabyBear, BabyBearExt4}
 use quadratic_plan::{QuadraticPlanInterpreter, QuadraticValueInterpreter}
-
-const fn protocol_tag(_ label: String<4>) -> u32 {
-    let bytes = label.as_bytes()
-    ((bytes[0] as u32) << 24)
-        | ((bytes[1] as u32) << 16)
-        | ((bytes[2] as u32) << 8)
-        | (bytes[3] as u32)
-}
-
-struct MandelbrotCompositionChallengeBabyBearV1 {}
-struct MandelbrotCompositionRowBabyBearV1 {}
-struct MandelbrotCompositionTranscriptBabyBearV1 {}
-
-impl Poseidon2FieldDomain for MandelbrotCompositionChallengeBabyBearV1 {
-    const TAG: u32 = protocol_tag("BC01")
-}
-
-impl Poseidon2FieldDomain for MandelbrotCompositionRowBabyBearV1 {
-    const TAG: u32 = protocol_tag("BC02")
-}
-
-impl Poseidon2FieldDomain for MandelbrotCompositionTranscriptBabyBearV1 {
-    const TAG: u32 = protocol_tag("BC03")
-}
 
 /// Public placement metadata for interpreters that stage the transcript over
 /// workgroups instead of evaluating the scalar sponge in one invocation.
@@ -66,6 +47,7 @@ derive CanonicalWords for CompositionDigest using CanonicalWordsProvider
 
 pub struct CompositionTranscriptDigest { pub valid: bool, pub value: Poseidon2Digest }
 impl core::marker::Copy for CompositionTranscriptDigest {}
+derive CanonicalWords for CompositionTranscriptDigest using CanonicalWordsProvider
 
 /// Derive a quartic challenge from any AIR interpreter that has committed all
 /// of its pre-composition codewords into this transcript type.

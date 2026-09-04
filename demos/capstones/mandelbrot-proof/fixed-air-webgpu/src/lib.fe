@@ -23,6 +23,11 @@ use canonical_words::{
     encode_canonical_words,
 }
 use core::default::Default
+use mandelbrot_proof_baby_bear_transcript::{
+    CompositionDigest,
+    CompositionTranscriptDigest,
+    bind_composition,
+}
 use mandelbrot_proof_fixed_air_baby_bear::{
     SPARSE_BASE_AIR_FIELDS,
     SPARSE_INTERACTION_AIR_FIELDS,
@@ -198,7 +203,13 @@ struct SparseCompositionPhaseRegions<const L: usize, const TRACE: usize, const L
         SparseCompositionPhaseRegions<L, TRACE, LDE>,
         SparseCompositionEvaluationChallenges,
     >,
+    composition_root: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, CompositionDigest>,
+    fri_transcript: Region<
+        SparseCompositionPhaseRegions<L, TRACE, LDE>,
+        CompositionTranscriptDigest,
+    >,
     valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
+    commitment_valid: Region<SparseCompositionPhaseRegions<L, TRACE, LDE>, u32>,
 }
 impl<
     const L: usize,
@@ -229,6 +240,14 @@ pub const fn sparse_composition_phase_validity_word<
     const LDE: usize,
 >() -> usize {
     region_bounds(sparse_composition_phase_regions<L, TRACE, LDE>().valid).start as usize
+}
+
+pub const fn sparse_composition_commitment_validity_word<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+>() -> usize {
+    region_bounds(sparse_composition_phase_regions<L, TRACE, LDE>().commitment_valid).start as usize
 }
 
 pub const fn sparse_composition_codeword_words<const LDE: usize>() -> usize {
@@ -522,6 +541,30 @@ where STORAGE_WORDS > 0, Space::WORDS <= storage_word_capacity<STORAGE_WORDS>()
         .finish()
 }
 
+fn clear_sparse_composition_commitment<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    WORKSPACE_WORDS > 0,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>()
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let root = CompositionDigest { valid: false, value: Poseidon2Digest::zero() }
+    let transcript = CompositionTranscriptDigest {
+        valid: false,
+        value: Poseidon2Digest::zero(),
+    }
+    encode_workspace_value(ref root, workspace, regions.composition_root)
+        && encode_workspace_value(ref transcript, workspace, regions.fri_transcript)
+        && store_region_word(workspace, regions.commitment_valid, 0, 0)
+}
+
 /// Persist one authenticated composition context after the AIR roots and
 /// security profile have been bound. Later workgroups receive only this
 /// nominal carrier, never a raw array of host-supplied challenge words.
@@ -555,6 +598,8 @@ where
     valid = encode_workspace_value(ref interaction, workspace, regions.interaction_root) && valid
     valid = encode_workspace_value(ref seed, workspace, regions.seed) && valid
     valid = encode_workspace_value(ref challenges, workspace, regions.challenges) && valid
+    valid = clear_sparse_composition_commitment<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
+        && valid
     let valid_word: u32 = if valid { 1 } else { 0 }
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
 }
@@ -620,6 +665,8 @@ where
     let mut valid = roots_valid
     valid = encode_workspace_value(ref base_root, workspace, regions.base_root) && valid
     valid = encode_workspace_value(ref interaction_root, workspace, regions.interaction_root)
+        && valid
+    valid = clear_sparse_composition_commitment<L, TRACE, LDE, WORKSPACE_WORDS>(workspace)
         && valid
     let valid_word: u32 = if valid { 1 } else { 0 }
     encode_workspace_value(ref valid_word, workspace, regions.valid) && valid
@@ -3215,6 +3262,127 @@ where
     let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
     let stored = store_region_word(workspace, regions.valid, 0, if valid { 1 } else { 0 })
     valid && stored
+}
+
+/// Bind the ordered BC02 tree root to the exact AIR transcript that produced
+/// the composition codeword. Both typed results remain in the phase schema so
+/// FRI can consume them without reconstructing protocol state from offsets.
+pub fn finish_sparse_bound_composition_commitment<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ root: Poseidon2Digest,
+    _ root_valid: bool,
+) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    TRACE > 1,
+    LDE > 0,
+    LDE > TRACE,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let seed = decode_workspace_value(
+        zero_sparse_composition_challenge_seed<L, TRACE, LDE>(),
+        workspace,
+        regions.seed,
+    )
+    let staged_valid = load_region_word(workspace, regions.valid, 0)
+    let root = CompositionDigest {
+        valid: root_valid
+            && seed.valid
+            && seed.value.is_valid()
+            && staged_valid.valid
+            && staged_valid.value == 1,
+        value: root,
+    }
+    let transcript = bind_composition(seed.value.air_transcript(), root)
+    let mut valid = root.valid && transcript.valid
+    valid = encode_workspace_value(ref root, workspace, regions.composition_root) && valid
+    valid = encode_workspace_value(ref transcript, workspace, regions.fri_transcript) && valid
+    let valid_word: u32 = if valid { 1 } else { 0 }
+    store_region_word(workspace, regions.commitment_valid, 0, valid_word) && valid
+}
+
+/// Read the typed composition root retained for receipt openings.
+pub fn sparse_composition_commitment_root<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> CompositionDigest
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let root = decode_workspace_value(
+        CompositionDigest { valid: false, value: Poseidon2Digest::zero() },
+        workspace,
+        regions.composition_root,
+    )
+    let phase = load_region_word(workspace, regions.commitment_valid, 0)
+    if !root.valid || !root.value.valid || !phase.valid || phase.value != 1 {
+        return CompositionDigest { valid: false, value: Poseidon2Digest::zero() }
+    }
+    root.value
+}
+
+/// Read the BC03 transcript retained as the sole authority for the first FRI
+/// challenge. Invalid or incomplete phase storage fails closed.
+pub fn sparse_composition_fri_transcript<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> CompositionTranscriptDigest
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0
+{
+    let regions = sparse_composition_phase_regions<L, TRACE, LDE>()
+    let transcript = decode_workspace_value(
+        CompositionTranscriptDigest { valid: false, value: Poseidon2Digest::zero() },
+        workspace,
+        regions.fri_transcript,
+    )
+    let phase = load_region_word(workspace, regions.commitment_valid, 0)
+    if !transcript.valid || !transcript.value.valid || !phase.valid || phase.value != 1 {
+        return CompositionTranscriptDigest { valid: false, value: Poseidon2Digest::zero() }
+    }
+    transcript.value
+}
+
+pub fn sparse_composition_commitment_is_valid<
+    const L: usize,
+    const TRACE: usize,
+    const LDE: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>) -> bool
+where
+    L > 1,
+    TRACE > 0,
+    LDE > TRACE,
+    SparseCompositionPhaseRegions<L, TRACE, LDE>::WORDS <= storage_word_capacity<WORKSPACE_WORDS>(),
+    WORKSPACE_WORDS > 0
+{
+    let receipt = load_region_word(
+        workspace,
+        sparse_composition_phase_regions<L, TRACE, LDE>().commitment_valid,
+        0,
+    )
+    receipt.valid && receipt.value == 1
 }
 
 pub fn sparse_composition_phase_is_valid<

@@ -1814,7 +1814,12 @@ All four are focused ingots and may remain so permanently.
   interpreter, build the exact ordered LD02 tree, and retain both LD01 and LD02
   roots without adding an actor resource. A physical 56-pass Chrome receipt
   matches independent Plonky3 codewords plus independent LD01 and LD02
-  Poseidon/Merkle roots. Composition commitment and complete proof continuation
+  Poseidon/Merkle roots. The next production slice derives the BC02 composition
+  commitment and BC03 continuation transcript through the same typed placement
+  machinery. Its complete 83-pass release bundle compiles and validates, its
+  scalar root matches the independent oracle under directed mutations, and the
+  generic GPU stages execute exactly on llvmpipe. Physical Chrome execution of
+  these five new production passes and the complete FRI/query continuation
   remain open.
 - **G-RECEIPT, partial.** The nonrecursive protocol shape, field arithmetic,
   AIR, commitments, LDE, FRI fold chain, authenticated queries, ordered
@@ -1884,9 +1889,25 @@ All four are focused ingots and may remain so permanently.
   now match independent references. The corrected 56-pass artifact contains
   2,274,793 WGSL bytes. Its cold production precompile took 1,513.6 seconds,
   exposing whole-actor invalidation as a compiler caching target rather than a
-  browser-prover runtime cost. Interactive point and disk selection, composition
-  commitment, complete proof receipt encoding, Wasm verification, and revm-Wasm
-  verification remain.
+  browser-prover runtime cost. The production actor now continues through the
+  BC02 composition-row commitment, its exact ordered Merkle tree, and BC03
+  transcript binding in five additional Fe-authored passes. Offset-aware
+  Poseidon placement lets those passes reuse disjoint regions of retired typed
+  resources, preserving the seven-resource actor and portable eight-binding
+  limit. A release gate compiled and Naga-validated the complete 83-pass graph
+  in 1,251.01 seconds. Every individual shader remains below 1,100,000 bytes;
+  the five new shaders are 2,174, 83,085, 1,457, 56,812, and 75,879 bytes. The
+  aggregate across all independently compiled pass shaders is 15,706,030 WGSL
+  bytes. A focused one-pass gate proves the poster reads only a derived,
+  trap-free completion receipt. The independent production Wasm oracle matches
+  every composition evaluation and the BC02 root against its bigint/Plonky3
+  reconstruction, and mutation of LD01, LD02, or the statement changes the
+  transcript, composition codeword, and root. The generic row-commitment,
+  ordered-tree, and root-derived challenge schedule also executes on llvmpipe
+  against Plonky3 with no GPU skip. Physical Chrome execution of the new
+  five-pass production continuation remains open. Interactive point and disk
+  selection, complete FRI/query receipt encoding, Wasm verification, and
+  revm-Wasm verification also remain.
 - **G-BROWSER shader materialization boundary, active.** The detailed boundary
   audit is recorded at
   `/workspace/scratch/mb2-fe-sonatina-boundary-assumption-audit-2026-09-02.md`.

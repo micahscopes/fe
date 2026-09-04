@@ -132,17 +132,36 @@ pub fn prepare_column_major_field_row_commitments<
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ invocation: ComputeInvocation,
 ) {
+    prepare_column_major_field_row_commitments_at<ROWS, WORKSPACE_WORDS>(
+        workspace,
+        0,
+        invocation,
+    )
+}
+
+/// Reset row cursors inside a caller-selected region of a shared placement
+/// arena. The offset lets a later proof phase reuse one logical GPU resource
+/// without overlapping the validity words retained beside it.
+pub fn prepare_column_major_field_row_commitments_at<
+    const ROWS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
+    _ invocation: ComputeInvocation,
+) {
     let row = invocation.global.x
     if row >= ROWS.downcast_truncate()
-        || (WORKSPACE_WORDS
-            < column_major_field_row_commitment_workspace_words(ROWS))
+        || (workspace_start as usize)
+            + column_major_field_row_commitment_workspace_words(ROWS)
+            > WORKSPACE_WORDS
     {
         return
     }
-    let valid_start: u32 =
-        column_major_field_row_commitment_valid_start(ROWS).downcast_truncate()
-    let progress_start: u32 =
-        column_major_field_row_commitment_progress_start(ROWS).downcast_truncate()
+    let valid_start: u32 = workspace_start
+        + column_major_field_row_commitment_valid_start(ROWS).downcast_truncate()
+    let progress_start: u32 = workspace_start
+        + column_major_field_row_commitment_progress_start(ROWS).downcast_truncate()
     workspace.store(index: valid_start + row, value: 0)
     workspace.store(index: progress_start + row, value: 0)
 }
@@ -150,9 +169,10 @@ pub fn prepare_column_major_field_row_commitments<
 #[inline(always)]
 fn load_column_major_commitment_state<const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
     _ row: u32,
 ) -> [u32; POSEIDON2_LANES] {
-    let start = row * POSEIDON2_LANES.downcast_truncate()
+    let start = workspace_start + row * POSEIDON2_LANES.downcast_truncate()
     let mut lanes = [0; POSEIDON2_LANES]
     let mut lane: u32 = 0
     while lane < POSEIDON2_LANES.downcast_truncate() {
@@ -165,10 +185,11 @@ fn load_column_major_commitment_state<const WORKSPACE_WORDS: usize>(
 #[inline(always)]
 fn store_column_major_commitment_state<const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
     _ row: u32,
     _ sponge: ref Poseidon2FieldSponge,
 ) {
-    let start = row * POSEIDON2_LANES.downcast_truncate()
+    let start = workspace_start + row * POSEIDON2_LANES.downcast_truncate()
     let mut lane: u32 = 0
     while lane < POSEIDON2_LANES.downcast_truncate() {
         workspace.store(
@@ -198,11 +219,39 @@ pub fn advance_column_major_field_row_commitments<
     _ prefix: ref [BabyBear; PREFIX_FIELDS],
     _ invocation: ComputeInvocation,
 ) -> ColumnMajorFieldRowCommitmentStep {
+    advance_column_major_field_row_commitments_at<
+        D,
+        ROWS,
+        FIELDS,
+        VALUE_WORDS,
+        PREFIX_FIELDS,
+        WORKSPACE_WORDS,
+    >(values, workspace, 0, prefix, invocation)
+}
+
+/// Advance one canonical row commitment inside a caller-selected region of a
+/// shared placement arena. Message semantics and domain selection are exactly
+/// those of `advance_column_major_field_row_commitments`.
+pub fn advance_column_major_field_row_commitments_at<
+    D: Poseidon2FieldDomain,
+    const ROWS: usize,
+    const FIELDS: usize,
+    const VALUE_WORDS: usize,
+    const PREFIX_FIELDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ values: StorageBuffer<u32, VALUE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ workspace_start: u32,
+    _ prefix: ref [BabyBear; PREFIX_FIELDS],
+    _ invocation: ComputeInvocation,
+) -> ColumnMajorFieldRowCommitmentStep {
     let row = invocation.global.x
     if row >= ROWS.downcast_truncate()
         || VALUE_WORDS < ROWS * FIELDS
-        || (WORKSPACE_WORDS
-            < column_major_field_row_commitment_workspace_words(ROWS))
+        || (workspace_start as usize)
+            + column_major_field_row_commitment_workspace_words(ROWS)
+            > WORKSPACE_WORDS
     {
         return inactive_row_commitment_step()
     }
@@ -211,10 +260,10 @@ pub fn advance_column_major_field_row_commitments<
         PREFIX_FIELDS,
         FIELDS,
     ).downcast_truncate()
-    let valid_start: u32 =
-        column_major_field_row_commitment_valid_start(ROWS).downcast_truncate()
-    let progress_start: u32 =
-        column_major_field_row_commitment_progress_start(ROWS).downcast_truncate()
+    let valid_start: u32 = workspace_start
+        + column_major_field_row_commitment_valid_start(ROWS).downcast_truncate()
+    let progress_start: u32 = workspace_start
+        + column_major_field_row_commitment_progress_start(ROWS).downcast_truncate()
     let progress_index = progress_start + row
     let step = workspace.load(index: progress_index)
     if step >= steps {
@@ -241,7 +290,7 @@ pub fn advance_column_major_field_row_commitments<
         Poseidon2FieldSponge::begin<D>(payload)
     } else {
         Poseidon2FieldSponge::restore(
-            load_column_major_commitment_state(workspace, row),
+            load_column_major_commitment_state(workspace, workspace_start, row),
             0,
             payload,
             start,
@@ -267,7 +316,7 @@ pub fn advance_column_major_field_row_commitments<
     }
     sponge.absorb_scheduled_block(ref block, count, final_block)
     input_valid = input_valid && sponge.is_valid()
-    store_column_major_commitment_state(workspace, row, ref sponge)
+    store_column_major_commitment_state(workspace, workspace_start, row, ref sponge)
     workspace.store(
         index: valid_start + row,
         value: if input_valid { 1 } else { 0 },

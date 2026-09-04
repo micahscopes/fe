@@ -1,0 +1,8 @@
+[ingot]
+name = "mandelbrot_proof_composition_receipt_poster_gate"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+mandelbrot_proof_fixed_air_webgpu = "../../../../../demos/capstones/mandelbrot-proof/fixed-air-webgpu"
+mandelbrot_proof_production_profile_baby_bear = "../../../../../demos/capstones/mandelbrot-proof/production-profile-baby-bear"

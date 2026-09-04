@@ -19,6 +19,59 @@ const INTERACTION_LDE_WORDS: u32 = LDE_ROWS * INTERACTION_FIELDS;
 const INPUT_GRID_LANES: u32 = BASE_FIELDS * TRACE_ROWS / 2;
 
 #[test]
+fn production_composition_receipt_is_render_safe() {
+    let dir = repo_root()
+        .join("crates/codegen/tests/fixtures/mandelbrot_proof_composition_receipt_poster_ingot");
+    let mut db = DriverDataBase::default();
+    let url = Url::from_directory_path(&dir)
+        .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "composition receipt poster fixture initialization diagnostics",
+    );
+    let ingot = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .expect("composition receipt poster fixture should resolve to one ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "composition receipt poster source diagnostics:\n{diagnostics}",
+    );
+    let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)
+        .expect("the actor should derive its typed WebGPU entry");
+    assert_eq!(mode, WebBundleMode::Render);
+    let bundle = fe_codegen::WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render(entry, Some("mandelbrot_composition_receipt_poster".into())),
+    )
+    .expect("the composition receipt poster should lower without render traps");
+
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.resources[0].name, "workspace");
+    assert_eq!(bundle.manifest.resources[0].length, 101);
+    assert_eq!(bundle.manifest.passes[0].source_entry, "paint");
+
+    let shader = &bundle.pass_wgsl[0].source;
+    let module = naga::front::wgsl::parse_str(shader)
+        .unwrap_or_else(|error| panic!("composition receipt WGSL parse failed: {error:?}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("composition receipt WGSL validation failed: {error:?}"));
+    assert!(
+        shader.len() < 50_000,
+        "composition receipt poster is unexpectedly large: {} WGSL bytes",
+        shader.len(),
+    );
+}
+
+#[test]
 fn production_sparse_product_denominators_have_a_focused_browser_webgpu_gate() {
     let dir = repo_root()
         .join("crates/codegen/tests/fixtures/mandelbrot_proof_interaction_bus_webgpu_ingot");
@@ -296,7 +349,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
     )
     .expect("sparse base trace fixture should compile into a WebBundle");
 
-    assert_eq!(bundle.manifest.passes.len(), 78);
+    assert_eq!(bundle.manifest.passes.len(), 83);
     assert_eq!(bundle.manifest.resources.len(), 7);
     let producer_names = [
         "derive_products",
@@ -586,7 +639,31 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
         bundle.manifest.passes[76].cooperation,
         Some(fe_codegen::WebDispatchCooperation { repeat_batch: 1 }),
     );
-    assert_eq!(bundle.manifest.passes[77].source_entry, "paint");
+    let composition_commitment_names = [
+        "prepare_composition_lde_commitments",
+        "advance_composition_lde_commitments",
+        "prepare_composition_lde_tree",
+        "advance_composition_lde_tree",
+        "finish_composition_lde_tree",
+    ];
+    assert_eq!(
+        bundle.manifest.passes[77..82]
+            .iter()
+            .map(|pass| pass.source_entry.as_str())
+            .collect::<Vec<_>>(),
+        composition_commitment_names,
+    );
+    assert_eq!(bundle.manifest.passes[77].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[77].repeat, 1);
+    assert_eq!(bundle.manifest.passes[78].dispatch, Some([128, 1, 1]));
+    assert_eq!(bundle.manifest.passes[78].repeat, 1);
+    assert_eq!(bundle.manifest.passes[79].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[79].repeat, 1);
+    assert_eq!(bundle.manifest.passes[80].dispatch, Some([64, 1, 1]));
+    assert_eq!(bundle.manifest.passes[80].repeat, 13);
+    assert_eq!(bundle.manifest.passes[81].dispatch, Some([1, 1, 1]));
+    assert_eq!(bundle.manifest.passes[81].repeat, 1);
+    assert_eq!(bundle.manifest.passes[82].source_entry, "paint");
 
     let resource_length = |name: &str| {
         bundle
@@ -628,7 +705,22 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
             .all(|pass| pass.layout.bindings.len() <= 8),
         "actor resources and compiler state must fit the browser storage-buffer limit",
     );
+    let mut total_wgsl_bytes = 0usize;
     for (pass, shader) in bundle.manifest.passes.iter().zip(&bundle.pass_wgsl) {
+        total_wgsl_bytes += shader.source.len();
+        assert!(
+            shader.source.len() < 1_100_000,
+            "{} exceeded the production browser-risk ceiling: {} WGSL bytes",
+            pass.source_entry,
+            shader.source.len(),
+        );
+        if composition_commitment_names.contains(&pass.source_entry.as_str()) {
+            eprintln!(
+                "composition commitment {}: {} WGSL bytes",
+                pass.source_entry,
+                shader.source.len(),
+            );
+        }
         let module = naga::front::wgsl::parse_str(&shader.source)
             .unwrap_or_else(|error| panic!("{} WGSL parse failed: {error:?}", pass.source_entry));
         naga::valid::Validator::new(
@@ -643,4 +735,5 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
             )
         });
     }
+    eprintln!("production proof graph: {total_wgsl_bytes} total WGSL bytes");
 }

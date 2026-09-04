@@ -680,6 +680,13 @@ impl<const L: usize, const TRACE: usize, const LDE: usize> SparseCompositionChal
     pub fn is_valid(self) -> bool {
         self.valid && self.base.valid
     }
+
+    /// Recover the authenticated AIR transcript represented by this compact
+    /// storage carrier. An invalid seed cannot be rebranded as a valid input
+    /// to the post-composition binding.
+    pub fn air_transcript(self) -> AirLdeTranscriptDigest {
+        AirLdeTranscriptDigest { valid: self.is_valid(), value: self.transcript }
+    }
 }
 
 pub fn zero_sparse_composition_challenge_seed<

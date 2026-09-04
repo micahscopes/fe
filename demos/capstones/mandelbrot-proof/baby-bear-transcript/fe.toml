@@ -5,6 +5,7 @@ version = "0.1.0"
 [dependencies]
 canonical_words = "../../../../ingots/canonical_words"
 core = "../../../../ingots/core"
+mandelbrot_proof_baby_bear_domains = "../baby-bear-domains"
 poseidon_baby_bear = "../../../../ingots/poseidon_baby_bear"
 precision = "../../../sketches/precision"
 quadratic_plan = "../../../../ingots/quadratic_plan"

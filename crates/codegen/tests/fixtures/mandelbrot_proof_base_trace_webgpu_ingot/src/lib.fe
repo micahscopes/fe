@@ -40,11 +40,14 @@ use mandelbrot_proof_fixed_air_webgpu::{
     finish_sparse_composition_phase_context,
     finish_sparse_interaction_accumulator_scan_lane,
     finish_sparse_bound_composition_codeword,
+    finish_sparse_bound_composition_commitment,
     finish_sparse_composition_component_lane,
     finish_transition_witness_workspace,
     load_transition_phase_receipt,
     prepare_sparse_interaction_accumulator_scan_lane,
     sparse_composition_codeword_words,
+    sparse_composition_commitment_validity_word,
+    sparse_composition_commitment_is_valid,
     sparse_composition_staging_words,
     sparse_composition_phase_is_valid,
     sparse_composition_phase_validity_word,
@@ -73,6 +76,7 @@ use mandelbrot_proof_fixed_air_webgpu::{
 }
 use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
 use mandelbrot_proof_baby_bear_domains::{
+    MandelbrotCompositionRowBabyBearV1,
     MandelbrotSparseBaseLdeLeafBabyBearV1,
     MandelbrotSparseInteractionLdeLeafBabyBearV1,
     SPARSE_LDE_INTERACTION_CHALLENGE_COUNT,
@@ -110,6 +114,7 @@ use poseidon_baby_bear_webgpu::{
     POSEIDON2_LANES,
     advance_digest_squeeze_batch_lane,
     advance_column_major_field_row_commitments,
+    advance_column_major_field_row_commitments_at,
     column_major_field_row_commitment_steps,
     column_major_field_row_commitment_workspace_words,
     digest_squeeze_batch_output_words,
@@ -118,6 +123,7 @@ use poseidon_baby_bear_webgpu::{
     finish_digest_squeeze_batch,
     prepare_digest_squeeze_batch,
     prepare_column_major_field_row_commitments,
+    prepare_column_major_field_row_commitments_at,
 }
 use poseidon_merkle_webgpu::{
     advance_ordered_binary_tree,
@@ -227,6 +233,19 @@ const COMPOSITION_VALIDITY_WORD: usize = sparse_composition_phase_validity_word<
     PRODUCTION_TRACE_LENGTH,
     BASE_LDE_LENGTH,
 >()
+const COMPOSITION_COMMITMENT_VALIDITY_WORD: usize = sparse_composition_commitment_validity_word<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    BASE_LDE_LENGTH,
+>()
+const COMPOSITION_COMMITMENT_FIELDS: usize = COMPOSITION_CODEWORD_WORDS / BASE_LDE_LENGTH - 1
+const COMPOSITION_COMMITMENT_STEPS: usize = column_major_field_row_commitment_steps(
+    0,
+    COMPOSITION_COMMITMENT_FIELDS,
+)
+const COMPOSITION_COMMITMENT_WORKSPACE_START: usize = BASE_TREE_NODES
+const COMPOSITION_COMMITMENT_WORKSPACE_END: usize = COMPOSITION_COMMITMENT_WORKSPACE_START
+    + column_major_field_row_commitment_workspace_words(BASE_LDE_LENGTH)
 const RETAINED_BASE_ROOT_NODE: u32 = 0
 
 static_assert(PRODUCTION_LIMBS == 4)
@@ -289,11 +308,17 @@ static_assert(LDE_OUTPUT_STAGES == 13)
 static_assert(TRANSITION_WORKSPACE_WORDS == 218)
 static_assert(TRANSITION_WORKSPACE_WORDS >= DIGEST_FIELDS)
 static_assert(COMPOSITION_WORKSPACE_WORDS <= TRANSITION_WORKSPACE_WORDS)
-static_assert(COMPOSITION_VALIDITY_WORD == 81)
+static_assert(COMPOSITION_VALIDITY_WORD == 99)
+static_assert(COMPOSITION_COMMITMENT_VALIDITY_WORD == 100)
 static_assert(COMPOSITION_CODEWORD_WORDS == 40960)
 static_assert(COMPOSITION_STAGING_WORDS == 319488)
 static_assert(COMPOSITION_STAGING_WORDS <= LDE_INPUT_GRID_LANES)
 static_assert(COMPOSITION_GROUPS == 128)
+static_assert(COMPOSITION_COMMITMENT_FIELDS == 4)
+static_assert(COMPOSITION_COMMITMENT_STEPS == 1)
+static_assert(COMPOSITION_COMMITMENT_WORKSPACE_START == 16383)
+static_assert(COMPOSITION_COMMITMENT_WORKSPACE_END == 163839)
+static_assert(COMPOSITION_COMMITMENT_WORKSPACE_END <= BASE_TRACE_WORDS)
 
 const fn witness_groups(_ rows: usize) -> usize {
     (rows + THREADS - 1) / THREADS
@@ -1890,8 +1915,143 @@ actor ProductionSparseBaseTrace uses (Program<WebGpuBackend>) {
         >(self.transition_workspace, self.lde_inverse_progress)
     }
 
+    /// Commit the completed quartic codeword under BC02. The first tree-sized
+    /// prefix of the retired base trace carries node validity, while the
+    /// following disjoint region carries staged Poseidon state.
+    fn prepare_composition_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_LEAF_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_column_major_field_row_commitments_at<
+            BASE_LDE_LENGTH,
+            BASE_TRACE_WORDS,
+        >(
+            self.base_trace,
+            COMPOSITION_COMMITMENT_WORKSPACE_START.downcast_truncate(),
+            invocation,
+        )
+    }
+
+    fn advance_composition_lde_commitments(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    BASE_TREE_LEAF_GROUPS,
+                    1,
+                    1,
+                    COMPOSITION_COMMITMENT_STEPS,
+                >,
+            >
+        )
+    {
+        let row = invocation.global.x
+        if row >= BASE_LDE_LENGTH.downcast_truncate() { return }
+        let prefix: [BabyBear; 0] = []
+        let step = advance_column_major_field_row_commitments_at<
+            MandelbrotCompositionRowBabyBearV1,
+            BASE_LDE_LENGTH,
+            COMPOSITION_COMMITMENT_FIELDS,
+            LDE_INPUT_GRID_LANES,
+            0,
+            BASE_TRACE_WORDS,
+        >(
+            self.lde_inverse_progress,
+            self.base_trace,
+            COMPOSITION_COMMITMENT_WORKSPACE_START.downcast_truncate(),
+            ref prefix,
+            invocation,
+        )
+        if step.complete {
+            let validity_start: u32 = (BASE_LDE_LENGTH * COMPOSITION_COMMITMENT_FIELDS)
+                .downcast_truncate()
+            write_ordered_binary_tree_leaf<
+                BASE_LDE_LENGTH,
+                BASE_TRACE_WORDS,
+                BASE_TRACE_WORDS,
+            >(
+                self.lde_inverse_values,
+                self.base_trace,
+                step.row,
+                step.commitment.require(
+                    sparse_composition_phase_is_valid<
+                        PRODUCTION_LIMBS,
+                        PRODUCTION_TRACE_LENGTH,
+                        BASE_LDE_LENGTH,
+                        TRANSITION_WORKSPACE_WORDS,
+                    >(self.transition_workspace)
+                        && self.lde_inverse_progress.load(index: validity_start + step.row) == 1,
+                ),
+            )
+        }
+    }
+
+    fn prepare_composition_lde_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Grid<BASE_TREE_PARENT_GROUPS, 1, 1>,
+            >
+        )
+    {
+        prepare_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            PRODUCTION_TRACE_LENGTH,
+        >(self.validity, invocation)
+    }
+
+    fn advance_composition_lde_tree(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Repeat<
+                    BASE_TREE_PARENT_GROUPS,
+                    1,
+                    1,
+                    BASE_TREE_LEVELS,
+                >,
+            >
+        )
+    {
+        advance_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            BASE_TREE_LEVELS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(
+            self.lde_inverse_values,
+            self.base_trace,
+            self.validity,
+            invocation,
+        )
+    }
+
+    fn finish_composition_lde_tree(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1, 1, 1>, Grid<1, 1, 1>>)
+    {
+        if invocation.global.x != 0 { return }
+        let root = finish_ordered_binary_tree<
+            BASE_LDE_LENGTH,
+            BASE_TREE_LEVELS,
+            BASE_TRACE_WORDS,
+            BASE_TRACE_WORDS,
+            PRODUCTION_TRACE_LENGTH,
+        >(self.lde_inverse_values, self.base_trace, self.validity)
+        finish_sparse_bound_composition_commitment<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            BASE_LDE_LENGTH,
+            TRANSITION_WORKSPACE_WORDS,
+        >(self.transition_workspace, root.value, root.valid)
+    }
+
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
-        let color: u32 = if sparse_composition_phase_is_valid<
+        let color: u32 = if sparse_composition_commitment_is_valid<
             PRODUCTION_LIMBS,
             PRODUCTION_TRACE_LENGTH,
             BASE_LDE_LENGTH,

@@ -1,0 +1,38 @@
+//! Render-safety gate for the production composition commitment receipt.
+
+use mandelbrot_proof_fixed_air_webgpu::{
+    sparse_composition_commitment_is_valid,
+    sparse_composition_phase_workspace_words,
+}
+use mandelbrot_proof_production_profile_baby_bear::{PRODUCTION_LIMBS, PRODUCTION_TRACE_LENGTH}
+use std::webgpu::{
+    FragmentSurface as Pixel,
+    GpuProgram as Program,
+    StorageBuffer as Shared,
+    WebGpuBackend,
+}
+
+const LDE_LENGTH: usize = PRODUCTION_TRACE_LENGTH * 2
+const WORKSPACE_WORDS: usize = sparse_composition_phase_workspace_words<
+    PRODUCTION_LIMBS,
+    PRODUCTION_TRACE_LENGTH,
+    LDE_LENGTH,
+>()
+
+actor CompositionCommitmentPosterProbe uses (Program<WebGpuBackend>) {
+    workspace: Shared<u32, WORKSPACE_WORDS>,
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {
+        let color: u32 = if sparse_composition_commitment_is_valid<
+            PRODUCTION_LIMBS,
+            PRODUCTION_TRACE_LENGTH,
+            LDE_LENGTH,
+            WORKSPACE_WORDS,
+        >(self.workspace) {
+            4278255360
+        } else {
+            4294901760
+        }
+        color.downcast_truncate()
+    }
+}
