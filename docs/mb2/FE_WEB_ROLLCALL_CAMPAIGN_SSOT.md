@@ -152,6 +152,23 @@ helper integration remain open. Arithmetic implementation/tests stay isolated
 and uncommitted until dependency reconciliation. The independent MIR identity
 cleanup is already on mb2 without changing its Sonatina pin.
 
+Native source integration now passes against the local arithmetic candidate.
+Checked i32 add/sub/mul execute ordinary values and raise architectural traps
+for overflowing inputs. Each trap runs in a separate child with core dumps
+disabled; the gate requires a marker after successful compilation and rejects
+compiler panics or memory-fault exits. Release build: 6m48s for the native
+feature/dependency variant; execution: 12.55s. Evidence:
+`/workspace/scratch/mb2-fe-checked-native-integration-release.log`.
+Existing native signature rejection, scalar arithmetic, and loop/helper-call
+tests pass (6.58s):
+`/workspace/scratch/mb2-fe-checked-native-regression-release.log`.
+The local override's lockfile changes were restored again after testing.
+A read-only remote check confirms `micah/mb2-task-borrows` remains at
+`b24f5bd692700b1468a908a82c78eebfca5bb6fb`, behind the five local verified
+arithmetic/error-handling commits through `e9232245`. Permission to publish
+that fast-forward was requested; no push has occurred. Fe's arithmetic source
+and gates remain isolated until a reproducible dependency pin can be landed.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
