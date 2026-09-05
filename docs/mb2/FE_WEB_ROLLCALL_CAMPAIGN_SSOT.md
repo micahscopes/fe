@@ -161,9 +161,12 @@ Authored raster still has its separate entry preparation; public contextual
 selection and partial rejection reporting remain unfinished. All 117 backend
 tests passed in 3.42s, including llvmpipe execution:
 `/workspace/scratch/mb2-sonatina-entry-preparation-release.log`.
-The production linear-stage gate is running against this local candidate:
+The production linear-stage gate passed against this local candidate with
+56,001 WGSL bytes, 2,150 reparsed Naga expressions, and 30 helpers, unchanged
+from the controlled comparison. Lowering took 12,370ms and total measured time
+was 15,448ms; one run is not a performance trend. Evidence:
 `/workspace/scratch/mb2-boundary-entry-preparation-production-release.log`.
-Do not count its result or size as verified until that process completes.
+The local dependency override was removed from Cargo.lock afterward.
 
 Legend:
 
