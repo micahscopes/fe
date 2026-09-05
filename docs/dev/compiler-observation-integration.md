@@ -157,6 +157,16 @@ development-server URLs failed to load. No existing application tab was used.
 Evidence: `/workspace/scratch/mb2-native-shader-chrome-smoke-isolated-20260905.log`.
 Full browser dispatch and independent production-result checking remain pending.
 
+The focused `private_aggregate_snapshots_execute_without_aliasing` execution
+gate passes on llvmpipe against published Sonatina pin
+`2567ec76f6a3e113aee468e89cb3f504ef3e578e`. It preserves a typed private borrow
+for indexed state access and a structured return, then observes the original
+and two updated copies. GPU readback matches the hand-derived result 4 and the
+compiler-declared trap channel remains zero. This is software Vulkan execution,
+not production proof execution or Chrome dispatch. The existing scalar runner
+now accepts the optional trap descriptor instead of assuming two bindings.
+Evidence: `/workspace/scratch/mb2-native-aggregate-execution-trap-20260905.log`.
+
 The argument plan is recorded at private signature declaration and consumed by
 parameter binding and call preparation. Resource-bearing products, explicit
 typed borrows, addressable parameter slots, external interfaces and Wasm keep

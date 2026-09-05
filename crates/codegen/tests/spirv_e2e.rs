@@ -1,19 +1,11 @@
-//! End-to-end acceptance: the first genuinely-Fe GPU-path slice (rung R-val).
+//! Fe shader lowering validation and execution gates.
 //!
-//! This takes a tiny straight-line Fe source, compiles it Fe -> MIR -> the
-//! wasm-path Sonatina `Module` (Wasm32 ISA / `NativeInstSet`), hands that Module
-//! UNCHANGED to Sonatina's naga-backed `SpirvBackend`, and asserts the emitted
-//! SPIR-V is naga-*validated* and starts with the SPIR-V magic word
-//! `0x07230203`.
-//!
-//! Honest label (the words this rung earns): **validated, NOT executed.** The
-//! naga validator runs inside `compile_module`, so an `Ok` artifact is a
-//! structurally-valid compute module and nothing more. Actual GPU execution on
-//! lavapipe is a later slice (S2); this file deliberately does not touch a GPU.
-//!
-//! The load-bearing fact under test: the wasm-path Module feeds `SpirvBackend`
-//! *without adaptation* (Sonatina downcasts generically against
-//! `function.inst_set()`), so there is no SPIR-V lowering port.
+//! Fe runtime packages enter the shader-specific Sonatina realization and the
+//! Naga backend, which emits validated WGSL and SPIR-V. A successful compilation
+//! alone does not establish execution correctness. Tests that invoke the GPU
+//! runners additionally compare readback values, with browser-profile runners
+//! requesting no optional device features. Software Vulkan execution is not a
+//! real-browser gate. `MB2_ALLOW_GPU_SKIP` explicitly weakens execution coverage.
 
 use common::InputDb;
 use driver::DriverDataBase;
@@ -722,7 +714,65 @@ fn assert_browser_profile_wgsl(wgsl: &str) {
 /// which downgrades the rung honestly.
 ///
 /// Returns `Some(value)` when the GPU ran the shader, `None` only under skip.
+#[test]
+fn private_aggregate_snapshots_execute_without_aliasing() {
+    let source = r#"
+struct State { words: [u32; 4], cursor: u32 }
+impl Copy for State {}
+fn advance(_ state: State) -> State {
+    let mut next = state
+    next.words[state.cursor as usize] = state.words[state.cursor as usize] + 1
+    next.cursor = state.cursor + 1
+    next
+}
+pub fn kernel(_ seed: u32) -> u32 {
+    let original = State { words: [seed, seed + 1, seed + 2, seed + 3], cursor: 0 }
+    let first = advance(original)
+    let second = advance(first)
+    original.words[0] + first.words[1] + second.words[0] + second.words[1]
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///aggregate_snapshot_gpu.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source.into()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+    let artifact = fe_codegen::compile_runtime_package_spirv(&db, &package).unwrap();
+    let wgsl = artifact.wgsl.as_deref().unwrap();
+    assert_browser_profile_wgsl(wgsl);
+    let module = naga::front::wgsl::parse_str(wgsl).unwrap();
+    let helper = module.functions.iter().find_map(|(_, function)| {
+        function.name.as_deref().filter(|name| name.contains("advance")).map(|_| function)
+    }).expect("the private state helper must remain outlined");
+    assert!(matches!(module.types[helper.result.as_ref().unwrap().ty].inner,
+        naga::TypeInner::Struct { .. }));
+    // Indexed access selects the typed-private-borrow ABI, not the native
+    // by-value argument ABI. Keep this distinction while testing value returns.
+    assert!(helper.arguments.iter().any(|argument| {
+        match module.types[argument.ty].inner {
+            naga::TypeInner::Pointer { base, space: naga::AddressSpace::Function } =>
+                matches!(module.types[base].inner, naga::TypeInner::Struct { .. }),
+            _ => false,
+        }
+    }), "indexed state must retain its typed private borrow");
+    // The runner's zero-initialized input gives seed=0. By value, the four
+    // observed words are 0, 1, 1, 2. Aliasing the snapshots changes this sum.
+    if let Some(actual) = run_wgsl_u32_with_trap_on_lavapipe(wgsl, artifact.layout.trap) {
+        assert_eq!(actual, 4, "returned state must not mutate earlier snapshots");
+    }
+}
+
 fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
+    run_wgsl_u32_with_trap_on_lavapipe(wgsl, None)
+}
+
+fn run_wgsl_u32_with_trap_on_lavapipe(
+    wgsl: &str,
+    trap: Option<sonatina_codegen::isa::spirv::SpirvResult>,
+) -> Option<u32> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
 
     let instance = wgpu::Instance::default();
@@ -799,16 +849,24 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
+    let trap_buf = trap.map(|slot| {
+        assert_eq!((slot.group, slot.offset, slot.width), (0, 0, 4));
+        assert!(slot.binding > 1, "trap binding must not alias scalar input/output");
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scalar_trap_status"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    });
     let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("poseidon_u32_staging"),
-        size: 4,
+        size: if trap.is_some() { 8 } else { 4 },
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("poseidon_u32_bgl"),
-        entries: &[
+    let mut layout_entries = vec![
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -829,7 +887,22 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
                 },
                 count: None,
             },
-        ],
+        ];
+    if let Some(slot) = trap {
+        layout_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: slot.binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
+    }
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("poseidon_u32_bgl"),
+        entries: &layout_entries,
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("poseidon_u32_pl"),
@@ -844,10 +917,7 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
         compilation_options: Default::default(),
         cache: None,
     });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("poseidon_u32_bg"),
-        layout: &bgl,
-        entries: &[
+    let mut bindings = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: output_buf.as_entire_binding(),
@@ -856,7 +926,17 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
                 binding: 1,
                 resource: input_buf.as_entire_binding(),
             },
-        ],
+        ];
+    if let (Some(slot), Some(buffer)) = (trap, trap_buf.as_ref()) {
+        bindings.push(wgpu::BindGroupEntry {
+            binding: slot.binding,
+            resource: buffer.as_entire_binding(),
+        });
+    }
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("poseidon_u32_bg"),
+        layout: &bgl,
+        entries: &bindings,
     });
 
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -867,6 +947,9 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
         pass.dispatch_workgroups(1, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, 4);
+    if let Some(buffer) = trap_buf.as_ref() {
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging_buf, 4, 4);
+    }
     queue.submit(Some(encoder.finish()));
 
     let slice = staging_buf.slice(..);
@@ -884,6 +967,10 @@ fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
         .expect("staging buffer should map for read");
     let data = slice.get_mapped_range();
     let gpu_result = u32::from_le_bytes(data[0..4].try_into().expect("4 bytes read back"));
+    if trap.is_some() {
+        assert_eq!(u32::from_le_bytes(data[4..8].try_into().unwrap()), 0,
+            "snapshot execution must not trap");
+    }
     drop(data);
     staging_buf.unmap();
 
