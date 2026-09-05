@@ -1,0 +1,15 @@
+use ingot::{ReadNested, NestedReader}
+use super::Pair as ImportedPair
+
+struct Imported { pair: ImportedPair }
+struct Qualified { pair: super::Pair }
+struct LocalPair { left: u32, right: u32 }
+struct Local { pair: self::LocalPair }
+
+derive ReadNested for Imported using NestedReader
+derive ReadNested for Qualified using NestedReader
+derive ReadNested for Local using NestedReader
+
+fn proves_imported(value: Imported) -> u32 { <Imported as ReadNested>::read(value) }
+fn proves_qualified(value: Qualified) -> u32 { <Qualified as ReadNested>::read(value) }
+fn proves_local(value: Local) -> u32 { <Local as ReadNested>::read(value) }

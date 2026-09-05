@@ -1,0 +1,22 @@
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+pub struct Pair { pub left: u32, pub right: u32 }
+pub trait ReadNested { fn read(_ value: Self) -> u32 }
+pub struct NestedReader {}
+
+impl Derive<ReadNested> for NestedReader {
+    const fn derive<T>(ev: own Evidence<ReadNested<T>>) -> Evidence<ReadNested<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<ReadNested<T>>)
+    {
+        let value = builder.arg_ref("value")
+        let result = value
+        for outer in reflect.fields() {
+            for inner in outer.ty().fields() {
+                result = builder.field_get(builder.field_get(value, outer), inner)
+            }
+        }
+        builder.emit_method("read", result)
+        builder.finish()
+        ev
+    }
+}

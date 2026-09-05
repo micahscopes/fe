@@ -754,6 +754,8 @@ pub(super) fn resolve_base_item<'db>(
 ///   is looked up directly in `from`.
 /// * `ingot`: start at the requesting ingot's root; walk all leading segments
 ///   after `ingot`.
+/// * `self` or repeated `super`: start at the requesting module or the
+///   corresponding ancestor. Walking above the ingot root fails closed.
 /// * an external-ingot alias (`core`, ..): start at that dependency ingot's
 ///   root module; walk the leading segments after the alias. Reading a
 ///   dependency ingot's base graphs never cycles back into this ingot's
@@ -778,6 +780,20 @@ fn resolve_path_root<'db, 'a>(
     // `leading` is `[root, mid...]` (the final trait segment is already split
     // off by the caller). The submodule steps after the root are `leading[1..]`.
     let after_root = &leading[1..];
+
+    if root.is_self(db) {
+        return Some((NavModule::Top(from), after_root));
+    }
+
+    if root.is_super(db) {
+        let mut ancestor = from;
+        let mut consumed = 0;
+        while consumed < leading.len() && leading[consumed].is_super(db) {
+            ancestor = ancestor.parent(db)?;
+            consumed += 1;
+        }
+        return Some((NavModule::Top(ancestor), &leading[consumed..]));
+    }
 
     if root.is_ingot(db) {
         return Some((NavModule::Top(from.ingot(db).root_mod(db)), after_root));

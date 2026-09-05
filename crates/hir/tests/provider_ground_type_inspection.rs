@@ -159,6 +159,23 @@ fn ground_type_inspection_exposes_constructor_and_ordered_args() {
 }
 
 #[test]
+fn nested_fields_resolve_relative_module_paths() {
+    use common::InputDb;
+    use driver::DriverDataBase;
+    use fe_hir::hir_def::HirIngot;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/provider_relative_fields");
+    let url = url::Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+    for module in ingot.all_modules(&db) {
+        let diagnostics = db.run_on_top_mod(*module).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+}
+
+#[test]
 fn configured_derive_provider_may_be_named_through_a_generic_type_alias() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
