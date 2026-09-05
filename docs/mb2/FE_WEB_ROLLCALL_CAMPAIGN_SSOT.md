@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `81be0b05`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `bb89ba01`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -91,6 +91,15 @@ Sonatina-owned GPU ABI and capabilities, early Fe intrinsic gating, CFG normal
 form, deletion of superseded mechanisms, the bounded direct-RMIR-to-Naga study,
 and full backend/browser capstone validation. No shader-size or browser-speed
 improvement is claimed for the planning refactors above.
+
+The broader shader gate uncovered an existing direct-return loop-exit bug,
+reproduced on unchanged `a233e45d`: the merged exit stored its phi but skipped
+return transport, yielding 0 instead of 52. `bb89ba01` shares exit-return
+handling across header, explicit-edge, and merged exits. All 116 focused
+shader-backend tests passed, including lavapipe execution, in 3.27s:
+`/workspace/scratch/mb2-sonatina-loop-exit-return-fix-release.log`.
+The earlier adapter failures required the Vulkan loader library path; they
+were not counted as passes. Chrome and production-prover gates remain open.
 
 Legend:
 
