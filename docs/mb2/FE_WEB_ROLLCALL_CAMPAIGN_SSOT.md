@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `b58ce181`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `23f8507b`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -304,6 +304,20 @@ Root CFG structurization still occurs in the individual vertex/fragment
 lowerers; this result is not a complete shader-validity certificate. Sharing
 those prepared control facts and exposing the public request query remain
 before Fe classifier replacement. No new raster transport is enabled.
+
+Sonatina `23f8507b` moves raster root normalization, structurization, and return
+arity checking into paired entry preparation, before Naga module construction.
+Each stage plan retains its normalized body with the CFG and return IDs derived
+from that body; vertex and fragment emission consume those plans without
+repeating control analysis. The focused preparation regression passed, and all
+117 backend tests passed with llvmpipe in 3.45s, including raster multi-return
+and early-return coverage. Evidence:
+`/workspace/scratch/mb2-sonatina-raster-cfg-preparation-release.log` and
+`/workspace/scratch/mb2-sonatina-raster-cfg-preparation-suite-release.log`.
+This closes the raster root-CFG preparation gap described above. The public
+contextual capability query and Fe classifier deletion remain unfinished.
+No fresh Chrome or production shader-size measurement is claimed for this
+refactor. The Sonatina commit is local; live Fe still uses its published pin.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
