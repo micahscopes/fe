@@ -168,6 +168,19 @@ was 15,448ms; one run is not a performance trend. Evidence:
 `/workspace/scratch/mb2-boundary-entry-preparation-production-release.log`.
 The local dependency override was removed from Cargo.lock afterward.
 
+Helper ABI planning now reports each function's local outcome in call-postorder
+instead of discarding valid child plans or stopping before later siblings.
+Both compute/fullscreen/legacy and authored-raster emission require a complete
+report; a partial success is not an emission authorization. A focused release
+test rejects an i256-returning parent while retaining its i32 child and later
+sibling, then confirms the partial report is rejected by the emission gate.
+Evidence: `/workspace/scratch/mb2-sonatina-partial-helper-report-release.log`.
+All 117 backend tests also passed in 2.47s:
+`/workspace/scratch/mb2-sonatina-partial-helper-report-suite-release.log`.
+These are local ABI plans, not yet transitive callability proofs or a public
+Fe query. Shared-context and typed-local preparation can still fail before
+this per-helper phase. Those boundaries remain part of the unfinished query.
+
 Legend:
 
 - `[x]` implemented and backed by the cited gate
