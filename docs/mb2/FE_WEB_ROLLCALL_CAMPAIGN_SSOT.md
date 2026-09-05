@@ -21,6 +21,14 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+The governing [boundary design and historical execution record](FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md)
+is now carried on shared mb2, recovered from the former cleanup worktree.
+Its historical pending markers do not override this ledger. In particular,
+the direct-route study still requires a resource-identity case and a fixed or
+balanced storage/helper case, identical execution oracles, and attribution of
+Sonatina optimization benefit. No scalar-only shortcut or permanent second
+backend satisfies that gate.
+
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
 Published Fe `3b7fcea19` pins published Sonatina `1bbd24a0`. The latter
