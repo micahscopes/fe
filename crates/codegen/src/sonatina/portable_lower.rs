@@ -21,9 +21,10 @@
 //! block (see `emit_panic_revert`), which is EVM-native. A faithful portable
 //! rewrite of that lowerer is target-backend scale. Here we lower runtime MIR
 //! directly. Primitive arithmetic arrives as `IntrinsicArith`, including its
-//! checked flag. Checked wasm32 `usize` add/sub/mul are explicitly guarded.
-//! Known semantic debt: ordinary integer arithmetic still uses the legacy R1
-//! wrapping realization even when marked checked. Non-overflowing inputs are
+//! checked flag. Unsigned checked add/sub and wasm32 `usize` multiplication
+//! are explicitly guarded. Known semantic debt: other ordinary integer
+//! arithmetic still uses the legacy R1 wrapping realization even when marked
+//! checked. Non-overflowing inputs are
 //! required for source-level arithmetic parity on that path. This is not a
 //! fail-closed implementation of general checked arithmetic.
 //!
@@ -12876,10 +12877,10 @@ where
     }
 
     /// Fe's primitive `+`/`-`/`*` lower to `IntrinsicArith` builtins (not
-    /// `Binary`). R1 emits plain (unchecked) arithmetic and IGNORES the
-    /// `checked` flag: Fe's checked-overflow semantics need real wasm overflow
-    /// flags/traps, which are R2 (and the WAFFLE translator currently fakes the
-    /// flag as 0), so R1 requires non-overflowing values. Every other builtin
+    /// `Binary`). Unsigned checked add/sub use explicit comparisons and traps;
+    /// narrowed usize multiplication is also guarded. Other ordinary checked
+    /// arithmetic retains the legacy wrapping realization and requires
+    /// non-overflowing inputs. Every other builtin
     /// (memory, EVM host, addmod/mulmod, saturating, byte/sign-extend) fails
     /// closed.
     fn lower_builtin(
@@ -13063,13 +13064,25 @@ where
             )),
             other => other,
         })?;
-        // CRITICAL bounds-safety: checked arithmetic on a narrowed `usize` (the
-        // wasm32 pointer width) MUST trap on overflow. R1 otherwise ignores the
-        // `checked` flag and emits a wrapping op, which would turn a semantically
-        // out-of-range index (`usize::MAX + 1`) into a small in-bounds one and
-        // slip past the array bounds check. Scoped strictly to the narrowed usize
-        // path (keyed on semantic `Usize` + i32 width): every other scalar keeps
-        // R1's wrapping behavior, so no existing kernel changes.
+        // Preserve the authored unsigned overflow contract before selecting a
+        // backend. Sonatina owns the width-specific overflow implementation;
+        // Fe consumes its result and overflow flag without reconstructing it.
+        if checked
+            && !class.is_signed_int()
+            && matches!(op, IntrinsicArithBinOp::Add | IntrinsicArithBinOp::Sub)
+        {
+            let lhs = self.local_value(lhs)?;
+            let rhs = self.local_value(rhs)?;
+            let [value, overflow] = match op {
+                IntrinsicArithBinOp::Add => self.fb.insert_uaddo(lhs, rhs),
+                IntrinsicArithBinOp::Sub => self.fb.insert_usubo(lhs, rhs),
+                _ => unreachable!(),
+            };
+            self.trap_if(overflow);
+            return Ok(value);
+        }
+        // Narrowed usize multiplication must also guard against wrapping an
+        // out-of-range address into an apparently in-bounds index.
         if checked
             && ty == Type::I32
             && is_usize_semantic_ty(

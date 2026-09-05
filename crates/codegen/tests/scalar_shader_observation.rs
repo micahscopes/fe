@@ -133,6 +133,15 @@ fn scalar_shader_capture_child() {
         return;
     }
     let artifact = result.unwrap();
+    assert!(
+        if grid {
+            // Grid diagnostics are a per-invocation array, not a scalar slot.
+            artifact.layout.bindings.iter().any(|binding| binding.name == "trap")
+        } else {
+            artifact.layout.trap.is_some()
+        },
+        "authored checked addition must retain a shader trap channel"
+    );
     let directory = Path::new(&directory);
     fs::write(directory.join("shader.spv"), artifact.as_bytes()).unwrap();
     fs::write(directory.join("shader.wgsl"), artifact.wgsl.unwrap()).unwrap();

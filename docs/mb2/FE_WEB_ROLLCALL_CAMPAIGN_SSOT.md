@@ -71,6 +71,21 @@ The study has not established a production backend preference.
 
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
+Unsigned checked add/sub now preserve `IntrinsicArith.checked` through
+Sonatina's existing `Uaddo`/`Usubo` operations and the existing trap path.
+An initial Fe-side compare implementation failed the u8 overflow gate and was
+replaced, not retained as another physical arithmetic implementation.
+Release Wasm tests cover u8/u16/u32/u64 boundaries and explicit u32 wrapping
+(two tests, 11.62s). Scalar/grid capture and Naga gates pass (30.47s); grid
+reports a per-invocation trap buffer, not a scalar `layout.trap` slot.
+Chrome AMD RDNA3 executes the exact 854-byte scalar shader with eight correct
+result/trap pairs, including two overflows, with no validation error or loss.
+Riffcat verifies `/workspace/scratch/mb2-checked-add-20260905.capture.json`.
+Browser log: `/workspace/scratch/mb2-checked-add-chrome-20260905.log`.
+This closes unsigned add/sub only. Signed checked arithmetic, ordinary checked
+multiplication, division semantics and production capstone validation remain
+open. Historical direct-study byte comparisons remain historical evidence.
+
 Published Fe `3b7fcea19` pins published Sonatina `1bbd24a0`. The latter
 preserves exact typed zero construction, reducing the measured 19-stage corpus
 from 2,706,004 to 2,531,533 WGSL bytes. This is not a proof runtime measurement.

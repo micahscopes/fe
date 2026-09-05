@@ -29,6 +29,61 @@ use url::Url;
 const HOST_WASM_CODEC_RUNTIME_JS: &str =
     include_str!("../../../demos/shared/host-wasm-codec-v1.js");
 
+#[test]
+fn unsigned_checked_add_sub_preserve_narrow_and_wide_boundaries() {
+    for bits in [8u32, 16, 64] {
+        let source = format!(r#"
+pub fn add(a: u{bits}, b: u{bits}) -> u{bits} {{ a + b }}
+pub fn sub(a: u{bits}, b: u{bits}) -> u{bits} {{ a - b }}
+"#);
+        let wasm = compile_to_wasm(&format!("checked_unsigned_{bits}.fe"), &source);
+        let (mut store, instance) = instantiate(&wasm);
+        let max = (1u128 << bits) - 1;
+        for (name, subtract) in [("add", false), ("sub", true)] {
+            for (a, b) in [(0, 0), (1, 2), (max, 0), (max, 1), (0, 1), (1u128 << (bits - 1), 1u128 << (bits - 1))] {
+                let expected = if subtract { a.checked_sub(b) } else { a.checked_add(b).filter(|v| *v <= max) };
+                let actual = if bits == 64 {
+                    instance.get_typed_func::<(i64, i64), i64>(&mut store, name).unwrap()
+                        .call(&mut store, (a as i64, b as i64)).map(|v| v as u64 as u128)
+                } else {
+                    instance.get_typed_func::<(i32, i32), i32>(&mut store, name).unwrap()
+                        .call(&mut store, (a as i32, b as i32)).map(|v| v as u32 as u128)
+                };
+                match expected {
+                    Some(value) => assert_eq!(actual.unwrap(), value, "u{bits} {name}({a}, {b})"),
+                    None => assert!(actual.is_err(), "u{bits} {name}({a}, {b}) must trap"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unsigned_checked_add_sub_trap_but_explicit_wrapping_remains_wrapping() {
+    let wasm = compile_to_wasm("checked_unsigned_arithmetic.fe", r#"
+use core::ops::{WrappingAdd, WrappingSub}
+pub fn add(a: u32, b: u32) -> u32 { a + b }
+pub fn sub(a: u32, b: u32) -> u32 { a - b }
+pub fn wrap_add(a: u32, b: u32) -> u32 { a.wrapping_add(b) }
+pub fn wrap_sub(a: u32, b: u32) -> u32 { a.wrapping_sub(b) }
+"#);
+    let (mut store, instance) = instantiate(&wasm);
+    for (checked, wrapping, subtract) in [("add", "wrap_add", false), ("sub", "wrap_sub", true)] {
+        let checked = instance.get_typed_func::<(i32, i32), i32>(&mut store, checked).unwrap();
+        let wrapping = instance.get_typed_func::<(i32, i32), i32>(&mut store, wrapping).unwrap();
+        for (a, b) in [(0u32, 0u32), (1, 2), (u32::MAX, 0), (u32::MAX, 1), (0, 1), (0x80000000, 0x80000000)] {
+            let expected = if subtract { a.checked_sub(b) } else { a.checked_add(b) };
+            let actual = checked.call(&mut store, (a as i32, b as i32));
+            match expected {
+                Some(value) => assert_eq!(actual.unwrap() as u32, value),
+                None => assert!(actual.is_err(), "checked arithmetic must trap for {a}, {b}"),
+            }
+            let expected = if subtract { a.wrapping_sub(b) } else { a.wrapping_add(b) };
+            assert_eq!(wrapping.call(&mut store, (a as i32, b as i32)).unwrap() as u32, expected);
+        }
+    }
+}
+
 type TwoSiteStep = (i32, i32, i32, i32, i32, i32, i32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
