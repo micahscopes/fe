@@ -15711,6 +15711,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn arena_plan_mismatch_fails_before_finishing_function() {
+        // Corrupt the derived plan, not the emitted instruction stream. This
+        // exercises the real prologue/block checks through function lowering.
+        for mutation in 0..5 {
+            let mut db = DriverDataBase::default();
+            let url = Url::parse("file:///arena_plan_mutation.fe").unwrap();
+            db.workspace().touch(&mut db, url.clone(), Some(
+                "pub fn probe(_ value: u32) -> u32 { value }".to_owned(),
+            ));
+            let file = db.workspace().get(&db, &url).unwrap();
+            let package = mir::build_wasm_runtime_package_for_entry(
+                &db, db.top_mod(file), "probe",
+            ).unwrap();
+            let isa = create_wasm32_isa();
+            let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
+            let mut module = PortableModuleLowerer::new(
+                &db, builder, &isa, &package, HashSet::new(), &[], false, true,
+                PrivatePlaceMaterialization::CanonicalArena,
+                AggregateCopyLowering::InlineLoop,
+            ).unwrap();
+            module.declare_functions().unwrap();
+            let instance = *module.func_map.keys().find(|&&instance| {
+                module.function_symbol(instance) == "probe"
+            }).expect("probe declaration");
+            let function = module.func_map[&instance];
+            let body = module.prepared_bodies.remove(&instance)
+                .unwrap_or_else(|| instance.body(&db));
+            let mut lowerer = PortableFunctionLowerer::new(
+                &mut module, body, function, false, false, HashSet::new(), false,
+            ).unwrap();
+            match mutation {
+                0 => {},
+                1 => lowerer.arena_plan.prologue.allocations += 1,
+                2 => lowerer.arena_plan.prologue.retained_results += 1,
+                3 => lowerer.arena_plan.blocks[0].allocations += 1,
+                4 => lowerer.arena_plan.blocks[0].retained_results += 1,
+                _ => unreachable!(),
+            }
+            let result = lowerer.lower();
+            if mutation == 0 {
+                result.expect("unaltered plan must lower");
+            } else {
+                let error = result.expect_err("corrupted plan must fail closed").to_string();
+                let site = if mutation <= 2 { "prologue" } else { "block 0" };
+                assert!(error.contains(&format!("arena storage plan mismatch in `probe` {site}")), "{error}");
+                assert!(error.contains("planned") && error.contains("emitted"), "{error}");
+            }
+        }
+    }
+
+    #[test]
     fn planned_arena_need_includes_callee_owned_results_without_allocations() {
         let none = ArenaEmissionCount::default();
         let allocation = ArenaEmissionCount { allocations: 1, retained_results: 0 };
