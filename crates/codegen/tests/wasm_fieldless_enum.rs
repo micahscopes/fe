@@ -1,8 +1,8 @@
 //! Focused Wasm value-representation gates for ordinary Fe policy enums.
 //!
 //! Payload-free enums are compiler-derived integer tags and may be carried as
-//! scalar leaves inside otherwise flattenable records. Payload enums remain
-//! fail-closed until the canonical tagged-union value ABI is implemented.
+//! scalar leaves inside otherwise flattenable records. Supported payload enums
+//! use flattened tag/payload lanes and reject invalid host-supplied tags.
 
 use common::InputDb;
 use driver::DriverDataBase;
@@ -111,7 +111,7 @@ pub fn method_receiver_is_scale(_ mode: Mode) -> bool {
 }
 
 #[test]
-fn payload_enum_value_transport_remains_fail_closed() {
+fn payload_enum_value_transport_executes_and_rejects_invalid_tags() {
     let source = r#"
 pub enum MaybeValue {
     None,
@@ -126,10 +126,31 @@ pub fn unwrap(_ value: own MaybeValue) -> f32 {
 }
 "#;
 
-    let error = compile_to_wasm("wasm_payload_enum.fe", source)
-        .expect_err("payload enum value transport must fail closed");
-    assert!(
-        error.contains("payload enum") || error.contains("payload-enum"),
-        "failure should name the unsupported payload-enum boundary:\n{error}"
-    );
+    let wasm = compile_to_wasm("wasm_payload_enum.fe", source)
+        .expect("supported payload enum should compile");
+    wasmparser::validate(&wasm).expect("payload enum module should be valid Wasm");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("module should load");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("module should instantiate without imports");
+    let unwrap = instance
+        .get_typed_func::<(i32, f32), f32>(&mut store, "unwrap")
+        .expect("flattened tag/payload export");
+
+    for payload in [0.0_f32, -0.0, 3.25, -7.5, f32::INFINITY] {
+        assert_eq!(unwrap.call(&mut store, (0, payload)).unwrap(), 0.0);
+        assert_eq!(
+            unwrap.call(&mut store, (1, payload)).unwrap().to_bits(),
+            payload.to_bits(),
+        );
+    }
+    assert_eq!(unwrap.call(&mut store, (0, f32::NAN)).unwrap(), 0.0);
+    assert!(unwrap.call(&mut store, (1, f32::NAN)).unwrap().is_nan());
+    for tag in [-1, 2, i32::MAX] {
+        assert!(
+            unwrap.call(&mut store, (tag, 1.0)).is_err(),
+            "invalid host tag {tag} must trap before payload extraction",
+        );
+    }
 }
