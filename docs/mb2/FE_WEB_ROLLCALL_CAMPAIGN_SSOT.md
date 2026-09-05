@@ -177,9 +177,15 @@ sibling, then confirms the partial report is rejected by the emission gate.
 Evidence: `/workspace/scratch/mb2-sonatina-partial-helper-report-release.log`.
 All 117 backend tests also passed in 2.47s:
 `/workspace/scratch/mb2-sonatina-partial-helper-report-suite-release.log`.
-These are local ABI plans, not yet transitive callability proofs or a public
-Fe query. Shared-context and typed-local preparation can still fail before
-this per-helper phase. Those boundaries remain part of the unfinished query.
+Follow-up: the report now closes successful ABI plans over direct callees in
+call-postorder. A locally representable ancestor of the rejected parent is
+also rejected, while the valid child and sibling remain planned. The expanded
+focused test passed, and all 117 backend tests passed in 14.31s:
+`/workspace/scratch/mb2-sonatina-transitive-helper-report-final-release.log`
+and `/workspace/scratch/mb2-sonatina-transitive-helper-report-suite-release.log`.
+This is still not the public Fe query. Shared-context and typed-local
+preparation can fail before this phase; their per-function failure reporting
+remains necessary before deleting Fe's classifier.
 
 Legend:
 
