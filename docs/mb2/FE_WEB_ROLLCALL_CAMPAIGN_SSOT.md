@@ -38,7 +38,11 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina candidate `9fcfcef1`; publication has not been authorized.
+on the local Sonatina line (now `ec7778de`, extending `9fcfcef1`); publication
+has not been authorized. The newest backend extraction plans contextual
+helper ABIs before emitting helper bodies and passed sixteen focused release
+tests. It is not yet the public Fe legality query; Fe's classifier remains.
+Evidence: `/workspace/scratch/mb2-sonatina-helper-plan-release.log`.
 Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
 `docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
 plan and gate logs. Isolated combined validation passed 26 focused release
