@@ -188,7 +188,15 @@ Follow-up execution reproduced that name-collision failure: an authored
 (`/workspace/scratch/mb2-native-authored-modular-baseline.log`). The isolated
 declaration repair now resolves only bodyless, exact-name, exact-signature
 runtime declarations and leaves authored definitions as ordinary functions.
-Its expanded integration gate is still running; it is not yet landed.
+Its expanded integration gate now passes: all 28 Cranelift backend tests in
+0.08s, including eight authored name collisions, six runtime aliases with
+zero/nonzero modulus, and malformed or unknown declaration rejection.
+Evidence: `/workspace/scratch/mb2-native-modular-repair-release.log`.
+The repair also removes silent success on a missing authored body. Runtime
+declarations are not exposed as undefined JIT exports. This backend slice is
+committed locally; Fe fallback deletion still awaits the dependency integration
+gate. Exact ABI symbol resolution here does not replace the outstanding typed
+intrinsic capability work.
 
 That gate also exposed an older runtime defect: u256 modular arithmetic reduced
 by repeated subtraction, hanging for modulus zero and taking quotient-dependent
