@@ -270,6 +270,23 @@ pass their compatibility gates.
 
 ## Next tooling capabilities, in order of usefulness
 
+### E1/E4 follow-up: reducer exception (2026-09-05)
+
+The paired saved-file census identifies one regression hidden by the total:
+`reduce_composition` grows from 148,162 to 235,397 bytes. Its `main` grows from
+49,274 to 143,786 bytes, while the surrounding helper text shrinks. Inspection
+shows repeated nested zero-record construction. A backend-only experiment now
+tests preserving zero aggregates through zero-field insertion, without changing
+the authored proof or shared-state semantics. Production savings are not yet
+measured and this candidate is not yet landed.
+
+Both reducer artifacts create pipelines on Chrome AMD RDNA-3 without reported
+validation errors or device loss. The baseline run takes 12,541 ms. The new
+artifact's repeat takes 268 ms, compared with its earlier 13,365 ms observation.
+Cache state is uncontrolled, so these numbers are not a speedup estimate. No
+dispatch occurred. Logs: `/workspace/scratch/mb2-e1-reduce-before-20260905.log`
+and `/workspace/scratch/mb2-e1-reduce-after-20260905.log`.
+
 - A stage waterfall with explicit scopes and the first growth boundary highlighted.
 - A per-helper expansion ranking separating new clones, cumulative observations,
   surviving original IDs, unknown rewritten descendants and retained shared code.
