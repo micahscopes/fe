@@ -152,6 +152,19 @@ passed 117 tests in 2.82s. Evidence:
 This strengthens the CFG/call boundary gate, not the contextual ABI query or
 the hardware-browser capstone. The Sonatina commit remains local and unpushed.
 
+Sonatina `6012c45e` separates entry-rooted preparation from function emission.
+`PreparedNagaEntry` owns its Naga type/global arenas, typed-local preparation,
+entry body facts, proven heap size, external roots/layout, and prepared helper
+ABIs. The existing compute/fullscreen/legacy emitter consumes that result.
+This reuses the existing checks and does not add a new legality classifier.
+Authored raster still has its separate entry preparation; public contextual
+selection and partial rejection reporting remain unfinished. All 117 backend
+tests passed in 3.42s, including llvmpipe execution:
+`/workspace/scratch/mb2-sonatina-entry-preparation-release.log`.
+The production linear-stage gate is running against this local candidate:
+`/workspace/scratch/mb2-boundary-entry-preparation-production-release.log`.
+Do not count its result or size as verified until that process completes.
+
 Legend:
 
 - `[x]` implemented and backed by the cited gate
