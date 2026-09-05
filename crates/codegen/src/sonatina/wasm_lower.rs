@@ -10289,6 +10289,7 @@ struct LocalSsaBinding {
 struct BodyLocalStoragePlan<'db> {
     binding_facts: BindingFacts,
     reachable: Vec<bool>,
+    copies: FxHashMap<(RLocalId, RLocalId), ValueCopyStorage<'db>>,
     calls: FxHashMap<(RuntimeInstance<'db>, Vec<RLocalId>), CallStoragePlan<'db>>,
     values: Vec<Option<LocalValueRepresentation>>,
     typed_private_locals: FxHashMap<RLocalId, TypedPrivateLocal<'db>>,
@@ -10427,6 +10428,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
         let mut plan = Self {
             binding_facts: derive_binding_facts(body),
             reachable,
+            copies: FxHashMap::default(),
             calls: FxHashMap::default(),
             values,
             typed_private_locals,
@@ -10439,6 +10441,17 @@ impl<'db> BodyLocalStoragePlan<'db> {
                 continue;
             }
             for stmt in &block.stmts {
+                if let RStmt::Assign { dst, expr: RExpr::Use(src), .. } = stmt
+                    && matches!(plan.values[dst.as_u32() as usize], Some(LocalValueRepresentation::Single(_)))
+                {
+                    // Flattened assignments have no object-copy adaptation.
+                    // Scalar/address-carried assignments consume this plan.
+                    let key = (*dst, *src);
+                    if !plan.copies.contains_key(&key) {
+                        let copy = plan.plan_value_copy(module, body, *dst, *src)?;
+                        plan.copies.insert(key, copy);
+                    }
+                }
                 let RStmt::Assign { expr: RExpr::Call { callee, args }, .. } = stmt else {
                     continue;
                 };
@@ -10458,6 +10471,53 @@ impl<'db> BodyLocalStoragePlan<'db> {
         }
         Ok(plan)
     }
+
+    fn plan_value_copy<I: Isa<InstSet = NativeInstSet>>(
+        &self,
+        module: &PortableModuleLowerer<'db, '_, I>,
+        body: &RuntimeBody<'db>,
+        dst: RLocalId,
+        src: RLocalId,
+    ) -> Result<ValueCopyStorage<'db>, LowerError> {
+        if self.materialized_scalar_slots.contains(&src) {
+            return Ok(ValueCopyStorage::ReadScalar);
+        }
+        if let Some(destination) = self.typed_private_locals.get(&dst)
+            && let Some(source) = self.typed_private_locals.get(&src)
+        {
+            if source.component_root != destination.component_root
+                || source.pointee != destination.pointee
+                || source.pointer_ty != destination.pointer_ty
+            {
+                return Err(LowerError::Internal(format!(
+                    "typed-private alias {src:?} -> {dst:?} crosses incompatible storage components"
+                )));
+            }
+            return Ok(ValueCopyStorage::Forward);
+        }
+        let class = body.value_class(src).ok_or_else(|| {
+            LowerError::Internal(format!("copy source {src:?} has no runtime class"))
+        })?;
+        let indirect = self.materialized_param_slots.contains(&src)
+            || self.address_carried_aggregate_values.contains(&src);
+        // Fresh bindings and proven borrows preserve object identity. Copying
+        // an existing Fe aggregate value must instead allocate independent storage.
+        let object_copy = module.is_memory_lowerable_object_ref(class)
+            && !self.binding_facts.is_fresh(src.as_u32() as usize)
+            && !self.binding_facts.is_borrowed(src.as_u32() as usize);
+        if indirect || object_copy {
+            let layout = match class {
+                RuntimeClass::AggregateValue { layout } if indirect => *layout,
+                _ => module.memory_lowerable_ref_layout(class).ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate copy source {src:?} lost its memory layout"))
+                })?,
+            };
+            Ok(ValueCopyStorage::DeepCopy(layout))
+        } else {
+            Ok(ValueCopyStorage::Forward)
+        }
+    }
+
     fn plan_call_storage<I: Isa<InstSet = NativeInstSet>>(
         &self,
         module: &PortableModuleLowerer<'db, '_, I>,
@@ -10575,6 +10635,13 @@ enum CallArgumentStorage<'db> {
     BorrowMaterialization,
 }
 
+#[derive(Clone, Copy)]
+enum ValueCopyStorage<'db> {
+    ReadScalar,
+    Forward,
+    DeepCopy(LayoutId<'db>),
+}
+
 impl CallArgumentStorage<'_> {
     fn materializes(&self) -> bool {
         matches!(self, Self::OwnedDeepCopy(_) | Self::OwnedMaterialization | Self::BorrowMaterialization)
@@ -10630,7 +10697,7 @@ where
 {
     module: &'ctx mut PortableModuleLowerer<'db, 'a, I>,
     body: RuntimeBody<'db>,
-    binding_facts: BindingFacts,
+    copy_storage: FxHashMap<(RLocalId, RLocalId), ValueCopyStorage<'db>>,
     fb: FunctionBuilder<InstInserter>,
     prologue_block: BlockId,
     block_map: Vec<BlockId>,
@@ -10701,8 +10768,9 @@ where
         indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
         let BodyLocalStoragePlan {
-            binding_facts,
+            binding_facts: _,
             reachable,
+            copies: copy_storage,
             calls: call_storage,
             values,
             typed_private_locals,
@@ -10740,7 +10808,7 @@ where
         Ok(Self {
             module,
             body,
-            binding_facts,
+            copy_storage,
             fb,
             prologue_block,
             block_map,
@@ -12328,70 +12396,19 @@ where
     fn lower_expr(&mut self, expr: &RExpr<'db>, dst: RLocalId) -> Result<ValueId, LowerError> {
         match expr {
             RExpr::Use(src) => {
-                // Address-taken scalar slots carry an arena pointer in SSA.
-                // A value-level `Use` observes the pointee, not that internal
-                // pointer. Place formation continues to call `local_value`
-                // directly and therefore retains the address.
-                if self.materialized_scalar_slots.contains(src) {
-                    return self.local_read_value(*src);
-                }
-                // The typed-private use-closure has already proved that every
-                // member of one component denotes the same non-escaping
-                // storage. Preserve that pointer identity across compiler-
-                // introduced borrow aliases. This is distinct from an authored
-                // Fe aggregate copy: a later copy is not admitted into the
-                // component and must still take the deep-copy path below.
-                if let Some(destination) = self.typed_private_locals.get(&dst).cloned()
-                    && let Some(source) = self.typed_private_locals.get(src).cloned()
-                {
-                    if source.component_root != destination.component_root
-                        || source.pointee != destination.pointee
-                        || source.pointer_ty != destination.pointer_ty
-                    {
-                        return Err(LowerError::Internal(format!(
-                            "typed-private alias {src:?} -> {dst:?} crosses incompatible storage components"
-                        )));
+                let storage = self.copy_storage.get(&(dst, *src)).copied().ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "value copy {src:?} -> {dst:?} has no body storage plan"
+                    ))
+                })?;
+                match storage {
+                    ValueCopyStorage::ReadScalar => self.local_read_value(*src),
+                    ValueCopyStorage::Forward => self.local_value(*src),
+                    ValueCopyStorage::DeepCopy(layout) => {
+                        let source = self.local_value(*src)?;
+                        self.lower_deep_object_copy(source, layout)
                     }
-                    return self.local_value(*src);
                 }
-                // Item 2: a whole-aggregate local behind an object/memory-provider
-                // reference carries its arena POINTER as its SSA value, so a plain
-                // `Use` copies the pointer, not the bytes. This is SAFE when it
-                // binds a freshly produced object to its variable (`a = use <temp>`
-                // where `<temp>` is an `AllocObject`/`MaterializeToObject`/... -- the
-                // ordinary local-array init: `a` and the temp are one array). It is
-                // the ALIASING BUG when it copies an EXISTING array reference
-                // (`let b = a` lowers to `b = use a`, where `a` is itself bound from
-                // an object): `a[0] = 9; b[0]` would wrongly observe 9, whereas Fe
-                // `[T; N]` is `Copy` (deep-copy semantics). Fail closed on the
-                // latter. Materialize an independent value here: Fe aggregate
-                // copy semantics are deep even though this target represents
-                // addressable aggregates by arena pointers.
-                let copy_indirect_value = self.is_address_carried_aggregate_value(*src);
-                let copy_object_ref = self.is_object_ref_local(*src)
-                    && !self.is_fresh_object_binding(*src)
-                    && !self.is_borrow_alias_binding(*src);
-                if copy_indirect_value || copy_object_ref {
-                    let class = self.body.value_class(*src).cloned().ok_or_else(|| {
-                        LowerError::Internal(format!(
-                            "aggregate copy source {src:?} has no runtime class"
-                        ))
-                    })?;
-                    let layout = match &class {
-                        RuntimeClass::AggregateValue { layout } if copy_indirect_value => *layout,
-                        _ => self
-                            .module
-                            .memory_lowerable_ref_layout(&class)
-                            .ok_or_else(|| {
-                                LowerError::Internal(format!(
-                                    "aggregate copy source {src:?} lost its memory layout"
-                                ))
-                            })?,
-                    };
-                    let source = self.local_value(*src)?;
-                    return self.lower_deep_object_copy(source, layout);
-                }
-                self.local_value(*src)
             }
             RExpr::ConstScalar(constant) => {
                 let ty = self.local_ty(dst)?;
@@ -15510,31 +15527,6 @@ where
         } else {
             self.local_ty(local)
         }
-    }
-
-    /// Whether `local` is a memory-lowerable object/memory-provider reference
-    /// (Change 1): its SSA value is an arena i32 pointer, not a copyable value.
-    fn is_object_ref_local(&self, local: RLocalId) -> bool {
-        self.body
-            .value_class(local)
-            .is_some_and(|class| self.module.is_memory_lowerable_object_ref(class))
-    }
-
-    /// Whether an object-ref `local` is bound directly from a FRESHLY produced
-    /// object (every definition is an `AllocObject` / `MaterializeToObject` /
-    /// `MaterializePlaceToObject` / `ConstRef`). The ordinary local-array init
-    /// (`a = use <alloc/materialize temp>`) satisfies this: the variable and the
-    /// temp name one array, so binding the pointer is a safe move. A copy of an
-    /// existing array (`b = use a`, where `a`'s definition is itself a `use` of an
-    /// object) does NOT, so it fails closed rather than pointer-aliasing. A local
-    /// with no definition (an array parameter) also does not qualify (deferred).
-    fn is_fresh_object_binding(&self, local: RLocalId) -> bool {
-        self.binding_facts.is_fresh(local.as_u32() as usize)
-    }
-
-    /// Forward a proven borrow without detaching its pointee into a copy.
-    fn is_borrow_alias_binding(&self, local: RLocalId) -> bool {
-        self.binding_facts.is_borrowed(local.as_u32() as usize)
     }
 
     fn binding_for(&self, local: RLocalId) -> Result<LocalSsaBinding, LowerError> {
