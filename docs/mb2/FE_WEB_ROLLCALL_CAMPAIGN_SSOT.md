@@ -262,6 +262,19 @@ Evidence: `/workspace/scratch/mb2-type-level-name-collision-repair.log` and
 Resource vocabulary and full capability gating remain unfinished; these gates
 do not establish whole-prover/browser behavior or complete the target cleanup.
 
+The pre-Sonatina residual-call guard now consumes all three shared numeric
+identity queries: f32, generic numeric, and scalar-suffixed numeric. Cleanup
+`a2e0c0a1b`, transplanted onto mb2 independently of the unpublished arithmetic
+integration, prevents malformed numeric declarations from becoming external
+calls. Eight RMIR-only source cases across Wasm32, Shader, and X86_64 pass in
+26.09s, covering malformed numeric arity, valid lowering, unused declarations,
+and authored same-name functions. The test uses the published `54c6c633` pin,
+not the concurrently modified local Sonatina worktree. Evidence:
+`/workspace/scratch/mb2-residual-numeric-intrinsic-gate.log`.
+This is a residual-intrinsic boundary gate, not the complete physical capability
+matrix. The 9m01s in that log is the optimized Rust test-binary build, not a
+shader compilation or proof-generation measurement.
+
 Browser capstone preflight on September 5 is not green. The Node-based existing
 health harness timed out navigating to `http://10.0.0.2:8024/health.html` before
 its one-word GPU control ran. A separate connectivity-only page loaded
