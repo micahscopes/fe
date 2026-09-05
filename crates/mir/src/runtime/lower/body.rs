@@ -3143,10 +3143,15 @@ impl<'db> RmirEmitter<'db> {
         if func.body(self.db).is_some() {
             return None;
         }
-        let name = func.name(self.db).to_opt()?.data(self.db);
         let generic_kind = hir::analysis::ty::corelib::generic_numeric_intrinsic_func_kind(
             self.db, func,
         );
+        let scalar_kind = hir::analysis::ty::corelib::scalar_numeric_intrinsic_func_kind(
+            self.db, func,
+        );
+        if generic_kind.is_none() && scalar_kind.is_none() {
+            return None;
+        }
         let mut boundary_sites = BoundarySiteAllocator::default();
         let call_input_plan = compile_call_input_plan_for_semantic(
             self.db,
@@ -3219,7 +3224,7 @@ impl<'db> RmirEmitter<'db> {
                 };
                 self.lower_unary_expr_for_mode(bb, UnOp::Minus, true, *value, ret_ty, &scalar)?
             }
-            _ => self.lower_numeric_intrinsic_expr(name.as_str(), &args, &scalar)?,
+            _ => self.lower_numeric_intrinsic_expr(scalar_kind?.op, &args, &scalar)?,
         };
         self.push_stmt(bb, RStmt::Assign { dst: ret, expr });
         Some(ret)
@@ -3361,13 +3366,13 @@ impl<'db> RmirEmitter<'db> {
 
     fn lower_numeric_intrinsic_expr(
         &self,
-        name: &str,
+        op: hir::analysis::ty::corelib::ScalarNumericIntrinsicOp,
         args: &[RLocalId],
         scalar: &ScalarClass<'db>,
     ) -> Option<RExpr<'db>> {
-        let (op, _) = intrinsic_numeric_name_parts(name)?;
+        use hir::analysis::ty::corelib::ScalarNumericIntrinsicOp as Op;
         Some(match op {
-            "add" => {
+            Op::Add => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
                     op: IntrinsicArithBinOp::Add,
@@ -3377,7 +3382,7 @@ impl<'db> RmirEmitter<'db> {
                     class: scalar.clone(),
                 })
             }
-            "sub" => {
+            Op::Sub => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
                     op: IntrinsicArithBinOp::Sub,
@@ -3387,7 +3392,7 @@ impl<'db> RmirEmitter<'db> {
                     class: scalar.clone(),
                 })
             }
-            "mul" => {
+            Op::Mul => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
                     op: IntrinsicArithBinOp::Mul,
@@ -3397,7 +3402,7 @@ impl<'db> RmirEmitter<'db> {
                     class: scalar.clone(),
                 })
             }
-            "div" => {
+            Op::Div => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
                     op: IntrinsicArithBinOp::Div,
@@ -3407,7 +3412,7 @@ impl<'db> RmirEmitter<'db> {
                     class: scalar.clone(),
                 })
             }
-            "rem" => {
+            Op::Rem => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
                     op: IntrinsicArithBinOp::Rem,
@@ -3417,7 +3422,7 @@ impl<'db> RmirEmitter<'db> {
                     class: scalar.clone(),
                 })
             }
-            "pow" => {
+            Op::Pow => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
                     op: IntrinsicArithBinOp::Pow,
@@ -3427,7 +3432,7 @@ impl<'db> RmirEmitter<'db> {
                     class: scalar.clone(),
                 })
             }
-            "shl" => {
+            Op::Shl => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Arith(ArithBinOp::LShift),
@@ -3435,7 +3440,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "shr" => {
+            Op::Shr => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Arith(ArithBinOp::RShift),
@@ -3443,7 +3448,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "bitand" => {
+            Op::Bitand => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Arith(ArithBinOp::BitAnd),
@@ -3451,7 +3456,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "bitor" => {
+            Op::Bitor => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Arith(ArithBinOp::BitOr),
@@ -3459,7 +3464,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "bitxor" => {
+            Op::Bitxor => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Arith(ArithBinOp::BitXor),
@@ -3467,7 +3472,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "eq" => {
+            Op::Eq => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Comp(CompBinOp::Eq),
@@ -3475,7 +3480,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "ne" => {
+            Op::Ne => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Comp(CompBinOp::NotEq),
@@ -3483,7 +3488,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "lt" => {
+            Op::Lt => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Comp(CompBinOp::Lt),
@@ -3491,7 +3496,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "le" => {
+            Op::Le => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Comp(CompBinOp::LtEq),
@@ -3499,7 +3504,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "gt" => {
+            Op::Gt => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Comp(CompBinOp::Gt),
@@ -3507,7 +3512,7 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "ge" => {
+            Op::Ge => {
                 let [lhs, rhs] = args else { return None };
                 RExpr::Binary {
                     op: BinOp::Comp(CompBinOp::GtEq),
@@ -3515,28 +3520,27 @@ impl<'db> RmirEmitter<'db> {
                     rhs: *rhs,
                 }
             }
-            "bitnot" => {
+            Op::Bitnot => {
                 let [value] = args else { return None };
                 RExpr::Unary {
                     op: UnOp::BitNot,
                     value: *value,
                 }
             }
-            "not" => {
+            Op::Not => {
                 let [value] = args else { return None };
                 RExpr::Unary {
                     op: UnOp::Not,
                     value: *value,
                 }
             }
-            "neg" => {
+            Op::Neg => {
                 let [value] = args else { return None };
                 RExpr::Unary {
                     op: UnOp::Minus,
                     value: *value,
                 }
             }
-            _ => return None,
         })
     }
 
@@ -5534,15 +5538,6 @@ fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn intrinsic_numeric_name_parts(name: &str) -> Option<(&str, &str)> {
-    let op = name.strip_prefix("__")?;
-    [
-        "_u8", "_u16", "_u32", "_u64", "_u128", "_u256", "_usize", "_i8", "_i16", "_i32", "_i64",
-        "_i128", "_i256", "_isize", "_bool", "_f32",
-    ]
-    .iter()
-    .find_map(|suffix| op.strip_suffix(suffix).map(|prefix| (prefix, *suffix)))
-}
 
 #[cfg(test)]
 mod tests {
@@ -5554,6 +5549,58 @@ mod tests {
         build_test_runtime_package, build_wasm_runtime_package,
         runtime::{IntrinsicArithBinOp, RExpr, RStmt, RuntimeBuiltin, RuntimeClass, ScalarRepr},
     };
+
+    #[test]
+    fn scalar_numeric_source_identity_preserves_authored_bodies() {
+        let source = r#"
+extern { fn __add_i32(_: i32, _: i32) -> i32 }
+fn __sub_i32(_ a: i32, _ b: i32) -> i32 { a ^ b }
+pub fn probe(_ a: i32, _ b: i32) -> i32 {
+    __sub_i32(__add_i32(a, b), b)
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///scalar_numeric_identity.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let package = build_wasm_runtime_package(&db, db.top_mod(file)).unwrap();
+        let mut saw_add = false;
+        let mut saw_authored_xor = false;
+        for function in package.functions(&db).iter().copied() {
+            let body = function.instance(&db).body(&db);
+            for statement in body.blocks.iter().flat_map(|block| &block.stmts) {
+                match statement {
+                    RStmt::Assign {
+                        expr:
+                            RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
+                                op: IntrinsicArithBinOp::Add,
+                                checked: false,
+                                ..
+                            }),
+                        ..
+                    } => saw_add = true,
+                    RStmt::Assign {
+                        expr:
+                            RExpr::Binary {
+                                op: hir::hir_def::BinOp::Arith(hir::hir_def::ArithBinOp::BitXor),
+                                ..
+                            },
+                        ..
+                    } if function.symbol(&db).contains("__sub_i32") => saw_authored_xor = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            saw_add,
+            "the bodyless add declaration must lower to numeric IR"
+        );
+        assert!(
+            saw_authored_xor,
+            "the authored subtraction spelling must retain its XOR body"
+        );
+    }
 
     #[test]
     fn f32_arithmetic_is_unchecked_and_minus_stays_unary_in_checked_mode() {

@@ -2918,22 +2918,13 @@ fn is_runtime_intrinsic_name(name: &str) -> bool {
     {
         return true;
     }
-    intrinsic_numeric_name_parts(name).is_some()
+    hir::analysis::ty::corelib::ScalarNumericIntrinsic::from_name(name).is_some()
 }
 
 pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
     F32IntrinsicKind::from_name(name).filter(|kind| *kind != F32IntrinsicKind::Rsqrt)
 }
 
-fn intrinsic_numeric_name_parts(name: &str) -> Option<(&str, &str)> {
-    let op = name.strip_prefix("__")?;
-    [
-        "_u8", "_u16", "_u32", "_u64", "_u128", "_u256", "_usize", "_i8", "_i16", "_i32", "_i64",
-        "_i128", "_i256", "_isize", "_bool", "_f32",
-    ]
-    .iter()
-    .find_map(|suffix| op.strip_suffix(suffix).map(|prefix| (prefix, *suffix)))
-}
 
 pub(crate) fn runtime_param_class<'db>(
     db: &'db dyn MirDb,
@@ -3134,6 +3125,63 @@ mod tests {
         package::runtime_instance_for_semantic,
         package::runtime_instance_for_semantic_with_visible_param_overrides,
     };
+
+    #[test]
+    fn scalar_numeric_recognition_is_an_explicit_typed_vocabulary() {
+        use hir::analysis::ty::corelib::{ScalarNumericIntrinsic, ScalarNumericIntrinsicOp as Op};
+        let operations = [
+            ("add", Op::Add),
+            ("sub", Op::Sub),
+            ("mul", Op::Mul),
+            ("div", Op::Div),
+            ("rem", Op::Rem),
+            ("pow", Op::Pow),
+            ("shl", Op::Shl),
+            ("shr", Op::Shr),
+            ("bitand", Op::Bitand),
+            ("bitor", Op::Bitor),
+            ("bitxor", Op::Bitxor),
+            ("eq", Op::Eq),
+            ("ne", Op::Ne),
+            ("lt", Op::Lt),
+            ("le", Op::Le),
+            ("gt", Op::Gt),
+            ("ge", Op::Ge),
+            ("bitnot", Op::Bitnot),
+            ("not", Op::Not),
+            ("neg", Op::Neg),
+        ];
+        let scalars = [
+            "u8", "u16", "u32", "u64", "u128", "u256", "usize", "i8", "i16", "i32", "i64", "i128",
+            "i256", "isize", "bool", "f32",
+        ];
+        for (name, op) in operations {
+            for scalar in scalars {
+                let name = format!("__{name}_{scalar}");
+                let identity = ScalarNumericIntrinsic::from_name(&name).unwrap();
+                assert_eq!(identity.op, op, "{name}");
+                assert!(is_runtime_intrinsic_name(&name), "{name}");
+            }
+        }
+        for name in [
+            "__invented_u32",
+            "__add_u33",
+            "add_u32",
+            "__add_u32_extra",
+            "__add",
+            "__foo_f32",
+            "__neg_String",
+        ] {
+            assert!(ScalarNumericIntrinsic::from_name(name).is_none(), "{name}");
+            assert!(!is_runtime_intrinsic_name(name), "{name}");
+        }
+        assert_eq!(
+            ScalarNumericIntrinsic::from_name("__add_u32")
+                .unwrap()
+                .scalar,
+            hir::hir_def::prim_ty::PrimTy::Uint(hir::hir_def::prim_ty::UintTy::U32)
+        );
+    }
 
     #[test]
     fn f32_intrinsic_recognition_is_explicit_supported_set() {

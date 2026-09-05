@@ -164,6 +164,99 @@ pub fn generic_numeric_intrinsic_func_kind<'db>(
     GenericNumericIntrinsicKind::from_name(func.name(db).to_opt()?.data(db).as_str())
 }
 
+/// Operation identity for the scalar-suffixed numeric declaration vocabulary.
+/// Target legality and declaration type checking remain separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum ScalarNumericIntrinsicOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Pow,
+    Shl,
+    Shr,
+    Bitand,
+    Bitor,
+    Bitxor,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Bitnot,
+    Not,
+    Neg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub struct ScalarNumericIntrinsic {
+    pub op: ScalarNumericIntrinsicOp,
+    pub scalar: crate::hir_def::prim_ty::PrimTy,
+}
+
+impl ScalarNumericIntrinsic {
+    pub fn from_name(name: &str) -> Option<Self> {
+        use crate::hir_def::prim_ty::{FloatTy, IntTy, PrimTy, UintTy};
+        let (op, scalar) = name.strip_prefix("__")?.rsplit_once('_')?;
+        let op = match op {
+            "add" => ScalarNumericIntrinsicOp::Add,
+            "sub" => ScalarNumericIntrinsicOp::Sub,
+            "mul" => ScalarNumericIntrinsicOp::Mul,
+            "div" => ScalarNumericIntrinsicOp::Div,
+            "rem" => ScalarNumericIntrinsicOp::Rem,
+            "pow" => ScalarNumericIntrinsicOp::Pow,
+            "shl" => ScalarNumericIntrinsicOp::Shl,
+            "shr" => ScalarNumericIntrinsicOp::Shr,
+            "bitand" => ScalarNumericIntrinsicOp::Bitand,
+            "bitor" => ScalarNumericIntrinsicOp::Bitor,
+            "bitxor" => ScalarNumericIntrinsicOp::Bitxor,
+            "eq" => ScalarNumericIntrinsicOp::Eq,
+            "ne" => ScalarNumericIntrinsicOp::Ne,
+            "lt" => ScalarNumericIntrinsicOp::Lt,
+            "le" => ScalarNumericIntrinsicOp::Le,
+            "gt" => ScalarNumericIntrinsicOp::Gt,
+            "ge" => ScalarNumericIntrinsicOp::Ge,
+            "bitnot" => ScalarNumericIntrinsicOp::Bitnot,
+            "not" => ScalarNumericIntrinsicOp::Not,
+            "neg" => ScalarNumericIntrinsicOp::Neg,
+            _ => return None,
+        };
+        let scalar = match scalar {
+            "u8" => PrimTy::Uint(UintTy::U8),
+            "u16" => PrimTy::Uint(UintTy::U16),
+            "u32" => PrimTy::Uint(UintTy::U32),
+            "u64" => PrimTy::Uint(UintTy::U64),
+            "u128" => PrimTy::Uint(UintTy::U128),
+            "u256" => PrimTy::Uint(UintTy::U256),
+            "usize" => PrimTy::Uint(UintTy::Usize),
+            "i8" => PrimTy::Int(IntTy::I8),
+            "i16" => PrimTy::Int(IntTy::I16),
+            "i32" => PrimTy::Int(IntTy::I32),
+            "i64" => PrimTy::Int(IntTy::I64),
+            "i128" => PrimTy::Int(IntTy::I128),
+            "i256" => PrimTy::Int(IntTy::I256),
+            "isize" => PrimTy::Int(IntTy::Isize),
+            "bool" => PrimTy::Bool,
+            "f32" => PrimTy::Float(FloatTy::F32),
+            _ => return None,
+        };
+        Some(Self { op, scalar })
+    }
+}
+
+#[salsa::tracked]
+pub fn scalar_numeric_intrinsic_func_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> Option<ScalarNumericIntrinsic> {
+    if func.body(db).is_some() {
+        return None;
+    }
+    ScalarNumericIntrinsic::from_name(func.name(db).to_opt()?.data(db).as_str())
+}
+
 /// Identity of the existing bodyless floating-point intrinsic declarations.
 /// Recognition lives here; evaluation and target support remain separate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
