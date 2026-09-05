@@ -65,7 +65,7 @@ fn canonical_arena_emission_is_explicit_and_typed() {
 }
 
 #[test]
-fn fe_malloc_uses_shared_byte_aligned_canonical_arena_and_grows_memory() {
+fn discarded_fe_allocations_share_canonical_arena_grow_memory_and_rewind() {
     let source = r#"
 use core::effect_ref::alloc_bytes
 
@@ -94,6 +94,40 @@ pub fn allocate_large(size: u32) {
     )
     .unwrap();
 
+    // Observe the actual backend boundary as well as execution. Discarded
+    // allocations must still use the shared allocator, inside a balanced
+    // scope. A final cursor of 1024 alone would also pass if allocation were
+    // accidentally omitted entirely.
+    let function_index = |name: &str| {
+        artifact.func_names.iter().position(|candidate| candidate == name).unwrap() as u32
+    };
+    let mut body_index = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&artifact.bytes) {
+        match payload.unwrap() {
+            wasmparser::Payload::ImportSection(imports) => {
+                assert_eq!(imports.count(), 0, "the allocator must not be a host import");
+            }
+            wasmparser::Payload::CodeSectionEntry(body) => {
+                if body_index == function_index("allocate_pair") {
+                    let calls = body.get_operators_reader().unwrap().into_iter()
+                        .filter_map(|operator| match operator.unwrap() {
+                            wasmparser::Operator::Call { function_index } => Some(function_index),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(calls, vec![
+                        function_index("__fe_cabi_checkpoint_internal"),
+                        function_index("fe_cabi_alloc"),
+                        function_index("fe_cabi_alloc"),
+                        function_index("__fe_cabi_rewind_internal"),
+                    ]);
+                }
+                body_index += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(body_index as usize, artifact.func_names.len());
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
     let mut store = wasmtime::Store::new(&engine, ());
@@ -114,16 +148,15 @@ pub fn allocate_large(size: u32) {
 
     reset.call(&mut store, ()).unwrap();
     pair.call(&mut store, (13, 29)).unwrap();
-    // MemAllocDynamic promises byte alignment only. With align=1, the cursor
-    // after 13 and 29 bytes is exact, proving both Fe allocations used the same
-    // arena cursor and occupied consecutive non-overlapping ranges.
-    assert_eq!(alloc.call(&mut store, (1, 1)).unwrap(), 1024 + 13 + 29);
+    // Neither pointer escapes. The compiler-proven scope restores the incoming
+    // cursor, just as for non-escaping compiler-owned array temporaries.
+    assert_eq!(alloc.call(&mut store, (1, 1)).unwrap(), 1024);
 
     reset.call(&mut store, ()).unwrap();
     let pages_before = memory.size(&store);
     large.call(&mut store, 200_000).unwrap();
     assert!(memory.size(&store) > pages_before);
-    assert_eq!(alloc.call(&mut store, (1, 1)).unwrap(), 1024 + 200_000);
+    assert_eq!(alloc.call(&mut store, (1, 1)).unwrap(), 1024);
 }
 
 #[test]
