@@ -43,7 +43,20 @@ the independent event oracle (1.60s), and canonical DOMString import execution
 regressions, not a fresh full backend or production browser receipt gate.
 The first extraction also passed 26 unit tests; its broadened module-name
 filter exposed the previously observed MvT5 residual-count failure, expected
-`(102, 6)` versus actual `(8, 8)`. That assertion remains unchanged and open.
+`(102, 6)` versus actual `(8, 8)`. The follow-up replaces the requirement to
+prune an already-absent expansion with a nonzero, nonexpanding transport budget
+of eight observed statements. The raw RMIR swap already consists of two
+whole-half projections and one aggregate construction before preparation.
+The Wasm execution regression now checks all 32 basis leaves against the
+independent half-swap rule `leaf XOR 16`, not only the original two observed
+render leaves; it passes in 1.93s. Raw observation:
+`/workspace/scratch/mb2-mvt5-rmir-20260905/489b03dd609c200ef97427cff61ab78e38b6b2bf4ee9726cc820f5a28d41d23d.rmir`.
+Riffcat's current capture begins after this preparation boundary, so this
+evidence uses the existing raw RMIR observer. The missing earlier-stage view
+is recorded in the compiler observation tooling requests, not inferred from
+Sonatina counts.
+All 27 shared portable-lowerer unit tests now pass in release (23.01s), recorded
+in `/workspace/scratch/mb2-portable-lower-full-unit-20260905.log`.
 Logs: `/workspace/scratch/mb2-portable-module-split-20260905.log` and
 `/workspace/scratch/mb2-wasm-synthesis-split-20260905.log`.
 

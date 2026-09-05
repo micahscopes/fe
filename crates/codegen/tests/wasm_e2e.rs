@@ -3454,8 +3454,34 @@ fn recursive_mvt2_f32_helper_call_executes_on_wasm() {
 
 #[test]
 fn recursive_mvt5_f32_nested_helper_executes_on_wasm() {
-    let source = include_str!("fixtures/spirv/mvt5_f32_nested_helper_render.fe");
-    let wasm = compile_to_wasm("wasm_mvt5_f32_nested_helper_render.fe", source);
+    let mut source = include_str!("fixtures/spirv/mvt5_f32_nested_helper_render.fe").to_owned();
+    // Basis inputs make every leaf observable. The original render entry
+    // reads only two leaves and cannot detect corruption of the other thirty.
+    fn basis_tree(depth: usize, first: usize) -> String {
+        if depth == 0 {
+            return format!("ScF {{ s: if seed == {first} {{ 1.0 }} else {{ 0.0 }} }}");
+        }
+        format!(
+            "NdF {{ a: {}, b: {} }}",
+            basis_tree(depth - 1, first),
+            basis_tree(depth - 1, first + (1 << (depth - 1))),
+        )
+    }
+    source.push_str(&format!(
+        "\npub fn basis_probe(seed: i32) -> i32 {{\nlet tree: MvTF<5> = {}\nlet swapped = nested_swap_mvt5(tree)\n",
+        basis_tree(5, 0),
+    ));
+    let terms = (0..32)
+        .map(|leaf| {
+            let path = (0..5).rev()
+                .map(|bit| if leaf & (1 << bit) == 0 { ".a" } else { ".b" })
+                .collect::<String>();
+            format!("__i32_from_f32(swapped{path}.s) * {}", leaf + 1)
+        })
+        .collect::<Vec<_>>();
+    source.push_str(&terms.join(" + "));
+    source.push_str("\n}\n");
+    let wasm = compile_to_wasm("wasm_mvt5_f32_nested_helper_render.fe", &source);
     let (mut store, instance) = instantiate(&wasm);
     let render = instance
         .get_typed_func::<(i32, i32, f32, f32), i32>(&mut store, "mvt5_f32_nested_helper_render")
@@ -3464,6 +3490,16 @@ fn recursive_mvt5_f32_nested_helper_executes_on_wasm() {
         .call(&mut store, (2, 3, 11.0, 22.0))
         .expect("inlined MvT<5> helper execution") as u32;
     assert_eq!(got.to_le_bytes(), [24, 14, 255, 255]);
+    let basis = instance
+        .get_typed_func::<i32, i32>(&mut store, "basis_probe")
+        .expect("full-leaf MvT5 permutation probe");
+    for leaf in 0..32 {
+        assert_eq!(
+            basis.call(&mut store, leaf).expect("basis execution"),
+            (leaf ^ 16) + 1,
+            "wrong half-swap at input leaf {leaf}",
+        );
+    }
 }
 
 #[test]

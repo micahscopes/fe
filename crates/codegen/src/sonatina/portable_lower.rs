@@ -14652,7 +14652,7 @@ pub fn lane(request: own Request) -> u32 {
     }
 
     #[test]
-    fn authored_mvt5_specialization_measures_smaller_nested_residual() {
+    fn authored_mvt5_preparation_keeps_nested_transport_bounded() {
         let source = include_str!("../../tests/fixtures/spirv/mvt5_f32_nested_helper_render.fe");
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///mvt5_specialization_residual.fe").unwrap();
@@ -14671,10 +14671,13 @@ pub fn lane(request: own Request) -> u32 {
 
         let prepared = prepare_inline_value_bodies(&db, &package);
         let (before, after) = prepared.residuals.get(&nested).copied().unwrap_or((0, 0));
-        assert_eq!(
-            (before, after),
-            (102, 6),
-            "authored nested MvT5 structural residual changed"
+        // Whole-half RMIR projections avoid the old 102-statement leaf
+        // expansion before this pass. Requiring pruning here would reward
+        // recreating that expansion. Bound the live transport instead;
+        // wasm_e2e checks the permutation of every leaf independently.
+        assert!(
+            before > 0 && after > 0 && after <= before && before <= 8,
+            "nested MvT5 transport expanded or was not observed: {before} -> {after}"
         );
     }
 
