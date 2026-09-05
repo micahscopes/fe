@@ -37,11 +37,20 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 (1). Logs: `/workspace/scratch/mb2-binding-facts-release.log` and
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
-The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `54c6c633`, extending `9fcfcef1`); publication
-has not been authorized. The newest backend extraction plans contextual
-helper ABIs before emitting helper bodies and passed sixteen focused release
-tests. It is not yet the public Fe legality query; Fe's classifier remains.
+The explicit Sonatina Shader ISA, Naga target/profile implementation, and
+public contextual helper query are now published through `54c6c633`.
+On September 5, `git ls-remote` reported `98696420` on the Sonatina remote's
+`mb2-task-borrows` branch; `54c6c633` is its verified ancestor. No push was
+performed here. The cleanup candidate now pins that exact tested ancestor in
+Cargo.toml and Cargo.lock, without a local dependency override. Its locked
+production replay is running in
+`/workspace/scratch/mb2-published-shader-boundary-production-release.log`.
+Live mb2 still has the earlier dependency until this integration gate closes.
+
+The following paragraphs record intermediate extraction gates. The earlier
+backend extraction planned contextual helper ABIs before emitting helper bodies
+and passed sixteen focused release tests, before the public Fe legality query
+and classifier deletion described later in this record.
 Evidence: `/workspace/scratch/mb2-sonatina-helper-plan-release.log`.
 The subsequent shared body query also passed sixteen helper tests and shares
 one structured CFG across resource variants. Fe's cleanup integration removes
