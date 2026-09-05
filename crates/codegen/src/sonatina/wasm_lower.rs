@@ -4271,9 +4271,11 @@ where
             arena_owned_locals: FxHashMap::default(),
         };
         lowerer.typed_private_borrow_params = lowerer.derive_typed_private_borrow_params();
-        let (indirect_params, indirect_returns) = lowerer.derive_indirect_aggregate_abi()?;
-        lowerer.indirect_aggregate_params = indirect_params;
-        lowerer.indirect_aggregate_returns = indirect_returns;
+        if lowerer.isa.triple().architecture == Architecture::Wasm32 {
+            let (indirect_params, indirect_returns) = lowerer.derive_wasm_indirect_aggregate_abi()?;
+            lowerer.indirect_aggregate_params = indirect_params;
+            lowerer.indirect_aggregate_returns = indirect_returns;
+        }
         lowerer.address_carried_aggregate_values =
             lowerer.derive_address_carried_aggregate_values();
         if enable_scoped_arena {
@@ -5263,7 +5265,7 @@ where
     /// validated parameter limit. The largest savings are selected first. A
     /// public, external, non-memory-lowerable, or still-oversized signature
     /// fails before Sonatina emits an invalid module.
-    fn derive_indirect_aggregate_abi(
+    fn derive_wasm_indirect_aggregate_abi(
         &self,
     ) -> Result<
         (
@@ -5272,6 +5274,7 @@ where
         ),
         LowerError,
     > {
+        debug_assert_eq!(self.isa.triple().architecture, Architecture::Wasm32);
         let mut selected = FxHashMap::default();
         let mut indirect_returns = HashSet::new();
         for function in self.functions_in_declaration_order() {
@@ -5433,7 +5436,8 @@ where
             let Some(shape) = self.flat_shape(class) else {
                 continue;
             };
-            if self.private_place_materialization == PrivatePlaceMaterialization::CanonicalArena
+            if self.isa.triple().architecture == Architecture::Wasm32
+                && self.private_place_materialization == PrivatePlaceMaterialization::CanonicalArena
                 && shape.leaf_count() > MAX_WASM_FLATTENED_LOCAL_AGGREGATE
             {
                 values.insert(RLocalId::from_u32(index as u32));
@@ -15677,6 +15681,44 @@ mod tests {
         let module = lowerer.finish();
         assert_eq!(module.ctx.triple, isa.triple());
         assert_eq!(module.ctx.type_layout.pointer_repl(), Type::I64);
+    }
+
+    #[test]
+    fn wasm_arity_limits_do_not_constrain_shader_or_native_ir() {
+        let source = r#"
+struct Wide { values: [u32; 1001] }
+impl core::marker::Copy for Wide {}
+pub fn probe(_ input: Wide) -> u32 { input.values[0] }
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///target_specific_arity.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "probe").unwrap();
+        let error = compile_runtime_package_wasm(&db, &package).err()
+            .expect("the public Wasm signature must retain its validator limit");
+        assert!(error.to_string().contains("validated limit of 1000"), "{error}");
+
+        let (shader, entries) = compile_runtime_package_shader_ir(&db, &package)
+            .expect("shader IR must not enforce Wasm validator limits");
+        assert_eq!(shader.ctx.func_sig(entries[0], |sig| sig.args().len()), 1001);
+
+        let isa = sonatina_ir::isa::native::Native::new(TargetTriple::new(
+            Architecture::X86_64, Vendor::Unknown, OperatingSystem::Native,
+        ));
+        let native = lower_portable_bodies(
+            &isa, &db, &package, HashSet::new(), &[], true, true,
+            PrivatePlaceMaterialization::CanonicalArena,
+            AggregateCopyLowering::InlineLoop,
+        ).expect("native IR must not enforce Wasm validator limits");
+        let entries = shader_runtime_entries(&native).unwrap();
+        let native = native.finish();
+        assert_eq!(native.ctx.func_sig(entries[0], |sig| sig.args().len()), 1001);
+        // These assertions cover IR construction, not acceptance of a shader
+        // entry interface or a native machine calling convention.
     }
     use common::InputDb;
     use hir::analysis::semantic::FieldIndex;
