@@ -30,6 +30,26 @@ const HOST_WASM_CODEC_RUNTIME_JS: &str =
     include_str!("../../../demos/shared/host-wasm-codec-v1.js");
 
 #[test]
+fn unsigned_division_and_remainder_guard_zero() {
+    let wasm = compile_to_wasm("guard_unsigned_division.fe", r#"
+pub fn div(a: u32, b: u32) -> u32 { a / b }
+pub fn rem(a: u32, b: u32) -> u32 { a % b }
+"#);
+    let (mut store, instance) = instantiate(&wasm);
+    for name in ["div", "rem"] {
+        let function = instance.get_typed_func::<(i32, i32), i32>(&mut store, name).unwrap();
+        for (a, b) in [(0u32, 0u32), (1, 0), (u32::MAX, 0), (0, 1), (u32::MAX, 7), (7, u32::MAX)] {
+            let actual = function.call(&mut store, (a as i32, b as i32));
+            if b == 0 {
+                assert!(actual.is_err(), "{name}({a}, {b}) must trap");
+            } else {
+                assert_eq!(actual.unwrap() as u32, if name == "div" { a / b } else { a % b });
+            }
+        }
+    }
+}
+
+#[test]
 fn checked_integer_arithmetic_uses_sonatina_overflow_semantics() {
     for bits in [8u32, 16, 32, 64] {
         for signed in [false, true] {

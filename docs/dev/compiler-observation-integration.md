@@ -417,3 +417,17 @@ capture, not a compiler improvement. Browser evidence is in
 
 This requests tooling over existing compiler evidence, not Riffcat-based
 legality, optimization decisions, or a competing provenance architecture.
+
+Additional comparison precondition from the zero-divisor browser gate:
+the Naga trap flag invalidates the result word; there is no in-band zero
+sentinel contract. The first harness incorrectly required `[0, 1]`, while
+division returned `[7, 1]`. The corrected oracle requires the trap bit on
+failure and exact numeric results on success. Preserve validity predicates
+when displaying behavioral comparisons, rather than treating invalid result
+lanes as mismatches or silently dropping their failure status.
+The original log is `mb2-div-chrome-sentinel-assumption-20260905.log` under
+`/workspace/scratch/`. Both `mb2-div-20260905.capture.json` and
+`mb2-rem-20260905.capture.json` replay as complete, with seven final module
+instructions and 677 WGSL bytes each. Equal size is not equal semantics.
+These captures do not certify post-trap side-effect suppression or host
+consumption of trap buffers; those need separate execution gates.

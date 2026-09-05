@@ -9,20 +9,26 @@ use url::Url;
 
 #[test]
 fn scalar_shader_capture_preserves_artifacts_and_reports_partial_runs() {
-    check_capture("scalar", false);
+    check_capture("scalar", "add");
 }
 
 #[test]
 fn grid_shader_capture_preserves_artifacts_and_reports_partial_runs() {
-    check_capture("grid", false);
+    check_capture("grid", "add");
 }
 
 #[test]
 fn checked_multiply_shader_capture_preserves_artifacts() {
-    check_capture("scalar", true);
+    check_capture("scalar", "mul");
 }
 
-fn check_capture(pipeline: &str, multiply: bool) {
+#[test]
+fn division_and_remainder_shader_captures_retain_traps() {
+    check_capture("scalar", "div");
+    check_capture("scalar", "rem");
+}
+
+fn check_capture(pipeline: &str, operation: &str) {
     let directory = tempfile::tempdir().unwrap();
     for mode in ["off", "complete", "partial", "strict"] {
         let output = directory.path().join(mode);
@@ -32,7 +38,7 @@ fn check_capture(pipeline: &str, multiply: bool) {
             .args(["--exact", "scalar_shader_capture_child", "--nocapture"])
             .env("FE_SCALAR_CAPTURE_TEST_MODE", mode)
             .env("FE_SCALAR_CAPTURE_TEST_PIPELINE", pipeline)
-            .env("FE_SCALAR_CAPTURE_TEST_MULTIPLY", if multiply { "1" } else { "0" })
+            .env("FE_SCALAR_CAPTURE_TEST_OPERATION", operation)
             .env("FE_SCALAR_CAPTURE_TEST_OUTPUT", &output)
             .env_remove("FE_BLOAT_CAPTURE_DIR")
             .env_remove("FE_OBSERVE_STRICT")
@@ -110,19 +116,25 @@ fn scalar_shader_capture_child() {
     };
     let directory = std::env::var_os("FE_SCALAR_CAPTURE_TEST_OUTPUT").unwrap();
     let grid = std::env::var("FE_SCALAR_CAPTURE_TEST_PIPELINE").unwrap() == "grid";
-    let multiply = std::env::var("FE_SCALAR_CAPTURE_TEST_MULTIPLY").as_deref() == Ok("1");
+    let operation = std::env::var("FE_SCALAR_CAPTURE_TEST_OPERATION").unwrap_or("add".into());
+    let expression = match operation.as_str() {
+        "add" => "x + 7",
+        "mul" => "x * 7",
+        "div" => "7 / x",
+        "rem" => "7 % x",
+        _ => panic!("unsupported test operation"),
+    };
+    let entry = if grid {
+        "pub fn kernel(_ x: u32, _ y: u32) -> u32 { helper(x + y) }"
+    } else {
+        "pub fn kernel(_ x: u32) -> u32 { helper(x) }"
+    };
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///scalar_capture.fe").unwrap();
     db.workspace().touch(
         &mut db,
         url.clone(),
-        Some(if multiply {
-            "fn mul(_ x: u32) -> u32 { x * 7 }\npub fn kernel(_ x: u32) -> u32 { mul(x) }\n".into()
-        } else if grid {
-            "fn add(_ x: u32) -> u32 { x + 7 }\npub fn kernel(_ x: u32, _ y: u32) -> u32 { add(x + y) }\n".into()
-        } else {
-            "fn add(_ x: u32) -> u32 { x + 7 }\npub fn kernel(_ x: u32) -> u32 { add(x) }\n".into()
-        }),
+        Some(format!("fn helper(_ x: u32) -> u32 {{ {expression} }}\n{entry}\n")),
     );
     let file = db.workspace().get(&db, &url).unwrap();
     let top = db.top_mod(file);

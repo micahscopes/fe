@@ -13081,6 +13081,15 @@ where
         let is = self.inst_set();
         let lhs = self.local_value(lhs)?;
         let rhs = self.local_value(rhs)?;
+        if !class.is_signed_int()
+            && matches!(op, IntrinsicArithBinOp::Div | IntrinsicArithBinOp::Rem)
+        {
+            // Fe division by zero is a panic, even on targets whose integer
+            // division instruction does not itself trap.
+            let zero = self.zero_value(ty)?;
+            let invalid = self.fb.insert_inst(CmpEq::new(is, rhs, zero), Type::I1);
+            self.trap_if(invalid);
+        }
         Ok(match op {
             IntrinsicArithBinOp::Add => self.fb.insert_inst(Add::new(is, lhs, rhs), ty),
             IntrinsicArithBinOp::Sub => self.fb.insert_inst(Sub::new(is, lhs, rhs), ty),

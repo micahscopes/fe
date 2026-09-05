@@ -71,6 +71,21 @@ The study has not established a production backend preference.
 
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
+Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
+portable lowering, matching the EVM source contract without depending on
+Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader
+capture gates (28.86s). Each saved shader passes eight Chrome AMD RDNA3 calls,
+including zero divisors and subsequent success, with no validation error or
+device loss. Trap flags invalidate results; an initial harness assertion for
+a zero result sentinel was corrected against the existing backend contract,
+not by weakening successful-call numeric checks. Evidence and Riffcat captures
+are recorded in `docs/dev/compiler-observation-integration.md`.
+Post-trap side effects and host trap consumption still require dedicated gates.
+
+The restored checked arithmetic also passes the existing Fe-derived BabyBear
+Poseidon2 parameters/permutation oracle against Plonky3 (79.20s). This is a
+proof-component compatibility result, not the full production proof gate.
+
 The checked-arithmetic follow-up extends the existing Sonatina operation path
 to signed add/sub and signed/unsigned multiplication, deleting the old
 usize-only widened multiplication implementation (68 net lowerer lines removed).
