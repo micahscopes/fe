@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `9347f7c2`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `74448e60`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -200,6 +200,28 @@ This is still not the public Fe query. Entry-rooted resource-variant propagation
 can fail before ABI planning, and the separate reports must be combined before
 deleting Fe's classifier. Invalid entry-resource declarations remain global
 request errors, not recoverable helper outcomes.
+
+Published-prerequisite reconciliation: live mb2 was still pinned to
+`ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
+`ef13a6568c0dbcd2e85a390048f81a20a61302ac`. The latter is already published
+on the Sonatina remote and is now selected by the mb2 manifest and lockfile.
+Its stable physical raster entry ABI requires matching test expectations
+(`fe_vertex_main` / `fe_fragment_main`); authored logical entry names remain
+unchanged. This prerequisite is not the newer Shader/Naga cleanup series.
+The focused release gates passed: authored raster (4), compute-resource helper
+retention (1), resident Wasm actor execution (1), the QCGA pencil demo (1), and
+typed-borrow/private-storage Shader IR (3).
+QCGA emitted 23,796 bytes of DE WGSL plus 10,025 bytes of marker WGSL, passing
+its existing size and Naga validation checks. Evidence:
+`/workspace/scratch/mb2-published-sonatina-prerequisite-raster-reconciled-release.log`,
+`/workspace/scratch/mb2-published-sonatina-compute-release.log`,
+`/workspace/scratch/mb2-published-sonatina-wasm-release.log`,
+`/workspace/scratch/mb2-published-sonatina-qcga-release.log`, and
+`/workspace/scratch/mb2-published-sonatina-shader-ir-release.log`.
+These integration runs include the shared worktree's existing resource-test
+changes; those changes are not included in this pin increment. No browser
+execution, full CI completion, or publication of the newer local Sonatina
+commits is claimed by these gates.
 
 Legend:
 
