@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `51546b51`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `9347f7c2`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -109,6 +109,13 @@ Fe integration passed three Shader IR tests (1.91s) and six raster tests
 (9.14s) in `/workspace/scratch/mb2-fe-entry-plan-context-release.log`.
 This makes another prerequisite independently reusable; it is not yet the
 complete public contextual ABI query.
+
+`9347f7c2` makes entry helper preparation return its context, physical plans,
+typed-local function map, and heap/trap transport together. Emission consumes
+that result instead of building its memory parameter types independently.
+All 116 shader-backend tests passed with lavapipe in 2.94s:
+`/workspace/scratch/mb2-sonatina-prepared-entry-helpers-release.log`.
+This candidate has not yet received a fresh Fe integration run.
 
 Legend:
 
