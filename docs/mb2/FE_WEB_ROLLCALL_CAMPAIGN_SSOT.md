@@ -33,7 +33,12 @@ candidate with the newly emitted checked-arithmetic trap channel.
 With published Sonatina `2804b9ca` plus the pending Fe arithmetic integration,
 the repaired runner passes 4,096-word gradient parity (2.90s), intentional
 overflow rejection at invocation 1 (10.73s), and all 262,144 Mandelbrot renderer
-pixels against both Wasmtime and the independent oracle (29.35s). Execution
+pixels against both Wasmtime and the independent oracle (29.35s). Its remaining
+Clifford consumer also passes: identity, e12 half-turn, and tilted rotors each
+match all 262,144 pixels across llvmpipe, Wasmtime, and the independent oracle
+(6.57s for the three-rotor test). All three grid-runner consumers are covered,
+including the four-word broadcast parameter buffer and per-invocation traps.
+Execution
 used llvmpipe with GPU skipping disabled, not Chrome. The scalar i64 validation
 and eight checked grid arithmetic emission cases also pass. No STARK proof or
 production shader-size claim follows. Logs: `/workspace/scratch/mb2-grid-status-*.log`
