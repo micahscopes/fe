@@ -85,6 +85,22 @@ the two test counts must not be conflated. Broader live-mb2 and Chrome capstone
 validation remain open, as do the broader
 storage, intrinsic-family, CFG-normal-form, and direct-route study obligations.
 
+`d7ec3b402` restricts Wasm's signature and oversized-local policies to the
+Wasm32 ISA. The regression first reproduced Shader IR rejecting a 1,001-lane
+signature with a Wasm 1,000-lane error. After the fix, Wasm still rejects the
+public signature while Shader and native IR construction accept it (5.36s).
+This is an IR distinction, not a claim that every physical shader/native ABI
+accepts 1,001 parameters; Sonatina's shader packing and limit checks remain.
+Four large-aggregate Wasm execution tests passed (8.21s), covering mutable and
+read-only borrows, discarded returns, and snapshots. The production linear
+gate also passed with unchanged counts: 56,001 WGSL bytes, 2,150 expressions,
+30 helpers (27,822ms lowering / 34,894ms total). The tested lowering file landed
+byte-identically on mb2; cleanup checkpoint is `6f7c09279`. Evidence:
+`/workspace/scratch/mb2-target-arity-baseline-release.log`,
+`/workspace/scratch/mb2-target-arity-fixed-release.log`,
+`/workspace/scratch/mb2-target-arity-production-release.log`, and
+`/workspace/scratch/mb2-target-arity-wasm-large-release.log`.
+
 The following paragraphs record intermediate extraction gates. The earlier
 backend extraction planned contextual helper ABIs before emitting helper bodies
 and passed sixteen focused release tests, before the public Fe legality query
