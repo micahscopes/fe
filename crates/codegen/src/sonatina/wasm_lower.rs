@@ -10361,6 +10361,35 @@ impl<'db> BodyLocalStoragePlan<'db> {
     }
 }
 
+/// Physical argument preparation, with ownership kept distinct even where two
+/// variants currently share the same materialization instructions.
+enum CallArgumentStorage<'db> {
+    Flat,
+    TypedBorrow,
+    OwnedDeepCopy(LayoutId<'db>),
+    OwnedMaterialization,
+    BorrowMaterialization,
+}
+
+impl CallArgumentStorage<'_> {
+    fn materializes(&self) -> bool {
+        matches!(self, Self::OwnedDeepCopy(_) | Self::OwnedMaterialization | Self::BorrowMaterialization)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallTemporaryLifetime {
+    None,
+    CallerFrame,
+    EnclosingResult,
+    CallScope,
+}
+
+struct CallStoragePlan<'db> {
+    arguments: Vec<CallArgumentStorage<'db>>,
+    lifetime: CallTemporaryLifetime,
+}
+
 struct PortableFunctionLowerer<'ctx, 'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -11035,72 +11064,38 @@ where
     /// rewound immediately after its scalar results have been captured. Any
     /// missed boundary adaptation fails before an invalid Wasm call reaches the
     /// emitter.
-    fn checked_call_arg_values(
-        &mut self,
+    fn plan_call_storage(
+        &self,
         callee: RuntimeInstance<'db>,
-        callee_ref: FuncRef,
         args: &[RLocalId],
-    ) -> Result<(Vec<ValueId>, Option<ValueId>), LowerError> {
-        let params = self
-            .module
-            .prepared_interfaces
-            .get(&callee)
+    ) -> Result<CallStoragePlan<'db>, LowerError> {
+        let params = &self.module.prepared_interfaces.get(&callee)
             .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
-            .params
-            .iter()
-            .map(|param| param.class.clone())
-            .collect::<Vec<_>>();
+            .params;
         if args.len() != params.len() {
             return Err(LowerError::Internal(format!(
                 "call to `{}` has {} Fe arguments but {} prepared parameters",
-                self.module.function_symbol(callee),
-                args.len(),
-                params.len(),
+                self.module.function_symbol(callee), args.len(), params.len(),
             )));
         }
-        let mut values = Vec::new();
-        let indirect_params = self
-            .module
-            .indirect_aggregate_params
-            .get(&callee)
-            .cloned()
-            .unwrap_or_default();
-        let callee_params = self
-            .module
-            .prepared_interfaces
-            .get(&callee)
-            .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
-            .params
-            .clone();
-        let mut call_checkpoint = None;
-        for ((arg, param), prepared_param) in args.iter().zip(&params).zip(&callee_params) {
-            let source = self.body.value_class(*arg).cloned().ok_or_else(|| {
+        let mut arguments = Vec::with_capacity(args.len());
+        let mut materializes = false;
+        for (arg, prepared_param) in args.iter().zip(params) {
+            let param = &prepared_param.class;
+            let source = self.body.value_class(*arg).ok_or_else(|| {
                 LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
             })?;
-            let typed_borrow_pointee = self
-                .module
-                .typed_private_borrow_pointee(callee, prepared_param.local);
-            let materialize_indirect_value = indirect_params.contains(&prepared_param.local);
-            let materialize_read_borrow = matches!(
-                param,
-                RuntimeClass::Ref {
-                    pointee,
-                    kind: RefKind::Const,
-                    view: RefView::Whole,
-                } if matches!(&source, RuntimeClass::AggregateValue { .. })
-                    && source.shares_runtime_rep_with(self.module.db, pointee)
-                    && self.module.aggregate_is_memory_lowerable(&source)
-            );
-            if let Some(pointee) = typed_borrow_pointee {
-                let source_pointee = match &source {
+            let storage = if let Some(pointee) = self.module
+                .typed_private_borrow_pointee(callee, prepared_param.local)
+            {
+                let source_pointee = match source {
                     RuntimeClass::Ref {
-                        pointee,
-                        kind: RefKind::Const | RefKind::Object,
+                        pointee, kind: RefKind::Const | RefKind::Object,
                         view: RefView::Whole,
                     } => Some(pointee.as_ref()),
                     _ => None,
                 };
-                let local = self.typed_private_locals.get(arg).cloned().ok_or_else(|| {
+                let local = self.typed_private_locals.get(arg).ok_or_else(|| {
                     LowerError::Internal(format!(
                         "call to `{}` selected typed borrow {arg:?}, but the caller did not preserve its storage",
                         self.module.function_symbol(callee),
@@ -11112,75 +11107,103 @@ where
                         self.module.function_symbol(callee),
                     )));
                 }
-                values.push(self.local_value(*arg)?);
-            } else if materialize_indirect_value {
-                if !self.scoped_arena
-                    && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
-                {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` requires an indirect aggregate value copy, but the callee failed the arena escape proof",
-                        self.module.function_symbol(callee),
-                    )));
-                }
-                if !self.scoped_arena && call_checkpoint.is_none() {
-                    // An indirect result is allocated after the same would-be
-                    // checkpoint and must remain live in the caller. Keep both
-                    // the by-value argument copy and result in the enclosing
-                    // arena lifetime; their MIR carrier remains AggregateValue,
-                    // so no Fe reference capability is created or exposed.
-                    if !self.module.indirect_aggregate_returns.contains(&callee) {
-                        let checkpoint_ty = self.fb.ptr_type(Type::I8);
-                        call_checkpoint = Some(
-                            self.fb
-                                .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
-                        );
-                    }
-                }
-                if !matches!(param, RuntimeClass::AggregateValue { .. })
-                    || !source.shares_runtime_rep_with(self.module.db, param)
-                    || !self.module.aggregate_is_memory_lowerable(&source)
-                {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` selected an incompatible indirect aggregate argument {arg:?}",
-                        self.module.function_symbol(callee),
-                    )));
-                }
-                let argument = if self.is_address_carried_aggregate_value(*arg) {
-                    let RuntimeClass::AggregateValue { layout } = source else {
-                        return Err(LowerError::Internal(format!(
-                            "indirect aggregate argument {arg:?} lost its value layout",
-                        )));
-                    };
-                    let source = self.local_value(*arg)?;
-                    self.lower_deep_object_copy(source, layout)?
-                } else {
-                    self.lower_materialize_to_object(*arg)?
-                };
-                values.push(argument);
-            } else if materialize_read_borrow {
-                if !self.scoped_arena
-                    && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
-                {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` requires a scoped aggregate borrow, but the callee failed the arena escape proof",
-                        self.module.function_symbol(callee),
-                    )));
-                }
-                if !self.scoped_arena && call_checkpoint.is_none() {
-                    // See the indirect-value arm above. The returned aggregate
-                    // owns the enclosing lifetime, so the borrowed materialized
-                    // input cannot be reclaimed at this call boundary.
-                    if !self.module.indirect_aggregate_returns.contains(&callee) {
-                        let checkpoint_ty = self.fb.ptr_type(Type::I8);
-                        call_checkpoint = Some(
-                            self.fb
-                                .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
-                        );
-                    }
-                }
-                values.push(self.lower_materialize_to_object(*arg)?);
+                CallArgumentStorage::TypedBorrow
             } else {
-                values.extend(self.local_flat_values(*arg)?);
+                let indirect = self.module.indirect_aggregate_params.get(&callee)
+                    .is_some_and(|params| params.contains(&prepared_param.local));
+                let read_borrow = matches!(param,
+                    RuntimeClass::Ref { pointee, kind: RefKind::Const, view: RefView::Whole }
+                    if matches!(source, RuntimeClass::AggregateValue { .. })
+                        && source.shares_runtime_rep_with(self.module.db, pointee)
+                        && self.module.aggregate_is_memory_lowerable(source)
+                );
+                if indirect || read_borrow {
+                    if !self.scoped_arena
+                        && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
+                    {
+                        let role = if indirect { "an indirect aggregate value copy" }
+                            else { "a scoped aggregate borrow" };
+                        return Err(LowerError::Internal(format!(
+                            "call to `{}` requires {role}, but the callee failed the arena escape proof",
+                            self.module.function_symbol(callee),
+                        )));
+                    }
+                    materializes = true;
+                    if indirect {
+                        if !matches!(param, RuntimeClass::AggregateValue { .. })
+                            || !source.shares_runtime_rep_with(self.module.db, param)
+                            || !self.module.aggregate_is_memory_lowerable(source)
+                        {
+                            return Err(LowerError::Internal(format!(
+                                "call to `{}` selected an incompatible indirect aggregate argument {arg:?}",
+                                self.module.function_symbol(callee),
+                            )));
+                        }
+                        if self.is_address_carried_aggregate_value(*arg) {
+                            let RuntimeClass::AggregateValue { layout } = source else {
+                                return Err(LowerError::Internal(format!(
+                                    "indirect aggregate argument {arg:?} lost its value layout",
+                                )));
+                            };
+                            CallArgumentStorage::OwnedDeepCopy(*layout)
+                        } else {
+                            CallArgumentStorage::OwnedMaterialization
+                        }
+                    } else {
+                        CallArgumentStorage::BorrowMaterialization
+                    }
+                } else {
+                    CallArgumentStorage::Flat
+                }
+            };
+            arguments.push(storage);
+        }
+        let lifetime = if !materializes {
+            CallTemporaryLifetime::None
+        } else if self.scoped_arena {
+            CallTemporaryLifetime::CallerFrame
+        } else if self.module.indirect_aggregate_returns.contains(&callee) {
+            // Rewinding at this call would invalidate its returned aggregate.
+            CallTemporaryLifetime::EnclosingResult
+        } else {
+            CallTemporaryLifetime::CallScope
+        };
+        Ok(CallStoragePlan { arguments, lifetime })
+    }
+
+    fn checked_call_arg_values(
+        &mut self,
+        callee: RuntimeInstance<'db>,
+        callee_ref: FuncRef,
+        args: &[RLocalId],
+    ) -> Result<(Vec<ValueId>, Option<ValueId>), LowerError> {
+        // Validate every adaptation before emitting any temporary allocations.
+        let plan = self.plan_call_storage(callee, args)?;
+        let mut values = Vec::new();
+        let mut call_checkpoint = None;
+        for (arg, storage) in args.iter().zip(plan.arguments) {
+            if storage.materializes()
+                && plan.lifetime == CallTemporaryLifetime::CallScope
+                && call_checkpoint.is_none()
+            {
+                // Keep the checkpoint at the first materializing argument:
+                // preceding flat-argument loads retain their original order.
+                let checkpoint_ty = self.fb.ptr_type(Type::I8);
+                call_checkpoint = Some(
+                    self.fb.insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                );
+            }
+            match storage {
+                CallArgumentStorage::Flat => values.extend(self.local_flat_values(*arg)?),
+                CallArgumentStorage::TypedBorrow => values.push(self.local_value(*arg)?),
+                CallArgumentStorage::OwnedDeepCopy(layout) => {
+                    let source = self.local_value(*arg)?;
+                    values.push(self.lower_deep_object_copy(source, layout)?);
+                }
+                CallArgumentStorage::OwnedMaterialization
+                | CallArgumentStorage::BorrowMaterialization => {
+                    values.push(self.lower_materialize_to_object(*arg)?);
+                }
             }
         }
         let expected = self
