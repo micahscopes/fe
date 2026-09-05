@@ -56,7 +56,8 @@ tests in `/workspace/scratch/mb2-fe-raster-abi-plan-release.log`.
 heap/bump/trap transport, into that same pre-emission plan. Sixteen helper and
 five raster release tests passed in
 `/workspace/scratch/mb2-sonatina-physical-parameters-release.log`.
-Fe integration against this exact local revision is running in
+Fe integration against this exact local revision passed three Shader IR tests
+(1.87s) and six raster tests (8.09s) in
 `/workspace/scratch/mb2-fe-physical-helper-parameters-release.log`.
 Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
 `docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
