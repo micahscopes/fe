@@ -13,7 +13,7 @@ use sonatina_codegen::{
 };
 use sonatina_ir::{Linkage, Type};
 
-use super::{LowerError, wasm_lower};
+use super::{LowerError, portable_lower};
 
 /// An owning JIT artifact with one verified public `(i32, i32) -> i32` entry.
 ///
@@ -53,7 +53,7 @@ pub fn compile_runtime_package_native_i32_entry(
     package: &RuntimePackage<'_>,
     entry: &str,
 ) -> Result<NativeI32EntryArtifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let expected = vec![Type::I32, Type::I32];
     resolve_checked_entry(&module, entry, &expected, &[Type::I32])?;
     let expected_definitions = expected_definition_names(&module);
@@ -452,7 +452,7 @@ pub(crate) fn compile_runtime_package_native_surface_schedule(
     entry: &str,
     event_first: bool,
 ) -> Result<NativeSurfaceScheduleArtifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let state = [
         Type::I1,
         Type::I1,
@@ -501,7 +501,7 @@ pub(crate) fn compile_runtime_package_native_surface_recovery(
     entry: &str,
     event_first: bool,
 ) -> Result<NativeSurfaceRecoveryArtifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let event = [Type::I32, Type::I32, Type::I1, Type::I1, Type::I32];
     let state = [Type::I1, Type::I32];
     let expected_args = if event_first {
@@ -531,7 +531,7 @@ pub fn compile_runtime_package_native_surface_transition4_f32(
     package: &RuntimePackage<'_>,
     entry: &str,
 ) -> Result<NativeSurfaceTransition4F32Artifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let mut expected_args = vec![
         Type::F32,
         Type::F32,
@@ -635,7 +635,7 @@ pub fn compile_runtime_package_native_merkle_root_entry(
     package: &RuntimePackage<'_>,
     entry: &str,
 ) -> Result<NativeMerkleRootEntryArtifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let expected = vec![Type::I32; MERKLE_ROOT_NATIVE_ENTRY_ARITY];
     resolve_checked_entry(&module, entry, &expected, &[Type::I32])?;
     let expected_definitions = expected_definition_names(&module);
@@ -714,7 +714,7 @@ pub fn compile_runtime_package_native_grid_loop_entry(
     package: &RuntimePackage<'_>,
     entry: &str,
 ) -> Result<NativeGridLoopEntryArtifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let expected = vec![Type::I32; GRID_LOOP_NATIVE_ENTRY_ARITY];
     resolve_checked_entry(&module, entry, &expected, &[Type::I32])?;
     let expected_definitions = expected_definition_names(&module);
@@ -814,7 +814,7 @@ pub fn compile_runtime_package_native_merkle8_root_entry(
     package: &RuntimePackage<'_>,
     entry: &str,
 ) -> Result<NativeMerkle8RootEntryArtifact, LowerError> {
-    let module = wasm_lower::compile_runtime_package_native(db, package)?;
+    let module = portable_lower::compile_runtime_package_native(db, package)?;
     let expected = vec![Type::I32; MERKLE8_ROOT_NATIVE_ENTRY_ARITY];
     resolve_checked_entry(&module, entry, &expected, &[Type::I32])?;
     let expected_definitions = expected_definition_names(&module);

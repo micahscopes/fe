@@ -9,7 +9,7 @@
 use crate::sonatina::{
     LowerError,
     bloat_capture::{CaptureConfig, CaptureObserver, Intervention},
-    wasm_lower::compile_runtime_package_shader_ir,
+    portable_lower::compile_runtime_package_shader_ir,
 };
 use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;

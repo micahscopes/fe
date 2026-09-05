@@ -21,6 +21,32 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+### Target entry and Wasm synthesis separation (2026-09-05)
+
+Published Fe `3b7fcea19` pins published Sonatina `1bbd24a0`. The latter
+preserves exact typed zero construction, reducing the measured 19-stage corpus
+from 2,706,004 to 2,531,533 WGSL bytes. This is not a proof runtime measurement.
+Fe `dc90984b4` derives realization policy from the selected ISA rather than
+accepting independently selectable storage, validation and copy-policy flags.
+
+The current extraction moves shared body construction to `portable_lower`.
+Shader and native callers enter it directly. Wasm entry orchestration and
+roughly 2,100 lines of host-wrapper synthesis move into `portable_lower::wasm`,
+with synthesis implemented only for `PortableModuleLowerer<Wasm32>`.
+Canonical memory operations and shared resumable/body representation remain
+in the common builder; this does not claim all Wasm-shaped assumptions removed.
+
+The final extraction passes five focused release shader/storage tests (2.63s).
+The extracted Wasm path passes both resident actor execution tests, including
+the independent event oracle (1.60s), and canonical DOMString import execution
+(1.38s). The arena-plan corruption gate passes in 6.29s. These are focused
+regressions, not a fresh full backend or production browser receipt gate.
+The first extraction also passed 26 unit tests; its broadened module-name
+filter exposed the previously observed MvT5 residual-count failure, expected
+`(102, 6)` versus actual `(8, 8)`. That assertion remains unchanged and open.
+Logs: `/workspace/scratch/mb2-portable-module-split-20260905.log` and
+`/workspace/scratch/mb2-wasm-synthesis-split-20260905.log`.
+
 ### Aggregate transport checkpoint and follow-through experiments (2026-09-05)
 
 Fe `e8744fdf3` preserves eligible private shader aggregate transport. The same

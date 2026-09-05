@@ -11,7 +11,8 @@ mod materialized_task;
 mod native;
 #[cfg(feature = "spirv-backend")]
 mod spirv_lower;
-mod wasm_lower;
+mod portable_lower;
+use portable_lower::wasm as wasm_lower;
 
 pub use materialized_task::{
     HOST_COMPLETION_RUNTIME_JS, MATERIALIZED_TASK_RUNTIME_JS, WasmTaskAdapter,
@@ -64,7 +65,7 @@ pub use spirv_lower::{
 pub use wasm_lower::compile_runtime_package_wasm;
 #[cfg(feature = "sonatina-indirect-calls")]
 pub use wasm_lower::compile_runtime_package_wasm_with_guest_callbacks;
-pub(crate) use wasm_lower::module_emits_dynamic_alloc;
+pub(crate) use portable_lower::module_emits_dynamic_alloc;
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -487,7 +488,7 @@ pub fn compile_runtime_package_wasm_with_options(
             manifest
         };
         backend.with_canonical_stack_memory(manifest)
-    } else if options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module) {
+    } else if options.canonical_arena || portable_lower::module_emits_dynamic_alloc(&module) {
         backend.with_canonical_arena()
     } else {
         backend
@@ -541,7 +542,7 @@ pub fn prepare_runtime_package_wasm_with_options(
         sonatina_codegen::optim::Pipeline::size().run(&mut module);
     }
     let canonical_arena =
-        options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module);
+        options.canonical_arena || portable_lower::module_emits_dynamic_alloc(&module);
     Ok(PreparedWasmEmission {
         module,
         import_modules,
