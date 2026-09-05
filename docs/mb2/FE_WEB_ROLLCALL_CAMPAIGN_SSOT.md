@@ -242,12 +242,25 @@ authored `__sub_i32` XOR body. Four existing floating-point MIR gates pass in
 These are identity/lowering gates, not claims that every operation/type pair is
 legal on every backend.
 
-Remaining: `ty/const_ty.rs::evaluate_int_const_expr_impl` has another numeric
-name parser for type-level integer evaluation, including ordinary method names
-and checked spellings. Its `ExternConstFnCall | UserConstFnCall` path must receive
-an authored-name collision regression and semantic reconciliation rather than
-a blind replacement. Resource vocabulary and full capability gating also
-remain unfinished; this is not the complete intrinsic capability system.
+The type-level evaluator follow-up reproduced a real authored-name collision:
+`evaluate_type_level_int_const_expr` treated an authored `add` XOR body as
+addition. Baseline evidence:
+`/workspace/scratch/mb2-type-level-name-collision-baseline.log`.
+Cleanup `a682afcb6`, transplanted onto mb2, deletes that third numeric-name
+parser. Its arithmetic fast path now accepts only bodyless scalar declarations
+recognized by the shared typed identity, with matching primitive result type.
+Authored calls use the existing CTFE body evaluator instead of guessing their
+meaning from names. This also avoids replacing checked wrapper bodies with
+wrapping arithmetic in this shortcut.
+
+Two focused release tests pass in 32.90s: six authored names retain their XOR
+bodies, while eleven scalar arithmetic operations retain the fast path. Five
+existing CTFE canonicalization regressions pass in 9.31s, including checked
+runtime calls, mutation invalidation, aggregates, and signed minimum literals.
+Evidence: `/workspace/scratch/mb2-type-level-name-collision-repair.log` and
+`/workspace/scratch/mb2-type-level-ctfe-regression.log`.
+Resource vocabulary and full capability gating remain unfinished; these gates
+do not establish whole-prover/browser behavior or complete the target cleanup.
 
 Browser capstone preflight on September 5 is not green. The Node-based existing
 health harness timed out navigating to `http://10.0.0.2:8024/health.html` before
