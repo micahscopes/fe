@@ -21,6 +21,33 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Arena frame planning landed as `acdf6eada` on mb2 (`5965d9268` in cleanup).
+The body storage plan counts static arena allocation sites and retained
+callee-owned results separately for the prologue and each reachable block.
+It accounts for parameter/scalar slots, value and argument copies, explicit
+object materialization, address-carried aggregate producers, return
+materialization, and `Malloc`. Existing escape legality plus planned demand
+decides frame creation before emission. Prologue/block emission must match
+the plan or compilation fails with function/site/count diagnostics. The
+post-hoc `remove_empty_scoped_arena` pass and `canonical_arena_used` boolean
+are deleted. These counts are not runtime allocation volume, high-water bounds,
+or a replacement for escape analysis or root-aware memory effects.
+All 28 focused release gates passed against unchanged published Sonatina
+`54c6c633`: arena-demand unit test, three Shader IR tests, seventeen typed
+allocation tests, five canonical-arena tests, and two target/arity tests.
+Build: 5m26s; Shader 8.31s, typed allocation 27.10s, canonical arena 7.26s.
+Logs: `/workspace/scratch/mb2-planned-arena-{build,unit,shader,typed,canonical,targets}.log`.
+No production/browser performance measurement is implied.
+
+Publication reconciliation is now unblocked: a read-only remote check found
+Sonatina `mb2-task-borrows` at `2804b9caf4a58ed3afb690f6e993aca9e015668c`.
+The local clean checkout matches it, and ancestry confirms it contains
+`6e50de9a` and the earlier arithmetic/native repairs. It also includes the
+separate Naga CFG fixes `a81222d9` and `2804b9ca`. No push was performed here.
+Next validate and pin that published candidate with the preserved Fe
+arithmetic/native integration, rather than continuing to carry the dependency
+mismatch. Fe's pin has not yet changed at this checkpoint.
+
 Value-copy storage planning landed as `a1a9bb786` on mb2 (`b9bf06a87` in the
 cleanup worktree). Reachable single-carrier `Use` assignments now receive a
 preconstruction choice of scalar-slot read, value/borrow forwarding, or an
