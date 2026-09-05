@@ -105,7 +105,8 @@ were not counted as passes. Chrome and production-prover gates remain open.
 high-water analysis into a reusable body plan consumed by emission. The
 combined candidate passed all 116 shader-backend tests with lavapipe in 2.95s:
 `/workspace/scratch/mb2-sonatina-entry-plan-combined-release.log`.
-Fe integration is running in `/workspace/scratch/mb2-fe-entry-plan-context-release.log`.
+Fe integration passed three Shader IR tests (1.91s) and six raster tests
+(9.14s) in `/workspace/scratch/mb2-fe-entry-plan-context-release.log`.
 This makes another prerequisite independently reusable; it is not yet the
 complete public contextual ABI query.
 
