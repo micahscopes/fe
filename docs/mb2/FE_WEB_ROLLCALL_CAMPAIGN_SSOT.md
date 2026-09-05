@@ -29,6 +29,30 @@ balanced storage/helper case, identical execution oracles, and attribution of
 Sonatina optimization benefit. No scalar-only shortcut or permanent second
 backend satisfies that gate.
 
+### Direct-route study: execution evidence, decision still open
+
+The disposable study has two initial Chrome execution results on AMD RDNA3:
+
+- Nested typed private structs and mutable/read-only helper borrows: six Naga
+  helpers, 6,776 WGSL bytes and 7,244 SPIR-V bytes. Eight inputs match the bigint
+  result/trap oracle, including three overflows.
+- Two attributed storage resources passed through identity/read helpers:
+  502 WGSL bytes and 1,120 SPIR-V bytes. Distinct, swapped, equal-content and
+  overflow inputs pass. A valid-WGSL wrong-index mutation fails all four cases.
+
+Neither result reports validation errors or device loss. The resource subset
+expands straight-line calls; it does not establish a general helper ABI or a
+production size advantage. Its resource-shape projection is deliberately
+scratch-only, not a second production classifier.
+
+The engineering timebox is 2026-09-05 21:15 through 23:15 UTC. Comparative
+Sonatina optimization benefit, matching physical layouts, and hard-production
+attribution remain open. The study cannot authorize a backend choice from
+these small results. Evidence logs are under `/workspace/scratch/`:
+`mb2-direct-naga-chrome-20260905.log`,
+`mb2-direct-naga-resource-chrome-20260905.log`, and
+`mb2-direct-naga-resource-negative-20260905.log`.
+
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
 Published Fe `3b7fcea19` pins published Sonatina `1bbd24a0`. The latter
