@@ -680,6 +680,7 @@ pub enum WebActorDraw {
 pub struct WebActorPassCycle {
     pub group: String,
     pub repeat: u32,
+    pub inner: Option<Box<WebActorPassCycle>>,
 }
 
 /// Compiler-derived physical contraction applied at actor-cycle boundaries.
@@ -923,6 +924,10 @@ fn compute_stage_shape(
         ));
     }
     if let (Some(taper), Some(cycle)) = (taper, cycle.as_ref()) {
+        let mut cycle = cycle;
+        while let Some(inner) = cycle.inner.as_deref() {
+            cycle = inner;
+        }
         let total_decrement = u64::from(taper.repeat_decrement)
             .checked_mul(u64::from(cycle.repeat - 1))
             .ok_or_else(|| {
@@ -1112,11 +1117,6 @@ fn compute_dispatch_shape(
             }
             let (dispatch, repeat, taper, cooperation, nested) =
                 compute_dispatch_shape(db, *inner)?;
-            if nested.is_some() {
-                return Err(WebBundleError::EntryDerivation(
-                    "nested actor pass cycles are not yet supported".to_owned(),
-                ));
-            }
             Ok((
                 dispatch,
                 repeat,
@@ -1125,6 +1125,7 @@ fn compute_dispatch_shape(
                 Some(WebActorPassCycle {
                     group: group.pretty_print(db).to_string(),
                     repeat: cycles,
+                    inner: nested.map(Box::new),
                 }),
             ))
         }
@@ -2119,41 +2120,42 @@ pub fn actor_gpu_program(
 
 fn validate_actor_pass_cycles(stages: &[WebActorStage]) -> Result<(), WebBundleError> {
     let mut completed = std::collections::HashSet::new();
-    let mut active: Option<&str> = None;
-    let mut active_repeat = 0;
+    let mut active: Vec<&WebActorPassCycle> = Vec::new();
     for stage in stages {
-        let cycle = match &stage.kind {
+        let mut chain = Vec::new();
+        let mut cycle = match &stage.kind {
             WebActorStageKind::Compute { cycle, .. } => cycle.as_ref(),
             _ => None,
         };
-        match cycle {
-            Some(cycle) if active == Some(cycle.group.as_str()) => {
-                if active_repeat != cycle.repeat {
-                    return Err(WebBundleError::EntryDerivation(format!(
-                        "actor pass cycle `{}` uses inconsistent repeat counts",
-                        cycle.group
-                    )));
-                }
+        while let Some(member) = cycle {
+            if chain.iter().any(|prior: &&WebActorPassCycle| prior.group == member.group) {
+                return Err(WebBundleError::EntryDerivation(
+                    format!("actor pass cycle `{}` cannot contain itself", member.group),
+                ));
             }
-            Some(cycle) => {
-                if let Some(previous) = active.take() {
-                    completed.insert(previous.to_owned());
-                }
-                if completed.contains(&cycle.group) {
-                    return Err(WebBundleError::EntryDerivation(format!(
-                        "actor pass cycle `{}` must occupy one consecutive stage range",
-                        cycle.group
-                    )));
-                }
-                active = Some(cycle.group.as_str());
-                active_repeat = cycle.repeat;
-            }
-            None => {
-                if let Some(previous) = active.take() {
-                    completed.insert(previous.to_owned());
-                }
+            chain.push(member);
+            cycle = member.inner.as_deref();
+        }
+        let common = active.iter().zip(&chain)
+            .take_while(|(a, b)| a.group == b.group).count();
+        for (a, b) in active[..common].iter().zip(&chain[..common]) {
+            if a.repeat != b.repeat {
+                return Err(WebBundleError::EntryDerivation(
+                    format!("actor pass cycle `{}` uses inconsistent repeat counts", a.group),
+                ));
             }
         }
+        for previous in &active[common..] {
+            completed.insert(previous.group.as_str());
+        }
+        for next in &chain[common..] {
+            if completed.contains(next.group.as_str()) {
+                return Err(WebBundleError::EntryDerivation(
+                    format!("actor pass cycle `{}` must occupy one consecutive stage range under one parent", next.group),
+                ));
+            }
+        }
+        active = chain;
     }
     Ok(())
 }
@@ -2161,7 +2163,7 @@ fn validate_actor_pass_cycles(stages: &[WebActorStage]) -> Result<(), WebBundleE
 fn validate_pass_activation_cycles(passes: &[WebPass]) -> Result<(), WebBundleError> {
     let mut index = 0;
     while index < passes.len() {
-        let Some(cycle) = passes[index].cycle else {
+        let Some(cycle) = passes[index].cycle.as_ref() else {
             index += 1;
             continue;
         };
@@ -2170,6 +2172,7 @@ fn validate_pass_activation_cycles(passes: &[WebPass]) -> Result<(), WebBundleEr
         while end < passes.len()
             && passes[end]
                 .cycle
+                .as_ref()
                 .is_some_and(|next| next.group == cycle.group)
         {
             if passes[end].activation != activation {
@@ -2188,7 +2191,7 @@ fn validate_pass_activation_cycles(passes: &[WebPass]) -> Result<(), WebBundleEr
 fn validate_pass_preparation_cycles(passes: &[WebPass]) -> Result<(), WebBundleError> {
     let mut index = 0;
     while index < passes.len() {
-        let Some(cycle) = passes[index].cycle else {
+        let Some(cycle) = passes[index].cycle.as_ref() else {
             index += 1;
             continue;
         };
@@ -2197,6 +2200,7 @@ fn validate_pass_preparation_cycles(passes: &[WebPass]) -> Result<(), WebBundleE
         while end < passes.len()
             && passes[end]
                 .cycle
+                .as_ref()
                 .is_some_and(|next| next.group == cycle.group)
         {
             if passes[end].preparation != preparation {
@@ -5956,10 +5960,25 @@ const fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebPassCycle {
     pub group: u32,
     pub repeat: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner: Option<Box<WebPassCycle>>,
+}
+
+fn lower_pass_cycle(cycle: WebActorPassCycle, groups: &mut Vec<String>) -> WebPassCycle {
+    let group = groups.iter().position(|group| group == &cycle.group)
+        .unwrap_or_else(|| {
+            groups.push(cycle.group);
+            groups.len() - 1
+        });
+    WebPassCycle {
+        group: u32::try_from(group).expect("actor pass cycle group count fits in u32"),
+        repeat: cycle.repeat,
+        inner: cycle.inner.map(|inner| Box::new(lower_pass_cycle(*inner, groups))),
+    }
 }
 
 const fn one_u32() -> u32 {
@@ -7278,19 +7297,7 @@ impl WebBundle {
                 &resource_field_indices,
             )?;
             let path = format!("{PASS_DIR}/{index:03}-{kind}.wgsl");
-            let cycle = cycle.map(|cycle| {
-                let group = cycle_groups
-                    .iter()
-                    .position(|group| group == &cycle.group)
-                    .unwrap_or_else(|| {
-                        cycle_groups.push(cycle.group);
-                        cycle_groups.len() - 1
-                    });
-                WebPassCycle {
-                    group: u32::try_from(group).expect("actor pass cycle group count fits in u32"),
-                    repeat: cycle.repeat,
-                }
-            });
+            let cycle = cycle.map(|cycle| lower_pass_cycle(cycle, &mut cycle_groups));
             passes.push(WebPass {
                 primitive: None,
                 source_entry: stage.source_entry.clone(),
@@ -8857,6 +8864,35 @@ mod tests {
     use super::*;
     use common::InputDb;
     use url::Url;
+
+    #[test]
+    fn nested_cycle_ranges_reject_reopening_reparenting_and_self_nesting() {
+        fn cycle(group: &str, repeat: u32, inner: Option<WebActorPassCycle>) -> WebActorPassCycle {
+            WebActorPassCycle { group: group.into(), repeat, inner: inner.map(Box::new) }
+        }
+        fn stage(cycle: WebActorPassCycle) -> WebActorStage {
+            WebActorStage {
+                source_entry: "work".into(),
+                kind: WebActorStageKind::Compute {
+                    workgroup_size: [1,1,1], dispatch: [1,1,1], repeat: 1,
+                    taper: None, cooperation: None, cycle: Some(cycle), invocation_context: false,
+                },
+            }
+        }
+        let outer = cycle("job",2,None);
+        let inner = cycle("job",2,Some(cycle("round",3,None)));
+        assert!(validate_actor_pass_cycles(&[
+            stage(outer.clone()),stage(inner.clone()),stage(inner.clone()),stage(outer.clone())
+        ]).is_ok());
+        for invalid in [
+            vec![stage(cycle("job",2,Some(outer.clone())))],
+            vec![stage(inner.clone()),stage(outer.clone()),stage(inner.clone())],
+            vec![stage(inner.clone()),stage(cycle("other",2,Some(cycle("round",3,None))))],
+            vec![stage(inner.clone()),stage(cycle("job",2,Some(cycle("round",4,None))))],
+        ] {
+            assert!(validate_actor_pass_cycles(&invalid).is_err());
+        }
+    }
 
     const SOURCE: &str = r#"
 pub fn ignored(x: u32, y: u32) -> u32 {

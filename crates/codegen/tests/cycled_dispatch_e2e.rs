@@ -112,9 +112,9 @@ fn nominal_cycle_executes_the_complete_actor_body_in_storage_order() {
             repeat_decrement: 1,
         })
     );
-    let cycle = compute[0].cycle.expect("first cycle member");
+    let cycle = compute[0].cycle.as_ref().expect("first cycle member");
     assert_eq!(cycle.repeat, 3);
-    assert_eq!(compute[1].cycle, Some(cycle));
+    assert_eq!(compute[1].cycle.as_ref(), Some(cycle));
     assert_eq!(bundle.manifest.passes[2].cycle, None);
 
     let receipt_binding = compute[0]

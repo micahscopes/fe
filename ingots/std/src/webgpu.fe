@@ -327,6 +327,9 @@ pub struct CooperativeDispatch<
 /// The compiler and fixed host execute that complete body `N` times. This lets
 /// Fe express a dependency such as challenge, fold, commit, and bind once,
 /// while a typed protocol schedule supplies its round count.
+/// Policies may nest: the outer group repeats the complete inner schedule.
+/// A group occupies one consecutive range under one parent and cannot contain
+/// itself. Tapering uses the innermost cycle's iteration, resetting per parent.
 #[gpu_dispatch(cycled)]
 pub struct CycledDispatch<Group, Dispatch, const N: usize> {}
 

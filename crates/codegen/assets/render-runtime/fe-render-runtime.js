@@ -1027,6 +1027,50 @@ export function wgslPayloadSummary(manifest) {
   };
 }
 
+/** Decode compiler-owned loop structure without expanding repeated commands.
+ * This is a physical interpreter; group identities/counts originate in Fe.
+ */
+export function planPassSchedule(records) {
+  const entries = [], closed = new Set();
+  let active = [];
+  for (const record of records) {
+    const chain = [], seen = new Set();
+    for (let cycle = record.pass.cycle; cycle != null; cycle = cycle.inner) {
+      if (!Number.isSafeInteger(cycle.group) || cycle.group < 0 || cycle.group > 0xffffffff ||
+          !Number.isSafeInteger(cycle.repeat) || cycle.repeat < 1 || cycle.repeat > 65535 ||
+          record.pass.layout.mode !== "compute" || seen.has(cycle.group)) {
+        throw new Error("fe render runtime: invalid compiler-derived actor pass cycle");
+      }
+      seen.add(cycle.group); chain.push(cycle);
+    }
+    let common = 0;
+    while (common < active.length && common < chain.length && active[common].group === chain[common].group) {
+      if (active[common].repeat !== chain[common].repeat) {
+        throw new Error("fe render runtime: inconsistent actor cycle repeat counts");
+      }
+      common += 1;
+    }
+    for (const cycle of active.slice(common)) closed.add(cycle.group);
+    for (const cycle of chain.slice(common)) {
+      if (closed.has(cycle.group)) throw new Error("fe render runtime: actor cycle reopened under another range or parent");
+    }
+    entries.push({record, chain}); active = chain;
+  }
+  const range = (start, end, depth) => {
+    const body = [];
+    for (let i = start; i < end;) {
+      const cycle = entries[i].chain[depth];
+      if (!cycle) { body.push({record: entries[i].record}); i += 1; continue; }
+      let next = i + 1;
+      while (next < end && entries[next].chain[depth]?.group === cycle.group) next += 1;
+      body.push({repeat: cycle.repeat, body: range(i, next, depth + 1)});
+      i = next;
+    }
+    return body;
+  };
+  return range(0, entries.length, 0);
+}
+
 /** Evaluate every distinct compiler-derived Fe pass policy exactly once for
  * one presentation and retain only records in the active subgraph. Pipeline
  * records themselves remain resident and are never rebuilt on mode changes. */
@@ -2661,46 +2705,22 @@ export class FeSurfaceElement extends HTMLElement {
           encoderMode = "render";
         }
       };
-      let passIndex = 0;
-      while (passIndex < activePassRecords.length) {
-        const record = activePassRecords[passIndex];
-        const cycle = record.pass.cycle;
-        if (cycle === undefined || cycle === null) {
-          await executeRecord(record);
-          passIndex += 1;
-          continue;
-        }
-        if (
-          !Number.isSafeInteger(cycle.group) || cycle.group < 0 || cycle.group > 0xffffffff ||
-          !Number.isSafeInteger(cycle.repeat) || cycle.repeat < 1 || cycle.repeat > 65535
-        ) {
-          throw new Error("fe render runtime: invalid compiler-derived actor pass cycle");
-        }
-        let cycleEnd = passIndex;
-        while (cycleEnd < activePassRecords.length) {
-          const member = activePassRecords[cycleEnd];
-          const memberCycle = member.pass.cycle;
-          if (memberCycle === undefined || memberCycle === null || memberCycle.group !== cycle.group) {
-            break;
+      const executeSchedule = async (body, iteration = null) => {
+        for (const node of body) {
+          if (node.record) {
+            await executeRecord(node.record, iteration);
+          } else {
+            // Preserve dependency order and bounded encoders at every nesting
+            // level. Inner iteration counters reset for each enclosing job.
+            submitEncoder();
+            for (let inner = 0; inner < node.repeat; inner += 1) {
+              await executeSchedule(node.body, inner);
+              submitEncoder();
+            }
           }
-          if (memberCycle.repeat !== cycle.repeat || member.pass.layout.mode !== "compute") {
-            throw new Error("fe render runtime: inconsistent compiler-derived actor pass cycle");
-          }
-          cycleEnd += 1;
         }
-        // A cycle is a compiler-derived dependency body. Queue submissions are
-        // ordered, so bounding each iteration in its own command buffer keeps
-        // the semantic phase order while avoiding protocol-sized encoders that
-        // destabilize browser WebGPU implementations.
-        submitEncoder();
-        for (let iteration = 0; iteration < cycle.repeat; iteration += 1) {
-          for (let memberIndex = passIndex; memberIndex < cycleEnd; memberIndex += 1) {
-            await executeRecord(activePassRecords[memberIndex], iteration);
-          }
-          submitEncoder();
-        }
-        passIndex = cycleEnd;
-      }
+      };
+      await executeSchedule(planPassSchedule(activePassRecords));
       if (capture && !texture) {
         throw new Error("fe render runtime: cannot capture a pass graph with no render pass");
       }

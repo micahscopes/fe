@@ -38,6 +38,34 @@ fn ingot_root(relative: &str) -> Url {
 }
 
 #[test]
+fn nested_actor_cycles_preserve_shared_stages_and_parent_order() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_nested_cycles");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::compute("finish", None))
+        .expect("nested actor stages compile once");
+    let passes = &bundle.manifest.passes;
+    assert_eq!(passes.len(), 6);
+    assert_eq!(bundle.pass_wgsl.len(), 6);
+    assert!(passes[0].cycle.is_none() && passes[5].cycle.is_none());
+    let outer = passes[1].cycle.as_ref().unwrap();
+    assert_eq!(outer.repeat, 2);
+    assert!(outer.inner.is_none());
+    assert_eq!(passes[4].cycle.as_ref(), Some(outer));
+    let nested = passes[2].cycle.as_ref().unwrap();
+    assert_eq!(nested.group, outer.group);
+    assert_eq!(nested.repeat, outer.repeat);
+    let inner = nested.inner.as_ref().unwrap();
+    assert_ne!(inner.group, outer.group);
+    assert_eq!(inner.repeat, 3);
+    assert!(inner.inner.is_none());
+    assert_eq!(passes[3].cycle.as_ref(), Some(nested));
+}
+
+#[test]
 fn actor_stage_and_reachable_helper_may_share_a_source_name() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_stage_same_name");
@@ -1946,6 +1974,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     let cycle = WebActorPassCycle {
         group: "ProtocolRound".to_owned(),
         repeat: 3,
+        inner: None,
     };
     assert_eq!(
         program.stages[0].kind,
@@ -1996,8 +2025,8 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
             repeat_decrement: 1,
         })
     );
-    let first_cycle = passes[0].cycle.expect("first cycle member");
-    let second_cycle = passes[1].cycle.expect("second cycle member");
+    let first_cycle = passes[0].cycle.as_ref().expect("first cycle member");
+    let second_cycle = passes[1].cycle.as_ref().expect("second cycle member");
     assert_eq!(first_cycle.group, 0);
     assert_eq!(first_cycle.repeat, 3);
     assert_eq!(second_cycle, first_cycle);

@@ -1,0 +1,30 @@
+use std::webgpu::{StorageBuffer,GpuProgram,WebGpuBackend,ComputeSurface,Workgroup,FixedDispatch,CycledDispatch}
+
+pub struct Job {}
+pub struct Round {}
+fn append(_ receipt:StorageBuffer<u32,32>,_ value:u32) {
+    let n=receipt.load(index:0)
+    receipt.store(index:n+1,value:value)
+    receipt.store(index:0,value:n+1)
+}
+actor NestedCycles uses (GpuProgram<WebGpuBackend>) {
+    receipt:StorageBuffer<u32,32>,
+    fn initialize(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        self.receipt.store(index:0,value:0)
+    }
+    fn begin(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<Job,FixedDispatch<1,1,1>,2>>) {
+        append(self.receipt,1)
+    }
+    fn first(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<Job,CycledDispatch<Round,FixedDispatch<1,1,1>,3>,2>>) {
+        append(self.receipt,2)
+    }
+    fn second(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<Job,CycledDispatch<Round,FixedDispatch<1,1,1>,3>,2>>) {
+        append(self.receipt,3)
+    }
+    fn end(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<Job,FixedDispatch<1,1,1>,2>>) {
+        append(self.receipt,4)
+    }
+    fn finish(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        append(self.receipt,5)
+    }
+}
