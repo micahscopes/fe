@@ -76,7 +76,13 @@ The early intrinsic gate separately passed its RMIR-only test (14.17s), all
 `/workspace/scratch/mb2-early-intrinsic-rmir-release.log`,
 `/workspace/scratch/mb2-early-intrinsic-f32-release.log`, and
 `/workspace/scratch/mb2-early-intrinsic-authored-release.log`.
-Full live-mb2 and Chrome capstone validation remain open, as do the broader
+Live mb2 then passed all four authored-raster tests present on that branch in
+19.37s, after an 8m01s release rebuild. These cover nominal varying derivation,
+payload rejection, shared content-addressed resources, and ordered mixed pass
+graphs. Evidence: `/workspace/scratch/mb2-main-naga-integration-raster-release.log`.
+The six-test cleanup run also includes two tests not yet present in live mb2;
+the two test counts must not be conflated. Broader live-mb2 and Chrome capstone
+validation remain open, as do the broader
 storage, intrinsic-family, CFG-normal-form, and direct-route study obligations.
 
 The following paragraphs record intermediate extraction gates. The earlier
