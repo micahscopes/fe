@@ -21,6 +21,22 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Value-copy storage planning landed as `a1a9bb786` on mb2 (`b9bf06a87` in the
+cleanup worktree). Reachable single-carrier `Use` assignments now receive a
+preconstruction choice of scalar-slot read, value/borrow forwarding, or an
+independent aggregate copy with a fixed layout. Typed borrow compatibility is
+checked by the plan. The emitter consumes those choices and no longer retains
+binding facts or the three fresh/object/borrow classification helpers. Erased
+and flattened assignments retain their distinct handling. This makes another
+source of synthesized allocation explicit; it does not yet remove empty-frame
+repair or constitute complete allocation planning.
+The isolated increment passed 25 release gates against unchanged Sonatina
+`54c6c633`: three Shader IR/validation tests (6.45s), seventeen typed-allocation
+execution/rejection tests (23.67s), and five canonical-arena tests (7.64s).
+Build: 3m29s. Logs: `/workspace/scratch/mb2-value-copy-storage-{build,shader,typed,arena}.log`.
+Pending arithmetic edits were preserved separately during validation and
+restored afterward. No whole-prover size, memory, or browser result is claimed.
+
 Residual-call result ownership now belongs to the preconstruction body storage
 plan: `ea871358d` on mb2 (`6d00c2cc5` in the cleanup worktree). The plan keeps
 callee-allocated result storage distinct from argument materialization and
