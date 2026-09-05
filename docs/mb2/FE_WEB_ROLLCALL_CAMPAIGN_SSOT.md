@@ -142,6 +142,16 @@ shader size; it does not explain earlier reductions. Evidence:
 `/workspace/scratch/mb2-boundary-production-linear-plan-fe-parent-release.log`.
 The integration was restored afterward and both source hashes verified.
 
+Sonatina `c2bbc9e9` adds the outlined-call counterpart of the loop-exit return
+regression. The same loop exercises header, conditional, and jump exits both
+as a shader entry and as a private helper. The test requires one retained
+helper body and call, and checks that caller computation after the call still
+executes. Both numerical tests ran on llvmpipe; the full shader-backend target
+passed 117 tests in 2.82s. Evidence:
+`/workspace/scratch/mb2-sonatina-outlined-loop-return-suite-release.log`.
+This strengthens the CFG/call boundary gate, not the contextual ABI query or
+the hardware-browser capstone. The Sonatina commit remains local and unpushed.
+
 Legend:
 
 - `[x]` implemented and backed by the cited gate
