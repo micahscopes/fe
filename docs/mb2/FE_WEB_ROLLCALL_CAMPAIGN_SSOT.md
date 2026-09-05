@@ -38,10 +38,16 @@ order. Native return lowering also discarded unresolved operands via
 propagates return-resolution errors. All 30 Cranelift backend tests pass,
 including six loop-layout permutations and both straight-line layouts.
 Evidence: `/workspace/scratch/mb2-native-block-order-{baseline,repair}.log`.
-The exact Fe renderer rerun against this local fix is pending in
-`/workspace/scratch/mb2-native-cfg-order-fe-capstone.log`. The new native fix
-is not published here, and the combined Fe pin/arithmetic/fallback-deletion
-increment is not yet landed. No shader-size improvement is claimed.
+The exact Fe renderer rerun against this local fix passed: all 262,144 pixels
+match the independent Q12 oracle (1.39s test time after a 1m43s build).
+All seven selected native regressions then passed in 10.92s; the expensive
+field/Poseidon cases were excluded, not counted green. Evidence:
+`/workspace/scratch/mb2-native-cfg-order-fe-capstone.log` and
+`/workspace/scratch/mb2-native-cfg-order-fe-regressions.log`.
+The new native fix is committed locally but unpublished; the remote remains
+`2804b9ca`. Publication requires explicit approval before the combined Fe
+pin/arithmetic/fallback-deletion increment can use a reproducible published
+revision. No shader-size improvement or browser proof execution is claimed.
 
 Arena frame planning landed as `acdf6eada` on mb2 (`5965d9268` in cleanup).
 The body storage plan counts static arena allocation sites and retained
@@ -61,14 +67,15 @@ Build: 5m26s; Shader 8.31s, typed allocation 27.10s, canonical arena 7.26s.
 Logs: `/workspace/scratch/mb2-planned-arena-{build,unit,shader,typed,canonical,targets}.log`.
 No production/browser performance measurement is implied.
 
-Publication reconciliation is now unblocked: a read-only remote check found
+The earlier publication reconciliation found
 Sonatina `mb2-task-borrows` at `2804b9caf4a58ed3afb690f6e993aca9e015668c`.
-The local clean checkout matches it, and ancestry confirms it contains
+Ancestry confirms it contains
 `6e50de9a` and the earlier arithmetic/native repairs. It also includes the
 separate Naga CFG fixes `a81222d9` and `2804b9ca`. No push was performed here.
-Next validate and pin that published candidate with the preserved Fe
-arithmetic/native integration, rather than continuing to carry the dependency
-mismatch. Fe's pin has not yet changed at this checkpoint.
+The validation above exposed the additional native fix, so the final pin must
+include `08890027`, not stop at this earlier candidate. Live mb2 still pins
+`54c6c633`; the cleanup candidate pins `2804b9ca`, with its local test override
+removed from the lockfile after validation.
 
 Value-copy storage planning landed as `a1a9bb786` on mb2 (`b9bf06a87` in the
 cleanup worktree). Reachable single-carrier `Use` assignments now receive a
