@@ -56,7 +56,9 @@ resources (1), and native scalar/control-flow execution (2). Logs:
 `/workspace/scratch/mb2-planned-ssa-carriers-validated-release.log` and
 `/workspace/scratch/mb2-planned-ssa-carriers-native-release.log`. The change is
 reconciled into the cleanup worktree as `9ee175e4f`; combined Shader-candidate
-validation is running. Its broader gates exposed an obsolete payload-enum
+validation passed three Shader IR and six authored raster tests. Evidence:
+`/workspace/scratch/mb2-shader-planned-carriers-release.log`.
+Its broader gates exposed an obsolete payload-enum
 rejection test, reproduced on the unchanged parent. `dbe192493` corrects that
 test to execute supported payload values and trap invalid host tags; both enum
 tests passed against the unchanged compiler. Parent/revised evidence:
