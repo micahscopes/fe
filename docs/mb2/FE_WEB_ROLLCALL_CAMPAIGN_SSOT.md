@@ -126,6 +126,16 @@ and replacement of Fe's type whitelist remain unfinished. The temporary
 lockfile override is removed. Publication permission for Sonatina through
 `9347f7c2` has been requested, not assumed; the portable Fe pin is unchanged.
 
+Focused production measurement on the pending Fe integration plus Sonatina
+`9347f7c2`: `production_sparse_linear_plan_lowers_in_isolation` passed with
+56,001 WGSL bytes, 30 helper functions, and 2,150 expressions in the reparsed
+Naga artifact. Lowering took 9,814ms; measured setup/lowering/validation took
+12,371ms. Evidence: `/workspace/scratch/mb2-boundary-production-linear-plan-release.log`.
+This is a real production-stage structural gate, not numerical execution or a
+complete proof. The expression count is not the pre-writer backend census.
+A same-input controlled baseline is still required to attribute size savings
+to the current cleanup; historical byte counts alone do not establish that.
+
 Legend:
 
 - `[x]` implemented and backed by the cited gate
