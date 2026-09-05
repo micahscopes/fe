@@ -359,15 +359,20 @@ not a reproducible causal A/B or proof behavior gate.
 
 Concrete follow-ups, with ownership kept distinct:
 
-- Compiler recorder entry coverage: the public scalar shader adapter
-  `compile_runtime_package_spirv_with_workgroup` reaches
-  `inline_spirv_calls_from_roots` with `capture: None`, whereas explicit browser
-  requests construct the shared capture observer. The direct-route study's
-  `typed_storage.fe` baseline uses that scalar adapter, so setting
-  `FE_BLOAT_CAPTURE_DIR` alone cannot produce its stage sequence. Success:
-  scalar and explicit-resource requests use the same recorder lifecycle while
-  preserving their target contracts and physical layouts. Do not add a second
-  recorder or silently claim the compute capture covers this path.
+- Compiler recorder entry coverage, closed for scalar and grid adapters: these
+  formerly passed `capture: None` into rooted inlining. They now share
+  `compile_observed_shader` with explicit browser requests while retaining their
+  existing backend contracts and helper queries. Release regressions verify
+  observation-on/off WGSL and SPIR-V equality, exact captured artifact bytes,
+  partial-budget behavior and strict-budget rejection (11.89s). The existing
+  attributed compute/fragment regression also passes (2.76s); its typed record
+  stores were executed in Chrome and read back as `[1065353216, 3221225472]`.
+  The direct-route study's scalar capture was imported and replay-verified:
+  `/workspace/scratch/mb2-study-scalar-20260905.capture.json`. It records 59
+  initial module instructions, 52 final instructions and 1,941 WGSL bytes.
+  Logs: `mb2-scalar-observation-test-20260905.log`,
+  `mb2-observed-explicit-resource-test-20260905.log`, and
+  `mb2-resource-store-browser-20260905.log` under `/workspace/scratch/`.
 - Compiler recorder: snapshots before and after RMIR preparation, including
   instance, argument-shape specialization, pass identity and occurrence ordinal.
   Reproducer: `mvt5_f32_nested_helper_render.fe`. Its old residual-count test

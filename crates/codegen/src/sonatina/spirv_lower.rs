@@ -91,20 +91,17 @@ pub fn compile_runtime_package_spirv_with_workgroup(
         workgroup_size[1],
         workgroup_size[2],
     );
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions, &backend)?;
-    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
-
-    backend
-        .compile_entry(&module, entry_functions[0])
-        .map_err(|errors| {
-            LowerError::Spirv(
-                errors
-                    .iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })
+    let entry = entry_functions.first().copied().ok_or_else(|| {
+        LowerError::Spirv("shader package has no runtime section entry".to_owned())
+    })?;
+    compile_observed_shader(
+        &mut module,
+        &[entry],
+        "legacy_scalar",
+        |module| backend.analyze_entry_helpers(module, entry),
+        |module| backend.compile_entry(module, entry),
+        |_, _| {},
+    )
 }
 
 /// Lower an explicit unit-returning compute stage with compiler-described
@@ -188,6 +185,33 @@ fn compile_webgpu_request(
         ShaderPipeline::LegacyScalar { .. } => "legacy_scalar",
         ShaderPipeline::LegacyGrid { .. } => "legacy_grid",
     };
+    compile_observed_shader(
+        module,
+        &roots,
+        pipeline_name,
+        |module| NagaBackend::analyze_request_helpers(module, &request),
+        |module| NagaBackend::compile_request(module, &request),
+        |module, phase| trace_contextual_helper_analysis(module, &request, phase),
+    )
+}
+
+/// One recorder lifecycle for shader drivers. Callers retain ownership of their
+/// target contract and backend legality query; observation cannot change either.
+fn compile_observed_shader(
+    module: &mut sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+    pipeline_name: &str,
+    analyze: impl FnOnce(
+        &sonatina_ir::Module,
+    ) -> Result<
+        sonatina_codegen::isa::naga::ShaderHelperAnalysis,
+        Vec<sonatina_codegen::isa::naga::SpirvError>,
+    >,
+    compile: impl FnOnce(
+        &sonatina_ir::Module,
+    ) -> Result<SpirvArtifact, Vec<sonatina_codegen::isa::naga::SpirvError>>,
+    trace: impl Fn(&sonatina_ir::Module, &str),
+) -> Result<SpirvArtifact, LowerError> {
     let strict_observation = std::env::var_os("FE_OBSERVE_STRICT").is_some();
     let mut capture = match std::env::var_os("FE_BLOAT_CAPTURE_DIR") {
         None => None,
@@ -221,7 +245,7 @@ fn compile_webgpu_request(
                         .unwrap_or(100_000),
                 },
                 module,
-                &roots,
+                roots,
                 pipeline_name,
             );
             match observer {
@@ -234,11 +258,11 @@ fn compile_webgpu_request(
             }
         }
     };
-    trace_contextual_helper_analysis(module, &request, "before_inline");
+    trace(module, "before_inline");
     let preserved_helpers = match inline_spirv_calls_from_roots(
         module,
-        &roots,
-        |module| NagaBackend::analyze_request_helpers(module, &request),
+        roots,
+        analyze,
         capture.as_mut(),
     ) {
         Ok(helpers) => helpers,
@@ -255,9 +279,9 @@ fn compile_webgpu_request(
             return Err(error);
         }
     };
-    trace_contextual_helper_analysis(module, &request, "after_inline");
-    for &entry in &roots {
-        if let Err(error) = ensure_spirv_entry_calls_lowerable(module, &[entry], &preserved_helpers)
+    trace(module, "after_inline");
+    for &entry in roots {
+        if let Err(error) = ensure_spirv_entry_calls_lowerable(module, entry, &preserved_helpers)
         {
             if let Some(observer) = capture.take() {
                 observer
@@ -271,7 +295,7 @@ fn compile_webgpu_request(
             return Err(error);
         }
     }
-    match NagaBackend::compile_request(module, &request) {
+    match compile(module) {
         Ok(artifact) => {
             if let Some(observer) = capture.take() {
                 if let Err(error) = observer.complete(&artifact, "final") {
@@ -373,20 +397,17 @@ pub fn compile_runtime_package_spirv_grid(
     let backend = SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
         .with_grid();
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions, &backend)?;
-    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
-
-    backend
-        .compile_entry(&module, entry_functions[0])
-        .map_err(|errors| {
-            LowerError::Spirv(
-                errors
-                    .iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })
+    let entry = entry_functions.first().copied().ok_or_else(|| {
+        LowerError::Spirv("shader package has no runtime section entry".to_owned())
+    })?;
+    compile_observed_shader(
+        &mut module,
+        &[entry],
+        "legacy_grid",
+        |module| backend.analyze_entry_helpers(module, entry),
+        |module| backend.compile_entry(module, entry),
+        |_, _| {},
+    )
 }
 
 /// Lower a MIR runtime package to naga-validated SPIR-V in RENDER mode: ONE
@@ -548,24 +569,6 @@ pub fn compile_render_wgsl<'db>(
 ) -> Result<SpirvArtifact, LowerError> {
     let package = build_wasm_runtime_package_for_entry(db, top_mod, entry)?;
     compile_runtime_package_spirv_render(db, &package)
-}
-
-fn inline_spirv_calls(
-    module: &mut sonatina_ir::Module,
-    roots: &[sonatina_ir::module::FuncRef],
-    backend: &SpirvBackend,
-) -> Result<std::collections::HashSet<sonatina_ir::module::FuncRef>, LowerError> {
-    // The legacy single-entry API selects the first runtime section. Preserve
-    // that policy without relying on Sonatina declaration order.
-    let entry = roots.first().copied().ok_or_else(|| {
-        LowerError::Spirv("shader package has no runtime section entry".to_owned())
-    })?;
-    inline_spirv_calls_from_roots(
-        module,
-        &[entry],
-        |module| backend.analyze_entry_helpers(module, entry),
-        None,
-    )
 }
 
 fn inline_spirv_calls_from_roots(
@@ -1572,14 +1575,9 @@ fn spirv_module_instruction_count(module: &sonatina_ir::Module) -> usize {
 
 fn ensure_spirv_entry_calls_lowerable(
     module: &sonatina_ir::Module,
-    entries: &[sonatina_ir::module::FuncRef],
+    entry: sonatina_ir::module::FuncRef,
     preserved_helpers: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
 ) -> Result<(), LowerError> {
-    let Some(&entry) = entries.first() else {
-        return Err(LowerError::Spirv(
-            "SPIR-V module has no runtime section entry".to_owned(),
-        ));
-    };
     let entry_name = module
         .ctx
         .get_sig(entry)
