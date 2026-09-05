@@ -21,6 +21,24 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Grid request migration is committed in cleanup as `b1f65e3dd`, pending final
+dependency reconciliation before integration on mb2. It routes the grid word
+interface through the explicit WebGPU request, replacing its legacy builder
+path. Scalar remains compatible with i64: the attempted blanket WebGPU
+migration correctly failed the existing keystone with `SHADER_INT64` missing,
+so a real Vulkan profile is required before removing that adapter.
+The grid runner now consumes declared bindings and checks every invocation's
+trap status. Its previous two-binding layout failed on both baseline and
+candidate with the newly emitted checked-arithmetic trap channel.
+With published Sonatina `2804b9ca` plus the pending Fe arithmetic integration,
+the repaired runner passes 4,096-word gradient parity (2.90s), intentional
+overflow rejection at invocation 1 (10.73s), and all 262,144 Mandelbrot renderer
+pixels against both Wasmtime and the independent oracle (29.35s). Execution
+used llvmpipe with GPU skipping disabled, not Chrome. The scalar i64 validation
+and eight checked grid arithmetic emission cases also pass. No STARK proof or
+production shader-size claim follows. Logs: `/workspace/scratch/mb2-grid-status-*.log`
+and `/workspace/scratch/mb2-explicit-grid-profile-*.log`.
+
 The published `2804b9ca` integration candidate now passes Wasm checked
 arithmetic (4 gates), generic numeric identity/rejection (2), Shader storage
 (3), typed allocation (17), canonical arena (5), and the eight-case checked
