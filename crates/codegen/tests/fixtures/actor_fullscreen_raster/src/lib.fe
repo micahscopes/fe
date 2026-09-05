@@ -1,0 +1,16 @@
+use std::webgpu::{
+    Depth24LessEqualMsaa4,
+    FragmentSurface,
+    GpuProgram,
+    RasterConfiguration,
+    RasterPlan,
+    WebGpuBackend,
+    raster_plan,
+}
+
+actor FullscreenRaster uses (GpuProgram<WebGpuBackend>) {
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
+    fn background(self, x: i32, y: i32) -> i32 uses (FragmentSurface) { -65536 }
+}

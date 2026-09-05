@@ -1092,7 +1092,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=10).contains(&version) {
+    if !(4..=11).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),
@@ -4837,6 +4837,39 @@ mod tests {
         let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
         assert_eq!(report.modules, 1);
         assert_eq!(report.files, output.assets.len());
+    }
+
+    #[test]
+    fn protocol_v11_deployment_preserves_view_independent_raster_policy() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let mut bundle = fake_v10_binding_stage_bundle();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(11);
+        manifest.as_object_mut().unwrap().remove("surface");
+        let raster = serde_json::json!({"sample_count": 4, "cull_mode": "none"});
+        manifest["raster"] = raster.clone();
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(bundle.clone())),
+        )
+        .unwrap();
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+        let bytes = output
+            .assets
+            .iter()
+            .find(|(name, _)| name.ends_with(".json"))
+            .unwrap()
+            .1;
+        let published: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(published["raster"], raster);
+        assert!(published.get("surface").is_none());
     }
 
     #[test]

@@ -67,7 +67,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 10;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 11;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
@@ -171,6 +171,10 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
     let write_buffer = operation("GPUQueue", "writeBuffer");
     let draw = operation("GPURenderPassEncoder", "draw");
     let draw_indirect = operation("GPURenderPassEncoder", "drawIndirect");
+    let blend_constant = operation("GPURenderPassEncoder", "setBlendConstant");
+    let color_dict_case = fe_webidl_bindgen::canonical_union_case_name(
+        &fe_webidl_bindgen::TypeRef::Named("GPUColorDict".into()),
+    );
     let semantic = fe_webidl_bindgen::emit_js_canonical_adapter(&world, &plan)
         .expect("pinned WebGPU runtime semantic adapter must emit");
     format!(
@@ -194,6 +198,9 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
                    queueHandle, bufferHandle, BigInt(bufferOffset), data, BigInt(dataOffset),\n          \
                    size === undefined ? undefined : BigInt(size),\n        \
                  ))),\n  \
+           renderBlendConstant: (renderPass, color) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
+               feWebGpuOperations[{blend_constant:?}](renderPassHandle, {{ case: {color_dict_case:?}, value: color }})),\n  \
            renderDraw: (renderPass, vertexCount, instanceCount = 1, firstVertex = 0, firstInstance = 0) =>\n    \
              feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
                feWebGpuOperations[{draw:?}](\n        \
@@ -5391,7 +5398,6 @@ fn project_surface(
     source_entry: &str,
     layout: &WebLayout,
     resource_field_indices: &[u32],
-    raster: Option<serde_json::Value>,
 ) -> Result<Option<WebSurface>, WebBundleError> {
     let decls = hir::lower::module_actor_decls(db, top_mod);
     let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
@@ -5513,7 +5519,7 @@ fn project_surface(
             } else {
                 "fullscreen_fragment".to_string()
             },
-            raster,
+            raster: None,
         },
         params,
         state: WebSurfaceState {
@@ -5890,6 +5896,11 @@ fn is_one_u32(value: &u32) -> bool {
 // retained for the round-trip tests. Nothing keys a manifest by hash/equality.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebBundleManifest {
+    /// Fe-authored render policy, independent of the optional UI view.
+    /// Protocol v11 moves this out of `surface.pipeline` so UI-free actors
+    /// cannot silently lose depth, multisampling, or color semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raster: Option<serde_json::Value>,
     pub protocol: String,
     pub protocol_version: u32,
     pub source_entry: String,
@@ -5968,8 +5979,9 @@ pub struct WebExtent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebPipeline {
     pub kind: String,
-    /// CTFE-evaluated Fe raster plan. Omitted when the actor does not provide a
-    /// `RasterConfiguration` behavior so existing color-only bundles stay compact.
+    /// Legacy v10-and-earlier location, retained for deserializing old bundles.
+    /// New bundles emit raster policy only in `WebBundleManifest::raster`,
+    /// independently of whether the actor has a UI description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raster: Option<serde_json::Value>,
 }
@@ -7472,7 +7484,6 @@ impl WebBundle {
             &options.source_entry,
             &layout,
             &resource_field_indices,
-            program.raster.clone(),
         )?;
         let provenance = options.provenance.with_bundle_shape(
             !wasm.is_empty(),
@@ -7484,6 +7495,7 @@ impl WebBundle {
             recovery_policy.is_some(),
         );
         let manifest = WebBundleManifest {
+            raster: program.raster.clone(),
             protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
             source_entry: options.source_entry,
@@ -7537,7 +7549,8 @@ impl WebBundle {
         let actor_program =
             with_isolated_compiler_database(db, top_mod, "<actor-program>", actor_gpu_program)?;
         if let Some(program) = actor_program
-            && (!program.resources.is_empty()
+            && (program.raster.is_some()
+                || !program.resources.is_empty()
                 || program.stages.iter().any(|stage| {
                     matches!(
                         stage.kind,
@@ -7839,7 +7852,7 @@ impl WebBundle {
         validate_browser_wgsl(&wgsl)?;
         let mut layout = WebLayout::from_spirv(&artifact.layout)?;
         project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[])?;
-        let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[], None)?;
+        let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[])?;
         let passes = vec![WebPass {
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),
@@ -7873,6 +7886,7 @@ impl WebBundle {
             recovery_policy.is_some(),
         );
         let manifest = WebBundleManifest {
+            raster: None,
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
             source_entry: options.source_entry,
@@ -8801,6 +8815,9 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains("gpu_queue_write_buffer"));
         assert!(runtime.contains("gpu_render_pass_encoder_draw"));
         assert!(runtime.contains("gpu_render_pass_encoder_draw_indirect"));
+        assert!(runtime.contains("gpu_render_pass_encoder_set_blend_constant"));
+        assert_eq!(runtime.matches("[\"setBlendConstant\"](").count(), 1);
+        assert!(!RENDER_RUNTIME_BASE_JS.contains(".setBlendConstant("));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.withBorrowed"));
         assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.take(bufferHandle)"));
         assert_eq!(

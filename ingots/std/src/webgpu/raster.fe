@@ -38,16 +38,145 @@ pub struct AttachmentOps {
     store: AttachmentStore,
 }
 
-pub struct ClearColor {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-}
+pub struct ClearColor { pub r: f32, pub g: f32, pub b: f32, pub a: f32 }
 
 pub struct ColorAttachmentPlan {
     clear: ClearColor,
     ops: AttachmentOps,
+    blend: Option<BlendState>,
+    write_mask: u32,
+    blend_constant: ClearColor,
+}
+
+/// Core WebGPU blend factors. Dual-source factors require a separate device
+/// feature and are deliberately not silently admitted by this portable policy.
+pub enum BlendFactor {
+    Zero,
+    One,
+    Src,
+    OneMinusSrc,
+    SrcAlpha,
+    OneMinusSrcAlpha,
+    Dst,
+    OneMinusDst,
+    DstAlpha,
+    OneMinusDstAlpha,
+    SrcAlphaSaturated,
+    Constant,
+    OneMinusConstant,
+}
+pub enum BlendOperation {
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max,
+}
+pub struct BlendComponent {
+    pub operation: BlendOperation,
+    pub src_factor: BlendFactor,
+    pub dst_factor: BlendFactor,
+}
+pub struct BlendState { pub color: BlendComponent, pub alpha: BlendComponent }
+impl Copy for BlendFactor {}
+impl Copy for BlendOperation {}
+impl Copy for BlendComponent {}
+impl Copy for BlendState {}
+
+pub const COLOR_WRITE_RED: u32 = 1
+pub const COLOR_WRITE_GREEN: u32 = 2
+pub const COLOR_WRITE_BLUE: u32 = 4
+pub const COLOR_WRITE_ALPHA: u32 = 8
+pub const COLOR_WRITE_ALL: u32 = 15
+
+pub trait RasterBlendPolicy {
+    const fn blend() -> Option<BlendState>
+}
+pub trait RasterBlendConstant {
+    const fn value() -> ClearColor
+}
+pub struct WithBlendConstant<Color, Constant> {}
+impl<
+    Color: RasterColorPolicy,
+    Constant: RasterBlendConstant,
+> RasterColorPolicy for WithBlendConstant<Color, Constant> {
+    const fn color() -> ColorAttachmentPlan {
+        let base = Color::color()
+        ColorAttachmentPlan {
+            clear: base.clear,
+            ops: base.ops,
+            blend: base.blend,
+            write_mask: base.write_mask,
+            blend_constant: Constant::value(),
+        }
+    }
+}
+pub struct ReplaceColor {}
+pub struct StraightAlpha {}
+pub struct PremultipliedAlpha {}
+pub struct AdditiveColor {}
+impl RasterBlendPolicy for ReplaceColor {
+    const fn blend() -> Option<BlendState> {
+        Option::None
+    }
+}
+const fn alpha_over_component() -> BlendComponent {
+    BlendComponent {
+        operation: BlendOperation::Add,
+        src_factor: BlendFactor::One,
+        dst_factor: BlendFactor::OneMinusSrcAlpha,
+    }
+}
+impl RasterBlendPolicy for StraightAlpha {
+    const fn blend() -> Option<BlendState> {
+        Option::Some(
+            BlendState {
+                color: BlendComponent {
+                    operation: BlendOperation::Add,
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                },
+                alpha: alpha_over_component(),
+            },
+        )
+    }
+}
+impl RasterBlendPolicy for PremultipliedAlpha {
+    const fn blend() -> Option<BlendState> {
+        Option::Some(
+            BlendState { color: alpha_over_component(), alpha: alpha_over_component() },
+        )
+    }
+}
+impl RasterBlendPolicy for AdditiveColor {
+    const fn blend() -> Option<BlendState> {
+        let component = BlendComponent {
+            operation: BlendOperation::Add,
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+        }
+        Option::Some(BlendState { color: component, alpha: component })
+    }
+}
+
+/// Compose color attachment ownership, blending, and write permissions without
+/// changing depth, samples, culling, or shader code. The mask is a WebGPU bitset.
+pub struct ColorTarget<Color, Blend, const WRITE_MASK: u32> {}
+impl<
+    Color: RasterColorPolicy,
+    Blend: RasterBlendPolicy,
+    const WRITE_MASK: u32,
+> RasterColorPolicy for ColorTarget<Color, Blend, WRITE_MASK> where WRITE_MASK <= 15 {
+    const fn color() -> ColorAttachmentPlan {
+        let base = Color::color()
+        ColorAttachmentPlan {
+            clear: base.clear,
+            ops: base.ops,
+            blend: Blend::blend(),
+            write_mask: WRITE_MASK,
+            blend_constant: base.blend_constant,
+        }
+    }
 }
 
 pub enum FaceCull {
@@ -158,6 +287,9 @@ impl<Ops: RasterAttachmentPolicy> RasterColorPolicy for OpaqueBlack<Ops> {
         ColorAttachmentPlan {
             clear: ClearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
             ops: Ops::ops(),
+            blend: Option::None,
+            write_mask: COLOR_WRITE_ALL,
+            blend_constant: ClearColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
         }
     }
 }
@@ -173,19 +305,21 @@ impl RasterDepthPolicy for NoDepth {
 pub struct DepthTest<Format, Compare, Write, Ops> {}
 
 impl<Format, Compare, Write, Ops> RasterDepthPolicy for DepthTest<Format, Compare, Write, Ops>
-    where Format: EnabledDepthFormat,
-          Compare: RasterDepthCompare,
-          Write: RasterDepthWrite,
-          Ops: RasterAttachmentPolicy
-{
+where
+    Format: EnabledDepthFormat,
+    Compare: RasterDepthCompare,
+    Write: RasterDepthWrite,
+    Ops: RasterAttachmentPolicy {
     const fn depth() -> DepthAttachment {
-        Option::Some(DepthPlan {
-            format: Format::format(),
-            compare: Compare::compare(),
-            write_enabled: Write::enabled(),
-            clear: Compare::clear(),
-            ops: Ops::ops(),
-        })
+        Option::Some(
+            DepthPlan {
+                format: Format::format(),
+                compare: Compare::compare(),
+                write_enabled: Write::enabled(),
+                clear: Compare::clear(),
+                ops: Ops::ops(),
+            },
+        )
     }
 }
 
@@ -193,11 +327,15 @@ pub struct Depth24Plus {}
 pub struct Depth32Float {}
 
 impl EnabledDepthFormat for Depth24Plus {
-    const fn format() -> DepthFormat { DepthFormat::Depth24Plus }
+    const fn format() -> DepthFormat {
+        DepthFormat::Depth24Plus
+    }
 }
 
 impl EnabledDepthFormat for Depth32Float {
-    const fn format() -> DepthFormat { DepthFormat::Depth32Float }
+    const fn format() -> DepthFormat {
+        DepthFormat::Depth32Float
+    }
 }
 
 pub struct CompareLess {}
@@ -207,50 +345,78 @@ pub struct CompareGreaterEqual {}
 pub struct CompareAlways {}
 
 impl RasterDepthCompare for CompareLess {
-    const fn compare() -> DepthCompare { DepthCompare::Less }
-    const fn clear() -> f32 { 1.0 }
+    const fn compare() -> DepthCompare {
+        DepthCompare::Less
+    }
+    const fn clear() -> f32 {
+        1.0
+    }
 }
 
 impl RasterDepthCompare for CompareLessEqual {
-    const fn compare() -> DepthCompare { DepthCompare::LessEqual }
-    const fn clear() -> f32 { 1.0 }
+    const fn compare() -> DepthCompare {
+        DepthCompare::LessEqual
+    }
+    const fn clear() -> f32 {
+        1.0
+    }
 }
 
 impl RasterDepthCompare for CompareGreater {
-    const fn compare() -> DepthCompare { DepthCompare::Greater }
-    const fn clear() -> f32 { 0.0 }
+    const fn compare() -> DepthCompare {
+        DepthCompare::Greater
+    }
+    const fn clear() -> f32 {
+        0.0
+    }
 }
 
 impl RasterDepthCompare for CompareGreaterEqual {
-    const fn compare() -> DepthCompare { DepthCompare::GreaterEqual }
-    const fn clear() -> f32 { 0.0 }
+    const fn compare() -> DepthCompare {
+        DepthCompare::GreaterEqual
+    }
+    const fn clear() -> f32 {
+        0.0
+    }
 }
 
 impl RasterDepthCompare for CompareAlways {
-    const fn compare() -> DepthCompare { DepthCompare::Always }
-    const fn clear() -> f32 { 1.0 }
+    const fn compare() -> DepthCompare {
+        DepthCompare::Always
+    }
+    const fn clear() -> f32 {
+        1.0
+    }
 }
 
 pub struct DepthReadOnly {}
 pub struct DepthWrite {}
 
 impl RasterDepthWrite for DepthReadOnly {
-    const fn enabled() -> bool { false }
+    const fn enabled() -> bool {
+        false
+    }
 }
 
 impl RasterDepthWrite for DepthWrite {
-    const fn enabled() -> bool { true }
+    const fn enabled() -> bool {
+        true
+    }
 }
 
 pub struct Samples1 {}
 pub struct Samples4 {}
 
 impl RasterSamples for Samples1 {
-    const fn sample_count() -> u32 { 1 }
+    const fn sample_count() -> u32 {
+        1
+    }
 }
 
 impl RasterSamples for Samples4 {
-    const fn sample_count() -> u32 { 4 }
+    const fn sample_count() -> u32 {
+        4
+    }
 }
 
 pub struct CullNone {}
@@ -258,23 +424,29 @@ pub struct CullFront {}
 pub struct CullBack {}
 
 impl RasterFaceCull for CullNone {
-    const fn cull() -> FaceCull { FaceCull::None }
+    const fn cull() -> FaceCull {
+        FaceCull::None
+    }
 }
 
 impl RasterFaceCull for CullFront {
-    const fn cull() -> FaceCull { FaceCull::Front }
+    const fn cull() -> FaceCull {
+        FaceCull::Front
+    }
 }
 
 impl RasterFaceCull for CullBack {
-    const fn cull() -> FaceCull { FaceCull::Back }
+    const fn cull() -> FaceCull {
+        FaceCull::Back
+    }
 }
 
 impl<Depth, Samples, Cull, Color> RasterPolicy for RasterState<Depth, Samples, Cull, Color>
-    where Depth: RasterDepthPolicy,
-          Samples: RasterSamples,
-          Cull: RasterFaceCull,
-          Color: RasterColorPolicy
-{
+where
+    Depth: RasterDepthPolicy,
+    Samples: RasterSamples,
+    Cull: RasterFaceCull,
+    Color: RasterColorPolicy {
     const fn plan() -> RasterPlan {
         RasterPlan {
             sample_count: Samples::sample_count(),
@@ -307,9 +479,4 @@ pub type Depth24LessEqual = RasterState<
 >
 
 /// Explicit color-only raster state.
-pub type ColorOnly = RasterState<
-    NoDepth,
-    Samples1,
-    CullNone,
-    OpaqueBlack<ClearThenLoadStore>,
->
+pub type ColorOnly = RasterState<NoDepth, Samples1, CullNone, OpaqueBlack<ClearThenLoadStore>>

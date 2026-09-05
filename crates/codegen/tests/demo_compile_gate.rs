@@ -1656,7 +1656,7 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
     wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
     assert_typed_surface_quality(&bundle);
     assert_typed_surface_recovery(&bundle);
-    assert_eq!(bundle.manifest.protocol_version, 10);
+    assert_eq!(bundle.manifest.protocol_version, 11);
     assert_eq!(bundle.manifest.resources.len(), 2);
     assert_eq!(bundle.manifest.passes.len(), 3);
     assert_eq!(bundle.pass_wgsl.len(), 3);
@@ -1749,7 +1749,7 @@ fn perturbational_mandelbrot_graph_compiles() {
         !exports.iter().any(|name| name == "display_reference"),
         "the GPU graph must not acquire a CPU pixel fallback"
     );
-    assert_eq!(bundle.manifest.protocol_version, 10);
+    assert_eq!(bundle.manifest.protocol_version, 11);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.resources[0].name, "orbit");
     assert_eq!(bundle.manifest.resources[0].stride, 32);

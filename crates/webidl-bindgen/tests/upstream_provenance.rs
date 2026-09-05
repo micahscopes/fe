@@ -224,7 +224,7 @@ fn pinned_webgpu_buffer_write_selection_preserves_fe_argument_semantics() {
 }
 
 #[test]
-fn consolidated_render_runtime_profile_is_exactly_the_five_proven_operations() {
+fn consolidated_render_runtime_profile_is_exactly_the_selected_proven_operations() {
     let provenance: serde_json::Value =
         serde_json::from_str(WEBGPU_RENDER_RUNTIME_PROVENANCE).unwrap();
     assert_eq!(
@@ -254,10 +254,23 @@ fn consolidated_render_runtime_profile_is_exactly_the_five_proven_operations() {
             "gpu_queue_write_buffer",
             "gpu_render_pass_encoder_draw",
             "gpu_render_pass_encoder_draw_indirect",
+            "gpu_render_pass_encoder_set_blend_constant",
         ]
     );
 
-    let fe = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    // The rich adapter preserves WebGPU's binary64 color union. The legacy
+    // flat Fe emitter cannot invent an f64 language/ABI carrier; assert that
+    // limitation instead of narrowing the official dictionary to f32.
+    let unsupported = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap_err();
+    assert!(unsupported.to_string().contains("double"));
+    // Keep the previous flat draw-signature gate on its supported subset.
+    let mut flat = world.clone();
+    flat.interfaces.get_mut("GPURenderPassEncoder").unwrap().members.retain(|member| {
+        !matches!(member, fe_webidl_bindgen::Member::Operation(operation) if operation.name == "setBlendConstant")
+    });
+    flat.dictionaries.remove("GPUColorDict");
+    flat.typedefs.remove("GPUColor");
+    let fe = emit_fe_flat_host_imports(&flat, WEBGPU_WEBIDL_MODULE).unwrap();
     assert!(fe.contains(
         "gpu_render_pass_encoder_draw(self_: GPURenderPassEncoder, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32)"
     ));
@@ -308,6 +321,7 @@ const buffer = Object.freeze({{ identity: "indirect-buffer" }});
 const renderPass = {{
   draw(...args) {{ calls.push(["draw", ...args]); }},
   drawIndirect(...args) {{ calls.push(["drawIndirect", ...args]); }},
+  setBlendConstant(color) {{ calls.push(["setBlendConstant", color]); }},
 }};
 
 runtime.resources.withBorrowed(renderPass, passHandle =>
@@ -316,17 +330,29 @@ runtime.resources.withBorrowed(renderPass, passHandle =>
   runtime.resources.withBorrowed(buffer, bufferHandle =>
     operations.gpu_render_pass_encoder_draw_indirect(passHandle, bufferHandle, 32n)));
 
-if (calls.length !== 2) throw new Error(`unexpected call count: ${{calls.length}}`);
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  operations.gpu_render_pass_encoder_set_blend_constant(passHandle, {{ case: {color_dict_case:?}, value: {{ r: 0.2, g: 0.4, b: 0.6, a: 0.8 }} }}));
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  operations.gpu_render_pass_encoder_set_blend_constant(passHandle, {{ case: {color_sequence_case:?}, value: [0.1, 0.3, 0.5, 0.7] }}));
+if (calls.length !== 4) throw new Error(`unexpected call count: ${{calls.length}}`);
 if (calls[0][0] !== "draw" || calls[0].slice(1).join(",") !== "12,7,3,2")
   throw new Error(`direct draw shape changed: ${{JSON.stringify(calls[0])}}`);
 if (calls[1][0] !== "drawIndirect" || calls[1][1] !== buffer || calls[1][2] !== 32)
   throw new Error(`indirect draw shape changed: ${{JSON.stringify(calls[1])}}`);
+if (calls[2][1].a !== 0.8 || calls[2][1].r !== 0.2 || calls[3][1][3] !== 0.7)
+  throw new Error("blend constant union conversion changed its values");
 if (runtime.inventory().resources !== 0)
   throw new Error("render-command borrows escaped their synchronous calls");
 "#,
         adapter_url = format!("file://{}", adapter_path.display()),
         runtime_url = format!("file://{}", runtime_path.display()),
         module = WEBGPU_WEBIDL_MODULE,
+        color_dict_case = fe_webidl_bindgen::canonical_union_case_name(
+            &fe_webidl_bindgen::TypeRef::Named("GPUColorDict".into())
+        ),
+        color_sequence_case = fe_webidl_bindgen::canonical_union_case_name(
+            &fe_webidl_bindgen::TypeRef::Sequence(Box::new(fe_webidl_bindgen::TypeRef::F64))
+        ),
     );
     std::fs::write(&test_path, script).unwrap();
     let output = std::process::Command::new("node")

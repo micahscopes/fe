@@ -310,8 +310,8 @@ export function rasterDrawShape(pass) {
   return { vertices, instances };
 }
 
-export function requiresGpuPassGraph(passes, resources = []) {
-  return resources.length > 0 || passes.some(
+export function requiresGpuPassGraph(passes, resources = [], raster = null) {
+  return raster != null || resources.length > 0 || passes.some(
     (pass) => pass.layout.mode === "compute" ||
       pass.draw_vertices !== undefined || pass.draw_indirect !== undefined,
   );
@@ -589,6 +589,7 @@ export function installGeneratedWebGpuOperations(operations) {
       typeof operations.bufferCreate !== "function" ||
       typeof operations.bufferWrite !== "function" ||
       typeof operations.renderDraw !== "function" ||
+      typeof operations.renderBlendConstant !== "function" ||
       typeof operations.renderDrawIndirect !== "function") {
     throw new TypeError("fe render runtime: generated WebGPU operations are incomplete");
   }
@@ -1188,8 +1189,29 @@ function attachmentOps(policy, label) {
   };
 }
 
-function rasterPlan(surface) {
-  const policy = surface?.pipeline?.raster;
+function blendComponent(component) {
+  const operations = ["add", "subtract", "reverse-subtract", "min", "max"];
+  const factors = ["zero", "one", "src", "one-minus-src", "src-alpha", "one-minus-src-alpha",
+    "dst", "one-minus-dst", "dst-alpha", "one-minus-dst-alpha", "src-alpha-saturated",
+    "constant", "one-minus-constant"];
+  const operation = component?.operation?.replaceAll?.("_", "-");
+  const srcFactor = component?.src_factor?.replaceAll?.("_", "-");
+  const dstFactor = component?.dst_factor?.replaceAll?.("_", "-");
+  if (!operations.includes(operation) || !factors.includes(srcFactor) || !factors.includes(dstFactor) ||
+      (["min", "max"].includes(operation) && (srcFactor !== "one" || dstFactor !== "one"))) {
+    throw new Error("fe render runtime: invalid derived blend component");
+  }
+  return { operation, srcFactor, dstFactor };
+}
+
+export function rasterColorTarget(format, raster) {
+  return { format, writeMask: raster.color.writeMask ?? 15,
+    ...(raster.color.blend ? { blend: raster.color.blend } : {}) };
+}
+
+export function rasterPlan(surface, authoredRaster) {
+  // v11 render policy is independent of the UI; retain old bundle decoding.
+  const policy = authoredRaster ?? surface?.pipeline?.raster;
   if (!policy) {
     return {
       sampleCount: 1,
@@ -1199,6 +1221,9 @@ function rasterPlan(surface) {
         firstLoad: "clear",
         followingLoad: "load",
         store: "store",
+        blend: null,
+        writeMask: 15,
+        blendConstant: { r: 0, g: 0, b: 0, a: 0 },
       },
       depth: null,
     };
@@ -1216,7 +1241,17 @@ function rasterPlan(surface) {
   const color = {
     clearValue: { r: clear.r, g: clear.g, b: clear.b, a: clear.a },
     ...attachmentOps(policy.color.ops, "color"),
+    blend: policy.color.blend == null ? null : {
+      color: blendComponent(policy.color.blend.color),
+      alpha: blendComponent(policy.color.blend.alpha),
+    },
+    writeMask: policy.color.write_mask ?? 15,
+    blendConstant: policy.color.blend_constant ?? { r: 0, g: 0, b: 0, a: 0 },
   };
+  if (!Number.isInteger(color.writeMask) || color.writeMask < 0 || color.writeMask > 15 ||
+      ![color.blendConstant.r, color.blendConstant.g, color.blendConstant.b, color.blendConstant.a].every(Number.isFinite)) {
+    throw new Error("fe render runtime: invalid derived color write mask or blend constant");
+  }
   const format = {
     depth24_plus: "depth24plus",
     depth32_float: "depth32float",
@@ -1607,7 +1642,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10, 11].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -1618,7 +1653,8 @@ export class FeSurfaceElement extends HTMLElement {
         ? manifest.passes
         : [{ source_entry: manifest.source_entry, shader: manifest.artifacts.wgsl, layout: manifest.layout }];
       this._resources = manifest.resources || [];
-      this._graph = requiresGpuPassGraph(this._passes, this._resources);
+      this._graph = requiresGpuPassGraph(this._passes, this._resources,
+        manifest.raster ?? manifest.surface?.pipeline?.raster);
       this._hasRenderPass = this._passes.some((pass) => pass.layout.mode === "render");
       const fragmentPass = [...this._passes].reverse().find((pass) => pass.layout.mode === "render");
       this._renderPass = fragmentPass ?? null;
@@ -2169,7 +2205,7 @@ export class FeSurfaceElement extends HTMLElement {
         if (initialBytes) writeGpuBuffer(device.queue, buffer, 0, initialBytes);
       }
 
-      const raster = rasterPlan(this._surface);
+      const raster = rasterPlan(this._surface, this._manifest.raster);
       const passRecords = [];
       for (let index = 0; index < this._passes.length; index++) {
         const pass = this._passes[index];
@@ -2249,7 +2285,7 @@ export class FeSurfaceElement extends HTMLElement {
               vertex: { entryPoint: pass.layout.vertex_entry },
               fragment: {
                 entryPoint: pass.layout.fragment_entry,
-                targets: [{ format }],
+                targets: [rasterColorTarget(format, raster)],
               },
               primitive: { topology: "triangle-list", cullMode: raster.cullMode },
               multisample: { count: raster.sampleCount },
@@ -2581,6 +2617,9 @@ export class FeSurfaceElement extends HTMLElement {
             depthStencilAttachment,
           });
           render.setPipeline(record.pipeline);
+          if (gpu.raster.color.blend) {
+            generatedWebGpuOperations.renderBlendConstant(render, gpu.raster.color.blendConstant);
+          }
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
           const draw = rasterDrawShape(record.pass);
           if (draw.indirect) {

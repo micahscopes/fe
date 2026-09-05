@@ -25,7 +25,7 @@
   ],
   "selection": {
     "path": "webgpu-render-runtime.webidl",
-    "sha256": "497e53518a9a0464cf363974f44d393700657896fc2e6bb4c9cf8e5d478d9b21",
+    "sha256": "1751d1a224177ec6f6fdbe08ee600108cab6347bdb7844f63547e7da40148194",
     "source_ranges": [
       "webgpu.idl:10-12",
       "webgpu.idl:142-143",
@@ -36,6 +36,7 @@
       "webgpu.idl:195-200",
       "webgpu.idl:202",
       "webgpu.idl:1060-1061",
+      "webgpu.idl:1069",
       "webgpu.idl:1077",
       "webgpu.idl:1082",
       "webgpu.idl:1140",
@@ -48,6 +49,7 @@
       "webgpu.idl:1209",
       "webgpu.idl:1338",
       "webgpu.idl:1341",
+      "webgpu.idl:1350-1356",
       "index.bs:15086-15090"
     ]
   }

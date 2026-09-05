@@ -2417,6 +2417,13 @@ pub fn emit_fe_flat_host_imports(world: &World, module: &str) -> Result<String, 
     emit_fe_import_layer(world, module, true)
 }
 
+/// The canonical adapter's tag for one explicitly selected union member.
+/// Host integrations use this metadata instead of duplicating the wire-name
+/// algorithm. `member` is the resolved member type, not the containing union.
+pub fn canonical_union_case_name(member: &TypeRef) -> String {
+    host_abi::stable_union_case_name(member)
+}
+
 fn emit_fe_import_layer(
     world: &World,
     module: &str,

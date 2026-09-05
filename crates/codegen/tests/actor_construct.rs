@@ -611,6 +611,9 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
             "cull_mode": "none",
             "color": {
                 "clear": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
+                "blend": null,
+                "write_mask": 15,
+                "blend_constant": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0 },
                 "ops": {
                     "first_load": "clear",
                     "following_load": "load",
@@ -723,6 +726,58 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
     assert!(
         !exports.iter().any(|name| name == "decide_fixture"),
         "the authored policy method must remain private",
+    );
+}
+
+#[test]
+fn fullscreen_only_actor_retains_raster_policy_without_resources_or_ui() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_fullscreen_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None)).unwrap();
+    assert!(bundle.manifest.surface.is_none());
+    assert!(bundle.manifest.resources.is_empty());
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    let raster = bundle.manifest.raster.as_ref().unwrap();
+    assert_eq!(raster["sample_count"], 4);
+    assert_eq!(raster["depth"]["format"], "depth24_plus");
+}
+
+#[test]
+fn alpha_blend_and_channel_permissions_are_projected_from_fe() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_alpha_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let program = actor_gpu_program(&db, top_mod).unwrap().unwrap();
+    let color = &program.raster.as_ref().unwrap()["color"];
+    assert_eq!(color["write_mask"], 7);
+    assert_eq!(
+        color["blend_constant"],
+        serde_json::json!({"r":0.25,"g":0.5,"b":0.75,"a":1.0})
+    );
+    assert_eq!(
+        color["blend"],
+        serde_json::json!({
+            "color": {"operation":"add","src_factor":"src_alpha","dst_factor":"one_minus_src_alpha"},
+            "alpha": {"operation":"add","src_factor":"one","dst_factor":"one_minus_src_alpha"},
+        })
+    );
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None)).unwrap();
+    assert!(
+        bundle.manifest.surface.is_none(),
+        "this actor deliberately has no UI view"
+    );
+    assert_eq!(
+        bundle.manifest.raster, program.raster,
+        "render semantics must survive without a view"
     );
 }
 
@@ -1232,7 +1287,7 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
             .with_resource_asset(BYTES.to_vec()),
     )
     .expect("verified content-addressed bundle");
-    assert_eq!(bundle.manifest.protocol_version, 10);
+    assert_eq!(bundle.manifest.protocol_version, 11);
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("content actor must derive exactly one resource")
     };
@@ -1302,7 +1357,7 @@ fn attributed_actor_builds_a_materialized_v10_pass_graph() {
     )
     .expect("v10 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 10);
+    assert_eq!(bundle.manifest.protocol_version, 11);
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);

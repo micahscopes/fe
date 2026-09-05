@@ -34,6 +34,18 @@ interface GPUQueue {
 [Exposed=(Window, Worker), SecureContext]
 interface GPURenderPassEncoder {};
 
+dictionary GPUColorDict {
+    required double r;
+    required double g;
+    required double b;
+    required double a;
+};
+typedef (sequence<double> or GPUColorDict) GPUColor;
+
+partial interface GPURenderPassEncoder {
+    undefined setBlendConstant(GPUColor color);
+};
+
 interface mixin GPURenderCommandsMixin {
     undefined draw(
         GPUSize32 vertexCount,

@@ -7,6 +7,7 @@ import test from "node:test";
 // constructing a surface or pretending to be a browser.
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
+const { rasterPlan, rasterColorTarget } = await import("./fe-render-runtime.js");
 
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
@@ -148,6 +149,7 @@ test("WGSL summary aggregates unique pass shaders rather than the primary artifa
 });
 
 installGeneratedWebGpuOperations({
+  renderBlendConstant: (pass, color) => pass.setBlendConstant(color),
   queueIdle: queue => queue.onSubmittedWorkDone(),
   bufferCreate: (device, descriptor) => device.createBuffer(descriptor),
   bufferWrite: (queue, buffer, offset, bytes) =>
@@ -156,6 +158,61 @@ installGeneratedWebGpuOperations({
     pass.draw(vertexCount, instanceCount, firstVertex, firstInstance),
   renderDrawIndirect: (pass, buffer, offset) =>
     pass.drawIndirect(buffer, offset),
+});
+
+test("Fe color targets preserve blend components, write masks, and constants", () => {
+  assert.equal(requiresGpuPassGraph([{layout: {mode: "render"}}], [], {sample_count: 4}), true,
+    "a fullscreen-only shader still requires its authored raster policy");
+  const component = (src, dst, operation = "add") => ({ operation, src_factor: src, dst_factor: dst });
+  const policy = {
+    sample_count: 4, cull_mode: "none", depth: null,
+    color: {
+      clear: { r: 0, g: 0, b: 0, a: 1 },
+      ops: { first_load: "clear", following_load: "load", store: "store" },
+      write_mask: 7, blend_constant: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 },
+      blend: { color: component("src_alpha", "one_minus_src_alpha"), alpha: component("one", "one_minus_src_alpha") },
+    },
+  };
+  const plan = () => rasterPlan({ pipeline: { raster: policy } });
+  assert.deepEqual(rasterPlan(null, policy), plan(), "render policy must not depend on a UI view");
+  assert.deepEqual(rasterColorTarget("bgra8unorm", plan()), {
+    format: "bgra8unorm", writeMask: 7,
+    blend: {
+      color: { operation: "add", srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" },
+      alpha: { operation: "add", srcFactor: "one", dstFactor: "one-minus-src-alpha" },
+    },
+  });
+  assert.deepEqual(plan().color.blendConstant, policy.color.blend_constant);
+  // Every portable factor travels independently in either component. Do not
+  // accidentally make the presets the only representable native blend states.
+  const factors = ["zero", "one", "src", "one_minus_src", "src_alpha", "one_minus_src_alpha",
+    "dst", "one_minus_dst", "dst_alpha", "one_minus_dst_alpha", "src_alpha_saturated",
+    "constant", "one_minus_constant"];
+  for (const operation of ["add", "subtract", "reverse_subtract"]) {
+    for (const src of factors) for (const dst of factors) {
+      policy.color.blend.color = component(src, dst, operation);
+      assert.deepEqual(plan().color.blend.color, {
+        operation: operation.replaceAll("_", "-"),
+        srcFactor: src.replaceAll("_", "-"), dstFactor: dst.replaceAll("_", "-"),
+      });
+    }
+  }
+  for (const operation of ["min", "max"]) {
+    policy.color.blend.color = component("one", "one", operation);
+    assert.equal(plan().color.blend.color.operation, operation);
+  }
+  for (const [operation, src, dst] of [["max", "src_alpha", "one"], ["multiply", "one", "one"], ["add", "src1", "one"]]) {
+    policy.color.blend.color = component(src, dst, operation);
+    assert.throws(plan, /invalid derived blend component/);
+  }
+  policy.color.blend = null;
+  assert.deepEqual(rasterColorTarget("bgra8unorm", plan()), { format: "bgra8unorm", writeMask: 7 });
+  policy.color.write_mask = 16;
+  assert.throws(plan, /invalid derived color write mask/);
+  policy.color.write_mask = 0;
+  assert.equal(plan().color.writeMask, 0);
+  policy.color.blend_constant.a = NaN;
+  assert.throws(plan, /invalid derived color write mask or blend constant/);
 });
 
 test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {
@@ -1228,6 +1285,7 @@ test("selected pass graphs fetch and realize pipelines sequentially through asyn
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._layout = { color_target_format: "rgba8unorm" };
   surface._manifestUrl = new URL("https://example.test/proof/manifest.json");
+  surface._manifest = { protocol_version: 7 };
   surface._passShaderUrls = [
     new URL("https://example.test/proof/first.wgsl"),
     new URL("https://example.test/proof/second.wgsl"),
