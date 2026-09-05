@@ -53,7 +53,39 @@ disable rasterization or depth writes. Blending and depth writes are independent
 - Dual-source blending requires an optional WebGPU feature and is not included
   in the portable factors.
 - Multisampling is separate from blend state; it does not resolve transparency
-  ordering, and there is no implicit alpha-to-coverage policy here.
+  ordering. Alpha-to-coverage is explicit, never inferred from a blend mode.
+
+## Sample coverage and depth comparisons
+
+```fe
+type Cutout = WithAlphaToCoverage<RasterState<
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite, ClearThenLoadStore>,
+    Samples4, CullNone, OpaqueBlack<ClearThenLoadStore>,
+>>
+type TwoSamples = WithSampleMask<Cutout, 5>
+```
+
+These wrappers modify only their own field of the Fe plan. The sample mask is
+an unsigned 32-bit value; zero is valid and disables all covered samples.
+`WithAlphaToCoverage` turns fragment alpha into multisample coverage. It requires
+four samples on the portable path and does not enable blending. Combining it
+with source-alpha blending applies both attenuations, which is usually not what
+an alpha-tested cutout wants. Neither mechanism supplies OIT.
+
+All eight core depth comparisons are available, including `CompareNever`,
+`CompareEqual`, and `CompareNotEqual`. Those three use a depth clear of 1;
+custom `RasterDepthCompare` implementations can choose a different clear value.
+
+Protocol v13 transports `sample_mask` and `alpha_to_coverage` from Fe to the
+native pipeline descriptor. Older bundles retain an all-ones mask and disabled
+alpha-to-coverage. Invalid masks and single-sample alpha coverage are rejected
+before pipeline creation. Current output is the alpha-bearing canvas target;
+future typed targets must also enforce WebGPU's blendable-alpha-format rule.
+
+The `actor_sample_coverage` fixture checks Fe composition and shader compilation;
+host tests cover all eight comparisons, unsigned masks (including high-bit and
+zero masks), malformed values, and legacy decoding. The normative contract is
+[WebGPU multisample state](https://www.w3.org/TR/webgpu/#multisample-state).
 
 ## Transport and executable evidence
 

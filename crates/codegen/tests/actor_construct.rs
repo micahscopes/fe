@@ -608,6 +608,8 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
         program.raster.as_ref().expect("Fe-authored raster plan"),
         &serde_json::json!({
             "sample_count": 4,
+            "sample_mask": 4294967295_u32,
+            "alpha_to_coverage": false,
             "cull_mode": "none",
             "color": {
                 "clear": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
@@ -841,6 +843,27 @@ fn alpha_blend_and_channel_permissions_are_projected_from_fe() {
         bundle.manifest.raster, program.raster,
         "render semantics must survive without a view"
     );
+}
+
+#[test]
+fn sample_coverage_and_depth_comparison_are_composed_in_fe() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_sample_coverage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let program = actor_gpu_program(&db, top_mod).unwrap().unwrap();
+    let raster = program.raster.as_ref().unwrap();
+    assert_eq!(raster["sample_count"], 4);
+    assert_eq!(raster["sample_mask"], 4294967295_u32);
+    assert_eq!(raster["alpha_to_coverage"], true);
+    assert_eq!(raster["color"]["blend"], serde_json::Value::Null);
+    assert_eq!(raster["depth"]["compare"], "not_equal");
+    assert_eq!(raster["depth"]["write_enabled"], false);
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("fragment", None))
+        .expect("compile native sample coverage");
+    assert_eq!(bundle.manifest.raster.as_ref(), Some(raster));
 }
 
 #[test]

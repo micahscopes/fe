@@ -1092,7 +1092,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=12).contains(&version) {
+    if !(4..=13).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),

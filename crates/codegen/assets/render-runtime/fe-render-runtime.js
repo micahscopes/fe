@@ -1209,6 +1209,11 @@ export function rasterColorTarget(format, raster) {
     ...(raster.color.blend ? { blend: raster.color.blend } : {}) };
 }
 
+export function rasterMultisample(raster) {
+  return { count: raster.sampleCount, mask: raster.sampleMask,
+    alphaToCoverageEnabled: raster.alphaToCoverage };
+}
+
 export function rasterPrimitive(pass, raster) {
   const policy = pass.primitive;
   const topology = policy === undefined ? "triangle-list" : policy?.topology?.replaceAll?.("_", "-");
@@ -1226,6 +1231,8 @@ export function rasterPlan(surface, authoredRaster) {
   if (!policy) {
     return {
       sampleCount: 1,
+      sampleMask: 0xffffffff,
+      alphaToCoverage: false,
       cullMode: "none",
       color: {
         clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -1241,6 +1248,12 @@ export function rasterPlan(surface, authoredRaster) {
   }
   if (policy.sample_count !== 1 && policy.sample_count !== 4) {
     throw new Error("fe render runtime: invalid derived raster sample count");
+  }
+  const sampleMask = policy.sample_mask === undefined ? 0xffffffff : policy.sample_mask;
+  const alphaToCoverage = policy.alpha_to_coverage === undefined ? false : policy.alpha_to_coverage;
+  if (!Number.isInteger(sampleMask) || sampleMask < 0 || sampleMask > 0xffffffff ||
+      typeof alphaToCoverage !== "boolean" || (alphaToCoverage && policy.sample_count === 1)) {
+    throw new Error("fe render runtime: invalid derived multisample mask or alpha coverage");
   }
   if (!["none", "front", "back"].includes(policy.cull_mode)) {
     throw new Error("fe render runtime: invalid derived raster cull mode");
@@ -1268,9 +1281,12 @@ export function rasterPlan(surface, authoredRaster) {
     depth32_float: "depth32float",
   }[policy.depth?.format];
   const compare = {
+    never: "never",
     less: "less",
+    equal: "equal",
     less_equal: "less-equal",
     greater: "greater",
+    not_equal: "not-equal",
     greater_equal: "greater-equal",
     always: "always",
   }[policy.depth?.compare];
@@ -1289,7 +1305,7 @@ export function rasterPlan(surface, authoredRaster) {
   )) {
     throw new Error("fe render runtime: invalid derived depth policy");
   }
-  return { sampleCount: policy.sample_count, cullMode: policy.cull_mode, color, depth };
+  return { sampleCount: policy.sample_count, sampleMask, alphaToCoverage, cullMode: policy.cull_mode, color, depth };
 }
 
 function releaseRasterAttachments(gpu) {
@@ -1653,7 +1669,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10, 11, 12].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -2299,7 +2315,7 @@ export class FeSurfaceElement extends HTMLElement {
                 targets: [rasterColorTarget(format, raster)],
               },
               primitive: rasterPrimitive(pass, raster),
-              multisample: { count: raster.sampleCount },
+              multisample: rasterMultisample(raster),
               ...(isAuthoredRasterPass(pass) && raster.depth
                 ? {
                     depthStencil: {

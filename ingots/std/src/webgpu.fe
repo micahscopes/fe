@@ -108,6 +108,9 @@ pub use raster::{
     ColorAttachmentPlan,
     ColorOnly,
     CompareAlways,
+    CompareNever,
+    CompareEqual,
+    CompareNotEqual,
     CompareGreater,
     CompareGreaterEqual,
     CompareLess,
@@ -143,6 +146,8 @@ pub use raster::{
     RasterState,
     Samples1,
     Samples4,
+    WithSampleMask,
+    WithAlphaToCoverage,
     raster_plan,
 }
 

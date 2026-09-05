@@ -14,6 +14,8 @@ pub struct RasterConfiguration {}
 #[web_raster_plan]
 pub struct RasterPlan {
     sample_count: u32,
+    sample_mask: u32,
+    alpha_to_coverage: bool,
     cull_mode: FaceCull,
     color: ColorAttachmentPlan,
     depth: DepthAttachment,
@@ -191,9 +193,12 @@ pub enum DepthFormat {
 }
 
 pub enum DepthCompare {
+    Never,
     Less,
+    Equal,
     LessEqual,
     Greater,
+    NotEqual,
     GreaterEqual,
     Always,
 }
@@ -343,6 +348,22 @@ pub struct CompareLessEqual {}
 pub struct CompareGreater {}
 pub struct CompareGreaterEqual {}
 pub struct CompareAlways {}
+pub struct CompareNever {}
+pub struct CompareEqual {}
+pub struct CompareNotEqual {}
+
+impl RasterDepthCompare for CompareNever {
+    const fn compare() -> DepthCompare { DepthCompare::Never }
+    const fn clear() -> f32 { 1.0 }
+}
+impl RasterDepthCompare for CompareEqual {
+    const fn compare() -> DepthCompare { DepthCompare::Equal }
+    const fn clear() -> f32 { 1.0 }
+}
+impl RasterDepthCompare for CompareNotEqual {
+    const fn compare() -> DepthCompare { DepthCompare::NotEqual }
+    const fn clear() -> f32 { 1.0 }
+}
 
 impl RasterDepthCompare for CompareLess {
     const fn compare() -> DepthCompare {
@@ -450,10 +471,36 @@ where
     const fn plan() -> RasterPlan {
         RasterPlan {
             sample_count: Samples::sample_count(),
+            sample_mask: 0xffffffff,
+            alpha_to_coverage: false,
             cull_mode: Cull::cull(),
             color: Color::color(),
             depth: Depth::depth(),
         }
+    }
+}
+
+/// Restrict covered samples independently of the attachment sample count.
+/// Zero is a valid mask: no samples are written.
+pub struct WithSampleMask<P, const MASK: u32> {}
+impl<P: RasterPolicy, const MASK: u32> RasterPolicy for WithSampleMask<P, MASK> {
+    const fn plan() -> RasterPlan {
+        let mut plan = P::plan()
+        plan.sample_mask = MASK
+        plan
+    }
+}
+
+/// Use fragment alpha as sample coverage. Requires multisampling (Samples4)
+/// and an alpha-bearing target; it is not ordered transparency or OIT.
+/// Color blending stays independent: combining both intentionally attenuates
+/// the color twice. Prefer ReplaceColor for ordinary alpha-tested coverage.
+pub struct WithAlphaToCoverage<P> {}
+impl<P: RasterPolicy> RasterPolicy for WithAlphaToCoverage<P> {
+    const fn plan() -> RasterPlan {
+        let mut plan = P::plan()
+        plan.alpha_to_coverage = true
+        plan
     }
 }
 

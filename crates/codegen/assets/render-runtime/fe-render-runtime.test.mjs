@@ -7,7 +7,7 @@ import test from "node:test";
 // constructing a surface or pretending to be a browser.
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
-const { rasterPlan, rasterColorTarget, rasterPrimitive } = await import("./fe-render-runtime.js");
+const { rasterPlan, rasterColorTarget, rasterPrimitive, rasterMultisample } = await import("./fe-render-runtime.js");
 
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
@@ -228,6 +228,39 @@ test("Fe color targets preserve blend components, write masks, and constants", (
   assert.equal(plan().color.writeMask, 0);
   policy.color.blend_constant.a = NaN;
   assert.throws(plan, /invalid derived color write mask or blend constant/);
+});
+
+test("Fe multisampling and all core depth comparisons reach native descriptors", () => {
+  const ops = { first_load: "clear", following_load: "load", store: "store" };
+  const policy = {
+    sample_count: 4, sample_mask: 5, alpha_to_coverage: true, cull_mode: "none",
+    color: { clear: {r: 0, g: 0, b: 0, a: 1}, ops },
+    depth: {format: "depth24_plus", compare: "equal", write_enabled: false, clear: 1, ops},
+  };
+  const plan = () => rasterPlan(null, policy);
+  assert.deepEqual(rasterMultisample(plan()), {count: 4, mask: 5, alphaToCoverageEnabled: true});
+  for (const compare of ["never", "less", "equal", "less_equal", "greater", "not_equal", "greater_equal", "always"]) {
+    policy.depth.compare = compare;
+    assert.equal(plan().depth.compare, compare.replaceAll("_", "-"));
+  }
+  for (const mask of [0, 1, 5, 15, 0x80000000, 0xffffffff]) {
+    policy.sample_mask = mask;
+    assert.equal(rasterMultisample(plan()).mask, mask);
+  }
+  for (const mask of [-1, 0x100000000, 1.5, NaN, null, "15"]) {
+    policy.sample_mask = mask;
+    assert.throws(plan, /invalid derived multisample/);
+  }
+  delete policy.sample_mask;
+  assert.equal(plan().sampleMask, 0xffffffff, "old bundles preserve all samples");
+  policy.sample_count = 1;
+  assert.throws(plan, /invalid derived multisample/);
+  for (const enabled of [1, "true", null]) {
+    policy.alpha_to_coverage = enabled;
+    assert.throws(plan, /invalid derived multisample/);
+  }
+  delete policy.alpha_to_coverage;
+  assert.deepEqual(rasterMultisample(plan()), {count: 1, mask: 0xffffffff, alphaToCoverageEnabled: false});
 });
 
 test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {
