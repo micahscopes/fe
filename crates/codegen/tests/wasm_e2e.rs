@@ -2258,7 +2258,12 @@ pub fn ge(a: f32, b: f32) -> bool { a >= b }
 /// AND cranelift backends side by side on the same IR).
 #[test]
 fn ordinary_functions_with_intrinsic_spellings_remain_calls() {
-    for name in ["__sqrt_f32", "__rsqrt_f32", "__min_f32", "__checked_add"] {
+    for name in [
+        "__sqrt_f32", "__rsqrt_f32", "__min_f32", "__checked_add",
+        "__checked_sub", "__checked_mul", "__checked_div", "__checked_rem",
+        "__checked_pow", "__checked_neg", "__saturating_add", "__saturating_sub",
+        "__saturating_mul", "__bitcast", "__int_truncate",
+    ] {
         let source = format!(
             "fn {name}(_ value: u32) -> u32 {{ value ^ 7 }}\n\
              pub fn probe(_ value: u32) -> u32 {{ {name}(value) }}"

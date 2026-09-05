@@ -25,7 +25,7 @@ use hir::analysis::{
         ty_def::{CapabilityKind, TyData, TyId, strip_derived_adt_layout_args},
     },
 };
-use hir::hir_def::{ArithBinOp, FuncParamMode, ItemKind};
+use hir::hir_def::{FuncParamMode, ItemKind};
 use hir::projection::Projection;
 use hir::semantic::{EffectEnvView, ProviderBinding, ProviderSource, constraints_for};
 use rustc_hash::FxHashMap;
@@ -37,7 +37,7 @@ use crate::{
     runtime::{
         AddressSpaceKind, BorrowAccess, Layout, LayoutId, RefKind, RefView, RuntimeBoundarySpec,
         RuntimeCarrier, RuntimeClass, RuntimeCodeRegion, RuntimeCodeRegionKey, RuntimeParamPlan,
-        SaturatingBinOp, ScalarClass, ScalarRepr, ScalarRole, VariantId,
+        ScalarClass, ScalarRepr, ScalarRole, VariantId,
     },
 };
 
@@ -2595,16 +2595,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
     ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GenericNumericIntrinsicKind {
-    Bitcast,
-    IntTruncate,
-    Saturating(SaturatingBinOp),
-    CheckedBinary(ArithBinOp),
-    CheckedNeg,
-}
-
-pub(super) use hir::analysis::ty::corelib::F32IntrinsicKind;
+pub(super) use hir::analysis::ty::corelib::{F32IntrinsicKind, GenericNumericIntrinsicKind};
 
 fn runtime_callee_assumptions<'db>(
     db: &'db dyn MirDb,
@@ -2922,7 +2913,7 @@ fn extern_builtin_return_class<'db>(
 
 fn is_runtime_intrinsic_name(name: &str) -> bool {
     if matches!(name, "alloc")
-        || generic_numeric_intrinsic_kind(name).is_some()
+        || GenericNumericIntrinsicKind::from_name(name).is_some()
         || f32_intrinsic_kind(name).is_some()
     {
         return true;
@@ -2932,24 +2923,6 @@ fn is_runtime_intrinsic_name(name: &str) -> bool {
 
 pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
     F32IntrinsicKind::from_name(name).filter(|kind| *kind != F32IntrinsicKind::Rsqrt)
-}
-
-pub(super) fn generic_numeric_intrinsic_kind(name: &str) -> Option<GenericNumericIntrinsicKind> {
-    Some(match name {
-        "__bitcast" => GenericNumericIntrinsicKind::Bitcast,
-        "__int_truncate" => GenericNumericIntrinsicKind::IntTruncate,
-        "__saturating_add" => GenericNumericIntrinsicKind::Saturating(SaturatingBinOp::Add),
-        "__saturating_sub" => GenericNumericIntrinsicKind::Saturating(SaturatingBinOp::Sub),
-        "__saturating_mul" => GenericNumericIntrinsicKind::Saturating(SaturatingBinOp::Mul),
-        "__checked_add" => GenericNumericIntrinsicKind::CheckedBinary(ArithBinOp::Add),
-        "__checked_sub" => GenericNumericIntrinsicKind::CheckedBinary(ArithBinOp::Sub),
-        "__checked_mul" => GenericNumericIntrinsicKind::CheckedBinary(ArithBinOp::Mul),
-        "__checked_div" => GenericNumericIntrinsicKind::CheckedBinary(ArithBinOp::Div),
-        "__checked_rem" => GenericNumericIntrinsicKind::CheckedBinary(ArithBinOp::Rem),
-        "__checked_pow" => GenericNumericIntrinsicKind::CheckedBinary(ArithBinOp::Pow),
-        "__checked_neg" => GenericNumericIntrinsicKind::CheckedNeg,
-        _ => return None,
-    })
 }
 
 fn intrinsic_numeric_name_parts(name: &str) -> Option<(&str, &str)> {

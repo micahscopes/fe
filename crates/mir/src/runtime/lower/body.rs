@@ -56,7 +56,7 @@ use super::{
     classify::{
         BodyEnv, BodyStaticFacts, ContractMetadataBuiltin, F32IntrinsicKind,
         GenericNumericIntrinsicKind, InferClassCache, RuntimeBodyCx, contract_metadata_builtin,
-        generic_numeric_intrinsic_kind, nonself_backing_value_place,
+        nonself_backing_value_place,
         resolve_runtime_call_key, semantic_return_ty, snapshot_source_place,
     },
     consts::{
@@ -3144,6 +3144,9 @@ impl<'db> RmirEmitter<'db> {
             return None;
         }
         let name = func.name(self.db).to_opt()?.data(self.db);
+        let generic_kind = hir::analysis::ty::corelib::generic_numeric_intrinsic_func_kind(
+            self.db, func,
+        );
         let mut boundary_sites = BoundarySiteAllocator::default();
         let call_input_plan = compile_call_input_plan_for_semantic(
             self.db,
@@ -3162,8 +3165,16 @@ impl<'db> RmirEmitter<'db> {
             RuntimeClass::AggregateValue { .. } | RuntimeClass::RawAddr { .. } => return None,
         };
         let ret = self.alloc_runtime_temp(ret_ty, RuntimeCarrier::Value(ret_class.clone()));
-        let expr = match generic_numeric_intrinsic_kind(name.as_str()) {
-            Some(GenericNumericIntrinsicKind::Saturating(op)) => {
+        let expr = match generic_kind {
+            Some(kind @ (GenericNumericIntrinsicKind::SaturatingAdd
+                | GenericNumericIntrinsicKind::SaturatingSub
+                | GenericNumericIntrinsicKind::SaturatingMul)) => {
+                let op = match kind {
+                    GenericNumericIntrinsicKind::SaturatingAdd => crate::runtime::SaturatingBinOp::Add,
+                    GenericNumericIntrinsicKind::SaturatingSub => crate::runtime::SaturatingBinOp::Sub,
+                    GenericNumericIntrinsicKind::SaturatingMul => crate::runtime::SaturatingBinOp::Mul,
+                    _ => unreachable!(),
+                };
                 let [lhs, rhs] = args.as_slice() else {
                     return None;
                 };
