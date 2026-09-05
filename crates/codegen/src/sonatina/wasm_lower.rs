@@ -15213,46 +15213,18 @@ where
                 )),
             };
         }
-        if let Some(name) = callee
-            .key(self.module.db)
-            .semantic(self.module.db)
-            .and_then(
-                |semantic| match semantic.key(self.module.db).owner(self.module.db) {
-                    hir::analysis::ty::ty_check::BodyOwner::Func(func)
-                        if func.body(self.module.db).is_none() =>
-                    {
-                        // MIR only recognizes bodyless intrinsic declarations.
-                        // An authored body must remain an ordinary call even
-                        // when its name matches a reserved intrinsic spelling.
-                        func.name(self.module.db)
-                            .to_opt()
-                            .map(|name| name.data(self.module.db).to_string())
-                    }
-                    _ => None,
-                },
-            )
+        if let Some(name) = callee.key(self.module.db).semantic(self.module.db)
+            .and_then(|semantic| {
+                let hir::analysis::ty::ty_check::BodyOwner::Func(func) =
+                    semantic.key(self.module.db).owner(self.module.db) else { return None };
+                hir::analysis::ty::corelib::f32_intrinsic_func_kind(self.module.db, func)?;
+                func.name(self.module.db).to_opt()
+                    .map(|name| name.data(self.module.db).to_string())
+            })
         {
-            if matches!(
-                name.as_str(),
-                "__sqrt_f32"
-                    | "__rsqrt_f32"
-                    | "__abs_f32"
-                    | "__min_f32"
-                    | "__max_f32"
-                    | "__min_relaxed_f32"
-                    | "__max_relaxed_f32"
-                    | "__clamp_f32"
-                    | "__floor_f32"
-                    | "__ceil_f32"
-                    | "__trunc_f32"
-                    | "__round_f32"
-                    | "__f32_from_i32"
-                    | "__i32_from_f32"
-            ) {
-                return Err(LowerError::Unsupported(format!(
-                    "wasm target: f32 intrinsic `{name}` needs dedicated Sonatina lowering and must not become an external call"
-                )));
-            }
+            return Err(LowerError::Unsupported(format!(
+                "wasm target: f32 intrinsic `{name}` needs dedicated Sonatina lowering and must not become an external call"
+            )));
         }
         let is = self.inst_set();
         let callee_ref =

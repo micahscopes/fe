@@ -2604,22 +2604,7 @@ pub(super) enum GenericNumericIntrinsicKind {
     CheckedNeg,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum F32IntrinsicKind {
-    FromI32,
-    ToI32,
-    Sqrt,
-    Abs,
-    Min,
-    Max,
-    MinRelaxed,
-    MaxRelaxed,
-    Clamp,
-    Floor,
-    Ceil,
-    Trunc,
-    Round,
-}
+pub(super) use hir::analysis::ty::corelib::F32IntrinsicKind;
 
 fn runtime_callee_assumptions<'db>(
     db: &'db dyn MirDb,
@@ -2946,24 +2931,7 @@ fn is_runtime_intrinsic_name(name: &str) -> bool {
 }
 
 pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
-    Some(match name {
-        "__f32_from_i32" => F32IntrinsicKind::FromI32,
-        "__i32_from_f32" => F32IntrinsicKind::ToI32,
-        "__sqrt_f32" => F32IntrinsicKind::Sqrt,
-        "__abs_f32" => F32IntrinsicKind::Abs,
-        "__min_f32" => F32IntrinsicKind::Min,
-        "__max_f32" => F32IntrinsicKind::Max,
-        "__min_relaxed_f32" => F32IntrinsicKind::MinRelaxed,
-        "__max_relaxed_f32" => F32IntrinsicKind::MaxRelaxed,
-        "__clamp_f32" => F32IntrinsicKind::Clamp,
-        "__floor_f32" => F32IntrinsicKind::Floor,
-        "__ceil_f32" => F32IntrinsicKind::Ceil,
-        "__trunc_f32" => F32IntrinsicKind::Trunc,
-        "__round_f32" => F32IntrinsicKind::Round,
-        // rsqrt intentionally remains an unrecognized extern until it has an
-        // explicit runtime and backend lowering.
-        _ => return None,
-    })
+    F32IntrinsicKind::from_name(name).filter(|kind| *kind != F32IntrinsicKind::Rsqrt)
 }
 
 pub(super) fn generic_numeric_intrinsic_kind(name: &str) -> Option<GenericNumericIntrinsicKind> {

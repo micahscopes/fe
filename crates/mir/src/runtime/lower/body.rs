@@ -56,7 +56,7 @@ use super::{
     classify::{
         BodyEnv, BodyStaticFacts, ContractMetadataBuiltin, F32IntrinsicKind,
         GenericNumericIntrinsicKind, InferClassCache, RuntimeBodyCx, contract_metadata_builtin,
-        f32_intrinsic_kind, generic_numeric_intrinsic_kind, nonself_backing_value_place,
+        generic_numeric_intrinsic_kind, nonself_backing_value_place,
         resolve_runtime_call_key, semantic_return_ty, snapshot_source_place,
     },
     consts::{
@@ -3223,10 +3223,11 @@ impl<'db> RmirEmitter<'db> {
         let BodyOwner::Func(func) = semantic.key(self.db).owner(self.db) else {
             return None;
         };
-        if func.body(self.db).is_some() {
+        let kind = hir::analysis::ty::corelib::f32_intrinsic_func_kind(self.db, func)?;
+        // CTFE supports reciprocal square root, but runtime lowering does not.
+        if kind == F32IntrinsicKind::Rsqrt {
             return None;
         }
-        let kind = f32_intrinsic_kind(func.name(self.db).to_opt()?.data(self.db).as_str())?;
         let mut boundary_sites = BoundarySiteAllocator::default();
         let input_plan = compile_call_input_plan_for_semantic(
             self.db,
@@ -3241,6 +3242,7 @@ impl<'db> RmirEmitter<'db> {
         let ret_class = self.top_level_class_for_ty(ret_ty, AddressSpaceKind::Memory)?;
         let ret = self.alloc_runtime_temp(ret_ty, RuntimeCarrier::Value(ret_class));
         let builtin = match kind {
+            F32IntrinsicKind::Rsqrt => return None,
             F32IntrinsicKind::FromI32 => {
                 let [value] = args.as_slice() else {
                     return None;
