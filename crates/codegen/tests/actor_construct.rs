@@ -1059,6 +1059,7 @@ fn attributed_aliases_derive_compute_resource_and_fragment_plan() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
+            indirect_resource: None,
             repeat: 1,
             taper: None,
             cooperation: None,
@@ -1865,6 +1866,7 @@ fn nominal_compute_invocation_maps_to_physical_builtins_without_parameter_storag
         WebActorStageKind::Compute {
             workgroup_size: [2, 2, 1],
             dispatch: [2, 2, 1],
+            indirect_resource: None,
             repeat: 1,
             taper: None,
             cooperation: None,
@@ -1952,6 +1954,7 @@ fn repeated_dispatch_is_derived_from_its_nominal_fe_policy() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
+            indirect_resource: None,
             repeat: 4,
             taper: None,
             cooperation: None,
@@ -2004,6 +2007,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
+            indirect_resource: None,
             repeat: 1,
             taper: None,
             cooperation: None,
@@ -2016,6 +2020,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
         WebActorStageKind::Compute {
             workgroup_size: [1, 1, 1],
             dispatch: [1, 1, 1],
+            indirect_resource: None,
             repeat: 3,
             taper: Some(fe_codegen::WebDispatchTaper {
                 shifts: [0, 0, 0],

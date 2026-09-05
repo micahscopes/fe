@@ -102,6 +102,7 @@ pub enum ActorTransition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuDispatch {
     Fixed,
+    Indirect,
     Repeated,
     Tapered,
     Cooperative,
@@ -614,6 +615,7 @@ impl<'db> AttrListId<'db> {
     pub fn gpu_dispatch(self, db: &'db dyn HirDb) -> Option<GpuDispatch> {
         match self.single_ident_arg(db, "gpu_dispatch")?.as_str() {
             "fixed" => Some(GpuDispatch::Fixed),
+            "indirect" => Some(GpuDispatch::Indirect),
             "repeated" => Some(GpuDispatch::Repeated),
             "tapered" => Some(GpuDispatch::Tapered),
             "cooperative" => Some(GpuDispatch::Cooperative),

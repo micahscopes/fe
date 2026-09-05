@@ -249,6 +249,7 @@ fn consolidated_render_runtime_profile_is_exactly_the_selected_proven_operations
     assert_eq!(
         operations,
         [
+            "gpu_compute_pass_encoder_dispatch_workgroups_indirect",
             "gpu_device_create_buffer",
             "gpu_queue_on_submitted_work_done",
             "gpu_queue_write_buffer",
@@ -276,6 +277,9 @@ fn consolidated_render_runtime_profile_is_exactly_the_selected_proven_operations
     ));
     assert!(fe.contains(
         "gpu_render_pass_encoder_draw_indirect(self_: GPURenderPassEncoder, indirectBuffer: GPUBuffer, indirectOffset: u64)"
+    ));
+    assert!(fe.contains(
+        "gpu_compute_pass_encoder_dispatch_workgroups_indirect(self_: GPUComputePassEncoder, indirectBuffer: GPUBuffer, indirectOffset: u64)"
     ));
 }
 
@@ -343,6 +347,16 @@ if (calls[2][1].a !== 0.8 || calls[2][1].r !== 0.2 || calls[3][1][3] !== 0.7)
   throw new Error("blend constant union conversion changed its values");
 if (runtime.inventory().resources !== 0)
   throw new Error("render-command borrows escaped their synchronous calls");
+const computePass = {{
+  dispatchWorkgroupsIndirect(...args) {{ calls.push(["dispatchWorkgroupsIndirect", ...args]); }},
+}};
+runtime.resources.withBorrowed(computePass, passHandle =>
+  runtime.resources.withBorrowed(buffer, bufferHandle =>
+    operations.gpu_compute_pass_encoder_dispatch_workgroups_indirect(passHandle, bufferHandle, 0n)));
+if (calls.length !== 5 || calls[4][0] !== "dispatchWorkgroupsIndirect" || calls[4][1] !== buffer || calls[4][2] !== 0)
+  throw new Error("indirect compute command changed identity or offset");
+if (runtime.inventory().resources !== 0)
+  throw new Error("compute-command borrows escaped their synchronous call");
 "#,
         adapter_url = format!("file://{}", adapter_path.display()),
         runtime_url = format!("file://{}", runtime_path.display()),

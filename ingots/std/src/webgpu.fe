@@ -42,6 +42,7 @@ pub use resource::{
     ContentAddressed,
     Derived,
     DrawIndirectBuffer,
+    DispatchIndirectBuffer,
     DynamicStorageBuffer,
     FragmentOnly,
     FrameTransient,
@@ -279,6 +280,12 @@ impl Copy for ComputeInvocation {}
 /// A fixed dispatch grid executed once whenever the pass graph runs.
 #[gpu_dispatch(fixed)]
 pub struct FixedDispatch<const X: usize, const Y: usize, const Z: usize> {}
+
+/// Execute GPU-written workgroup counts from one exact actor resource type.
+/// The command contains three u32 words; zero counts are a valid no-op.
+/// A preceding dispatch owns command production, never the consuming pass.
+#[gpu_dispatch(indirect)]
+pub struct IndirectDispatch<Args> {}
 
 /// A fixed dispatch grid executed `N` times in strict queue order through one
 /// compiled pipeline. Storage written by one dispatch is visible to the next.

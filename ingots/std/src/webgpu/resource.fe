@@ -454,6 +454,9 @@ impl<Brand, const N: usize, T> IndirectBuffer<Brand, N, T> {
 /// Four words consumed by `drawIndirect` for one non-indexed draw.
 pub type DrawIndirectBuffer<Brand> = IndirectBuffer<Brand, 4, u32>
 
+/// Three GPU-written workgroup counts consumed by dispatchWorkgroupsIndirect.
+pub type DispatchIndirectBuffer<Brand> = IndirectBuffer<Brand, 3, u32>
+
 /// GPU storage whose completed contents are transported as one typed actor
 /// message `M`. `T` and `N` retain the ordinary storage element and extent
 /// contract; `M` is a compile-time brand consumed by `ReadbackTransition<M>`.

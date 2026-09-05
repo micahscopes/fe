@@ -171,6 +171,7 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
     let write_buffer = operation("GPUQueue", "writeBuffer");
     let draw = operation("GPURenderPassEncoder", "draw");
     let draw_indirect = operation("GPURenderPassEncoder", "drawIndirect");
+    let dispatch_indirect = operation("GPUComputePassEncoder", "dispatchWorkgroupsIndirect");
     let blend_constant = operation("GPURenderPassEncoder", "setBlendConstant");
     let color_dict_case = fe_webidl_bindgen::canonical_union_case_name(
         &fe_webidl_bindgen::TypeRef::Named("GPUColorDict".into()),
@@ -206,6 +207,10 @@ static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
                feWebGpuOperations[{draw:?}](\n        \
                  renderPassHandle, vertexCount, instanceCount, firstVertex, firstInstance,\n      \
                )),\n  \
+           computeDispatchIndirect: (computePass, buffer, offset = 0) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(computePass, passHandle =>\n      \
+               feWebGpuWebIdlRuntime.resources.withBorrowed(buffer, bufferHandle =>\n        \
+                 feWebGpuOperations[{dispatch_indirect:?}](passHandle, bufferHandle, BigInt(offset)))),\n  \
            renderDrawIndirect: (renderPass, buffer, offset = 0) =>\n    \
              feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
                feWebGpuWebIdlRuntime.resources.withBorrowed(buffer, bufferHandle =>\n        \
@@ -635,6 +640,7 @@ pub enum WebActorStageKind {
     Compute {
         workgroup_size: [u32; 3],
         dispatch: [u32; 3],
+        indirect_resource: Option<u32>,
         repeat: u32,
         taper: Option<WebDispatchTaper>,
         cooperation: Option<WebDispatchCooperation>,
@@ -964,6 +970,7 @@ fn compute_dispatch_shape(
         )
     })?;
     match attrs.gpu_dispatch(db) {
+        Some(GpuDispatch::Indirect) => Ok(([1, 1, 1], 1, None, None, None)),
         Some(GpuDispatch::Fixed) => {
             let dispatch = semantic_const_triplet(db, dispatch_ty).ok_or_else(|| {
                 WebBundleError::EntryDerivation(
@@ -1135,6 +1142,39 @@ fn compute_dispatch_shape(
     }
 }
 
+fn compute_indirect_resource(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+    behavior: hir::hir_def::Func<'_>,
+    role: PathId<'_>,
+) -> Result<Option<u32>, WebBundleError> {
+    let args = role.generic_args(db).data(db);
+    let path = args.get(1).and_then(|arg| nested_type_path_db(db, arg))
+        .ok_or_else(|| WebBundleError::EntryDerivation("missing compute dispatch type".into()))?;
+    let mut ty = resolve_metadata_ty(db, path, behavior.scope())
+        .ok_or_else(|| WebBundleError::EntryDerivation("unresolved compute dispatch type".into()))?;
+    let mut tapered = false;
+    loop {
+        let kind = nominal_attrs(db, ty).and_then(|attrs| attrs.gpu_dispatch(db));
+        let index = match kind {
+            Some(GpuDispatch::Indirect) => {
+                if tapered {
+                    return Err(WebBundleError::EntryDerivation("indirect dispatch cannot be host-tapered; its GPU producer owns counts".into()));
+                }
+                let requested = ty.generic_args(db).first().copied()
+                    .ok_or_else(|| WebBundleError::EntryDerivation("indirect dispatch requires an exact command resource type".into()))?;
+                return exact_indirect_command_resource_field(db, actor, requested, 3).map(Some);
+            }
+            Some(GpuDispatch::Cycled) => 1,
+            Some(GpuDispatch::Cooperative) => 0,
+            Some(GpuDispatch::Tapered) => { tapered = true; 0 }
+            _ => return Ok(None),
+        };
+        ty = ty.generic_args(db).get(index).copied()
+            .ok_or_else(|| WebBundleError::EntryDerivation("dispatch wrapper has no inner policy".into()))?;
+    }
+}
+
 fn compute_invocation_context(
     db: &DriverDataBase,
     behavior: hir::hir_def::Func<'_>,
@@ -1278,6 +1318,15 @@ fn exact_indirect_resource_field(
     actor: &SemanticActor<'_>,
     requested: TyId<'_>,
 ) -> Result<u32, WebBundleError> {
+    exact_indirect_command_resource_field(db, actor, requested, 4)
+}
+
+fn exact_indirect_command_resource_field(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+    requested: TyId<'_>,
+    words: u32,
+) -> Result<u32, WebBundleError> {
     let requested = requested.as_view(db).unwrap_or(requested);
     let assumptions = PredicateListId::empty_list(db);
     let mut matches = Vec::new();
@@ -1294,14 +1343,14 @@ fn exact_indirect_resource_field(
     let (field_index, field) = match matches.as_slice() {
         [] => {
             return Err(WebBundleError::EntryDerivation(format!(
-                "indirect triangle-list draw policy names `{}`, but the actor has no field of that exact resource type",
+                "indirect command policy names `{}`, but the actor has no field of that exact resource type",
                 requested.pretty_print(db),
             )));
         }
         [found] => *found,
         found => {
             return Err(WebBundleError::EntryDerivation(format!(
-                "indirect triangle-list draw policy names `{}`, but {count} actor fields have that exact resource type; use distinct nominal brands",
+                "indirect command policy names `{}`, but {count} actor fields have that exact resource type; use distinct nominal brands",
                 requested.pretty_print(db),
                 count = found.len(),
             )));
@@ -1315,20 +1364,20 @@ fn exact_indirect_resource_field(
     let resource = semantic_gpu_resource(db, requested)
         .map_err(|message| {
             WebBundleError::EntryDerivation(format!(
-                "indirect draw resource `{name}` is malformed: {message}"
+                "indirect command resource `{name}` is malformed: {message}"
             ))
         })?
         .ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
-                "indirect draw resource `{name}` has no GPU resource meaning"
+                "indirect command resource `{name}` has no GPU resource meaning"
             ))
         })?;
     if resource.kind != GpuResource::Indirect {
         return Err(WebBundleError::EntryDerivation(format!(
-            "indirect triangle-list draw resource `{name}` must use the nominal Fe indirect-buffer family"
+            "indirect command resource `{name}` must use the nominal Fe indirect-buffer family"
         )));
     }
-    if semantic_const_u32(db, resource.length_ty) != Some(4)
+    if semantic_const_u32(db, resource.length_ty) != Some(words)
         || !matches!(
             resource
                 .element_ty
@@ -1340,7 +1389,7 @@ fn exact_indirect_resource_field(
         )
     {
         return Err(WebBundleError::EntryDerivation(format!(
-            "indirect triangle-list draw resource `{name}` must contain exactly four `u32` words"
+            "indirect command resource `{name}` must contain exactly {words} `u32` words"
         )));
     }
     Ok(u32::try_from(field_index).expect("actor field count fits in u32"))
@@ -2037,10 +2086,12 @@ pub fn actor_gpu_program(
                 let (workgroup_size, dispatch, repeat, taper, cooperation, cycle) =
                     compute_stage_shape(db, *behavior, role_path)?;
                 let invocation_context = compute_invocation_context(db, *behavior)?;
+                let indirect_resource = compute_indirect_resource(db, actor, *behavior, role_path)?;
                 (
                     WebActorStageKind::Compute {
                         workgroup_size,
                         dispatch,
+                        indirect_resource,
                         repeat,
                         taper,
                         cooperation,
@@ -5912,6 +5963,9 @@ pub struct WebPass {
     pub shader_stages: Vec<WebShaderStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<[u32; 3]>,
+    /// Exact actor command resource; the host never reads its three counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_indirect: Option<WebDrawIndirect>,
     /// Number of strictly ordered submissions of one compiled compute stage.
     /// This is derived from an Fe dispatch-policy type. A legacy or ordinary
     /// fixed pass decodes as one.
@@ -7226,6 +7280,7 @@ impl WebBundle {
                     preparation,
                     shader_stages: vec![WebShaderStage::Vertex, WebShaderStage::Fragment],
                     dispatch: None,
+                    dispatch_indirect: None,
                     repeat: 1,
                     taper: None,
                     cooperation: None,
@@ -7310,7 +7365,19 @@ impl WebBundle {
                 } else {
                     vec![WebShaderStage::Fragment]
                 },
-                dispatch,
+                dispatch: if matches!(&stage.kind, WebActorStageKind::Compute { indirect_resource: Some(_), .. }) { None } else { dispatch },
+                dispatch_indirect: match &stage.kind {
+                    WebActorStageKind::Compute { indirect_resource: Some(field), .. } => {
+                        let resource = program.resources.iter().find(|r| r.field_index == *field)
+                            .ok_or_else(|| WebBundleError::EntryDerivation("indirect dispatch lost its actor resource".into()))?;
+                        if layout.bindings.iter().any(|b| b.name == resource.name) {
+                            return Err(WebBundleError::EntryDerivation(
+                                "indirect dispatch command must not also be bound by its consuming shader".into()));
+                        }
+                        Some(WebDrawIndirect { resource: resource.name.clone(), offset: 0 })
+                    }
+                    _ => None,
+                },
                 repeat,
                 taper,
                 cooperation,
@@ -7977,6 +8044,7 @@ impl WebBundle {
                 WebBundleMode::Render => vec![WebShaderStage::Fragment],
             },
             dispatch: None,
+            dispatch_indirect: None,
             repeat: 1,
             taper: None,
             cooperation: None,
@@ -8875,6 +8943,7 @@ mod tests {
                 source_entry: "work".into(),
                 kind: WebActorStageKind::Compute {
                     workgroup_size: [1,1,1], dispatch: [1,1,1], repeat: 1,
+                    indirect_resource: None,
                     taper: None, cooperation: None, cycle: Some(cycle), invocation_context: false,
                 },
             }
@@ -8957,6 +9026,9 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains("gpu_queue_write_buffer"));
         assert!(runtime.contains("gpu_render_pass_encoder_draw"));
         assert!(runtime.contains("gpu_render_pass_encoder_draw_indirect"));
+        assert!(runtime.contains("gpu_compute_pass_encoder_dispatch_workgroups_indirect"));
+        assert_eq!(runtime.matches("[\"dispatchWorkgroupsIndirect\"](").count(), 1);
+        assert!(!RENDER_RUNTIME_BASE_JS.contains(".dispatchWorkgroupsIndirect("));
         assert!(runtime.contains("gpu_render_pass_encoder_set_blend_constant"));
         assert_eq!(runtime.matches("[\"setBlendConstant\"](").count(), 1);
         assert!(!RENDER_RUNTIME_BASE_JS.contains(".setBlendConstant("));

@@ -638,6 +638,13 @@ function drawGpuIndirect(renderPass, buffer, offset) {
   generatedWebGpuOperations.renderDrawIndirect(renderPass, buffer, offset);
 }
 
+function dispatchGpuIndirect(computePass, buffer, offset) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  generatedWebGpuOperations.computeDispatchIndirect(computePass, buffer, offset);
+}
+
 function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
   return sharedGpuDeviceLifecycle.publish(
     GpuDeviceEventKind.Unavailable,
@@ -2373,6 +2380,14 @@ export class FeSurfaceElement extends HTMLElement {
         const indirectBuffer = pass.draw_indirect === undefined
           ? null
           : resourceBuffers.get(pass.draw_indirect.resource);
+        const dispatchIndirectBuffer = pass.dispatch_indirect === undefined
+          ? null : resourceBuffers.get(pass.dispatch_indirect.resource);
+        if (pass.dispatch_indirect !== undefined && (
+          !dispatchIndirectBuffer || pass.dispatch_indirect.offset !== 0 ||
+          dispatchIndirectBuffer.size < 12 || !(dispatchIndirectBuffer.usage & GPUBufferUsage.INDIRECT)
+        )) {
+          throw new Error("fe render runtime: invalid indirect dispatch command resource");
+        }
         if (pass.draw_indirect !== undefined && !indirectBuffer) {
           throw new Error(
             `fe render runtime: indirect draw resource \`${pass.draw_indirect.resource}\` is undeclared`,
@@ -2390,6 +2405,7 @@ export class FeSurfaceElement extends HTMLElement {
           inputs,
           outputs,
           indirectBuffer,
+          dispatchIndirectBuffer,
         });
       }
       return {
@@ -2600,10 +2616,18 @@ export class FeSurfaceElement extends HTMLElement {
           // protocol-sized encoder before a canvas texture can be captured.
           if (encoderMode === "render") submitEncoder();
           let dispatch = record.pass.dispatch;
-          if (!dispatch) throw new Error("fe render runtime: compute pass has no fixed dispatch");
+          if (!dispatch && !record.dispatchIndirectBuffer) {
+            throw new Error("fe render runtime: compute pass has no dispatch source");
+          }
+          if (dispatch && record.dispatchIndirectBuffer) {
+            throw new Error("fe render runtime: compute pass has ambiguous dispatch sources");
+          }
           let repeat = record.pass.repeat ?? 1;
           const taper = record.pass.taper;
           if (taper !== undefined && taper !== null) {
+            if (record.dispatchIndirectBuffer) {
+              throw new Error("fe render runtime: indirect dispatch cannot be host-tapered");
+            }
             if (!Number.isSafeInteger(cycleIteration) || cycleIteration < 0) {
               throw new Error("fe render runtime: tapered dispatch escaped its actor cycle");
             }
@@ -2647,7 +2671,11 @@ export class FeSurfaceElement extends HTMLElement {
             compute.setPipeline(record.pipeline);
             if (record.bindGroup) compute.setBindGroup(0, record.bindGroup);
             for (let iteration = 0; iteration < batch; iteration += 1) {
-              compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+              if (record.dispatchIndirectBuffer) {
+                dispatchGpuIndirect(compute, record.dispatchIndirectBuffer, 0);
+              } else {
+                compute.dispatchWorkgroups(dispatch[0], dispatch[1], dispatch[2]);
+              }
             }
             compute.end();
             encoded = true;

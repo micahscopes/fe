@@ -1,0 +1,21 @@
+use std::webgpu::{GpuProgram, WebGpuBackend, ComputeSurface, ComputeInvocation,
+    Workgroup, FixedDispatch, CycledDispatch, IndirectDispatch, DispatchIndirectBuffer, StorageBuffer}
+
+struct ActiveWork {}
+struct Round {}
+
+actor ResidentWork uses (GpuProgram<WebGpuBackend>) {
+    command: DispatchIndirectBuffer<ActiveWork>,
+    output: StorageBuffer<u32, 64>,
+
+    fn prepare(self) uses (ComputeSurface<Workgroup<1,1,1>, FixedDispatch<1,1,1>>) {
+        self.command.store(index:0, value:1)
+        self.command.store(index:1, value:1)
+        self.command.store(index:2, value:1)
+    }
+
+    fn work(self, i:ComputeInvocation) uses (ComputeSurface<Workgroup<64,1,1>,
+        CycledDispatch<Round, IndirectDispatch<DispatchIndirectBuffer<ActiveWork>>, 2>>) {
+        if i.global.x<64 {self.output.store(index:i.global.x, value:i.global.x+1)}
+    }
+}

@@ -1,0 +1,7 @@
+[ingot]
+name = "actor_dispatch_indirect"
+version = "0.1.0"
+
+[dependencies]
+core = "../../../../../ingots/core"
+std = "../../../../../ingots/std"

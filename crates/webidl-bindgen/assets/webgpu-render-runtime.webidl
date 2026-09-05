@@ -34,6 +34,11 @@ interface GPUQueue {
 [Exposed=(Window, Worker), SecureContext]
 interface GPURenderPassEncoder {};
 
+[Exposed=(Window, Worker), SecureContext]
+interface GPUComputePassEncoder {
+    undefined dispatchWorkgroupsIndirect(GPUBuffer indirectBuffer, GPUSize64 indirectOffset);
+};
+
 dictionary GPUColorDict {
     required double r;
     required double g;
