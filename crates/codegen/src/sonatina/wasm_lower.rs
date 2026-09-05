@@ -35,6 +35,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::binding_facts::{BindingDefinition, BindingFacts};
+
 use compiler_db::DriverDataBase;
 use hir::projection::IndexSource;
 use hir::{
@@ -10207,6 +10209,41 @@ fn address_taken_scalar_slots(body: &RuntimeBody<'_>) -> HashSet<RLocalId> {
     slots
 }
 
+fn derive_binding_facts(body: &RuntimeBody<'_>) -> BindingFacts {
+    let definitions = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .filter_map(|stmt| {
+            let RStmt::Assign { dst, expr } = stmt else {
+                return None;
+            };
+            let definition = match expr {
+                RExpr::AllocObject { .. }
+                | RExpr::MaterializeToObject { .. }
+                | RExpr::MaterializePlaceToObject { .. }
+                | RExpr::ConstRef { .. } => BindingDefinition::Fresh,
+                RExpr::AddrOf { .. } | RExpr::Load { .. }
+                    if matches!(
+                        body.value_class(*dst),
+                        Some(RuntimeClass::Ref {
+                            kind: RefKind::Object | RefKind::Const,
+                            ..
+                        })
+                    ) =>
+                {
+                    BindingDefinition::BorrowRoot
+                }
+                RExpr::Use(source) | RExpr::RetagRef { value: source } => {
+                    BindingDefinition::Forward(source.as_u32() as usize)
+                }
+                _ => BindingDefinition::Other,
+            };
+            Some((dst.as_u32() as usize, definition))
+        });
+    BindingFacts::derive(body.locals.len(), definitions)
+}
+
 #[derive(Clone)]
 enum LocalValueRepresentation {
     Single(Type),
@@ -10218,6 +10255,7 @@ enum LocalValueRepresentation {
 /// interprocedural ABI and arena escape facts; it does not replace their
 /// analyses. Emission retains the resulting materialization and call plans.
 struct BodyLocalStoragePlan<'db> {
+    binding_facts: BindingFacts,
     reachable: Vec<bool>,
     calls: FxHashMap<(RuntimeInstance<'db>, Vec<RLocalId>), CallStoragePlan<'db>>,
     values: Vec<Option<LocalValueRepresentation>>,
@@ -10355,6 +10393,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
 
         let reachable = compute_reachable_blocks(body);
         let mut plan = Self {
+            binding_facts: derive_binding_facts(body),
             reachable,
             calls: FxHashMap::default(),
             values,
@@ -10537,6 +10576,7 @@ where
 {
     module: &'ctx mut PortableModuleLowerer<'db, 'a, I>,
     body: RuntimeBody<'db>,
+    binding_facts: BindingFacts,
     fb: FunctionBuilder<InstInserter>,
     prologue_block: BlockId,
     block_map: Vec<BlockId>,
@@ -10607,6 +10647,7 @@ where
         indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
         let BodyLocalStoragePlan {
+            binding_facts,
             reachable,
             calls: call_storage,
             values,
@@ -10639,6 +10680,7 @@ where
         Ok(Self {
             module,
             body,
+            binding_facts,
             fb,
             prologue_block,
             block_map,
@@ -10802,8 +10844,11 @@ where
         let entry = self.block_map[0];
         self.fb.insert_inst_no_result(Jump::new(is, entry));
 
-        let blocks = self.body.blocks.clone();
-        for (idx, block) in blocks.iter().enumerate() {
+        // Ownership and reachability facts have already been derived. Place
+        // resolution below needs only local/provider metadata, so consume the
+        // source blocks instead of retaining a second full statement graph.
+        let blocks = std::mem::take(&mut self.body.blocks);
+        for (idx, block) in blocks.into_iter().enumerate() {
             self.fb.switch_to_block(self.block_map[idx]);
             if !self.reachable[idx] {
                 self.fb.insert_inst_no_result(Unreachable::new(is));
@@ -15461,74 +15506,12 @@ where
     /// object) does NOT, so it fails closed rather than pointer-aliasing. A local
     /// with no definition (an array parameter) also does not qualify (deferred).
     fn is_fresh_object_binding(&self, local: RLocalId) -> bool {
-        let mut has_fresh_def = false;
-        for block in &self.body.blocks {
-            for stmt in &block.stmts {
-                let RStmt::Assign { dst, expr } = stmt else {
-                    continue;
-                };
-                if *dst != local {
-                    continue;
-                }
-                if matches!(
-                    expr,
-                    RExpr::AllocObject { .. }
-                        | RExpr::MaterializeToObject { .. }
-                        | RExpr::MaterializePlaceToObject { .. }
-                        | RExpr::ConstRef { .. }
-                ) {
-                    has_fresh_def = true;
-                } else {
-                    return false;
-                }
-            }
-        }
-        has_fresh_def
+        self.binding_facts.is_fresh(local.as_u32() as usize)
     }
 
-    /// Whether an object-ref local denotes a borrow of existing storage rather
-    /// than an owned aggregate value. Forwarding this pointer must preserve
-    /// identity: copying the pointee would turn a mutable borrow into a write to
-    /// a detached temporary, so the caller would not observe the mutation.
+    /// Forward a proven borrow without detaching its pointee into a copy.
     fn is_borrow_alias_binding(&self, local: RLocalId) -> bool {
-        fn visit(
-            body: &RuntimeBody<'_>,
-            local: RLocalId,
-            visiting: &mut HashSet<RLocalId>,
-        ) -> bool {
-            if !visiting.insert(local) {
-                return false;
-            }
-            let mut has_definition = false;
-            for block in &body.blocks {
-                for stmt in &block.stmts {
-                    let RStmt::Assign { dst, expr } = stmt else {
-                        continue;
-                    };
-                    if *dst != local {
-                        continue;
-                    }
-                    has_definition = true;
-                    match expr {
-                        RExpr::AddrOf { .. } | RExpr::Load { .. }
-                            if matches!(
-                                body.value_class(local),
-                                Some(RuntimeClass::Ref {
-                                    kind: RefKind::Object | RefKind::Const,
-                                    ..
-                                })
-                            ) => {}
-                        RExpr::Use(source) | RExpr::RetagRef { value: source }
-                            if visit(body, *source, visiting) => {}
-                        _ => return false,
-                    }
-                }
-            }
-            visiting.remove(&local);
-            has_definition
-        }
-
-        visit(&self.body, local, &mut HashSet::new())
+        self.binding_facts.is_borrowed(local.as_u32() as usize)
     }
 
     fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
