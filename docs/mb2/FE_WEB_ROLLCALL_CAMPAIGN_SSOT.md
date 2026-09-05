@@ -48,9 +48,15 @@ Shader-candidate validation passed all 20 selected tests (three Shader IR and
 seventeen typed allocation). The log is
 `/workspace/scratch/mb2-shader-binding-facts-release.log`.
 
-The next pending code patch makes emission consume the local carrier chosen by
-the body plan, deleting the duplicate local-type classifier and its separate
-GPU-resource lookup. Its broader gates exposed an obsolete payload-enum
+`d22b707c2` makes emission consume the local carrier chosen by the body plan,
+deleting the duplicate local-type classifier and its separate GPU-resource
+lookup. All 31 selected release tests passed: Shader IR (3), typed allocation
+(17), address-taken scalars (1), enums (2), record views (1), raster (4), compute
+resources (1), and native scalar/control-flow execution (2). Logs:
+`/workspace/scratch/mb2-planned-ssa-carriers-validated-release.log` and
+`/workspace/scratch/mb2-planned-ssa-carriers-native-release.log`. The change is
+reconciled into the cleanup worktree as `9ee175e4f`; combined Shader-candidate
+validation is running. Its broader gates exposed an obsolete payload-enum
 rejection test, reproduced on the unchanged parent. `dbe192493` corrects that
 test to execute supported payload values and trap invalid host tags; both enum
 tests passed against the unchanged compiler. Parent/revised evidence:
