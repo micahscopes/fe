@@ -339,3 +339,48 @@ and `/workspace/scratch/mb2-e1-reduce-after-20260905.log`.
 Use the Mandelbrot round-interaction kernel and Quilting triangulation as real
 consumers after the small fixtures pass. Budgets should flag regressions relative
 to reviewed baselines, not invent a universal shader-size correctness limit.
+
+### Eager use and concrete missing views (2026-09-05)
+
+Use Riffcat eagerly for representation and size investigations. When inspection
+must supplement it, record the question, the missing producer evidence or
+consumer view, a real fixture, and a success criterion here. Do not silently
+replace the shared recorder with a second diagnostic pipeline.
+
+The saved zero-aggregate reducer was imported and artifact-verified with the
+existing `riffcat-bloat` binary. Outputs:
+`/workspace/scratch/mb2-zero-reducer-riffcat-20260905.capture.json` and
+`/workspace/scratch/mb2-zero-reducer-riffcat-20260905.report.json`.
+It reports complete capture status, 18,200 all-module instructions before merge,
+9,300 after merge, and 133,270 final WGSL bytes. These scopes differ and are not
+an instruction-to-byte conversion. The import explicitly marks the historical
+source digest and dirty-patch digest unrecorded; this is artifact verification,
+not a reproducible causal A/B or proof behavior gate.
+
+Concrete follow-ups, with ownership kept distinct:
+
+- Compiler recorder: snapshots before and after RMIR preparation, including
+  instance, argument-shape specialization, pass identity and occurrence ordinal.
+  Reproducer: `mvt5_f32_nested_helper_render.fe`. Its old residual-count test
+  expects `(102, 6)` but now observes `(8, 8)`. The current production capture
+  begins at Sonatina pre-merge and cannot identify the earlier change.
+  Success: the capture locates whether aggregate expansion disappeared before
+  inlining, during shape seeding, or during residual pruning. Behavior remains
+  a separate executed oracle, not inferred from matching facets.
+- Consumer representation views: rank aggregate construction, extraction,
+  scalar flatten/rebuild, zero insertion and arena accesses separately.
+  Reproducer: the saved reducer and `linear_ports` captures. Success: expose the
+  214-lane transport and redundant zero reconstruction without manual WGSL
+  text counting. Report unavailable operand/type evidence as missing; MB2 owns
+  adding that evidence to the recorder where needed.
+- Consumer presentation: compact stage summaries and explicit scoped deltas,
+  including repeated-pass occurrences, without requiring a hand-written jq
+  filter over the full report. Success: show the first expansion and subsequent
+  cleanup, preserving all-module versus reachable versus emitted-byte scope.
+- Producer/consumer provenance: a missing source or dirty-patch digest should
+  appear prominently in replay/comparison conclusions, not only as a caller
+  setting. Artifact verification must remain usable, but must not imply that
+  the experiment can be reconstructed from revisions alone.
+
+This requests tooling over existing compiler evidence, not Riffcat-based
+legality, optimization decisions, or a competing provenance architecture.
