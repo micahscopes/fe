@@ -21,6 +21,19 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Generic numeric identity consolidation landed as `2ac48d96a` (cleanup
+`dd3c45e15`). HIR now owns the twelve existing checked-arithmetic,
+saturating-arithmetic, bitcast, and integer-truncation declaration spellings,
+with a body-aware tracked function query. CTFE consumes that vocabulary;
+its duplicate checked/saturating name table and separate bitcast/truncation
+dispatch entries are deleted. One focused release test evaluated all twelve
+through static assertions, including saturating boundaries and bit transport:
+`/workspace/scratch/mb2-generic-intrinsic-ctfe-release.log` (1.27s after a
+2m22s build). Runtime consumption and expanded authored-name/trap tests are
+still uncommitted in the cleanup worktree while their release gate runs.
+The scalar-suffixed arithmetic/comparison and resource vocabularies remain
+unfinished; this is not the complete intrinsic capability system.
+
 Browser capstone preflight on September 5 is not green. The Node-based existing
 health harness timed out navigating to `http://10.0.0.2:8024/health.html` before
 its one-word GPU control ran. A separate connectivity-only page loaded
