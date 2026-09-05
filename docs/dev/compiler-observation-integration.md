@@ -48,6 +48,61 @@ byte for byte. The manifest and lockfile now use the published git revision.
 
 ## Outcome
 
+### Production finding: aggregate replay transport (2026-09-05)
+
+The 19-stage composition fixture passes release compilation and Naga validation
+at Fe db96a9235 with published Sonatina ca5210d1. It emits 12,936,420 backend WGSL
+bytes in total; the largest stages are linear_ports (1,011,478 bytes) and
+linear_boundary (1,011,759 bytes). This is not a browser execution gate.
+
+The linear_ports helper sparse_linear_copy_plan is already 36,397 instructions
+at the pre-merge Sonatina boundary and remains 36,394 after rooted cleanup. Its
+690,388-byte WGSL body contains 51 groups of 210 scalar result-to-local stores:
+10,710 stores, 620,298 literal bytes. The replay witness has 52 four-limb field
+elements. Each call receives a typed pointer but returns 214 scalar lanes:
+witness (208), cursor/validity (2), and selected value (4). Each successive call
+rebuilds the 210-lane state even though the witness is unchanged.
+
+This evidence identifies a representation boundary, not a proven 620 KB saving.
+The current ABI requires those transfers, and source-level value snapshots must
+remain observable. The final rooted inliner is not where this body first grows.
+
+The Fe probe at 6e8be9d2d isolates a state-return chain with observable old values.
+Its release gate checks lowering and Naga/SPIR-V validation only. Sonatina test
+commit 9bf0e3de on mb2-task-borrows separately proves whole aggregate helper
+returns execute through WGSL on llvmpipe: a returned snapshot remains 42 after
+the original storage changes to 99. The helper remains outlined and uses no byte
+arena. That test-only commit is local and is not the Fe manifest pin.
+
+The corrective boundary must span all three operations:
+
+1. Select a native aggregate result for eligible private shader helpers, with
+   legality owned by the existing Sonatina Naga contract. Keep external and Wasm
+   interfaces unchanged.
+2. Carry intermediate aggregate values intact through call, copy, projection,
+   construction and control-flow joins. A call-only ABI change that immediately
+   splits the returned struct into tuple_vars merely moves the expansion.
+3. Materialize typed values with whole-value transfers. Reuse storage only under
+   the existing lifetime/snapshot proof; never equate value copying with pointer
+   aliasing. Keep raw byte-observable values on their declared representation.
+
+Current source anchors in sonatina/wasm_lower.rs are lower_body_signature,
+scalar_tuple_element_tys, local_flat_values, aggregate RExpr::Call lowering,
+lower_copy_value_into_place and lower_materialize_to_typed_object. A local-store
+peephole alone cannot repair the already flattened intermediate representation.
+Derive the value representation alongside the per-body storage plan, not through
+an observational digest, another independent helper classifier, or a global flag.
+
+Validation must include changed-field and unchanged-witness cases, old snapshots
+live across calls, branches/loops and aliasing negatives, followed by the exact
+production capture and independent proof oracle. Measure final artifacts and
+execution separately. No production size or runtime improvement has landed yet.
+
+Full capture provenance and a reproducible literal-text census are recorded in
+/workspace/scratch/mb2-bloat-diagnosis-20260905.md. The exact composition artifacts
+are under /workspace/scratch/mb2-bloat-composition-20260905. They are suitable for
+comparison with Quilting's independent captures, not proof of a shared cause.
+
 One compiler-owned observation boundary feeds the Riffcat tooling. It must answer
 where shader expansion occurs, which representations and transformations account
 for it, and whether a controlled change improves an exact, behavior-tested
