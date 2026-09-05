@@ -4467,7 +4467,7 @@ fn conditional_f32_selection_feeds_loop_carry_and_both_exits_on_wasm() {
 }
 
 #[test]
-fn unsupported_f32_helpers_fail_closed_by_name() {
+fn unsupported_f32_helpers_fail_before_sonatina_construction() {
     // `__abs_f32`/`__min_f32`/`__max_f32`/`__clamp_f32` graduated to
     // dedicated Sonatina lowering (`Fabs`/`Fmin`/`Fmax`/`Fclamp`); see
     // `f32_abs_min_max_clamp_intrinsics_execute_on_wasm` above for their
@@ -4486,8 +4486,9 @@ fn unsupported_f32_helpers_fail_closed_by_name() {
         );
         assert!(
             error.contains("dedicated Sonatina lowering")
-                && error.contains("must not become an external call"),
-            "unsupported helper `{name}` must fail closed before import emission: {error}"
+                && error.contains("must not become an external call")
+                && error.contains("rejected before Sonatina construction"),
+            "unsupported helper `{name}` must fail before Sonatina construction: {error}"
         );
     }
 }

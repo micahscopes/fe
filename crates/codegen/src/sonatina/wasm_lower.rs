@@ -262,9 +262,9 @@ pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, Vec<FuncRef>), LowerError> {
-    // Compatibility ISA until the Shader revision is reproducibly pinned.
-    // Shared body lowering never chooses an ISA implicitly.
-    let isa = create_wasm32_isa();
+    let isa = sonatina_ir::isa::shader::Shader::new(TargetTriple::new(
+        Architecture::Shader, Vendor::Unknown, OperatingSystem::Unknown,
+    ));
     let lowerer = lower_portable_bodies(
         &isa, db, package, HashSet::new(), &[], false, true,
         PrivatePlaceMaterialization::ShaderTypedWhenLegal,
@@ -402,6 +402,7 @@ fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
     private_place_materialization: PrivatePlaceMaterialization,
     aggregate_copy_lowering: AggregateCopyLowering,
 ) -> Result<PortableModuleLowerer<'db, 'a, I>, LowerError> {
+    validate_portable_intrinsic_calls(db, package, isa.triple().architecture)?;
     wasm_lower_trace(|| format!("begin runtime package, functions={}", package.functions(db).len()));
     observe_runtime_package(db, package);
     let builder = ModuleBuilder::new(ModuleCtx::new(isa));
@@ -416,6 +417,33 @@ fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
     lowerer.lower_bodies()?;
     wasm_lower_trace(|| "lowered portable runtime function bodies".to_owned());
     Ok(lowerer)
+}
+
+/// Dedicated MIR intrinsic operations must not survive as external calls.
+/// Validate the residual package before constructing any Sonatina module or
+/// preparing physical signatures. Authored same-spelling bodies are ordinary
+/// functions and are excluded by the HIR identity query.
+fn validate_portable_intrinsic_calls(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    architecture: Architecture,
+) -> Result<(), LowerError> {
+    for function in package.functions(db) {
+        let Some(semantic) = function.instance(db).key(db).semantic(db) else {
+            continue;
+        };
+        let hir::analysis::ty::ty_check::BodyOwner::Func(func) =
+            semantic.key(db).owner(db) else { continue };
+        let Some(kind) = hir::analysis::ty::corelib::f32_intrinsic_func_kind(db, func) else {
+            continue;
+        };
+        let name = func.name(db).to_opt().expect("recognized intrinsic has a name");
+        return Err(LowerError::Unsupported(format!(
+            "{architecture:?} target: f32 intrinsic `{}` ({kind:?}) needs dedicated Sonatina lowering and must not become an external call; rejected before Sonatina construction",
+            name.data(db),
+        )));
+    }
+    Ok(())
 }
 
 fn validate_wasm_host_results(
@@ -15213,19 +15241,6 @@ where
                 )),
             };
         }
-        if let Some(name) = callee.key(self.module.db).semantic(self.module.db)
-            .and_then(|semantic| {
-                let hir::analysis::ty::ty_check::BodyOwner::Func(func) =
-                    semantic.key(self.module.db).owner(self.module.db) else { return None };
-                hir::analysis::ty::corelib::f32_intrinsic_func_kind(self.module.db, func)?;
-                func.name(self.module.db).to_opt()
-                    .map(|name| name.data(self.module.db).to_string())
-            })
-        {
-            return Err(LowerError::Unsupported(format!(
-                "wasm target: f32 intrinsic `{name}` needs dedicated Sonatina lowering and must not become an external call"
-            )));
-        }
         let is = self.inst_set();
         let callee_ref =
             *self.module.func_map.get(&callee).ok_or_else(|| {
@@ -15606,6 +15621,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn residual_intrinsic_gate_runs_on_rmir_without_sonatina() {
+        let cases = [
+            ("extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __rsqrt_f32(value) }", true),
+            ("extern { fn __sqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __sqrt_f32(value) }", false),
+            ("extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { value }", false),
+            ("fn __rsqrt_f32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __rsqrt_f32(value) }", false),
+        ];
+        for (source, rejects) in cases {
+            let mut db = DriverDataBase::default();
+            let url = Url::parse("file:///residual_intrinsic_gate.fe").unwrap();
+            db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
+            let file = db.workspace().get(&db, &url).unwrap();
+            let top_mod = db.top_mod(file);
+            let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+            assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+            let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+            // This gate needs only RMIR and target identity, not a Sonatina ISA,
+            // module, signature, instruction builder, or physical storage plan.
+            for target in [Architecture::Wasm32, Architecture::Shader, Architecture::X86_64] {
+                let result = validate_portable_intrinsic_calls(&db, &package, target);
+                assert_eq!(result.is_err(), rejects, "{target:?}: {source}");
+                if let Err(error) = result {
+                    let message = error.to_string();
+                    assert!(message.contains("__rsqrt_f32"), "{message}");
+                    assert!(message.contains(&format!("{target:?} target")), "{message}");
+                    assert!(message.contains("before Sonatina construction"), "{message}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn portable_ir_uses_the_callers_isa() {
         let mut db = DriverDataBase::default();
         let url = url::Url::parse("file:///portable_explicit_isa.fe").unwrap();
@@ -15689,6 +15736,7 @@ pub fn kernel(_ value: u32) -> u32 {
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
         let (module, entries) = compile_runtime_package_shader_ir(&db, &package).unwrap();
+        assert_eq!(module.ctx.triple.architecture, Architecture::Shader);
         assert_eq!(entries.len(), 1, "the selected package has one section entry");
         assert_eq!(
             module.ctx.func_sig(entries[0], |signature| signature.name().to_owned()),

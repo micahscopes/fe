@@ -1,24 +1,19 @@
-//! Fe -> SPIR-V wire (slice S1): the shortest path from a Fe source to
-//! naga-validated SPIR-V words.
+//! Fe shader driver for the Sonatina Naga backend.
 //!
-//! There is no SPIR-V lowering port. `compile_runtime_package_wasm` already
-//! builds a Sonatina `Module` under the Wasm32 ISA whose `inst_set()` is
-//! `NativeInstSet` (`wasm_lower.rs`), and Sonatina's `SpirvBackend` consumes any
-//! `Module` by downcasting generically against `function.inst_set()`
-//! (`isa/spirv/mod.rs`). So the wasm-path Module is SPIR-V-consumable
-//! *unchanged*: this driver just hands it over. For an Add/Mul/Return
-//! single-function kernel every op is inside SPIR-V's envelope.
-//!
-//! The naga validator runs *inside* `SpirvBackend::compile_module`, so a
-//! returned `SpirvArtifact` is already a structurally-valid compute module (the
-//! honest rung this slice earns is R-val: validated, NOT executed). Execution on
-//! a real GPU runtime (lavapipe) is a later slice.
+//! Shared portable lowering constructs a module under the Shader ISA. Browser
+//! compute and raster requests explicitly select WebGPU capabilities and
+//! WGSL/SPIR-V encodings. Legacy scalar/grid capability adapters remain pending
+//! migration. Validation establishes artifact validity, not execution
+//! or numerical correctness on a device.
 
 use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
 use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
-use sonatina_codegen::Backend as _;
+use sonatina_codegen::isa::naga::{
+    NagaBackend, ShaderCompileRequest, ShaderEncoding, ShaderEnvironment, ShaderPipeline,
+    ShaderTargetContract,
+};
 use sonatina_codegen::isa::spirv::{
     SpirvArtifact, SpirvBackend, SpirvBuiltinArgument, SpirvExternalResource,
 };
@@ -38,8 +33,7 @@ use std::{
 
 static SPIRV_INLINE_SNAPSHOT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
-/// Lower a MIR runtime package to naga-validated SPIR-V by reusing the wasm-path
-/// Sonatina `Module`.
+/// Lower a MIR runtime package to naga-validated SPIR-V using the Shader ISA.
 ///
 /// Returns the `SpirvArtifact` (`words: Vec<u32>` little-endian SPIR-V, plus an
 /// optional WGSL side artifact for later GPU execution). Any translation or
@@ -85,15 +79,16 @@ pub fn compile_runtime_package_spirv_with_workgroup(
         },
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
-    // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
-    // (compute shaders have no wasm-style imports), so it is discarded here.
+    // Preserve runtime section identity while the shared lowerer constructs the
+    // shader module. Root optimization at those declarations, not module order.
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    let backend = SpirvBackend::new()
+        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2]);
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions, &backend)?;
     ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
-    SpirvBackend::new()
-        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
-        .compile_module(&module)
+    backend
+        .compile_entry(&module, entry_functions[0])
         .map_err(|errors| {
             LowerError::Spirv(
                 errors
@@ -136,20 +131,58 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     builtin_arguments: &[SpirvBuiltinArgument],
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
-    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
-    let mut backend = SpirvBackend::new()
-        .with_compute()
-        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
-        .with_dispatch_grid(dispatch_grid[0], dispatch_grid[1], dispatch_grid[2]);
-    for resource in resources {
-        backend = backend.with_external_resource(resource.clone());
+    let entry = entry_functions.first().copied().ok_or_else(|| {
+        LowerError::Spirv("compute package has no runtime section entry".to_owned())
+    })?;
+    compile_webgpu_request(
+        &mut module,
+        ShaderPipeline::Compute {
+            entry,
+            workgroup_size,
+            dispatch_grid,
+        },
+        resources,
+        builtin_arguments,
+    )
+}
+
+/// Browser compilation chooses its capability profile and encodings explicitly.
+/// Resource and builtin evidence belongs to this request, not mutable backend
+/// mode flags. The backend validates the final physical shader interface.
+fn compile_webgpu_request(
+    module: &mut sonatina_ir::Module,
+    pipeline: ShaderPipeline,
+    resources: &[SpirvExternalResource],
+    builtin_arguments: &[SpirvBuiltinArgument],
+) -> Result<SpirvArtifact, LowerError> {
+    let target = ShaderTargetContract::new(
+        ShaderEnvironment::WebGpu,
+        [ShaderEncoding::Wgsl, ShaderEncoding::Spirv],
+    )
+    .map_err(|error| LowerError::Spirv(error.to_string()))?;
+    let mut request = ShaderCompileRequest::new(&target, pipeline);
+    request.resources = resources;
+    request.builtin_arguments = builtin_arguments;
+    // Establish the complete browser request before helper selection. The
+    // contextual backend query needs resource identity and stage restrictions,
+    // not only the types visible in an isolated helper signature.
+    let roots = match request.pipeline {
+        ShaderPipeline::Raster { vertex, fragment } => vec![vertex, fragment],
+        ShaderPipeline::Compute { entry, .. }
+        | ShaderPipeline::Fullscreen { entry }
+        | ShaderPipeline::LegacyScalar { entry, .. }
+        | ShaderPipeline::LegacyGrid { entry, .. } => vec![entry],
+    };
+    trace_contextual_helper_analysis(module, &request, "before_inline");
+    let preserved_helpers = inline_spirv_calls_from_roots(
+        module, &roots, |module| NagaBackend::analyze_request_helpers(module, &request),
+    )?;
+    trace_contextual_helper_analysis(module, &request, "after_inline");
+    for &entry in &roots {
+        ensure_spirv_entry_calls_lowerable(module, &[entry], &preserved_helpers)?;
     }
-    for argument in builtin_arguments {
-        backend = backend.with_builtin_argument(*argument);
-    }
-    backend.compile_module(&module).map_err(|errors| {
+    NagaBackend::compile_request(module, &request).map_err(|errors| {
         LowerError::Spirv(
             errors
                 .iter()
@@ -158,6 +191,33 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
                 .join("; "),
         )
     })
+}
+
+/// Observe the backend query at the two integration boundaries. This trace
+/// never selects helpers or substitutes a fallback after a query rejection.
+fn trace_contextual_helper_analysis(
+    module: &sonatina_ir::Module,
+    request: &ShaderCompileRequest<'_>,
+    phase: &str,
+) {
+    if std::env::var_os("FE_SPIRV_INLINE_TRACE").is_none() {
+        return;
+    }
+    match NagaBackend::analyze_request_helpers(module, request) {
+        Ok(analysis) => {
+            eprintln!("fe naga helper query: phase={phase}, callable={}, rejected={}",
+                analysis.callable.len(), analysis.rejected.len());
+            for (function, reason) in analysis.rejected {
+                eprintln!("fe naga helper rejection: phase={phase}, function={}, reason={reason}",
+                    module.ctx.func_sig(function, |signature| signature.name().to_owned()));
+            }
+        }
+        Err(errors) => {
+            for error in errors {
+                eprintln!("fe naga helper query unavailable: phase={phase}, reason={error}");
+            }
+        }
+    }
 }
 
 /// Lower a MIR runtime package to naga-validated SPIR-V in GRID mode: one
@@ -189,15 +249,16 @@ pub fn compile_runtime_package_spirv_grid(
         },
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
-    // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
+    // Root optimization at the runtime section declarations.
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    let backend = SpirvBackend::new()
+        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
+        .with_grid();
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions, &backend)?;
     ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
-    SpirvBackend::new()
-        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
-        .with_grid()
-        .compile_module(&module)
+    backend
+        .compile_entry(&module, entry_functions[0])
         .map_err(|errors| {
             LowerError::Spirv(
                 errors
@@ -226,8 +287,7 @@ pub fn compile_runtime_package_spirv_grid(
 /// layout records `[0, 0, 0]`). Fail-closed in the translator: u32 word only,
 /// >= 2 args, no ObjAlloc, mutually exclusive with grid/batch.
 ///
-/// Body is identical to [`compile_runtime_package_spirv_grid`] plus `.with_render()`
-/// (and NO `.with_grid()`/workgroup size) on the `SpirvBackend` builder.
+/// Uses a fullscreen raster request under the checked WebGPU profile.
 pub fn compile_runtime_package_spirv_render(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
@@ -245,23 +305,13 @@ pub fn compile_runtime_package_spirv_render(
         },
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
-    // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
+    // Root optimization at the runtime section declarations.
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
-    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
-    SpirvBackend::new()
-        .with_render()
-        .compile_module(&module)
-        .map_err(|errors| {
-            LowerError::Spirv(
-                errors
-                    .iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })
+    let entry = entry_functions.first().copied().ok_or_else(|| {
+        LowerError::Spirv("render package has no runtime section entry".to_owned())
+    })?;
+    compile_webgpu_request(&mut module, ShaderPipeline::Fullscreen { entry }, &[], &[])
 }
 
 /// Lower a fragment stage whose compiler-described storage resources are
@@ -272,22 +322,11 @@ pub fn compile_runtime_package_spirv_render_with_resources(
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
-    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
-    let mut backend = SpirvBackend::new().with_render();
-    for resource in resources {
-        backend = backend.with_external_resource(resource.clone());
-    }
-    backend.compile_module(&module).map_err(|errors| {
-        LowerError::Spirv(
-            errors
-                .iter()
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    })
+    let entry = entry_functions.first().copied().ok_or_else(|| {
+        LowerError::Spirv("render package has no runtime section entry".to_owned())
+    })?;
+    compile_webgpu_request(&mut module, ShaderPipeline::Fullscreen { entry }, resources, &[])
 }
 
 /// Lower two Fe behaviors as one authored raster module. The package must
@@ -319,23 +358,46 @@ pub fn compile_runtime_package_spirv_authored_raster_with_resources(
     fragment_entry: &str,
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
-    ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
+    compile_runtime_package_spirv_authored_raster_with_interface(
+        db,
+        package,
+        vertex_entry,
+        fragment_entry,
+        resources,
+        &[],
+    )
+}
 
-    let mut backend = SpirvBackend::new().with_authored_raster(vertex_entry, fragment_entry);
-    for resource in resources {
-        backend = backend.with_external_resource(resource.clone());
-    }
-    backend.compile_module(&module).map_err(|errors| {
-        LowerError::Spirv(
-            errors
-                .iter()
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    })
+/// Lower an authored raster pair with compiler-described resources and a
+/// physical vertex invocation context. The ordinary path supplies no explicit
+/// builtins and retains the established implicit vertex index; an instanced
+/// draw supplies vertex and instance indices as two source-language arguments.
+pub fn compile_runtime_package_spirv_authored_raster_with_interface(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    resources: &[SpirvExternalResource],
+    builtin_arguments: &[SpirvBuiltinArgument],
+) -> Result<SpirvArtifact, LowerError> {
+    let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
+    // Resolve the public API's names only among declared runtime entries, once.
+    // Optimization, legality checking and emission all retain these identities.
+    let resolve = |name: &str| {
+        entry_functions.iter().copied().find(|&entry| {
+            module.ctx.func_sig(entry, |signature| signature.name() == name)
+        }).ok_or_else(|| LowerError::Spirv(format!(
+            "raster runtime entry `{name}` is absent after lowering"
+        )))
+    };
+    let vertex = resolve(vertex_entry)?;
+    let fragment = resolve(fragment_entry)?;
+    compile_webgpu_request(
+        &mut module,
+        ShaderPipeline::Raster { vertex, fragment },
+        resources,
+        builtin_arguments,
+    )
 }
 
 /// Build the render-shaped MIR runtime package rooted at `entry` and lower it
@@ -359,33 +421,28 @@ pub fn compile_render_wgsl<'db>(
 fn inline_spirv_calls(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
-) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
-    // The legacy single-entry API selects the first runtime section, not the
-    // first arbitrary Sonatina declaration.
-    let selected = &roots[..roots.len().min(1)];
-    inline_spirv_calls_from_roots(module, selected, true)
-}
-
-fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&str]) {
-    let roots = module
-        .funcs()
-        .into_iter()
-        .filter(|&function| {
-            module.ctx.func_sig(function, |signature| {
-                entry_names.contains(&signature.name())
-            })
-        })
-        .collect::<Vec<_>>();
-    let preserved = inline_spirv_calls_from_roots(module, &roots, false);
-    debug_assert!(preserved.is_empty());
+    backend: &SpirvBackend,
+) -> Result<std::collections::HashSet<sonatina_ir::module::FuncRef>, LowerError> {
+    // The legacy single-entry API selects the first runtime section. Preserve
+    // that policy without relying on Sonatina declaration order.
+    let entry = roots.first().copied().ok_or_else(|| {
+        LowerError::Spirv("shader package has no runtime section entry".to_owned())
+    })?;
+    inline_spirv_calls_from_roots(module, &[entry], |module| {
+        backend.analyze_entry_helpers(module, entry)
+    })
 }
 
 fn inline_spirv_calls_from_roots(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
-    preserve_helpers: bool,
-) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
+    analyze: impl FnOnce(&sonatina_ir::Module) -> Result<
+        sonatina_codegen::isa::naga::ShaderHelperAnalysis,
+        Vec<sonatina_codegen::isa::naga::SpirvError>,
+    >,
+) -> Result<std::collections::HashSet<sonatina_ir::module::FuncRef>, LowerError> {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
+    let trace_clones = std::env::var_os("FE_SPIRV_INLINE_TRACE_CLONES").is_some();
     let functions_before_merge = module.funcs().len();
     let instructions_before_merge = spirv_module_instruction_count(module);
     let merge_stats = run_exact_private_func_merge(module, roots);
@@ -420,7 +477,7 @@ fn inline_spirv_calls_from_roots(
     // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
     let mut inliner_config = spirv_inliner_config();
-    inliner_config.record_full_clone_ids = trace;
+    inliner_config.record_full_clone_ids = trace_clones;
     // GVN's sparse predicated solver can require many GiB on one generated
     // proof entry after only a few frontiers. It is not a legality pass, and
     // the local CFG/SCCP sequence already removes the dead structure exposed
@@ -438,12 +495,10 @@ fn inline_spirv_calls_from_roots(
     if let Some((directory, sequence)) = &snapshot {
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "pre");
     }
-    let preserved_helpers = if preserve_helpers {
-        normalize_spirv_helper_graph(module);
-        spirv_helper_candidates(module, roots)
-    } else {
-        std::collections::HashSet::new()
-    };
+    normalize_spirv_helper_graph(module);
+    let analysis = analyze(module).map_err(|errors| LowerError::Spirv(errors.iter()
+        .map(ToString::to_string).collect::<Vec<_>>().join("; ")))?;
+    let preserved_helpers = select_profitable_naga_helpers(module, roots, analysis, trace);
     if !preserved_helpers.is_empty() {
         let helpers = preserved_helpers.iter().copied().collect::<Vec<_>>();
         run_function_passes_on(
@@ -451,9 +506,6 @@ fn inline_spirv_calls_from_roots(
             &helpers,
             &[Pass::RangeBranchSimplify, Pass::CfgCleanup],
         );
-    }
-    if trace {
-        trace_spirv_helper_classification(module, roots, &preserved_helpers);
     }
     let original_hints = preserved_helpers
         .iter()
@@ -492,6 +544,8 @@ fn inline_spirv_calls_from_roots(
                 changed,
                 spirv_root_instruction_count(module, roots)
             );
+        }
+        if trace_clones {
             trace_spirv_full_inline_clone_survival(
                 module,
                 &clone_records,
@@ -512,12 +566,14 @@ fn inline_spirv_calls_from_roots(
                     pass.as_str(),
                     spirv_root_instruction_count(module, roots)
                 );
-                trace_spirv_full_inline_clone_survival(
-                    module,
-                    &clone_records,
-                    frontier,
-                    pass.as_str(),
-                );
+                if trace_clones {
+                    trace_spirv_full_inline_clone_survival(
+                        module,
+                        &clone_records,
+                        frontier,
+                        pass.as_str(),
+                    );
+                }
             }
         } else {
             run_function_passes_on(module, roots, &cleanup);
@@ -546,12 +602,14 @@ fn inline_spirv_calls_from_roots(
                 pass.as_str(),
                 spirv_root_instruction_count(module, roots)
             );
-            trace_spirv_full_inline_clone_survival(
-                module,
-                &clone_records,
-                MAX_FRONTIERS,
-                pass.as_str(),
-            );
+            if trace_clones {
+                trace_spirv_full_inline_clone_survival(
+                    module,
+                    &clone_records,
+                    MAX_FRONTIERS,
+                    pass.as_str(),
+                );
+            }
         }
     } else {
         run_function_passes_on(module, roots, &final_cleanup);
@@ -591,7 +649,7 @@ fn inline_spirv_calls_from_roots(
             dead_ret_stats.blocked_higher_order_funcs,
         );
     }
-    preserved_helpers
+    Ok(preserved_helpers)
 }
 
 fn trace_spirv_full_inline_clone_survival(
@@ -633,44 +691,6 @@ fn trace_spirv_full_inline_clone_survival(
     }
 }
 
-fn spirv_helper_memory_effect_is_lowerable(
-    inst_set: &dyn sonatina_ir::InstSetBase,
-    instruction: &dyn sonatina_ir::Inst,
-) -> bool {
-    use sonatina_ir::{
-        InstDowncast,
-        inst::data::{Alloca, Gep, Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore},
-    };
-
-    <&Alloca as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&Gep as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&Mload as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&Mstore as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&ObjIndex as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&ObjLoad as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&ObjProj as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&ObjStore as InstDowncast>::downcast(inst_set, instruction).is_some()
-}
-
-fn spirv_helper_instruction_accesses_resource(
-    inst_set: &dyn sonatina_ir::InstSetBase,
-    instruction: &dyn sonatina_ir::Inst,
-) -> bool {
-    use sonatina_ir::{
-        InstDowncast,
-        inst::data::{ObjLoad, ObjStore},
-    };
-
-    <&ObjLoad as InstDowncast>::downcast(inst_set, instruction).is_some()
-        || <&ObjStore as InstDowncast>::downcast(inst_set, instruction).is_some()
-}
-
-fn spirv_helper_scalar_type(ty: sonatina_ir::Type) -> bool {
-    matches!(
-        ty,
-        sonatina_ir::Type::I1 | sonatina_ir::Type::I32 | sonatina_ir::Type::F32
-    )
-}
 
 fn spirv_helper_resource_root_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
     let Some(sonatina_ir::types::CompoundType::ObjRef(referent)) = ty.resolve_compound(&module.ctx)
@@ -683,27 +703,68 @@ fn spirv_helper_resource_root_type(module: &sonatina_ir::Module, ty: sonatina_ir
     )
 }
 
-fn spirv_helper_result_abi_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
-    spirv_helper_scalar_type(ty) || spirv_helper_resource_root_type(module, ty)
-}
 
-fn spirv_helper_argument_abi_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
-    spirv_helper_result_abi_type(module, ty)
-        || matches!(
-            ty.resolve_compound(&module.ctx),
-            Some(sonatina_ir::types::CompoundType::Ptr(_))
-        )
-}
-
-fn spirv_helper_body_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
-    spirv_helper_scalar_type(ty)
-        || matches!(
-            ty.resolve_compound(&module.ctx),
-            Some(
-                sonatina_ir::types::CompoundType::ObjRef(_)
-                    | sonatina_ir::types::CompoundType::Ptr(_)
+/// Profitability is a frontend policy over backend-authorized helpers, not a
+/// second ABI classifier. Resource-only wrappers stay inline unless their
+/// measured expansion or a profitable caller justifies retaining them.
+fn select_profitable_naga_helpers(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+    analysis: sonatina_codegen::isa::naga::ShaderHelperAnalysis,
+    trace: bool,
+) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
+    let counts = spirv_root_expansion_counts(module, roots);
+    let dependencies = spirv_profitable_helper_dependency_closure(module, roots, &counts);
+    let mut selected = std::collections::HashSet::new();
+    for helper in analysis.callable {
+        let carries_resource = module.ctx.func_sig(helper.function, |signature| {
+            signature.args().iter().chain(signature.ret_tys()).copied()
+                .any(|ty| spirv_helper_resource_root_type(module, ty))
+        });
+        if !carries_resource || helper.accesses_resource
+            || spirv_resource_passthrough_outline_worthy(
+                counts.get(&helper.function).copied().unwrap_or_default(),
+                helper.instruction_count,
             )
-        )
+            || dependencies.contains(&helper.function)
+        {
+            selected.insert(helper.function);
+        }
+    }
+    if trace {
+        for (function, reason) in analysis.rejected {
+            eprintln!("fe naga rejected helper: function={}, reason={reason}",
+                module.ctx.func_sig(function, |signature| signature.name().to_owned()));
+        }
+    }
+    // Keep the retained set closed: a helper is independently lowerable only
+    // when every direct callee is retained under the same scalar ABI.
+    loop {
+        let rejected = selected
+            .iter()
+            .copied()
+            .filter(|&function_ref| {
+                module
+                    .func_store
+                    .try_view(function_ref, |function| {
+                        function
+                            .layout
+                            .iter_block()
+                            .flat_map(|block| function.layout.iter_inst(block))
+                            .filter_map(|instruction| function.dfg.call_info(instruction))
+                            .any(|call| !selected.contains(&call.callee()))
+                    })
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            break;
+        }
+        for function in rejected {
+            selected.remove(&function);
+        }
+    }
+    selected
 }
 
 fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
@@ -842,384 +903,6 @@ fn spirv_profitable_helper_dependency_closure(
     required
 }
 
-fn spirv_helper_candidates(
-    module: &sonatina_ir::Module,
-    roots: &[sonatina_ir::module::FuncRef],
-) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
-    use sonatina_ir::inst::control_flow;
-
-    fn classify(
-        module: &sonatina_ir::Module,
-        roots: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
-        function_ref: sonatina_ir::module::FuncRef,
-        call_counts: &std::collections::HashMap<sonatina_ir::module::FuncRef, usize>,
-        profitable_dependencies: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
-        states: &mut std::collections::HashMap<sonatina_ir::module::FuncRef, u8>,
-        accepted: &mut std::collections::HashSet<sonatina_ir::module::FuncRef>,
-    ) -> bool {
-        if roots.contains(&function_ref) {
-            return false;
-        }
-        match states.get(&function_ref).copied() {
-            Some(1) => return false,
-            Some(2) => return accepted.contains(&function_ref),
-            _ => {}
-        }
-        states.insert(function_ref, 1);
-
-        let Some(signature) = module.ctx.get_sig(function_ref) else {
-            states.insert(function_ref, 2);
-            return false;
-        };
-        let signature_carries_resource = signature
-            .args()
-            .iter()
-            .chain(signature.ret_tys())
-            .copied()
-            .any(|ty| spirv_helper_resource_root_type(module, ty));
-        let signature_ok = signature
-            .args()
-            .iter()
-            .copied()
-            .all(|ty| spirv_helper_argument_abi_type(module, ty))
-            && signature
-                .ret_tys()
-                .iter()
-                .copied()
-                .all(|ty| spirv_helper_result_abi_type(module, ty));
-        let Some((body_ok, callees, accesses_resource, instruction_count)) =
-            module.func_store.try_view(function_ref, |function| {
-                let inst_set = function.inst_set();
-                // Helper outlining is only profitable if the backend can
-                // represent the helper as an independent structured function.
-                // Preflight the same structurizer used by Naga lowering so a
-                // newly legal ABI does not turn an existing inlinable CFG into
-                // a late backend failure.
-                let mut body_ok = signature_ok
-                    && sonatina_codegen::structurize::structurize_function(function).is_ok();
-                let mut callees = Vec::new();
-                let mut accesses_resource = false;
-                let mut instruction_count = 0usize;
-                for block in function.layout.iter_block() {
-                    for instruction in function.layout.iter_inst(block) {
-                        instruction_count += 1;
-                        let data = function.dfg.inst(instruction);
-                        accesses_resource |=
-                            spirv_helper_instruction_accesses_resource(inst_set, data);
-                        let direct_call = function.dfg.call_info(instruction);
-                        if let Some(call) = direct_call {
-                            callees.push(call.callee());
-                        } else if data.declared_effect_hint().has_memory_effect()
-                            && !spirv_helper_memory_effect_is_lowerable(inst_set, data)
-                        {
-                            body_ok = false;
-                        }
-                        if <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
-                            inst_set, data,
-                        )
-                        .is_some()
-                        {
-                            body_ok = false;
-                        }
-                        if function
-                            .dfg
-                            .inst_results(instruction)
-                            .iter()
-                            .copied()
-                            .any(|value| {
-                                !spirv_helper_body_type(module, function.dfg.value_ty(value))
-                            })
-                            || data.collect_values().into_iter().any(|value| {
-                                !spirv_helper_body_type(module, function.dfg.value_ty(value))
-                            })
-                        {
-                            body_ok = false;
-                        }
-                    }
-                }
-                (body_ok, callees, accesses_resource, instruction_count)
-            })
-        else {
-            states.insert(function_ref, 2);
-            return false;
-        };
-        // Visit every reachable child even after one child proves this parent
-        // ineligible. Aggregate resource wrappers often appear above otherwise
-        // self-contained scalar arithmetic islands. Short-circuiting here would
-        // hide those islands from the helper ABI merely because their parent
-        // must still be inlined.
-        let mut callees_ok = true;
-        for callee in callees {
-            if !classify(
-                module,
-                roots,
-                callee,
-                call_counts,
-                profitable_dependencies,
-                states,
-                accepted,
-            ) {
-                callees_ok = false;
-            }
-        }
-        // A resource-only cursor or error-state wrapper blocks useful scalar
-        // simplification across the call while doing no resource work itself.
-        // Inline that wrapper. Preserve the richer capability boundary only
-        // where the helper actually loads from or stores to the resource.
-        let passthrough_outline_worthy = spirv_resource_passthrough_outline_worthy(
-            call_counts.get(&function_ref).copied().unwrap_or_default(),
-            instruction_count,
-        );
-        if body_ok
-            && callees_ok
-            && (!signature_carries_resource
-                || accesses_resource
-                || passthrough_outline_worthy
-                || profitable_dependencies.contains(&function_ref))
-        {
-            accepted.insert(function_ref);
-        }
-        states.insert(function_ref, 2);
-        accepted.contains(&function_ref)
-    }
-
-    let roots = roots
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let call_counts =
-        spirv_root_expansion_counts(module, &roots.iter().copied().collect::<Vec<_>>());
-    let profitable_dependencies = spirv_profitable_helper_dependency_closure(
-        module,
-        &roots.iter().copied().collect::<Vec<_>>(),
-        &call_counts,
-    );
-    let root_callees = roots
-        .iter()
-        .flat_map(|&root| {
-            module
-                .func_store
-                .try_view(root, |function| {
-                    function
-                        .layout
-                        .iter_block()
-                        .flat_map(|block| function.layout.iter_inst(block))
-                        .filter_map(|instruction| function.dfg.call_info(instruction))
-                        .map(|call| call.callee())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>();
-    let mut states = std::collections::HashMap::new();
-    let mut accepted = std::collections::HashSet::new();
-    for callee in root_callees {
-        classify(
-            module,
-            &roots,
-            callee,
-            &call_counts,
-            &profitable_dependencies,
-            &mut states,
-            &mut accepted,
-        );
-    }
-    accepted
-}
-
-fn trace_spirv_helper_classification(
-    module: &sonatina_ir::Module,
-    roots: &[sonatina_ir::module::FuncRef],
-    accepted: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
-) {
-    use sonatina_ir::inst::control_flow;
-
-    let call_counts = spirv_root_expansion_counts(module, roots);
-    let profitable_dependencies =
-        spirv_profitable_helper_dependency_closure(module, roots, &call_counts);
-    let root_set = roots
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let mut reachable = std::collections::HashSet::new();
-    let mut worklist = roots.to_vec();
-    while let Some(function_ref) = worklist.pop() {
-        if !reachable.insert(function_ref) {
-            continue;
-        }
-        if let Some(callees) = module.func_store.try_view(function_ref, |function| {
-            function
-                .layout
-                .iter_block()
-                .flat_map(|block| function.layout.iter_inst(block))
-                .filter_map(|instruction| function.dfg.call_info(instruction))
-                .map(|call| call.callee())
-                .collect::<Vec<_>>()
-        }) {
-            worklist.extend(callees);
-        }
-    }
-
-    let mut accepted_instructions = 0usize;
-    let mut rejected = Vec::new();
-    for function_ref in reachable
-        .iter()
-        .copied()
-        .filter(|function| !root_set.contains(function))
-    {
-        let instruction_count = module
-            .func_store
-            .try_view(function_ref, |function| {
-                function
-                    .layout
-                    .iter_block()
-                    .map(|block| function.layout.iter_inst(block).count())
-                    .sum::<usize>()
-            })
-            .unwrap_or_default();
-        if accepted.contains(&function_ref) {
-            accepted_instructions += instruction_count;
-            continue;
-        }
-
-        let mut reasons = std::collections::BTreeSet::new();
-        let signature_carries_resource =
-            module.ctx.get_sig(function_ref).is_some_and(|signature| {
-                signature
-                    .args()
-                    .iter()
-                    .chain(signature.ret_tys())
-                    .copied()
-                    .any(|ty| spirv_helper_resource_root_type(module, ty))
-            });
-        module
-            .ctx
-            .get_sig(function_ref)
-            .map(|signature| {
-                if !signature
-                    .args()
-                    .iter()
-                    .copied()
-                    .all(|ty| spirv_helper_argument_abi_type(module, ty))
-                {
-                    reasons.insert("signature_args");
-                }
-                if !signature
-                    .ret_tys()
-                    .iter()
-                    .copied()
-                    .all(|ty| spirv_helper_result_abi_type(module, ty))
-                {
-                    reasons.insert("signature_results");
-                }
-            })
-            .unwrap_or_else(|| {
-                reasons.insert("missing_signature");
-            });
-        module.func_store.try_view(function_ref, |function| {
-            let inst_set = function.inst_set();
-            let mut accesses_resource = false;
-            if let Err(error) = sonatina_codegen::structurize::structurize_function(function) {
-                reasons.insert("unstructured_control");
-                eprintln!(
-                    "fe spirv helper structurize rejection: function={}, error={error}",
-                    module
-                        .ctx
-                        .func_sig(function_ref, |signature| signature.name().to_owned()),
-                );
-                eprintln!(
-                    "fe spirv rejected helper IR:\n{}",
-                    sonatina_ir::ir_writer::FuncWriter::new(function_ref, function).dump_string(),
-                );
-            }
-            for block in function.layout.iter_block() {
-                for instruction in function.layout.iter_inst(block) {
-                    let data = function.dfg.inst(instruction);
-                    accesses_resource |= spirv_helper_instruction_accesses_resource(inst_set, data);
-                    if let Some(call) = function.dfg.call_info(instruction) {
-                        if !accepted.contains(&call.callee()) {
-                            reasons.insert("rejected_callee");
-                        }
-                    } else if data.declared_effect_hint().has_memory_effect()
-                        && !spirv_helper_memory_effect_is_lowerable(inst_set, data)
-                    {
-                        reasons.insert("memory_effect");
-                    }
-                    if <&control_flow::CallIndirect as sonatina_ir::InstDowncast>::downcast(
-                        inst_set, data,
-                    )
-                    .is_some()
-                    {
-                        reasons.insert("indirect_call");
-                    }
-                    if function
-                        .dfg
-                        .inst_results(instruction)
-                        .iter()
-                        .copied()
-                        .any(|value| !spirv_helper_body_type(module, function.dfg.value_ty(value)))
-                        || data.collect_values().into_iter().any(|value| {
-                            !spirv_helper_body_type(module, function.dfg.value_ty(value))
-                        })
-                    {
-                        reasons.insert("non_scalar_value");
-                    }
-                }
-            }
-            if signature_carries_resource
-                && !accesses_resource
-                && !spirv_resource_passthrough_outline_worthy(
-                    call_counts.get(&function_ref).copied().unwrap_or_default(),
-                    instruction_count,
-                )
-                && !profitable_dependencies.contains(&function_ref)
-            {
-                reasons.insert("resource_passthrough_only");
-            }
-        });
-        if reasons.is_empty() {
-            reasons.insert("unclassified");
-        }
-        rejected.push((function_ref, instruction_count, reasons));
-    }
-
-    let mut by_reason = std::collections::BTreeMap::<&str, (usize, usize)>::new();
-    for (_, instructions, reasons) in &rejected {
-        for &reason in reasons {
-            let totals = by_reason.entry(reason).or_default();
-            totals.0 += 1;
-            totals.1 += instructions;
-        }
-    }
-    eprintln!(
-        "fe spirv helper classification: reachable={}, accepted={}, accepted_insts={}, rejected={}, rejected_insts={}",
-        reachable.len(),
-        accepted.len(),
-        accepted_instructions,
-        rejected.len(),
-        rejected
-            .iter()
-            .map(|(_, instructions, _)| instructions)
-            .sum::<usize>(),
-    );
-    for (reason, (functions, instructions)) in by_reason {
-        eprintln!(
-            "fe spirv helper rejection: reason={reason}, functions={functions}, instructions={instructions}"
-        );
-    }
-    rejected.sort_unstable_by_key(|(_, instructions, _)| std::cmp::Reverse(*instructions));
-    for (function_ref, instructions, reasons) in rejected {
-        let name = module
-            .ctx
-            .get_sig(function_ref)
-            .map(|signature| signature.name().to_string())
-            .unwrap_or_else(|| format!("{function_ref:?}"));
-        eprintln!(
-            "fe spirv rejected helper: function={name}, instructions={instructions}, reasons={}",
-            reasons.into_iter().collect::<Vec<_>>().join("+")
-        );
-    }
-}
 
 fn write_spirv_inline_snapshot(
     module: &sonatina_ir::Module,
@@ -1402,51 +1085,4 @@ fn ensure_spirv_entry_calls_lowerable(
         ))),
         None => Ok(()),
     }
-}
-
-fn ensure_spirv_entries_call_free(
-    module: &sonatina_ir::Module,
-    entry_names: &[&str],
-) -> Result<(), LowerError> {
-    for entry_name in entry_names {
-        let entry = module
-            .funcs()
-            .iter()
-            .copied()
-            .find(|entry| {
-                module
-                    .ctx
-                    .get_sig(*entry)
-                    .is_some_and(|signature| signature.name() == *entry_name)
-            })
-            .ok_or_else(|| {
-                LowerError::Spirv(format!(
-                    "SPIR-V entry `{entry_name}` is absent after lowering"
-                ))
-            })?;
-        let residual = module.func_store.view(entry, |function| {
-            function.layout.iter_block().find_map(|block| {
-                function.layout.iter_inst(block).find_map(|inst| {
-                    let call = function.dfg.call_info(inst)?;
-                    let callee = call.callee();
-                    Some({
-                        let name = module
-                            .ctx
-                            .get_sig(callee)
-                            .map(|signature| signature.name().to_string())
-                            .unwrap_or_else(|| format!("{callee:?}"));
-                        let linkage = module.ctx.func_linkage(callee);
-                        let hints = module.ctx.func_hints(callee);
-                        format!("`{name}` (linkage={linkage:?}, hints={hints:?})")
-                    })
-                })
-            })
-        });
-        if let Some(callee) = residual {
-            return Err(LowerError::Spirv(format!(
-                "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to {callee}"
-            )));
-        }
-    }
-    Ok(())
 }
