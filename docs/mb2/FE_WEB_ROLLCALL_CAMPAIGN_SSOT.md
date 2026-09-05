@@ -133,8 +133,14 @@ Naga artifact. Lowering took 9,814ms; measured setup/lowering/validation took
 12,371ms. Evidence: `/workspace/scratch/mb2-boundary-production-linear-plan-release.log`.
 This is a real production-stage structural gate, not numerical execution or a
 complete proof. The expression count is not the pre-writer backend census.
-A same-input controlled baseline is still required to attribute size savings
-to the current cleanup; historical byte counts alone do not establish that.
+A controlled baseline on Fe `d1fb17473`, with only the two pending Fe boundary
+integration files removed and the same Sonatina `9347f7c2`, passed with exactly
+the same 56,001 bytes, 30 helpers, and 2,150 reparsed expressions. Baseline
+lowering took 11,740ms and total measured time was 14,911ms. These single-run
+times are not a speedup claim. This Fe integration preserves the measured
+shader size; it does not explain earlier reductions. Evidence:
+`/workspace/scratch/mb2-boundary-production-linear-plan-fe-parent-release.log`.
+The integration was restored afterward and both source hashes verified.
 
 Legend:
 
