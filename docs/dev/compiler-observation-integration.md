@@ -145,6 +145,18 @@ absorb_sparse_control_link is 27,394 bytes. The full instrumented test takes
 172.99 seconds. These are emitted-code and compilation measurements, not GPU
 execution or proof-generation timings.
 
+Chrome pipeline smoke gate: the saved largest `reduce_composition` artifact
+successfully creates a compute pipeline on the host AMD RDNA-3 adapter in
+13,365.2 ms, with no compilation messages, validation errors or observed device
+loss. This is compilation only, with no command submission or proof execution.
+The exact saved file is 235,397 bytes (distinct from the backend event count of
+235,398), SHA-256
+`69530a62b31df0b202927001f3c3ef043f7beabca2a1dd6bde584bde3a1447b1`.
+The isolated secure localhost document was fulfilled through DevTools after
+development-server URLs failed to load. No existing application tab was used.
+Evidence: `/workspace/scratch/mb2-native-shader-chrome-smoke-isolated-20260905.log`.
+Full browser dispatch and independent production-result checking remain pending.
+
 The argument plan is recorded at private signature declaration and consumed by
 parameter binding and call preparation. Resource-bearing products, explicit
 typed borrows, addressable parameter slots, external interfaces and Wasm keep
