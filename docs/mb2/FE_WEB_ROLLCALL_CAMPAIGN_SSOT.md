@@ -190,9 +190,16 @@ report; an interned type does not authorize an invalid use closure or budget.
 The focused regression and all 117 backend tests passed (suite 4.80s):
 `/workspace/scratch/mb2-sonatina-typed-local-report-release.log` and
 `/workspace/scratch/mb2-sonatina-typed-local-report-suite-release.log`.
-This is still not the public Fe query. Shared resource-context preparation
+Resource-result planning now also records per-helper outcomes. Its regression
+rejects conflicting resource returns and the caller depending on that missing
+identity, while retaining an independent helper's exact argument identity.
+The focused regression and all 117 backend tests passed (suite 2.44s):
+`/workspace/scratch/mb2-sonatina-resource-result-report-release.log` and
+`/workspace/scratch/mb2-sonatina-resource-result-report-suite-release.log`.
+This is still not the public Fe query. Entry-rooted resource-variant propagation
 can fail before ABI planning, and the separate reports must be combined before
-deleting Fe's classifier.
+deleting Fe's classifier. Invalid entry-resource declarations remain global
+request errors, not recoverable helper outcomes.
 
 Legend:
 
