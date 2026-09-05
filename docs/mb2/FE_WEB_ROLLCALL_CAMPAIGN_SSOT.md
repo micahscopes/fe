@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `678fb936`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `47e8e52d`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -237,6 +237,21 @@ partial context outcomes with physical selection, exposing the public query,
 and replacing Fe's classifier remain open. Authored raster retains its current
 entry preparation and supported local subset; no new raster capability is
 implied by sharing the planner's rejection input.
+
+Sonatina `47e8e52d` joins partial context and typed-local outcomes with physical
+planning in `EntryHelperSelectionReport`. Production entry preparation now
+consumes this report's complete-result gate. Independent resource helpers can
+receive physical plans despite another helper's resource rejection; rejected
+prerequisites also disqualify dependent callers. Missing entry-arena ownership
+is a prerequisite rejection, not an assumed heap handle. The focused combined
+selection regression passed, and all 117 backend tests passed with llvmpipe in
+2.96s, including the missing-arena-owner gate. Evidence:
+`/workspace/scratch/mb2-sonatina-contextual-selection-release.log` and
+`/workspace/scratch/mb2-sonatina-contextual-selection-suite-release.log`.
+The report remains internal: request-level validation and authored-raster
+preparation must support the public query before Fe's classifier is removed.
+It does not claim legality for unresolved resource identities or incomplete
+entry contexts, nor does it emit a partially valid shader.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
