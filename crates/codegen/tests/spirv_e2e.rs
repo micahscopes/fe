@@ -15,9 +15,9 @@ use url::Url;
 const SPIRV_MAGIC: u32 = 0x0723_0203;
 
 /// The keystone kernel, authored as one straight-line, call-free, param-free Fe
-/// function so it lands inside SPIR-V's narrow envelope (single function,
-/// Add/Mul/Return only, no branches, no calls). `funcs().first()` in the SPIR-V
-/// translator is therefore unambiguously this kernel. Semantics mirror the
+/// function to keep this artifact smoke test focused on arithmetic rather than
+/// helper or control-flow legalization. The runtime section identifies the
+/// kernel entry explicitly. Semantics mirror the
 /// hand-built Poseidon-sigma known answer; all intermediates stay < 2^64.
 const KEYSTONE_SOURCE: &str = "\
 pub fn poseidon_sigma() -> u64 {\n\
@@ -33,11 +33,10 @@ pub fn poseidon_sigma() -> u64 {\n\
 \x20   a4\n\
 }\n";
 
-/// R-val, the direct path: Fe source -> wasm-path Module -> `SpirvBackend` ->
-/// inspect the raw `SpirvArtifact`. Proves the wasm Module feeds SPIR-V
-/// unchanged, that naga validation passes (an `Ok` return means the validator
-/// accepted the module), that `words[0]` is the SPIR-V magic, and that the WGSL
-/// side artifact needed by the later GPU-exec slice is produced.
+/// R-val: Fe source -> runtime package -> Shader-ISA Sonatina module -> Naga.
+/// Inspect the returned artifact for validation success, SPIR-V magic, and the
+/// WGSL side artifact needed by later GPU-execution tests. This does not test
+/// a Wasm-materialized module or establish execution correctness.
 #[test]
 fn keystone_lowers_to_naga_validated_spirv() {
     let mut db = DriverDataBase::default();
@@ -47,9 +46,8 @@ fn keystone_lowers_to_naga_validated_spirv() {
     let file = db.workspace().get(&db, &url).expect("file should load");
     let top_mod = db.top_mod(file);
 
-    // Reuse the wasm-path Sonatina Module (no SPIR-V lowering port), then hand it
-    // to Sonatina's SpirvBackend. Failure here means either the wasm Module did
-    // NOT feed SpirvBackend cleanly, or naga rejected the module.
+    // This runtime-package builder retains its historical Wasm name. The
+    // shader driver independently selects Shader-ISA storage and ABI lowering.
     let package = mir::build_wasm_runtime_package(&db, top_mod)
         .expect("keystone should build a wasm runtime package");
     let artifact = fe_codegen::compile_runtime_package_spirv(&db, &package)
