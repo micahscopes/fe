@@ -10207,6 +10207,160 @@ fn address_taken_scalar_slots(body: &RuntimeBody<'_>) -> HashSet<RLocalId> {
     slots
 }
 
+#[derive(Clone)]
+enum LocalValueRepresentation {
+    Single(Type),
+    Flattened(Vec<Type>),
+}
+
+/// One local-representation decision per prepared body, derived before any
+/// instructions or SSA variables are emitted. This owns declaration and
+/// materialization choices, but does not replace interprocedural ABI or arena
+/// escape analysis. The function lowerer consumes it once and retains its
+/// materialization facts for subsequent place emission.
+struct BodyLocalStoragePlan<'db> {
+    values: Vec<Option<LocalValueRepresentation>>,
+    typed_private_locals: FxHashMap<RLocalId, TypedPrivateLocal<'db>>,
+    materialized_param_slots: HashSet<RLocalId>,
+    materialized_scalar_slots: HashSet<RLocalId>,
+    address_carried_aggregate_values: HashSet<RLocalId>,
+}
+
+impl<'db> BodyLocalStoragePlan<'db> {
+    fn derive<I: Isa<InstSet = NativeInstSet>>(
+        module: &mut PortableModuleLowerer<'db, '_, I>,
+        body: &RuntimeBody<'db>,
+    ) -> Result<Self, LowerError> {
+        let address_carried_aggregate_values = module
+            .address_carried_aggregate_values
+            .get(&body.owner)
+            .cloned()
+            .unwrap_or_default();
+        let typed_private_locals = module.derive_typed_private_locals(body)?;
+
+        // Declare one SSA variable per value-carried local. A primitive scalar
+        // Slot used only through whole-slot loads/stores is promoted to the same
+        // SSA representation; projected/aggregate/addressed Slot operations stay
+        // fail-closed. R2.1: a scalar-tuple local gets ONE variable per element
+        // word (`tuple_vars`); every other value-carried local keeps its single
+        // `ty_for_class` variable (and a multi-field aggregate that is NOT a
+        // scalar tuple still fails closed there, unchanged).
+        let mut values = vec![None; body.locals.len()];
+        let mut materialized_param_slots = HashSet::new();
+        let materialized_scalar_slots = address_taken_scalar_slots(body);
+        for (idx, local) in body.locals.iter().enumerate() {
+            if let RuntimeCarrier::Value(class) = &local.carrier {
+                let local_id = RLocalId::from_u32(idx as u32);
+                let semantic_ty =
+                    instantiated_runtime_local_ty(module.db, body.owner, local.semantic_ty);
+                if semantic_gpu_resource(module.db, semantic_ty) {
+                    let ty = module.gpu_resource_type(semantic_ty)?;
+                    values[idx] = Some(LocalValueRepresentation::Single(ty));
+                    continue;
+                }
+                if address_carried_aggregate_values.contains(&local_id) {
+                    if !matches!(class, RuntimeClass::AggregateValue { .. })
+                        || !module.aggregate_is_memory_lowerable(class)
+                    {
+                        return Err(LowerError::Internal(format!(
+                            "indirect Wasm parameter {local_id:?} is not a memory-lowerable aggregate"
+                        )));
+                    }
+                    values[idx] = Some(LocalValueRepresentation::Single(Type::I32));
+                    continue;
+                }
+                if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
+                    // Conditional-value and multi-exit joins can materialize a
+                    // primitive scalar through a MIR Slot even when every
+                    // reached operation is a direct load/store of the whole
+                    // scalar. Promote exactly that closed shape to an SSA var;
+                    // projected/aggregate slots and aliasing operations remain
+                    // fail-closed in expression/statement lowering.
+                    if matches!(class, RuntimeClass::Scalar(_)) {
+                        let ty = if materialized_scalar_slots.contains(&local_id) {
+                            Type::I32
+                        } else {
+                            module.ty_for_class(class)?
+                        };
+                        values[idx] = Some(LocalValueRepresentation::Single(ty));
+                    } else if matches!(
+                        class,
+                        RuntimeClass::AggregateValue { layout }
+                            if module.single_scalar_field(*layout).is_some()
+                                || module.fieldless_enum_tag(*layout).is_some()
+                    ) {
+                        // One-word nominal values retain their canonical scalar
+                        // carrier across conditional and multi-exit joins. They
+                        // are aggregates semantically, but do not require an
+                        // aggregate place merely because MIR selected a Slot.
+                        let ty = module.ty_for_class(class)?;
+                        values[idx] = Some(LocalValueRepresentation::Single(ty));
+                    } else if let Some(elem_tys) =
+                        module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                    {
+                        if body
+                            .signature
+                            .params
+                            .iter()
+                            .any(|param| param.local == local_id)
+                        {
+                            values[idx] = Some(LocalValueRepresentation::Single(Type::I32));
+                            materialized_param_slots.insert(local_id);
+                        } else {
+                            // Conditional and continuation joins are represented
+                            // by MIR Slots even when they are only assigned and
+                            // consumed as complete values. Promote that closed
+                            // use to the same recursively flattened SSA lanes as
+                            // an ordinary aggregate local. Any later AddrOf,
+                            // projected Load/Store, or other place operation still
+                            // fails closed because tuple_vars supplies no address.
+                            values[idx] = Some(LocalValueRepresentation::Flattened(elem_tys));
+                        }
+                    }
+                    continue;
+                }
+                if let Some(elem_tys) =
+                    module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                {
+                    values[idx] = Some(LocalValueRepresentation::Flattened(elem_tys));
+                } else if module.is_memory_lowerable_object_ref(class)
+                    || module.object_value_layout(class).is_some()
+                {
+                    // Change 1: a function-local aggregate behind an object /
+                    // memory-provider reference lowers to an i32 linear-memory
+                    // pointer (the arena offset the AllocObject arm mints). The
+                    // local's SSA value IS that pointer; element reads/writes go
+                    // through i32 address arithmetic + typed Mload/Mstore. SSA/phi
+                    // is free (only the pointer is carried, never the aggregate).
+                    let ty = typed_private_locals
+                        .get(&local_id)
+                        .map_or(Type::I32, |local| local.pointer_ty);
+                    values[idx] = Some(LocalValueRepresentation::Single(ty));
+                } else {
+                    let ty = module.ty_for_class(class).map_err(|error| match error {
+                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                            "{message}; while declaring Wasm local {local_id:?} with semantic type `{}` in `{}`",
+                            semantic_ty.pretty_print(module.db),
+                            module.function_symbol(body.owner),
+                        )),
+                        other => other,
+                    })?;
+                    values[idx] = Some(LocalValueRepresentation::Single(ty));
+                }
+            }
+        }
+
+
+        Ok(Self {
+            values,
+            typed_private_locals,
+            materialized_param_slots,
+            materialized_scalar_slots,
+            address_carried_aggregate_values,
+        })
+    }
+}
+
 struct PortableFunctionLowerer<'ctx, 'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -10280,134 +10434,31 @@ where
         indirect_aggregate_params: HashSet<RLocalId>,
         indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
-        let address_carried_aggregate_values = module
-            .address_carried_aggregate_values
-            .get(&body.owner)
-            .cloned()
-            .unwrap_or_default();
-        let typed_private_locals = module.derive_typed_private_locals(&body)?;
+        let BodyLocalStoragePlan {
+            values,
+            typed_private_locals,
+            materialized_param_slots,
+            materialized_scalar_slots,
+            address_carried_aggregate_values,
+        } = BodyLocalStoragePlan::derive(module, &body)?;
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
-
-        // Declare one SSA variable per value-carried local. A primitive scalar
-        // Slot used only through whole-slot loads/stores is promoted to the same
-        // SSA representation; projected/aggregate/addressed Slot operations stay
-        // fail-closed. R2.1: a scalar-tuple local gets ONE variable per element
-        // word (`tuple_vars`); every other value-carried local keeps its single
-        // `ty_for_class` variable (and a multi-field aggregate that is NOT a
-        // scalar tuple still fails closed there, unchanged).
         let mut vars = FxHashMap::default();
-        let mut tuple_vars: FxHashMap<RLocalId, Vec<Variable>> = FxHashMap::default();
-        let mut materialized_param_slots = HashSet::new();
-        let materialized_scalar_slots = address_taken_scalar_slots(&body);
-        for (idx, local) in body.locals.iter().enumerate() {
-            if let RuntimeCarrier::Value(class) = &local.carrier {
-                let local_id = RLocalId::from_u32(idx as u32);
-                let semantic_ty =
-                    instantiated_runtime_local_ty(module.db, body.owner, local.semantic_ty);
-                if semantic_gpu_resource(module.db, semantic_ty) {
-                    let ty = module.gpu_resource_type(semantic_ty)?;
-                    vars.insert(local_id, fb.declare_var(ty));
-                    continue;
+        let mut tuple_vars = FxHashMap::default();
+        for (index, representation) in values.into_iter().enumerate() {
+            let local = RLocalId::from_u32(index as u32);
+            match representation {
+                Some(LocalValueRepresentation::Single(ty)) => {
+                    vars.insert(local, fb.declare_var(ty));
                 }
-                if address_carried_aggregate_values.contains(&local_id) {
-                    if !matches!(class, RuntimeClass::AggregateValue { .. })
-                        || !module.aggregate_is_memory_lowerable(class)
-                    {
-                        return Err(LowerError::Internal(format!(
-                            "indirect Wasm parameter {local_id:?} is not a memory-lowerable aggregate"
-                        )));
-                    }
-                    vars.insert(local_id, fb.declare_var(Type::I32));
-                    continue;
+                Some(LocalValueRepresentation::Flattened(types)) => {
+                    tuple_vars.insert(
+                        local,
+                        types.into_iter().map(|ty| fb.declare_var(ty)).collect(),
+                    );
                 }
-                if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
-                    // Conditional-value and multi-exit joins can materialize a
-                    // primitive scalar through a MIR Slot even when every
-                    // reached operation is a direct load/store of the whole
-                    // scalar. Promote exactly that closed shape to an SSA var;
-                    // projected/aggregate slots and aliasing operations remain
-                    // fail-closed in expression/statement lowering.
-                    if matches!(class, RuntimeClass::Scalar(_)) {
-                        let ty = if materialized_scalar_slots.contains(&local_id) {
-                            Type::I32
-                        } else {
-                            module.ty_for_class(class)?
-                        };
-                        vars.insert(local_id, fb.declare_var(ty));
-                    } else if matches!(
-                        class,
-                        RuntimeClass::AggregateValue { layout }
-                            if module.single_scalar_field(*layout).is_some()
-                                || module.fieldless_enum_tag(*layout).is_some()
-                    ) {
-                        // One-word nominal values retain their canonical scalar
-                        // carrier across conditional and multi-exit joins. They
-                        // are aggregates semantically, but do not require an
-                        // aggregate place merely because MIR selected a Slot.
-                        let ty = module.ty_for_class(class)?;
-                        vars.insert(local_id, fb.declare_var(ty));
-                    } else if let Some(elem_tys) =
-                        module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
-                    {
-                        if body
-                            .signature
-                            .params
-                            .iter()
-                            .any(|param| param.local == local_id)
-                        {
-                            vars.insert(local_id, fb.declare_var(Type::I32));
-                            materialized_param_slots.insert(local_id);
-                        } else {
-                            // Conditional and continuation joins are represented
-                            // by MIR Slots even when they are only assigned and
-                            // consumed as complete values. Promote that closed
-                            // use to the same recursively flattened SSA lanes as
-                            // an ordinary aggregate local. Any later AddrOf,
-                            // projected Load/Store, or other place operation still
-                            // fails closed because tuple_vars supplies no address.
-                            let elem_vars = elem_tys
-                                .iter()
-                                .map(|ty| fb.declare_var(*ty))
-                                .collect::<Vec<_>>();
-                            tuple_vars.insert(local_id, elem_vars);
-                        }
-                    }
-                    continue;
-                }
-                if let Some(elem_tys) =
-                    module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
-                {
-                    let elem_vars = elem_tys
-                        .iter()
-                        .map(|ty| fb.declare_var(*ty))
-                        .collect::<Vec<_>>();
-                    tuple_vars.insert(local_id, elem_vars);
-                } else if module.is_memory_lowerable_object_ref(class)
-                    || module.object_value_layout(class).is_some()
-                {
-                    // Change 1: a function-local aggregate behind an object /
-                    // memory-provider reference lowers to an i32 linear-memory
-                    // pointer (the arena offset the AllocObject arm mints). The
-                    // local's SSA value IS that pointer; element reads/writes go
-                    // through i32 address arithmetic + typed Mload/Mstore. SSA/phi
-                    // is free (only the pointer is carried, never the aggregate).
-                    let ty = typed_private_locals
-                        .get(&local_id)
-                        .map_or(Type::I32, |local| local.pointer_ty);
-                    vars.insert(local_id, fb.declare_var(ty));
-                } else {
-                    let ty = module.ty_for_class(class).map_err(|error| match error {
-                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                            "{message}; while declaring Wasm local {local_id:?} with semantic type `{}` in `{}`",
-                            semantic_ty.pretty_print(module.db),
-                            module.function_symbol(body.owner),
-                        )),
-                        other => other,
-                    })?;
-                    vars.insert(local_id, fb.declare_var(ty));
-                }
+                None => {}
             }
         }
 
