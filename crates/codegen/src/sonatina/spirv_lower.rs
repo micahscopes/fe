@@ -87,9 +87,9 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     );
     // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
     // (compute shaders have no wasm-style imports), so it is discarded here.
-    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module);
-    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
+    let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -135,9 +135,9 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
     resources: &[SpirvExternalResource],
     builtin_arguments: &[SpirvBuiltinArgument],
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module);
-    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
+    let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
     let mut backend = SpirvBackend::new()
         .with_compute()
@@ -190,9 +190,9 @@ pub fn compile_runtime_package_spirv_grid(
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
-    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module);
-    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
+    let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -246,9 +246,9 @@ pub fn compile_runtime_package_spirv_render(
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
-    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module);
-    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
+    let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
     SpirvBackend::new()
         .with_render()
@@ -271,9 +271,9 @@ pub fn compile_runtime_package_spirv_render_with_resources(
     package: &RuntimePackage<'_>,
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
-    let preserved_helpers = inline_spirv_calls(&mut module);
-    ensure_spirv_entry_calls_lowerable(&module, &preserved_helpers)?;
+    let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
+    let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions);
+    ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
     let mut backend = SpirvBackend::new().with_render();
     for resource in resources {
@@ -319,7 +319,7 @@ pub fn compile_runtime_package_spirv_authored_raster_with_resources(
     fragment_entry: &str,
     resources: &[SpirvExternalResource],
 ) -> Result<SpirvArtifact, LowerError> {
-    let (mut module, _import_modules) = compile_runtime_package_shader_ir(db, package)?;
+    let (mut module, _entry_functions) = compile_runtime_package_shader_ir(db, package)?;
     inline_spirv_named_calls(&mut module, &[vertex_entry, fragment_entry]);
     ensure_spirv_entries_call_free(&module, &[vertex_entry, fragment_entry])?;
 
@@ -358,9 +358,12 @@ pub fn compile_render_wgsl<'db>(
 
 fn inline_spirv_calls(
     module: &mut sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
 ) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
-    let roots = module.funcs().into_iter().take(1).collect::<Vec<_>>();
-    inline_spirv_calls_from_roots(module, &roots, true)
+    // The legacy single-entry API selects the first runtime section, not the
+    // first arbitrary Sonatina declaration.
+    let selected = &roots[..roots.len().min(1)];
+    inline_spirv_calls_from_roots(module, selected, true)
 }
 
 fn inline_spirv_named_calls(module: &mut sonatina_ir::Module, entry_names: &[&str]) {
@@ -1359,11 +1362,12 @@ fn spirv_module_instruction_count(module: &sonatina_ir::Module) -> usize {
 
 fn ensure_spirv_entry_calls_lowerable(
     module: &sonatina_ir::Module,
+    entries: &[sonatina_ir::module::FuncRef],
     preserved_helpers: &std::collections::HashSet<sonatina_ir::module::FuncRef>,
 ) -> Result<(), LowerError> {
-    let Some(&entry) = module.funcs().first() else {
+    let Some(&entry) = entries.first() else {
         return Err(LowerError::Spirv(
-            "SPIR-V module has no entry function".to_string(),
+            "SPIR-V module has no runtime section entry".to_owned(),
         ));
     };
     let entry_name = module

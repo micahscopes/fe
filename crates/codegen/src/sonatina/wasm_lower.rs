@@ -259,22 +259,17 @@ pub fn compile_runtime_package_wasm(
 pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
-) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(
-        db,
-        package,
-        &[],
-        &[],
-        None,
-        &[],
-        None,
-        None,
-        &[],
-        &[],
-        false,
-        true,
+) -> Result<(Module, Vec<FuncRef>), LowerError> {
+    // Compatibility ISA until the Shader revision is reproducibly pinned.
+    // Shared body lowering never chooses an ISA implicitly.
+    let isa = create_wasm32_isa();
+    let lowerer = lower_portable_bodies(
+        &isa, db, package, HashSet::new(), &[], false, true,
         PrivatePlaceMaterialization::ShaderTypedWhenLegal,
-    )
+        AggregateCopyLowering::Memcopy,
+    )?;
+    let entries = shader_runtime_entries(&lowerer)?;
+    Ok((lowerer.finish(), entries))
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -287,20 +282,17 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
     callbacks: &[crate::guest_callbacks::ResolvedGuestCallback],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
-    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
+    let mut lowerer = lower_portable_bodies(
         &isa,
+        db,
         package,
         HashSet::new(),
         &[],
         true,
         true,
         PrivatePlaceMaterialization::CanonicalArena,
+        AggregateCopyLowering::Memcopy,
     )?;
-    lowerer.declare_functions()?;
-    lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
@@ -318,89 +310,12 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     resident_policies: &[super::WasmResidentPolicy],
     fixed_i32_exports: &[(String, i32)],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(
-        db,
-        package,
-        canonical_lanes,
-        export_aliases,
-        resident_transition,
-        resident_aux_transitions,
-        resident_initializer,
-        resident_projection,
-        resident_policies,
-        fixed_i32_exports,
-        true,
-        true,
-        PrivatePlaceMaterialization::CanonicalArena,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compile_runtime_package_wasm_inner(
-    db: &DriverDataBase,
-    package: &RuntimePackage<'_>,
-    canonical_lanes: &[crate::CanonicalLane],
-    export_aliases: &[(String, String)],
-    resident_transition: Option<&super::WasmResidentTransition>,
-    resident_aux_transitions: &[super::WasmResidentTransition],
-    resident_initializer: Option<&super::WasmResidentInitializer>,
-    resident_projection: Option<&super::WasmResidentProjection>,
-    resident_policies: &[super::WasmResidentPolicy],
-    fixed_i32_exports: &[(String, i32)],
-    validate_host_enum_params: bool,
-    enable_scoped_arena: bool,
-    private_place_materialization: PrivatePlaceMaterialization,
-) -> Result<(Module, HashMap<String, String>), LowerError> {
-    wasm_lower_trace(|| {
-        format!(
-            "begin runtime package, functions={}",
-            package.functions(db).len(),
-        )
-    });
-    observe_runtime_package(db, package);
-    // Reject unsupported indirect host results before constructing any
-    // Sonatina signatures. A local wrapper may itself return the authored enum
-    // and appear before the import in package order, so gating inside
-    // `declare_functions` is already too late.
-    for function in package.functions(db) {
-        let instance = function.instance(db);
-        let Some(name) = mir::host_import_name(db, instance) else {
-            continue;
-        };
-        let Some(descriptor) = mir::indirect_host_result(db, instance) else {
-            continue;
-        };
-        let mut missing = Vec::new();
-        if descriptor.requires_realloc {
-            missing.push("realloc");
-        }
-        if descriptor.requires_post_return {
-            missing.push("post-return");
-        }
-        if !missing.is_empty() {
-            return Err(LowerError::Unsupported(format!(
-                "extern host import `{name}` uses indirect host result codec `{}`, but the Wasm \
-                 backend is missing required capabilities: {}",
-                mir::IndirectHostResult::FE_HOST_WASM_PROTOCOL,
-                missing.join(", ")
-            )));
-        }
-    }
-
-    // CONSULT (DispatchKind axis): the wasm target realizes the `Export` kind.
-    // Every entry (`main`, the `fe_task` task table, the degraded-mode
-    // `on_ready` continuation) is a named export the host invokes directly, with
-    // no in-band selector and no synthesized dispatch root. This names what this
-    // lowering already does; a mismatch fires in debug, zero effect in release.
-    debug_assert!(
-        {
-            let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Wasm);
-            matches!(kind, crate::dispatch::DispatchKind::Export) && kind.entries_invoked_directly()
-        },
-        "wasm lowering must realize the Export DispatchKind (entries invoked directly)"
-    );
+    debug_assert!({
+        let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Wasm);
+        matches!(kind, crate::dispatch::DispatchKind::Export) && kind.entries_invoked_directly()
+    }, "wasm lowering must realize the Export DispatchKind (entries invoked directly)");
+    validate_wasm_host_results(db, package)?;
     let isa = create_wasm32_isa();
-    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
     let mut wrapped_lane_names: HashSet<String> = canonical_lanes
         .iter()
         .map(|lane| lane.name.clone())
@@ -435,22 +350,11 @@ fn compile_runtime_package_wasm_inner(
         };
         wrapped_lane_names.insert(symbol.clone());
     }
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
-        &isa,
-        package,
-        wrapped_lane_names,
-        export_aliases,
-        validate_host_enum_params,
-        enable_scoped_arena,
-        private_place_materialization,
+    let mut lowerer = lower_portable_bodies(
+        &isa, db, package, wrapped_lane_names, export_aliases, true, true,
+        PrivatePlaceMaterialization::CanonicalArena,
+        AggregateCopyLowering::Memcopy,
     )?;
-    wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
-    lowerer.declare_functions()?;
-    wasm_lower_trace(|| "declared portable runtime functions".to_owned());
-    lowerer.lower_bodies()?;
-    wasm_lower_trace(|| "lowered portable runtime function bodies".to_owned());
     for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
     }
@@ -478,8 +382,99 @@ fn compile_runtime_package_wasm_inner(
         lowerer.synthesize_fixed_i32_export(export, *value)?;
     }
     let import_modules = lowerer.import_modules();
-    wasm_lower_trace(|| "finished portable Sonatina module".to_owned());
     Ok((lowerer.finish(), import_modules))
+}
+
+/// Construct and lower portable bodies without synthesizing a host interface.
+/// The caller owns target identity, representation policy, and any subsequent
+/// host wrappers. Full prepared bodies are still consumed incrementally.
+#[allow(clippy::too_many_arguments)]
+fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
+    isa: &'a I,
+    db: &'db DriverDataBase,
+    package: &'a RuntimePackage<'db>,
+    wrapped_lane_names: HashSet<String>,
+    export_aliases: &[(String, String)],
+    validate_host_enum_params: bool,
+    enable_scoped_arena: bool,
+    private_place_materialization: PrivatePlaceMaterialization,
+    aggregate_copy_lowering: AggregateCopyLowering,
+) -> Result<PortableModuleLowerer<'db, 'a, I>, LowerError> {
+    wasm_lower_trace(|| format!("begin runtime package, functions={}", package.functions(db).len()));
+    observe_runtime_package(db, package);
+    let builder = ModuleBuilder::new(ModuleCtx::new(isa));
+    let mut lowerer = PortableModuleLowerer::new(
+        db, builder, isa, package, wrapped_lane_names, export_aliases,
+        validate_host_enum_params, enable_scoped_arena, private_place_materialization,
+        aggregate_copy_lowering,
+    )?;
+    wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
+    lowerer.declare_functions()?;
+    wasm_lower_trace(|| "declared portable runtime functions".to_owned());
+    lowerer.lower_bodies()?;
+    wasm_lower_trace(|| "lowered portable runtime function bodies".to_owned());
+    Ok(lowerer)
+}
+
+fn validate_wasm_host_results(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+) -> Result<(), LowerError> {
+    // Reject unsupported indirect host results before constructing any
+    // Sonatina signatures. A local wrapper may itself return the authored enum
+    // and appear before the import in package order, so gating inside
+    // `declare_functions` is already too late.
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        let Some(name) = mir::host_import_name(db, instance) else {
+            continue;
+        };
+        let Some(descriptor) = mir::indirect_host_result(db, instance) else {
+            continue;
+        };
+        let mut missing = Vec::new();
+        if descriptor.requires_realloc {
+            missing.push("realloc");
+        }
+        if descriptor.requires_post_return {
+            missing.push("post-return");
+        }
+        if !missing.is_empty() {
+            return Err(LowerError::Unsupported(format!(
+                "extern host import `{name}` uses indirect host result codec `{}`, but the Wasm \
+                 backend is missing required capabilities: {}",
+                mir::IndirectHostResult::FE_HOST_WASM_PROTOCOL,
+                missing.join(", ")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Section identity defines the legacy primary entry. Explicit public exports
+/// additionally admit paired stages without scanning arbitrary declarations.
+fn shader_runtime_entries<I: Isa<InstSet = NativeInstSet>>(
+    lowerer: &PortableModuleLowerer<'_, '_, I>,
+) -> Result<Vec<FuncRef>, LowerError> {
+    let db = lowerer.db;
+    let package = lowerer.package;
+    let section_instances = package.root_objects(db).into_iter().flat_map(|object| {
+        object.sections(db).iter().map(|section| section.entry.instance(db)).collect::<Vec<_>>()
+    });
+    let export_instances = package.functions(db).into_iter()
+        .filter(|function| function.linkage(db) == RuntimeLinkage::Internal)
+        .map(|function| function.instance(db));
+    let mut entries = Vec::new();
+    for instance in section_instances.chain(export_instances) {
+        let entry = lowerer.func_map.get(&instance).copied().ok_or_else(|| {
+            LowerError::Internal("runtime entry has no declared Sonatina function".to_owned())
+        })?;
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
 }
 
 /// Change 5: whether the lowered module emits any `MemAllocDynamic`. The default
@@ -948,20 +943,17 @@ pub(crate) fn compile_runtime_package_native(
         Vendor::Unknown,
         OperatingSystem::Native,
     ));
-    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
+    let lowerer = lower_portable_bodies(
         &isa,
+        db,
         package,
         HashSet::new(),
         &[],
         true,
         false,
         PrivatePlaceMaterialization::CanonicalArena,
+        AggregateCopyLowering::InlineLoop,
     )?;
-    lowerer.declare_functions()?;
-    lowerer.lower_bodies()?;
     Ok(lowerer.finish())
 }
 
@@ -3913,13 +3905,12 @@ where
     resumable_continuations: Vec<PreparedResumableContinuation<'db>>,
     wrapped_lane_names: HashSet<String>,
     validate_host_enum_params: bool,
-    /// Actual Wasm modules may express address-carried value copies as one
-    /// overlap-safe bulk-memory operation. The shared shader IR retains its
-    /// checked portable loop because SPIR-V has no equivalent instruction.
-    emit_wasm_bulk_memory: bool,
+    /// Copy realization is independent of arena lifetime analysis. Wasm and
+    /// Naga admit Memcopy; native retains its existing inline copy loop.
+    aggregate_copy_lowering: AggregateCopyLowering,
     /// Bodies whose arena-backed locals are compiler-proven not to escape.
-    /// Only the Wasm lowering enables these scopes. Shader and native paths do
-    /// not emit arena-control instructions their backends cannot realize.
+    /// Wasm and shader lowering enable these scopes. Native keeps its current
+    /// unscoped representation until its allocation semantics are verified.
     scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
     /// Pure Fe bodies admitted below an enclosing resumable segment's arena
     /// checkpoint. These callees may manipulate borrowed memory pointers, but
@@ -3950,6 +3941,20 @@ where
     /// derived from an arena allocation. Public/raw entry parameters are never
     /// trusted merely because their flattened Wasm carrier is `i32`.
     arena_owned_locals: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AggregateCopyLowering {
+    Memcopy,
+    #[cfg(any(
+        test,
+        all(
+            feature = "native-backend",
+            not(target_arch = "wasm32"),
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+        )
+    ))]
+    InlineLoop,
 }
 
 struct PreparedResumableContinuation<'db> {
@@ -4042,6 +4047,7 @@ where
         validate_host_enum_params: bool,
         enable_scoped_arena: bool,
         private_place_materialization: PrivatePlaceMaterialization,
+        aggregate_copy_lowering: AggregateCopyLowering,
     ) -> Result<Self, LowerError> {
         wasm_lower_trace(|| "prepare inline value bodies".to_owned());
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
@@ -4224,7 +4230,7 @@ where
             resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
-            emit_wasm_bulk_memory: enable_scoped_arena,
+            aggregate_copy_lowering,
             scoped_arena_bodies: HashSet::new(),
             resumable_arena_safe_bodies: HashSet::new(),
             resumable_scoped_arena_bodies: HashSet::new(),
@@ -5894,7 +5900,8 @@ where
                 )),
                 other => other,
             })?;
-            if self.emit_wasm_bulk_memory && ((index + 1) % 500 == 0 || index + 1 == total) {
+            // Releasing consumed compiler data is not a target-memory feature.
+            if (index + 1) % 500 == 0 || index + 1 == total {
                 let released = reclaim_consumed_prepared_body_slack();
                 wasm_lower_trace(|| {
                     format!(
@@ -12708,7 +12715,7 @@ where
             LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
         })?;
         let is = self.inst_set();
-        if self.module.emit_wasm_bulk_memory {
+        if self.module.aggregate_copy_lowering == AggregateCopyLowering::Memcopy {
             let len = self.fb.make_imm_value(Immediate::I32(byte_len));
             self.fb
                 .insert_inst_no_result(Memcopy::new(is, destination, source, len));
@@ -15537,6 +15544,33 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_ir_uses_the_callers_isa() {
+        let mut db = DriverDataBase::default();
+        let url = url::Url::parse("file:///portable_explicit_isa.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(
+            "pub fn kernel(_ value: u32) -> u32 { value }".to_owned(),
+        ));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let isa = sonatina_ir::isa::native::Native::new(TargetTriple::new(
+            Architecture::X86_64, Vendor::Unknown, OperatingSystem::Native,
+        ));
+        // Scalar-only: this tests target propagation, not native aggregate
+        // allocation support or a change to the package's serialized layout.
+        let lowerer = lower_portable_bodies(
+            &isa, &db, &package, HashSet::new(), &[],
+            true, true, PrivatePlaceMaterialization::CanonicalArena,
+            AggregateCopyLowering::InlineLoop,
+        ).unwrap();
+        let module = lowerer.finish();
+        assert_eq!(module.ctx.triple, isa.triple());
+        assert_eq!(module.ctx.type_layout.pointer_repl(), Type::I64);
+    }
     use common::InputDb;
     use hir::analysis::semantic::FieldIndex;
     use mir::ScalarRole;
@@ -15594,7 +15628,13 @@ pub fn kernel(_ value: u32) -> u32 {
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
-        let (module, _) = compile_runtime_package_shader_ir(&db, &package).unwrap();
+        let (module, entries) = compile_runtime_package_shader_ir(&db, &package).unwrap();
+        assert_eq!(entries.len(), 1, "the selected package has one section entry");
+        assert_eq!(
+            module.ctx.func_sig(entries[0], |signature| signature.name().to_owned()),
+            "kernel",
+            "shader entry identity must come from the runtime section declaration",
+        );
 
         let typed_pointer_arguments = module
             .funcs()
