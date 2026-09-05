@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `ca1f9f45`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `ba2998c4`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -48,7 +48,10 @@ one structured CFG across resource variants. Fe's cleanup integration removes
 its duplicate instruction/control preflight and trace classifiers, with all
 nine selected gates passing in
 `/workspace/scratch/mb2-fe-helper-body-query-release.log`. The full
-contextual type/resource ABI query and authored-raster ABI consolidation remain.
+contextual type/resource ABI query remains. Authored raster now uses the common
+ABI planner too, with its existing restrictions preserved. Sixteen helper and
+five raster tests passed; Fe integration is running in
+`/workspace/scratch/mb2-fe-raster-abi-plan-release.log`.
 Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
 `docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
 plan and gate logs. Isolated combined validation passed 26 focused release
