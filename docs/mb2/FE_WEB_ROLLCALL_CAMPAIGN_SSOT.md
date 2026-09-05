@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-09-02
+Updated: 2026-09-04
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -18,6 +18,32 @@ It audits the implemented Fe proof stack, the exact boundary between recursive
 relations and recursive cryptography, the current compiler and WebGPU costs,
 and the recommended consolidation order. It is supporting analysis for this
 burn-down, not a second checklist.
+
+## Current priority: compiler boundary consolidation
+
+New Mandelbrot protocol work is paused while the Fe-to-Sonatina boundary is
+consolidated. The existing prover remains the browser correctness/performance
+capstone; this does not remove any proof or gallery completion gates below.
+
+Landed on mb2: portable body lowering separated from Wasm host synthesis
+(`80ccc9fd2`), the scoped authored-allocation regression corrected with emitted
+Wasm and execution evidence (`2aa303099`), local storage planning (`f1381f63e`),
+explicit call storage/lifetimes (`cd48e2591`), and reachable-call planning before
+SSA emission (`af3524c95`). The last increment passed 31 focused release tests.
+
+The explicit Sonatina Shader ISA and Naga target/profile implementation remain
+on the local Sonatina candidate `9fcfcef1`; publication has not been authorized.
+Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
+`docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
+plan and gate logs. Isolated combined validation is running after shared Cargo
+artifacts exposed cross-worktree reuse. The pending binding-facts/block-clone
+removal patch on mb2 has algorithm tests only, not completed Fe execution gates.
+
+Remaining boundary work includes representation/lifetime consolidation,
+Sonatina-owned GPU ABI and capabilities, early Fe intrinsic gating, CFG normal
+form, deletion of superseded mechanisms, the bounded direct-RMIR-to-Naga study,
+and full backend/browser capstone validation. No shader-size or browser-speed
+improvement is claimed for the planning refactors above.
 
 Legend:
 
