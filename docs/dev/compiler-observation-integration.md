@@ -492,3 +492,22 @@ from compiler channels and show the exact binding that crosses the budget.
 Do not reconstruct liveness from WGSL names or sum counts across entry points.
 These new direct Sonatina unit gates do not currently produce Fe recorder
 captures; their test results must not be labeled Riffcat-verified comparisons.
+
+RMIR-only ingestion gap, reproduced during intrinsic identity cleanup:
+`riffcat-bloat import-fe` rejects
+`/workspace/scratch/mb2-intrinsic-identity-wasm-20260905.log` with
+`trace contains no exact Fe function-merge marker`. The log contains real
+content-addressed RMIR snapshot paths from `FE_RUNTIME_IR_SNAPSHOT_DIR`, but
+no shader inliner events because these are Wasm execution gates.
+The current CLI offers no dedicated RMIR snapshot import. Keep the scope
+partial rather than inventing a function-merge event or a shader stage.
+
+Concrete acceptance inputs are under
+`/workspace/scratch/mb2-intrinsic-identity-rmir-20260905/`: snapshot
+`18397ae7f3434bc735f74316271869c79c57c940492f7ea195389c79089e792f.rmir`
+retains the ordinary `alloc` call, and
+`144d77ff81bb1d47d6c45c257311c07cdb46baac173730a441f0c48c2e839e93.rmir`
+retains the ordinary `__add_u32` call. Expose source function identity versus
+dedicated intrinsic operations from producer facts, without classifying calls
+by spelling. Preserve the missing later-stage evidence and dirty-producer
+qualification. These snapshots were inspected manually, not imported successfully.

@@ -2885,21 +2885,7 @@ fn runtime_extern_builtin_return_class<'db>(
     let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
         return None;
     };
-    if func.body(db).is_none()
-        && func
-            .name(db)
-            .to_opt()
-            .is_some_and(|name| is_runtime_intrinsic_name(name.data(db).as_str()))
-    {
-        return Some(top_level_class_for_ty_in_env(
-            db,
-            env,
-            result_ty,
-            AddressSpaceKind::Memory,
-        ));
-    }
-    runtime_builtin_func_kind(db, func)
-        .is_some()
+    is_runtime_intrinsic_func(db, func)
         .then(|| top_level_class_for_ty_in_env(db, env, result_ty, AddressSpaceKind::Memory))
 }
 
@@ -2911,18 +2897,18 @@ fn extern_builtin_return_class<'db>(
     runtime_extern_builtin_return_class(db, semantic, result_ty)
 }
 
-fn is_runtime_intrinsic_name(name: &str) -> bool {
-    if matches!(name, "alloc")
-        || GenericNumericIntrinsicKind::from_name(name).is_some()
-        || f32_intrinsic_kind(name).is_some()
-    {
-        return true;
-    }
-    hir::analysis::ty::corelib::ScalarNumericIntrinsic::from_name(name).is_some()
-}
-
-pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
-    F32IntrinsicKind::from_name(name).filter(|kind| *kind != F32IntrinsicKind::Rsqrt)
+fn is_runtime_intrinsic_func<'db>(db: &'db dyn MirDb, func: hir::hir_def::Func<'db>) -> bool {
+    use hir::analysis::ty::corelib::{
+        f32_intrinsic_func_kind, generic_numeric_intrinsic_func_kind,
+        scalar_numeric_intrinsic_func_kind,
+    };
+    // Identity owns recognition. Target support (including unsupported Rsqrt)
+    // is checked by lowering, not by another spelling table in representation
+    // inference. Allocation requires its registered builtin identity too.
+    runtime_builtin_func_kind(db, func).is_some()
+        || generic_numeric_intrinsic_func_kind(db, func).is_some()
+        || scalar_numeric_intrinsic_func_kind(db, func).is_some()
+        || f32_intrinsic_func_kind(db, func).is_some()
 }
 
 
@@ -3160,7 +3146,6 @@ mod tests {
                 let name = format!("__{name}_{scalar}");
                 let identity = ScalarNumericIntrinsic::from_name(&name).unwrap();
                 assert_eq!(identity.op, op, "{name}");
-                assert!(is_runtime_intrinsic_name(&name), "{name}");
             }
         }
         for name in [
@@ -3173,7 +3158,6 @@ mod tests {
             "__neg_String",
         ] {
             assert!(ScalarNumericIntrinsic::from_name(name).is_none(), "{name}");
-            assert!(!is_runtime_intrinsic_name(name), "{name}");
         }
         assert_eq!(
             ScalarNumericIntrinsic::from_name("__add_u32")
@@ -3184,7 +3168,8 @@ mod tests {
     }
 
     #[test]
-    fn f32_intrinsic_recognition_is_explicit_supported_set() {
+    fn f32_intrinsic_identity_includes_target_unsupported_operations() {
+        let f32_intrinsic_kind = F32IntrinsicKind::from_name;
         assert_eq!(
             f32_intrinsic_kind("__f32_from_i32"),
             Some(F32IntrinsicKind::FromI32)
@@ -3229,8 +3214,31 @@ mod tests {
             Some(F32IntrinsicKind::Round)
         );
 
-        for unsupported in ["__rsqrt_f32"] {
-            assert_eq!(f32_intrinsic_kind(unsupported), None, "{unsupported}");
+        assert_eq!(f32_intrinsic_kind("__rsqrt_f32"), Some(F32IntrinsicKind::Rsqrt));
+    }
+
+    #[test]
+    fn extern_return_classification_uses_function_identity() {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///extern_return_identity.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(r#"
+extern {
+    fn alloc(_: u32) -> u32
+    fn __sqrt_f32(_: f32) -> f32
+    fn __rsqrt_f32(_: f32) -> f32
+    fn __checked_add(_: u32, _: u32) -> u32
+    fn __add_u32(_: u32, _: u32) -> u32
+}
+fn __min_f32(_ value: u32) -> u32 { value }
+fn ordinary(_ value: u32) -> u32 { value }
+"#.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        for name in ["__sqrt_f32", "__rsqrt_f32", "__checked_add", "__add_u32"] {
+            assert!(is_runtime_intrinsic_func(&db, func_by_name(&db, top, name)), "{name}");
+        }
+        for name in ["alloc", "__min_f32", "ordinary"] {
+            assert!(!is_runtime_intrinsic_func(&db, func_by_name(&db, top, name)), "{name}");
         }
     }
 

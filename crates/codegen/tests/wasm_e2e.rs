@@ -2378,6 +2378,7 @@ pub fn ge(a: f32, b: f32) -> bool { a >= b }
 #[test]
 fn ordinary_functions_with_intrinsic_spellings_remain_calls() {
     for name in [
+        "alloc", "__add_u32",
         "__sqrt_f32", "__rsqrt_f32", "__min_f32", "__checked_add",
         "__checked_sub", "__checked_mul", "__checked_div", "__checked_rem",
         "__checked_pow", "__checked_neg", "__saturating_add", "__saturating_sub",

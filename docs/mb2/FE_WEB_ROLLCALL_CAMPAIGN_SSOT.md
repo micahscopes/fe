@@ -29,6 +29,22 @@ comparative gates explicitly recorded. No permanent second backend was added.
 
 ### Direct-route study: closed, inconclusive for production
 
+Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses
+`is_runtime_intrinsic_name` or a separate f32 name decoder to select extern
+return representation. It delegates to the existing HIR function-identity
+queries, including registered allocation builtins. An unrelated extern named
+`alloc` is no longer captured merely by its spelling. Intrinsic recognition
+does not imply target support: `rsqrt` remains rejected before Sonatina
+construction. The new MIR identity gate passes, as do the vocabulary/related
+intrinsic unit checks, three Wasm intrinsic execution tests (22.90s), and the
+unsupported-f32 gate (1.62s). The Wasm run uses published Sonatina `71c78dda`
+and the classification candidate over Fe `413a8d9c3`. Logs:
+`mb2-intrinsic-return-identity-20260905.log`,
+`mb2-intrinsic-identity-wasm-20260905.log`, and
+`mb2-intrinsic-identity-negative-20260905.log` under `/workspace/scratch/`.
+This removes one remaining MIR spelling fallback, not every source-vocabulary
+decoder in HIR or every target-capability adapter.
+
 The [final report](DIRECT_NAGA_STUDY_2026_09_05.md) records the executed cases,
 Riffcat captures, numeric-contract mismatch, and missing comparison controls.
 Explicit wrapping arithmetic passes on both routes. Removing unused trap
