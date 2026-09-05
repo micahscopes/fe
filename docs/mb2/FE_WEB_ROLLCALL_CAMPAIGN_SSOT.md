@@ -42,10 +42,32 @@ public contextual helper query are now published through `54c6c633`.
 On September 5, `git ls-remote` reported `98696420` on the Sonatina remote's
 `mb2-task-borrows` branch; `54c6c633` is its verified ancestor. No push was
 performed here. The cleanup candidate now pins that exact tested ancestor in
-Cargo.toml and Cargo.lock, without a local dependency override. Its locked
-production replay is running in
-`/workspace/scratch/mb2-published-shader-boundary-production-release.log`.
-Live mb2 still has the earlier dependency until this integration gate closes.
+Cargo.toml and Cargo.lock, without a local dependency override. The verified
+integration landed on live mb2 as `462593c76` (cleanup checkpoint `0204d7ce5`).
+It installs the Shader ISA, explicit Naga requests, the shared backend-owned
+helper analysis, and early residual-f32 rejection, and deletes the Fe helper
+legality classifier and raster scalar-only filter. The two lowering files are
+byte-identical to the tested cleanup candidate. The live-mb2 integration has
+329 insertions and 644 deletions across five files; unrelated proof and WebGPU
+worktree edits were not staged. No push was performed here.
+
+Locked published-pin gates passed in the cleanup checkout: the production
+linear plan (56,001 WGSL bytes, 2,150 Naga expressions, 30 helpers), six authored
+raster tests (33.36s), and the independent f32 render oracle on real llvmpipe
+execution (7.12s, no GPU skip). Logs:
+`/workspace/scratch/mb2-published-shader-boundary-production-release.log`,
+`/workspace/scratch/mb2-published-shader-boundary-raster-release.log`, and
+`/workspace/scratch/mb2-published-shader-boundary-f32-gpu-release.log`.
+The first production replay reported 38,748ms lowering and 46,725ms total,
+slower than the earlier local-override run despite identical artifact counts.
+A warm repetition is running; no performance improvement is claimed.
+The early intrinsic gate separately passed its RMIR-only test (14.17s), all
+13 f32 execution tests (16.36s), and authored-name execution (7.85s). Evidence:
+`/workspace/scratch/mb2-early-intrinsic-rmir-release.log`,
+`/workspace/scratch/mb2-early-intrinsic-f32-release.log`, and
+`/workspace/scratch/mb2-early-intrinsic-authored-release.log`.
+Full live-mb2 and Chrome capstone validation remain open, as do the broader
+storage, intrinsic-family, CFG-normal-form, and direct-route study obligations.
 
 The following paragraphs record intermediate extraction gates. The earlier
 backend extraction planned contextual helper ABIs before emitting helper bodies
