@@ -78,6 +78,31 @@ fn atomic_resource_policy_and_operations_reach_real_shader_atomics() {
 }
 
 #[test]
+fn authored_raster_prunes_compute_only_atomics_but_keeps_actor_allocation() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_atomic_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("compute-only atomic storage must not poison an authored raster pair");
+    assert_eq!(bundle.manifest.resources.len(), 2);
+    assert_eq!(bundle.manifest.resources[0].element, WebActorResourceElement::AtomicU32);
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert!(bundle.pass_wgsl[0].source.contains("atomicStore("));
+    let raster = &bundle.manifest.passes[1];
+    let resources = raster.layout.bindings.iter()
+        .filter(|b| b.role == fe_codegen::WebBindingRole::Resource)
+        .collect::<Vec<_>>();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].name, "colors");
+    assert_eq!(resources[0].shader_stages, [fe_codegen::WebShaderStage::Fragment]);
+    assert!(!bundle.pass_wgsl[1].source.contains("claims"));
+    assert!(!bundle.pass_wgsl[1].source.contains("atomic<u32>"));
+}
+
+#[test]
 fn atomic_resource_access_cannot_be_confused_with_ordinary_access() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_atomic_access_rejected");
