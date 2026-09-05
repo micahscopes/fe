@@ -183,6 +183,25 @@ ordinary errors. The recent per-function error propagation repair does not
 close this independent skip path. Keep this work in the existing intrinsic
 capability consolidation slice rather than adding another fallback classifier.
 
+Follow-up execution reproduced that name-collision failure: an authored
+`addmod` function reached Cranelift's undefined-function finalization panic
+(`/workspace/scratch/mb2-native-authored-modular-baseline.log`). The isolated
+declaration repair now resolves only bodyless, exact-name, exact-signature
+runtime declarations and leaves authored definitions as ordinary functions.
+Its expanded integration gate is still running; it is not yet landed.
+
+That gate also exposed an older runtime defect: u256 modular arithmetic reduced
+by repeated subtraction, hanging for modulus zero and taking quotient-dependent
+time for large inputs. Local Sonatina commit `2e74c940` replaces this with the
+existing wide-integer implementation, preserving the full 257-bit sum or
+512-bit product and explicitly returning zero for modulus zero. Nine optimized
+runtime tests pass in 0.01s, including 512 full-width cases compared against
+revm's independent ruint implementation, full-width boundary identities, and
+aliased-output multiplication. Evidence:
+`/workspace/scratch/mb2-native-modular-runtime-release.log`.
+This is native runtime correctness evidence, not a shader-size or browser
+performance result. No dependency publication or Fe pin change has occurred.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
