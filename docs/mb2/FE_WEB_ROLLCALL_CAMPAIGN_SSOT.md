@@ -29,8 +29,12 @@ its duplicate checked/saturating name table and separate bitcast/truncation
 dispatch entries are deleted. One focused release test evaluated all twelve
 through static assertions, including saturating boundaries and bit transport:
 `/workspace/scratch/mb2-generic-intrinsic-ctfe-release.log` (1.27s after a
-2m22s build). Runtime consumption and expanded authored-name/trap tests are
-still uncommitted in the cleanup worktree. Their first release gate passed
+2m22s build). Runtime identity consumption and the expanded authored-name
+regression landed as `03b89af54` (cleanup `e755023dc`), deleting MIR's second
+generic numeric enum/name table and consuming HIR's tracked declaration query.
+All fifteen authored-name cases pass (38.35s):
+`/workspace/scratch/mb2-fe-authored-intrinsic-identities-release.log`.
+The first candidate release gate passed
 the fifteen authored-name cases and two existing f32 groups, but the all-numeric
 execution test failed at the preexisting rejection of signed division.
 The portable lowerer also rejects signed remainder, power, and saturation.
@@ -131,6 +135,22 @@ testing. Fe's published dependency remains unchanged, so this is candidate
 integration evidence, not a landed frontend repair. Signed division/remainder,
 power, saturation, complete intrinsic gating, and shader/native integration
 gates remain unfinished. No new full-prover or Chrome claim follows.
+
+The runtime identity tests now separate supported execution from unsupported
+capabilities instead of asking one successful module to contain unsupported
+signed division/remainder, power, and saturation. Three release gates pass
+(13.64s): supported identity execution including checked negation, named
+fail-closed diagnostics for all six unsupported cases, and checked unsigned
+division/remainder success plus zero-divisor traps. Evidence:
+`/workspace/scratch/mb2-fe-generic-runtime-gates-release.log`.
+The source-to-shader integration gate also passes all eight checked i32/u32
+arithmetic cases (17.62s), requiring browser-capability Naga validation,
+SPIR-V emission, the u32 word profile, and an explicit trap-status binding:
+`/workspace/scratch/mb2-fe-checked-shader-integration-release.log`.
+That shader gate validates/emits only; source-level GPU execution and outlined
+helper integration remain open. Arithmetic implementation/tests stay isolated
+and uncommitted until dependency reconciliation. The independent MIR identity
+cleanup is already on mb2 without changing its Sonatina pin.
 
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
