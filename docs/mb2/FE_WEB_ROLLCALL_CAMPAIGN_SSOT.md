@@ -50,6 +50,23 @@ checked arithmetic semantics and backend capability support before calling the
 runtime intrinsic consolidation verified. No full-prover correctness conclusion
 follows from this small arithmetic repro alone.
 
+The first backend repair is committed locally in Sonatina as `a2c48db9`:
+Wasm `Uaddo` and `Umulo` now return the wrapped value and actual overflow,
+instead of a hardcoded i64 operation and false flag. A direct execution oracle
+checks 2,660 cases across 1/8/16/32/64-bit widths against u128 arithmetic,
+including zero multiplication and randomized operands. The parent reproduced
+`u64::MAX + 1 -> (0, false)`; the repaired oracle passed in 0.03s. Logs:
+`/workspace/scratch/mb2-sonatina-overflow-baseline-execution-release.log` and
+`/workspace/scratch/mb2-sonatina-overflow-fixed-release.log`.
+The affected Wasm-backend suite passed 31/31 in 0.06s after separately reconciling
+the stale empty-module memory golden. Its old ceiling had already been removed
+by `1fb9968e`; a saved earlier executable reproduced the identical mismatch.
+Evidence: `/workspace/scratch/mb2-sonatina-empty-module-saved-baseline.log` and
+`/workspace/scratch/mb2-sonatina-overflow-wasm-suite-reconciled-release.log`.
+These Sonatina changes are not yet in Fe's published dependency pin and have
+not been pushed here. Signed operations, Naga support, and Fe's checked trap
+wiring remain open; the checked-i32 Fe regression is still red.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
