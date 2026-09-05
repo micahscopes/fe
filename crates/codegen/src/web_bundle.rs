@@ -2026,12 +2026,15 @@ pub fn actor_gpu_program(
     validate_actor_pass_cycles(&stages)?;
     let raster = typed_raster_policy(db, actor)?;
     if raster.is_some()
-        && !stages
-            .iter()
-            .any(|stage| matches!(stage.kind, WebActorStageKind::Vertex { .. }))
+        && !stages.iter().any(|stage| {
+            matches!(
+                stage.kind,
+                WebActorStageKind::Vertex { .. } | WebActorStageKind::Fragment
+            )
+        })
     {
         return Err(WebBundleError::EntryDerivation(
-            "RasterConfiguration requires at least one authored vertex/fragment raster pair".into(),
+            "RasterConfiguration requires at least one fullscreen or authored raster pass".into(),
         ));
     }
     Ok(Some(WebActorProgram {
