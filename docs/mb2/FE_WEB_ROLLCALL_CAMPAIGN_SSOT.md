@@ -417,6 +417,33 @@ is still isolated and uncommitted pending a portable Sonatina dependency pin;
 publication approval has been requested, not assumed. No Chrome gate or full
 CI completion is claimed. Earlier intrinsic gating and broader cleanup remain.
 
+Phase-5 inspection found a real downstream identity mismatch: MIR excludes
+functions with authored bodies from its intrinsic declaration recognizers,
+but the portable call guard rejected f32 intrinsic spellings regardless of
+body presence. The new execution regression reproduced rejection of an
+ordinary u32 function named `__sqrt_f32` before the fix. Live mb2 commit
+`8341897a4` aligns that guard with MIR's bodyless-declaration boundary.
+Four ordinary names (`__sqrt_f32`, `__rsqrt_f32`, `__min_f32`, `__checked_add`)
+execute their authored arithmetic across four inputs each. Three live-mb2
+intrinsic tests passed in 7.24s against the published dependency pin, and the
+unsupported `__rsqrt_f32` declaration gate still passed in 1.61s. The cleanup
+worktree additionally passed all 13 f32-filtered tests in 19.69s.
+Evidence: `/workspace/scratch/mb2-intrinsic-spelling-verified-baseline-release.log`,
+`/workspace/scratch/mb2-intrinsic-spelling-fixed-release.log`,
+`/workspace/scratch/mb2-intrinsic-spelling-f32-release.log`,
+`/workspace/scratch/mb2-main-intrinsic-identity-release.log`, and
+`/workspace/scratch/mb2-main-intrinsic-negative-release.log`.
+This is a concrete correctness fix, not completion of typed intrinsic identity
+or early target gating. Name-based bodyless numeric declarations in MIR/CTFE
+and the downstream compatibility guard still require coordinated migration.
+During testing, concurrent uncommitted ObjAtomic instruction edits appeared in
+the shared Sonatina worktree and lacked parser builders. They were left intact.
+Cleanup validation now has a detached immutable dependency checkout at
+`/workspace/sonatina-worktrees/mb2-boundary-verified` (`54c6c633`) and a
+command-scoped override `/workspace/scratch/mb2-verified-sonatina.toml`.
+The interrupted dirty-dependency build is not counted as an intrinsic test.
+No publication occurred; the live-mb2 fix needs no unpublished dependency.
+
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
 `ef13a6568c0dbcd2e85a390048f81a20a61302ac`. The latter is already published
