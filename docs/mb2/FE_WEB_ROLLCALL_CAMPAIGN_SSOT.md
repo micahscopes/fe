@@ -179,6 +179,19 @@ graph integration. Both epoch commits remain local; Fe currently pins the
 preceding published `8b011e5b`. Coordinated publication is needed before a
 portable Fe dependency-pin update; no unpublished pin has been committed.
 
+Sonatina `bd6d4e6e` now enforces the portable storage-buffer budget after Naga
+validation and before emitting either requested encoding. It uses each entry's
+validated global-use information, including helper accesses and atomic status
+channels. Two focused release tests prove that a sixteen-buffer module split
+across two eight-buffer entries is admitted, while nine used by one entry,
+including a helper-reached atomic channel, are rejected. All three epoch tests
+also pass with the new gate. Logs: `mb2-webgpu-resource-limits-20260905.log` and
+`mb2-epoch-with-resource-limits-20260905.log` under `/workspace/scratch/`.
+This applies to the explicit WebGPU target contract, not the legacy all-capability
+adapter. Fe's existing manifest budget check remains; when the dependency pin is
+updated, replace its duplicate numeric constant with Sonatina's exported
+`WEBGPU_STORAGE_BUFFERS_PER_STAGE`, retaining Fe's source/pass diagnostics.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader

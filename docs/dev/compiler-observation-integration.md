@@ -480,3 +480,15 @@ occurs between the dispatches. A final snapshot alone misses the failure.
 The useful additional facet is status lifetime: invocation, dispatch and graph
 epoch must not be collapsed into a generic boolean named `trap`. This adds no
 new artifact-size comparison; the exact 626-byte shader is unchanged.
+
+Resource-budget observation follow-up: Sonatina's target gate now uses Naga's
+validated per-entry global-use facts, not module-wide declaration counts.
+The concrete regression is `target::resource_tests`: sixteen declarations can
+be legal across two eight-buffer entries, whereas a ninth resource reached
+through a helper (including an atomic epoch channel) exceeds one entry's budget.
+Expose those producer-derived entry/stage binding sets and limit provenance in
+the capture alongside bytes. The consumer should distinguish authored resources
+from compiler channels and show the exact binding that crosses the budget.
+Do not reconstruct liveness from WGSL names or sum counts across entry points.
+These new direct Sonatina unit gates do not currently produce Fe recorder
+captures; their test results must not be labeled Riffcat-verified comparisons.
