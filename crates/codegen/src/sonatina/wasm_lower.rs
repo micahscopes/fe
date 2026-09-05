@@ -1,7 +1,11 @@
-//! MIR -> Sonatina IR lowering for the wasm target.
+//! Shared RMIR -> Sonatina construction with target-specific realization.
 //!
-//! This is the first genuinely-Fe-compiled wasm path: `MIR runtime package ->
-//! Sonatina IR (portable vocabulary, Wasm32 ISA) -> WAFFLE -> wasm bytes`.
+//! Wasm uses Wasm32 and canonical host wrappers; shaders use the Shader ISA
+//! and typed private places/values; native CPU lowering uses its native ISA.
+//! `PortableLoweringPolicy` derives realization choices from that selected ISA.
+//! Sonatina owns final shader capability and physical call legality checks.
+//! The Wasm wrappers still live here pending the target-entry module split.
+//!
 //! The portable value lane includes scalar arithmetic/control flow/calls,
 //! recursively flattened struct and fixed-array values, materialized aggregate
 //! slots and object references, target-layout memory projections, fieldless
@@ -117,6 +121,49 @@ fn wasm_lower_trace_detail(message: impl FnOnce() -> String) {
 enum PrivatePlaceMaterialization {
     CanonicalArena,
     ShaderTypedWhenLegal,
+}
+
+/// Fe's realization choices for a selected ISA, not shader call legality or
+/// device capabilities (which belong to Sonatina). Entry points cannot mix
+/// Wasm validation, native copy lowering and shader storage independently.
+struct PortableLoweringPolicy {
+    validate_host_enum_params: bool,
+    enable_scoped_arena: bool,
+    private_place_materialization: PrivatePlaceMaterialization,
+    aggregate_copy_lowering: AggregateCopyLowering,
+}
+
+impl PortableLoweringPolicy {
+    fn for_architecture(architecture: Architecture) -> Result<Self, LowerError> {
+        match architecture {
+            Architecture::Wasm32 => Ok(Self {
+                validate_host_enum_params: true,
+                enable_scoped_arena: true,
+                private_place_materialization: PrivatePlaceMaterialization::CanonicalArena,
+                aggregate_copy_lowering: AggregateCopyLowering::Memcopy,
+            }),
+            Architecture::Shader => Ok(Self {
+                validate_host_enum_params: false,
+                enable_scoped_arena: true,
+                private_place_materialization: PrivatePlaceMaterialization::ShaderTypedWhenLegal,
+                aggregate_copy_lowering: AggregateCopyLowering::Memcopy,
+            }),
+            #[cfg(any(test, all(
+                feature = "native-backend",
+                not(target_arch = "wasm32"),
+                any(target_arch = "x86_64", target_arch = "aarch64"),
+            )))]
+            Architecture::X86_64 | Architecture::Aarch64 => Ok(Self {
+                validate_host_enum_params: true,
+                enable_scoped_arena: false,
+                private_place_materialization: PrivatePlaceMaterialization::CanonicalArena,
+                aggregate_copy_lowering: AggregateCopyLowering::InlineLoop,
+            }),
+            _ => Err(LowerError::Unsupported(format!(
+                "{architecture:?} has no portable RMIR realization policy"
+            ))),
+        }
+    }
 }
 
 /// Emit one content-addressed, human-readable Fe runtime-IR package only when
@@ -266,9 +313,7 @@ pub(crate) fn compile_runtime_package_shader_ir(
         Architecture::Shader, Vendor::Unknown, OperatingSystem::Unknown,
     ));
     let lowerer = lower_portable_bodies(
-        &isa, db, package, HashSet::new(), &[], false, true,
-        PrivatePlaceMaterialization::ShaderTypedWhenLegal,
-        AggregateCopyLowering::Memcopy,
+        &isa, db, package, HashSet::new(), &[],
     )?;
     let entries = shader_runtime_entries(&lowerer)?;
     Ok((lowerer.finish(), entries))
@@ -290,10 +335,6 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
         package,
         HashSet::new(),
         &[],
-        true,
-        true,
-        PrivatePlaceMaterialization::CanonicalArena,
-        AggregateCopyLowering::Memcopy,
     )?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
     let import_modules = lowerer.import_modules();
@@ -353,9 +394,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         wrapped_lane_names.insert(symbol.clone());
     }
     let mut lowerer = lower_portable_bodies(
-        &isa, db, package, wrapped_lane_names, export_aliases, true, true,
-        PrivatePlaceMaterialization::CanonicalArena,
-        AggregateCopyLowering::Memcopy,
+        &isa, db, package, wrapped_lane_names, export_aliases,
     )?;
     for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
@@ -397,10 +436,6 @@ fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
     package: &'a RuntimePackage<'db>,
     wrapped_lane_names: HashSet<String>,
     export_aliases: &[(String, String)],
-    validate_host_enum_params: bool,
-    enable_scoped_arena: bool,
-    private_place_materialization: PrivatePlaceMaterialization,
-    aggregate_copy_lowering: AggregateCopyLowering,
 ) -> Result<PortableModuleLowerer<'db, 'a, I>, LowerError> {
     validate_portable_intrinsic_calls(db, package, isa.triple().architecture)?;
     wasm_lower_trace(|| format!("begin runtime package, functions={}", package.functions(db).len()));
@@ -408,8 +443,6 @@ fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
     let builder = ModuleBuilder::new(ModuleCtx::new(isa));
     let mut lowerer = PortableModuleLowerer::new(
         db, builder, isa, package, wrapped_lane_names, export_aliases,
-        validate_host_enum_params, enable_scoped_arena, private_place_materialization,
-        aggregate_copy_lowering,
     )?;
     wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
     lowerer.declare_functions()?;
@@ -989,10 +1022,6 @@ pub(crate) fn compile_runtime_package_native(
         package,
         HashSet::new(),
         &[],
-        true,
-        false,
-        PrivatePlaceMaterialization::CanonicalArena,
-        AggregateCopyLowering::InlineLoop,
     )?;
     Ok(lowerer.finish())
 }
@@ -4085,11 +4114,13 @@ where
         package: &'a RuntimePackage<'db>,
         wrapped_lane_names: HashSet<String>,
         export_aliases: &[(String, String)],
-        validate_host_enum_params: bool,
-        enable_scoped_arena: bool,
-        private_place_materialization: PrivatePlaceMaterialization,
-        aggregate_copy_lowering: AggregateCopyLowering,
     ) -> Result<Self, LowerError> {
+        let PortableLoweringPolicy {
+            validate_host_enum_params,
+            enable_scoped_arena,
+            private_place_materialization,
+            aggregate_copy_lowering,
+        } = PortableLoweringPolicy::for_architecture(isa.triple().architecture)?;
         wasm_lower_trace(|| "prepare inline value bodies".to_owned());
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         wasm_lower_trace(|| format!("prepared {} inline value bodies", prepared_bodies.len()));
@@ -16063,9 +16094,7 @@ mod tests {
             let isa = create_wasm32_isa();
             let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
             let mut module = PortableModuleLowerer::new(
-                &db, builder, &isa, &package, HashSet::new(), &[], false, true,
-                PrivatePlaceMaterialization::CanonicalArena,
-                AggregateCopyLowering::InlineLoop,
+                &db, builder, &isa, &package, HashSet::new(), &[],
             ).unwrap();
             module.declare_functions().unwrap();
             let instance = *module.func_map.keys().find(|&&instance| {
@@ -16173,6 +16202,25 @@ mod tests {
     }
 
     #[test]
+    fn portable_target_policy_is_derived_from_the_selected_isa() {
+        let wasm = PortableLoweringPolicy::for_architecture(Architecture::Wasm32).unwrap();
+        assert!(wasm.validate_host_enum_params && wasm.enable_scoped_arena);
+        assert_eq!(wasm.private_place_materialization, PrivatePlaceMaterialization::CanonicalArena);
+        assert_eq!(wasm.aggregate_copy_lowering, AggregateCopyLowering::Memcopy);
+        let shader = PortableLoweringPolicy::for_architecture(Architecture::Shader).unwrap();
+        assert!(!shader.validate_host_enum_params && shader.enable_scoped_arena);
+        assert_eq!(shader.private_place_materialization, PrivatePlaceMaterialization::ShaderTypedWhenLegal);
+        assert_eq!(shader.aggregate_copy_lowering, AggregateCopyLowering::Memcopy);
+        for architecture in [Architecture::X86_64, Architecture::Aarch64] {
+            let native = PortableLoweringPolicy::for_architecture(architecture).unwrap();
+            assert!(native.validate_host_enum_params && !native.enable_scoped_arena);
+            assert_eq!(native.private_place_materialization, PrivatePlaceMaterialization::CanonicalArena);
+            assert_eq!(native.aggregate_copy_lowering, AggregateCopyLowering::InlineLoop);
+        }
+        assert!(PortableLoweringPolicy::for_architecture(Architecture::Evm).is_err());
+    }
+
+    #[test]
     fn portable_ir_uses_the_callers_isa() {
         let mut db = DriverDataBase::default();
         let url = url::Url::parse("file:///portable_explicit_isa.fe").unwrap();
@@ -16191,8 +16239,6 @@ mod tests {
         // allocation support or a change to the package's serialized layout.
         let lowerer = lower_portable_bodies(
             &isa, &db, &package, HashSet::new(), &[],
-            true, true, PrivatePlaceMaterialization::CanonicalArena,
-            AggregateCopyLowering::InlineLoop,
         ).unwrap();
         let module = lowerer.finish();
         assert_eq!(module.ctx.triple, isa.triple());
@@ -16226,9 +16272,7 @@ pub fn probe(_ input: Wide) -> u32 { input.values[0] }
             Architecture::X86_64, Vendor::Unknown, OperatingSystem::Native,
         ));
         let native = lower_portable_bodies(
-            &isa, &db, &package, HashSet::new(), &[], true, true,
-            PrivatePlaceMaterialization::CanonicalArena,
-            AggregateCopyLowering::InlineLoop,
+            &isa, &db, &package, HashSet::new(), &[],
         ).expect("native IR must not enforce Wasm validator limits");
         let entries = shader_runtime_entries(&native).unwrap();
         let native = native.finish();
