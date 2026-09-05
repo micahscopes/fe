@@ -16215,6 +16215,53 @@ pub fn kernel(_ seed: u32) -> u32 {
     }
 
     #[test]
+    fn shader_state_return_chain_lowers_observable_snapshots() {
+        // A small version of the prover's replay-state transport. Keep the old
+        // state observable. This gate checks lowering/validation only; execution
+        // must additionally check snapshots before changing aggregate forwarding.
+        let source = r#"
+struct State { words: [u32; 4], cursor: u32 }
+impl Copy for State {}
+
+fn advance(_ state: State) -> State {
+    let mut next = state
+    next.words[state.cursor as usize] = state.words[state.cursor as usize] + 1
+    next.cursor = state.cursor + 1
+    next
+}
+
+pub fn kernel(_ seed: u32) -> u32 {
+    let original = State { words: [seed, seed + 1, seed + 2, seed + 3], cursor: 0 }
+    let first = advance(original)
+    let second = advance(first)
+    original.words[0] + first.words[1] + second.words[0] + second.words[1]
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///shader_state_return_chain.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let (module, _) = compile_runtime_package_shader_ir(&db, &package)
+            .expect("state-return chain should lower");
+        for function in module.funcs() {
+            module.ctx.func_sig(function, |signature| {
+                if signature.name() == "advance" {
+                    eprintln!("state-return ABI: {:?} -> {:?}", signature.args(), signature.ret_tys());
+                }
+            });
+        }
+        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+            &db, &package, [1, 1, 1],
+        )
+        .expect("snapshot-observing state chain should reach validated SPIR-V");
+    }
+
+    #[test]
     fn runtime_ir_observation_is_content_addressed_and_idempotent() {
         let directory = tempfile::tempdir().expect("snapshot directory");
         let text = "package \"tiny\" {\n}";
