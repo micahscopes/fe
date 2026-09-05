@@ -73,6 +73,7 @@ pub enum PageAttributeKind {
     Template,
     ClassToken,
     Publish,
+    ObserveLocation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,6 +554,7 @@ fn read_attribute_kind(
         "Template" => PageAttributeKind::Template,
         "ClassToken" => PageAttributeKind::ClassToken,
         "Publish" => PageAttributeKind::Publish,
+        "ObserveLocation" => PageAttributeKind::ObserveLocation,
         _ => {
             return Err(PageProjectionError::Shape(format!(
                 "unknown PageAttributeKind variant `{name}`"

@@ -1,3 +1,4 @@
+mod binding_facts;
 mod lower_runtime;
 mod materialized_task;
 #[cfg(all(

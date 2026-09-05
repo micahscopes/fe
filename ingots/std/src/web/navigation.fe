@@ -1,0 +1,274 @@
+//! Typed URL structure and fieldless route-segment derivation.
+//!
+//! Browser History and Location remain standards capabilities at the fixed
+//! host edge. Fe receives one untouched URL and owns its interpretation. A
+//! route enum derives both directions from its authored variant names, so an
+//! application cannot drift a parser, printer, numeric route table, or JSON
+//! registry apart.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use super::super::text::{Utf8Buffer, Utf8View, Utf8Write}
+use core::BrowserString
+
+/// One route segment decoded into a nominal Fe value. `valid` is explicit so
+/// applications can choose recovery without inventing a sentinel variant.
+pub struct RouteSegmentParse<T> { value: T, valid: bool }
+
+impl<T: Copy> Copy for RouteSegmentParse<T> {}
+
+impl<T> RouteSegmentParse<T> {
+    /// Begin an exact parse with a nominal fallback that remains unselected.
+    /// Generated route implementations call this ordinary Fe constructor
+    /// instead of embedding record construction in a quote body.
+    pub fn none(_ value: T) -> Self {
+        Self { value: value, valid: false }
+    }
+
+    /// Construct a successful nominal parse without exposing representation.
+    pub fn matched(_ value: T) -> Self {
+        Self { value: value, valid: true }
+    }
+}
+
+impl<T: Copy> RouteSegmentParse<T> {
+    pub fn is_valid(self) -> bool {
+        self.valid
+    }
+    pub fn value(self) -> T {
+        self.value
+    }
+
+    /// Add one candidate to a derived parser. FCO only composes these ordinary
+    /// calls; the runtime branch remains checked Fe code over a nominal value.
+    pub fn select<const N: usize>(
+        self,
+        _ input: Utf8View,
+        _ segment: [u8; N],
+        _ candidate: T,
+    ) -> Self {
+        if input.equals_literal(segment) {
+            Self { value: candidate, valid: true }
+        } else {
+            self
+        }
+    }
+}
+
+/// A fieldless enum whose authored variant names are its canonical URL
+/// segments. The provider emits one exact parser/printer pair from that single
+/// declaration. Segment names are case-sensitive and remain ordinary UTF-8.
+pub trait RouteSegment {
+    const fn route_segment(self) -> String<31>
+    fn parse_route_segment(
+        _ input: ingot::text::Utf8View,
+    ) -> ingot::web::navigation::RouteSegmentParse<Self>
+    fn write_route_segment(self, _ destination: ingot::text::Utf8Buffer) -> ingot::text::Utf8Write
+
+    /// Provider bridge that keeps route-parse construction in ordinary typed
+    /// Fe. The generated implementation needs only a receiver method call.
+    fn begin_route_segment_parse(self) -> RouteSegmentParse<Self> {
+        RouteSegmentParse::none(self)
+    }
+}
+
+pub struct RouteSegmentProvider {}
+
+impl Derive<RouteSegment> for RouteSegmentProvider {
+    const fn derive<T>(ev: own Evidence<RouteSegment<T>>) -> Evidence<RouteSegment<T>>
+    uses (reflect: Reflect<T>, builder: mut ImplBuilder<RouteSegment<T>>)
+    {
+        let variants = reflect.variants()
+        let first = variants.at(0)
+        let fallback = builder.variant_init(first)
+        let input = builder.arg_ref("input")
+        let mut parse = builder.call(fallback, "begin_route_segment_parse")
+        let mut names = quote {}
+        let mut writes = quote {}
+
+        for variant in variants {
+            let name = variant.name()
+            let value = builder.variant_init(variant)
+            parse = builder.call(parse, "select", input, builder.str(name), value)
+            names = quote { ${names}, ${variant}(ignored) => ${name} }
+            writes = quote(destination) {
+                ${writes},
+                ${variant}(ignored) => destination.append_literal(${name})
+            }
+        }
+
+        builder
+            .emit_method(
+                "route_segment",
+                quote {
+                    match self {
+                        ${names},
+                    }
+                },
+            )
+        builder.emit_method("parse_route_segment", parse)
+        builder
+            .emit_method(
+                "write_route_segment",
+                quote(destination) {
+                    match self {
+                        ${writes},
+                    }
+                },
+            )
+        builder.finish()
+        ev
+    }
+}
+
+/// The path portion of one URL, excluding query and fragment delimiters.
+pub struct RoutePath { value: Utf8View }
+/// The query portion of one URL, excluding `?`.
+pub struct RouteQuery { value: Utf8View }
+/// The fragment portion of one URL, excluding `#`.
+pub struct RouteHash { value: Utf8View }
+
+impl Copy for RoutePath {}
+impl Copy for RouteQuery {}
+impl Copy for RouteHash {}
+
+impl RoutePath {
+    pub fn view(self) -> Utf8View {
+        self.value
+    }
+}
+
+impl RouteHash {
+    pub fn view(self) -> Utf8View {
+        self.value
+    }
+}
+
+/// Result of selecting one exact query key. The first router slice accepts a
+/// single key/value pair and rejects ambiguous duplicates or extra pairs.
+pub struct RouteQueryValue { pub value: Utf8View, pub present: bool, pub valid: bool }
+
+impl Copy for RouteQueryValue {}
+
+impl RouteQuery {
+    pub fn view(self) -> Utf8View {
+        self.value
+    }
+    pub fn single<const N: usize>(self, _ key: [u8; N]) -> RouteQueryValue {
+        if self.value.is_empty() {
+            return RouteQueryValue { value: Utf8View::empty(), present: false, valid: true }
+        }
+        let mut separator = self.value.len()
+        let mut index: u32 = 0
+        while index < self.value.len() {
+            if self.value.byte(index: index) == 38 {
+                return RouteQueryValue { value: Utf8View::empty(), present: false, valid: false }
+            }
+            if separator == self.value.len() && self.value.byte(index: index) == 61 {
+                separator = index
+            }
+            index = index + 1
+        }
+        if separator == self.value.len() {
+            return RouteQueryValue { value: Utf8View::empty(), present: false, valid: false }
+        }
+        let name = self.value.slice(start: 0, end: separator)
+        if !name.valid || !name.view.equals_literal(key) {
+            return RouteQueryValue { value: Utf8View::empty(), present: false, valid: false }
+        }
+        let value = self.value.slice(start: separator + 1, end: self.value.len())
+        RouteQueryValue { value: value.view, present: true, valid: value.valid }
+    }
+}
+
+/// Structural URL observation. This value borrows the component event's
+/// bounded browser string, and therefore must be interpreted during the
+/// resident transition that receives it.
+pub struct RouteLocation {
+    pub path: RoutePath,
+    pub query: RouteQuery,
+    pub hash: RouteHash,
+    pub valid: bool,
+}
+
+impl Copy for RouteLocation {}
+
+fn checked_slice(value: Utf8View, start: u32, end: u32) -> Utf8View {
+    let result = value.slice(start: start, end: end)
+    if !result.valid {
+        return Utf8View::empty()
+    }
+    result.view
+}
+
+/// Split an absolute or relative URL without assigning it application
+/// meaning. The parser recognizes an authority only through the standard
+/// `scheme://authority` form and otherwise preserves the relative path.
+pub fn parse_location(_ value: own BrowserString) -> RouteLocation {
+    let input = Utf8View::from_browser(value)
+    if !input.is_valid() {
+        return RouteLocation {
+            path: RoutePath { value: Utf8View::empty() },
+            query: RouteQuery { value: Utf8View::empty() },
+            hash: RouteHash { value: Utf8View::empty() },
+            valid: false,
+        }
+    }
+
+    let mut hash_at = input.len()
+    let mut index: u32 = 0
+    while index < input.len() {
+        if input.byte(index: index) == 35 && hash_at == input.len() {
+            hash_at = index
+        }
+        index = index + 1
+    }
+    let mut query_at = hash_at
+    index = 0
+    while index < hash_at {
+        if input.byte(index: index) == 63 && query_at == hash_at {
+            query_at = index
+        }
+        index = index + 1
+    }
+    let path_end = query_at
+    let mut path_start: u32 = 0
+    let mut authority_at = input.len()
+    index = 0
+    while index + 2 < path_end {
+        if input.byte(index: index) == 58
+            && input.byte(index: index + 1) == 47
+            && input.byte(index: index + 2) == 47 {
+            authority_at = index + 3
+            index = path_end
+        } else {
+            index = index + 1
+        }
+    }
+    if authority_at < path_end {
+        path_start = path_end
+        index = authority_at
+        while index < path_end {
+            if input.byte(index: index) == 47 && path_start == path_end {
+                path_start = index
+            }
+            index = index + 1
+        }
+    }
+
+    let query_start = if query_at < hash_at {
+        query_at + 1
+    } else {
+        query_at
+    }
+    let hash_start = if hash_at < input.len() {
+        hash_at + 1
+    } else {
+        hash_at
+    }
+    RouteLocation {
+        path: RoutePath { value: checked_slice(value: input, start: path_start, end: path_end) },
+        query: RouteQuery { value: checked_slice(value: input, start: query_start, end: hash_at) },
+        hash: RouteHash { value: checked_slice(value: input, start: hash_start, end: input.len()) },
+        valid: true,
+    }
+}

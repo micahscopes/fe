@@ -35,6 +35,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::binding_facts::{BindingDefinition, BindingFacts};
+
 use compiler_db::DriverDataBase;
 use hir::projection::IndexSource;
 use hir::{
@@ -259,22 +261,17 @@ pub fn compile_runtime_package_wasm(
 pub(crate) fn compile_runtime_package_shader_ir(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
-) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(
-        db,
-        package,
-        &[],
-        &[],
-        None,
-        &[],
-        None,
-        None,
-        &[],
-        &[],
-        false,
-        true,
+) -> Result<(Module, Vec<FuncRef>), LowerError> {
+    // Compatibility ISA until the Shader revision is reproducibly pinned.
+    // Shared body lowering never chooses an ISA implicitly.
+    let isa = create_wasm32_isa();
+    let lowerer = lower_portable_bodies(
+        &isa, db, package, HashSet::new(), &[], false, true,
         PrivatePlaceMaterialization::ShaderTypedWhenLegal,
-    )
+        AggregateCopyLowering::Memcopy,
+    )?;
+    let entries = shader_runtime_entries(&lowerer)?;
+    Ok((lowerer.finish(), entries))
 }
 
 /// Overlay-only callback-capstone entry point. The default pin cannot name the
@@ -287,20 +284,17 @@ pub fn compile_runtime_package_wasm_with_guest_callbacks(
     callbacks: &[crate::guest_callbacks::ResolvedGuestCallback],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
-    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
+    let mut lowerer = lower_portable_bodies(
         &isa,
+        db,
         package,
         HashSet::new(),
         &[],
         true,
         true,
         PrivatePlaceMaterialization::CanonicalArena,
+        AggregateCopyLowering::Memcopy,
     )?;
-    lowerer.declare_functions()?;
-    lowerer.lower_bodies()?;
     lowerer.synthesize_guest_callbacks(callbacks)?;
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
@@ -318,89 +312,12 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     resident_policies: &[super::WasmResidentPolicy],
     fixed_i32_exports: &[(String, i32)],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_inner(
-        db,
-        package,
-        canonical_lanes,
-        export_aliases,
-        resident_transition,
-        resident_aux_transitions,
-        resident_initializer,
-        resident_projection,
-        resident_policies,
-        fixed_i32_exports,
-        true,
-        true,
-        PrivatePlaceMaterialization::CanonicalArena,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compile_runtime_package_wasm_inner(
-    db: &DriverDataBase,
-    package: &RuntimePackage<'_>,
-    canonical_lanes: &[crate::CanonicalLane],
-    export_aliases: &[(String, String)],
-    resident_transition: Option<&super::WasmResidentTransition>,
-    resident_aux_transitions: &[super::WasmResidentTransition],
-    resident_initializer: Option<&super::WasmResidentInitializer>,
-    resident_projection: Option<&super::WasmResidentProjection>,
-    resident_policies: &[super::WasmResidentPolicy],
-    fixed_i32_exports: &[(String, i32)],
-    validate_host_enum_params: bool,
-    enable_scoped_arena: bool,
-    private_place_materialization: PrivatePlaceMaterialization,
-) -> Result<(Module, HashMap<String, String>), LowerError> {
-    wasm_lower_trace(|| {
-        format!(
-            "begin runtime package, functions={}",
-            package.functions(db).len(),
-        )
-    });
-    observe_runtime_package(db, package);
-    // Reject unsupported indirect host results before constructing any
-    // Sonatina signatures. A local wrapper may itself return the authored enum
-    // and appear before the import in package order, so gating inside
-    // `declare_functions` is already too late.
-    for function in package.functions(db) {
-        let instance = function.instance(db);
-        let Some(name) = mir::host_import_name(db, instance) else {
-            continue;
-        };
-        let Some(descriptor) = mir::indirect_host_result(db, instance) else {
-            continue;
-        };
-        let mut missing = Vec::new();
-        if descriptor.requires_realloc {
-            missing.push("realloc");
-        }
-        if descriptor.requires_post_return {
-            missing.push("post-return");
-        }
-        if !missing.is_empty() {
-            return Err(LowerError::Unsupported(format!(
-                "extern host import `{name}` uses indirect host result codec `{}`, but the Wasm \
-                 backend is missing required capabilities: {}",
-                mir::IndirectHostResult::FE_HOST_WASM_PROTOCOL,
-                missing.join(", ")
-            )));
-        }
-    }
-
-    // CONSULT (DispatchKind axis): the wasm target realizes the `Export` kind.
-    // Every entry (`main`, the `fe_task` task table, the degraded-mode
-    // `on_ready` continuation) is a named export the host invokes directly, with
-    // no in-band selector and no synthesized dispatch root. This names what this
-    // lowering already does; a mismatch fires in debug, zero effect in release.
-    debug_assert!(
-        {
-            let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Wasm);
-            matches!(kind, crate::dispatch::DispatchKind::Export) && kind.entries_invoked_directly()
-        },
-        "wasm lowering must realize the Export DispatchKind (entries invoked directly)"
-    );
+    debug_assert!({
+        let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Wasm);
+        matches!(kind, crate::dispatch::DispatchKind::Export) && kind.entries_invoked_directly()
+    }, "wasm lowering must realize the Export DispatchKind (entries invoked directly)");
+    validate_wasm_host_results(db, package)?;
     let isa = create_wasm32_isa();
-    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
     let mut wrapped_lane_names: HashSet<String> = canonical_lanes
         .iter()
         .map(|lane| lane.name.clone())
@@ -435,22 +352,11 @@ fn compile_runtime_package_wasm_inner(
         };
         wrapped_lane_names.insert(symbol.clone());
     }
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
-        &isa,
-        package,
-        wrapped_lane_names,
-        export_aliases,
-        validate_host_enum_params,
-        enable_scoped_arena,
-        private_place_materialization,
+    let mut lowerer = lower_portable_bodies(
+        &isa, db, package, wrapped_lane_names, export_aliases, true, true,
+        PrivatePlaceMaterialization::CanonicalArena,
+        AggregateCopyLowering::Memcopy,
     )?;
-    wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
-    lowerer.declare_functions()?;
-    wasm_lower_trace(|| "declared portable runtime functions".to_owned());
-    lowerer.lower_bodies()?;
-    wasm_lower_trace(|| "lowered portable runtime function bodies".to_owned());
     for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
     }
@@ -478,8 +384,99 @@ fn compile_runtime_package_wasm_inner(
         lowerer.synthesize_fixed_i32_export(export, *value)?;
     }
     let import_modules = lowerer.import_modules();
-    wasm_lower_trace(|| "finished portable Sonatina module".to_owned());
     Ok((lowerer.finish(), import_modules))
+}
+
+/// Construct and lower portable bodies without synthesizing a host interface.
+/// The caller owns target identity, representation policy, and any subsequent
+/// host wrappers. Full prepared bodies are still consumed incrementally.
+#[allow(clippy::too_many_arguments)]
+fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
+    isa: &'a I,
+    db: &'db DriverDataBase,
+    package: &'a RuntimePackage<'db>,
+    wrapped_lane_names: HashSet<String>,
+    export_aliases: &[(String, String)],
+    validate_host_enum_params: bool,
+    enable_scoped_arena: bool,
+    private_place_materialization: PrivatePlaceMaterialization,
+    aggregate_copy_lowering: AggregateCopyLowering,
+) -> Result<PortableModuleLowerer<'db, 'a, I>, LowerError> {
+    wasm_lower_trace(|| format!("begin runtime package, functions={}", package.functions(db).len()));
+    observe_runtime_package(db, package);
+    let builder = ModuleBuilder::new(ModuleCtx::new(isa));
+    let mut lowerer = PortableModuleLowerer::new(
+        db, builder, isa, package, wrapped_lane_names, export_aliases,
+        validate_host_enum_params, enable_scoped_arena, private_place_materialization,
+        aggregate_copy_lowering,
+    )?;
+    wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
+    lowerer.declare_functions()?;
+    wasm_lower_trace(|| "declared portable runtime functions".to_owned());
+    lowerer.lower_bodies()?;
+    wasm_lower_trace(|| "lowered portable runtime function bodies".to_owned());
+    Ok(lowerer)
+}
+
+fn validate_wasm_host_results(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+) -> Result<(), LowerError> {
+    // Reject unsupported indirect host results before constructing any
+    // Sonatina signatures. A local wrapper may itself return the authored enum
+    // and appear before the import in package order, so gating inside
+    // `declare_functions` is already too late.
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        let Some(name) = mir::host_import_name(db, instance) else {
+            continue;
+        };
+        let Some(descriptor) = mir::indirect_host_result(db, instance) else {
+            continue;
+        };
+        let mut missing = Vec::new();
+        if descriptor.requires_realloc {
+            missing.push("realloc");
+        }
+        if descriptor.requires_post_return {
+            missing.push("post-return");
+        }
+        if !missing.is_empty() {
+            return Err(LowerError::Unsupported(format!(
+                "extern host import `{name}` uses indirect host result codec `{}`, but the Wasm \
+                 backend is missing required capabilities: {}",
+                mir::IndirectHostResult::FE_HOST_WASM_PROTOCOL,
+                missing.join(", ")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Section identity defines the legacy primary entry. Explicit public exports
+/// additionally admit paired stages without scanning arbitrary declarations.
+fn shader_runtime_entries<I: Isa<InstSet = NativeInstSet>>(
+    lowerer: &PortableModuleLowerer<'_, '_, I>,
+) -> Result<Vec<FuncRef>, LowerError> {
+    let db = lowerer.db;
+    let package = lowerer.package;
+    let section_instances = package.root_objects(db).into_iter().flat_map(|object| {
+        object.sections(db).iter().map(|section| section.entry.instance(db)).collect::<Vec<_>>()
+    });
+    let export_instances = package.functions(db).into_iter()
+        .filter(|function| function.linkage(db) == RuntimeLinkage::Internal)
+        .map(|function| function.instance(db));
+    let mut entries = Vec::new();
+    for instance in section_instances.chain(export_instances) {
+        let entry = lowerer.func_map.get(&instance).copied().ok_or_else(|| {
+            LowerError::Internal("runtime entry has no declared Sonatina function".to_owned())
+        })?;
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
 }
 
 /// Change 5: whether the lowered module emits any `MemAllocDynamic`. The default
@@ -948,20 +945,17 @@ pub(crate) fn compile_runtime_package_native(
         Vendor::Unknown,
         OperatingSystem::Native,
     ));
-    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
+    let lowerer = lower_portable_bodies(
         &isa,
+        db,
         package,
         HashSet::new(),
         &[],
         true,
         false,
         PrivatePlaceMaterialization::CanonicalArena,
+        AggregateCopyLowering::InlineLoop,
     )?;
-    lowerer.declare_functions()?;
-    lowerer.lower_bodies()?;
     Ok(lowerer.finish())
 }
 
@@ -3913,13 +3907,12 @@ where
     resumable_continuations: Vec<PreparedResumableContinuation<'db>>,
     wrapped_lane_names: HashSet<String>,
     validate_host_enum_params: bool,
-    /// Actual Wasm modules may express address-carried value copies as one
-    /// overlap-safe bulk-memory operation. The shared shader IR retains its
-    /// checked portable loop because SPIR-V has no equivalent instruction.
-    emit_wasm_bulk_memory: bool,
+    /// Copy realization is independent of arena lifetime analysis. Wasm and
+    /// Naga admit Memcopy; native retains its existing inline copy loop.
+    aggregate_copy_lowering: AggregateCopyLowering,
     /// Bodies whose arena-backed locals are compiler-proven not to escape.
-    /// Only the Wasm lowering enables these scopes. Shader and native paths do
-    /// not emit arena-control instructions their backends cannot realize.
+    /// Wasm and shader lowering enable these scopes. Native keeps its current
+    /// unscoped representation until its allocation semantics are verified.
     scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
     /// Pure Fe bodies admitted below an enclosing resumable segment's arena
     /// checkpoint. These callees may manipulate borrowed memory pointers, but
@@ -3950,6 +3943,20 @@ where
     /// derived from an arena allocation. Public/raw entry parameters are never
     /// trusted merely because their flattened Wasm carrier is `i32`.
     arena_owned_locals: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AggregateCopyLowering {
+    Memcopy,
+    #[cfg(any(
+        test,
+        all(
+            feature = "native-backend",
+            not(target_arch = "wasm32"),
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+        )
+    ))]
+    InlineLoop,
 }
 
 struct PreparedResumableContinuation<'db> {
@@ -4042,6 +4049,7 @@ where
         validate_host_enum_params: bool,
         enable_scoped_arena: bool,
         private_place_materialization: PrivatePlaceMaterialization,
+        aggregate_copy_lowering: AggregateCopyLowering,
     ) -> Result<Self, LowerError> {
         wasm_lower_trace(|| "prepare inline value bodies".to_owned());
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
@@ -4224,7 +4232,7 @@ where
             resumable_continuations,
             wrapped_lane_names,
             validate_host_enum_params,
-            emit_wasm_bulk_memory: enable_scoped_arena,
+            aggregate_copy_lowering,
             scoped_arena_bodies: HashSet::new(),
             resumable_arena_safe_bodies: HashSet::new(),
             resumable_scoped_arena_bodies: HashSet::new(),
@@ -5582,24 +5590,6 @@ where
         Ok(resource_ref_ty)
     }
 
-    /// Retrieve the object-reference type already declared for a semantic GPU
-    /// resource. Function-local resource copies are declared through
-    /// `gpu_resource_type` before statement lowering begins, so their later
-    /// type checks must preserve that same representation instead of treating
-    /// the nominal one-field struct as an arena-carried aggregate.
-    fn cached_gpu_resource_type(&self, resource_ty: TyId<'db>) -> Result<Type, LowerError> {
-        let resource_ty = resource_ty.as_view(self.db).unwrap_or(resource_ty);
-        self.resource_type_cache
-            .get(&resource_ty)
-            .copied()
-            .ok_or_else(|| {
-                LowerError::Internal(
-                    "semantic GPU resource reached lowering before its type was declared"
-                        .to_owned(),
-                )
-            })
-    }
-
     fn declare_functions(&mut self) -> Result<(), LowerError> {
         // DECLARED-EXTERNAL host imports dedup to ONE import per `(module, op-name)`
         // identity: the same `extern` reached through two effect-provider scopes
@@ -5894,7 +5884,8 @@ where
                 )),
                 other => other,
             })?;
-            if self.emit_wasm_bulk_memory && ((index + 1) % 500 == 0 || index + 1 == total) {
+            // Releasing consumed compiler data is not a target-memory feature.
+            if (index + 1) % 500 == 0 || index + 1 == total {
                 let released = reclaim_consumed_prepared_body_slack();
                 wasm_lower_trace(|| {
                     format!(
@@ -10200,16 +10191,388 @@ fn address_taken_scalar_slots(body: &RuntimeBody<'_>) -> HashSet<RLocalId> {
     slots
 }
 
+fn derive_binding_facts(body: &RuntimeBody<'_>) -> BindingFacts {
+    let definitions = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .filter_map(|stmt| {
+            let RStmt::Assign { dst, expr } = stmt else {
+                return None;
+            };
+            let definition = match expr {
+                RExpr::AllocObject { .. }
+                | RExpr::MaterializeToObject { .. }
+                | RExpr::MaterializePlaceToObject { .. }
+                | RExpr::ConstRef { .. } => BindingDefinition::Fresh,
+                RExpr::AddrOf { .. } | RExpr::Load { .. }
+                    if matches!(
+                        body.value_class(*dst),
+                        Some(RuntimeClass::Ref {
+                            kind: RefKind::Object | RefKind::Const,
+                            ..
+                        })
+                    ) =>
+                {
+                    BindingDefinition::BorrowRoot
+                }
+                RExpr::Use(source) | RExpr::RetagRef { value: source } => {
+                    BindingDefinition::Forward(source.as_u32() as usize)
+                }
+                _ => BindingDefinition::Other,
+            };
+            Some((dst.as_u32() as usize, definition))
+        });
+    BindingFacts::derive(body.locals.len(), definitions)
+}
+
+#[derive(Clone)]
+enum LocalValueRepresentation {
+    Single(Type),
+    Flattened(Vec<Type>),
+}
+
+/// The SSA declaration and its planned physical carrier remain one binding.
+/// Emission must not reclassify the source type to recover this carrier.
+#[derive(Clone, Copy)]
+struct LocalSsaBinding {
+    variable: Variable,
+    carrier: Type,
+}
+
+/// Local and residual-call storage decisions for one prepared body, derived
+/// before any instructions or SSA variables are emitted. This consumes the
+/// interprocedural ABI and arena escape facts; it does not replace their
+/// analyses. Emission retains the resulting materialization and call plans.
+struct BodyLocalStoragePlan<'db> {
+    binding_facts: BindingFacts,
+    reachable: Vec<bool>,
+    calls: FxHashMap<(RuntimeInstance<'db>, Vec<RLocalId>), CallStoragePlan<'db>>,
+    values: Vec<Option<LocalValueRepresentation>>,
+    typed_private_locals: FxHashMap<RLocalId, TypedPrivateLocal<'db>>,
+    materialized_param_slots: HashSet<RLocalId>,
+    materialized_scalar_slots: HashSet<RLocalId>,
+    address_carried_aggregate_values: HashSet<RLocalId>,
+}
+
+impl<'db> BodyLocalStoragePlan<'db> {
+    fn derive<I: Isa<InstSet = NativeInstSet>>(
+        module: &mut PortableModuleLowerer<'db, '_, I>,
+        body: &RuntimeBody<'db>,
+        scoped_arena: bool,
+    ) -> Result<Self, LowerError> {
+        let address_carried_aggregate_values = module
+            .address_carried_aggregate_values
+            .get(&body.owner)
+            .cloned()
+            .unwrap_or_default();
+        let typed_private_locals = module.derive_typed_private_locals(body)?;
+
+        // Declare one SSA variable per value-carried local. A primitive scalar
+        // Slot used only through whole-slot loads/stores is promoted to the same
+        // SSA representation; projected/aggregate/addressed Slot operations stay
+        // fail-closed. R2.1: a scalar-tuple local gets ONE variable per element
+        // word (`tuple_vars`); every other value-carried local keeps its single
+        // `ty_for_class` variable (and a multi-field aggregate that is NOT a
+        // scalar tuple still fails closed there, unchanged).
+        let mut values = vec![None; body.locals.len()];
+        let mut materialized_param_slots = HashSet::new();
+        let materialized_scalar_slots = address_taken_scalar_slots(body);
+        for (idx, local) in body.locals.iter().enumerate() {
+            if let RuntimeCarrier::Value(class) = &local.carrier {
+                let local_id = RLocalId::from_u32(idx as u32);
+                let semantic_ty =
+                    instantiated_runtime_local_ty(module.db, body.owner, local.semantic_ty);
+                if semantic_gpu_resource(module.db, semantic_ty) {
+                    let ty = module.gpu_resource_type(semantic_ty)?;
+                    values[idx] = Some(LocalValueRepresentation::Single(ty));
+                    continue;
+                }
+                if address_carried_aggregate_values.contains(&local_id) {
+                    if !matches!(class, RuntimeClass::AggregateValue { .. })
+                        || !module.aggregate_is_memory_lowerable(class)
+                    {
+                        return Err(LowerError::Internal(format!(
+                            "indirect Wasm parameter {local_id:?} is not a memory-lowerable aggregate"
+                        )));
+                    }
+                    values[idx] = Some(LocalValueRepresentation::Single(Type::I32));
+                    continue;
+                }
+                if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
+                    // Conditional-value and multi-exit joins can materialize a
+                    // primitive scalar through a MIR Slot even when every
+                    // reached operation is a direct load/store of the whole
+                    // scalar. Promote exactly that closed shape to an SSA var;
+                    // projected/aggregate slots and aliasing operations remain
+                    // fail-closed in expression/statement lowering.
+                    if matches!(class, RuntimeClass::Scalar(_)) {
+                        let ty = if materialized_scalar_slots.contains(&local_id) {
+                            Type::I32
+                        } else {
+                            module.ty_for_class(class)?
+                        };
+                        values[idx] = Some(LocalValueRepresentation::Single(ty));
+                    } else if matches!(
+                        class,
+                        RuntimeClass::AggregateValue { layout }
+                            if module.single_scalar_field(*layout).is_some()
+                                || module.fieldless_enum_tag(*layout).is_some()
+                    ) {
+                        // One-word nominal values retain their canonical scalar
+                        // carrier across conditional and multi-exit joins. They
+                        // are aggregates semantically, but do not require an
+                        // aggregate place merely because MIR selected a Slot.
+                        let ty = module.ty_for_class(class)?;
+                        values[idx] = Some(LocalValueRepresentation::Single(ty));
+                    } else if let Some(elem_tys) =
+                        module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                    {
+                        if body
+                            .signature
+                            .params
+                            .iter()
+                            .any(|param| param.local == local_id)
+                        {
+                            values[idx] = Some(LocalValueRepresentation::Single(Type::I32));
+                            materialized_param_slots.insert(local_id);
+                        } else {
+                            // Conditional and continuation joins are represented
+                            // by MIR Slots even when they are only assigned and
+                            // consumed as complete values. Promote that closed
+                            // use to the same recursively flattened SSA lanes as
+                            // an ordinary aggregate local. Any later AddrOf,
+                            // projected Load/Store, or other place operation still
+                            // fails closed because tuple_vars supplies no address.
+                            values[idx] = Some(LocalValueRepresentation::Flattened(elem_tys));
+                        }
+                    }
+                    continue;
+                }
+                if let Some(elem_tys) =
+                    module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                {
+                    values[idx] = Some(LocalValueRepresentation::Flattened(elem_tys));
+                } else if module.is_memory_lowerable_object_ref(class)
+                    || module.object_value_layout(class).is_some()
+                {
+                    // Change 1: a function-local aggregate behind an object /
+                    // memory-provider reference lowers to an i32 linear-memory
+                    // pointer (the arena offset the AllocObject arm mints). The
+                    // local's SSA value IS that pointer; element reads/writes go
+                    // through i32 address arithmetic + typed Mload/Mstore. SSA/phi
+                    // is free (only the pointer is carried, never the aggregate).
+                    let ty = typed_private_locals
+                        .get(&local_id)
+                        .map_or(Type::I32, |local| local.pointer_ty);
+                    values[idx] = Some(LocalValueRepresentation::Single(ty));
+                } else {
+                    let ty = module.ty_for_class(class).map_err(|error| match error {
+                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                            "{message}; while declaring Wasm local {local_id:?} with semantic type `{}` in `{}`",
+                            semantic_ty.pretty_print(module.db),
+                            module.function_symbol(body.owner),
+                        )),
+                        other => other,
+                    })?;
+                    values[idx] = Some(LocalValueRepresentation::Single(ty));
+                }
+            }
+        }
+
+
+        let reachable = compute_reachable_blocks(body);
+        let mut plan = Self {
+            binding_facts: derive_binding_facts(body),
+            reachable,
+            calls: FxHashMap::default(),
+            values,
+            typed_private_locals,
+            materialized_param_slots,
+            materialized_scalar_slots,
+            address_carried_aggregate_values,
+        };
+        for (index, block) in body.blocks.iter().enumerate() {
+            if !plan.reachable[index] {
+                continue;
+            }
+            for stmt in &block.stmts {
+                let RStmt::Assign { expr: RExpr::Call { callee, args }, .. } = stmt else {
+                    continue;
+                };
+                // Declaration already excludes compiler-consumed intrinsics
+                // and effects. Do not duplicate their classification here.
+                if !module.func_map.contains_key(callee) {
+                    continue;
+                }
+                // Adaptation depends on local representations, not SSA values.
+                // Repeated calls with these locals share one body-local plan.
+                let key = (*callee, args.to_vec());
+                if !plan.calls.contains_key(&key) {
+                    let call = plan.plan_call_storage(module, body, scoped_arena, *callee, args)?;
+                    plan.calls.insert(key, call);
+                }
+            }
+        }
+        Ok(plan)
+    }
+    fn plan_call_storage<I: Isa<InstSet = NativeInstSet>>(
+        &self,
+        module: &PortableModuleLowerer<'db, '_, I>,
+        body: &RuntimeBody<'db>,
+        scoped_arena: bool,
+        callee: RuntimeInstance<'db>,
+        args: &[RLocalId],
+    ) -> Result<CallStoragePlan<'db>, LowerError> {
+        let params = &module.prepared_interfaces.get(&callee)
+            .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
+            .params;
+        if args.len() != params.len() {
+            return Err(LowerError::Internal(format!(
+                "call to `{}` has {} Fe arguments but {} prepared parameters",
+                module.function_symbol(callee), args.len(), params.len(),
+            )));
+        }
+        let mut arguments = Vec::with_capacity(args.len());
+        let mut materializes = false;
+        for (arg, prepared_param) in args.iter().zip(params) {
+            let param = &prepared_param.class;
+            let source = body.value_class(*arg).ok_or_else(|| {
+                LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
+            })?;
+            let storage = if let Some(pointee) = module
+                .typed_private_borrow_pointee(callee, prepared_param.local)
+            {
+                let source_pointee = match source {
+                    RuntimeClass::Ref {
+                        pointee, kind: RefKind::Const | RefKind::Object,
+                        view: RefView::Whole,
+                    } => Some(pointee.as_ref()),
+                    _ => None,
+                };
+                let local = self.typed_private_locals.get(arg).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "call to `{}` selected typed borrow {arg:?}, but the caller did not preserve its storage",
+                        module.function_symbol(callee),
+                    ))
+                })?;
+                if source_pointee != Some(&pointee) || local.pointee != pointee {
+                    return Err(LowerError::Internal(format!(
+                        "call to `{}` selected incompatible typed borrow {arg:?}",
+                        module.function_symbol(callee),
+                    )));
+                }
+                CallArgumentStorage::TypedBorrow
+            } else {
+                let indirect = module.indirect_aggregate_params.get(&callee)
+                    .is_some_and(|params| params.contains(&prepared_param.local));
+                let read_borrow = matches!(param,
+                    RuntimeClass::Ref { pointee, kind: RefKind::Const, view: RefView::Whole }
+                    if matches!(source, RuntimeClass::AggregateValue { .. })
+                        && source.shares_runtime_rep_with(module.db, pointee)
+                        && module.aggregate_is_memory_lowerable(source)
+                );
+                if indirect || read_borrow {
+                    if !scoped_arena
+                        && !module.indirect_aggregate_safe_bodies.contains(&callee)
+                    {
+                        let role = if indirect { "an indirect aggregate value copy" }
+                            else { "a scoped aggregate borrow" };
+                        return Err(LowerError::Internal(format!(
+                            "call to `{}` requires {role}, but the callee failed the arena escape proof",
+                            module.function_symbol(callee),
+                        )));
+                    }
+                    materializes = true;
+                    if indirect {
+                        if !matches!(param, RuntimeClass::AggregateValue { .. })
+                            || !source.shares_runtime_rep_with(module.db, param)
+                            || !module.aggregate_is_memory_lowerable(source)
+                        {
+                            return Err(LowerError::Internal(format!(
+                                "call to `{}` selected an incompatible indirect aggregate argument {arg:?}",
+                                module.function_symbol(callee),
+                            )));
+                        }
+                        if self.materialized_param_slots.contains(arg)
+                            || self.address_carried_aggregate_values.contains(arg)
+                        {
+                            let RuntimeClass::AggregateValue { layout } = source else {
+                                return Err(LowerError::Internal(format!(
+                                    "indirect aggregate argument {arg:?} lost its value layout",
+                                )));
+                            };
+                            CallArgumentStorage::OwnedDeepCopy(*layout)
+                        } else {
+                            CallArgumentStorage::OwnedMaterialization
+                        }
+                    } else {
+                        CallArgumentStorage::BorrowMaterialization
+                    }
+                } else {
+                    CallArgumentStorage::Flat
+                }
+            };
+            arguments.push(storage);
+        }
+        let lifetime = if !materializes {
+            CallTemporaryLifetime::None
+        } else if scoped_arena {
+            CallTemporaryLifetime::CallerFrame
+        } else if module.indirect_aggregate_returns.contains(&callee) {
+            // Rewinding at this call would invalidate its returned aggregate.
+            CallTemporaryLifetime::EnclosingResult
+        } else {
+            CallTemporaryLifetime::CallScope
+        };
+        Ok(CallStoragePlan { arguments, lifetime })
+    }
+}
+
+/// Physical argument preparation, with ownership kept distinct even where two
+/// variants currently share the same materialization instructions.
+#[derive(Clone)]
+enum CallArgumentStorage<'db> {
+    Flat,
+    TypedBorrow,
+    OwnedDeepCopy(LayoutId<'db>),
+    OwnedMaterialization,
+    BorrowMaterialization,
+}
+
+impl CallArgumentStorage<'_> {
+    fn materializes(&self) -> bool {
+        matches!(self, Self::OwnedDeepCopy(_) | Self::OwnedMaterialization | Self::BorrowMaterialization)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallTemporaryLifetime {
+    None,
+    CallerFrame,
+    EnclosingResult,
+    CallScope,
+}
+
+#[derive(Clone)]
+struct CallStoragePlan<'db> {
+    arguments: Vec<CallArgumentStorage<'db>>,
+    lifetime: CallTemporaryLifetime,
+}
+
 struct PortableFunctionLowerer<'ctx, 'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
 {
     module: &'ctx mut PortableModuleLowerer<'db, 'a, I>,
     body: RuntimeBody<'db>,
+    binding_facts: BindingFacts,
     fb: FunctionBuilder<InstInserter>,
     prologue_block: BlockId,
     block_map: Vec<BlockId>,
-    vars: FxHashMap<RLocalId, Variable>,
+    reachable: Vec<bool>,
+    call_storage: FxHashMap<(RuntimeInstance<'db>, Vec<RLocalId>), CallStoragePlan<'db>>,
+    vars: FxHashMap<RLocalId, LocalSsaBinding>,
     /// R2.1: scalar-tuple locals carry ONE SSA variable per element word (a
     /// `(Pending, Pending)` local is two i32 vars). A local is in exactly one of
     /// `vars` (a single scalar word) or `tuple_vars` (a flattened scalar tuple),
@@ -10273,131 +10636,52 @@ where
         indirect_aggregate_params: HashSet<RLocalId>,
         indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
-        let address_carried_aggregate_values = module
-            .address_carried_aggregate_values
-            .get(&body.owner)
-            .cloned()
-            .unwrap_or_default();
-        let typed_private_locals = module.derive_typed_private_locals(&body)?;
+        let BodyLocalStoragePlan {
+            binding_facts,
+            reachable,
+            calls: call_storage,
+            values,
+            typed_private_locals,
+            materialized_param_slots,
+            materialized_scalar_slots,
+            address_carried_aggregate_values,
+        } = BodyLocalStoragePlan::derive(module, &body, scoped_arena)?;
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
-
-        // Declare one SSA variable per value-carried local. A primitive scalar
-        // Slot used only through whole-slot loads/stores is promoted to the same
-        // SSA representation; projected/aggregate/addressed Slot operations stay
-        // fail-closed. R2.1: a scalar-tuple local gets ONE variable per element
-        // word (`tuple_vars`); every other value-carried local keeps its single
-        // `ty_for_class` variable (and a multi-field aggregate that is NOT a
-        // scalar tuple still fails closed there, unchanged).
         let mut vars = FxHashMap::default();
-        let mut tuple_vars: FxHashMap<RLocalId, Vec<Variable>> = FxHashMap::default();
-        let mut materialized_param_slots = HashSet::new();
-        let materialized_scalar_slots = address_taken_scalar_slots(&body);
-        for (idx, local) in body.locals.iter().enumerate() {
-            if let RuntimeCarrier::Value(class) = &local.carrier {
-                let local_id = RLocalId::from_u32(idx as u32);
-                let semantic_ty =
-                    instantiated_runtime_local_ty(module.db, body.owner, local.semantic_ty);
-                if semantic_gpu_resource(module.db, semantic_ty) {
-                    let ty = module.gpu_resource_type(semantic_ty)?;
-                    vars.insert(local_id, fb.declare_var(ty));
-                    continue;
+        let mut tuple_vars = FxHashMap::default();
+        for (index, representation) in values.into_iter().enumerate() {
+            let local = RLocalId::from_u32(index as u32);
+            match representation {
+                Some(LocalValueRepresentation::Single(ty)) => {
+                    vars.insert(
+                        local,
+                        LocalSsaBinding {
+                            variable: fb.declare_var(ty),
+                            carrier: ty,
+                        },
+                    );
                 }
-                if address_carried_aggregate_values.contains(&local_id) {
-                    if !matches!(class, RuntimeClass::AggregateValue { .. })
-                        || !module.aggregate_is_memory_lowerable(class)
-                    {
-                        return Err(LowerError::Internal(format!(
-                            "indirect Wasm parameter {local_id:?} is not a memory-lowerable aggregate"
-                        )));
-                    }
-                    vars.insert(local_id, fb.declare_var(Type::I32));
-                    continue;
+                Some(LocalValueRepresentation::Flattened(types)) => {
+                    tuple_vars.insert(
+                        local,
+                        types.into_iter().map(|ty| fb.declare_var(ty)).collect(),
+                    );
                 }
-                if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
-                    // Conditional-value and multi-exit joins can materialize a
-                    // primitive scalar through a MIR Slot even when every
-                    // reached operation is a direct load/store of the whole
-                    // scalar. Promote exactly that closed shape to an SSA var;
-                    // projected/aggregate slots and aliasing operations remain
-                    // fail-closed in expression/statement lowering.
-                    if matches!(class, RuntimeClass::Scalar(_)) {
-                        let ty = if materialized_scalar_slots.contains(&local_id) {
-                            Type::I32
-                        } else {
-                            module.ty_for_class(class)?
-                        };
-                        vars.insert(local_id, fb.declare_var(ty));
-                    } else if let Some(elem_tys) =
-                        module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
-                    {
-                        if body
-                            .signature
-                            .params
-                            .iter()
-                            .any(|param| param.local == local_id)
-                        {
-                            vars.insert(local_id, fb.declare_var(Type::I32));
-                            materialized_param_slots.insert(local_id);
-                        } else {
-                            // Conditional and continuation joins are represented
-                            // by MIR Slots even when they are only assigned and
-                            // consumed as complete values. Promote that closed
-                            // use to the same recursively flattened SSA lanes as
-                            // an ordinary aggregate local. Any later AddrOf,
-                            // projected Load/Store, or other place operation still
-                            // fails closed because tuple_vars supplies no address.
-                            let elem_vars = elem_tys
-                                .iter()
-                                .map(|ty| fb.declare_var(*ty))
-                                .collect::<Vec<_>>();
-                            tuple_vars.insert(local_id, elem_vars);
-                        }
-                    }
-                    continue;
-                }
-                if let Some(elem_tys) =
-                    module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
-                {
-                    let elem_vars = elem_tys
-                        .iter()
-                        .map(|ty| fb.declare_var(*ty))
-                        .collect::<Vec<_>>();
-                    tuple_vars.insert(local_id, elem_vars);
-                } else if module.is_memory_lowerable_object_ref(class)
-                    || module.object_value_layout(class).is_some()
-                {
-                    // Change 1: a function-local aggregate behind an object /
-                    // memory-provider reference lowers to an i32 linear-memory
-                    // pointer (the arena offset the AllocObject arm mints). The
-                    // local's SSA value IS that pointer; element reads/writes go
-                    // through i32 address arithmetic + typed Mload/Mstore. SSA/phi
-                    // is free (only the pointer is carried, never the aggregate).
-                    let ty = typed_private_locals
-                        .get(&local_id)
-                        .map_or(Type::I32, |local| local.pointer_ty);
-                    vars.insert(local_id, fb.declare_var(ty));
-                } else {
-                    let ty = module.ty_for_class(class).map_err(|error| match error {
-                        LowerError::Unsupported(message) => LowerError::Unsupported(format!(
-                            "{message}; while declaring Wasm local {local_id:?} with semantic type `{}` in `{}`",
-                            semantic_ty.pretty_print(module.db),
-                            module.function_symbol(body.owner),
-                        )),
-                        other => other,
-                    })?;
-                    vars.insert(local_id, fb.declare_var(ty));
-                }
+                None => {}
             }
         }
 
         Ok(Self {
             module,
             body,
+            binding_facts,
             fb,
             prologue_block,
             block_map,
+            reachable,
+            call_storage,
             vars,
             tuple_vars,
             typed_private_locals,
@@ -10556,11 +10840,13 @@ where
         let entry = self.block_map[0];
         self.fb.insert_inst_no_result(Jump::new(is, entry));
 
-        let blocks = self.body.blocks.clone();
-        let reachable = compute_reachable_blocks(&self.body);
-        for (idx, block) in blocks.iter().enumerate() {
+        // Ownership and reachability facts have already been derived. Place
+        // resolution below needs only local/provider metadata, so consume the
+        // source blocks instead of retaining a second full statement graph.
+        let blocks = std::mem::take(&mut self.body.blocks);
+        for (idx, block) in blocks.into_iter().enumerate() {
             self.fb.switch_to_block(self.block_map[idx]);
-            if !reachable[idx] {
+            if !self.reachable[idx] {
                 self.fb.insert_inst_no_result(Unreachable::new(is));
                 continue;
             }
@@ -10965,152 +11251,45 @@ where
     /// rewound immediately after its scalar results have been captured. Any
     /// missed boundary adaptation fails before an invalid Wasm call reaches the
     /// emitter.
+
     fn checked_call_arg_values(
         &mut self,
         callee: RuntimeInstance<'db>,
         callee_ref: FuncRef,
         args: &[RLocalId],
     ) -> Result<(Vec<ValueId>, Option<ValueId>), LowerError> {
-        let params = self
-            .module
-            .prepared_interfaces
-            .get(&callee)
-            .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
-            .params
-            .iter()
-            .map(|param| param.class.clone())
-            .collect::<Vec<_>>();
-        if args.len() != params.len() {
-            return Err(LowerError::Internal(format!(
-                "call to `{}` has {} Fe arguments but {} prepared parameters",
+        // Validate every adaptation before emitting any temporary allocations.
+        let plan = self.call_storage.get(&(callee, args.to_vec())).cloned().ok_or_else(|| {
+            LowerError::Internal(format!(
+                "call to `{}` has no body storage plan",
                 self.module.function_symbol(callee),
-                args.len(),
-                params.len(),
-            )));
-        }
+            ))
+        })?;
         let mut values = Vec::new();
-        let indirect_params = self
-            .module
-            .indirect_aggregate_params
-            .get(&callee)
-            .cloned()
-            .unwrap_or_default();
-        let callee_params = self
-            .module
-            .prepared_interfaces
-            .get(&callee)
-            .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
-            .params
-            .clone();
         let mut call_checkpoint = None;
-        for ((arg, param), prepared_param) in args.iter().zip(&params).zip(&callee_params) {
-            let source = self.body.value_class(*arg).cloned().ok_or_else(|| {
-                LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
-            })?;
-            let typed_borrow_pointee = self
-                .module
-                .typed_private_borrow_pointee(callee, prepared_param.local);
-            let materialize_indirect_value = indirect_params.contains(&prepared_param.local);
-            let materialize_read_borrow = matches!(
-                param,
-                RuntimeClass::Ref {
-                    pointee,
-                    kind: RefKind::Const,
-                    view: RefView::Whole,
-                } if matches!(&source, RuntimeClass::AggregateValue { .. })
-                    && source.shares_runtime_rep_with(self.module.db, pointee)
-                    && self.module.aggregate_is_memory_lowerable(&source)
-            );
-            if let Some(pointee) = typed_borrow_pointee {
-                let source_pointee = match &source {
-                    RuntimeClass::Ref {
-                        pointee,
-                        kind: RefKind::Const | RefKind::Object,
-                        view: RefView::Whole,
-                    } => Some(pointee.as_ref()),
-                    _ => None,
-                };
-                let local = self.typed_private_locals.get(arg).cloned().ok_or_else(|| {
-                    LowerError::Internal(format!(
-                        "call to `{}` selected typed borrow {arg:?}, but the caller did not preserve its storage",
-                        self.module.function_symbol(callee),
-                    ))
-                })?;
-                if source_pointee != Some(&pointee) || local.pointee != pointee {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` selected incompatible typed borrow {arg:?}",
-                        self.module.function_symbol(callee),
-                    )));
-                }
-                values.push(self.local_value(*arg)?);
-            } else if materialize_indirect_value {
-                if !self.scoped_arena
-                    && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
-                {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` requires an indirect aggregate value copy, but the callee failed the arena escape proof",
-                        self.module.function_symbol(callee),
-                    )));
-                }
-                if !self.scoped_arena && call_checkpoint.is_none() {
-                    // An indirect result is allocated after the same would-be
-                    // checkpoint and must remain live in the caller. Keep both
-                    // the by-value argument copy and result in the enclosing
-                    // arena lifetime; their MIR carrier remains AggregateValue,
-                    // so no Fe reference capability is created or exposed.
-                    if !self.module.indirect_aggregate_returns.contains(&callee) {
-                        let checkpoint_ty = self.fb.ptr_type(Type::I8);
-                        call_checkpoint = Some(
-                            self.fb
-                                .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
-                        );
-                    }
-                }
-                if !matches!(param, RuntimeClass::AggregateValue { .. })
-                    || !source.shares_runtime_rep_with(self.module.db, param)
-                    || !self.module.aggregate_is_memory_lowerable(&source)
-                {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` selected an incompatible indirect aggregate argument {arg:?}",
-                        self.module.function_symbol(callee),
-                    )));
-                }
-                let argument = if self.is_address_carried_aggregate_value(*arg) {
-                    let RuntimeClass::AggregateValue { layout } = source else {
-                        return Err(LowerError::Internal(format!(
-                            "indirect aggregate argument {arg:?} lost its value layout",
-                        )));
-                    };
+        for (arg, storage) in args.iter().zip(plan.arguments) {
+            if storage.materializes()
+                && plan.lifetime == CallTemporaryLifetime::CallScope
+                && call_checkpoint.is_none()
+            {
+                // Keep the checkpoint at the first materializing argument:
+                // preceding flat-argument loads retain their original order.
+                let checkpoint_ty = self.fb.ptr_type(Type::I8);
+                call_checkpoint = Some(
+                    self.fb.insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                );
+            }
+            match storage {
+                CallArgumentStorage::Flat => values.extend(self.local_flat_values(*arg)?),
+                CallArgumentStorage::TypedBorrow => values.push(self.local_value(*arg)?),
+                CallArgumentStorage::OwnedDeepCopy(layout) => {
                     let source = self.local_value(*arg)?;
-                    self.lower_deep_object_copy(source, layout)?
-                } else {
-                    self.lower_materialize_to_object(*arg)?
-                };
-                values.push(argument);
-            } else if materialize_read_borrow {
-                if !self.scoped_arena
-                    && !self.module.indirect_aggregate_safe_bodies.contains(&callee)
-                {
-                    return Err(LowerError::Internal(format!(
-                        "call to `{}` requires a scoped aggregate borrow, but the callee failed the arena escape proof",
-                        self.module.function_symbol(callee),
-                    )));
+                    values.push(self.lower_deep_object_copy(source, layout)?);
                 }
-                if !self.scoped_arena && call_checkpoint.is_none() {
-                    // See the indirect-value arm above. The returned aggregate
-                    // owns the enclosing lifetime, so the borrowed materialized
-                    // input cannot be reclaimed at this call boundary.
-                    if !self.module.indirect_aggregate_returns.contains(&callee) {
-                        let checkpoint_ty = self.fb.ptr_type(Type::I8);
-                        call_checkpoint = Some(
-                            self.fb
-                                .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
-                        );
-                    }
+                CallArgumentStorage::OwnedMaterialization
+                | CallArgumentStorage::BorrowMaterialization => {
+                    values.push(self.lower_materialize_to_object(*arg)?);
                 }
-                values.push(self.lower_materialize_to_object(*arg)?);
-            } else {
-                values.extend(self.local_flat_values(*arg)?);
             }
         }
         let expected = self
@@ -12696,7 +12875,7 @@ where
             LowerError::Unsupported(format!("wasm aggregate copy size {byte_len} exceeds i32"))
         })?;
         let is = self.inst_set();
-        if self.module.emit_wasm_bulk_memory {
+        if self.module.aggregate_copy_lowering == AggregateCopyLowering::Memcopy {
             let len = self.fb.make_imm_value(Immediate::I32(byte_len));
             self.fb
                 .insert_inst_no_result(Memcopy::new(is, destination, source, len));
@@ -15323,77 +15502,15 @@ where
     /// object) does NOT, so it fails closed rather than pointer-aliasing. A local
     /// with no definition (an array parameter) also does not qualify (deferred).
     fn is_fresh_object_binding(&self, local: RLocalId) -> bool {
-        let mut has_fresh_def = false;
-        for block in &self.body.blocks {
-            for stmt in &block.stmts {
-                let RStmt::Assign { dst, expr } = stmt else {
-                    continue;
-                };
-                if *dst != local {
-                    continue;
-                }
-                if matches!(
-                    expr,
-                    RExpr::AllocObject { .. }
-                        | RExpr::MaterializeToObject { .. }
-                        | RExpr::MaterializePlaceToObject { .. }
-                        | RExpr::ConstRef { .. }
-                ) {
-                    has_fresh_def = true;
-                } else {
-                    return false;
-                }
-            }
-        }
-        has_fresh_def
+        self.binding_facts.is_fresh(local.as_u32() as usize)
     }
 
-    /// Whether an object-ref local denotes a borrow of existing storage rather
-    /// than an owned aggregate value. Forwarding this pointer must preserve
-    /// identity: copying the pointee would turn a mutable borrow into a write to
-    /// a detached temporary, so the caller would not observe the mutation.
+    /// Forward a proven borrow without detaching its pointee into a copy.
     fn is_borrow_alias_binding(&self, local: RLocalId) -> bool {
-        fn visit(
-            body: &RuntimeBody<'_>,
-            local: RLocalId,
-            visiting: &mut HashSet<RLocalId>,
-        ) -> bool {
-            if !visiting.insert(local) {
-                return false;
-            }
-            let mut has_definition = false;
-            for block in &body.blocks {
-                for stmt in &block.stmts {
-                    let RStmt::Assign { dst, expr } = stmt else {
-                        continue;
-                    };
-                    if *dst != local {
-                        continue;
-                    }
-                    has_definition = true;
-                    match expr {
-                        RExpr::AddrOf { .. } | RExpr::Load { .. }
-                            if matches!(
-                                body.value_class(local),
-                                Some(RuntimeClass::Ref {
-                                    kind: RefKind::Object | RefKind::Const,
-                                    ..
-                                })
-                            ) => {}
-                        RExpr::Use(source) | RExpr::RetagRef { value: source }
-                            if visit(body, *source, visiting) => {}
-                        _ => return false,
-                    }
-                }
-            }
-            visiting.remove(&local);
-            has_definition
-        }
-
-        visit(&self.body, local, &mut HashSet::new())
+        self.binding_facts.is_borrowed(local.as_u32() as usize)
     }
 
-    fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
+    fn binding_for(&self, local: RLocalId) -> Result<LocalSsaBinding, LowerError> {
         self.vars.get(&local).copied().ok_or_else(|| {
             let details = self
                 .body
@@ -15413,33 +15530,17 @@ where
                 })
                 .unwrap_or_else(|| "missing local".to_owned());
             LowerError::Unsupported(format!(
-                "wasm target (R1): local {local:?} is not a value-carried scalar \
-                 (address-taken/aggregate locals are R2); {details}"
+                "local {local:?} has no planned single-value SSA binding; {details}"
             ))
         })
     }
 
+    fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
+        Ok(self.binding_for(local)?.variable)
+    }
+
     fn local_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
-        if let Some(local) = self.typed_private_locals.get(&local) {
-            return Ok(local.pointer_ty);
-        }
-        if let Some(local_data) = self.body.local(local)
-            && semantic_gpu_resource(self.module.db, local_data.semantic_ty)
-        {
-            return self.module.cached_gpu_resource_type(local_data.semantic_ty);
-        }
-        let class = self.body.value_class(local).cloned().ok_or_else(|| {
-            LowerError::Internal(format!("local {local:?} carries no value class"))
-        })?;
-        if self.is_address_carried_aggregate_value(local)
-            || self.materialized_scalar_slots.contains(&local)
-            || self.module.is_memory_lowerable_object_ref(&class)
-            || self.module.object_value_layout(&class).is_some()
-        {
-            Ok(Type::I32)
-        } else {
-            self.module.ty_for_class(&class)
-        }
+        Ok(self.binding_for(local)?.carrier)
     }
 
     fn materialized_scalar_slot_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
@@ -15525,6 +15626,33 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_ir_uses_the_callers_isa() {
+        let mut db = DriverDataBase::default();
+        let url = url::Url::parse("file:///portable_explicit_isa.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(
+            "pub fn kernel(_ value: u32) -> u32 { value }".to_owned(),
+        ));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let isa = sonatina_ir::isa::native::Native::new(TargetTriple::new(
+            Architecture::X86_64, Vendor::Unknown, OperatingSystem::Native,
+        ));
+        // Scalar-only: this tests target propagation, not native aggregate
+        // allocation support or a change to the package's serialized layout.
+        let lowerer = lower_portable_bodies(
+            &isa, &db, &package, HashSet::new(), &[],
+            true, true, PrivatePlaceMaterialization::CanonicalArena,
+            AggregateCopyLowering::InlineLoop,
+        ).unwrap();
+        let module = lowerer.finish();
+        assert_eq!(module.ctx.triple, isa.triple());
+        assert_eq!(module.ctx.type_layout.pointer_repl(), Type::I64);
+    }
     use common::InputDb;
     use hir::analysis::semantic::FieldIndex;
     use mir::ScalarRole;
@@ -15582,7 +15710,13 @@ pub fn kernel(_ value: u32) -> u32 {
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
-        let (module, _) = compile_runtime_package_shader_ir(&db, &package).unwrap();
+        let (module, entries) = compile_runtime_package_shader_ir(&db, &package).unwrap();
+        assert_eq!(entries.len(), 1, "the selected package has one section entry");
+        assert_eq!(
+            module.ctx.func_sig(entries[0], |signature| signature.name().to_owned()),
+            "kernel",
+            "shader entry identity must come from the runtime section declaration",
+        );
 
         let typed_pointer_arguments = module
             .funcs()

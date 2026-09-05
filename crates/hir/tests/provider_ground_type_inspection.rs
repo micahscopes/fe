@@ -3,6 +3,24 @@ use fe_hir::{
 };
 
 #[test]
+fn route_parse_constructors_do_not_require_copy_evidence() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "route_parse_unconstrained_constructors.fe".into(),
+        r#"
+fn absent<T>(_ value:T) -> std::web::RouteSegmentParse<T> {
+    std::web::RouteSegmentParse::none(value)
+}
+fn present<T>(_ value:T) -> std::web::RouteSegmentParse<T> {
+    std::web::RouteSegmentParse::matched(value)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn reflected_const_candidate_can_narrow_into_an_exact_i32_term() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -641,6 +659,193 @@ fn proves_alignment(value: Carrier) -> u32 {
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn reflected_variant_names_generate_one_typed_match() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_variant_name_match.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait VariantName { const fn variant_name(self) -> String<31> }
+struct VariantNameProvider {}
+
+impl Derive<VariantName> for VariantNameProvider {
+    const fn derive<T>(ev: own Evidence<VariantName<T>>) -> Evidence<VariantName<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<VariantName<T>>)
+    {
+        let mut arms = quote {}
+        for variant in reflect.variants() {
+            arms = quote {
+                ${arms},
+                ${variant}(ignored) => ${variant.name()}
+            }
+        }
+        builder.emit_method("variant_name", quote { match self { ${arms} } })
+        builder.finish()
+        ev
+    }
+}
+
+enum Direction { North, South, East, West }
+derive VariantName for Direction using VariantNameProvider
+
+const NORTH: String<31> = Direction::North.variant_name()
+const SOUTH: String<31> = Direction::South.variant_name()
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn reflected_variants_generate_one_typed_method_call_chain() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_variant_method_call_chain.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+struct Input {}
+impl Copy for Input {}
+impl Input {
+    fn equals_literal<const N: usize>(self, _ value: [u8; N]) -> bool { false }
+}
+
+struct Parsed<T> { value: T, valid: bool }
+impl<T> Parsed<T> {
+    fn none(_ value: T) -> Self { Self { value: value, valid: false } }
+    fn select<const N: usize>(
+        self,
+        _ input: Input,
+        _ segment: [u8; N],
+        _ candidate: T,
+    ) -> Self {
+        if input.equals_literal(segment) {
+            Self { value: candidate, valid: true }
+        } else {
+            self
+        }
+    }
+}
+
+trait Segment {
+    fn parse(_ input: Input) -> Parsed<Self>
+    fn begin_parse(self) -> Parsed<Self> { Parsed::none(self) }
+}
+
+struct SegmentProvider {}
+impl Derive<Segment> for SegmentProvider {
+    const fn derive<T>(ev: own Evidence<Segment<T>>) -> Evidence<Segment<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Segment<T>>)
+    {
+        let variants = reflect.variants()
+        let fallback = builder.variant_init(variants.at(0))
+        let input = builder.arg_ref("input")
+        let mut parse = builder.call(fallback, "begin_parse")
+        for variant in variants {
+            parse = builder.call(
+                parse,
+                "select",
+                input,
+                builder.str(variant.name()),
+                builder.variant_init(variant),
+            )
+        }
+        builder.emit_method("parse", parse)
+        builder.finish()
+        ev
+    }
+}
+
+enum Direction { North, South, East, West }
+derive Segment for Direction using SegmentProvider
+
+fn parse_direction(input: Input) -> Parsed<Direction> { Direction::parse(input) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn route_segment_provider_keeps_definition_site_signature_paths() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_route_segment_signature_paths.fe".into(),
+        r#"
+use std::web::{RouteSegment, RouteSegmentProvider}
+
+enum Direction { North, South }
+impl Copy for Direction {}
+derive RouteSegment for Direction using RouteSegmentProvider
+
+fn parse_direction(
+    input: std::text::Utf8View,
+) -> std::web::RouteSegmentParse<Direction> {
+    Direction::parse_route_segment(input)
+}
+
+fn select_direction(input: std::text::Utf8View) -> Direction {
+    let parsed = Direction::parse_route_segment(input)
+    if !parsed.is_valid() { return Direction::North }
+    parsed.value()
+}
+
+fn write_direction(
+    direction: Direction,
+    destination: std::text::Utf8Buffer,
+) -> std::text::Utf8Write {
+    direction.write_route_segment(destination)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    let generated_parse = top_mod
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "parse_route_segment")
+                && func.containing_impl_trait(&db).is_some()
+        })
+        .expect("missing generated RouteSegment impl method");
+    let hir_return = generated_parse
+        .ret_ty_hir(&db)
+        .expect("generated parse method must retain its explicit result")
+        .pretty_print(&db);
+    let semantic_return = generated_parse.return_ty(&db).pretty_print(&db);
+    assert_eq!(
+        hir_return, "std::web::navigation::RouteSegmentParse<Self>",
+        "generated result must retain the trait declaration's type-driven Self"
+    );
+    assert_eq!(
+        semantic_return, "RouteSegmentParse<Direction>",
+        "generated result must resolve the downstream route type"
+    );
+
+    let _select_direction = top_mod
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "select_direction")
+        })
+        .expect("missing select_direction");
+
+    let semantic_diags = collect_semantic_borrow_diagnostic_vouchers(&db, top_mod);
+    assert!(
+        semantic_diags.is_empty(),
+        "nested provider result types must lower through their typed accessors"
+    );
 }
 
 #[test]

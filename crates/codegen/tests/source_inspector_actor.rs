@@ -19,7 +19,7 @@ use fe_webidl_bindgen::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-const STATE_LEAVES: usize = 18;
+const STATE_LEAVES: usize = 24;
 
 fn i32_results(values: &[wasmtime::Val]) -> Vec<i32> {
     values
@@ -34,6 +34,11 @@ fn i32_results(values: &[wasmtime::Val]) -> Vec<i32> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Model {
     url: String,
+    route: String,
+    scope: u32,
+    destination: u32,
+    anchor: u32,
+    push_route: bool,
     selected: u32,
     pending: u32,
     status: u32,
@@ -58,6 +63,11 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             url: String::new(),
+            route: String::new(),
+            scope: 0,
+            destination: 0,
+            anchor: 0,
+            push_route: false,
             selected: 0,
             pending: 0,
             status: 0,
@@ -126,6 +136,7 @@ fn task_event(
 fn reduce(model: &mut Model, event: Event<'_>) {
     model.prevent_default = false;
     model.focus_close = false;
+    model.push_route = false;
 
     match event.kind {
         0 => {
@@ -161,6 +172,24 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             model.control_url_len = model.url.len() as u32;
             model.control_binary = model.selected == 2;
             model.control_active = true;
+        }
+        3 if model.connected && event.target == 11 && !event.text.is_empty() => {
+            if let Some(destination) = route_destination(event.text) {
+                let anchor = if destination.3 == "Selection" { 1 } else { 0 };
+                let changed = model.scope != destination.0
+                    || model.destination != destination.1
+                    || model.anchor != anchor;
+                model.scope = destination.0;
+                model.destination = destination.1;
+                model.anchor = anchor;
+                model.route = if model.scope == 0 {
+                    format!("#{}", destination.3)
+                } else {
+                    format!("?demo={}#{}", destination.2, destination.3)
+                };
+                model.push_route = changed;
+                model.prevent_default = true;
+            }
         }
         3 if model.connected && event.target == 5 && model.open => {
             model.open = false;
@@ -212,14 +241,68 @@ fn reduce(model: &mut Model, event: Event<'_>) {
             };
             model.revision += 1;
         }
+        14 if model.connected && !event.text.is_empty() => {
+            if let Some(destination) = route_destination(event.text) {
+                model.scope = destination.0;
+                model.destination = destination.1;
+                model.anchor = if destination.3 == "Selection" { 1 } else { 0 };
+            } else {
+                model.scope = 0;
+                model.destination = 0;
+                model.anchor = 0;
+            }
+            model.route.clear();
+        }
         _ => {}
     }
+}
+
+fn route_destination(input: &str) -> Option<(u32, u32, &'static str, &'static str)> {
+    let url = Url::parse(input).ok()?;
+    let anchor = match url.fragment().unwrap_or("") {
+        "" | "Top" => "Top",
+        "Selection" => "Selection",
+        _ => return None,
+    };
+    let query = url.query().unwrap_or("");
+    if query.is_empty() {
+        return Some((0, 0, "", anchor));
+    }
+    if query.contains('&') {
+        return None;
+    }
+    let (key, value) = query.split_once('=')?;
+    if key != "demo" {
+        return None;
+    }
+    let destination = match value {
+        "Gradient" => (0, "Gradient"),
+        "ClassicQuilting" => (1, "ClassicQuilting"),
+        "QuiltingLod" => (2, "QuiltingLod"),
+        "TodoMvc" => (3, "TodoMvc"),
+        "EventStudio" => (4, "EventStudio"),
+        "Cga3d" => (5, "Cga3d"),
+        "Qcga" => (6, "Qcga"),
+        "QcgaPencil" => (7, "QcgaPencil"),
+        "Desargues" => (8, "Desargues"),
+        "Plasma" => (9, "Plasma"),
+        "Raymarch" => (10, "Raymarch"),
+        "Mandelbrot" => (11, "Mandelbrot"),
+        "PerturbationMandelbrot" => (12, "PerturbationMandelbrot"),
+        "MandelbrotProof" => (13, "MandelbrotProof"),
+        "Dec" => (14, "Dec"),
+        "KnownColor" => (15, "KnownColor"),
+        "Rollcall" => (16, "Rollcall"),
+        _ => return None,
+    };
+    Some((1, destination.0, destination.1, anchor))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operation {
     Text(u32, String),
     Href(u32, String),
+    Push(String),
 }
 
 fn decode(bytes: &[u8]) -> Vec<Operation> {
@@ -257,6 +340,7 @@ fn decode(bytes: &[u8]) -> Vec<Operation> {
                     _ => unreachable!(),
                 });
             }
+            15 => operations.push(Operation::Push(text(bytes, &mut cursor))),
             _ => panic!("unexpected SourceInspector opcode {opcode}"),
         }
     }
@@ -264,7 +348,11 @@ fn decode(bytes: &[u8]) -> Vec<Operation> {
 }
 
 fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
-    let mut mask = 0;
+    let mut mask = if model.scope == 0 {
+        ((1u32 << 17) - 1) << 13
+    } else {
+        1u32 << (13 + model.destination)
+    };
     if model.connected && model.open {
         mask |= 1 << 0;
         mask |= 1 << (model.selected + 5);
@@ -278,6 +366,9 @@ fn expected_projection(model: &Model) -> (u32, u32, u32, Vec<Operation>) {
     let mut operations = Vec::new();
     if model.open && !model.url.is_empty() {
         operations.push(Operation::Href(11, model.url.clone()));
+    }
+    if model.push_route && !model.route.is_empty() {
+        operations.push(Operation::Push(model.route.clone()));
     }
     if model.status == 1 {
         if model.selected == 2 {
@@ -314,8 +405,11 @@ fn source_inspector_owns_selection_loading_stale_response_and_presentation_polic
             && source.contains(
                 "ActorSink<WasmBackend, ComponentEvent<InspectorAction, InspectorTask>> = BrowserActorSink {}"
             )
-            && source.contains("ComponentEventKind::TaskMessage"),
-        "gallery loading must consume typed Fe surface and visibility streams"
+            && source.contains("ComponentEventKind::TaskMessage")
+            && source.contains("derive RouteSegment for GalleryDestination using RouteSegmentProvider")
+            && source.contains("ComponentEventKind::Navigation")
+            && source.contains("writer.push_location(value: route_location)"),
+        "gallery lifecycle and routing must remain typed Fe programs"
     );
     assert!(
         !source.contains("loader.next_begin"),
@@ -510,7 +604,7 @@ if (actorEvents.length !== 3
     || actorEvents[2].join() !== "13,7,0,0,0,0,0,0,0,0,0,0,0,2") {{
   throw new Error(`scoped task did not deliver typed resident events: ${{JSON.stringify(actorEvents)}}`);
 }}
-if (residentState[15] !== 2 || residentState[16] !== 1 || residentState[17] !== 0) {{
+if (residentState[21] !== 2 || residentState[22] !== 1 || residentState[23] !== 0) {{
   throw new Error(`resident Fe state did not retain surface completion: ${{residentState}}`);
 }}
 if (loads.length !== 2 || loads[0] !== 11n || loads[1] !== 22n) throw new Error("host reordered surface tokens");
@@ -544,8 +638,8 @@ const close = () => {{
 }};
 const content = () => decode.decode(new Uint8Array(
   instance.exports.memory.buffer,
-  residentState[8],
-  residentState[9],
+  residentState[14],
+  residentState[15],
 ));
 
 const resourceLifetime = new AbortController();
@@ -559,7 +653,7 @@ activate(1, "https://example.test/slow.fe");
 await waitFor(() => fetchCalls.length === 1, "Fe did not begin the first generated fetch");
 activate(1, "https://example.test/fresh.fe");
 await waitFor(
-  () => residentState[6] === 1 && content() === "fresh Fe",
+  () => residentState[12] === 1 && content() === "fresh Fe",
   "Fe did not select and commit the newer text request",
 );
 if (fetchCalls.join() !== "https://example.test/slow.fe,https://example.test/fresh.fe") {{
@@ -578,17 +672,17 @@ if (actorEvents.length !== 1 || content() !== "fresh Fe") {{
 
 activate(3, "https://example.test/module.wasm");
 await waitFor(
-  () => residentState[6] === 1 && residentState[7] === 5,
+  () => residentState[12] === 1 && residentState[13] === 5,
   "Fe did not commit the generated binary response",
 );
 activate(2, "https://example.test/missing.wgsl");
 await waitFor(
-  () => residentState[6] === 2 && content() === "not found",
+  () => residentState[12] === 2 && content() === "not found",
   "Fe did not classify a non-success HTTP response",
 );
 activate(1, "https://example.test/broken.fe");
 await waitFor(
-  () => residentState[6] === 2 && content() === "Resource request failed",
+  () => residentState[12] === 2 && content() === "Resource request failed",
   "Fe did not own generated fetch failure presentation",
 );
 if (actorEvents.map(event => event[1]).join() !== "9,9,9,10"
@@ -748,11 +842,11 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
         .call(&mut store, &[], &mut initial_results)
         .unwrap();
     let initial = i32_results(&initial_results);
-    let pointers = (initial[0], initial[1], initial[2], initial[8]);
+    let pointers = (initial[0], initial[1], initial[2], initial[4], initial[14]);
     let scratch = realloc.call(&mut store, (0, 0, 1, 4096)).unwrap();
     let mut model = Model::default();
 
-    let tape = [
+    let mut tape = vec![
         Event {
             kind: 3,
             target: 1,
@@ -768,6 +862,30 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
             key: 0,
             detail: 0,
             text: "",
+        },
+        Event {
+            kind: 14,
+            target: 0,
+            request: 0,
+            key: 0,
+            detail: 0,
+            text: "https://example.test/gallery.html?demo=Mandelbrot#Selection",
+        },
+        Event {
+            kind: 3,
+            target: 11,
+            request: 0,
+            key: 0,
+            detail: 1,
+            text: "https://example.test/gallery.html?demo=QcgaPencil#Selection",
+        },
+        Event {
+            kind: 14,
+            target: 0,
+            request: 0,
+            key: 0,
+            detail: 0,
+            text: "https://example.test/gallery.html?demo=%41ll#Selection",
         },
         Event {
             kind: 13,
@@ -967,12 +1085,45 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
         task_event(10, 14, 404, 9, "not found", 0),
         browser_event(3, 5, 0, ""),
     ];
+    let route_urls = [
+        "Gradient",
+        "ClassicQuilting",
+        "QuiltingLod",
+        "TodoMvc",
+        "EventStudio",
+        "Cga3d",
+        "Qcga",
+        "QcgaPencil",
+        "Desargues",
+        "Plasma",
+        "Raymarch",
+        "Mandelbrot",
+        "PerturbationMandelbrot",
+        "MandelbrotProof",
+        "Dec",
+        "KnownColor",
+        "Rollcall",
+    ]
+    .map(|name| format!("https://example.test/gallery.html?demo={name}#Selection"));
+    for (index, url) in route_urls.iter().enumerate() {
+        tape.push(browser_event(3, 11, 1, url));
+        tape.push(browser_event(14, 0, 0, url));
+        if index == 0 {
+            // The Fe route state consumes the click but does not ask the fixed
+            // History adapter to create a duplicate entry.
+            tape.push(browser_event(3, 11, 1, url));
+        }
+    }
+    let all_url = "https://example.test/gallery.html#Top";
+    tape.push(browser_event(3, 11, 1, all_url));
+    tape.push(browser_event(14, 0, 0, all_url));
+    tape.push(browser_event(3, 11, 1, all_url));
     for (index, event) in tape.into_iter().enumerate() {
         let task_message = event.kind == 13;
         let resource_message = task_message && (event.target == 9 || event.target == 10);
         if resource_message {
             memory
-                .write(&mut store, initial[8] as usize, event.text.as_bytes())
+                .write(&mut store, initial[14] as usize, event.text.as_bytes())
                 .unwrap();
         } else {
             memory
@@ -1034,7 +1185,7 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
             .unwrap_or_else(|error| panic!("SourceInspector event {index}: {error}"));
         let actual = i32_results(&actual_results);
         assert_eq!(
-            (actual[0], actual[1], actual[2], actual[8]),
+            (actual[0], actual[1], actual[2], actual[4], actual[14]),
             pointers,
             "persistent pointers at {index}"
         );
@@ -1043,27 +1194,36 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
             model.url.len() as u32,
             "url length at {index}"
         );
-        assert_eq!(actual[4] as u32, model.selected, "selection at {index}");
         assert_eq!(
-            actual[5] as u32, model.pending,
+            actual[5] as usize,
+            model.route.len(),
+            "route length at {index}"
+        );
+        assert_eq!(actual[6] as u32, model.scope, "route scope at {index}");
+        assert_eq!(actual[7] as u32, model.destination, "route at {index}");
+        assert_eq!(actual[8] as u32, model.anchor, "route anchor at {index}");
+        assert_eq!(actual[9] != 0, model.push_route, "route push at {index}");
+        assert_eq!(actual[10] as u32, model.selected, "selection at {index}");
+        assert_eq!(
+            actual[11] as u32, model.pending,
             "pending request at {index}"
         );
-        assert_eq!(actual[6] as u32, model.status, "status at {index}");
-        assert_eq!(actual[7] as u32, model.byte_len, "byte length at {index}");
+        assert_eq!(actual[12] as u32, model.status, "status at {index}");
+        assert_eq!(actual[13] as u32, model.byte_len, "byte length at {index}");
         assert_eq!(
-            actual[9] as u32,
+            actual[15] as u32,
             model.content.len() as u32,
             "content length at {index}"
         );
-        assert_eq!(actual[10] != 0, model.connected, "connected at {index}");
-        assert_eq!(actual[11] != 0, model.open, "open at {index}");
+        assert_eq!(actual[16] != 0, model.connected, "connected at {index}");
+        assert_eq!(actual[17] != 0, model.open, "open at {index}");
         assert_eq!(
-            actual[12] != 0,
+            actual[18] != 0,
             model.prevent_default,
             "prevent default at {index}"
         );
-        assert_eq!(actual[13] != 0, model.focus_close, "focus at {index}");
-        assert_eq!(actual[14] as u32, model.revision, "revision at {index}");
+        assert_eq!(actual[19] != 0, model.focus_close, "focus at {index}");
+        assert_eq!(actual[20] as u32, model.revision, "revision at {index}");
         let mut control = [0u8; 20];
         memory
             .read(&store, initial[1] as usize, &mut control)
@@ -1084,16 +1244,16 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
             "Fe-owned load command at {index}"
         );
         assert_eq!(
-            actual[15] as u32, model.surfaces_settled,
+            actual[21] as u32, model.surfaces_settled,
             "settled surfaces at {index}"
         );
         assert_eq!(
-            actual[16] != 0,
+            actual[22] != 0,
             model.surface_sequence_complete,
             "surface completion at {index}"
         );
         assert_eq!(
-            actual[17] != 0,
+            actual[23] != 0,
             model.surface_sequence_failed,
             "surface failure at {index}"
         );
@@ -1120,6 +1280,11 @@ if (broker.activeCount() !== 0 || broker.cancelAll() !== 0) {{
                 wasmtime::Val::I32(0),
                 wasmtime::Val::F32(0),
                 wasmtime::Val::F32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
+                wasmtime::Val::I32(0),
                 wasmtime::Val::I32(0),
                 wasmtime::Val::I32(0),
             ];

@@ -195,6 +195,20 @@ impl Utf8View {
         true
     }
 
+    /// Compare a resident UTF-8 view with one inferred string literal or
+    /// fixed byte array without allocating an intermediate browser string.
+    pub fn equals_literal<const N: usize>(self, _ other: [u8; N]) -> bool {
+        let mut index: usize = 0
+        let mut resident_index: u32 = 0
+        while index < other.len() {
+            if resident_index >= self.len { return false }
+            if self.byte(index: resident_index) != other[index] { return false }
+            index = index + 1
+            resident_index = resident_index + 1
+        }
+        resident_index == self.len
+    }
+
     /// Bytewise UTF-8 ordering, which agrees with Unicode scalar ordering.
     pub fn compare(self, other: Utf8View) -> i32 {
         let limit = if self.len < other.len { self.len } else { other.len }
@@ -423,6 +437,25 @@ impl Utf8Buffer {
             },
             truncated: retained.len != suffix.len,
             valid: true,
+        }
+    }
+
+    /// Append one inferred owned `[u8; N]`. Like `replace_literal`, this is a
+    /// Fe-side UTF-8 operation: the browser host never receives a string codec
+    /// or a route-specific byte table.
+    pub fn append_literal<const N: usize>(self, _ value: own [u8; N]) -> Utf8Write {
+        let suffix = Utf8Buffer::empty(
+            ptr: self.ptr + self.len,
+            capacity: self.capacity - self.len,
+        ).replace_literal(value)
+        Utf8Write {
+            buffer: Self {
+                ptr: self.ptr,
+                len: self.len + suffix.buffer.len,
+                capacity: self.capacity,
+            },
+            truncated: suffix.truncated,
+            valid: suffix.valid,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-09-02
+Updated: 2026-09-05
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -18,6 +18,343 @@ It audits the implemented Fe proof stack, the exact boundary between recursive
 relations and recursive cryptography, the current compiler and WebGPU costs,
 and the recommended consolidation order. It is supporting analysis for this
 burn-down, not a second checklist.
+
+## Current priority: compiler boundary consolidation
+
+New Mandelbrot protocol work is paused while the Fe-to-Sonatina boundary is
+consolidated. The existing prover remains the browser correctness/performance
+capstone; this does not remove any proof or gallery completion gates below.
+
+Landed on mb2: portable body lowering separated from Wasm host synthesis
+(`80ccc9fd2`), the scoped authored-allocation regression corrected with emitted
+Wasm and execution evidence (`2aa303099`), local storage planning (`f1381f63e`),
+explicit call storage/lifetimes (`cd48e2591`), and reachable-call planning before
+SSA emission (`af3524c95`). Binding facts are now derived once before consuming
+runtime blocks (`5f0d9f68a`), removing recursive full-body scans and the emission
+block clone. Its 33 focused release tests passed: exhaustive binding-rule
+comparison and a 50,000-local chain (2), Shader IR (3), typed allocation (17),
+canonical arena (5), resident lifecycle (1), raster (4), and compute resources
+(1). Logs: `/workspace/scratch/mb2-binding-facts-release.log` and
+`/workspace/scratch/mb2-binding-facts-resource-release.log`.
+
+The explicit Sonatina Shader ISA and Naga target/profile implementation remain
+on the local Sonatina line (now `f9e96fcd`, extending `9fcfcef1`); publication
+has not been authorized. The newest backend extraction plans contextual
+helper ABIs before emitting helper bodies and passed sixteen focused release
+tests. It is not yet the public Fe legality query; Fe's classifier remains.
+Evidence: `/workspace/scratch/mb2-sonatina-helper-plan-release.log`.
+The subsequent shared body query also passed sixteen helper tests and shares
+one structured CFG across resource variants. Fe's cleanup integration removes
+its duplicate instruction/control preflight and trace classifiers, with all
+nine selected gates passing in
+`/workspace/scratch/mb2-fe-helper-body-query-release.log`. The full
+contextual type/resource ABI query remains. Authored raster now uses the common
+ABI planner too, with its existing restrictions preserved. Sixteen helper and
+five raster tests passed; Fe integration passed three Shader IR and six raster
+tests in `/workspace/scratch/mb2-fe-raster-abi-plan-release.log`.
+`81be0b05` moves the complete physical parameter list, including hidden
+heap/bump/trap transport, into that same pre-emission plan. Sixteen helper and
+five raster release tests passed in
+`/workspace/scratch/mb2-sonatina-physical-parameters-release.log`.
+Fe integration against this exact local revision passed three Shader IR tests
+(1.87s) and six raster tests (8.09s) in
+`/workspace/scratch/mb2-fe-physical-helper-parameters-release.log`.
+Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
+`docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
+plan and gate logs. Isolated combined validation passed 26 focused release
+tests after shared Cargo artifacts exposed cross-worktree reuse. The newer
+binding-facts change is also incorporated there as `a6cf87ed5`; its combined
+Shader-candidate validation passed all 20 selected tests (three Shader IR and
+seventeen typed allocation). The log is
+`/workspace/scratch/mb2-shader-binding-facts-release.log`.
+
+`d22b707c2` makes emission consume the local carrier chosen by the body plan,
+deleting the duplicate local-type classifier and its separate GPU-resource
+lookup. All 31 selected release tests passed: Shader IR (3), typed allocation
+(17), address-taken scalars (1), enums (2), record views (1), raster (4), compute
+resources (1), and native scalar/control-flow execution (2). Logs:
+`/workspace/scratch/mb2-planned-ssa-carriers-validated-release.log` and
+`/workspace/scratch/mb2-planned-ssa-carriers-native-release.log`. The change is
+reconciled into the cleanup worktree as `9ee175e4f`; combined Shader-candidate
+validation passed three Shader IR and six authored raster tests. Evidence:
+`/workspace/scratch/mb2-shader-planned-carriers-release.log`.
+Its broader gates exposed an obsolete payload-enum
+rejection test, reproduced on the unchanged parent. `dbe192493` corrects that
+test to execute supported payload values and trap invalid host tags; both enum
+tests passed against the unchanged compiler. Parent/revised evidence:
+`/workspace/scratch/mb2-parent-payload-enum-release.log` and
+`/workspace/scratch/mb2-payload-enum-contract-release.log`. This is a test
+contract correction, not new payload-enum support or a compiler behavior fix.
+
+Remaining boundary work includes representation/lifetime consolidation,
+Sonatina-owned GPU ABI and capabilities, early Fe intrinsic gating, CFG normal
+form, deletion of superseded mechanisms, the bounded direct-RMIR-to-Naga study,
+and full backend/browser capstone validation. No shader-size or browser-speed
+improvement is claimed for the planning refactors above.
+
+The broader shader gate uncovered an existing direct-return loop-exit bug,
+reproduced on unchanged `a233e45d`: the merged exit stored its phi but skipped
+return transport, yielding 0 instead of 52. `bb89ba01` shares exit-return
+handling across header, explicit-edge, and merged exits. All 116 focused
+shader-backend tests passed, including lavapipe execution, in 3.27s:
+`/workspace/scratch/mb2-sonatina-loop-exit-return-fix-release.log`.
+The earlier adapter failures required the Vulkan loader library path; they
+were not counted as passes. Chrome and production-prover gates remain open.
+
+`51546b51` extracts entry instruction legality, trap requirements, and arena
+high-water analysis into a reusable body plan consumed by emission. The
+combined candidate passed all 116 shader-backend tests with lavapipe in 2.95s:
+`/workspace/scratch/mb2-sonatina-entry-plan-combined-release.log`.
+Fe integration passed three Shader IR tests (1.91s) and six raster tests
+(9.14s) in `/workspace/scratch/mb2-fe-entry-plan-context-release.log`.
+This makes another prerequisite independently reusable; it is not yet the
+complete public contextual ABI query.
+
+`9347f7c2` makes entry helper preparation return its context, physical plans,
+typed-local function map, and heap/trap transport together. Emission consumes
+that result instead of building its memory parameter types independently.
+All 116 shader-backend tests passed with lavapipe in 2.94s:
+`/workspace/scratch/mb2-sonatina-prepared-entry-helpers-release.log`.
+Fresh Fe integration passed three Shader IR and six raster tests:
+`/workspace/scratch/mb2-fe-prepared-entry-helpers-release.log`.
+The pending Fe request driver now establishes pipeline/resource/builtin context
+before outlining and performs selected-root validation centrally. Its ten
+release tests passed (three Shader IR, six raster, one compute-resource):
+`/workspace/scratch/mb2-fe-request-owned-outlining-release.log`.
+This moves context to the selection boundary; the public contextual ABI query
+and replacement of Fe's type whitelist remain unfinished. The temporary
+lockfile override is removed. Publication permission for Sonatina through
+`9347f7c2` has been requested, not assumed; the portable Fe pin is unchanged.
+
+Focused production measurement on the pending Fe integration plus Sonatina
+`9347f7c2`: `production_sparse_linear_plan_lowers_in_isolation` passed with
+56,001 WGSL bytes, 30 helper functions, and 2,150 expressions in the reparsed
+Naga artifact. Lowering took 9,814ms; measured setup/lowering/validation took
+12,371ms. Evidence: `/workspace/scratch/mb2-boundary-production-linear-plan-release.log`.
+This is a real production-stage structural gate, not numerical execution or a
+complete proof. The expression count is not the pre-writer backend census.
+A controlled baseline on Fe `d1fb17473`, with only the two pending Fe boundary
+integration files removed and the same Sonatina `9347f7c2`, passed with exactly
+the same 56,001 bytes, 30 helpers, and 2,150 reparsed expressions. Baseline
+lowering took 11,740ms and total measured time was 14,911ms. These single-run
+times are not a speedup claim. This Fe integration preserves the measured
+shader size; it does not explain earlier reductions. Evidence:
+`/workspace/scratch/mb2-boundary-production-linear-plan-fe-parent-release.log`.
+The integration was restored afterward and both source hashes verified.
+
+Sonatina `c2bbc9e9` adds the outlined-call counterpart of the loop-exit return
+regression. The same loop exercises header, conditional, and jump exits both
+as a shader entry and as a private helper. The test requires one retained
+helper body and call, and checks that caller computation after the call still
+executes. Both numerical tests ran on llvmpipe; the full shader-backend target
+passed 117 tests in 2.82s. Evidence:
+`/workspace/scratch/mb2-sonatina-outlined-loop-return-suite-release.log`.
+This strengthens the CFG/call boundary gate, not the contextual ABI query or
+the hardware-browser capstone. The Sonatina commit remains local and unpushed.
+
+Sonatina `6012c45e` separates entry-rooted preparation from function emission.
+`PreparedNagaEntry` owns its Naga type/global arenas, typed-local preparation,
+entry body facts, proven heap size, external roots/layout, and prepared helper
+ABIs. The existing compute/fullscreen/legacy emitter consumes that result.
+This reuses the existing checks and does not add a new legality classifier.
+Authored raster still has its separate entry preparation; public contextual
+selection and partial rejection reporting remain unfinished. All 117 backend
+tests passed in 3.42s, including llvmpipe execution:
+`/workspace/scratch/mb2-sonatina-entry-preparation-release.log`.
+The production linear-stage gate passed against this local candidate with
+56,001 WGSL bytes, 2,150 reparsed Naga expressions, and 30 helpers, unchanged
+from the controlled comparison. Lowering took 12,370ms and total measured time
+was 15,448ms; one run is not a performance trend. Evidence:
+`/workspace/scratch/mb2-boundary-entry-preparation-production-release.log`.
+The local dependency override was removed from Cargo.lock afterward.
+
+Helper ABI planning now reports each function's local outcome in call-postorder
+instead of discarding valid child plans or stopping before later siblings.
+Both compute/fullscreen/legacy and authored-raster emission require a complete
+report; a partial success is not an emission authorization. A focused release
+test rejects an i256-returning parent while retaining its i32 child and later
+sibling, then confirms the partial report is rejected by the emission gate.
+Evidence: `/workspace/scratch/mb2-sonatina-partial-helper-report-release.log`.
+All 117 backend tests also passed in 2.47s:
+`/workspace/scratch/mb2-sonatina-partial-helper-report-suite-release.log`.
+Follow-up: the report now closes successful ABI plans over direct callees in
+call-postorder. A locally representable ancestor of the rejected parent is
+also rejected, while the valid child and sibling remain planned. The expanded
+focused test passed, and all 117 backend tests passed in 14.31s:
+`/workspace/scratch/mb2-sonatina-transitive-helper-report-final-release.log`
+and `/workspace/scratch/mb2-sonatina-transitive-helper-report-suite-release.log`.
+Typed-local preparation now also retains per-function rejections alongside
+the interned type map. A rejected i256 local no longer prevents preparing a
+later function's f32 local. Final emission still requires a complete type
+report; an interned type does not authorize an invalid use closure or budget.
+The focused regression and all 117 backend tests passed (suite 4.80s):
+`/workspace/scratch/mb2-sonatina-typed-local-report-release.log` and
+`/workspace/scratch/mb2-sonatina-typed-local-report-suite-release.log`.
+Resource-result planning now also records per-helper outcomes. Its regression
+rejects conflicting resource returns and the caller depending on that missing
+identity, while retaining an independent helper's exact argument identity.
+The focused regression and all 117 backend tests passed (suite 2.44s):
+`/workspace/scratch/mb2-sonatina-resource-result-report-release.log` and
+`/workspace/scratch/mb2-sonatina-resource-result-report-suite-release.log`.
+Sonatina `4a018ab9` now retains per-helper resource-variant outcomes as well.
+Conflicting resource aliases in one helper do not discard an independent
+sibling's proven entry-rooted identity or prevent propagating it to a child.
+The focused regression passed, including rejection of partial reports for
+emission and of conflicting entry declarations as global request errors.
+All 117 backend tests passed with llvmpipe in 2.62s. Evidence:
+`/workspace/scratch/mb2-sonatina-resource-variant-report-release.log` and
+`/workspace/scratch/mb2-sonatina-resource-variant-report-suite-release.log`.
+This is still not the public Fe query: the separate reports must be combined
+before deleting Fe's classifier. An identity binding alone never authorizes
+emission of its rejected owner. The newer Sonatina commits remain local and
+unpushed; this reporting change makes no shader-size or browser-speed claim.
+
+Sonatina `e3d00226` combines logical-result, resource-variant, and memory
+analysis in `EntryHelperContextReport`. The existing emitter obtains its
+context only through the report's complete-result gate, including the proven
+entry-arena requirement. A resource rejection no longer prevents independent
+memory analysis from running. The contextual regression passed, and all 117
+backend tests passed with llvmpipe in 6.78s. Evidence:
+`/workspace/scratch/mb2-sonatina-context-report-release.log` and
+`/workspace/scratch/mb2-sonatina-context-report-suite-release.log`.
+This report is still internal. Typed-local and physical-ABI outcomes must join
+the public selection query; authored-raster entry preparation remains separate.
+Missing logical resource identities can still prevent deriving downstream
+entry-rooted bindings. No missing identity is invented to recover a candidate.
+
+Sonatina `678fb936` feeds per-function typed-local rejections into the shared
+physical ABI planner. Root-local validity remains mandatory before entry
+preparation; helper storage failures now close over dependent callers in the
+same plan that handles signature failures, preserving independent children
+and siblings. The new regression uses a representable 20,000-byte typed array
+that exceeds the private-storage policy: successful type interning cannot
+authorize the helper. Both focused helper-report tests passed, and all 117
+backend tests passed with llvmpipe in 3.24s. Evidence:
+`/workspace/scratch/mb2-sonatina-typed-physical-report-release.log` and
+`/workspace/scratch/mb2-sonatina-typed-physical-report-suite-release.log`.
+The complete-context requirement still precedes physical planning. Combining
+partial context outcomes with physical selection, exposing the public query,
+and replacing Fe's classifier remain open. Authored raster retains its current
+entry preparation and supported local subset; no new raster capability is
+implied by sharing the planner's rejection input.
+
+Sonatina `47e8e52d` joins partial context and typed-local outcomes with physical
+planning in `EntryHelperSelectionReport`. Production entry preparation now
+consumes this report's complete-result gate. Independent resource helpers can
+receive physical plans despite another helper's resource rejection; rejected
+prerequisites also disqualify dependent callers. Missing entry-arena ownership
+is a prerequisite rejection, not an assumed heap handle. The focused combined
+selection regression passed, and all 117 backend tests passed with llvmpipe in
+2.96s, including the missing-arena-owner gate. Evidence:
+`/workspace/scratch/mb2-sonatina-contextual-selection-release.log` and
+`/workspace/scratch/mb2-sonatina-contextual-selection-suite-release.log`.
+The report remains internal: request-level validation and authored-raster
+preparation must support the public query before Fe's classifier is removed.
+It does not claim legality for unresolved resource identities or incomplete
+entry contexts, nor does it emit a partially valid shader.
+
+Sonatina `e2128b46` extracts the existing single-entry signature, resource,
+builtin, dispatch, and resource-liveness checks into `NagaEntryInterface`.
+Emission consumes the same derived facts; the extraction adds no alternative
+validator. The focused regression checks dispatch extent/count/span, zero
+dimensions, overflow, and missing builtin arguments. It also verifies that a
+valid interface containing an unsupported helper still fails full compilation.
+The regression passed, and all 117 backend tests passed with llvmpipe in 2.81s.
+Evidence: `/workspace/scratch/mb2-sonatina-entry-interface-release.log` and
+`/workspace/scratch/mb2-sonatina-entry-interface-suite-release.log`.
+This is interface analysis, not complete request legality: body-dependent mode
+checks and paired authored-raster preparation remain separate. The public
+capability query and Fe classifier replacement are still pending.
+
+Sonatina `2d8e7b75` moves the existing grid/batch/compute/fullscreen body-mode
+checks before helper body emission. Interface and body preparation still
+precede this gate; this is not a new complete capability query. The impossible
+simultaneous render/grid guard is deleted because `ShaderPipeline` already
+excludes that state. A focused derived-body contract test covers incompatible
+allocations, arena use, traps, and their compatible counterparts. It passed;
+all 117 backend tests passed with llvmpipe in 2.70s. Evidence:
+`/workspace/scratch/mb2-sonatina-entry-mode-release.log` and
+`/workspace/scratch/mb2-sonatina-entry-mode-suite-release.log`.
+The accepted mode surface is preserved; no shader-size improvement is claimed.
+Paired authored-raster preparation and public contextual-query integration
+remain open, as do the broader CFG and intrinsic-capability tasks.
+
+Sonatina `d009979f` separates paired-root scalar helper preparation from raster
+emission. The existing scalar-only contract now supplies per-function
+prerequisite rejections to the common physical ABI planner. Unsupported
+parents no longer hide valid children or independent siblings. The preparation
+regression passed and checks that a partial report cannot emit even a valid
+prefix. All 117 backend tests passed with llvmpipe in 4.66s. Evidence:
+`/workspace/scratch/mb2-sonatina-raster-helper-preparation-release.log` and
+`/workspace/scratch/mb2-sonatina-raster-helper-preparation-suite-release.log`.
+Raster helper ABI support is unchanged: aggregate/resource/private-memory
+transport is not enabled by this extraction. Paired entry interface/body
+preparation and the public request query still need consolidation before Fe's
+classifier can be replaced.
+
+Sonatina `b58ce181` extracts paired raster entry preparation before Naga module
+construction. The result preserves builtin resolution, the complete scalar
+state record, compact external resources, and exact stage visibility, using
+the existing interface and root-operation checks. Its regression passed for
+state preservation and invalid entry pairing, state suffixes, and builtin
+prefixes. All 117 backend tests passed with llvmpipe in 2.43s. Evidence:
+`/workspace/scratch/mb2-sonatina-raster-entry-preparation-release.log` and
+`/workspace/scratch/mb2-sonatina-raster-entry-preparation-suite-release.log`.
+Root CFG structurization still occurs in the individual vertex/fragment
+lowerers; this result is not a complete shader-validity certificate. Sharing
+those prepared control facts and exposing the public request query remain
+before Fe classifier replacement. No new raster transport is enabled.
+
+Sonatina `23f8507b` moves raster root normalization, structurization, and return
+arity checking into paired entry preparation, before Naga module construction.
+Each stage plan retains its normalized body with the CFG and return IDs derived
+from that body; vertex and fragment emission consume those plans without
+repeating control analysis. The focused preparation regression passed, and all
+117 backend tests passed with llvmpipe in 3.45s, including raster multi-return
+and early-return coverage. Evidence:
+`/workspace/scratch/mb2-sonatina-raster-cfg-preparation-release.log` and
+`/workspace/scratch/mb2-sonatina-raster-cfg-preparation-suite-release.log`.
+This closes the raster root-CFG preparation gap described above. The public
+contextual capability query and Fe classifier deletion remain unfinished.
+No fresh Chrome or production shader-size measurement is claimed for this
+refactor. The Sonatina commit is local; live Fe still uses its published pin.
+
+Sonatina `f9e96fcd` preserves the partial helper-selection report through entry
+preparation. Previously that boundary immediately required completeness and
+discarded independent helper plans after any helper rejection. Emission now
+consumes the completeness check explicitly, before emitting any helper body.
+Three preparation tests passed, including an unsupported helper and dependent
+parent alongside an independently valid leaf. All 117 backend tests passed
+with llvmpipe in 2.50s. Evidence:
+`/workspace/scratch/mb2-sonatina-entry-partial-selection-release.log` and
+`/workspace/scratch/mb2-sonatina-entry-partial-selection-suite-release.log`.
+Entry-body validity remains a prerequisite: the initial regression with an
+i256 result directly in the entry correctly failed its carrier check. A public
+pre-outlining query must distinguish invalid entry operations from call-boundary
+shapes requiring legalization; this report is not yet that public query.
+No new browser, shader-size, or live Fe integration claim accompanies this gate.
+
+Published-prerequisite reconciliation: live mb2 was still pinned to
+`ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
+`ef13a6568c0dbcd2e85a390048f81a20a61302ac`. The latter is already published
+on the Sonatina remote and is now selected by the mb2 manifest and lockfile.
+Its stable physical raster entry ABI requires matching test expectations
+(`fe_vertex_main` / `fe_fragment_main`); authored logical entry names remain
+unchanged. This prerequisite is not the newer Shader/Naga cleanup series.
+The focused release gates passed: authored raster (4), compute-resource helper
+retention (1), resident Wasm actor execution (1), the QCGA pencil demo (1), and
+typed-borrow/private-storage Shader IR (3).
+QCGA emitted 23,796 bytes of DE WGSL plus 10,025 bytes of marker WGSL, passing
+its existing size and Naga validation checks. Evidence:
+`/workspace/scratch/mb2-published-sonatina-prerequisite-raster-reconciled-release.log`,
+`/workspace/scratch/mb2-published-sonatina-compute-release.log`,
+`/workspace/scratch/mb2-published-sonatina-wasm-release.log`,
+`/workspace/scratch/mb2-published-sonatina-qcga-release.log`, and
+`/workspace/scratch/mb2-published-sonatina-shader-ir-release.log`.
+These integration runs include the shared worktree's existing resource-test
+changes; those changes are not included in this pin increment. No browser
+execution, full CI completion, or publication of the newer local Sonatina
+commits is claimed by these gates.
 
 Legend:
 

@@ -98,6 +98,13 @@ kinds and unresolved fields fail closed. Because `fields()` and `same_name`
 are typed reflection reads rather than `ImplBuilder` commands, the frozen
 46-operation builder inventory does not change.
 
+A variant handle exposes its authored `name()` as the same inert compile-time
+string value used by `field.name()`. This permits a fieldless enum to derive a
+single parser/printer pair from its nominal declaration, while generated
+variant construction and matching still consume the owner-qualified handle.
+The name cannot select another declaration or bypass ordinary checking, and it
+adds no `ImplBuilder` command.
+
 ## Natural iteration
 
 Provider `for` accepts an ordinary `Value::Seq`. Reflection iterators and exact

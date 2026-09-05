@@ -163,7 +163,7 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
 /// TD5c: this list is now EMPTY. Every reflection read — scalar AND iterating —
 /// has migrated off the bespoke executor:
 /// * the non-iterating reads (`reflect.is_struct`/`is_enum`/`target_name`,
-///   `field.ty`/`name`, `variant.is_default`/`precedes`) migrated onto the
+///   `field.ty`/`name`, `variant.name`/`is_default`/`precedes`) migrated onto the
 ///   typed read-only handle the receiver `Value` carries
 ///   ([`ReflectHandle`]/[`FieldHandle`]/[`VariantHandle`]), which owns its own
 ///   read vocabulary; the executor consults the handle by name and no longer
@@ -663,7 +663,7 @@ enum Value<'db> {
     /// scalar read `is_default` and the binary read `precedes` resolve against
     /// the handle's own vocabulary; its declaration-order index identity is
     /// exposed via [`VariantHandle::index`].
-    Variant(VariantHandle),
+    Variant(VariantHandle<'db>),
     /// A type witness (e.g. the result of `field.ty()`) together with the
     /// module that owns the source spelling.
     Ty(TypeHandle<'db>),
@@ -905,28 +905,30 @@ impl<'db> FieldHandle<'db> {
 /// A typed read-only handle over a reflected variant (TD5c). It is the value
 /// `Value::Variant` carries.
 ///
-/// It takes the `variant.*` reads (`is_default` scalar; `precedes` binary) OFF
-/// the bespoke executor: it copies `is_default` at construction and owns its own
-/// read vocabulary (`scalar_read` for `is_default`, `precedes` for the
-/// declaration-order compare). The executor consults the handle by name and no
-/// longer knows those names. The declaration-order index identity
-/// ([`Self::index`]) is preserved unchanged — it still flows into generated HIR
-/// (`variant_init`/`variant_pat`/`variant_binder`) and is the basis of the
-/// `precedes` compare.
+/// It takes the `variant.*` reads (`name`/`is_default` scalars; `precedes`
+/// binary) OFF the bespoke executor: it copies those facts at construction and
+/// owns its own read vocabulary (`scalar_read` for `name`/`is_default`,
+/// `precedes` for the declaration-order compare). The executor consults the
+/// handle by name and no longer knows those names. The declaration-order index
+/// identity ([`Self::index`]) is preserved unchanged. It still flows into
+/// generated HIR (`variant_init`/`variant_pat`/`variant_binder`) and is the
+/// basis of the `precedes` compare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VariantHandle {
+struct VariantHandle<'db> {
     index: usize,
+    name: StringId<'db>,
     is_default: bool,
 }
 
-impl VariantHandle {
+impl<'db> VariantHandle<'db> {
     /// Builds a read-only handle for the variant at `index`, copying its
     /// `is_default` fact. Returns `None` if `index` names no variant, exactly as
     /// the old `self.reflection.variant(..)` lookup did.
-    fn new(reflection: &TargetReflection<'_>, index: usize) -> Option<Self> {
+    fn new(db: &'db dyn HirDb, reflection: &TargetReflection<'db>, index: usize) -> Option<Self> {
         let reflected = reflection.variant(index)?;
         Some(VariantHandle {
             index,
+            name: StringId::new(db, reflected.name.data(db).clone()),
             is_default: reflected.is_default,
         })
     }
@@ -937,13 +939,16 @@ impl VariantHandle {
         self.index
     }
 
-    /// This handle's read-only scalar vocabulary (`is_default`), as a data
+    /// This handle's read-only scalar vocabulary (`name`/`is_default`), as a data
     /// table (TD5c).
-    fn scalar_reads<'db>(&self) -> [(&'static str, ScalarRead<'db>); 1] {
-        [("is_default", ScalarRead::Bool(self.is_default))]
+    fn scalar_reads(&self) -> [(&'static str, ScalarRead<'db>); 2] {
+        [
+            ("name", ScalarRead::Str(self.name)),
+            ("is_default", ScalarRead::Bool(self.is_default)),
+        ]
     }
 
-    fn scalar_read<'db>(&self, name: &str) -> Option<ScalarRead<'db>> {
+    fn scalar_read(&self, name: &str) -> Option<ScalarRead<'db>> {
         self.scalar_reads()
             .into_iter()
             .find(|(prop, _)| *prop == name)
@@ -957,7 +962,7 @@ impl VariantHandle {
     /// "declared earlier". The vocabulary (the name and the expected operand
     /// kind) lives HERE; the executor evaluates the operand and applies the
     /// resolved comparator without knowing the name (TD5c).
-    fn binary_read<'db>(&self, name: &str) -> Option<BinaryRead<'db>> {
+    fn binary_read(&self, name: &str) -> Option<BinaryRead<'db>> {
         match name {
             "precedes" => Some(BinaryRead {
                 operand: CompareOperand::Variant,
@@ -3204,7 +3209,8 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     .variants()
                     .iter()
                     .filter_map(|variant| {
-                        VariantHandle::new(self.reflection, variant.index).map(Value::Variant)
+                        VariantHandle::new(self.db, self.reflection, variant.index)
+                            .map(Value::Variant)
                     })
                     .collect(),
             ),
@@ -3335,10 +3341,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 // its signature (the old `method`/`with_self`/`with_arg`/
                 // `returns` dance) was pure ceremony. We synthesize the same
                 // `GenMethodSig` the dance produced: self-ness, arg names, and
-                // arg/return types come from the declaration, with the trait's
-                // `Self`/self-type-param substituted by `target_ty()` (argument
-                // position) / `self_ty()` (return position) exactly as the dance
-                // did. The generated impl is byte-identical.
+                // arg/return types come from the declaration. Trait generic
+                // parameters are concretized throughout constructed types;
+                // return-side `Self` keeps its idiomatic spelling.
                 let name = self.string_value_ident(name_arg.expr)?;
                 let sig = self.infer_method_sig(name_arg.expr, name)?;
                 let body = match self.eval_expr(body_arg.expr)? {
@@ -3981,17 +3986,17 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     /// method, so its signature is exactly the trait's declaration of `name`.
     /// The old author-facing dance (`builder.method("name")` then
     /// `with_self`/`with_arg`/`returns`) merely re-spelled that declaration; we
-    /// reconstruct the identical [`GenMethodSig`] here so the generated impl is
-    /// byte-identical:
+    /// reconstruct the equivalent [`GenMethodSig`] here:
     ///
     /// * self-ness ← the declaration's first parameter being a `self` receiver;
     /// * argument names ← the declaration's remaining parameter names, in order;
-    /// * argument/return *types* ← the declared types, with the trait's `Self`
-    ///   type and its own generic parameters (a saturated derive goal binds
-    ///   every trait type-param to the target) substituted by the SAME witness
-    ///   the dance used — `target_ty()` in argument position, `self_ty()`
-    ///   (`Self`) in return position. Any other declared type is used as
-    ///   written.
+    /// * argument/return *types* ← the declared types, with the trait's own
+    ///   generic parameters (a saturated derive goal binds every trait
+    ///   type-param to the target) substituted with `target_ty()`. `Self`
+    ///   remains available in generated return types, while argument-side
+    ///   `Self` retains the historical concrete-target spelling. Definition-
+    ///   site `ingot` paths are translated to the requesting ingot's external
+    ///   alias. Every other declared type is preserved structurally.
     ///
     /// `at` is the `name` argument expression of `emit_method`, used for error
     /// spans.
@@ -4229,31 +4234,164 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         })
     }
 
-    /// Maps a goal-trait-declared signature type to the witness the dance used:
-    /// the trait's `Self` type, or any of the trait's own generic parameters
-    /// (bound to the target in a saturated derive goal), becomes `target_ty()`
-    /// in argument position and `self_ty()` (`Self`) in return position; any
-    /// other type is used as written.
+    /// Maps a goal-trait-declared signature type to the witness the dance used.
+    /// The trait's own generic parameters become `target_ty()` because a
+    /// saturated derive goal binds each one to the target. Return-side `Self`
+    /// remains `Self`, including under nominal applications, so the generated
+    /// method retains the declaration's idiomatic result shape. Paths rooted
+    /// at the provider's `ingot` keyword are translated while traversing the
+    /// type so an implementation synthesized into another ingot remains valid.
     fn substitute_target(
         &self,
         decl_ty: TypeId<'db>,
         trait_params: &[IdentId<'db>],
         position: SigPosition,
     ) -> TypeId<'db> {
-        let is_target = decl_ty.is_self_ty(self.db)
-            || matches!(
-                decl_ty.data(self.db),
-                TypeKind::Path(Partial::Present(path))
-                    if path.as_ident(self.db).is_some_and(|id| trait_params.contains(&id))
-            );
-        if is_target {
+        let is_trait_param = matches!(
+            decl_ty.data(self.db),
+            TypeKind::Path(Partial::Present(path))
+                if path.as_ident(self.db).is_some_and(|id| trait_params.contains(&id))
+        );
+        if decl_ty.is_self_ty(self.db) {
             match position {
                 SigPosition::Arg => self.target_ty,
                 SigPosition::Return => TypeId::fallback_self_ty(self.db),
             }
+        } else if is_trait_param {
+            self.target_ty
         } else {
-            decl_ty
+            let data = match decl_ty.data(self.db) {
+                TypeKind::Ptr(inner) => TypeKind::Ptr(
+                    inner
+                        .to_opt()
+                        .map(|ty| self.substitute_target(ty, trait_params, position))
+                        .into(),
+                ),
+                TypeKind::Mode(mode, inner) => TypeKind::Mode(
+                    *mode,
+                    inner
+                        .to_opt()
+                        .map(|ty| self.substitute_target(ty, trait_params, position))
+                        .into(),
+                ),
+                TypeKind::Path(path) => TypeKind::Path(
+                    path.to_opt()
+                        .map(|path| self.substitute_target_path(path, trait_params, position))
+                        .into(),
+                ),
+                TypeKind::Tuple(tuple) => TypeKind::Tuple(crate::hir_def::TupleTypeId::new(
+                    self.db,
+                    tuple
+                        .data(self.db)
+                        .iter()
+                        .map(|ty| {
+                            ty.to_opt()
+                                .map(|ty| self.substitute_target(ty, trait_params, position))
+                                .into()
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                TypeKind::Array(element, length) => TypeKind::Array(
+                    element
+                        .to_opt()
+                        .map(|ty| self.substitute_target(ty, trait_params, position))
+                        .into(),
+                    *length,
+                ),
+                TypeKind::Never => TypeKind::Never,
+            };
+            TypeId::new(self.db, data)
         }
+    }
+
+    fn substitute_target_path(
+        &self,
+        path: PathId<'db>,
+        trait_params: &[IdentId<'db>],
+        position: SigPosition,
+    ) -> PathId<'db> {
+        let original_parent = path.parent(self.db);
+        let parent =
+            original_parent.map(|path| self.substitute_target_path(path, trait_params, position));
+        let kind = match path.kind(self.db) {
+            PathKind::Ident {
+                ident,
+                generic_args,
+            } => PathKind::Ident {
+                ident: match ident {
+                    Partial::Present(ident)
+                        if original_parent.is_none() && ident.is_ingot(self.db) =>
+                    {
+                        Partial::Present(self.request_signature_ingot_root(ident))
+                    }
+                    _ => ident,
+                },
+                generic_args: self.substitute_target_args(generic_args, trait_params, position),
+            },
+            PathKind::QualifiedType { type_, trait_ } => PathKind::QualifiedType {
+                type_: self.substitute_target(type_, trait_params, position),
+                trait_: {
+                    let path: Partial<PathId<'db>> = trait_
+                        .path(self.db)
+                        .to_opt()
+                        .map(|path| self.substitute_target_path(path, trait_params, position))
+                        .into();
+                    TraitRefId::new(self.db, path)
+                },
+            },
+        };
+        PathId::new(self.db, kind, parent)
+    }
+
+    /// A signature declared inside a provider ingot can use `ingot` as its
+    /// stable definition-site root. Replaying that signature in a downstream
+    /// ingot must spell the same dependency using the requester's external
+    /// alias, just as method-local trait bounds do.
+    fn request_signature_ingot_root(&self, definition_root: IdentId<'db>) -> IdentId<'db> {
+        let provider_ingot = self.provider_top_mod.ingot(self.db);
+        let request_ingot = self.request_top_mod.ingot(self.db);
+        if provider_ingot == request_ingot {
+            return definition_root;
+        }
+        request_ingot
+            .resolved_external_ingots(self.db)
+            .iter()
+            .find_map(|(alias, ingot)| (*ingot == provider_ingot).then_some(*alias))
+            .unwrap_or(definition_root)
+    }
+
+    fn substitute_target_args(
+        &self,
+        args: GenericArgListId<'db>,
+        trait_params: &[IdentId<'db>],
+        position: SigPosition,
+    ) -> GenericArgListId<'db> {
+        let is_given = args.is_given(self.db);
+        let substituted: Vec<_> = args
+            .data(self.db)
+            .iter()
+            .map(|arg| match arg {
+                GenericArg::Type(arg) => GenericArg::Type(crate::hir_def::TypeGenericArg {
+                    ty: arg
+                        .ty
+                        .to_opt()
+                        .map(|ty| self.substitute_target(ty, trait_params, position))
+                        .into(),
+                }),
+                GenericArg::Const(arg) => GenericArg::Const(arg.clone()),
+                GenericArg::AssocType(arg) => {
+                    GenericArg::AssocType(crate::hir_def::AssocTypeGenericArg {
+                        name: arg.name,
+                        ty: arg
+                            .ty
+                            .to_opt()
+                            .map(|ty| self.substitute_target(ty, trait_params, position))
+                            .into(),
+                    })
+                }
+            })
+            .collect();
+        GenericArgListId::new(self.db, substituted, is_given)
     }
 
     /// A generated-type argument. Concrete `Ty` witnesses (from `ty<T>()` /

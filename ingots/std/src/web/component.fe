@@ -46,6 +46,10 @@ pub enum ComponentEventKind {
     /// DOM event: it transports the task's complete compiler-flattened
     /// `ComponentEvent<A>` value without interpreting `target` or its payload.
     TaskMessage,
+    /// The current standards Location changed. `text` contains the untouched
+    /// absolute URL; the resident Fe actor owns parsing, recovery, selection,
+    /// and any resulting lifecycle transition.
+    Navigation,
 }
 
 impl Copy for ComponentEventKind {}
@@ -561,6 +565,15 @@ impl ComponentWriter {
     /// Compatibility spelling for the original opcode-14 API.
     pub fn activate_surface(self, sequence: u32, timeout_ms: u32) -> Self {
         self.load_surface(sequence: sequence, timeout_ms: timeout_ms)
+    }
+
+    /// Commit a same-origin location selected by Fe-authored route state.
+    /// The fixed standards adapter validates and realizes History.pushState,
+    /// but neither parses the route nor chooses its destination.
+    pub fn push_location(self, value: own BrowserString) -> Self {
+        let writer = self.byte(value: 15)
+        let writer = writer.word(value: value.len)
+        writer.bytes(value: value)
     }
 
     pub fn finish(self) -> BrowserBytes {
