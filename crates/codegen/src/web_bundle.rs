@@ -5875,6 +5875,12 @@ pub struct WebLayout {
     pub bindings: Vec<WebBinding>,
     pub builtin_inputs: Vec<WebBuiltinInput>,
     pub result: Option<WebResult>,
+    /// Backend-declared trap readback location. This preserves the existing
+    /// Naga ABI descriptor, not a graph-wide failure or recovery policy.
+    /// Absence does not certify non-trapping code: grid status is array-shaped
+    /// and is not described by the backend's single-slot field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trap: Option<WebResult>,
     pub vertex_entry: Option<String>,
     pub fragment_entry: Option<String>,
     pub color_target_format: Option<String>,
@@ -8768,6 +8774,12 @@ impl WebLayout {
                 offset: result.offset,
                 width: result.width,
             }),
+            trap: layout.trap.map(|trap| WebResult {
+                group: trap.group,
+                binding: trap.binding,
+                offset: trap.offset,
+                width: trap.width,
+            }),
             vertex_entry: layout.vertex_entry.clone(),
             fragment_entry: layout.fragment_entry.clone(),
             color_target_format: layout.color_target_format.clone(),
@@ -8932,6 +8944,41 @@ mod tests {
     use super::*;
     use common::InputDb;
     use url::Url;
+
+    #[test]
+    fn web_layout_preserves_backend_trap_descriptor() {
+        let layout = SpirvLayout {
+            entry_point: "main".into(),
+            mode: LayoutMode::Compute,
+            workgroup_size: [1, 1, 1],
+            word: WordKind::U32,
+            bindings: vec![],
+            builtin_inputs: vec![],
+            result: None,
+            trap: Some(sonatina_codegen::isa::spirv::SpirvResult {
+                group: 2,
+                binding: 7,
+                offset: 12,
+                width: 4,
+            }),
+            vertex_entry: None,
+            fragment_entry: None,
+            color_target_format: None,
+        };
+        // This tests projection, not binding validation or graph consumption.
+        let web = WebLayout::from_spirv(&layout).unwrap();
+        let expected = WebResult { group: 2, binding: 7, offset: 12, width: 4 };
+        assert_eq!(web.trap, Some(expected));
+        let mut json = serde_json::to_value(&web).unwrap();
+        assert_eq!(json["trap"]["binding"], 7);
+        assert_eq!(serde_json::from_value::<WebLayout>(json.clone()).unwrap(), web);
+        // Older manifests omit this metadata. Do not invent a trap location
+        // from a binding name, result slot or shader text when reading them.
+        json.as_object_mut().unwrap().remove("trap");
+        let legacy: WebLayout = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.trap, None);
+        assert!(serde_json::to_value(legacy).unwrap().get("trap").is_none());
+    }
 
     #[test]
     fn nested_cycle_ranges_reject_reopening_reparenting_and_self_nesting() {

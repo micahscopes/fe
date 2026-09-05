@@ -72,6 +72,12 @@ The study has not established a production backend preference.
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
 Open correctness gate: generic browser pass-graph trap consumption.
+The web layout projection now preserves the backend's explicit `trap`
+descriptor instead of dropping it. The focused release unit gate verifies
+all four location fields, JSON round-trip and old manifests without the field
+(`mb2-trap-manifest-20260905.log` under `/workspace/scratch/`). This is metadata
+transport only: grid-array status is not covered by the backend's slot field,
+and no runtime consumption or dependent-pass suppression is claimed.
 Inspection of `fe-render-runtime.js` finds compiler `role: output` buffers
 allocated with STORAGE only, saved in each record's `outputs`, and never read
 by another use of that property. The compute loop can enqueue subsequent
