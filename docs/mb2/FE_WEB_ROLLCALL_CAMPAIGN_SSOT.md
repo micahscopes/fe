@@ -21,6 +21,17 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Typed-root fallback hardening landed as `a64e34e4c` on mb2 (`e3dfaf39e` in
+cleanup). A selected typed-private root may no longer fall through scalar
+projection resolution into arena byte addressing. A missing target pointee
+type after typed selection is an internal plan error, not an invitation to
+try another representation. Three shader-IR gates (2.50s) and seventeen
+typed-allocation gates (7.56s) passed in cleanup against the published
+`2804b9ca` integration candidate after a 1m39s release build. The cherry-pick
+does not change dependencies; a separate rerun on live mb2's older pin remains
+unclaimed. Logs: `/workspace/scratch/mb2-typed-root-no-fallback-*.log`.
+This closes a fallback edge, not all planned-place lowering or memory domains.
+
 Current isolated sparse linear-plan measurement: 86,684 bundle WGSL bytes,
 2,782 reparsed Naga expressions, 30 helpers, and zero entry private heap bytes.
 Exact-function merging reduces 261 functions to 83 (5,215 to 1,836 instructions);
