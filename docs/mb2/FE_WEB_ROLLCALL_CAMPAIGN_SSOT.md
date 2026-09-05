@@ -118,6 +118,28 @@ observation. Source inspection also finds unconditional atomic stores and RMW;
 the browser probe covers ordinary stores only. A store-only guard would not
 close the required graph failure contract and must not be presented as that fix.
 
+The same artifact now has a repeated-dispatch Chrome gate. One submission
+copies divisor zero, dispatches, snapshots status, then copies divisor one,
+dispatches and snapshots status again. There is no host readback or trap reset
+between dispatches. AMD RDNA3 returns status history `[1, 0]`, with no Naga,
+WebGPU validation or device-loss errors. Thus a final-only diagnostic readback
+can lose an earlier failure even before considering dependent passes.
+Evidence: `/workspace/scratch/mb2-trap-repeat-chrome-20260905.log`; exact shader
+SHA256 `2788ef76a1d50fc1d65a90a8f3bbe50db0a6176f765eb38b85347eed1a3bead5`.
+This is expected for the current per-dispatch overwrite ABI, not an atomic race.
+
+Next implementation boundary: keep per-invocation result validity distinct
+from a graph-execution failure accumulator. A graph-scoped status must be
+monotone until an explicit new execution/recovery epoch; independent calls
+must still be able to succeed after a previous call fails. Do not change the
+existing slot to sticky status implicitly. The candidate GPU implementation
+is a compiler-declared atomic failure resource shared across dependent
+dispatches, with status publication before dispatch completion and consumer
+entry guards. Validate portable binding budgets and barrier uniformity before
+admitting that mode. Raster consumers and host recovery need their own handling;
+compute entry guards alone do not establish a complete graph contract.
+No such accumulator or guard has been implemented yet.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader

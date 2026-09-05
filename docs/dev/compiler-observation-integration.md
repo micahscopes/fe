@@ -472,3 +472,11 @@ A later guarded candidate must distinguish ordinary stores from atomic RMW,
 and must not claim graph-level recovery from a shader-local improvement.
 MB2 owns emitting missing typed facts; the Riffcat consumer owns displaying and
 comparing them. This is not a request for a second compiler legality analysis.
+
+The same capture now has execution-history evidence in
+`/workspace/scratch/mb2-trap-repeat-chrome-20260905.log`: one command submission
+with failure followed by success writes status history `[1, 0]`. No host reset
+occurs between the dispatches. A final snapshot alone misses the failure.
+The useful additional facet is status lifetime: invocation, dispatch and graph
+epoch must not be collapsed into a generic boolean named `trap`. This adds no
+new artifact-size comparison; the exact 626-byte shader is unchanged.
