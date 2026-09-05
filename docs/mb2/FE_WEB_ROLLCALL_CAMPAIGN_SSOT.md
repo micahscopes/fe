@@ -62,9 +62,14 @@ The first production replay reported 38,748ms lowering and 46,725ms total,
 slower than the earlier local-override run despite identical artifact counts.
 A warm repetition passed with identical artifact counts, reporting 28,779ms
 lowering and 36,524ms total. Both saved before/after test executables still
-exist, so a same-session paired replay is running without rebuilding either
-compiler; the slowdown is not yet attributed. No performance improvement is
-claimed. Warm log:
+exist, so a same-session paired replay ran without rebuilding either compiler.
+The earlier executable reported 25,852ms lowering / 35,716ms total; the new
+executable reported 18,338ms / 25,353ms. Both passed with identical artifact
+counts. This pair does not reproduce a regression, and the earlier executable
+also ran substantially slower than its historical 9,962ms observation. These
+single runs are not a controlled speedup benchmark. Pair evidence:
+`/workspace/scratch/mb2-shader-boundary-paired-before.log` and
+`/workspace/scratch/mb2-shader-boundary-paired-after.log`. Warm log:
 `/workspace/scratch/mb2-published-shader-boundary-production-warm-release.log`.
 The early intrinsic gate separately passed its RMIR-only test (14.17s), all
 13 f32 execution tests (16.36s), and authored-name execution (7.85s). Evidence:
