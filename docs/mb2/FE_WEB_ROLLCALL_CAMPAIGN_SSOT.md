@@ -210,6 +210,20 @@ aliased-output multiplication. Evidence:
 This is native runtime correctness evidence, not a shader-size or browser
 performance result. No dependency publication or Fe pin change has occurred.
 
+Local Sonatina `6e50de9a` closes the declaration skip path. Against that exact
+clean checkout, the isolated Fe cleanup now deletes the definition-name census
+and panic-catching JIT-export probe. The native backend owns completeness and
+returns ordinary errors. The Fe-authored runtime-name regression passes for six
+spellings in 12.15s. Existing entry-signature rejection, scalar arithmetic,
+loop/helper execution, and checked-arithmetic subprocess trap regressions also
+pass using the newly built native test binary. Evidence:
+`/workspace/scratch/mb2-fe-native-without-fallback-release.log` and
+`/workspace/scratch/mb2-fe-native-without-fallback-regression.log`.
+The fallback deletion and arithmetic integration remain uncommitted in the
+cleanup worktree until Sonatina publication is authorized and a reproducible
+remote pin can accompany them. Cargo.lock was restored after the local override
+gate. No publication has been inferred from automatic goal continuations.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
