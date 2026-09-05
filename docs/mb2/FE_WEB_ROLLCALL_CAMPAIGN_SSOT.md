@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `2d8e7b75`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `d009979f`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -278,6 +278,19 @@ all 117 backend tests passed with llvmpipe in 2.70s. Evidence:
 The accepted mode surface is preserved; no shader-size improvement is claimed.
 Paired authored-raster preparation and public contextual-query integration
 remain open, as do the broader CFG and intrinsic-capability tasks.
+
+Sonatina `d009979f` separates paired-root scalar helper preparation from raster
+emission. The existing scalar-only contract now supplies per-function
+prerequisite rejections to the common physical ABI planner. Unsupported
+parents no longer hide valid children or independent siblings. The preparation
+regression passed and checks that a partial report cannot emit even a valid
+prefix. All 117 backend tests passed with llvmpipe in 4.66s. Evidence:
+`/workspace/scratch/mb2-sonatina-raster-helper-preparation-release.log` and
+`/workspace/scratch/mb2-sonatina-raster-helper-preparation-suite-release.log`.
+Raster helper ABI support is unchanged: aggregate/resource/private-memory
+transport is not enabled by this extraction. Paired entry interface/body
+preparation and the public request query still need consolidation before Fe's
+classifier can be replaced.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
