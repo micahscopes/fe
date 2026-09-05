@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `6ae3c3fa`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `54c6c633`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -391,6 +391,31 @@ local Sonatina `6ae3c3fa`; the command-scoped override's lock changes were
 restored. Do not claim this code is in live mb2 or portably dependency-pinned.
 Legacy classifier deletion, earlier intrinsic gating, broader gates, and
 publication/integration remain unfinished. No browser run accompanied this gate.
+
+Sonatina `54c6c633` routes legacy `analyze_entry_helpers` and explicit request
+analysis through the same physical preparation. Legacy selection resolves the
+same envelope as `compile_entry`, without imposing the WebGPU environment on
+its existing i64 modes. The new legacy i64 and invalid-grid query coverage and
+all 117 backend tests passed (llvmpipe, 2.80s):
+`/workspace/scratch/mb2-sonatina-legacy-helper-analysis-suite-release.log`.
+The pending Fe driver now uses this query for legacy scalar/grid too. Its
+recursive helper-legality classifier, scalar/argument/result/body ABI tables,
+and duplicate diagnostic classifier are deleted. Both paths preserve Fe's
+profitability policy over backend-authorized helpers, with no error fallback.
+The two-file Fe integration is now net 493 lines smaller than its committed
+base (182 additions, 675 deletions, including the earlier boundary work).
+Fe's legacy i64 keystone artifact gate passed in 1.32s; the grid execution gate
+passed in 2.89s on llvmpipe with all 4,096 pixels matching the independent oracle
+and Wasmtime. Production remained 56,001 WGSL bytes, 2,150 reparsed expressions,
+and 30 helpers (instrumented lowering 9,962ms, total 12,554ms, test 12.67s).
+Evidence: `/workspace/scratch/mb2-boundary-shared-selection-legacy-release.log`,
+`/workspace/scratch/mb2-boundary-shared-selection-grid-release.log`, and
+`/workspace/scratch/mb2-boundary-shared-selection-production-release.log`.
+Backup: `/workspace/scratch/mb2-shared-selection-fe-integration.patch`.
+Cargo.lock is restored after command-scoped local dependency testing. Fe code
+is still isolated and uncommitted pending a portable Sonatina dependency pin;
+publication approval has been requested, not assumed. No Chrome gate or full
+CI completion is claimed. Earlier intrinsic gating and broader cleanup remain.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
