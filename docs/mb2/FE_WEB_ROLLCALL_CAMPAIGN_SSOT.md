@@ -96,6 +96,23 @@ after checking remaining declaration/runtime-call handling. These native
 changes are not pushed or pinned by Fe. Naga overflow support and Fe checked
 trap wiring remain open; no full browser or proof gate is implied.
 
+The following local Sonatina slice, `e9232245`, adds Naga emission for all six
+overflow result pairs through the same instruction decoder. Browser-width
+arithmetic uses u32 operations without requiring shader i64. The local
+llvmpipe execution gate checks 27,648 value/flag pairs at one-bit and 32-bit
+widths, including zero and signed/unsigned boundary seeds. Signed one-bit
+arithmetic uses the semantic range [-1, 0], not the boolean carrier's numeric
+range. A separate six-operation i64 gate validates/emits the legacy SPIR-V
+path but does not execute it. Both tests pass in release (13.02s):
+`/workspace/scratch/mb2-naga-overflow-complete-release.log`.
+Six existing target-selection, scalar-helper, grid, rejection, and escape-grid
+regressions also pass (0.62s):
+`/workspace/scratch/mb2-naga-overflow-regression-release.log`.
+The current shader contract still rejects narrow 8/16-bit integer values;
+this patch does not bypass that capability boundary. Chrome hardware execution,
+Fe checked trap wiring, and outlined overflow-helper integration remain open.
+The new Sonatina commit is local, not pushed or pinned by Fe.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
