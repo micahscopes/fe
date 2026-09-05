@@ -104,6 +104,14 @@ load-bearing. Browser evidence:
 errors or device loss. The emitted shader and layout are retained under
 `/workspace/scratch/mb2-trap-effects-20260905/`.
 
+Riffcat imported and replay-verified this exact failure capture: 15 final
+all-module instructions, two functions, 626 WGSL bytes and 1,508 SPIR-V bytes.
+The concrete tooling gap and acceptance fixture are recorded in
+`docs/dev/compiler-observation-integration.md` under failure/effect contract
+observation. Source inspection also finds unconditional atomic stores and RMW;
+the browser probe covers ordinary stores only. A store-only guard would not
+close the required graph failure contract and must not be presented as that fix.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader

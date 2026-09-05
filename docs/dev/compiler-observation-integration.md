@@ -431,3 +431,44 @@ The original log is `mb2-div-chrome-sentinel-assumption-20260905.log` under
 instructions and 677 WGSL bytes each. Equal size is not equal semantics.
 These captures do not certify post-trap side-effect suppression or host
 consumption of trap buffers; those need separate execution gates.
+
+### Failure/effect contract observation request (2026-09-05)
+
+The executed `shader_trap_effects` fixture is now imported and replay-verified
+as `/workspace/scratch/mb2-trap-effects-20260905.capture.json`, capture ID
+`2031279757bd06b7ec90c9ffa81bf976c9cd117a6ec7b4855a3224b3547717aa`.
+It contains 15 final all-module instructions, 10 selected-root instructions,
+two functions, 626 WGSL bytes and 1,508 SPIR-V bytes. The capture predates
+committing the fixture: `ec6c1e7b9` is a retrospective source anchor, not a
+claim that the historical producer was clean. Its dirty patch was not recorded.
+
+This is a concrete case where artifact verification succeeds but cannot answer
+the important question: does a failing helper prevent later observable effects
+and consumption of invalid data? Manual inspection finds unconditional ObjStore,
+ObjAtomicStore and atomic RMW emission in Sonatina's Naga instruction lowering.
+The helper shares the invocation's trap flag, but that flag is not a guard on
+those operations. Browser execution confirms ordinary stores after the failing
+helper still execute. This agrees with the existing poison-output contract;
+it is not evidence that all three operation classes were executed by the probe.
+
+Requested observation, over existing IR and declared contracts:
+
+- Classify failure sites, external stores, atomic stores/RMW, private stores,
+  calls and status publication separately. Do not count all Store statements
+  as externally visible effects.
+- Present may-reach paths from a failure site through helper returns to effects,
+  including whether a status guard is present. Absence of sufficient CFG or
+  interprocedural evidence must be reported as unknown, not safe.
+- Attach the producer's declared failure contract (poisoned outputs versus
+  suppressed continuation), status binding and reset/accumulation scope. The
+  consumer must not infer these semantics from an instruction hash or name.
+- Keep host/pass-graph consumption evidence separate from shader evidence.
+  A shader capture alone cannot prove dependent passes inspect its status.
+
+Acceptance fixture: this two-function capture must expose the post-call stores
+and link the independent Chrome failure result, without declaring a correctness
+pass merely because compilation, Naga validation and artifact replay succeed.
+A later guarded candidate must distinguish ordinary stores from atomic RMW,
+and must not claim graph-level recovery from a shader-local improvement.
+MB2 owns emitting missing typed facts; the Riffcat consumer owns displaying and
+comparing them. This is not a request for a second compiler legality analysis.
