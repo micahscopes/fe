@@ -2195,6 +2195,9 @@ export class FeSurfaceElement extends HTMLElement {
    * selected Fe policy is re-run against the current GPU/CPU capability and
    * its exact decision becomes the next resident extent and presentation. */
   async _refreshLiveBackingExtent() {
+    // A compute-only graph has no presentation backing to resize. Replaying it
+    // here can overwrite durable GPU results merely because its host box moved.
+    if (this._graph && !this._hasRenderPass) return;
     if (this._fsm !== "live" || this._resizePending) return;
     this._resizePending = true;
     try {
@@ -2210,6 +2213,7 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _wireResizeObserver() {
+    if (this._graph && !this._hasRenderPass) return;
     if (this._resizeObserver || typeof ResizeObserver !== "function") return;
     this._resizeObserver = new ResizeObserver(() => {
       this._refreshLiveBackingExtent().catch(error => this._fail(error));

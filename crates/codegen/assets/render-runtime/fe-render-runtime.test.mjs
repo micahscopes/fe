@@ -850,6 +850,25 @@ test("live resize re-runs the Fe policy against current GPU facts and realizes i
   assert.equal(surface._resizePending, false);
 });
 
+test("compute-only graphs neither observe presentation resize nor replay on a stale callback", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "live";
+  surface._graph = true;
+  surface._hasRenderPass = false;
+  surface._resizePending = false;
+  surface._applyBackingExtent = () => { throw Error("compute graph has no backing extent"); };
+  surface._render = () => { throw Error("resize must not replay compute effects"); };
+  const previous = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class { constructor() { throw Error("compute graph must not observe presentation resize"); } };
+  try {
+    surface._wireResizeObserver();
+    await surface._refreshLiveBackingExtent();
+    assert.equal(surface._resizePending, false);
+  } finally {
+    globalThis.ResizeObserver = previous;
+  }
+});
+
 test("device fallback re-runs Fe quality with CPU capability before rendering", async () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
