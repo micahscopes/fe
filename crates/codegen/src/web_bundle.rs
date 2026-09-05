@@ -6456,7 +6456,7 @@ fn validate_resource_stage_visibility(
     Ok(())
 }
 
-const PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE: usize = 8;
+use sonatina_codegen::isa::naga::WEBGPU_STORAGE_BUFFERS_PER_STAGE as PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE;
 
 fn validate_portable_pass_bindings(passes: &[WebPass]) -> Result<(), WebBundleError> {
     for pass in passes {
@@ -8961,6 +8961,7 @@ mod tests {
                 offset: 12,
                 width: 4,
             }),
+            graph_failure: None,
             vertex_entry: None,
             fragment_entry: None,
             color_target_format: None,

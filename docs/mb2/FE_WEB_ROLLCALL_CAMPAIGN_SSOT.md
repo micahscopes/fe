@@ -27,7 +27,7 @@ Its historical pending markers do not override this ledger. The bounded
 direct-route study is closed as inconclusive for production, with its missing
 comparative gates explicitly recorded. No permanent second backend was added.
 
-### Direct-route study: closed, inconclusive for production
+### Intrinsic return classification (2026-09-05)
 
 Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses
 `is_runtime_intrinsic_name` or a separate f32 name decoder to select extern
@@ -44,6 +44,8 @@ and the classification candidate over Fe `413a8d9c3`. Logs:
 `mb2-intrinsic-identity-negative-20260905.log` under `/workspace/scratch/`.
 This removes one remaining MIR spelling fallback, not every source-vocabulary
 decoder in HIR or every target-capability adapter.
+
+### Direct-route study: closed, inconclusive for production
 
 The [final report](DIRECT_NAGA_STUDY_2026_09_05.md) records the executed cases,
 Riffcat captures, numeric-contract mismatch, and missing comparison controls.
@@ -191,9 +193,9 @@ failure, dependent work is suppressed, and explicit reset admits a new epoch.
 No validation errors or device loss. Logs are
 `/workspace/scratch/mb2-graph-failure-multi-{test,chrome}-20260905.log`.
 This closes the focused mixed-invocation gate, not broad stress testing or Fe
-graph integration. Both epoch commits remain local; Fe currently pins the
-preceding published `8b011e5b`. Coordinated publication is needed before a
-portable Fe dependency-pin update; no unpublished pin has been committed.
+graph integration. Subsequent shared integration published the epoch commits
+as ancestors of `71c78dda`; Fe `413a8d9c3` pins that revision. Publication is
+therefore no longer a prerequisite for this slice. This session did not push.
 
 Sonatina `bd6d4e6e` now enforces the portable storage-buffer budget after Naga
 validation and before emitting either requested encoding. It uses each entry's
@@ -204,9 +206,12 @@ including a helper-reached atomic channel, are rejected. All three epoch tests
 also pass with the new gate. Logs: `mb2-webgpu-resource-limits-20260905.log` and
 `mb2-epoch-with-resource-limits-20260905.log` under `/workspace/scratch/`.
 This applies to the explicit WebGPU target contract, not the legacy all-capability
-adapter. Fe's existing manifest budget check remains; when the dependency pin is
-updated, replace its duplicate numeric constant with Sonatina's exported
-`WEBGPU_STORAGE_BUFFERS_PER_STAGE`, retaining Fe's source/pass diagnostics.
+adapter. Fe's existing manifest budget check now uses Sonatina's exported
+`WEBGPU_STORAGE_BUFFERS_PER_STAGE` instead of a duplicate numeric constant,
+retaining Fe's source/pass diagnostics. The layout projection regression passes
+against `71c78dda`, including its additional graph-status metadata field:
+`/workspace/scratch/mb2-published-epoch-reconciliation-20260905.log`.
+Fe still does not select or project the graph epoch contract in production.
 
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
