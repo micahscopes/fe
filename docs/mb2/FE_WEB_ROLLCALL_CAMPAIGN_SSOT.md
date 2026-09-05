@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `bb89ba01`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `51546b51`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -100,6 +100,14 @@ shader-backend tests passed, including lavapipe execution, in 3.27s:
 `/workspace/scratch/mb2-sonatina-loop-exit-return-fix-release.log`.
 The earlier adapter failures required the Vulkan loader library path; they
 were not counted as passes. Chrome and production-prover gates remain open.
+
+`51546b51` extracts entry instruction legality, trap requirements, and arena
+high-water analysis into a reusable body plan consumed by emission. The
+combined candidate passed all 116 shader-backend tests with lavapipe in 2.95s:
+`/workspace/scratch/mb2-sonatina-entry-plan-combined-release.log`.
+Fe integration is running in `/workspace/scratch/mb2-fe-entry-plan-context-release.log`.
+This makes another prerequisite independently reusable; it is not yet the
+complete public contextual ABI query.
 
 Legend:
 
