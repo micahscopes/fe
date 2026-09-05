@@ -14384,9 +14384,10 @@ where
                 "typed private place resolution changed its result class".to_owned(),
             ));
         }
-        let Some(pointee_ty) = self.module.typed_private_type_for_class(&current_class)? else {
-            return Ok(None);
-        };
+        let pointee_ty = self.module.typed_private_type_for_class(&current_class)?
+            .ok_or_else(|| LowerError::Internal(
+                "planned typed-private projection has no target pointee type".to_owned(),
+            ))?;
         let pointer_ty = self.module.builder.ptr_type(pointee_ty);
         let pointer = self.fb.insert_inst(Gep::new(is, indices), pointer_ty);
         Ok(Some((pointer, resolved.result_class)))
@@ -14437,8 +14438,17 @@ where
         &mut self,
         place: &RuntimePlace<'db>,
     ) -> Result<Option<(ValueId, Type)>, LowerError> {
-        if let Some(projected) = self.typed_private_scalar_place(place)? {
-            return Ok(Some(projected));
+        // The body plan owns the root representation. Failure to project a
+        // selected typed root must not reinterpret its pointer as an arena
+        // byte offset, including after bounds-check instructions were emitted.
+        if let PlaceRoot::Ref(root) = place.root
+            && self.typed_private_locals.contains_key(&root)
+        {
+            return self.typed_private_scalar_place(place)?.map(Some).ok_or_else(|| {
+                LowerError::Unsupported(
+                    "planned typed-private place is not a supported scalar projection".to_owned(),
+                )
+            });
         }
         let program = self.module.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
