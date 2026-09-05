@@ -2,7 +2,7 @@
 
 Status: authoritative campaign burn-down
 
-Updated: 2026-09-04
+Updated: 2026-09-05
 
 Goal spine: write the math, get the kernel, keep the proof.
 
@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `d009979f`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `b58ce181`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -291,6 +291,19 @@ Raster helper ABI support is unchanged: aggregate/resource/private-memory
 transport is not enabled by this extraction. Paired entry interface/body
 preparation and the public request query still need consolidation before Fe's
 classifier can be replaced.
+
+Sonatina `b58ce181` extracts paired raster entry preparation before Naga module
+construction. The result preserves builtin resolution, the complete scalar
+state record, compact external resources, and exact stage visibility, using
+the existing interface and root-operation checks. Its regression passed for
+state preservation and invalid entry pairing, state suffixes, and builtin
+prefixes. All 117 backend tests passed with llvmpipe in 2.43s. Evidence:
+`/workspace/scratch/mb2-sonatina-raster-entry-preparation-release.log` and
+`/workspace/scratch/mb2-sonatina-raster-entry-preparation-suite-release.log`.
+Root CFG structurization still occurs in the individual vertex/fragment
+lowerers; this result is not a complete shader-validity certificate. Sharing
+those prepared control facts and exposing the public request query remain
+before Fe classifier replacement. No new raster transport is enabled.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
