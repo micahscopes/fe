@@ -850,6 +850,26 @@ test("live resize re-runs the Fe policy against current GPU facts and realizes i
   assert.equal(surface._resizePending, false);
 });
 
+test("concurrent live requests share one in-flight graph realization", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "ready";
+  surface._graph = true;
+  surface._hasRenderPass = false;
+  surface._deliverSurfaceLifecycle = () => {};
+  surface._ensurePipeline = async () => ({});
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let presentations = 0;
+  surface._presentOn = async () => { presentations++; await gate; };
+  surface._enterLive = () => { surface._fsm = "live"; };
+  const first = surface.live(), second = surface.live();
+  await Promise.resolve(); await Promise.resolve();
+  release();
+  await Promise.all([first, second]);
+  assert.equal(presentations, 1, "overlapping requests must not reuse the same scratch arena concurrently");
+  assert.equal(surface._fsm, "live");
+});
+
 test("compute-only graphs neither observe presentation resize nor replay on a stale callback", async () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._fsm = "live";
@@ -867,6 +887,22 @@ test("compute-only graphs neither observe presentation resize nor replay on a st
   } finally {
     globalThis.ResizeObserver = previous;
   }
+});
+
+test("a rejected live realization clears its shared promise for retry", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._fsm = "ready";
+  let calls = 0;
+  surface._goLiveOnce = async () => {
+    if (++calls === 1) throw Error("transient realization failure");
+    surface._fsm = "live";
+  };
+  const results = await Promise.allSettled([surface.live(), surface.live()]);
+  assert.deepEqual(results.map(r => r.status), ["rejected", "rejected"]);
+  assert.equal(calls, 1);
+  await surface.live();
+  assert.equal(calls, 2);
+  assert.equal(surface._fsm, "live");
 });
 
 test("device fallback re-runs Fe quality with CPU capability before rendering", async () => {

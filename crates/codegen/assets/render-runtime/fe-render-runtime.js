@@ -3063,6 +3063,18 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   async _goLive() {
+    if (this._liveTransition) return this._liveTransition;
+    // Pointer, focus and explicit live() requests can arrive before the first
+    // GPU submission completes. Publish the shared promise before starting any
+    // effects so they cannot concurrently replay one resident scratch arena.
+    const pending = Promise.resolve().then(() => this._goLiveOnce()).finally(() => {
+      if (this._liveTransition === pending) this._liveTransition = null;
+    });
+    this._liveTransition = pending;
+    return pending;
+  }
+
+  async _goLiveOnce() {
     if (this._fsm === "live") return;
     if (this._fsm === "cold") await this._readyPromise.catch(() => {});
     if (this._fsm === "error") return;
