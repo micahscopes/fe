@@ -1056,6 +1056,27 @@ fn int_bounds(bits: u16, signed: bool) -> (BigInt, BigInt) {
 }
 
 fn numeric_extern_intrinsic(name: &str) -> Option<NumericExternIntrinsic> {
+    use crate::analysis::ty::corelib::F32IntrinsicKind;
+    if let Some(kind) = F32IntrinsicKind::from_name(name) {
+        // Exact evaluation is the canonical refinement of relaxed min/max.
+        let operation = match kind {
+            F32IntrinsicKind::FromI32 => FloatOp::FromI32,
+            F32IntrinsicKind::ToI32 => FloatOp::ToI32,
+            F32IntrinsicKind::Sqrt => FloatOp::Sqrt,
+            F32IntrinsicKind::Rsqrt => FloatOp::Rsqrt,
+            F32IntrinsicKind::Abs => FloatOp::Abs,
+            F32IntrinsicKind::Min => FloatOp::Min,
+            F32IntrinsicKind::Max => FloatOp::Max,
+            F32IntrinsicKind::MinRelaxed => FloatOp::Min,
+            F32IntrinsicKind::MaxRelaxed => FloatOp::Max,
+            F32IntrinsicKind::Clamp => FloatOp::Clamp,
+            F32IntrinsicKind::Floor => FloatOp::Floor,
+            F32IntrinsicKind::Ceil => FloatOp::Ceil,
+            F32IntrinsicKind::Trunc => FloatOp::Trunc,
+            F32IntrinsicKind::Round => FloatOp::Round,
+        };
+        return Some(NumericExternIntrinsic::Float(operation));
+    }
     Some(match name {
         "__checked_add" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Add),
         "__checked_sub" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Sub),
@@ -1079,33 +1100,12 @@ fn numeric_extern_intrinsic(name: &str) -> Option<NumericExternIntrinsic> {
         "__mul_f32" => NumericExternIntrinsic::Float(FloatOp::Mul),
         "__div_f32" => NumericExternIntrinsic::Float(FloatOp::Div),
         "__neg_f32" => NumericExternIntrinsic::Float(FloatOp::Neg),
-        "__sqrt_f32" => NumericExternIntrinsic::Float(FloatOp::Sqrt),
-        "__rsqrt_f32" => NumericExternIntrinsic::Float(FloatOp::Rsqrt),
-        "__abs_f32" => NumericExternIntrinsic::Float(FloatOp::Abs),
-        "__min_f32" => NumericExternIntrinsic::Float(FloatOp::Min),
-        "__max_f32" => NumericExternIntrinsic::Float(FloatOp::Max),
-        // Relaxed min/max are only reachable through `core::num::Regular`
-        // (the float-semantics type API's domain newtype); at the CTFE
-        // layer the relaxed contract's canonical refinement IS the exact
-        // contract, so these map onto the SAME `FloatOp::Min`/`Max`
-        // evaluation as the exact externs above -- deterministic,
-        // backend-independent const-eval, never diverging from what a
-        // `const` item folds `Regular::assume(x).min(y)` to.
-        "__min_relaxed_f32" => NumericExternIntrinsic::Float(FloatOp::Min),
-        "__max_relaxed_f32" => NumericExternIntrinsic::Float(FloatOp::Max),
-        "__clamp_f32" => NumericExternIntrinsic::Float(FloatOp::Clamp),
-        "__floor_f32" => NumericExternIntrinsic::Float(FloatOp::Floor),
-        "__ceil_f32" => NumericExternIntrinsic::Float(FloatOp::Ceil),
-        "__trunc_f32" => NumericExternIntrinsic::Float(FloatOp::Trunc),
-        "__round_f32" => NumericExternIntrinsic::Float(FloatOp::Round),
         "__eq_f32" => NumericExternIntrinsic::Float(FloatOp::Eq),
         "__ne_f32" => NumericExternIntrinsic::Float(FloatOp::Ne),
         "__lt_f32" => NumericExternIntrinsic::Float(FloatOp::Lt),
         "__le_f32" => NumericExternIntrinsic::Float(FloatOp::Le),
         "__gt_f32" => NumericExternIntrinsic::Float(FloatOp::Gt),
         "__ge_f32" => NumericExternIntrinsic::Float(FloatOp::Ge),
-        "__f32_from_i32" => NumericExternIntrinsic::Float(FloatOp::FromI32),
-        "__i32_from_f32" => NumericExternIntrinsic::Float(FloatOp::ToI32),
         _ => {
             let suffix = |prefix| {
                 name.strip_prefix(prefix)

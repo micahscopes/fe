@@ -1,0 +1,33 @@
+// Exact small values exercise every shared floating-point helper identity.
+// CTFE supports rsqrt even though runtime lowering still rejects it.
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+    const fn __i32_from_f32(_: f32) -> i32
+    const fn __sqrt_f32(_: f32) -> f32
+    const fn __rsqrt_f32(_: f32) -> f32
+    const fn __abs_f32(_: f32) -> f32
+    const fn __min_f32(_: f32, _: f32) -> f32
+    const fn __max_f32(_: f32, _: f32) -> f32
+    const fn __min_relaxed_f32(_: f32, _: f32) -> f32
+    const fn __max_relaxed_f32(_: f32, _: f32) -> f32
+    const fn __clamp_f32(_: f32, _: f32, _: f32) -> f32
+    const fn __floor_f32(_: f32) -> f32
+    const fn __ceil_f32(_: f32) -> f32
+    const fn __trunc_f32(_: f32) -> f32
+    const fn __round_f32(_: f32) -> f32
+}
+
+static_assert(__f32_from_i32(7) == 7.0)
+static_assert(__i32_from_f32(7.0) == 7)
+static_assert(__sqrt_f32(9.0) == 3.0)
+static_assert(__rsqrt_f32(4.0) == 0.5)
+static_assert(__abs_f32(-3.0) == 3.0)
+static_assert(__min_f32(2.0, 3.0) == 2.0)
+static_assert(__max_f32(2.0, 3.0) == 3.0)
+static_assert(__min_relaxed_f32(2.0, 3.0) == 2.0)
+static_assert(__max_relaxed_f32(2.0, 3.0) == 3.0)
+static_assert(__clamp_f32(4.0, 1.0, 3.0) == 3.0)
+static_assert(__floor_f32(2.5) == 2.0)
+static_assert(__ceil_f32(2.5) == 3.0)
+static_assert(__trunc_f32(-2.5) == -2.0)
+static_assert(__round_f32(2.25) == 2.0)

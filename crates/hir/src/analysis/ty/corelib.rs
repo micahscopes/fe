@@ -120,6 +120,61 @@ pub fn lib_trait_matches<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>, pa
     actual_suffix == target_suffix
 }
 
+/// Identity of the existing bodyless floating-point intrinsic declarations.
+/// Recognition lives here; evaluation and target support remain separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum F32IntrinsicKind {
+    FromI32,
+    ToI32,
+    Sqrt,
+    Rsqrt,
+    Abs,
+    Min,
+    Max,
+    MinRelaxed,
+    MaxRelaxed,
+    Clamp,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+}
+
+impl F32IntrinsicKind {
+    /// Decode the current declaration vocabulary, not an arbitrary call target.
+    /// Callers with a function identity should use `f32_intrinsic_func_kind`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "__f32_from_i32" => Self::FromI32,
+            "__i32_from_f32" => Self::ToI32,
+            "__sqrt_f32" => Self::Sqrt,
+            "__rsqrt_f32" => Self::Rsqrt,
+            "__abs_f32" => Self::Abs,
+            "__min_f32" => Self::Min,
+            "__max_f32" => Self::Max,
+            "__min_relaxed_f32" => Self::MinRelaxed,
+            "__max_relaxed_f32" => Self::MaxRelaxed,
+            "__clamp_f32" => Self::Clamp,
+            "__floor_f32" => Self::Floor,
+            "__ceil_f32" => Self::Ceil,
+            "__trunc_f32" => Self::Trunc,
+            "__round_f32" => Self::Round,
+            _ => return None,
+        })
+    }
+}
+
+#[salsa::tracked]
+pub fn f32_intrinsic_func_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> Option<F32IntrinsicKind> {
+    if func.body(db).is_some() {
+        return None;
+    }
+    F32IntrinsicKind::from_name(func.name(db).to_opt()?.data(db).as_str())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum RuntimeBuiltinFuncKind {
     Malloc,

@@ -1,0 +1,6 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/float_ctfe_intrinsic_identity.fe
+---
+
