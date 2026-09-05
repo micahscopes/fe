@@ -2257,6 +2257,22 @@ pub fn ge(a: f32, b: f32) -> bool { a >= b }
 /// own test suite at `cranelift_backend.rs`, since that needs both the wasm
 /// AND cranelift backends side by side on the same IR).
 #[test]
+fn ordinary_functions_with_intrinsic_spellings_remain_calls() {
+    for name in ["__sqrt_f32", "__rsqrt_f32", "__min_f32", "__checked_add"] {
+        let source = format!(
+            "fn {name}(_ value: u32) -> u32 {{ value ^ 7 }}\n\
+             pub fn probe(_ value: u32) -> u32 {{ {name}(value) }}"
+        );
+        let bytes = compile_to_wasm(&format!("ordinary{name}.fe"), &source);
+        let (mut store, instance) = instantiate(&bytes);
+        let probe = instance.get_typed_func::<i32, i32>(&mut store, "probe").unwrap();
+        for input in [0, 7, 42, i32::MAX] {
+            assert_eq!(probe.call(&mut store, input).unwrap(), input ^ 7, "{name}");
+        }
+    }
+}
+
+#[test]
 fn f32_abs_min_max_clamp_intrinsics_execute_on_wasm() {
     let source = r#"
 extern {

@@ -15218,10 +15218,16 @@ where
             .semantic(self.module.db)
             .and_then(
                 |semantic| match semantic.key(self.module.db).owner(self.module.db) {
-                    hir::analysis::ty::ty_check::BodyOwner::Func(func) => func
-                        .name(self.module.db)
-                        .to_opt()
-                        .map(|name| name.data(self.module.db).to_string()),
+                    hir::analysis::ty::ty_check::BodyOwner::Func(func)
+                        if func.body(self.module.db).is_none() =>
+                    {
+                        // MIR only recognizes bodyless intrinsic declarations.
+                        // An authored body must remain an ordinary call even
+                        // when its name matches a reserved intrinsic spelling.
+                        func.name(self.module.db)
+                            .to_opt()
+                            .map(|name| name.data(self.module.db).to_string())
+                    }
                     _ => None,
                 },
             )
