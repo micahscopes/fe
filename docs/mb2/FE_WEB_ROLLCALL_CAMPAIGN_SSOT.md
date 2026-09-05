@@ -444,6 +444,18 @@ command-scoped override `/workspace/scratch/mb2-verified-sonatina.toml`.
 The interrupted dirty-dependency build is not counted as an intrinsic test.
 No publication occurred; the live-mb2 fix needs no unpublished dependency.
 
+The first shared intrinsic-identity slice is now on live mb2 at `a6f892737`.
+HIR owns the 14 existing bodyless f32 helper identities and a tracked
+function-identity query that excludes authored bodies. CTFE consumes that
+vocabulary instead of its duplicate helper-name table. Both focused release
+CTFE fixtures passed (2 tests, 4.98s) in the cleanup worktree, including all
+14 identities and the CTFE-only reciprocal-square-root case. The four source
+and fixture files landed byte-identically on mb2. Evidence is
+`/workspace/scratch/mb2-shared-f32-identity-ctfe-release.log`.
+MIR and portable codegen consumer migration is still pending its runtime gate.
+This centralizes existing declaration spelling, not explicit intrinsic tags or
+complete early target-capability gating; other numeric families remain open.
+
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
 `ef13a6568c0dbcd2e85a390048f81a20a61302ac`. The latter is already published
