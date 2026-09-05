@@ -21,6 +21,20 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Browser capstone preflight on September 5 is not green. The Node-based existing
+health harness timed out navigating to `http://10.0.0.2:8024/health.html` before
+its one-word GPU control ran. A separate connectivity-only page loaded
+`about:blank` successfully, but the same HTTP navigation timed out after 15s
+without a request reaching its local HTTP server. An attempted DevTools-served
+control then timed out in `Network.setCacheDisabled`, before shader submission.
+These observations do not diagnose a GPU crash, prove driver health, or test
+the production shader. The next browser gate must establish page delivery and
+the tiny GPU control before running the prover. Existing user pages and servers
+were left untouched. Evidence:
+`/workspace/scratch/mb2-naga-boundary-chrome-health-node.log`,
+`/workspace/scratch/mb2-chrome-connectivity.log`, and
+`/workspace/scratch/mb2-chrome-connectivity-isolated.log`.
+
 New Mandelbrot protocol work is paused while the Fe-to-Sonatina boundary is
 consolidated. The existing prover remains the browser correctness/performance
 capstone; this does not remove any proof or gallery completion gates below.
