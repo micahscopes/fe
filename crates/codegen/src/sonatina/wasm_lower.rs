@@ -5590,24 +5590,6 @@ where
         Ok(resource_ref_ty)
     }
 
-    /// Retrieve the object-reference type already declared for a semantic GPU
-    /// resource. Function-local resource copies are declared through
-    /// `gpu_resource_type` before statement lowering begins, so their later
-    /// type checks must preserve that same representation instead of treating
-    /// the nominal one-field struct as an arena-carried aggregate.
-    fn cached_gpu_resource_type(&self, resource_ty: TyId<'db>) -> Result<Type, LowerError> {
-        let resource_ty = resource_ty.as_view(self.db).unwrap_or(resource_ty);
-        self.resource_type_cache
-            .get(&resource_ty)
-            .copied()
-            .ok_or_else(|| {
-                LowerError::Internal(
-                    "semantic GPU resource reached lowering before its type was declared"
-                        .to_owned(),
-                )
-            })
-    }
-
     fn declare_functions(&mut self) -> Result<(), LowerError> {
         // DECLARED-EXTERNAL host imports dedup to ONE import per `(module, op-name)`
         // identity: the same `extern` reached through two effect-provider scopes
@@ -10250,6 +10232,14 @@ enum LocalValueRepresentation {
     Flattened(Vec<Type>),
 }
 
+/// The SSA declaration and its planned physical carrier remain one binding.
+/// Emission must not reclassify the source type to recover this carrier.
+#[derive(Clone, Copy)]
+struct LocalSsaBinding {
+    variable: Variable,
+    carrier: Type,
+}
+
 /// Local and residual-call storage decisions for one prepared body, derived
 /// before any instructions or SSA variables are emitted. This consumes the
 /// interprocedural ABI and arena escape facts; it does not replace their
@@ -10582,7 +10572,7 @@ where
     block_map: Vec<BlockId>,
     reachable: Vec<bool>,
     call_storage: FxHashMap<(RuntimeInstance<'db>, Vec<RLocalId>), CallStoragePlan<'db>>,
-    vars: FxHashMap<RLocalId, Variable>,
+    vars: FxHashMap<RLocalId, LocalSsaBinding>,
     /// R2.1: scalar-tuple locals carry ONE SSA variable per element word (a
     /// `(Pending, Pending)` local is two i32 vars). A local is in exactly one of
     /// `vars` (a single scalar word) or `tuple_vars` (a flattened scalar tuple),
@@ -10665,7 +10655,13 @@ where
             let local = RLocalId::from_u32(index as u32);
             match representation {
                 Some(LocalValueRepresentation::Single(ty)) => {
-                    vars.insert(local, fb.declare_var(ty));
+                    vars.insert(
+                        local,
+                        LocalSsaBinding {
+                            variable: fb.declare_var(ty),
+                            carrier: ty,
+                        },
+                    );
                 }
                 Some(LocalValueRepresentation::Flattened(types)) => {
                     tuple_vars.insert(
@@ -15514,7 +15510,7 @@ where
         self.binding_facts.is_borrowed(local.as_u32() as usize)
     }
 
-    fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
+    fn binding_for(&self, local: RLocalId) -> Result<LocalSsaBinding, LowerError> {
         self.vars.get(&local).copied().ok_or_else(|| {
             let details = self
                 .body
@@ -15534,33 +15530,17 @@ where
                 })
                 .unwrap_or_else(|| "missing local".to_owned());
             LowerError::Unsupported(format!(
-                "wasm target (R1): local {local:?} is not a value-carried scalar \
-                 (address-taken/aggregate locals are R2); {details}"
+                "local {local:?} has no planned single-value SSA binding; {details}"
             ))
         })
     }
 
+    fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
+        Ok(self.binding_for(local)?.variable)
+    }
+
     fn local_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
-        if let Some(local) = self.typed_private_locals.get(&local) {
-            return Ok(local.pointer_ty);
-        }
-        if let Some(local_data) = self.body.local(local)
-            && semantic_gpu_resource(self.module.db, local_data.semantic_ty)
-        {
-            return self.module.cached_gpu_resource_type(local_data.semantic_ty);
-        }
-        let class = self.body.value_class(local).cloned().ok_or_else(|| {
-            LowerError::Internal(format!("local {local:?} carries no value class"))
-        })?;
-        if self.is_address_carried_aggregate_value(local)
-            || self.materialized_scalar_slots.contains(&local)
-            || self.module.is_memory_lowerable_object_ref(&class)
-            || self.module.object_value_layout(&class).is_some()
-        {
-            Ok(Type::I32)
-        } else {
-            self.module.ty_for_class(&class)
-        }
+        Ok(self.binding_for(local)?.carrier)
     }
 
     fn materialized_scalar_slot_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
