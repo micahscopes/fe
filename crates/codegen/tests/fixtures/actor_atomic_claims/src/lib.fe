@@ -4,19 +4,35 @@ use std::webgpu::{
 }
 
 fn claim_word(words: AtomicStorageBuffer<4>, value: u32) -> u32 {
-    let ticket = words.atomic_add(index: 0, value: 1)
     words.atomic_add(index: 0, value: 1)
-    words.atomic_min(index: 1, value: value + ticket)
+    words.atomic_add(index: 0, value: 1)
+    words.atomic_min(index: 1, value: value)
 }
 
 actor AtomicClaims uses (GpuProgram<WebGpuBackend>) {
     claims: AtomicStorageBuffer<4>,
     receipts: StorageBuffer<u32, 64>,
 
+    fn initialize(self)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        self.claims.atomic_store(index: 0, value: 0)
+        self.claims.atomic_store(index: 1, value: 4294967295)
+    }
+
     fn claim(self, lane: ComputeInvocation)
         uses (ComputeSurface<Workgroup<64, 1, 1>, FixedDispatch<1, 1, 1>>)
     {
         self.receipts.store(index: lane.global.x, value: claim_word(words: self.claims, value: lane.global.x))
+    }
+
+    fn observe(self, lane: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<64, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        self.claims.atomic_load(index: 2)
+        let count = self.claims.atomic_load(index: 0)
+        let minimum = self.claims.atomic_load(index: 1)
+        self.receipts.store(index: lane.global.x, value: count + minimum)
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {

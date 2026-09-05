@@ -54,11 +54,27 @@ fn atomic_resource_policy_and_operations_reach_real_shader_atomics() {
     assert_eq!(claims.policy["access"], "atomic_read_write");
     assert_eq!(claims.policy["visibility"], "compute");
     assert_eq!(claims.buffer_usage, [WebBufferUsage::Storage]);
-    let shader = &bundle.pass_wgsl[0].source;
+    assert_eq!(bundle.manifest.passes.len(), 4);
+    let initialize = &bundle.pass_wgsl[0].source;
+    assert_eq!(initialize.matches("atomicStore(").count(), 2, "{initialize}");
+    let shader = &bundle.pass_wgsl[1].source;
     assert!(shader.contains("array<atomic<u32>>"), "{shader}");
     assert_eq!(shader.matches("atomicAdd(").count(), 2, "unused return must not erase the second update: {shader}");
     assert!(shader.contains("atomicMin("), "{shader}");
-    assert!(!bundle.pass_wgsl[1].source.contains("atomic<u32>"), "unused atomics must not widen fragment bindings");
+    let observe = &bundle.pass_wgsl[2].source;
+    assert_eq!(observe.matches("atomicLoad(").count(), 3, "unused observation must survive: {observe}");
+    assert!(!bundle.pass_wgsl[3].source.contains("atomic<u32>"), "unused atomics must not widen fragment bindings");
+    // Optional diagnostic transport of the actual compiler output. Browser
+    // tests must not replace these Fe-authored stages with lookalike WGSL.
+    if std::env::var_os("FE_PRINT_ATOMIC_ACTOR").is_some() {
+        let passes: Vec<_> = bundle.manifest.passes.iter().zip(&bundle.pass_wgsl)
+            .map(|(declaration, shader)| serde_json::json!({
+                "declaration": declaration, "wgsl": shader.source,
+            })).collect();
+        println!("ATOMIC_ACTOR_BEGIN\n{}\nATOMIC_ACTOR_END", serde_json::json!({
+            "resources": bundle.manifest.resources, "passes": passes,
+        }));
+    }
 }
 
 #[test]
@@ -68,7 +84,7 @@ fn atomic_resource_access_cannot_be_confused_with_ordinary_access() {
     assert!(!driver::init_ingot(&mut db, &url));
     let diagnostics = db.run_on_top_mod(ingot_top_mod(&db, &url)).format_diags(&db);
     assert!(!diagnostics.contains("`AtomicStorageBuffer` is not found"), "missing API is not access enforcement: {diagnostics}");
-    for name in ["load", "store", "atomic_add"] {
+    for name in ["load", "store", "atomic_add", "atomic_load", "atomic_store"] {
         assert!(diagnostics.contains(&format!("`{name}`")), "missing rejection for {name}: {diagnostics}");
     }
     assert!(!diagnostics.is_empty());

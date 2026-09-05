@@ -397,6 +397,16 @@ impl<Kind, Residency, Init, Recovery, Visibility, const N: usize>
     /// Separate producer/consumer dispatches when using this for ownership.
     #[gpu_intrinsic(storage_atomic_min)]
     pub fn atomic_min(self, index: u32, value: u32) -> u32 { core::panic() }
+
+    /// Device-scope relaxed read. A dispatch boundary is still needed when
+    /// consuming non-atomic data produced by other workgroups.
+    #[gpu_intrinsic(storage_atomic_load)]
+    pub fn atomic_load(self, index: u32) -> u32 { core::panic() }
+
+    /// Device-scope relaxed write, including initialization of claim words.
+    /// Initialization and competing claims belong in separate dispatches.
+    #[gpu_intrinsic(storage_atomic_store)]
+    pub fn atomic_store(self, index: u32, value: u32) { core::panic() }
 }
 
 /// Zero-initialized, compute-local atomic words in the ordinary resource family.

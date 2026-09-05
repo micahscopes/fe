@@ -60,6 +60,8 @@ pub enum GpuIntrinsic {
     StorageStore,
     StorageAtomicAdd,
     StorageAtomicMin,
+    StorageAtomicLoad,
+    StorageAtomicStore,
 }
 
 /// Fixed-runtime control role carried by a nominal actor behavior type.
@@ -550,6 +552,8 @@ impl<'db> AttrListId<'db> {
             "storage_store" => Some(GpuIntrinsic::StorageStore),
             "storage_atomic_add" => Some(GpuIntrinsic::StorageAtomicAdd),
             "storage_atomic_min" => Some(GpuIntrinsic::StorageAtomicMin),
+            "storage_atomic_load" => Some(GpuIntrinsic::StorageAtomicLoad),
+            "storage_atomic_store" => Some(GpuIntrinsic::StorageAtomicStore),
             _ => None,
         }
     }
