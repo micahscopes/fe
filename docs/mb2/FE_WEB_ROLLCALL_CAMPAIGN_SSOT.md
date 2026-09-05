@@ -138,7 +138,34 @@ dispatches, with status publication before dispatch completion and consumer
 entry guards. Validate portable binding budgets and barrier uniformity before
 admitting that mode. Raster consumers and host recovery need their own handling;
 compute entry guards alone do not establish a complete graph contract.
-No such accumulator or guard has been implemented yet.
+The opt-in Sonatina implementation is committed as `e2f3da02` on the shared
+`mb2-task-borrows` integration line (not pushed or pinned by Fe yet):
+`ShaderCompileRequest.graph_failure` selects an explicit atomic binding, and
+the artifact layout reports it separately from `trap`. Explicit compute entry
+admission checks the epoch status; its epilogue publishes failure with atomic
+OR. Ordinary invocation trap overwrite semantics remain unchanged. Binding
+collisions, workgroup barriers and entry returns bypassing the epilogue are
+rejected. No default/legacy path opts into this contract.
+Two focused release tests pass, covering emission, collision rejection,
+barrier/epilogue rejection and unchanged bytes when the option is absent.
+Log: `/workspace/scratch/mb2-graph-failure-test-20260905.log`.
+
+Chrome executed the emitted 687-byte shader on AMD RDNA3. In one submission,
+failure, dependent valid work, then explicit epoch reset and valid work produce
+`[1,33,1,303,0,33]` (epoch status and output pairs). The second dispatch leaves
+the reset output sentinel 303 untouched; the new epoch writes 33. No validation
+or device loss occurred. This does not suppress writes inside the first failing
+invocation (its output is 33 and invalid). Evidence:
+`/workspace/scratch/mb2-graph-failure-chrome-20260905.log`, shader SHA256
+`c02a9cafd4fe9cd984dd98b6118efed7c103550ca8d2087ea57b5dc892b320bd`.
+The fixture is Sonatina-authored, not the earlier Fe division fixture; their
+byte sizes must not be treated as a causal optimization comparison.
+
+Still required: Fe dependency integration and manifest projection of the new
+contract; compiler-derived shared epoch resource allocation and reset; binding
+budget validation; multi-invocation execution gates; host failure observation
+through Fe actor/effect handling; raster-consumer policy; and the real browser
+graph regression. The focused shader test is not production graph integration.
 
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
