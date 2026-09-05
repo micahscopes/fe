@@ -91,6 +91,19 @@ readback cannot establish that dependent passes were suppressed. Preserve
 GPU scheduling by distinguishing execution dependency enforcement from host
 diagnostic readback; do not silently add one host round trip per invocation.
 
+The first half is now reproduced by `tests/fixtures/shader_trap_effects` and
+`tests/shader_trap_effects.rs`. The artifact-only gate passes (1.43s), but does
+not assert store suppression. Chrome executes the exact 626-byte shader:
+divisor 1 gives `[1,11,7,33,0]`; divisor 0 gives `[0,11,7,33,1]`; divisor 2
+then gives `[2,11,3,33,0]`. The last word is the trap flag. Both stores after
+the trapping call execute on the failing invocation. This is consistent with
+the existing Naga poison-output contract, not evidence of source-level early
+termination. The generic graph's missing consumption makes that distinction
+load-bearing. Browser evidence:
+`/workspace/scratch/mb2-trap-effects-chrome-20260905.log`, with no validation
+errors or device loss. The emitted shader and layout are retained under
+`/workspace/scratch/mb2-trap-effects-20260905/`.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader

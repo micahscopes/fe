@@ -1,0 +1,17 @@
+use std::webgpu::{
+    ComputeSurface, FixedDispatch, GpuProgram, StorageBuffer, Workgroup, WebGpuBackend,
+}
+
+fn quotient(_ divisor: u32) -> u32 { 7 / divisor }
+
+actor TrapEffects uses (GpuProgram<WebGpuBackend>) {
+    data: StorageBuffer<u32, 4>,
+
+    fn probe(self) uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
+        let divisor = self.data.load(index: 0)
+        self.data.store(index: 1, value: 11)
+        let value = quotient(divisor)
+        self.data.store(index: 2, value: value)
+        self.data.store(index: 3, value: 33)
+    }
+}
