@@ -28,8 +28,12 @@ type after typed selection is an internal plan error, not an invitation to
 try another representation. Three shader-IR gates (2.50s) and seventeen
 typed-allocation gates (7.56s) passed in cleanup against the published
 `2804b9ca` integration candidate after a 1m39s release build. The cherry-pick
-does not change dependencies; a separate rerun on live mb2's older pin remains
-unclaimed. Logs: `/workspace/scratch/mb2-typed-root-no-fallback-*.log`.
+does not change dependencies. The live mb2 rerun against unchanged published
+Sonatina `54c6c633` also passes: three shader gates (2.94s), seventeen typed
+allocation gates (7.89s), and the four-corruption/control mutation test (11.42s),
+after a 4m22s Rust build. Other agents' dirty files were preserved. Logs:
+`/workspace/scratch/mb2-typed-root-no-fallback-*.log` and
+`/workspace/scratch/mb2-live-storage-*.log`.
 This closes a fallback edge, not all planned-place lowering or memory domains.
 
 Current isolated sparse linear-plan measurement: 86,684 bundle WGSL bytes,
@@ -51,8 +55,10 @@ prologue/block retained-result counts. Each corruption must report the
 function, site, planned count, and emitted count before finishing the function.
 The release gate passed in cleanup against the published `2804b9ca` integration
 candidate (12.02s after a 4m20s Rust build). The cherry-pick is test-only; no
-production or pin change is included, and no rerun against live mb2's older pin
-is claimed. Log: `/workspace/scratch/mb2-arena-plan-mutation.log`.
+production or pin change is included. The subsequent live-mb2 run on its older
+pin also passed, as recorded above. Logs:
+`/workspace/scratch/mb2-arena-plan-mutation.log` and
+`/workspace/scratch/mb2-live-storage-mutation.log`.
 
 Grid request migration is committed in cleanup as `b1f65e3dd`, pending final
 dependency reconciliation before integration on mb2. It routes the grid word
