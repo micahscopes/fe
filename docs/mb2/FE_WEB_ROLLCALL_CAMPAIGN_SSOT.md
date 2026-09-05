@@ -211,7 +211,17 @@ adapter. Fe's existing manifest budget check now uses Sonatina's exported
 retaining Fe's source/pass diagnostics. The layout projection regression passes
 against `71c78dda`, including its additional graph-status metadata field:
 `/workspace/scratch/mb2-published-epoch-reconciliation-20260905.log`.
-Fe still does not select or project the graph epoch contract in production.
+Fe now projects `graph_failure` as its own typed binding descriptor, distinct
+from invocation `trap`, and exports `WebGraphFailureBinding` through the public
+codegen API. The release projection/JSON regression passes, including older
+manifests omitting either field:
+`/workspace/scratch/mb2-graph-failure-projection-20260905.log`.
+No production actor pass opts in yet. Allocation/reset, the Fe-owned failure
+transition and host consumption must land together before enabling it. Do not
+route arithmetic failure through `SurfaceRecoveryEvent`, which describes device
+lifecycle. Add a same-compute-pass repeated-dispatch execution gate as well:
+the current Chrome epoch probes separate dispatches with compute-pass boundaries,
+whereas the production runtime can batch repeated dispatches in one pass.
 
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on

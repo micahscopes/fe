@@ -116,7 +116,7 @@ pub use web_bundle::{
     WebCanonicalStatus, WebControl, WebControlArgSource, WebControlWasmType,
     WebDispatchCooperation, WebDispatchTaper, WebDrawIndirect, WebFeResponsibility, WebFixedHostProvenance,
     WebBufferUsage, WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility,
-    WebLayout, WebPass, WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceArtifact,
+    WebGraphFailureBinding, WebLayout, WebPass, WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceArtifact,
     WebResourceAsset, WebResult, WebScalarKind, WebShaderStage, WebSourceProvenance,
     WebSurfacePointerMotion, actor_gpu_program, actor_web_entry, render_runtime_js,
     resolve_web_entry,

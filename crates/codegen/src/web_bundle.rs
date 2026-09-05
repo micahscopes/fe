@@ -5881,9 +5881,19 @@ pub struct WebLayout {
     /// and is not described by the backend's single-slot field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trap: Option<WebResult>,
+    /// Shared atomic status for one graph execution epoch. It must not be
+    /// allocated or reset as a pass-local invocation result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_failure: Option<WebGraphFailureBinding>,
     pub vertex_entry: Option<String>,
     pub fragment_entry: Option<String>,
     pub color_target_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebGraphFailureBinding {
+    pub group: u32,
+    pub binding: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8780,6 +8790,10 @@ impl WebLayout {
                 offset: trap.offset,
                 width: trap.width,
             }),
+            graph_failure: layout.graph_failure.map(|binding| WebGraphFailureBinding {
+                group: binding.group,
+                binding: binding.binding,
+            }),
             vertex_entry: layout.vertex_entry.clone(),
             fragment_entry: layout.fragment_entry.clone(),
             color_target_format: layout.color_target_format.clone(),
@@ -8961,7 +8975,9 @@ mod tests {
                 offset: 12,
                 width: 4,
             }),
-            graph_failure: None,
+            graph_failure: Some(sonatina_codegen::isa::naga::GraphFailureBinding {
+                group: 1, binding: 6,
+            }),
             vertex_entry: None,
             fragment_entry: None,
             color_target_format: None,
@@ -8970,14 +8986,17 @@ mod tests {
         let web = WebLayout::from_spirv(&layout).unwrap();
         let expected = WebResult { group: 2, binding: 7, offset: 12, width: 4 };
         assert_eq!(web.trap, Some(expected));
+        assert_eq!(web.graph_failure, Some(WebGraphFailureBinding { group: 1, binding: 6 }));
         let mut json = serde_json::to_value(&web).unwrap();
         assert_eq!(json["trap"]["binding"], 7);
         assert_eq!(serde_json::from_value::<WebLayout>(json.clone()).unwrap(), web);
         // Older manifests omit this metadata. Do not invent a trap location
         // from a binding name, result slot or shader text when reading them.
         json.as_object_mut().unwrap().remove("trap");
+        json.as_object_mut().unwrap().remove("graph_failure");
         let legacy: WebLayout = serde_json::from_value(json).unwrap();
         assert_eq!(legacy.trap, None);
+        assert_eq!(legacy.graph_failure, None);
         assert!(serde_json::to_value(legacy).unwrap().get("trap").is_none());
     }
 
