@@ -65,6 +65,12 @@ evidence and a decision; it does not justify dropping its correctness gate.
   final module size, pipeline time and execution. Prior flattened-ABI results
   are not a substitute. No global inline policy change from a single fixture.
 - [ ] E4, remaining representation round trips.
+  First measured intervention: Sonatina `1bbd24a0` folds type-compatible zero
+  insertion into zero aggregates. Six aggregate GPU regressions and the signed
+  zero unit gate pass. The 19-stage capture totals 2,531,533 bytes; the reducer
+  falls from 235,397 to 133,270 bytes and creates a Chrome pipeline. Dispatch
+  correctness, publication/Fe pin integration and the other patterns below
+  remain open. See the observation record for exact provenance and cache limits.
   Align RMIR, initial/optimized Sonatina, Naga and WGSL captures. Count
   construct/extract/reconstruct chains, typed-to-byte-arena round trips and
   repeated unchanged-data decoding with explicit scopes and unknown lineage.

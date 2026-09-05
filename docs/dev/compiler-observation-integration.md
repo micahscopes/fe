@@ -275,10 +275,44 @@ pass their compatibility gates.
 The paired saved-file census identifies one regression hidden by the total:
 `reduce_composition` grows from 148,162 to 235,397 bytes. Its `main` grows from
 49,274 to 143,786 bytes, while the surrounding helper text shrinks. Inspection
-shows repeated nested zero-record construction. A backend-only experiment now
-tests preserving zero aggregates through zero-field insertion, without changing
-the authored proof or shared-state semantics. Production savings are not yet
-measured and this candidate is not yet landed.
+shows repeated nested zero-record construction. This motivated the backend-only
+zero-field insertion experiment below, without changing the authored proof or
+shared-state semantics.
+
+Follow-through: Sonatina `1bbd24a0bf21f2b1065565ad64cf0931160cc9f9` implements
+typed zero insertion folding. The field type must match; negative floating
+zero is not folded to positive zero. Six focused aggregate integration tests
+execute on llvmpipe, and the signed-zero/nonzero unit test passes.
+
+The complete production capture passes all 19 validation/size gates in 198.48s
+(instrumented test time, not execution). Saved WGSL totals 2,531,533 bytes,
+174,471 fewer than the previous native-aggregate capture. The reducer falls
+from 235,397 to 133,270 bytes, below the original 148,162-byte baseline. The
+largest saved shader is now control_relation at 174,346 bytes. The reducer's
+961 literal zero-wrapper assignment lines (59,650 bytes) are gone. This is
+literal text evidence, not a claim about driver register allocation or runtime.
+
+Producer: Fe `8db372576501578bf5dadd9a63b9bef7075a9a7b`, with the existing
+shared actor-test and HIR provider edits, using the explicit local Sonatina
+override at `1bbd24a0`. The parent Sonatina raster-helper change is also present;
+this is not a clean same-revision toggle experiment. The shared Fe lockfile was
+restored to its published pin after Cargo resolved the override. The new
+Sonatina commit is local; publishing it and updating Fe's reproducible pin
+remain separate integration steps.
+
+Capture: `/workspace/scratch/mb2-bloat-zero-aggregates-20260905/`.
+Census: `/workspace/scratch/mb2-zero-aggregates-census-20260905.jsonl`.
+Logs: `/workspace/scratch/mb2-bloat-zero-aggregates-20260905.log`,
+`/workspace/scratch/mb2-zero-aggregate-focused-20260905.log` and
+`/workspace/scratch/mb2-zero-aggregate-signed-zero-20260905.log`.
+
+Chrome pipeline creation for the new reducer passes on AMD RDNA-3 with no
+reported diagnostics, validation errors or device loss. Observed time is
+230.5 ms with uncontrolled cache state, not a cold-compilation or runtime
+speedup. No commands were submitted. The first attempt lost its execution
+context; after adding an explicit document-load wait, the isolated harness
+completed. Log: `/workspace/scratch/mb2-zero-reducer-chrome-loaded-20260905.log`.
+Artifact SHA-256: `56b315e4640f2228492a00bbff771d52e320a0e4b985615fcbe109c34a032a3a`.
 
 Both reducer artifacts create pipelines on Chrome AMD RDNA-3 without reported
 validation errors or device loss. The baseline run takes 12,541 ms. The new
