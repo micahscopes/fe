@@ -29,15 +29,22 @@ Landed on mb2: portable body lowering separated from Wasm host synthesis
 (`80ccc9fd2`), the scoped authored-allocation regression corrected with emitted
 Wasm and execution evidence (`2aa303099`), local storage planning (`f1381f63e`),
 explicit call storage/lifetimes (`cd48e2591`), and reachable-call planning before
-SSA emission (`af3524c95`). The last increment passed 31 focused release tests.
+SSA emission (`af3524c95`). Binding facts are now derived once before consuming
+runtime blocks (`5f0d9f68a`), removing recursive full-body scans and the emission
+block clone. Its 33 focused release tests passed: exhaustive binding-rule
+comparison and a 50,000-local chain (2), Shader IR (3), typed allocation (17),
+canonical arena (5), resident lifecycle (1), raster (4), and compute resources
+(1). Logs: `/workspace/scratch/mb2-binding-facts-release.log` and
+`/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
 on the local Sonatina candidate `9fcfcef1`; publication has not been authorized.
 Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
 `docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
-plan and gate logs. Isolated combined validation is running after shared Cargo
-artifacts exposed cross-worktree reuse. The pending binding-facts/block-clone
-removal patch on mb2 has algorithm tests only, not completed Fe execution gates.
+plan and gate logs. Isolated combined validation passed 26 focused release
+tests after shared Cargo artifacts exposed cross-worktree reuse. The newer
+binding-facts change is also incorporated there as `a6cf87ed5`; its combined
+Shader-candidate validation remains to be rerun.
 
 Remaining boundary work includes representation/lifetime consolidation,
 Sonatina-owned GPU ABI and capabilities, early Fe intrinsic gating, CFG normal
