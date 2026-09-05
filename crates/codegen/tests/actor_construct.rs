@@ -38,6 +38,21 @@ fn ingot_root(relative: &str) -> Url {
 }
 
 #[test]
+fn actor_stage_and_reachable_helper_may_share_a_source_name() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_stage_same_name");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::compute("initialize", None))
+        .expect("select the actor stage by identity, not its unmangled source name");
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert!(bundle.pass_wgsl[0].source.contains("@compute"));
+}
+
+#[test]
 fn repeated_resource_loop_remains_a_shared_shader_helper() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_resource_loop_helper");

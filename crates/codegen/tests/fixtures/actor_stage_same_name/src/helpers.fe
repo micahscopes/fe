@@ -1,0 +1,5 @@
+use std::webgpu::StorageBuffer
+
+pub fn initialize(_ buffer: StorageBuffer<u32, 1>) {
+    buffer.store(index: 0, value: 42)
+}

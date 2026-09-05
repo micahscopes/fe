@@ -6444,11 +6444,32 @@ fn stage_external_resources(
     access: Access,
     leading_context_leaves: Option<u32>,
 ) -> Result<Vec<SpirvExternalResource>, WebBundleError> {
+    // Runtime symbols may be mangled when a reachable helper shares the
+    // stage's source name. Resolve the exact source function first; matching
+    // a bare emitted name would reject a valid actor (or select a helper).
+    let top_mod = package.top_mod(db);
+    let source_functions = top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|function| {
+            function.top_mod(db) == top_mod
+                && function.name(db).to_opt().is_some_and(|name| name.data(db) == entry)
+        })
+        .collect::<Vec<_>>();
+    let [source_function] = source_functions.as_slice() else {
+        return Err(WebBundleError::Lower(format!(
+            "GPU stage `{entry}` must select exactly one source function (found {})",
+            source_functions.len()
+        )));
+    };
+    let symbol = mir::runtime_package_symbol_for_func(db, *package, *source_function)
+        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
     let functions = package
         .functions(db)
         .into_iter()
         .filter(|function| {
-            function.linkage(db) == mir::RuntimeLinkage::Internal && function.symbol(db) == entry
+            function.linkage(db) == mir::RuntimeLinkage::Internal && function.symbol(db) == symbol
         })
         .collect::<Vec<_>>();
     let [function] = functions.as_slice() else {
