@@ -395,6 +395,25 @@ Concrete follow-ups, with ownership kept distinct:
   appear prominently in replay/comparison conclusions, not only as a caller
   setting. Artifact verification must remain usable, but must not imply that
   the experiment can be reconstructed from revisions alone.
+- Comparison preconditions: attach an explicit numeric contract and physical ABI
+  description to comparative conclusions. The direct-route study's original
+  checked-add fixture has overflow reporting in the scratch emitter but not in
+  the legacy scalar production route. A byte comparison alone hides that semantic
+  difference. The explicit `WrappingAdd` fixture now passes all eight inputs on
+  both routes in Chrome, including wraparound, but their buffer layouts and trap
+  transport still differ. Success: a comparison prominently reports these
+  declared mismatches, without claiming to prove semantic equivalence from
+  metadata or hashes. MB2 supplies the contract evidence; the consumer presents
+  it alongside size deltas.
+
+The wrapping fixture's production capture is also imported and replay-verified:
+`/workspace/scratch/mb2-study-wrapping-20260905.capture.json`, capture ID
+`ef504dab395aa4927a4c54e2dcbdb73d34b0eec2f9f9ffee82cab32953dcbf17`.
+It records 62 initial and 54 final all-module instructions, 2,211 WGSL bytes and
+2,572 SPIR-V bytes. This is a different source fixture from the checked-add
+capture, not a compiler improvement. Browser evidence is in
+`mb2-wrapping-baseline-browser-20260905.log` and
+`mb2-wrapping-direct-browser-20260905.log` under `/workspace/scratch/`.
 
 This requests tooling over existing compiler evidence, not Riffcat-based
 legality, optimization decisions, or a competing provenance architecture.
