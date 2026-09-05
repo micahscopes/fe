@@ -71,6 +71,26 @@ The study has not established a production backend preference.
 
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
+Open correctness gate: generic browser pass-graph trap consumption.
+Inspection of `fe-render-runtime.js` finds compiler `role: output` buffers
+allocated with STORAGE only, saved in each record's `outputs`, and never read
+by another use of that property. The compute loop can enqueue subsequent
+passes/repetitions without observing these diagnostics. This path is distinct
+from the focused Chrome harness, which explicitly reads the trap buffer.
+Do not report generic gallery/proof graph trap handling as verified from those
+harness results. Numeric outputs are invalid when their trap flag is set.
+
+Required regression: a Fe-authored pass writes a visible value, traps in a
+helper, and has both a post-trap store and a dependent pass. Check local
+side-effect suppression separately from graph failure propagation, including
+repeated dispatches (a later success must not erase an earlier failure),
+multiple invocations, and recovery. The fix must use the compiler-derived
+status/resource contract and the Fe effect/actor failure path, not an
+application-specific JS check or a guessed magic result value. A final-only
+readback cannot establish that dependent passes were suppressed. Preserve
+GPU scheduling by distinguishing execution dependency enforcement from host
+diagnostic readback; do not silently add one host round trip per invocation.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader
