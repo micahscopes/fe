@@ -434,12 +434,22 @@ fn validate_portable_intrinsic_calls(
         };
         let hir::analysis::ty::ty_check::BodyOwner::Func(func) =
             semantic.key(db).owner(db) else { continue };
-        let Some(kind) = hir::analysis::ty::corelib::f32_intrinsic_func_kind(db, func) else {
+        use hir::analysis::ty::corelib::{
+            f32_intrinsic_func_kind, generic_numeric_intrinsic_func_kind,
+            scalar_numeric_intrinsic_func_kind,
+        };
+        let kind = if let Some(kind) = f32_intrinsic_func_kind(db, func) {
+            format!("f32 {kind:?}")
+        } else if let Some(kind) = generic_numeric_intrinsic_func_kind(db, func) {
+            format!("generic numeric {kind:?}")
+        } else if let Some(kind) = scalar_numeric_intrinsic_func_kind(db, func) {
+            format!("scalar numeric {kind:?}")
+        } else {
             continue;
         };
         let name = func.name(db).to_opt().expect("recognized intrinsic has a name");
         return Err(LowerError::Unsupported(format!(
-            "{architecture:?} target: f32 intrinsic `{}` ({kind:?}) needs dedicated Sonatina lowering and must not become an external call; rejected before Sonatina construction",
+            "{architecture:?} target: intrinsic `{}` ({kind}) needs dedicated Sonatina lowering and must not become an external call; rejected before Sonatina construction",
             name.data(db),
         )));
     }
@@ -15631,6 +15641,10 @@ mod tests {
             ("extern { fn __sqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __sqrt_f32(value) }", false),
             ("extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { value }", false),
             ("fn __rsqrt_f32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __rsqrt_f32(value) }", false),
+            ("extern { fn __add_u32(_: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value) }", true),
+            ("extern { fn __checked_add(_: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __checked_add(value) }", true),
+            ("fn __add_u32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value) }", false),
+            ("extern { fn __add_u32(_: u32, _: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value, value) }", false),
         ];
         for (source, rejects) in cases {
             let mut db = DriverDataBase::default();
@@ -15648,7 +15662,7 @@ mod tests {
                 assert_eq!(result.is_err(), rejects, "{target:?}: {source}");
                 if let Err(error) = result {
                     let message = error.to_string();
-                    assert!(message.contains("__rsqrt_f32"), "{message}");
+                    assert!(message.contains("intrinsic `__"), "{message}");
                     assert!(message.contains(&format!("{target:?} target")), "{message}");
                     assert!(message.contains("before Sonatina construction"), "{message}");
                 }
