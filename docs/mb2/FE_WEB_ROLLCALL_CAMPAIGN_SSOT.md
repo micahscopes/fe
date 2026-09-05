@@ -115,7 +115,16 @@ typed-local function map, and heap/trap transport together. Emission consumes
 that result instead of building its memory parameter types independently.
 All 116 shader-backend tests passed with lavapipe in 2.94s:
 `/workspace/scratch/mb2-sonatina-prepared-entry-helpers-release.log`.
-This candidate has not yet received a fresh Fe integration run.
+Fresh Fe integration passed three Shader IR and six raster tests:
+`/workspace/scratch/mb2-fe-prepared-entry-helpers-release.log`.
+The pending Fe request driver now establishes pipeline/resource/builtin context
+before outlining and performs selected-root validation centrally. Its ten
+release tests passed (three Shader IR, six raster, one compute-resource):
+`/workspace/scratch/mb2-fe-request-owned-outlining-release.log`.
+This moves context to the selection boundary; the public contextual ABI query
+and replacement of Fe's type whitelist remain unfinished. The temporary
+lockfile override is removed. Publication permission for Sonatina through
+`9347f7c2` has been requested, not assumed; the portable Fe pin is unchanged.
 
 Legend:
 
