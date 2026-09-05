@@ -224,8 +224,30 @@ cleanup worktree until Sonatina publication is authorized and a reproducible
 remote pin can accompany them. Cargo.lock was restored after the local override
 gate. No publication has been inferred from automatic goal continuations.
 
-The scalar-suffixed arithmetic/comparison and resource vocabularies remain
-unfinished; this is not the complete intrinsic capability system.
+The scalar-suffixed arithmetic/comparison vocabulary now has a shared HIR
+identity: `ScalarNumericIntrinsic` carries a typed operation and primitive
+scalar type, with a body-aware tracked declaration query. MIR classification
+and expression lowering no longer carry their duplicate suffix parsers, and
+expression lowering matches the operation exhaustively. Unknown operations
+such as `__invented_u32` no longer qualify solely through their suffix. Numeric
+call lowering now establishes identity before materializing call arguments.
+This independent slice was committed as cleanup `fcbd38f71` and transplanted
+onto mb2 without changing the Sonatina dependency.
+
+Two optimized MIR gates pass in 2.97s: 320 operation/type spellings plus malformed
+names, and source lowering that distinguishes bodyless `__add_i32` from an
+authored `__sub_i32` XOR body. Four existing floating-point MIR gates pass in
+5.55s. Evidence: `/workspace/scratch/mb2-scalar-numeric-source-release.log` and
+`/workspace/scratch/mb2-scalar-numeric-f32-regression.log`.
+These are identity/lowering gates, not claims that every operation/type pair is
+legal on every backend.
+
+Remaining: `ty/const_ty.rs::evaluate_int_const_expr_impl` has another numeric
+name parser for type-level integer evaluation, including ordinary method names
+and checked spellings. Its `ExternConstFnCall | UserConstFnCall` path must receive
+an authored-name collision regression and semantic reconciliation rather than
+a blind replacement. Resource vocabulary and full capability gating also
+remain unfinished; this is not the complete intrinsic capability system.
 
 Browser capstone preflight on September 5 is not green. The Node-based existing
 health harness timed out navigating to `http://10.0.0.2:8024/health.html` before
