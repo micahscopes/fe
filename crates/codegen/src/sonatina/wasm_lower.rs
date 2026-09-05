@@ -11103,6 +11103,9 @@ where
         if let Some(intrinsic) = gpu_intrinsic(self.module.db, callee) {
             return match intrinsic {
                 GpuIntrinsic::StorageStore => self.lower_gpu_storage_store(args),
+                GpuIntrinsic::StorageAtomicAdd | GpuIntrinsic::StorageAtomicMin => {
+                    self.lower_gpu_storage_atomic_rmw(intrinsic, args).map(|_| ())
+                }
                 GpuIntrinsic::StorageLoad => Err(LowerError::Internal(
                     "GPU storage load appeared as a unit-returning call".to_owned(),
                 )),
@@ -11162,6 +11165,24 @@ where
                 "GPU storage record load reached scalar expression lowering".to_owned(),
             )),
         }
+    }
+
+    fn lower_gpu_storage_atomic_rmw(&mut self, intrinsic: GpuIntrinsic, args: &[RLocalId]) -> Result<ValueId, LowerError> {
+        let [_, _, value] = args else {
+            return Err(LowerError::Internal("GPU atomic RMW requires resource, index, and value".into()));
+        };
+        let (object, element) = self.gpu_resource_element_object(args)?;
+        if !matches!(element, GpuResourceElementType::Scalar(Type::I32)) {
+            return Err(LowerError::Unsupported("GPU atomic RMW requires u32 storage".into()));
+        }
+        let value = self.local_value(*value)?;
+        let is = self.inst_set();
+        use sonatina_ir::inst::data::{ObjAtomicAdd, ObjAtomicUMin};
+        Ok(match intrinsic {
+            GpuIntrinsic::StorageAtomicAdd => self.fb.insert_inst(ObjAtomicAdd::new(is, object, value), Type::I32),
+            GpuIntrinsic::StorageAtomicMin => self.fb.insert_inst(ObjAtomicUMin::new(is, object, value), Type::I32),
+            _ => return Err(LowerError::Internal("non-atomic intrinsic in atomic lowering".into())),
+        })
     }
 
     fn lower_gpu_storage_load_tuple(
@@ -12172,7 +12193,7 @@ where
                 if let Some(intrinsic) = gpu_intrinsic(self.module.db, *callee) {
                     return match intrinsic {
                         GpuIntrinsic::StorageLoad => self.lower_gpu_storage_load_tuple(dst, args),
-                        GpuIntrinsic::StorageStore => Err(LowerError::Internal(
+                        GpuIntrinsic::StorageStore | GpuIntrinsic::StorageAtomicAdd | GpuIntrinsic::StorageAtomicMin => Err(LowerError::Internal(
                             "GPU storage store appeared as a tuple-returning call".to_owned(),
                         )),
                     };
@@ -15208,6 +15229,7 @@ where
         if let Some(intrinsic) = gpu_intrinsic(self.module.db, callee) {
             return match intrinsic {
                 GpuIntrinsic::StorageLoad => self.lower_gpu_storage_load_scalar(args),
+                GpuIntrinsic::StorageAtomicAdd | GpuIntrinsic::StorageAtomicMin => self.lower_gpu_storage_atomic_rmw(intrinsic, args),
                 GpuIntrinsic::StorageStore => Err(LowerError::Internal(
                     "GPU storage store appeared as a value-returning call".to_owned(),
                 )),

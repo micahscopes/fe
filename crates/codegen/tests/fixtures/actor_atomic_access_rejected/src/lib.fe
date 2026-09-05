@@ -1,0 +1,13 @@
+use std::webgpu::{AtomicStorageBuffer, StorageBuffer}
+
+pub fn ordinary_load_is_not_atomic(words: AtomicStorageBuffer<4>) -> u32 {
+    words.load(index: 0)
+}
+
+pub fn ordinary_store_is_not_atomic(words: AtomicStorageBuffer<4>) {
+    words.store(index: 0, value: 1)
+}
+
+pub fn atomic_update_requires_atomic_storage(words: StorageBuffer<u32, 4>) -> u32 {
+    words.atomic_add(index: 0, value: 1)
+}

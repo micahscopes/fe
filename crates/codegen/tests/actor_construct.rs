@@ -38,6 +38,43 @@ fn ingot_root(relative: &str) -> Url {
 }
 
 #[test]
+fn atomic_resource_policy_and_operations_reach_real_shader_atomics() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_atomic_claims");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("paint", None))
+        .expect("typed atomic actor compiles");
+    assert_eq!(bundle.manifest.resources.len(), 2);
+    let claims = &bundle.manifest.resources[0];
+    assert_eq!(claims.name, "claims");
+    assert_eq!(claims.element, WebActorResourceElement::AtomicU32);
+    assert_eq!(claims.policy["access"], "atomic_read_write");
+    assert_eq!(claims.policy["visibility"], "compute");
+    assert_eq!(claims.buffer_usage, [WebBufferUsage::Storage]);
+    let shader = &bundle.pass_wgsl[0].source;
+    assert!(shader.contains("array<atomic<u32>>"), "{shader}");
+    assert_eq!(shader.matches("atomicAdd(").count(), 2, "unused return must not erase the second update: {shader}");
+    assert!(shader.contains("atomicMin("), "{shader}");
+    assert!(!bundle.pass_wgsl[1].source.contains("atomic<u32>"), "unused atomics must not widen fragment bindings");
+}
+
+#[test]
+fn atomic_resource_access_cannot_be_confused_with_ordinary_access() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_atomic_access_rejected");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let diagnostics = db.run_on_top_mod(ingot_top_mod(&db, &url)).format_diags(&db);
+    assert!(!diagnostics.contains("`AtomicStorageBuffer` is not found"), "missing API is not access enforcement: {diagnostics}");
+    for name in ["load", "store", "atomic_add"] {
+        assert!(diagnostics.contains(&format!("`{name}`")), "missing rejection for {name}: {diagnostics}");
+    }
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
 fn indirect_raster_draw_is_derived_from_one_exact_fe_resource_type() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_raster_indirect");

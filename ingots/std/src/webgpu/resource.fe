@@ -27,6 +27,7 @@ pub enum ResourceAccess {
     ReadOnly,
     WriteOnly,
     ReadWrite,
+    AtomicReadWrite,
 }
 
 pub enum ResourceResidency {
@@ -117,6 +118,14 @@ pub struct WriteOnly {}
 
 /// Both shader loads and stores are admitted.
 pub struct ReadWrite {}
+
+/// Atomic u32 storage. Deliberately supplies neither GpuReadable nor
+/// GpuWritable: ordinary buffer methods cannot bypass atomic access.
+pub struct AtomicReadWrite {}
+
+impl ResourceAccessPolicy for AtomicReadWrite {
+    const fn access() -> ResourceAccess { ResourceAccess::AtomicReadWrite }
+}
 
 impl ResourceAccessPolicy for ReadOnly {
     const fn access() -> ResourceAccess { ResourceAccess::ReadOnly }
@@ -375,6 +384,25 @@ impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
         core::panic()
     }
 }
+
+impl<Kind, Residency, Init, Recovery, Visibility, const N: usize>
+    GpuBuffer<Kind, AtomicReadWrite, Residency, Init, Recovery, Visibility, N, u32>
+{
+    /// Device-scope relaxed addition modulo 2^32; returns the previous value.
+    /// This does not publish unrelated writes or synchronize workgroups.
+    #[gpu_intrinsic(storage_atomic_add)]
+    pub fn atomic_add(self, index: u32, value: u32) -> u32 { core::panic() }
+
+    /// Device-scope relaxed unsigned minimum; returns the previous value.
+    /// Separate producer/consumer dispatches when using this for ownership.
+    #[gpu_intrinsic(storage_atomic_min)]
+    pub fn atomic_min(self, index: u32, value: u32) -> u32 { core::panic() }
+}
+
+/// Zero-initialized, compute-local atomic words in the ordinary resource family.
+pub type AtomicStorageBuffer<const N: usize> = GpuBuffer<
+    StorageKind, AtomicReadWrite, ActorResident, Zeroed, ReplayRecipe, ComputeOnly, N, u32,
+>
 
 /// One nominal GPU-written command buffer consumed by a later indirect draw.
 ///

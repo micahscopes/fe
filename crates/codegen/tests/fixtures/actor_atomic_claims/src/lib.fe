@@ -1,0 +1,25 @@
+use std::webgpu::{
+    AtomicStorageBuffer, StorageBuffer, GpuProgram, WebGpuBackend,
+    ComputeSurface, ComputeInvocation, Workgroup, FixedDispatch, FragmentSurface,
+}
+
+fn claim_word(words: AtomicStorageBuffer<4>, value: u32) -> u32 {
+    let ticket = words.atomic_add(index: 0, value: 1)
+    words.atomic_add(index: 0, value: 1)
+    words.atomic_min(index: 1, value: value + ticket)
+}
+
+actor AtomicClaims uses (GpuProgram<WebGpuBackend>) {
+    claims: AtomicStorageBuffer<4>,
+    receipts: StorageBuffer<u32, 64>,
+
+    fn claim(self, lane: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<64, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        self.receipts.store(index: lane.global.x, value: claim_word(words: self.claims, value: lane.global.x))
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        self.receipts.load(index: 0).downcast_truncate()
+    }
+}

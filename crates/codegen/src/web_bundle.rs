@@ -773,6 +773,7 @@ fn normalized_resource_initialization<'a>(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebActorResourceElement {
     U32,
+    AtomicU32,
     F32,
     Record {
         fields: Vec<WebActorResourceField>,
@@ -1953,9 +1954,18 @@ fn actor_resources(
                 "storage resource `{name}` length must be nonzero"
             )));
         }
+        let mut element = resource_element(db, resource.element_ty, &name)?;
+        if normalized_resource_policy_field(&policy, "access", &name)? == "atomic_read_write" {
+            if element != WebActorResourceElement::U32 {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "atomic resource `{name}` requires a u32 element",
+                )));
+            }
+            element = WebActorResourceElement::AtomicU32;
+        }
         resources.push(WebActorResource {
             field_index: u32::try_from(field_index).unwrap(),
-            element: resource_element(db, resource.element_ty, &name)?,
+            element,
             name,
             length,
             kind: resource.kind,
@@ -6215,7 +6225,7 @@ fn web_resource_manifest(
     copy_source: bool,
 ) -> Result<WebResource, WebBundleError> {
     let span = match &resource.element {
-        WebActorResourceElement::U32 | WebActorResourceElement::F32 => 4,
+        WebActorResourceElement::U32 | WebActorResourceElement::AtomicU32 | WebActorResourceElement::F32 => 4,
         WebActorResourceElement::Record { span, .. } => *span,
     };
     let bytes = span.checked_mul(resource.length).ok_or_else(|| {
@@ -6490,6 +6500,7 @@ fn stage_external_resources(
                     // the physical carrier therefore uses read_write.
                     "write_only" => Access::ReadWrite,
                     "read_write" => access,
+                    "atomic_read_write" => Access::ReadWrite,
                     unsupported => {
                         return Err(WebBundleError::EntryDerivation(format!(
                             "resource `{}` has unsupported Fe access `{unsupported}`",
@@ -6498,6 +6509,7 @@ fn stage_external_resources(
                     }
                 },
                 element: match &resource.element {
+                    WebActorResourceElement::AtomicU32 => SpirvResourceElement::AtomicU32,
                     WebActorResourceElement::U32 => {
                         SpirvResourceElement::Scalar(SpirvScalarKind::U32)
                     }
