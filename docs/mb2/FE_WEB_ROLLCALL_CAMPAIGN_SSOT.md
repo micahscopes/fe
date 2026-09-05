@@ -183,9 +183,16 @@ also rejected, while the valid child and sibling remain planned. The expanded
 focused test passed, and all 117 backend tests passed in 14.31s:
 `/workspace/scratch/mb2-sonatina-transitive-helper-report-final-release.log`
 and `/workspace/scratch/mb2-sonatina-transitive-helper-report-suite-release.log`.
-This is still not the public Fe query. Shared-context and typed-local
-preparation can fail before this phase; their per-function failure reporting
-remains necessary before deleting Fe's classifier.
+Typed-local preparation now also retains per-function rejections alongside
+the interned type map. A rejected i256 local no longer prevents preparing a
+later function's f32 local. Final emission still requires a complete type
+report; an interned type does not authorize an invalid use closure or budget.
+The focused regression and all 117 backend tests passed (suite 4.80s):
+`/workspace/scratch/mb2-sonatina-typed-local-report-release.log` and
+`/workspace/scratch/mb2-sonatina-typed-local-report-suite-release.log`.
+This is still not the public Fe query. Shared resource-context preparation
+can fail before ABI planning, and the separate reports must be combined before
+deleting Fe's classifier.
 
 Legend:
 
