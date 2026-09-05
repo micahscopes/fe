@@ -169,6 +169,20 @@ arithmetic/error-handling commits through `e9232245`. Permission to publish
 that fast-forward was requested; no push has occurred. Fe's arithmetic source
 and gates remain isolated until a reproducible dependency pin can be landed.
 
+The native missing-definition fallback is not yet safe to delete merely after
+pinning the arithmetic repair. Inspection of Sonatina `e9232245` found a
+separate bypass in `isa/cranelift/translate.rs`: module translation skips every
+definition whose name contains `addmod` or `mulmod`, and call translation
+intercepts the same substrings as u256 runtime operations. Neither check
+distinguishes an authored body from a declaration or verifies the semantic
+intrinsic identity. This is code-inspection evidence, not a newly executed
+miscompilation repro. Before deleting Fe's fallback, add authored-body collision
+and real u256-declaration regressions, replace the broad name test with explicit
+intrinsic identity/signature handling, and make unsupported declarations return
+ordinary errors. The recent per-function error propagation repair does not
+close this independent skip path. Keep this work in the existing intrinsic
+capability consolidation slice rather than adding another fallback classifier.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
