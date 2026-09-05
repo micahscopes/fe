@@ -1147,8 +1147,57 @@ fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
     .expect("Fe-authored compute stage");
     let compute_wgsl = compute.wgsl.as_deref().expect("compute WGSL");
     assert!(compute_wgsl.contains("var<storage, read_write> orbit"));
-    assert!(compute_wgsl.contains(".re_bits = 1065353216u"));
-    assert!(compute_wgsl.contains(".im_bits = 3221225472u"));
+    // Constant records may remain typed composites until Naga emission. Check
+    // the values reaching the resource fields, not one pretty-printer spelling.
+    let parsed = naga::front::wgsl::parse_str(compute_wgsl).unwrap();
+    let writer = parsed
+        .functions
+        .iter()
+        .find_map(|(_, function)| {
+            (function.name.as_deref() == Some("write_known")).then_some(function)
+        })
+        .expect("retained resource writer");
+    fn constant_u32(
+        expressions: &naga::Arena<naga::Expression>,
+        value: naga::Handle<naga::Expression>,
+    ) -> Option<u32> {
+        match &expressions[value] {
+            naga::Expression::Literal(naga::Literal::U32(value)) => Some(*value),
+            naga::Expression::AccessIndex { base, index } => {
+                let naga::Expression::Compose { components, .. } = &expressions[*base] else {
+                    return None;
+                };
+                constant_u32(expressions, *components.get(*index as usize)?)
+            }
+            _ => None,
+        }
+    }
+    let mut stored = std::collections::BTreeMap::new();
+    for statement in writer.body.iter() {
+        let naga::Statement::Store { pointer, value } = statement else {
+            continue;
+        };
+        let naga::Expression::AccessIndex { base, index } = writer.expressions[*pointer] else {
+            continue;
+        };
+        let naga::Expression::Access { base, .. } = writer.expressions[base] else {
+            continue;
+        };
+        let naga::Expression::GlobalVariable(global) = writer.expressions[base] else {
+            continue;
+        };
+        if parsed.global_variables[global].name.as_deref() != Some("orbit") {
+            continue;
+        }
+        assert!(
+            stored.insert(index, constant_u32(&writer.expressions, *value)).is_none(),
+            "duplicate field store"
+        );
+    }
+    assert_eq!(
+        stored,
+        [(0, Some(1065353216)), (1, Some(3221225472))].into_iter().collect()
+    );
     assert!(
         compute_wgsl.contains("fn write_known") && compute_wgsl.matches("write_known").count() >= 2,
         "the helper which stores through a resource must remain callable:\n{compute_wgsl}",
