@@ -23,13 +23,19 @@ burn-down, not a second checklist.
 
 The governing [boundary design and historical execution record](FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md)
 is now carried on shared mb2, recovered from the former cleanup worktree.
-Its historical pending markers do not override this ledger. In particular,
-the direct-route study still requires a resource-identity case and a fixed or
-balanced storage/helper case, identical execution oracles, and attribution of
-Sonatina optimization benefit. No scalar-only shortcut or permanent second
-backend satisfies that gate.
+Its historical pending markers do not override this ledger. The bounded
+direct-route study is closed as inconclusive for production, with its missing
+comparative gates explicitly recorded. No permanent second backend was added.
 
-### Direct-route study: execution evidence, decision still open
+### Direct-route study: closed, inconclusive for production
+
+The [final report](DIRECT_NAGA_STUDY_2026_09_05.md) records the executed cases,
+Riffcat captures, numeric-contract mismatch, and missing comparison controls.
+Explicit wrapping arithmetic passes on both routes. Removing unused trap
+transport reduces the scratch wrapping shader from 7,405 to 5,960 bytes, but
+does not demonstrate a production advantage. The experiment stops rather than
+growing a second optimizer or structurizer. The earlier observations below
+remain evidence, not outstanding instructions to extend the experiment.
 
 The disposable study has two initial Chrome execution results on AMD RDNA3:
 
@@ -45,7 +51,7 @@ expands straight-line calls; it does not establish a general helper ABI or a
 production size advantage. Its resource-shape projection is deliberately
 scratch-only, not a second production classifier.
 
-The engineering timebox is 2026-09-05 21:15 through 23:15 UTC. Comparative
+The maximum engineering timebox was 2026-09-05 21:15 through 23:15 UTC. Comparative
 Sonatina optimization benefit, matching physical layouts, and hard-production
 attribution remain open. The study cannot authorize a backend choice from
 these small results. Evidence logs are under `/workspace/scratch/`:
