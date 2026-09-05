@@ -370,6 +370,28 @@ fixtures meet the query prerequisites from this one successful production gate.
 This run used a command-scoped local Sonatina override, with Cargo.lock restored
 afterward. No Chrome execution or new proof completion is claimed.
 
+Pending Fe cleanup now selects explicit WebGPU helpers from Sonatina's
+`analyze_request_helpers`, after exact merging and graph normalization.
+Query errors propagate without a fallback. Fe retains only profitability and
+the selected-callee closure policy; its separate raster scalar ABI filter and
+the preserve/scalar-only booleans are deleted. Legacy scalar/grid entry points
+still use the old classifier, explicitly separate from the WebGPU request path.
+The production gate with backend-driven selection passed unchanged at 56,001
+WGSL bytes, 2,150 reparsed Naga expressions, and 30 helpers. Instrumented
+lowering was 13,244ms, total 16,949ms (test 17.09s), not a speedup claim.
+Six raster-focused gates passed in 7.88s, the compute/resource gate passed in
+1.36s, and the independent resident scalar-actor Wasm oracle passed in 1.31s.
+Logs: `/workspace/scratch/mb2-boundary-backend-selection-production-release.log`,
+`/workspace/scratch/mb2-boundary-backend-selection-raster-release.log`,
+`/workspace/scratch/mb2-boundary-backend-selection-compute-release.log`, and
+`/workspace/scratch/mb2-boundary-backend-selection-wasm-release.log`.
+The two-file Fe integration remains in its isolated worktree, backed up at
+`/workspace/scratch/mb2-backend-selection-fe-integration.patch`. It requires
+local Sonatina `6ae3c3fa`; the command-scoped override's lock changes were
+restored. Do not claim this code is in live mb2 or portably dependency-pinned.
+Legacy classifier deletion, earlier intrinsic gating, broader gates, and
+publication/integration remain unfinished. No browser run accompanied this gate.
+
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
 `ef13a6568c0dbcd2e85a390048f81a20a61302ac`. The latter is already published
