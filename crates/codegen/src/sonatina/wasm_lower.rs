@@ -16217,8 +16217,8 @@ pub fn kernel(_ seed: u32) -> u32 {
     #[test]
     fn shader_state_return_chain_lowers_observable_snapshots() {
         // A small version of the prover's replay-state transport. Keep the old
-        // state observable. This gate checks lowering/validation only; execution
-        // must additionally check snapshots before changing aggregate forwarding.
+        // state observable. Wasm execution checks the source expectation; the
+        // shader leg checks lowering/validation, not GPU execution.
         let source = r#"
 struct State { words: [u32; 4], cursor: u32 }
 impl Copy for State {}
@@ -16259,6 +16259,23 @@ pub fn kernel(_ seed: u32) -> u32 {
             &db, &package, [1, 1, 1],
         )
         .expect("snapshot-observing state chain should reach validated SPIR-V");
+        let bytes = crate::BackendKind::Wasm
+            .create()
+            .compile(
+                &db, top_mod, crate::layout_for(crate::BackendKind::Wasm), crate::OptLevel::O0,
+            )
+            .expect("snapshot chain should retain the Wasm ABI")
+            .into_bytecode()
+            .expect("Wasm bytes");
+        let engine = wasmtime::Engine::default();
+        let wasm = wasmtime::Module::new(&engine, bytes).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &wasm, &[]).unwrap();
+        let kernel = instance.get_typed_func::<i32, i32>(&mut store, "kernel").unwrap();
+        for seed in [0, 1, 42, 1000] {
+            assert_eq!(kernel.call(&mut store, seed).unwrap(), 4 * seed + 4,
+                "old snapshots must not observe mutations to returned copies");
+        }
     }
 
     #[test]
