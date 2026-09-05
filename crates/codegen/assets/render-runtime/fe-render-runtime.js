@@ -2610,6 +2610,7 @@ export class FeSurfaceElement extends HTMLElement {
       let encoder = device.createCommandEncoder();
       let encoded = false;
       let encoderMode = null;
+      let computePassCount = 0;
       let texture = null;
       let rendered = false;
       let depthRendered = false;
@@ -2619,6 +2620,7 @@ export class FeSurfaceElement extends HTMLElement {
         encoder = device.createCommandEncoder();
         encoded = false;
         encoderMode = null;
+        computePassCount = 0;
       };
       const executeRecord = async (record, cycleIteration = null) => {
         if (record.pass.layout.mode === "compute") {
@@ -2692,10 +2694,16 @@ export class FeSurfaceElement extends HTMLElement {
             compute.end();
             encoded = true;
             encoderMode = "compute";
+            computePassCount += 1;
             remaining -= batch;
             if (cooperation !== undefined && cooperation !== null) {
               submitEncoder();
               await awaitSharedGpuQueueIdle(gpu);
+            } else if (computePassCount >= 256) {
+              // Bound command-buffer size without turning every actor-loop
+              // iteration into a queue submission. Separate compute passes
+              // retain storage/indirect dependencies inside one encoder.
+              submitEncoder();
             }
           }
         } else {
@@ -2750,12 +2758,12 @@ export class FeSurfaceElement extends HTMLElement {
           if (node.record) {
             await executeRecord(node.record, iteration);
           } else {
-            // Preserve dependency order and bounded encoders at every nesting
-            // level. Inner iteration counters reset for each enclosing job.
-            submitEncoder();
+            // Loop nesting controls order, not a CPU/GPU synchronization
+            // boundary. Encoding is bounded by the compute-pass budget above;
+            // explicit cooperation still submits and waits at its own boundary.
+            // Inner iteration counters reset for each enclosing job.
             for (let inner = 0; inner < node.repeat; inner += 1) {
               await executeSchedule(node.body, inner);
-              submitEncoder();
             }
           }
         }

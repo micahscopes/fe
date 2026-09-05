@@ -1617,7 +1617,7 @@ test("GPU-resident dispatch preserves command identity and actor-cycle ordering 
   surface._gpu = { device, passRecords: [record("schedule", false), record("work", true)] };
   await surface._presentOn({}, []);
   assert.deepEqual(trace, [
-    ["schedule", "fixed", 1, 1, 1], ["work", "indirect", 0], ["submit"],
+    ["schedule", "fixed", 1, 1, 1], ["work", "indirect", 0],
     ["schedule", "fixed", 1, 1, 1], ["work", "indirect", 0], ["submit"],
   ]);
 
@@ -1677,6 +1677,48 @@ test("typed actor readback transfers exact opaque bytes into resident Fe state",
     ["transition", 32, 4, 0n, [17, 19, 23, 29]],
     ["refresh"],
   ]);
+});
+
+test("nested compute cycles batch submissions with a bounded encoder and no readback", async () => {
+  const submissions = [];
+  const command = {};
+  const device = {
+    createCommandEncoder() {
+      const calls = [];
+      return {
+        beginComputePass() {
+          let name;
+          return {
+            setPipeline(p) { name = p.name; },
+            dispatchWorkgroups() { calls.push(name); },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              assert.equal(buffer, command); assert.equal(offset, 0); calls.push(name);
+            },
+            end() {},
+          };
+        },
+        finish() { return calls; },
+        copyBufferToBuffer() { assert.fail("no scheduling readback"); },
+      };
+    },
+    queue: {
+      submit(buffers) { submissions.push(buffers[0]); },
+      onSubmittedWorkDone() { assert.fail("no implicit cycle wait"); },
+    },
+  };
+  const record = (name, inner = false, indirect = false) => ({
+    pass: { layout: { mode: "compute" },
+      cycle: { group: 0, repeat: 3, ...(inner ? {inner:{group:1,repeat:100}} : {}) },
+      ...(indirect ? {dispatch_indirect:{resource:"command",offset:0}} : {dispatch:[1,1,1]}) },
+    pipeline:{name}, inputs:[], bindGroup:null, dispatchIndirectBuffer:indirect ? command : null,
+  });
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = true; surface._memberIndexByName = new Map();
+  surface._gpu = {device,passRecords:[record("begin"),record("schedule",true),record("work",true,true),record("end")]};
+  await surface._presentOn({}, []);
+  assert.deepEqual(submissions.map(s=>s.length),[256,256,94]);
+  const expected = Array.from({length:3},()=>["begin",...Array.from({length:100},()=>["schedule","work"]).flat(),"end"]).flat();
+  assert.deepEqual(submissions.flat(),expected);
 });
 
 test("Fe-derived cooperative dispatch batches preserve stage order and await queue idle", async () => {
