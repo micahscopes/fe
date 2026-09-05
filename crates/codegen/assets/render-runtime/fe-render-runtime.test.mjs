@@ -7,7 +7,7 @@ import test from "node:test";
 // constructing a surface or pretending to be a browser.
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
-const { rasterPlan, rasterColorTarget } = await import("./fe-render-runtime.js");
+const { rasterPlan, rasterColorTarget, rasterPrimitive } = await import("./fe-render-runtime.js");
 
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
@@ -158,6 +158,21 @@ installGeneratedWebGpuOperations({
     pass.draw(vertexCount, instanceCount, firstVertex, firstInstance),
   renderDrawIndirect: (pass, buffer, offset) =>
     pass.drawIndirect(buffer, offset),
+});
+
+test("Fe primitive plans preserve all native topologies and winding per pass", () => {
+  const raster = { cullMode: "back" };
+  for (const topology of ["point_list", "line_list", "line_strip", "triangle_list", "triangle_strip"]) {
+    for (const front_face of ["ccw", "cw"]) {
+      assert.deepEqual(rasterPrimitive({primitive: {topology, front_face}}, raster), {
+        topology: topology.replaceAll("_", "-"), frontFace: front_face, cullMode: "back",
+      });
+    }
+  }
+  assert.deepEqual(rasterPrimitive({}, raster), { topology: "triangle-list", frontFace: "ccw", cullMode: "back" });
+  assert.throws(() => rasterPrimitive({primitive: {topology: "quads", front_face: "ccw"}}, raster), /invalid Fe primitive/);
+  assert.throws(() => rasterPrimitive({primitive: null}, raster), /invalid Fe primitive/);
+  assert.throws(() => rasterPrimitive({primitive: {topology: "line_list", front_face: "unknown"}}, raster), /invalid Fe primitive/);
 });
 
 test("Fe color targets preserve blend components, write masks, and constants", () => {
@@ -1210,11 +1225,13 @@ test("fixed host consumes the Fe-derived authored-raster draw shape", () => {
     "legacy fullscreen render remains one three-vertex instance",
   );
   assert.throws(
-    () => rasterDrawShape({ draw_vertices: 0 }),
+    () => rasterDrawShape({ draw_vertices: -1 }),
     /invalid compiler-derived raster vertex count/,
   );
+  assert.deepEqual(rasterDrawShape({draw_vertices: 0, draw_instances: 0}), {vertices: 0, instances: 0});
+  assert.throws(() => rasterDrawShape({draw_vertices: 0x100000000}), /invalid compiler-derived raster vertex count/);
   assert.throws(
-    () => rasterDrawShape({ draw_vertices: 3, draw_instances: 0 }),
+    () => rasterDrawShape({ draw_vertices: 3, draw_instances: -1 }),
     /invalid compiler-derived raster instance count/,
   );
   assert.throws(

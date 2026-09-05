@@ -48,7 +48,7 @@ disable rasterization or depth writes. Blending and depth writes are independent
   Transparent overlap still requires an appropriate ordering or a different
   compositing algorithm. An invisible fragment can still write depth if enabled.
 - The current actor raster plan is shared by its raster passes. Per-pass raster
-  overrides, indexed drawing and additional primitive topologies are separate
+  overrides and indexed drawing are separate
   API work, not implied by the color policy.
 - Dual-source blending requires an optional WebGPU feature and is not included
   in the portable factors.
@@ -91,16 +91,16 @@ poster after `await surface.freeze()`, not from an expired canvas texture.
 The color slice does not constitute a complete WebGPU rendering interface.
 Continue in small independently tested changes on mb2:
 
-1. Per-draw point/line/triangle lists and strips, preserving the topology through
-   instancing. Primitive policy must belong to the pass, not to a whole demo.
-2. Typed index resources, 16/32-bit formats, indexed and indexed-indirect draws,
+Per-pass primitive assembly is implemented separately in [Draw policies](DRAW_POLICIES.md).
+
+1. Typed index resources, 16/32-bit formats, indexed and indexed-indirect draws,
    first/base offsets, strip restart, and exact resource identity/usage tracking.
    Compute-authored arguments and indices must remain GPU-resident.
-3. Pass-local raster composition so opaque geometry, transparent curves and
+2. Pass-local raster composition so opaque geometry, transparent curves and
    overlays can use different blend/depth-write policies in one actor graph.
-4. Complete depth comparisons, front-face orientation, depth bias and stencil
+3. Complete depth comparisons, depth bias and stencil
    policies; viewport/scissor and stencil-reference commands through WebIDL.
-5. Multisample masks and explicit alpha-to-coverage; typed color targets and
+4. Multisample masks and explicit alpha-to-coverage; typed color targets and
    capability-checked formats, including a non-packed floating color output path.
 
 Compare each slice with the [WebGPU specification](https://www.w3.org/TR/webgpu/)

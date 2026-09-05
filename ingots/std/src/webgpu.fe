@@ -17,6 +17,13 @@ use super::web::{
 }
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
+pub use draw::{
+    PrimitivePlan, PrimitiveTopology, FrontFace, PrimitivePolicy, primitive_plan,
+    PointTopology, LineTopology, LineStripTopology, TriangleTopology, TriangleStripTopology,
+    Clockwise, DirectDraw, IndirectDraw, PointList, LineList, LineStrip, TriangleList,
+    TriangleStrip, IndirectTriangleList,
+}
+
 pub use layout::{
     GpuLayout,
     StorageGpuLayout,
@@ -316,11 +323,6 @@ pub struct CooperativeDispatch<
 #[gpu_dispatch(cycled)]
 pub struct CycledDispatch<Group, Dispatch, const N: usize> {}
 
-/// One non-indexed triangle-list draw. Vertex/index-buffer variants can join
-/// this policy family without changing the stage role or browser ABI.
-#[gpu_draw(triangle_list)]
-pub struct TriangleList<const VERTICES: usize> {}
-
 /// Repeat one draw policy over a compile-time number of instances.
 ///
 /// The vertex behavior receives `vertex_index` followed by `instance_index`.
@@ -329,16 +331,6 @@ pub struct TriangleList<const VERTICES: usize> {}
 /// without expanding those values into one flattened vertex stream.
 #[gpu_draw(instanced)]
 pub struct Instanced<Draw, const INSTANCES: usize> {}
-
-/// Draw one non-indexed triangle list from the four WebGPU draw arguments in
-/// the exact actor resource `Args`:
-/// `[vertex_count, instance_count, first_vertex, first_instance]`.
-///
-/// Compute may author the arguments and the following raster pass consumes
-/// them without host readback. Both `vertex_index` and `instance_index` are
-/// therefore available to the vertex behavior even when one count is one.
-#[gpu_draw(indirect_triangle_list)]
-pub struct IndirectTriangleList<Args> {}
 
 /// The gesture-driven control-state role of an actor behavior (R3 param
 /// gestures): a `self`-taking behavior that maps raw gesture deltas (pan

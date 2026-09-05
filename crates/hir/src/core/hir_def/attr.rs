@@ -107,6 +107,8 @@ pub enum GpuDispatch {
 /// Primitive topology carried by a nominal authored-raster draw type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuDraw {
+    Direct,
+    Indirect,
     TriangleList,
     Instanced,
     /// A non-indexed triangle-list draw whose four WebGPU arguments are read
@@ -614,6 +616,8 @@ impl<'db> AttrListId<'db> {
 
     pub fn gpu_draw(self, db: &'db dyn HirDb) -> Option<GpuDraw> {
         match self.single_ident_arg(db, "gpu_draw")?.as_str() {
+            "direct" => Some(GpuDraw::Direct),
+            "indirect" => Some(GpuDraw::Indirect),
             "triangle_list" => Some(GpuDraw::TriangleList),
             "instanced" => Some(GpuDraw::Instanced),
             "indirect_triangle_list" => Some(GpuDraw::IndirectTriangleList),
@@ -702,6 +706,11 @@ impl<'db> AttrListId<'db> {
     /// compiler consumers only project the resulting concrete value.
     pub fn is_web_resource_plan(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_resource_plan")
+    }
+
+    /// Fe-owned primitive assembly and winding plan, evaluated per draw.
+    pub fn is_web_primitive_plan(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_primitive_plan")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

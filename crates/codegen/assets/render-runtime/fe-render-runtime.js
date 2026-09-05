@@ -301,10 +301,10 @@ export function rasterDrawShape(pass) {
   }
   const vertices = pass.draw_vertices ?? 3;
   const instances = pass.draw_instances ?? 1;
-  if (!Number.isSafeInteger(vertices) || vertices <= 0) {
+  if (!Number.isSafeInteger(vertices) || vertices < 0 || vertices > 0xffffffff) {
     throw new Error(`fe render runtime: invalid compiler-derived raster vertex count ${vertices}`);
   }
-  if (!Number.isSafeInteger(instances) || instances <= 0) {
+  if (!Number.isSafeInteger(instances) || instances < 0 || instances > 0xffffffff) {
     throw new Error(`fe render runtime: invalid compiler-derived raster instance count ${instances}`);
   }
   return { vertices, instances };
@@ -1209,6 +1209,17 @@ export function rasterColorTarget(format, raster) {
     ...(raster.color.blend ? { blend: raster.color.blend } : {}) };
 }
 
+export function rasterPrimitive(pass, raster) {
+  const policy = pass.primitive;
+  const topology = policy === undefined ? "triangle-list" : policy?.topology?.replaceAll?.("_", "-");
+  const frontFace = policy === undefined ? "ccw" : policy?.front_face;
+  if (!["point-list", "line-list", "line-strip", "triangle-list", "triangle-strip"].includes(topology) ||
+      !["ccw", "cw"].includes(frontFace)) {
+    throw new Error("fe render runtime: invalid Fe primitive assembly policy");
+  }
+  return { topology, frontFace, cullMode: raster.cullMode };
+}
+
 export function rasterPlan(surface, authoredRaster) {
   // v11 render policy is independent of the UI; retain old bundle decoding.
   const policy = authoredRaster ?? surface?.pipeline?.raster;
@@ -1642,7 +1653,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10, 11].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10, 11, 12].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -2287,7 +2298,7 @@ export class FeSurfaceElement extends HTMLElement {
                 entryPoint: pass.layout.fragment_entry,
                 targets: [rasterColorTarget(format, raster)],
               },
-              primitive: { topology: "triangle-list", cullMode: raster.cullMode },
+              primitive: rasterPrimitive(pass, raster),
               multisample: { count: raster.sampleCount },
               ...(isAuthoredRasterPass(pass) && raster.depth
                 ? {

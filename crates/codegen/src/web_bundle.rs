@@ -67,7 +67,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 11;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 12;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
@@ -648,6 +648,7 @@ pub enum WebActorStageKind {
         varying: CanonicalType,
         draw: WebActorDraw,
         instance_index: bool,
+        primitive: Option<serde_json::Value>,
     },
     Fragment,
     /// Authored fragment behavior paired with `Vertex` by exact nominal
@@ -1237,10 +1238,37 @@ fn role_payload_ty<'db>(
     Ok(*payload)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RasterDrawShape {
     draw: WebActorDraw,
     instance_index: bool,
+    primitive: Option<serde_json::Value>,
+}
+
+fn typed_primitive_policy(
+    db: &DriverDataBase,
+    draw: TyId<'_>,
+    primitive: TyId<'_>,
+) -> Result<serde_json::Value, WebBundleError> {
+    let function =
+        projected_const_plan_function(db, draw, "draw primitive", "PrimitivePlan", |attrs| {
+            attrs.is_web_primitive_plan(db)
+        })?;
+    let value =
+        eval_body_owner_const(db, BodyOwner::Func(function), vec![primitive]).map_err(|error| {
+            WebBundleError::EntryDerivation(format!(
+                "draw has no valid Fe PrimitivePolicy evidence: {}",
+                describe_raster_ctfe_error(&error)
+            ))
+        })?;
+    // Const evaluation can expose a recovery Unit for an ill-typed generic
+    // application. That is not an absent policy or a request for defaults.
+    if !matches!(value.value(db), SemConstValue::Struct { ty, .. } if ty == function.return_ty(db)) {
+        return Err(WebBundleError::EntryDerivation(
+            "draw has no valid Fe PrimitivePolicy evidence: evaluation did not return PrimitivePlan".into(),
+        ));
+    }
+    project_manifest_const(db, value, "Fe primitive plan")
 }
 
 fn exact_indirect_resource_field(
@@ -1327,6 +1355,34 @@ fn raster_draw_shape_from_ty(
         )
     })?;
     match attrs.gpu_draw(db) {
+        Some(GpuDraw::Direct | GpuDraw::Indirect) => {
+            let [primitive, operand, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "draw policy requires a primitive policy and a count or exact argument resource".into()));
+            };
+            let primitive = Some(typed_primitive_policy(db, draw, *primitive)?);
+            let indirect = attrs.gpu_draw(db) == Some(GpuDraw::Indirect);
+            let draw = if indirect {
+                WebActorDraw::Indirect {
+                    resource_field_index: exact_indirect_resource_field(db, actor, *operand)?,
+                }
+            } else {
+                let vertex_count = semantic_const_u32(db, *operand).ok_or_else(|| {
+                    WebBundleError::EntryDerivation(
+                        "direct vertex count must be a concrete u32-sized integer".into(),
+                    )
+                })?;
+                WebActorDraw::Direct {
+                    vertex_count,
+                    instance_count: 1,
+                }
+            };
+            Ok(RasterDrawShape {
+                draw,
+                instance_index: indirect,
+                primitive,
+            })
+        }
         Some(GpuDraw::TriangleList) => {
             let [count, ..] = draw.generic_args(db) else {
                 return Err(WebBundleError::EntryDerivation(
@@ -1349,6 +1405,7 @@ fn raster_draw_shape_from_ty(
                     instance_count: 1,
                 },
                 instance_index: false,
+                primitive: None,
             })
         }
         Some(GpuDraw::Instanced) => {
@@ -1363,11 +1420,6 @@ fn raster_draw_shape_from_ty(
                     "instanced draw count must be a concrete u32-sized integer".to_owned(),
                 )
             })?;
-            if count == 0 {
-                return Err(WebBundleError::EntryDerivation(
-                    "instanced draw count must be nonzero".to_owned(),
-                ));
-            }
             let inner = raster_draw_shape_from_ty(db, actor, *inner)?;
             let WebActorDraw::Direct {
                 vertex_count,
@@ -1390,6 +1442,7 @@ fn raster_draw_shape_from_ty(
                     instance_count,
                 },
                 instance_index: true,
+                primitive: inner.primitive,
             })
         }
         Some(GpuDraw::IndirectTriangleList) => {
@@ -1404,6 +1457,7 @@ fn raster_draw_shape_from_ty(
                     resource_field_index: exact_indirect_resource_field(db, actor, *resource)?,
                 },
                 instance_index: true,
+                primitive: None,
             })
         }
         None => Err(WebBundleError::EntryDerivation(
@@ -1527,6 +1581,7 @@ fn raster_vertex_stage<'db>(
             varying,
             draw: draw.draw,
             instance_index: draw.instance_index,
+            primitive: draw.primitive,
         },
         payload,
     ))
@@ -1650,15 +1705,17 @@ fn resource_element(
     Ok(WebActorResourceElement::Record { fields, span })
 }
 
-fn projected_resource_plan_function<'db>(
+fn projected_const_plan_function<'db>(
     db: &'db DriverDataBase,
-    resource_ty: TyId<'db>,
-    path: &str,
+    owner_ty: TyId<'db>,
+    context: &str,
+    plan_name: &str,
+    is_plan: impl Fn(hir::hir_def::AttrListId<'db>) -> bool,
 ) -> Result<Func<'db>, WebBundleError> {
-    let resource_name = resource_ty.pretty_print(db);
-    let ingot = resource_ty.ingot(db).ok_or_else(|| {
+    let owner_name = owner_ty.pretty_print(db);
+    let ingot = owner_ty.ingot(db).ok_or_else(|| {
         WebBundleError::EntryDerivation(format!(
-            "resource `{path}` type `{resource_name}` is not owned by a resolvable Fe ingot"
+            "{context} type `{owner_name}` is not owned by a resolvable Fe ingot"
         ))
     })?;
     let candidates = ingot
@@ -1675,17 +1732,16 @@ fn projected_resource_plan_function<'db>(
                     func.hir_generic_params(db).data(db).as_slice(),
                     [GenericParam::Type(_)]
                 )
-                && nominal_attrs(db, func.return_ty(db))
-                    .is_some_and(|attrs| attrs.is_web_resource_plan(db))
+                && nominal_attrs(db, func.return_ty(db)).is_some_and(&is_plan)
         })
         .collect::<Vec<_>>();
     match candidates.as_slice() {
         [function] => Ok(*function),
         [] => Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` type `{resource_name}` has no unique public generic Fe const evaluator returning the nominal ResourcePlan"
+            "{context} type `{owner_name}` has no unique public generic Fe const evaluator returning the nominal {plan_name}"
         ))),
         _ => Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` type `{resource_name}` has {} matching Fe resource-plan evaluators; exactly one is required",
+            "{context} type `{owner_name}` has {} matching Fe {plan_name} evaluators; exactly one is required",
             candidates.len()
         ))),
     }
@@ -1833,7 +1889,13 @@ fn typed_resource_policy(
     resource_ty: TyId<'_>,
     path: &str,
 ) -> Result<serde_json::Value, WebBundleError> {
-    let function = projected_resource_plan_function(db, resource_ty, path)?;
+    let function = projected_const_plan_function(
+        db,
+        resource_ty,
+        &format!("resource `{path}`"),
+        "ResourcePlan",
+        |attrs| attrs.is_web_resource_plan(db),
+    )?;
     let value = eval_body_owner_const(db, BodyOwner::Func(function), vec![resource_ty]).map_err(
         |error| {
             WebBundleError::EntryDerivation(format!(
@@ -5812,6 +5874,10 @@ pub struct WebResourceArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebPass {
+    /// CTFE-evaluated Fe primitive assembly for this draw, independent of the
+    /// count source and the other passes in the actor graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<serde_json::Value>,
     pub source_entry: String,
     pub shader: String,
     pub shader_bytes: u64,
@@ -7012,6 +7078,7 @@ impl WebBundle {
             if let WebActorStageKind::Vertex {
                 draw,
                 instance_index,
+                primitive,
                 ..
             } = &stage.kind
             {
@@ -7099,6 +7166,7 @@ impl WebBundle {
                     }
                 };
                 passes.push(WebPass {
+                    primitive: primitive.clone(),
                     source_entry: fragment_entry.clone(),
                     shader: path.clone(),
                     shader_bytes: shader.len() as u64,
@@ -7191,6 +7259,7 @@ impl WebBundle {
                 }
             });
             passes.push(WebPass {
+                primitive: None,
                 source_entry: stage.source_entry.clone(),
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
@@ -7857,6 +7926,7 @@ impl WebBundle {
         project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[])?;
         let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[])?;
         let passes = vec![WebPass {
+            primitive: None,
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,

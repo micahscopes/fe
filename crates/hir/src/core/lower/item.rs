@@ -307,11 +307,8 @@ fn validate_struct_attrs<'db>(
                 "`#[web_surface_recovery_step]`",
             ),
             AttrRule::supported("web_raster_plan", BARE_FORM, "`#[web_raster_plan]`"),
-            AttrRule::supported(
-                "web_resource_plan",
-                BARE_FORM,
-                "`#[web_resource_plan]`",
-            ),
+            AttrRule::supported("web_primitive_plan", BARE_FORM, "`#[web_primitive_plan]`"),
+            AttrRule::supported("web_resource_plan", BARE_FORM, "`#[web_resource_plan]`"),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported(
                 "gpu_dispatch",
@@ -321,7 +318,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_draw",
                 GPU_IDENT_FORM,
-                "`#[gpu_draw(triangle_list)]`, `#[gpu_draw(instanced)]`, or `#[gpu_draw(indirect_triangle_list)]`",
+                "`#[gpu_draw(direct)]`, `#[gpu_draw(indirect)]`, `#[gpu_draw(instanced)]`, or legacy triangle-list draw forms",
             ),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),

@@ -1,0 +1,88 @@
+use std::webgpu::{
+    ClipPosition,
+    ComputeInvocation,
+    ComputeSurface,
+    DrawIndirectBuffer,
+    FixedDispatch,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    RasterVertex,
+    VertexStage,
+    WebGpuBackend,
+    Workgroup,
+    DirectDraw,
+    IndirectDraw,
+    Clockwise,
+    Instanced,
+    PointList,
+    LineList,
+    LineStripTopology,
+    TriangleList,
+    TriangleStrip,
+}
+
+struct Commands {}
+struct Varying { value: f32 }
+impl Copy for Varying {}
+fn corner(_ index: u32, _ x: f32, _ y: f32) -> RasterVertex<Varying> {
+    RasterVertex {
+        position: ClipPosition {
+            x: x + if index % 2 == 0 { -0.18 } else { 0.18 },
+            y: y + if index < 2 { -0.18 } else { 0.18 },
+            z: 0.5,
+            w: 1.0,
+        },
+        varying: Varying { value: 1.0 },
+    }
+}
+
+actor PrimitiveTopologies uses (GpuProgram<WebGpuBackend>) {
+    commands: DrawIndirectBuffer<Commands>,
+    fn prepare(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
+        self.commands.store(index: 0, value: 4)
+        self.commands.store(index: 1, value: 1)
+        self.commands.store(index: 2, value: 0)
+        self.commands.store(index: 3, value: 0)
+    }
+    fn background(self, x: i32, y: i32) -> i32 uses (FragmentSurface) { -16777216 }
+
+    fn points(self, index: u32) -> RasterVertex<Varying> uses (VertexStage<Varying, PointList<4>>) {
+        corner(index, -0.6, 0.5)
+    }
+    fn point_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+
+    fn lines(self, index: u32, instance: u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying, Instanced<LineList<4>, 2>>) {
+        corner(index, if instance == 0 { -0.05 } else { 0.05 }, 0.5)
+    }
+    fn line_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+
+    fn line_strip(self, index: u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying, DirectDraw<Clockwise<LineStripTopology>, 4>>) {
+        corner(index, 0.6, 0.5)
+    }
+    fn strip_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+
+    fn triangles(self, index: u32) -> RasterVertex<Varying> uses (VertexStage<Varying, TriangleList<3>>) {
+        corner(index, -0.6, -0.3)
+    }
+    fn triangle_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+
+    fn triangle_strip(self, index: u32) -> RasterVertex<Varying> uses (VertexStage<Varying, TriangleStrip<4>>) {
+        corner(index, 0.0, -0.3)
+    }
+    fn triangle_strip_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+
+    fn indirect(self, index: u32, instance: u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying, IndirectDraw<LineStripTopology, DrawIndirectBuffer<Commands>>>) {
+        corner(index, 0.6, -0.3)
+    }
+    fn indirect_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+
+    fn empty(self, index: u32) -> RasterVertex<Varying> uses (VertexStage<Varying, PointList<0>>) {
+        corner(index, 0.0, 0.0)
+    }
+    fn empty_color(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+}

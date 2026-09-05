@@ -730,6 +730,68 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
 }
 
 #[test]
+fn primitive_policy_requires_fe_trait_evidence_before_shader_lowering() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_primitive_missing_policy");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error.to_string().contains("PrimitivePolicy evidence"),
+        "{error}"
+    );
+}
+
+#[test]
+fn primitive_policies_compose_with_direct_instanced_and_indirect_counts() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_primitive_topologies");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None)).unwrap();
+    let draws = bundle
+        .manifest
+        .passes
+        .iter()
+        .filter(|pass| pass.primitive.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(draws.len(), 7);
+    assert_eq!(
+        draws
+            .iter()
+            .map(|pass| pass.primitive.as_ref().unwrap()["topology"]
+                .as_str()
+                .unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "point_list",
+            "line_list",
+            "line_strip",
+            "triangle_list",
+            "triangle_strip",
+            "line_strip",
+            "point_list"
+        ]
+    );
+    assert_eq!(draws[1].draw_instances, Some(2));
+    assert_eq!(draws[2].primitive.as_ref().unwrap()["front_face"], "cw");
+    assert_eq!(
+        draws[5].draw_indirect.as_ref().unwrap().resource,
+        "commands"
+    );
+    assert_eq!(draws[6].draw_vertices, Some(0));
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert!(
+        bundle.manifest.resources[0]
+            .buffer_usage
+            .contains(&WebBufferUsage::Indirect)
+    );
+}
+
+#[test]
 fn fullscreen_only_actor_retains_raster_policy_without_resources_or_ui() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_fullscreen_raster");
@@ -1287,7 +1349,10 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
             .with_resource_asset(BYTES.to_vec()),
     )
     .expect("verified content-addressed bundle");
-    assert_eq!(bundle.manifest.protocol_version, 11);
+    assert_eq!(
+        bundle.manifest.protocol_version,
+        fe_codegen::WEB_BUNDLE_PROTOCOL_VERSION
+    );
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("content actor must derive exactly one resource")
     };
@@ -1357,7 +1422,10 @@ fn attributed_actor_builds_a_materialized_v10_pass_graph() {
     )
     .expect("v10 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 11);
+    assert_eq!(
+        bundle.manifest.protocol_version,
+        fe_codegen::WEB_BUNDLE_PROTOCOL_VERSION
+    );
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);
