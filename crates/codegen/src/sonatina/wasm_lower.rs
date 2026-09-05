@@ -10287,6 +10287,7 @@ struct LocalSsaBinding {
 /// interprocedural ABI and arena escape facts; it does not replace their
 /// analyses. Emission retains the resulting materialization and call plans.
 struct BodyLocalStoragePlan<'db> {
+    arena: BodyArenaPlan,
     binding_facts: BindingFacts,
     reachable: Vec<bool>,
     copies: FxHashMap<(RLocalId, RLocalId), ValueCopyStorage<'db>>,
@@ -10426,6 +10427,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
 
         let reachable = compute_reachable_blocks(body);
         let mut plan = Self {
+            arena: BodyArenaPlan::default(),
             binding_facts: derive_binding_facts(body),
             reachable,
             copies: FxHashMap::default(),
@@ -10469,7 +10471,72 @@ impl<'db> BodyLocalStoragePlan<'db> {
                 }
             }
         }
+        plan.arena = plan.plan_arena(module, body);
         Ok(plan)
+    }
+
+    fn plan_arena<I: Isa<InstSet = NativeInstSet>>(
+        &self,
+        module: &PortableModuleLowerer<'db, '_, I>,
+        body: &RuntimeBody<'db>,
+    ) -> BodyArenaPlan {
+        let indirect_params = module.indirect_aggregate_params.get(&body.owner);
+        let mut arena = BodyArenaPlan {
+            prologue: ArenaEmissionCount {
+                allocations: self.materialized_scalar_slots.len()
+                    + body.signature.params.iter().filter(|param| {
+                        !indirect_params.is_some_and(|params| params.contains(&param.local))
+                            && !self.materialized_scalar_slots.contains(&param.local)
+                            && self.materialized_param_slots.contains(&param.local)
+                    }).count(),
+                retained_results: 0,
+            },
+            blocks: vec![ArenaEmissionCount::default(); body.blocks.len()],
+        };
+        for (index, block) in body.blocks.iter().enumerate() {
+            if !self.reachable[index] {
+                continue;
+            }
+            let demand = &mut arena.blocks[index];
+            for stmt in &block.stmts {
+                let RStmt::Assign { dst, expr } = stmt else { continue };
+                if let RExpr::Call { callee, args } = expr {
+                    if let Some(call) = self.calls.get(&(*callee, args.to_vec())) {
+                        demand.allocations += call.arguments.iter()
+                            .filter(|argument| argument.materializes()).count();
+                        demand.retained_results += usize::from(call.result == CallResultStorage::EnclosingArena);
+                    }
+                    continue;
+                }
+                // Erased and flattened assignments never synthesize arena
+                // storage. Their emitters have no single-value materialization.
+                if !matches!(self.values[dst.as_u32() as usize], Some(LocalValueRepresentation::Single(_))) {
+                    continue;
+                }
+                let allocates = match expr {
+                    RExpr::Use(src) => matches!(
+                        self.copies.get(&(*dst, *src)), Some(ValueCopyStorage::DeepCopy(_))
+                    ),
+                    RExpr::AggregateMake { .. } | RExpr::Load { .. }
+                    | RExpr::AggregateExtract { .. } => self.address_carried_aggregate_values.contains(dst),
+                    RExpr::AllocObject { .. } | RExpr::MaterializeToObject { .. } => {
+                        !self.typed_private_locals.contains_key(dst)
+                    }
+                    RExpr::MaterializePlaceToObject { .. }
+                    | RExpr::Builtin(RuntimeBuiltin::Malloc { .. }) => true,
+                    _ => false,
+                };
+                demand.allocations += usize::from(allocates);
+            }
+            if module.indirect_aggregate_returns.contains(&body.owner)
+                && let RTerminator::Return(Some(value)) = &block.terminator
+                && !self.materialized_param_slots.contains(value)
+                && !self.address_carried_aggregate_values.contains(value)
+            {
+                demand.allocations += 1;
+            }
+        }
+        arena
     }
 
     fn plan_value_copy<I: Isa<InstSet = NativeInstSet>>(
@@ -10635,6 +10702,40 @@ enum CallArgumentStorage<'db> {
     BorrowMaterialization,
 }
 
+/// Static emission counts, not runtime allocation volume or an arena bound.
+/// A loop's allocation site is counted once; a callee-owned result is a
+/// separate lifetime use even when this body emits no allocation instruction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ArenaEmissionCount {
+    allocations: usize,
+    retained_results: usize,
+}
+
+impl ArenaEmissionCount {
+    fn uses_arena(self) -> bool {
+        self.allocations != 0 || self.retained_results != 0
+    }
+
+    fn since(self, before: Self) -> Self {
+        Self {
+            allocations: self.allocations - before.allocations,
+            retained_results: self.retained_results - before.retained_results,
+        }
+    }
+}
+
+#[derive(Default)]
+struct BodyArenaPlan {
+    prologue: ArenaEmissionCount,
+    blocks: Vec<ArenaEmissionCount>,
+}
+
+impl BodyArenaPlan {
+    fn uses_arena(&self) -> bool {
+        self.prologue.uses_arena() || self.blocks.iter().any(|block| block.uses_arena())
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ValueCopyStorage<'db> {
     ReadScalar,
@@ -10748,10 +10849,8 @@ where
     trap_block: Option<BlockId>,
     scoped_arena: bool,
     arena_checkpoint: Option<ValueId>,
-    /// Whether lowering emitted storage whose lifetime is owned by this
-    /// function's canonical-arena frame. Typed shader locals do not set this:
-    /// their function storage is already represented by Sonatina `alloca`.
-    canonical_arena_used: bool,
+    arena_plan: BodyArenaPlan,
+    emitted_arena: ArenaEmissionCount,
 }
 
 impl<'ctx, 'db, 'a, I> PortableFunctionLowerer<'ctx, 'db, 'a, I>
@@ -10768,6 +10867,7 @@ where
         indirect_aggregate_return: bool,
     ) -> Result<Self, LowerError> {
         let BodyLocalStoragePlan {
+            arena: arena_plan,
             binding_facts: _,
             reachable,
             copies: copy_storage,
@@ -10778,6 +10878,7 @@ where
             materialized_scalar_slots,
             address_carried_aggregate_values,
         } = BodyLocalStoragePlan::derive(module, &body, scoped_arena)?;
+        let scoped_arena = scoped_arena && arena_plan.uses_arena();
         let mut fb = module.builder.func_builder::<InstInserter>(func_ref);
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
@@ -10826,7 +10927,8 @@ where
             trap_block: None,
             scoped_arena,
             arena_checkpoint: None,
-            canonical_arena_used: false,
+            arena_plan,
+            emitted_arena: ArenaEmissionCount::default(),
         })
     }
 
@@ -10969,6 +11071,7 @@ where
                 wasm_arg_idx += 1;
             }
         }
+        self.check_arena_emission("prologue", self.arena_plan.prologue, self.emitted_arena)?;
         let entry = self.block_map[0];
         self.fb.insert_inst_no_result(Jump::new(is, entry));
 
@@ -10982,6 +11085,7 @@ where
                 self.fb.insert_inst_no_result(Unreachable::new(is));
                 continue;
             }
+            let before_arena = self.emitted_arena;
             for stmt in &block.stmts {
                 self.lower_stmt(stmt)?;
             }
@@ -10993,70 +11097,30 @@ where
                     )),
                     other => other,
                 })?;
+            self.check_arena_emission(
+                &format!("block {idx}"),
+                self.arena_plan.blocks[idx],
+                self.emitted_arena.since(before_arena),
+            )?;
         }
 
-        self.remove_empty_scoped_arena()?;
         self.fb.seal_all();
         self.fb.finish();
         Ok(())
     }
 
-    /// Remove the conservative function arena frame when target-specific
-    /// materialization proved that the lowered body never used it. The RMIR
-    /// escape analysis deliberately runs before shader typed-local selection,
-    /// so it can request a frame for an aggregate which later becomes a
-    /// function-local `alloca`. Keeping that empty checkpoint and its rewinds
-    /// would make an otherwise callable helper look memory-effectful to the
-    /// SPIR-V backend and force repeated inlining.
-    fn remove_empty_scoped_arena(&mut self) -> Result<(), LowerError> {
-        if !self.scoped_arena || self.canonical_arena_used {
-            return Ok(());
-        }
-        let Some(checkpoint) = self.arena_checkpoint.take() else {
-            return Err(LowerError::Internal(
-                "scoped arena body has no prologue checkpoint".to_owned(),
-            ));
-        };
-        let checkpoint_inst = self.fb.func.dfg.value_inst(checkpoint).ok_or_else(|| {
-            LowerError::Internal("scoped arena checkpoint has no defining instruction".to_owned())
-        })?;
-        let inst_set = self.fb.func.inst_set();
-        let mut rewinds = Vec::new();
-        let mut unexpected_users = Vec::new();
-        for block in self.fb.func.layout.iter_block() {
-            for inst in self.fb.func.layout.iter_inst(block) {
-                let data = self.fb.func.dfg.inst(inst);
-                let mut uses_checkpoint = false;
-                data.for_each_value(&mut |value| uses_checkpoint |= value == checkpoint);
-                if !uses_checkpoint {
-                    continue;
-                }
-                if <&MemRewind as sonatina_ir::InstDowncast>::downcast(inst_set, data)
-                    .is_some_and(|rewind| *rewind.checkpoint() == checkpoint)
-                {
-                    rewinds.push(inst);
-                } else {
-                    unexpected_users.push(inst);
-                }
-            }
-        }
-        if !unexpected_users.is_empty() {
+    fn check_arena_emission(
+        &self,
+        site: &str,
+        planned: ArenaEmissionCount,
+        emitted: ArenaEmissionCount,
+    ) -> Result<(), LowerError> {
+        if planned != emitted {
             return Err(LowerError::Internal(format!(
-                "empty scoped arena checkpoint has unexpected users {unexpected_users:?}"
+                "arena storage plan mismatch in `{}` {site}: planned {planned:?}, emitted {emitted:?}",
+                self.module.function_symbol(self.body.owner),
             )));
         }
-        for rewind in rewinds {
-            self.fb.func.layout.remove_inst(rewind);
-            self.fb.func.erase_inst(rewind);
-        }
-        self.fb.func.layout.remove_inst(checkpoint_inst);
-        self.fb.func.erase_inst(checkpoint_inst);
-        wasm_lower_trace_detail(|| {
-            format!(
-                "removed empty scoped arena, symbol={}",
-                self.module.function_symbol(self.body.owner),
-            )
-        });
         Ok(())
     }
 
@@ -11400,7 +11464,7 @@ where
         // Callee-allocated results belong to our enclosing frame even when
         // argument preparation emits no allocation. Consume the body plan,
         // rather than reclassifying return ownership in each call emitter.
-        self.canonical_arena_used |= plan.result == CallResultStorage::EnclosingArena;
+        self.emitted_arena.retained_results += usize::from(plan.result == CallResultStorage::EnclosingArena);
         let mut values = Vec::new();
         let mut call_checkpoint = None;
         for (arg, storage) in args.iter().zip(plan.arguments) {
@@ -12914,7 +12978,7 @@ where
         size: usize,
         description: &str,
     ) -> Result<ValueId, LowerError> {
-        self.canonical_arena_used = true;
+        self.emitted_arena.allocations += 1;
         let is = self.inst_set();
         const ALIGN: i32 = 8;
         let alloc_size = size
@@ -14865,7 +14929,7 @@ where
                 Ok(self.fb.insert_inst(Fround::new(is, value), Type::F32))
             }
             RuntimeBuiltin::Malloc { size } => {
-                self.canonical_arena_used = true;
+                self.emitted_arena.allocations += 1;
                 let is = self.inst_set();
                 let size = self.local_value(*size)?;
                 if self.fb.type_of(size) != Type::I32 {
@@ -15645,6 +15709,23 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planned_arena_need_includes_callee_owned_results_without_allocations() {
+        let none = ArenaEmissionCount::default();
+        let allocation = ArenaEmissionCount { allocations: 1, retained_results: 0 };
+        let result = ArenaEmissionCount { allocations: 0, retained_results: 1 };
+        for prologue in [none, allocation] {
+            for block in [none, allocation, result] {
+                let plan = BodyArenaPlan { prologue, blocks: vec![none, block] };
+                assert_eq!(plan.uses_arena(), prologue != none || block != none);
+            }
+        }
+        let before = ArenaEmissionCount { allocations: 3, retained_results: 2 };
+        assert_eq!(before.since(before), none);
+        let after = ArenaEmissionCount { allocations: 3, retained_results: 3 };
+        assert_eq!(after.since(before), result);
+    }
 
     #[test]
     fn call_storage_plan_keeps_result_ownership_independent_of_arguments() {
