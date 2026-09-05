@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `47e8e52d`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `e2128b46`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -252,6 +252,19 @@ The report remains internal: request-level validation and authored-raster
 preparation must support the public query before Fe's classifier is removed.
 It does not claim legality for unresolved resource identities or incomplete
 entry contexts, nor does it emit a partially valid shader.
+
+Sonatina `e2128b46` extracts the existing single-entry signature, resource,
+builtin, dispatch, and resource-liveness checks into `NagaEntryInterface`.
+Emission consumes the same derived facts; the extraction adds no alternative
+validator. The focused regression checks dispatch extent/count/span, zero
+dimensions, overflow, and missing builtin arguments. It also verifies that a
+valid interface containing an unsupported helper still fails full compilation.
+The regression passed, and all 117 backend tests passed with llvmpipe in 2.81s.
+Evidence: `/workspace/scratch/mb2-sonatina-entry-interface-release.log` and
+`/workspace/scratch/mb2-sonatina-entry-interface-suite-release.log`.
+This is interface analysis, not complete request legality: body-dependent mode
+checks and paired authored-raster preparation remain separate. The public
+capability query and Fe classifier replacement are still pending.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
