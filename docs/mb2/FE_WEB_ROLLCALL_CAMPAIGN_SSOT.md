@@ -44,7 +44,19 @@ Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
 plan and gate logs. Isolated combined validation passed 26 focused release
 tests after shared Cargo artifacts exposed cross-worktree reuse. The newer
 binding-facts change is also incorporated there as `a6cf87ed5`; its combined
-Shader-candidate validation remains to be rerun.
+Shader-candidate validation passed all 20 selected tests (three Shader IR and
+seventeen typed allocation). The log is
+`/workspace/scratch/mb2-shader-binding-facts-release.log`.
+
+The next pending code patch makes emission consume the local carrier chosen by
+the body plan, deleting the duplicate local-type classifier and its separate
+GPU-resource lookup. Its broader gates exposed an obsolete payload-enum
+rejection test, reproduced on the unchanged parent. `dbe192493` corrects that
+test to execute supported payload values and trap invalid host tags; both enum
+tests passed against the unchanged compiler. Parent/revised evidence:
+`/workspace/scratch/mb2-parent-payload-enum-release.log` and
+`/workspace/scratch/mb2-payload-enum-contract-release.log`. This is a test
+contract correction, not new payload-enum support or a compiler behavior fix.
 
 Remaining boundary work includes representation/lifetime consolidation,
 Sonatina-owned GPU ABI and capabilities, early Fe intrinsic gating, CFG normal
