@@ -452,7 +452,16 @@ CTFE fixtures passed (2 tests, 4.98s) in the cleanup worktree, including all
 14 identities and the CTFE-only reciprocal-square-root case. The four source
 and fixture files landed byte-identically on mb2. Evidence is
 `/workspace/scratch/mb2-shared-f32-identity-ctfe-release.log`.
-MIR and portable codegen consumer migration is still pending its runtime gate.
+MIR and portable codegen consumer migration subsequently landed as `8aa2f0da2`.
+The cleanup checkout passed all 13 f32-filtered Wasm execution tests (23.46s)
+and the authored intrinsic-spelling regression (21.80s), against immutable
+Sonatina `54c6c633`. The migration removes 58 net lines on live mb2, replacing
+the duplicate runtime enum/name table and downstream call-name guard with the
+shared identity. Runtime rsqrt remains explicitly unsupported, unlike CTFE.
+Evidence: `/workspace/scratch/mb2-shared-f32-identity-all-f32-release.log`
+and `/workspace/scratch/mb2-shared-f32-identity-authored-release.log`.
+A live-mb2 published-pin replay is running, not yet counted as passed:
+`/workspace/scratch/mb2-main-shared-f32-identity-release.log`.
 This centralizes existing declaration spelling, not explicit intrinsic tags or
 complete early target-capability gating; other numeric families remain open.
 
