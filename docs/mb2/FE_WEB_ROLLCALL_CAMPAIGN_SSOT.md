@@ -21,6 +21,79 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+### Aggregate transport checkpoint and follow-through experiments (2026-09-05)
+
+Fe `e8744fdf3` preserves eligible private shader aggregate transport. The same
+19-stage composition corpus shrank from 12,936,420 to 2,706,004 WGSL bytes.
+Chrome created the largest saved shader's pipeline on AMD RDNA-3 in 13.37s;
+this was compilation only. `44941bb9f` adds executed snapshot and zero-trap
+checking on llvmpipe. The existing EVM/Wasm/GPU scalar keystone still agrees.
+These newer measurements supersede earlier composition-size checkpoints, not
+the remaining architectural obligations below. Detailed provenance and limits:
+[`compiler observation record`](../dev/compiler-observation-integration.md).
+
+The following six experiments are required follow-through, not another master
+checklist. Owner: shared mb2 compiler work, with Quilting owning its application
+inputs. Land successful generic fixes in verified increments on the shared Fe
+and Sonatina lines. A negative result closes an experiment only with recorded
+evidence and a decision; it does not justify dropping its correctness gate.
+
+- [ ] E1, bounded browser execution and cost comparison (next).
+  Freeze matching old/new shader artifacts, source digest, compiler revisions,
+  binding layouts, input tapes and an independent expected output. Compare
+  shader/module and pipeline creation, submission-to-completion, readback and
+  device loss separately. Record adapter/backend and cold versus warm runs;
+  use GPU timestamps only when supported, otherwise label host wall time.
+  Start with the smallest semantically valid dispatch, serialize trials, and
+  stop on device loss instead of retrying into a crash loop. Pipeline creation
+  and focused software-Vulkan snapshots are partial evidence, not this gate.
+  The production reducer requires valid transcript/context, base rows and an
+  accumulator; zero-filled buffers are not an adequate correctness oracle.
+- [ ] E2, immutable witness forwarding versus whole-state copying.
+  Compare whole structured replay state with compiler-realized immutable
+  witness sharing and separate cursor/validity, preserving identical Fe source
+  semantics. Measure emitted copy/projection operations, declared private
+  storage, pipeline cost and execution. Do not infer physical register/spill
+  cost from WGSL text. Require old snapshots live across calls, changed and
+  unchanged witnesses, branches/loops and mutation/aliasing negatives. Retain
+  sharing only with a demonstrated no-mutation/no-escape justification, not
+  an application rewrite to shared mutable state.
+- [ ] E3, helper profitability under the new aggregate ABI.
+  Select a small measured set of costly helpers. Compare retention, inlining
+  and specialization under identical inputs, using request-scoped interventions.
+  Record whole reachable code, surviving clones, constant-folding effects,
+  final module size, pipeline time and execution. Prior flattened-ABI results
+  are not a substitute. No global inline policy change from a single fixture.
+- [ ] E4, remaining representation round trips.
+  Align RMIR, initial/optimized Sonatina, Naga and WGSL captures. Count
+  construct/extract/reconstruct chains, typed-to-byte-arena round trips and
+  repeated unchanged-data decoding with explicit scopes and unknown lineage.
+  Select one measured pattern, isolate it with snapshot/alias/trap regressions,
+  and verify its removal at the first responsible lowering boundary. Riffcat
+  remains observational; no digest-based legality or alternative recorder.
+- [ ] E5, dispatch scheduling and fusion comparison.
+  After E1 correctness, compare separate submissions, batched dispatches and
+  one legally fusible adjacent-stage group. Keep the denotation, ordering and
+  output identical. Record barriers, intermediate storage, pipeline cost,
+  execution and host responsiveness. Account for dispatch-wide dependencies
+  that a workgroup barrier cannot replace. Reject fusion that recreates an
+  oversized or unstable kernel; report batching separately from kernel fusion.
+- [ ] E6, independent Quilting transfer gate.
+  Coordinate a fixed triangulation source/input pair and exact dependency pins
+  with Quilting. Apply the same staged census and old/new compiler comparison,
+  then its independent topology checks and bounded browser execution. Attribute
+  any residual cost separately to transport, specialization or structurization.
+  Do not extrapolate Mandelbrot's 79% reduction to Quilting without measurement,
+  and do not start a competing application rewrite or divergent compiler line.
+
+For each experiment record exact artifact hashes, dirty-source provenance,
+commands, complete/failure receipts, measured outcome, decision and regression
+test in the observation record. Correctness is mandatory; shader byte counts
+are diagnostic metrics, not a universal WebGPU correctness limit. E1 and E4
+can use read-only inspection concurrently, but heavy builds and host-GPU trials
+remain serialized. Full proof protocol development stays paused during the
+target-boundary consolidation.
+
 Typed-root fallback hardening landed as `a64e34e4c` on mb2 (`e3dfaf39e` in
 cleanup). A selected typed-private root may no longer fall through scalar
 projection resolution into arena byte addressing. A missing target pointee
