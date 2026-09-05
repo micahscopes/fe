@@ -21,6 +21,28 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+The published `2804b9ca` integration candidate now passes Wasm checked
+arithmetic (4 gates), generic numeric identity/rejection (2), Shader storage
+(3), typed allocation (17), canonical arena (5), and the eight-case checked
+Shader arithmetic gate (validation/emission). The u32 keystone also executed
+exactly as `4261282562` on revm, Wasmtime, and llvmpipe with GPU skipping
+disabled. Logs: `/workspace/scratch/mb2-published-arithmetic-*.log`.
+Six selected native tests passed, including overflow traps and the real surface
+transition, but the full-frame Mandelbrot renderer failed to compile with
+`unresolved value v25`. This is not a recursive-proof test.
+
+Two direct Sonatina regressions reproduced a native layout-order assumption:
+definitions and loop phi values fail when valid blocks are stored out of CFG
+order. Native return lowering also discarded unresolved operands via
+`filter_map(...ok())`. Local commit `08890027` uses CFG reverse postorder and
+propagates return-resolution errors. All 30 Cranelift backend tests pass,
+including six loop-layout permutations and both straight-line layouts.
+Evidence: `/workspace/scratch/mb2-native-block-order-{baseline,repair}.log`.
+The exact Fe renderer rerun against this local fix is pending in
+`/workspace/scratch/mb2-native-cfg-order-fe-capstone.log`. The new native fix
+is not published here, and the combined Fe pin/arithmetic/fallback-deletion
+increment is not yet landed. No shader-size improvement is claimed.
+
 Arena frame planning landed as `acdf6eada` on mb2 (`5965d9268` in cleanup).
 The body storage plan counts static arena allocation sites and retained
 callee-owned results separately for the prologue and each reachable block.
