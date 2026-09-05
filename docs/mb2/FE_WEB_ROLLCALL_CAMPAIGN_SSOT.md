@@ -30,7 +30,26 @@ dispatch entries are deleted. One focused release test evaluated all twelve
 through static assertions, including saturating boundaries and bit transport:
 `/workspace/scratch/mb2-generic-intrinsic-ctfe-release.log` (1.27s after a
 2m22s build). Runtime consumption and expanded authored-name/trap tests are
-still uncommitted in the cleanup worktree while their release gate runs.
+still uncommitted in the cleanup worktree. Their first release gate passed
+the fifteen authored-name cases and two existing f32 groups, but the all-numeric
+execution test failed at the preexisting rejection of signed division.
+The portable lowerer also rejects signed remainder, power, and saturation.
+Log: `/workspace/scratch/mb2-generic-intrinsic-wasm-release.log`.
+
+The follow-up focused execution gate found a correctness defect, not merely
+missing support: checked `i32::MAX + 1` returns `-2147483648` instead of trapping.
+`checked_i32_intrinsic_addition_traps_on_overflow` reproduces this in 1.51s:
+`/workspace/scratch/mb2-checked-i32-overflow-baseline-release.log`.
+The unchanged portable `lower_intrinsic_arith` implementation explicitly guards
+only narrowed `usize`, dropping the checked flag for other integer add/sub/mul
+operations. This behavior is present in cleanup parent `6f7c09279`; the new
+identity mapping did not introduce it. The pinned Sonatina Wasm translator also
+implements `Uaddo` and `Umulo` with a constant false overflow result, so changing
+the Fe opcode alone is not a repair. Keep the failing regression and resolve
+checked arithmetic semantics and backend capability support before calling the
+runtime intrinsic consolidation verified. No full-prover correctness conclusion
+follows from this small arithmetic repro alone.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
