@@ -78,6 +78,24 @@ This closes the Wasm instruction slice, not Cranelift/Naga or Fe integration.
 The frontend still drops checked arithmetic flags and its regression remains
 red. The local backend changes have not been pushed or pinned by Fe.
 
+Native overflow support is now committed locally in Sonatina as `c11e3d5d`.
+Wasm and Cranelift share the decoder for the six existing overflow instruction
+identities, while each target retains its physical lowering. Native checks
+cover 8,190 cases at 1/8/16/32/64 bits and 30,246 cases at 128 bits against
+independent Rust wide-integer arithmetic. The i128 multiply uses 64-bit limb
+products and carries because Cranelift rejects `umul_overflow.i128`; constant
+lowering now preserves both i128 words. A separate constant gate checks zero,
+all ones, the sign bit, and distinct high/low words.
+All 26 Cranelift and 31 Wasm backend tests pass in release (0.06s and 0.05s):
+`/workspace/scratch/mb2-sonatina-native-overflow-complete-release.log`.
+Translation failures now return a function-named error before JIT finalization
+instead of silently skipping definitions. Both rejected native allocation
+tests assert that stronger error contract. Once the new dependency is
+integrated, Fe's panic-catching missing-definition fallback can be removed
+after checking remaining declaration/runtime-call handling. These native
+changes are not pushed or pinned by Fe. Naga overflow support and Fe checked
+trap wiring remain open; no full browser or proof gate is implied.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
