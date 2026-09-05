@@ -352,6 +352,24 @@ call-boundary shapes requiring legalization before that prerequisite holds;
 resolving this distinction and deleting Fe's classifier remain next, not done.
 The new Sonatina series remains local and is not live Fe's dependency pin.
 
+Production query integration evidence on Sonatina `6ae3c3fa` and the pending
+Fe cleanup driver: the existing inline trace now observes the contextual query
+before and after inlining without changing helper selection. Contrary to the
+general entry-validity concern above, this production linear-plan fixture is
+already valid for the query before inlining: 216 callable helpers and two ABI
+rejections (`encode__g1bad` and `write_sparse_base_air_partition_lane`). After
+the existing inliner it reports 30 callable helpers and no rejections.
+The release artifact gate passed with 56,001 WGSL bytes, 2,150 reparsed Naga
+expressions, and 30 helpers, unchanged from the prior measured artifact.
+Instrumented lowering took 13,522ms, total 17,050ms (test 17.20s); these timings
+include the extra observational analyses and are not a speedup claim.
+Evidence: `/workspace/scratch/mb2-boundary-public-query-production-release.log`.
+Next is replacing this path's Fe legality classifier using the backend result
+while retaining Fe's profitability policy. Do not infer that all pre-outlining
+fixtures meet the query prerequisites from this one successful production gate.
+This run used a command-scoped local Sonatina override, with Cargo.lock restored
+afterward. No Chrome execution or new proof completion is claimed.
+
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
 `ef13a6568c0dbcd2e85a390048f81a20a61302ac`. The latter is already published
