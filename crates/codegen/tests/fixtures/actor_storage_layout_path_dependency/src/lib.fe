@@ -1,0 +1,9 @@
+use std::webgpu::{StorageBuffer,
+    GpuProgram,WebGpuBackend,ComputeSurface,Workgroup,FixedDispatch}
+use ingot::job::Job
+actor PathDependency uses (GpuProgram<WebGpuBackend>) {
+    job:StorageBuffer<Job,1>,
+    fn initialize(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        self.job.store(index:0,value:Job {ordinal:42})
+    }
+}

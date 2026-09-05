@@ -1,0 +1,3 @@
+use std::webgpu::{StorageGpuLayout,StorageLayoutProvider}
+pub struct Job {pub ordinal:u32}
+derive StorageGpuLayout for Job using StorageLayoutProvider

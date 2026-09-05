@@ -1136,7 +1136,7 @@ pub(super) enum SelectionOutcome<'db> {
 /// Compile<Program<Dot<Vector<L>, Vector<R>>, M>>`. Provider execution already
 /// receives the exact written type and normalizes it for `provider_ty()`
 /// inspection; selection only needs the underlying provider declaration's
-/// nominal name. Follow alias heads through base HIR so this syntactic
+/// nominal identity. Follow alias heads through base HIR so this syntactic
 /// abstraction does not require a duplicate `Derive` impl.
 ///
 /// The public selection boundary remains deliberately narrow: the spelling at
@@ -1147,7 +1147,7 @@ fn named_provider_head<'db>(
     db: &'db dyn HirDb,
     from: TopLevelMod<'db>,
     written: PathId<'db>,
-) -> Option<IdentId<'db>> {
+) -> Option<(IdentId<'db>, Option<ItemKind<'db>>)> {
     let mut path = written.strip_generic_args(db);
     path.as_ident(db)?;
     let mut owner = from;
@@ -1157,7 +1157,7 @@ fn named_provider_head<'db>(
             // Preserve direct name-based lookup for provider declarations that
             // are visible through the existing provider discovery route but
             // cannot be resolved as an ordinary nominal item here.
-            return path.as_ident(db);
+            return path.as_ident(db).map(|name| (name, None));
         };
         match item {
             ItemKind::TypeAlias(alias) => {
@@ -1168,7 +1168,7 @@ fn named_provider_head<'db>(
                 path = target.to_opt()?.strip_generic_args(db);
                 owner = alias.top_mod(db);
             }
-            _ => return item.name(db),
+            _ => return item.name(db).map(|name| (name, Some(item))),
         }
     }
     None
@@ -1198,7 +1198,7 @@ pub(super) fn select_provider<'db>(
             // through a generic type alias. The exact applied path is retained
             // by the expansion key and exposed to FCO; only nominal provider
             // discovery follows the alias head.
-            let Some(selected) = named_provider_head(db, from, path) else {
+            let Some((selected, definition)) = named_provider_head(db, from, path) else {
                 return SelectionOutcome::NotFound {
                     wrong_goal_heads: Vec::new(),
                 };
@@ -1206,6 +1206,17 @@ pub(super) fn select_provider<'db>(
             let named: Vec<_> = visible_providers(db, from)
                 .into_iter()
                 .filter(|provider| provider.name == selected)
+                .filter(|provider| {
+                    // A resolved `using` import names one nominal provider,
+                    // not every same-spelled provider in transitive libraries.
+                    // Preserve the legacy unresolved-name discovery path only
+                    // when there was no resolved identity to contradict it.
+                    let Some(definition) = definition else { return true; };
+                    let provider_definition = provider.provider.type_ref(db).to_opt()
+                        .and_then(|ty| type_head_path(db, ty))
+                        .and_then(|path| resolve_base_item(db, provider.provider.top_mod(db), path.strip_generic_args(db)));
+                    provider_definition == Some(definition)
+                })
                 .collect();
             let matching: Vec<_> = named
                 .iter()
@@ -1454,12 +1465,53 @@ mod tests {
     use super::{
         core_providers, goal_matches_provider, is_core_derivable, resolve_base_item,
         resolve_trait_def,
+        named_provider_head, select_provider, ProviderSelection, SelectionOutcome,
     };
     use crate::{
         hir_def::{ItemKind, PathId},
         lower::map_file_to_mod,
         test_db::TestDb,
     };
+
+    #[test]
+    fn named_provider_alias_preserves_nominal_identity() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "struct Provider {}\ntype Alias = Provider\nstruct Other {}\n",
+        );
+        let top = map_file_to_mod(&db, file);
+        let direct = named_provider_head(&db, top, PathId::from_str(&db, "Provider"))
+            .expect("direct provider resolves");
+        let alias = named_provider_head(&db, top, PathId::from_str(&db, "Alias"))
+            .expect("alias resolves");
+        let other = named_provider_head(&db, top, PathId::from_str(&db, "Other"))
+            .expect("distinct provider resolves");
+        assert!(direct.1.is_some());
+        assert_eq!(direct, alias);
+        assert_ne!(direct.1, other.1);
+    }
+
+    #[test]
+    fn exact_provider_identity_does_not_hide_duplicate_implementations() {
+        let mut db = TestDb::default();
+        let implementation = r#"
+            impl Derive<Eq> for Provider {
+                const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+                    uses (reflect: Reflect<T>, builder: mut ImplBuilder<Eq<T>>) { ev }
+            }
+        "#;
+        let source = format!(
+            "use core::ops::Eq\nuse core::derive::{{Derive, Evidence, Reflect, ImplBuilder}}\nstruct Provider {{}}\n{implementation}\n{implementation}",
+        );
+        let file = db.standalone_file(&source);
+        let top = map_file_to_mod(&db, file);
+        let result = select_provider(&db, top, PathId::from_str(&db, "Eq"),
+            ProviderSelection::Named(PathId::from_str(&db, "Provider")));
+        match result {
+            SelectionOutcome::Ambiguous { provider_names } => assert_eq!(provider_names.len(), 2),
+            _ => panic!("two implementations for the same exact provider must remain ambiguous"),
+        }
+    }
 
     #[test]
     fn base_item_resolver_handles_grouped_and_renamed_direct_imports() {

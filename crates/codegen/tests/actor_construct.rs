@@ -38,6 +38,21 @@ fn ingot_root(relative: &str) -> Url {
 }
 
 #[test]
+fn explicit_layout_provider_is_not_confused_with_an_implicit_std_dependency() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_storage_layout_path_dependency");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::compute("initialize", None))
+        .expect("the explicitly imported layout provider retains its identity");
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert!(bundle.pass_wgsl[0].source.contains("@compute"));
+}
+
+#[test]
 fn nested_actor_cycles_preserve_shared_stages_and_parent_order() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_nested_cycles");

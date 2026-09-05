@@ -1,0 +1,7 @@
+[ingot]
+name = "actor_storage_layout_path_dependency"
+version = "0.1.0"
+[dependencies]
+core = {path = "../../../../../ingots/core"}
+std = {path = "../../../../../ingots/std"}
+leaf = {path = "leaf"}
