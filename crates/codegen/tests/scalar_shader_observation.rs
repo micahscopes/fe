@@ -9,15 +9,20 @@ use url::Url;
 
 #[test]
 fn scalar_shader_capture_preserves_artifacts_and_reports_partial_runs() {
-    check_capture("scalar");
+    check_capture("scalar", false);
 }
 
 #[test]
 fn grid_shader_capture_preserves_artifacts_and_reports_partial_runs() {
-    check_capture("grid");
+    check_capture("grid", false);
 }
 
-fn check_capture(pipeline: &str) {
+#[test]
+fn checked_multiply_shader_capture_preserves_artifacts() {
+    check_capture("scalar", true);
+}
+
+fn check_capture(pipeline: &str, multiply: bool) {
     let directory = tempfile::tempdir().unwrap();
     for mode in ["off", "complete", "partial", "strict"] {
         let output = directory.path().join(mode);
@@ -27,6 +32,7 @@ fn check_capture(pipeline: &str) {
             .args(["--exact", "scalar_shader_capture_child", "--nocapture"])
             .env("FE_SCALAR_CAPTURE_TEST_MODE", mode)
             .env("FE_SCALAR_CAPTURE_TEST_PIPELINE", pipeline)
+            .env("FE_SCALAR_CAPTURE_TEST_MULTIPLY", if multiply { "1" } else { "0" })
             .env("FE_SCALAR_CAPTURE_TEST_OUTPUT", &output)
             .env_remove("FE_BLOAT_CAPTURE_DIR")
             .env_remove("FE_OBSERVE_STRICT")
@@ -104,12 +110,15 @@ fn scalar_shader_capture_child() {
     };
     let directory = std::env::var_os("FE_SCALAR_CAPTURE_TEST_OUTPUT").unwrap();
     let grid = std::env::var("FE_SCALAR_CAPTURE_TEST_PIPELINE").unwrap() == "grid";
+    let multiply = std::env::var("FE_SCALAR_CAPTURE_TEST_MULTIPLY").as_deref() == Ok("1");
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///scalar_capture.fe").unwrap();
     db.workspace().touch(
         &mut db,
         url.clone(),
-        Some(if grid {
+        Some(if multiply {
+            "fn mul(_ x: u32) -> u32 { x * 7 }\npub fn kernel(_ x: u32) -> u32 { mul(x) }\n".into()
+        } else if grid {
             "fn add(_ x: u32) -> u32 { x + 7 }\npub fn kernel(_ x: u32, _ y: u32) -> u32 { add(x + y) }\n".into()
         } else {
             "fn add(_ x: u32) -> u32 { x + 7 }\npub fn kernel(_ x: u32) -> u32 { add(x) }\n".into()
@@ -140,7 +149,7 @@ fn scalar_shader_capture_child() {
         } else {
             artifact.layout.trap.is_some()
         },
-        "authored checked addition must retain a shader trap channel"
+        "authored checked arithmetic must retain a shader trap channel"
     );
     let directory = Path::new(&directory);
     fs::write(directory.join("shader.spv"), artifact.as_bytes()).unwrap();

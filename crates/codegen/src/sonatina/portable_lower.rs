@@ -21,12 +21,10 @@
 //! block (see `emit_panic_revert`), which is EVM-native. A faithful portable
 //! rewrite of that lowerer is target-backend scale. Here we lower runtime MIR
 //! directly. Primitive arithmetic arrives as `IntrinsicArith`, including its
-//! checked flag. Unsigned checked add/sub and wasm32 `usize` multiplication
-//! are explicitly guarded. Known semantic debt: other ordinary integer
-//! arithmetic still uses the legacy R1 wrapping realization even when marked
-//! checked. Non-overflowing inputs are
-//! required for source-level arithmetic parity on that path. This is not a
-//! fail-closed implementation of general checked arithmetic.
+//! checked flag. Checked integer add/sub/mul use Sonatina overflow operations
+//! and the shared trap path. Explicit wrapping operations remain unchecked.
+//! Division/remainder semantics still require a separate target audit; signed
+//! division/remainder and exponentiation are currently rejected.
 //!
 //! It reuses Sonatina's `FunctionBuilder` SSA-variable machinery (declare/def/
 //! use + `seal_all`) exactly as the EVM lowerer does, so loop-carried values
@@ -12877,12 +12875,8 @@ where
     }
 
     /// Fe's primitive `+`/`-`/`*` lower to `IntrinsicArith` builtins (not
-    /// `Binary`). Unsigned checked add/sub use explicit comparisons and traps;
-    /// narrowed usize multiplication is also guarded. Other ordinary checked
-    /// arithmetic retains the legacy wrapping realization and requires
-    /// non-overflowing inputs. Every other builtin
-    /// (memory, EVM host, addmod/mulmod, saturating, byte/sign-extend) fails
-    /// closed.
+    /// `Binary`). Checked integer add/sub/mul retain their Sonatina overflow
+    /// operations. Unsupported builtin families fail closed below.
     fn lower_builtin(
         &mut self,
         builtin: &RuntimeBuiltin<'db>,
@@ -13064,35 +13058,25 @@ where
             )),
             other => other,
         })?;
-        // Preserve the authored unsigned overflow contract before selecting a
+        // Preserve the authored integer overflow contract before selecting a
         // backend. Sonatina owns the width-specific overflow implementation;
         // Fe consumes its result and overflow flag without reconstructing it.
         if checked
-            && !class.is_signed_int()
-            && matches!(op, IntrinsicArithBinOp::Add | IntrinsicArithBinOp::Sub)
+            && matches!(op, IntrinsicArithBinOp::Add | IntrinsicArithBinOp::Sub | IntrinsicArithBinOp::Mul)
         {
             let lhs = self.local_value(lhs)?;
             let rhs = self.local_value(rhs)?;
-            let [value, overflow] = match op {
-                IntrinsicArithBinOp::Add => self.fb.insert_uaddo(lhs, rhs),
-                IntrinsicArithBinOp::Sub => self.fb.insert_usubo(lhs, rhs),
+            let [value, overflow] = match (op, class.is_signed_int()) {
+                (IntrinsicArithBinOp::Add, false) => self.fb.insert_uaddo(lhs, rhs),
+                (IntrinsicArithBinOp::Sub, false) => self.fb.insert_usubo(lhs, rhs),
+                (IntrinsicArithBinOp::Mul, false) => self.fb.insert_umulo(lhs, rhs),
+                (IntrinsicArithBinOp::Add, true) => self.fb.insert_saddo(lhs, rhs),
+                (IntrinsicArithBinOp::Sub, true) => self.fb.insert_ssubo(lhs, rhs),
+                (IntrinsicArithBinOp::Mul, true) => self.fb.insert_smulo(lhs, rhs),
                 _ => unreachable!(),
             };
             self.trap_if(overflow);
             return Ok(value);
-        }
-        // Narrowed usize multiplication must also guard against wrapping an
-        // out-of-range address into an apparently in-bounds index.
-        if checked
-            && ty == Type::I32
-            && is_usize_semantic_ty(
-                self.module.db,
-                self.body.locals[dst.as_u32() as usize].semantic_ty,
-            )
-        {
-            let lhs = self.local_value(lhs)?;
-            let rhs = self.local_value(rhs)?;
-            return self.lower_checked_usize_arith(op, lhs, rhs);
         }
         let is = self.inst_set();
         let lhs = self.local_value(lhs)?;
@@ -13114,58 +13098,6 @@ where
                 )));
             }
         })
-    }
-
-    /// Checked unsigned 32-bit (`usize` on wasm32) arithmetic: compute the result
-    /// and trap (`Unreachable`) on overflow, matching Fe's checked-overflow panic.
-    /// `Add`/`Sub` detect wrap with an unsigned compare; `Mul` widens to i64,
-    /// multiplies, and traps when the product exceeds `u32::MAX`. WebAssembly's
-    /// unsigned division and remainder instructions provide the required
-    /// divide-by-zero trap directly; unsigned division has no overflow case.
-    fn lower_checked_usize_arith(
-        &mut self,
-        op: IntrinsicArithBinOp,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> Result<ValueId, LowerError> {
-        let is = self.inst_set();
-        match op {
-            IntrinsicArithBinOp::Add => {
-                let sum = self.fb.insert_inst(Add::new(is, lhs, rhs), Type::I32);
-                // Unsigned overflow iff the wrapped sum is below an addend.
-                let overflow = self.fb.insert_inst(Lt::new(is, sum, lhs), Type::I1);
-                self.trap_if(overflow);
-                Ok(sum)
-            }
-            IntrinsicArithBinOp::Sub => {
-                // Unsigned underflow iff lhs < rhs.
-                let underflow = self.fb.insert_inst(Lt::new(is, lhs, rhs), Type::I1);
-                self.trap_if(underflow);
-                Ok(self.fb.insert_inst(Sub::new(is, lhs, rhs), Type::I32))
-            }
-            IntrinsicArithBinOp::Mul => {
-                let lhs64 = self
-                    .fb
-                    .insert_inst(Zext::new(is, lhs, Type::I64), Type::I64);
-                let rhs64 = self
-                    .fb
-                    .insert_inst(Zext::new(is, rhs, Type::I64), Type::I64);
-                let product = self.fb.insert_inst(Mul::new(is, lhs64, rhs64), Type::I64);
-                let limit = self.fb.make_imm_value(Immediate::I64(u32::MAX as i64));
-                // Overflow iff the 64-bit product exceeds u32::MAX (unsigned `>`).
-                let overflow = self.fb.insert_inst(Lt::new(is, limit, product), Type::I1);
-                self.trap_if(overflow);
-                Ok(self
-                    .fb
-                    .insert_inst(Trunc::new(is, product, Type::I32), Type::I32))
-            }
-            IntrinsicArithBinOp::Div => Ok(self.fb.insert_inst(Udiv::new(is, lhs, rhs), Type::I32)),
-            IntrinsicArithBinOp::Rem => Ok(self.fb.insert_inst(Umod::new(is, lhs, rhs), Type::I32)),
-            other => Err(LowerError::Unsupported(format!(
-                "wasm target: checked usize intrinsic arithmetic `{other:?}` is not supported \
-                 (pow is R2)"
-            ))),
-        }
     }
 
     /// Signedness of a binary op's operands, from the MIR value class (the EVM

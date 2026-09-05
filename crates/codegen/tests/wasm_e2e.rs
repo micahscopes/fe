@@ -30,6 +30,50 @@ const HOST_WASM_CODEC_RUNTIME_JS: &str =
     include_str!("../../../demos/shared/host-wasm-codec-v1.js");
 
 #[test]
+fn checked_integer_arithmetic_uses_sonatina_overflow_semantics() {
+    for bits in [8u32, 16, 32, 64] {
+        for signed in [false, true] {
+            let ty = format!("{}{bits}", if signed { "i" } else { "u" });
+            let source = format!(r#"
+pub fn add(a: {ty}, b: {ty}) -> {ty} {{ a + b }}
+pub fn sub(a: {ty}, b: {ty}) -> {ty} {{ a - b }}
+pub fn mul(a: {ty}, b: {ty}) -> {ty} {{ a * b }}
+"#);
+            let wasm = compile_to_wasm(&format!("checked_{ty}.fe"), &source);
+            let (mut store, instance) = instantiate(&wasm);
+            let min = if signed { -(1i128 << (bits - 1)) } else { 0 };
+            let max = (1i128 << (bits - u32::from(signed))) - 1;
+            let values = if signed { vec![min, min + 1, -2, -1, 0, 1, 2, max - 1, max] }
+                else { vec![0, 1, 2, max / 2, max / 2 + 1, max - 1, max] };
+            for name in ["add", "sub", "mul"] {
+                for &a in &values {
+                    for &b in &values {
+                        let expected = match name {
+                            "add" => a.checked_add(b),
+                            "sub" => a.checked_sub(b),
+                            "mul" => a.checked_mul(b),
+                            _ => unreachable!(),
+                        }.filter(|v| *v >= min && *v <= max);
+                        let actual = if bits == 64 {
+                            instance.get_typed_func::<(i64, i64), i64>(&mut store, name).unwrap()
+                                .call(&mut store, (a as i64, b as i64)).map(|v| v as u64 as u128)
+                        } else {
+                            instance.get_typed_func::<(i32, i32), i32>(&mut store, name).unwrap()
+                                .call(&mut store, (a as i32, b as i32)).map(|v| v as u32 as u128)
+                        };
+                        let mask = (1u128 << bits) - 1;
+                        match expected {
+                            Some(value) => assert_eq!(actual.unwrap() & mask, value as u128 & mask, "{ty} {name}({a}, {b})"),
+                            None => assert!(actual.is_err(), "{ty} {name}({a}, {b}) must trap"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn unsigned_checked_add_sub_preserve_narrow_and_wide_boundaries() {
     for bits in [8u32, 16, 64] {
         let source = format!(r#"

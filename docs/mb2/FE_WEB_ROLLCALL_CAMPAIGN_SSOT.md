@@ -71,6 +71,19 @@ The study has not established a production backend preference.
 
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
+The checked-arithmetic follow-up extends the existing Sonatina operation path
+to signed add/sub and signed/unsigned multiplication, deleting the old
+usize-only widened multiplication implementation (68 net lowerer lines removed).
+The release Wasm matrix passes 1,560 boundary combinations over eight integer
+types and three operations (19.33s). Four scalar/grid/multiply observation
+gates pass (38.67s). Chrome AMD RDNA3 executes the saved 910-byte unsigned
+multiply shader across seven calls, including the overflow boundary and a
+successful call after trapping, without validation errors or device loss.
+Riffcat capture: `/workspace/scratch/mb2-checked-mul-20260905.capture.json`;
+browser log: `/workspace/scratch/mb2-checked-mul-chrome-20260905.log`.
+This is not yet full native, signed-GPU, gallery or proof-capstone coverage.
+Division/remainder semantics remain separate unresolved work.
+
 Unsigned checked add/sub now preserve `IntrinsicArith.checked` through
 Sonatina's existing `Uaddo`/`Usubo` operations and the existing trap path.
 An initial Fe-side compare implementation failed the u8 overflow gate and was
