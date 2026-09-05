@@ -44,6 +44,19 @@ const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 const CPU_MAX_DIMENSION = 256;
 const GPU_BYTES_PER_ROW_ALIGNMENT = 256;
 
+// WebDrawIndirect omits its zero offset on the wire. Interpret that declared
+// default here, but reject null/nonzero offsets and invalid command storage.
+export function resolveDispatchIndirectBuffer(command, resources) {
+  if (command === undefined) return null;
+  const buffer = resources.get(command?.resource);
+  const offset = command?.offset === undefined ? 0 : command.offset;
+  if (!buffer || offset !== 0 || buffer.size < 12 ||
+      !(buffer.usage & GPUBufferUsage.INDIRECT)) {
+    throw new Error("fe render runtime: invalid indirect dispatch command resource");
+  }
+  return buffer;
+}
+
 /** Mechanically realize compiler-derived physical buffer capabilities.
  * Missing data retains the broad v6/v7 compatibility allocation; every v8
  * compiler bundle carries an explicit minimal set. */
@@ -2380,14 +2393,9 @@ export class FeSurfaceElement extends HTMLElement {
         const indirectBuffer = pass.draw_indirect === undefined
           ? null
           : resourceBuffers.get(pass.draw_indirect.resource);
-        const dispatchIndirectBuffer = pass.dispatch_indirect === undefined
-          ? null : resourceBuffers.get(pass.dispatch_indirect.resource);
-        if (pass.dispatch_indirect !== undefined && (
-          !dispatchIndirectBuffer || pass.dispatch_indirect.offset !== 0 ||
-          dispatchIndirectBuffer.size < 12 || !(dispatchIndirectBuffer.usage & GPUBufferUsage.INDIRECT)
-        )) {
-          throw new Error("fe render runtime: invalid indirect dispatch command resource");
-        }
+        const dispatchIndirectBuffer = resolveDispatchIndirectBuffer(
+          pass.dispatch_indirect, resourceBuffers,
+        );
         if (pass.draw_indirect !== undefined && !indirectBuffer) {
           throw new Error(
             `fe render runtime: indirect draw resource \`${pass.draw_indirect.resource}\` is undeclared`,

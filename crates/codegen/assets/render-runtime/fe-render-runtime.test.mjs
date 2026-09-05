@@ -1500,6 +1500,27 @@ test("typed actor readback follows all Fe GPU passes in the same submission", as
   ]);
 });
 
+test("indirect dispatch accepts the serialized default offset and rejects invalid commands", async () => {
+  const { resolveDispatchIndirectBuffer } = await import("./fe-render-runtime.js");
+  globalThis.GPUBufferUsage = { ...globalThis.GPUBufferUsage, INDIRECT: 256 };
+  const buffer = Object.freeze({ size: 12, usage: GPUBufferUsage.INDIRECT });
+  const resources = new Map([["work-command", buffer]]);
+  assert.equal(resolveDispatchIndirectBuffer(undefined, resources), null);
+  // Exact WebDrawIndirect JSON: serde omits offset when it is zero.
+  const serialized = JSON.parse('{"resource":"work-command"}');
+  assert.equal(resolveDispatchIndirectBuffer(serialized, resources), buffer);
+  assert.equal(resolveDispatchIndirectBuffer({ ...serialized, offset: 0 }, resources), buffer);
+  for (const offset of [null, 4, -4, "0", NaN]) {
+    assert.throws(() => resolveDispatchIndirectBuffer({ ...serialized, offset }, resources),
+      /invalid indirect dispatch command resource/);
+  }
+  assert.throws(() => resolveDispatchIndirectBuffer({ resource: "missing" }, resources));
+  assert.throws(() => resolveDispatchIndirectBuffer(null, resources));
+  for (const invalid of [{ size: 8, usage: GPUBufferUsage.INDIRECT }, { size: 12, usage: 0 }]) {
+    assert.throws(() => resolveDispatchIndirectBuffer(serialized, new Map([["work-command", invalid]])));
+  }
+});
+
 test("GPU-resident dispatch preserves command identity and actor-cycle ordering without readback", async () => {
   const trace = [];
   const command = Object.freeze({ name: "work-command" });

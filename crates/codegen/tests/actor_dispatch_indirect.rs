@@ -25,6 +25,9 @@ fn indirect_dispatch_preserves_command_identity_without_shader_binding() {
     assert!(passes[1].dispatch.is_none());
     assert_eq!(command.resource, "command");
     assert_eq!(command.offset, 0);
+    assert_eq!(serde_json::to_value(command).unwrap(),
+        serde_json::json!({"resource": "command"}),
+        "the runtime must interpret the omitted zero-offset wire default");
     assert_eq!(passes[1].cycle.as_ref().unwrap().repeat, 2);
     assert!(passes[1].layout.bindings.iter().all(|b| b.name != "command"));
     let resource = bundle.manifest.resources.iter().find(|r| r.name == "command").unwrap();
