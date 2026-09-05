@@ -1,0 +1,41 @@
+use std::webgpu::{
+    StorageBuffer, GpuProgram, WebGpuBackend,
+    ComputeSurface, ComputeInvocation, Workgroup, FixedDispatch, FragmentSurface,
+}
+
+fn read_word(words: StorageBuffer<u32, 64>, index: u32) -> u32 {
+    words.load(index: index)
+}
+
+fn tiny_passthrough(words: StorageBuffer<u32, 64>, index: u32) -> u32 {
+    read_word(words: words, index: index)
+}
+
+fn walk_values(words: StorageBuffer<u32, 64>, start: u32, count: u32) -> u32 {
+    let mut total = 0
+    let mut i = 0
+    while i < count {
+        total = total + read_word(words: words, index: (start + i) % 64)
+        i = i + 1
+    }
+    total
+}
+
+actor ResourceLoop uses (GpuProgram<WebGpuBackend>) {
+    words: StorageBuffer<u32, 64>,
+    results: StorageBuffer<u32, 64>,
+
+    fn sample(self, lane: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<64, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        let a = walk_values(words: self.words, start: lane.global.x, count: 3)
+        let b = walk_values(words: self.words, start: lane.global.x, count: 5)
+        let c = tiny_passthrough(words: self.words, index: lane.global.x)
+        let d = tiny_passthrough(words: self.words, index: (lane.global.x + 1) % 64)
+        self.results.store(index: lane.global.x, value: a + b + c + d)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        self.results.load(index: 0).downcast_truncate()
+    }
+}

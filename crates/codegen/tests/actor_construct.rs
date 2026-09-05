@@ -38,6 +38,22 @@ fn ingot_root(relative: &str) -> Url {
 }
 
 #[test]
+fn repeated_resource_loop_remains_a_shared_shader_helper() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_loop_helper");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("paint", None))
+        .expect("resource loop actor compiles");
+    let shader = &bundle.pass_wgsl[0].source;
+    assert!(shader.contains("fn walk_values"), "repeated resource loop was expanded:\n{shader}");
+    assert_eq!(shader.matches("loop {").count(), 1, "one shared loop:\n{shader}");
+    assert!(!shader.contains("fn tiny_passthrough"), "tiny wrappers should still inline:\n{shader}");
+}
+
+#[test]
 fn atomic_resource_policy_and_operations_reach_real_shader_atomics() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_atomic_claims");
