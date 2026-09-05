@@ -55,6 +55,7 @@ use fe_codegen::{
     WebCanonicalPolicy, WebFeResponsibility, WebHostResponsibility, actor_gpu_program,
     resolve_web_entry,
 };
+use hir::analysis::semantic::project_view_surface;
 use hir::hir_def::HirIngot;
 use url::Url;
 
@@ -650,8 +651,8 @@ fn compile_surface_policy(policy: &str) -> WebBundle {
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let source = source.replacen(
-        "FragmentSurface, GpuProgram, LatestPerFrame, SurfaceScheduling",
-        &format!("FragmentSurface, GpuProgram, {policy}, SurfaceScheduling"),
+        "FragmentSurface, GpuProgram, LatestPerFrame, SurfacePointerMotion",
+        &format!("FragmentSurface, GpuProgram, LatestPerFrame, {policy}, SurfacePointerMotion"),
         1,
     );
     let source = source.replacen(
@@ -790,7 +791,50 @@ fn compile_standalone_grid(rel_path: &str, entry: &str, workgroup: [u32; 3]) -> 
 fn view_vocabulary_const_constructs_a_surface() {
     with_standalone_file(
         "crates/codegen/tests/fixtures/view/view_surface_smoke.fe",
-        |_db, _top_mod| {},
+        |db, top_mod| {
+            let view = top_mod
+                .all_funcs(db)
+                .iter()
+                .copied()
+                .find(|func| {
+                    func.name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == "smoke_view")
+                })
+                .expect("smoke_view function");
+            let surface = project_view_surface(db, view).expect("project smoke view");
+            assert_eq!(
+                surface.params[4].presentation.options,
+                ["grid", "atlas", "fan", "blue noise"],
+                "named choices must remain Fe-authored const data",
+            );
+        },
+    );
+}
+
+#[test]
+fn named_choice_is_metadata_while_wasm_state_stays_scalar() {
+    let bundle = compile_actor_ingot("crates/codegen/tests/fixtures/named_choice_actor");
+    wasmparser::validate(&bundle.wasm).expect("named-choice transition should emit valid Wasm");
+    let surface = bundle
+        .manifest
+        .surface
+        .as_ref()
+        .expect("named-choice surface");
+    let mode = surface
+        .params
+        .iter()
+        .find(|param| param.name == "mode")
+        .expect("mode param");
+    assert_eq!(mode.min, Some(0.0));
+    assert_eq!(mode.max, Some(2.0));
+    assert_eq!(mode.init, Some(1.0));
+    assert_eq!(
+        mode.presentation
+            .as_ref()
+            .expect("mode presentation")
+            .options,
+        ["regular grid", "atlas charts", "blue noise"],
     );
 }
 
@@ -821,6 +865,41 @@ fn new_param_binding_actor_needs_only_fe_source() {
             "Fe binding implementation detail `{forbidden}` leaked into JSON: {manifest_json}"
         );
     }
+
+    let params = &bundle
+        .manifest
+        .surface
+        .as_ref()
+        .expect("ParamBindingProbe surface")
+        .params;
+    assert_eq!(
+        params
+            .iter()
+            .map(|param| param.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["int", "angle", "range", "extent_x"],
+        "Fe enum variant names must project opaquely without a Rust kind mirror",
+    );
+    for param in &params[..3] {
+        assert!(
+            param.visible,
+            "Fe control constructor marks {} visible",
+            param.name
+        );
+        assert!(param.min.is_some() && param.max.is_some() && param.init.is_some());
+        assert_eq!(param.source.as_deref(), Some("initial"));
+        assert_eq!(param.presentation.as_ref().unwrap().widget, "range");
+    }
+    assert_eq!(params[0].presentation.as_ref().unwrap().readout, "integer");
+    assert_eq!(params[1].presentation.as_ref().unwrap().scale, "linear");
+    let extent = &params[3];
+    assert!(
+        !extent.visible,
+        "Fe extent binding is not a browser control"
+    );
+    assert_eq!((extent.min, extent.max, extent.init), (None, None, None));
+    assert_eq!(extent.source.as_deref(), Some("surface_width"));
+    assert_eq!(extent.presentation.as_ref().unwrap().widget, "hidden");
 
     assert_eq!(
         call_four_state_transition(&bundle, 10.0, -5.0, -1.0, [3.0, 0.0, 2.0, 256.0], 640.0,),
@@ -1251,6 +1330,19 @@ fn surface_scheduling_policy_family_is_fe_authored_and_structurally_selected() {
     // Fe implementation through generated Wasm; policy names never reach the
     // fixed export or a manifest.
     assert_surface_policy_tape(
+        "ContinuousFrames",
+        &[
+            (4, 0.0, 0, (0, 1, 0)),
+            (2, 16.0, 0, (1, 0, 0)),
+            (0, 17.0, 1, (0, 0, 0)),
+            (3, 18.0, 1, (0, 1, 0)),
+            (2, 32.0, 1, (1, 0, 0)),
+            (5, 33.0, 0, (0, 0, 0)),
+            (3, 34.0, 0, (0, 0, 0)),
+            (4, 40.0, 0, (0, 1, 0)),
+        ],
+    );
+    assert_surface_policy_tape(
         "SampleLatest",
         &[
             (4, 0.0, 0, (0, 0, 0)),
@@ -1564,7 +1656,7 @@ fn rollcall_pipeline_pass_graph_compiles_with_external_resources_and_private_mem
     wasmparser::validate(&bundle.wasm).expect("quality-only Wasm should be valid");
     assert_typed_surface_quality(&bundle);
     assert_typed_surface_recovery(&bundle);
-    assert_eq!(bundle.manifest.protocol_version, 7);
+    assert_eq!(bundle.manifest.protocol_version, fe_codegen::WEB_BUNDLE_PROTOCOL_VERSION);
     assert_eq!(bundle.manifest.resources.len(), 2);
     assert_eq!(bundle.manifest.passes.len(), 3);
     assert_eq!(bundle.pass_wgsl.len(), 3);
@@ -1657,7 +1749,7 @@ fn perturbational_mandelbrot_graph_compiles() {
         !exports.iter().any(|name| name == "display_reference"),
         "the GPU graph must not acquire a CPU pixel fallback"
     );
-    assert_eq!(bundle.manifest.protocol_version, 7);
+    assert_eq!(bundle.manifest.protocol_version, fe_codegen::WEB_BUNDLE_PROTOCOL_VERSION);
     assert_eq!(bundle.manifest.resources.len(), 1);
     assert_eq!(bundle.manifest.resources[0].name, "orbit");
     assert_eq!(bundle.manifest.resources[0].stride, 32);
@@ -3020,10 +3112,8 @@ fn classic_quilting_lod_is_fe_reactive_and_uses_the_checked_atlas() {
     assert_eq!(resource.artifact.as_ref().unwrap().bytes, 1296);
     assert_eq!(resource.artifact.as_ref().unwrap().sha256, SHA256);
     assert_eq!(
-        resource.policy.initialization,
-        fe_codegen::WebResourceInitialization::ContentAddressed {
-            sha256: SHA256.to_owned(),
-        },
+        resource.policy["initialization"],
+        serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 }),
     );
 
     let center: [f32; 4] = call_state_batch_with_resources(

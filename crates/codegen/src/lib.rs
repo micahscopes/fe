@@ -87,6 +87,7 @@ pub use sonatina::{
 pub use sonatina::{
     compile_render_wgsl, compile_runtime_package_spirv,
     compile_runtime_package_spirv_authored_raster,
+    compile_runtime_package_spirv_authored_raster_with_interface,
     compile_runtime_package_spirv_authored_raster_with_resources,
     compile_runtime_package_spirv_compute_with_interface,
     compile_runtime_package_spirv_compute_with_resources, compile_runtime_package_spirv_grid,
@@ -107,19 +108,18 @@ pub fn standalone_ctfe_ingot_source(source: &str) -> String {
 #[cfg(feature = "spirv-backend")]
 pub use web_bundle::{
     WEB_ACTOR_RUNTIME_PROTOCOL, WEB_ACTOR_RUNTIME_VERSION, WEB_BUNDLE_PROTOCOL,
-    WEB_BUNDLE_PROTOCOL_VERSION, WebActorPassCycle, WebActorProgram, WebActorResource,
+    WEB_BUNDLE_PROTOCOL_VERSION, WebActorDraw, WebActorPassCycle, WebActorProgram, WebActorResource,
     WebActorResourceElement, WebActorResourceField, WebActorStage, WebActorStageKind,
     WebArtifactManifest, WebAuthoredSourceKind, WebBinding, WebBindingAccess, WebBindingMember,
     WebBindingRole, WebBrowserRuntimeManifest, WebBuildOptions, WebBuiltinInput, WebBuiltinSource,
     WebBundle, WebBundleError, WebBundleFile, WebBundleManifest, WebBundleMode, WebCanonicalPolicy,
     WebCanonicalStatus, WebControl, WebControlArgSource, WebControlWasmType,
-    WebDispatchCooperation, WebDispatchTaper, WebFeResponsibility, WebFixedHostProvenance,
-    WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility, WebLayout, WebPass,
-    WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceAccess,
-    WebResourceArtifact, WebResourceAsset, WebResourceInitialization, WebResourceKind,
-    WebResourcePolicy, WebResourceRecovery, WebResourceResidency, WebResourceVisibility, WebResult,
-    WebScalarKind, WebSourceProvenance, WebSurfacePointerMotion, actor_gpu_program,
-    actor_web_entry, render_runtime_js, resolve_web_entry,
+    WebDispatchCooperation, WebDispatchTaper, WebDrawIndirect, WebFeResponsibility, WebFixedHostProvenance,
+    WebBufferUsage, WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility,
+    WebLayout, WebPass, WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceArtifact,
+    WebResourceAsset, WebResult, WebScalarKind, WebShaderStage, WebSourceProvenance,
+    WebSurfacePointerMotion, actor_gpu_program, actor_web_entry, render_runtime_js,
+    resolve_web_entry,
 };
 #[cfg(all(
     feature = "spirv-backend",

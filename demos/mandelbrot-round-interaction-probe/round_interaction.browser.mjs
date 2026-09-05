@@ -177,16 +177,12 @@ async function firstNixStorePath(nameFragment, suffix) {
 }
 
 async function loadPuppeteer() {
-  try {
-    return await import("puppeteer");
-  } catch {
-    const bundled = await firstNixStorePath(
-      "-chrome-devtools-mcp-",
-      "lib/chrome-devtools-mcp/build/src/third_party/index.js",
-    );
-    if (!bundled) throw new Error("Puppeteer is unavailable");
-    return import(pathToFileURL(bundled).href);
-  }
+  const bundled = await firstNixStorePath(
+    "-chrome-devtools-mcp-",
+    "lib/chrome-devtools-mcp/build/src/third_party/index.js",
+  );
+  if (bundled) return import(pathToFileURL(bundled).href);
+  return import("puppeteer");
 }
 
 const contentTypes = new Map([

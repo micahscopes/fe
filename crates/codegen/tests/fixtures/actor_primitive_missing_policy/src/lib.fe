@@ -1,0 +1,18 @@
+use std::webgpu::{
+    ClipPosition,
+    DirectDraw,
+    FragmentStage,
+    GpuProgram,
+    RasterVertex,
+    VertexStage,
+    WebGpuBackend,
+}
+struct Varying { value: f32 }
+impl Copy for Varying {}
+actor MissingPrimitive uses (GpuProgram<WebGpuBackend>) {
+    fn vertices(self, index: u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying, DirectDraw<u32, 3>>) {
+        RasterVertex { position: ClipPosition {x: 0.0, y: 0.0, z: 0.5, w: 1.0}, varying: Varying {value: 1.0} }
+    }
+    fn shade(self, v: Varying) -> u32 uses (FragmentStage<Varying>) { 4294967295 }
+}

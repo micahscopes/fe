@@ -447,6 +447,7 @@ fn builtin_source_str(source: SpirvBuiltinSource) -> &'static str {
         SpirvBuiltinSource::FragmentPositionX => "FragmentPositionX",
         SpirvBuiltinSource::FragmentPositionY => "FragmentPositionY",
         SpirvBuiltinSource::VertexIndex => "VertexIndex",
+        SpirvBuiltinSource::InstanceIndex => "InstanceIndex",
     }
 }
 

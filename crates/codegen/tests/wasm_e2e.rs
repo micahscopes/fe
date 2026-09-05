@@ -4737,6 +4737,350 @@ fn generated_webidl_binding_uses_generic_wasm_imports() {
     );
 }
 
+/// A WebGPU buffer descriptor is authored and constructed in Fe, lowered as a
+/// recursively flat record by the ordinary compiler ABI, reconstructed by the
+/// generated host codec, and realized by the generated Web IDL adapter. No
+/// handwritten JavaScript descriptor or operation shim participates.
+#[test]
+fn generated_webidl_create_buffer_runs_from_fe_through_core_wasm() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = fe_webidl_bindgen::parse(fe_webidl_bindgen::WEBGPU_BUFFER_CREATE_WEBIDL)
+        .expect("pinned createBuffer Web IDL should parse");
+    let plan = fe_webidl_bindgen::build_adapter_plan(
+        &world,
+        "webgpu-buffer-create",
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
+    )
+    .expect("createBuffer should lower to the generic host ABI");
+    let transport = fe_webidl_bindgen::build_transport_plan(&plan)
+        .expect("createBuffer should have a Core Wasm transport plan");
+    let create = transport
+        .functions
+        .iter()
+        .find(|function| function.import_name == "gpu_device_create_buffer")
+        .expect("transport should contain GPUDevice.createBuffer");
+    assert_eq!(
+        create.core,
+        Some(fe_webidl_bindgen::CoreSignature {
+            params: vec![
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+            ],
+            results: vec![fe_webidl_bindgen::CoreValueType::I32],
+        }),
+        "device + label(ptr,len) + size + usage + mappedAtCreation must stay directly flat",
+    );
+
+    let bindings = fe_webidl_bindgen::emit_fe_flat_host_imports(
+        &world,
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
+    )
+    .expect("createBuffer bindings should be ordinary Fe declarations");
+    assert!(bindings.contains("pub struct GPUBufferDescriptor"));
+    assert!(bindings.contains("pub mapped_at_creation: bool"));
+    let source = format!(
+        r#"{bindings}
+pub fn make_buffer(
+    _ device: GPUDevice,
+    _ label: BrowserString,
+    _ size: u64,
+    _ usage: u32,
+) -> GPUBuffer {{
+    gpu_device_create_buffer(
+        self_: device,
+        descriptor: GPUBufferDescriptor {{
+            label,
+            size,
+            usage,
+            mapped_at_creation: false,
+        }},
+    )
+}}
+"#
+    );
+    let wasm = compile_to_wasm("generated_webidl_create_buffer.fe", &source);
+    assert!(func_imports(&wasm).contains(&(
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE.to_owned(),
+        "gpu_device_create_buffer".to_owned(),
+    )));
+
+    let interface = fe_compiler_protocol::InterfaceManifest {
+        imports: func_imports(&wasm)
+            .into_iter()
+            .filter(|(module, _)| module == fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE)
+            .map(|(module, name)| fe_compiler_protocol::InterfaceFunction {
+                module,
+                name,
+                signature_complete: false,
+                params: Vec::new(),
+                results: Vec::new(),
+            })
+            .collect(),
+        ..fe_compiler_protocol::InterfaceManifest::default()
+    };
+    let metadata =
+        fe_webidl_bindgen::adapter_operation_metadata(&plan, "generated-webgpu-create-buffer");
+    let selection = fe_webidl_bindgen::select_adapter_operations(&interface, &metadata)
+        .expect("compiled Fe imports should select their generated Web IDL operations");
+    let adapter = fe_webidl_bindgen::emit_js_selected_core_adapter(
+        &world,
+        &plan,
+        "generated-webgpu-create-buffer",
+        &selection,
+    )
+    .expect("selected createBuffer adapter should emit");
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("create-buffer.wasm");
+    let adapter_path = directory.path().join("create-buffer-adapter.mjs");
+    let script_path = directory.path().join("execute.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let script = format!(
+        r#"
+import {{ createFeBrowserCoreAdapter }} from {adapter_url:?};
+
+let observed;
+let calls = 0;
+const hostBuffer = Object.freeze({{ identity: "buffer" }});
+const hostDevice = {{
+  createBuffer(descriptor) {{
+    calls += 1;
+    observed = descriptor;
+    return hostBuffer;
+  }},
+}};
+const adapter = createFeBrowserCoreAdapter({{}}, {{ GPUBuffer: {{}}, GPUDevice: {{}} }});
+const bytes = await (await import("node:fs/promises")).readFile({wasm_path:?});
+const {{ instance }} = await WebAssembly.instantiate(bytes, adapter.imports);
+adapter.attach(instance);
+
+const label = new TextEncoder().encode("quilt 🧵");
+const labelPtr = 2048;
+new Uint8Array(instance.exports.memory.buffer, labelPtr, label.length).set(label);
+const realized = adapter.runtime.resources.withBorrowed(hostDevice, device => {{
+  const buffer = instance.exports.make_buffer(
+    adapter.runtime.resources.toCore(device),
+    labelPtr,
+    label.length,
+    64n,
+    0x80,
+  );
+  return adapter.runtime.resources.take(buffer);
+}});
+if (realized !== hostBuffer) throw new Error("GPUBuffer identity did not transfer exactly once");
+if (calls !== 1 || observed.label !== "quilt 🧵" || observed.size !== 64 ||
+    typeof observed.size !== "number" || observed.usage !== 0x80 ||
+    observed.mappedAtCreation !== false) {{
+  throw new Error(`Fe descriptor did not survive generated transport: ${{JSON.stringify(observed)}}`);
+}}
+if (adapter.runtime.inventory().resources !== 0)
+  throw new Error("successful Fe createBuffer leaked a host resource");
+
+let rangeError;
+try {{
+  adapter.runtime.resources.withBorrowed(hostDevice, device =>
+    instance.exports.make_buffer(
+      adapter.runtime.resources.toCore(device),
+      labelPtr,
+      label.length,
+      9007199254740992n,
+      0x80,
+    )
+  );
+}} catch (error) {{ rangeError = error; }}
+if (!(rangeError instanceof RangeError) || calls !== 1 ||
+    adapter.runtime.inventory().resources !== 0) {{
+  throw new Error("unsafe u64 did not fail closed before WebGPU realization");
+}}
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&script_path, script).unwrap();
+    let execution = std::process::Command::new("node")
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "Fe/Core-Wasm/generated-WebIDL createBuffer capstone failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr),
+    );
+}
+
+/// Fe supplies the upload policy and invokes the standards operation directly:
+/// the byte view is borrowed, the Web IDL default is concrete, and the final
+/// size is a real Fe `Option<u64>`. The generic generated codec is the only
+/// browser-boundary realization.
+#[test]
+fn generated_webidl_write_buffer_runs_from_fe_through_core_wasm() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = fe_webidl_bindgen::parse(fe_webidl_bindgen::WEBGPU_BUFFER_WRITE_WEBIDL)
+        .expect("pinned writeBuffer Web IDL should parse");
+    let plan = fe_webidl_bindgen::build_adapter_plan(
+        &world,
+        "webgpu-buffer-write",
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
+    )
+    .expect("writeBuffer should lower to the generic host ABI");
+    let bindings = fe_webidl_bindgen::emit_fe_flat_host_imports(
+        &world,
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
+    )
+    .expect("writeBuffer bindings should be ordinary Fe declarations");
+    let source = format!(
+        r#"{bindings}
+pub fn write_all(
+    _ queue: GPUQueue,
+    _ buffer: GPUBuffer,
+    _ data: BrowserBytes,
+    _ buffer_offset: u64,
+) {{
+    gpu_queue_write_buffer(
+        self_: queue,
+        buffer,
+        bufferOffset: buffer_offset,
+        data,
+        dataOffset: 0,
+        size: Option::None,
+    )
+}}
+
+pub fn write_prefix(
+    _ queue: GPUQueue,
+    _ buffer: GPUBuffer,
+    _ data: BrowserBytes,
+    _ buffer_offset: u64,
+    _ size: u64,
+) {{
+    gpu_queue_write_buffer(
+        self_: queue,
+        buffer,
+        bufferOffset: buffer_offset,
+        data,
+        dataOffset: 0,
+        size: Option::Some(size),
+    )
+}}
+"#
+    );
+    let wasm = compile_to_wasm("generated_webidl_write_buffer.fe", &source);
+    assert!(func_imports(&wasm).contains(&(
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE.to_owned(),
+        "gpu_queue_write_buffer".to_owned(),
+    )));
+
+    let interface = fe_compiler_protocol::InterfaceManifest {
+        imports: func_imports(&wasm)
+            .into_iter()
+            .filter(|(module, _)| module == fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE)
+            .map(|(module, name)| fe_compiler_protocol::InterfaceFunction {
+                module,
+                name,
+                signature_complete: false,
+                params: Vec::new(),
+                results: Vec::new(),
+            })
+            .collect(),
+        ..fe_compiler_protocol::InterfaceManifest::default()
+    };
+    let metadata =
+        fe_webidl_bindgen::adapter_operation_metadata(&plan, "generated-webgpu-write-buffer");
+    let selection = fe_webidl_bindgen::select_adapter_operations(&interface, &metadata)
+        .expect("compiled Fe import should select GPUQueue.writeBuffer");
+    let adapter = fe_webidl_bindgen::emit_js_selected_core_adapter(
+        &world,
+        &plan,
+        "generated-webgpu-write-buffer",
+        &selection,
+    )
+    .expect("selected writeBuffer adapter should emit");
+
+    let directory = tempfile::tempdir().unwrap();
+    let wasm_path = directory.path().join("write-buffer.wasm");
+    let adapter_path = directory.path().join("write-buffer-adapter.mjs");
+    let script_path = directory.path().join("execute.mjs");
+    std::fs::write(&wasm_path, wasm).unwrap();
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let script = format!(
+        r#"
+import {{ createFeBrowserCoreAdapter }} from {adapter_url:?};
+
+const calls = [];
+const hostBuffer = Object.freeze({{ identity: "buffer" }});
+const hostQueue = {{
+  writeBuffer(buffer, bufferOffset, data, dataOffset, size) {{
+    calls.push({{ buffer, bufferOffset, data: [...data], dataOffset, size }});
+  }},
+}};
+const adapter = createFeBrowserCoreAdapter({{}}, {{ GPUBuffer: {{}}, GPUQueue: {{}} }});
+const bytes = await (await import("node:fs/promises")).readFile({wasm_path:?});
+const {{ instance }} = await WebAssembly.instantiate(bytes, adapter.imports);
+adapter.attach(instance);
+
+const upload = new Uint8Array([3, 1, 4, 1, 5]);
+const ptr = 2048;
+new Uint8Array(instance.exports.memory.buffer, ptr, upload.length).set(upload);
+const invoke = callback => adapter.runtime.resources.withBorrowed(hostQueue, queue =>
+  adapter.runtime.resources.withBorrowed(hostBuffer, buffer => callback(
+    adapter.runtime.resources.toCore(queue),
+    adapter.runtime.resources.toCore(buffer),
+  ))
+);
+invoke((queue, buffer) => instance.exports.write_all(
+  queue, buffer, ptr, upload.length, 7n,
+));
+invoke((queue, buffer) => instance.exports.write_prefix(
+  queue, buffer, ptr, upload.length, 11n, 3n,
+));
+
+if (calls.length !== 2 || calls.some(call => call.buffer !== hostBuffer))
+  throw new Error("borrowed GPU resource identity was not preserved");
+if (calls.some(call => call.data.join(",") !== "3,1,4,1,5" ||
+    !(call.data instanceof Array) || call.dataOffset !== 0))
+  throw new Error(`borrowed BrowserBytes were not realized exactly: ${{JSON.stringify(calls)}}`);
+if (calls[0].bufferOffset !== 7 || calls[0].size !== undefined ||
+    calls[1].bufferOffset !== 11 || calls[1].size !== 3)
+  throw new Error(`Fe Option/default semantics did not survive transport: ${{JSON.stringify(calls)}}`);
+if (adapter.runtime.inventory().resources !== 0)
+  throw new Error("writeBuffer retained borrowed host resources");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        wasm_path = wasm_path.display().to_string(),
+    );
+    std::fs::write(&script_path, script).unwrap();
+    let execution = std::process::Command::new("node")
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "Fe/Core-Wasm/generated-WebIDL writeBuffer capstone failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr),
+    );
+}
+
 /// The checked-in `std::web` facade remains an ordinary consumer of generated
 /// host imports. This executes the currently honest resource/u32 subset without
 /// teaching MIR or Wasm codegen any Web API names.

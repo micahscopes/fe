@@ -238,6 +238,7 @@ fn production_fri_actor_schedule_lowers_to_browser_webgpu() {
         assert_eq!(pass.cooperation, cooperation);
         let cycle = pass
             .cycle
+            .as_ref()
             .expect("every FRI phase belongs to one round cycle");
         assert_eq!(cycle.group, 0);
         assert_eq!(cycle.repeat, FRI_ROUNDS as u32);

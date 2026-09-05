@@ -1,0 +1,529 @@
+//! Fe-owned raster-pipeline and attachment policy.
+//!
+//! A render actor supplies one compile-time behavior using
+//! `RasterConfiguration` and returns a `RasterPlan`. The plan is composed from
+//! ordinary Fe traits and zero-sized policy types. The compiler evaluates that
+//! Fe value and transports the resulting physical plan; neither the compiler
+//! nor the browser host chooses depth, multisampling, or culling policy.
+
+/// Marks the actor behavior which denotes its compile-time raster plan.
+#[gpu_control(raster_pipeline)]
+pub struct RasterConfiguration {}
+
+/// The physical value projected from Fe into a render bundle.
+#[web_raster_plan]
+pub struct RasterPlan {
+    sample_count: u32,
+    sample_mask: u32,
+    alpha_to_coverage: bool,
+    cull_mode: FaceCull,
+    color: ColorAttachmentPlan,
+    depth: DepthAttachment,
+}
+
+pub enum AttachmentLoad {
+    Clear,
+    Load,
+}
+
+pub enum AttachmentStore {
+    Store,
+    Discard,
+}
+
+/// Attachment operations for the first and following render passes in one
+/// ordered Fe actor graph. The fixed host realizes these values; it does not
+/// choose clear/preserve/discard behavior from local booleans.
+pub struct AttachmentOps {
+    first_load: AttachmentLoad,
+    following_load: AttachmentLoad,
+    store: AttachmentStore,
+}
+
+pub struct ClearColor { pub r: f32, pub g: f32, pub b: f32, pub a: f32 }
+
+pub struct ColorAttachmentPlan {
+    clear: ClearColor,
+    ops: AttachmentOps,
+    blend: Option<BlendState>,
+    write_mask: u32,
+    blend_constant: ClearColor,
+}
+
+/// Core WebGPU blend factors. Dual-source factors require a separate device
+/// feature and are deliberately not silently admitted by this portable policy.
+pub enum BlendFactor {
+    Zero,
+    One,
+    Src,
+    OneMinusSrc,
+    SrcAlpha,
+    OneMinusSrcAlpha,
+    Dst,
+    OneMinusDst,
+    DstAlpha,
+    OneMinusDstAlpha,
+    SrcAlphaSaturated,
+    Constant,
+    OneMinusConstant,
+}
+pub enum BlendOperation {
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max,
+}
+pub struct BlendComponent {
+    pub operation: BlendOperation,
+    pub src_factor: BlendFactor,
+    pub dst_factor: BlendFactor,
+}
+pub struct BlendState { pub color: BlendComponent, pub alpha: BlendComponent }
+impl Copy for BlendFactor {}
+impl Copy for BlendOperation {}
+impl Copy for BlendComponent {}
+impl Copy for BlendState {}
+
+pub const COLOR_WRITE_RED: u32 = 1
+pub const COLOR_WRITE_GREEN: u32 = 2
+pub const COLOR_WRITE_BLUE: u32 = 4
+pub const COLOR_WRITE_ALPHA: u32 = 8
+pub const COLOR_WRITE_ALL: u32 = 15
+
+pub trait RasterBlendPolicy {
+    const fn blend() -> Option<BlendState>
+}
+pub trait RasterBlendConstant {
+    const fn value() -> ClearColor
+}
+pub struct WithBlendConstant<Color, Constant> {}
+impl<
+    Color: RasterColorPolicy,
+    Constant: RasterBlendConstant,
+> RasterColorPolicy for WithBlendConstant<Color, Constant> {
+    const fn color() -> ColorAttachmentPlan {
+        let base = Color::color()
+        ColorAttachmentPlan {
+            clear: base.clear,
+            ops: base.ops,
+            blend: base.blend,
+            write_mask: base.write_mask,
+            blend_constant: Constant::value(),
+        }
+    }
+}
+pub struct ReplaceColor {}
+pub struct StraightAlpha {}
+pub struct PremultipliedAlpha {}
+pub struct AdditiveColor {}
+impl RasterBlendPolicy for ReplaceColor {
+    const fn blend() -> Option<BlendState> {
+        Option::None
+    }
+}
+const fn alpha_over_component() -> BlendComponent {
+    BlendComponent {
+        operation: BlendOperation::Add,
+        src_factor: BlendFactor::One,
+        dst_factor: BlendFactor::OneMinusSrcAlpha,
+    }
+}
+impl RasterBlendPolicy for StraightAlpha {
+    const fn blend() -> Option<BlendState> {
+        Option::Some(
+            BlendState {
+                color: BlendComponent {
+                    operation: BlendOperation::Add,
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                },
+                alpha: alpha_over_component(),
+            },
+        )
+    }
+}
+impl RasterBlendPolicy for PremultipliedAlpha {
+    const fn blend() -> Option<BlendState> {
+        Option::Some(
+            BlendState { color: alpha_over_component(), alpha: alpha_over_component() },
+        )
+    }
+}
+impl RasterBlendPolicy for AdditiveColor {
+    const fn blend() -> Option<BlendState> {
+        let component = BlendComponent {
+            operation: BlendOperation::Add,
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+        }
+        Option::Some(BlendState { color: component, alpha: component })
+    }
+}
+
+/// Compose color attachment ownership, blending, and write permissions without
+/// changing depth, samples, culling, or shader code. The mask is a WebGPU bitset.
+pub struct ColorTarget<Color, Blend, const WRITE_MASK: u32> {}
+impl<
+    Color: RasterColorPolicy,
+    Blend: RasterBlendPolicy,
+    const WRITE_MASK: u32,
+> RasterColorPolicy for ColorTarget<Color, Blend, WRITE_MASK> where WRITE_MASK <= 15 {
+    const fn color() -> ColorAttachmentPlan {
+        let base = Color::color()
+        ColorAttachmentPlan {
+            clear: base.clear,
+            ops: base.ops,
+            blend: Blend::blend(),
+            write_mask: WRITE_MASK,
+            blend_constant: base.blend_constant,
+        }
+    }
+}
+
+pub enum FaceCull {
+    None,
+    Front,
+    Back,
+}
+
+pub enum DepthFormat {
+    Depth24Plus,
+    Depth32Float,
+}
+
+pub enum DepthCompare {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+pub struct DepthPlan {
+    format: DepthFormat,
+    compare: DepthCompare,
+    write_enabled: bool,
+    clear: f32,
+    ops: AttachmentOps,
+}
+
+/// Optional depth attachment in the physical plan. Keeping this as the
+/// ordinary Fe `Option` gives every CTFE-projected host plan the same generic
+/// null/value transport instead of teaching the compiler a raster-only enum.
+pub type DepthAttachment = Option<DepthPlan>
+
+impl Copy for AttachmentLoad {}
+impl Copy for AttachmentStore {}
+impl Copy for AttachmentOps {}
+impl Copy for ClearColor {}
+impl Copy for ColorAttachmentPlan {}
+impl Copy for FaceCull {}
+impl Copy for DepthFormat {}
+impl Copy for DepthCompare {}
+impl Copy for DepthPlan {}
+impl Copy for RasterPlan {}
+
+/// A policy denotes one complete physical raster plan at compile time.
+pub trait RasterPolicy {
+    const fn plan() -> RasterPlan
+}
+
+pub trait RasterDepthPolicy {
+    const fn depth() -> DepthAttachment
+}
+
+pub trait RasterColorPolicy {
+    const fn color() -> ColorAttachmentPlan
+}
+
+pub trait RasterAttachmentPolicy {
+    const fn ops() -> AttachmentOps
+}
+
+pub trait EnabledDepthFormat {
+    const fn format() -> DepthFormat
+}
+
+pub trait RasterDepthCompare {
+    const fn compare() -> DepthCompare
+    const fn clear() -> f32
+}
+
+pub trait RasterDepthWrite {
+    const fn enabled() -> bool
+}
+
+pub trait RasterSamples {
+    const fn sample_count() -> u32
+}
+
+pub trait RasterFaceCull {
+    const fn cull() -> FaceCull
+}
+
+/// Orthogonal type-level raster state. Its implementation below is the sole
+/// composition rule: each axis contributes only its own denotation.
+pub struct RasterState<Depth, Samples, Cull, Color> {}
+
+/// Clear an attachment on the first raster pass, preserve it between
+/// following passes, and retain its final contents.
+pub struct ClearThenLoadStore {}
+
+impl RasterAttachmentPolicy for ClearThenLoadStore {
+    const fn ops() -> AttachmentOps {
+        AttachmentOps {
+            first_load: AttachmentLoad::Clear,
+            following_load: AttachmentLoad::Load,
+            store: AttachmentStore::Store,
+        }
+    }
+}
+
+/// Opaque black presentation target with independently selected attachment
+/// lifecycle. Additional clear-color policies remain ordinary Fe types.
+pub struct OpaqueBlack<Ops> {}
+
+impl<Ops: RasterAttachmentPolicy> RasterColorPolicy for OpaqueBlack<Ops> {
+    const fn color() -> ColorAttachmentPlan {
+        ColorAttachmentPlan {
+            clear: ClearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            ops: Ops::ops(),
+            blend: Option::None,
+            write_mask: COLOR_WRITE_ALL,
+            blend_constant: ClearColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+        }
+    }
+}
+
+pub struct NoDepth {}
+
+impl RasterDepthPolicy for NoDepth {
+    const fn depth() -> DepthAttachment {
+        Option::None
+    }
+}
+
+pub struct DepthTest<Format, Compare, Write, Ops> {}
+
+impl<Format, Compare, Write, Ops> RasterDepthPolicy for DepthTest<Format, Compare, Write, Ops>
+where
+    Format: EnabledDepthFormat,
+    Compare: RasterDepthCompare,
+    Write: RasterDepthWrite,
+    Ops: RasterAttachmentPolicy {
+    const fn depth() -> DepthAttachment {
+        Option::Some(
+            DepthPlan {
+                format: Format::format(),
+                compare: Compare::compare(),
+                write_enabled: Write::enabled(),
+                clear: Compare::clear(),
+                ops: Ops::ops(),
+            },
+        )
+    }
+}
+
+pub struct Depth24Plus {}
+pub struct Depth32Float {}
+
+impl EnabledDepthFormat for Depth24Plus {
+    const fn format() -> DepthFormat {
+        DepthFormat::Depth24Plus
+    }
+}
+
+impl EnabledDepthFormat for Depth32Float {
+    const fn format() -> DepthFormat {
+        DepthFormat::Depth32Float
+    }
+}
+
+pub struct CompareLess {}
+pub struct CompareLessEqual {}
+pub struct CompareGreater {}
+pub struct CompareGreaterEqual {}
+pub struct CompareAlways {}
+pub struct CompareNever {}
+pub struct CompareEqual {}
+pub struct CompareNotEqual {}
+
+impl RasterDepthCompare for CompareNever {
+    const fn compare() -> DepthCompare { DepthCompare::Never }
+    const fn clear() -> f32 { 1.0 }
+}
+impl RasterDepthCompare for CompareEqual {
+    const fn compare() -> DepthCompare { DepthCompare::Equal }
+    const fn clear() -> f32 { 1.0 }
+}
+impl RasterDepthCompare for CompareNotEqual {
+    const fn compare() -> DepthCompare { DepthCompare::NotEqual }
+    const fn clear() -> f32 { 1.0 }
+}
+
+impl RasterDepthCompare for CompareLess {
+    const fn compare() -> DepthCompare {
+        DepthCompare::Less
+    }
+    const fn clear() -> f32 {
+        1.0
+    }
+}
+
+impl RasterDepthCompare for CompareLessEqual {
+    const fn compare() -> DepthCompare {
+        DepthCompare::LessEqual
+    }
+    const fn clear() -> f32 {
+        1.0
+    }
+}
+
+impl RasterDepthCompare for CompareGreater {
+    const fn compare() -> DepthCompare {
+        DepthCompare::Greater
+    }
+    const fn clear() -> f32 {
+        0.0
+    }
+}
+
+impl RasterDepthCompare for CompareGreaterEqual {
+    const fn compare() -> DepthCompare {
+        DepthCompare::GreaterEqual
+    }
+    const fn clear() -> f32 {
+        0.0
+    }
+}
+
+impl RasterDepthCompare for CompareAlways {
+    const fn compare() -> DepthCompare {
+        DepthCompare::Always
+    }
+    const fn clear() -> f32 {
+        1.0
+    }
+}
+
+pub struct DepthReadOnly {}
+pub struct DepthWrite {}
+
+impl RasterDepthWrite for DepthReadOnly {
+    const fn enabled() -> bool {
+        false
+    }
+}
+
+impl RasterDepthWrite for DepthWrite {
+    const fn enabled() -> bool {
+        true
+    }
+}
+
+pub struct Samples1 {}
+pub struct Samples4 {}
+
+impl RasterSamples for Samples1 {
+    const fn sample_count() -> u32 {
+        1
+    }
+}
+
+impl RasterSamples for Samples4 {
+    const fn sample_count() -> u32 {
+        4
+    }
+}
+
+pub struct CullNone {}
+pub struct CullFront {}
+pub struct CullBack {}
+
+impl RasterFaceCull for CullNone {
+    const fn cull() -> FaceCull {
+        FaceCull::None
+    }
+}
+
+impl RasterFaceCull for CullFront {
+    const fn cull() -> FaceCull {
+        FaceCull::Front
+    }
+}
+
+impl RasterFaceCull for CullBack {
+    const fn cull() -> FaceCull {
+        FaceCull::Back
+    }
+}
+
+impl<Depth, Samples, Cull, Color> RasterPolicy for RasterState<Depth, Samples, Cull, Color>
+where
+    Depth: RasterDepthPolicy,
+    Samples: RasterSamples,
+    Cull: RasterFaceCull,
+    Color: RasterColorPolicy {
+    const fn plan() -> RasterPlan {
+        RasterPlan {
+            sample_count: Samples::sample_count(),
+            sample_mask: 0xffffffff,
+            alpha_to_coverage: false,
+            cull_mode: Cull::cull(),
+            color: Color::color(),
+            depth: Depth::depth(),
+        }
+    }
+}
+
+/// Restrict covered samples independently of the attachment sample count.
+/// Zero is a valid mask: no samples are written.
+pub struct WithSampleMask<P, const MASK: u32> {}
+impl<P: RasterPolicy, const MASK: u32> RasterPolicy for WithSampleMask<P, MASK> {
+    const fn plan() -> RasterPlan {
+        let mut plan = P::plan()
+        plan.sample_mask = MASK
+        plan
+    }
+}
+
+/// Use fragment alpha as sample coverage. Requires multisampling (Samples4)
+/// and an alpha-bearing target; it is not ordered transparency or OIT.
+/// Color blending stays independent: combining both intentionally attenuates
+/// the color twice. Prefer ReplaceColor for ordinary alpha-tested coverage.
+pub struct WithAlphaToCoverage<P> {}
+impl<P: RasterPolicy> RasterPolicy for WithAlphaToCoverage<P> {
+    const fn plan() -> RasterPlan {
+        let mut plan = P::plan()
+        plan.alpha_to_coverage = true
+        plan
+    }
+}
+
+/// Evaluate any well-typed raster policy into its physical Fe value.
+pub const fn raster_plan<P: RasterPolicy>() -> RasterPlan {
+    P::plan()
+}
+
+/// Conventional forward-Z, double-sided, four-sample surface rendering.
+pub type Depth24LessEqualMsaa4 = RasterState<
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite, ClearThenLoadStore>,
+    Samples4,
+    CullNone,
+    OpaqueBlack<ClearThenLoadStore>,
+>
+
+/// Conventional forward-Z, double-sided, single-sample surface rendering.
+pub type Depth24LessEqual = RasterState<
+    DepthTest<Depth24Plus, CompareLessEqual, DepthWrite, ClearThenLoadStore>,
+    Samples1,
+    CullNone,
+    OpaqueBlack<ClearThenLoadStore>,
+>
+
+/// Explicit color-only raster state.
+pub type ColorOnly = RasterState<NoDepth, Samples1, CullNone, OpaqueBlack<ClearThenLoadStore>>

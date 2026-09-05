@@ -3,6 +3,24 @@ use fe_hir::{
 };
 
 #[test]
+fn route_parse_constructors_do_not_require_copy_evidence() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "route_parse_unconstrained_constructors.fe".into(),
+        r#"
+fn absent<T>(_ value:T) -> std::web::RouteSegmentParse<T> {
+    std::web::RouteSegmentParse::none(value)
+}
+fn present<T>(_ value:T) -> std::web::RouteSegmentParse<T> {
+    std::web::RouteSegmentParse::matched(value)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn reflected_const_candidate_can_narrow_into_an_exact_i32_term() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -156,6 +174,23 @@ fn ground_type_inspection_exposes_constructor_and_ordered_args() {
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn nested_fields_resolve_relative_module_paths() {
+    use common::InputDb;
+    use driver::DriverDataBase;
+    use fe_hir::hir_def::HirIngot;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/provider_relative_fields");
+    let url = url::Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+    for module in ingot.all_modules(&db) {
+        let diagnostics = db.run_on_top_mod(*module).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
 }
 
 #[test]

@@ -10,7 +10,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -18,31 +18,34 @@ use std::{
 use common::InputDb;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
-    semantic::{ViewParam, ViewParamKind, project_view_surface},
+    semantic::{
+        SemConstId, SemConstScalar, SemConstValue, ViewParam,
+        ctfe::{CtfeError, eval_body_owner_const},
+        project_view_surface,
+    },
     ty::{
         adt_def::AdtRef,
         const_ty::{ConstTyData, EvaluatedConstTy},
         trait_resolution::PredicateListId,
+        ty_check::BodyOwner,
         ty_def::{PrimTy, TyBase, TyData, TyId},
         ty_lower::lower_hir_ty,
     },
 };
 use hir::hir_def::{
-    FieldParent, Func, GenericArg, GpuControl, GpuDispatch, GpuDraw, GpuResource,
-    GpuResourceAccess, GpuResourceInit, GpuResourceKind, GpuResourceRecovery, GpuResourceResidency,
-    GpuResourceVisibility, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
+    EnumVariant, FieldParent, Func, GenericArg, GenericParam, GpuControl, GpuDispatch, GpuDraw,
+    GpuResource, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvArtifact, SpirvBuiltinArgument, SpirvBuiltinSource,
     SpirvExternalResource, SpirvLayout, SpirvResourceElement, SpirvResourceField, SpirvScalarKind,
-    WordKind,
+    SpirvShaderStage, WordKind,
 };
 
 use crate::actor_semantics::{
-    SemanticActor, SemanticGpuResourceFamily, nominal_attrs, resolve_metadata_ty, semantic_actors,
-    semantic_gpu_resource,
+    SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors, semantic_gpu_resource,
 };
 use crate::browser_actor_runtime::{
     BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
@@ -51,7 +54,7 @@ use crate::resident_actor::{
     StructuredChildActorArtifact, behavior_is_scoped_task, compile_scoped_task_support,
 };
 use crate::sonatina::{
-    WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_resources,
+    WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_interface,
     compile_runtime_package_spirv_compute_with_interface, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
     compile_runtime_package_wasm_with_options,
@@ -64,7 +67,7 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 7;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 13;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = BROWSER_ACTOR_RUNTIME_PROTOCOL;
 pub const WEB_ACTOR_RUNTIME_VERSION: u32 = BROWSER_ACTOR_RUNTIME_VERSION;
 
@@ -106,6 +109,12 @@ const TYPED_SURFACE_QUALITY_EXPORT: &str = "fe_surface_quality_v1";
 /// Fixed discovery point for the actor-level Fe shared-device policy. Its
 /// private supervision state remains resident in generated Wasm.
 const TYPED_SURFACE_RECOVERY_EXPORT: &str = "fe_surface_recovery_v1";
+/// Prefix for compiler-owned pure Fe predicates that select the active GPU
+/// pass subgraph. The manifest carries only the dense ordinal suffix.
+const TYPED_PASS_ACTIVATION_EXPORT_PREFIX: &str = "fe_pass_activation_v1_";
+/// Prefix for compiler-owned pure Fe decisions that select ahead-of-demand
+/// pipeline preparation. The manifest carries only the dense ordinal suffix.
+const TYPED_PASS_PREPARATION_EXPORT_PREFIX: &str = "fe_pass_preparation_v1_";
 /// Fixed delivery point for one compiler-derived GPU result message. The
 /// authored behavior and message type remain Fe vocabulary; the browser sees
 /// only the canonical `(pointer, length)` transport plus inert resource
@@ -131,14 +140,97 @@ const RENDER_SCOPED_TASK_OPTION_MARKER: &str = "/* FE_SCOPED_TASK_OPTION */";
 /// (crates/html-precompile/assets/bootstrap.js), so both paths share one
 /// render runtime instead of maintaining two.
 const RENDER_RUNTIME_JS_FILE: &str = "fe-render-runtime.js";
-const RENDER_RUNTIME_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
+const RENDER_RUNTIME_BASE_JS: &str = include_str!("../assets/render-runtime/fe-render-runtime.js");
+static RENDER_RUNTIME_JS: LazyLock<String> = LazyLock::new(|| {
+    let world = fe_webidl_bindgen::parse(fe_webidl_bindgen::WEBGPU_RENDER_RUNTIME_WEBIDL)
+        .expect("pinned WebGPU runtime Web IDL selections must compose and parse");
+    let plan = fe_webidl_bindgen::build_adapter_plan(
+        &world,
+        "webgpu-render-runtime",
+        fe_webidl_bindgen::WEBGPU_WEBIDL_MODULE,
+    )
+    .expect("pinned WebGPU runtime adapter plan must lower");
+    let operation = |resource_name: &str, member_name: &str| {
+        plan.resources
+            .iter()
+            .find(|resource| resource.name == resource_name)
+            .and_then(|resource| {
+                resource
+                    .functions
+                    .iter()
+                    .find(|function| function.member_name == member_name)
+            })
+            .unwrap_or_else(|| {
+                panic!("pinned WebGPU operation {resource_name}.{member_name} must remain selected")
+            })
+            .import_name
+            .clone()
+    };
+    let queue_idle = operation("GPUQueue", "onSubmittedWorkDone");
+    let create_buffer = operation("GPUDevice", "createBuffer");
+    let write_buffer = operation("GPUQueue", "writeBuffer");
+    let draw = operation("GPURenderPassEncoder", "draw");
+    let draw_indirect = operation("GPURenderPassEncoder", "drawIndirect");
+    let blend_constant = operation("GPURenderPassEncoder", "setBlendConstant");
+    let color_dict_case = fe_webidl_bindgen::canonical_union_case_name(
+        &fe_webidl_bindgen::TypeRef::Named("GPUColorDict".into()),
+    );
+    let semantic = fe_webidl_bindgen::emit_js_canonical_adapter(&world, &plan)
+        .expect("pinned WebGPU runtime semantic adapter must emit");
+    format!(
+        "{}\n{}\n{}\n\
+         const feWebGpuWebIdlRuntime = createFeHostRuntime();\n\
+         const feWebGpuWebIdlAdapter = createFeHostAdapter({{}}, feWebGpuWebIdlRuntime);\n\
+         const feWebGpuOperations = feWebGpuWebIdlAdapter.imports[{module:?}];\n\
+         installGeneratedWebGpuOperations(Object.freeze({{\n  \
+           queueIdle: queue =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(queue, handle =>\n      \
+               feWebGpuOperations[{queue_idle:?}](handle)),\n  \
+           bufferCreate: (device, descriptor) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(device, handle => {{\n      \
+               const bufferHandle = feWebGpuOperations[{create_buffer:?}](handle, descriptor);\n      \
+               return feWebGpuWebIdlRuntime.resources.take(bufferHandle);\n    \
+             }}),\n  \
+           bufferWrite: (queue, buffer, bufferOffset, data, dataOffset = 0, size = undefined) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(queue, queueHandle =>\n      \
+               feWebGpuWebIdlRuntime.resources.withBorrowed(buffer, bufferHandle =>\n        \
+                 feWebGpuOperations[{write_buffer:?}](\n          \
+                   queueHandle, bufferHandle, BigInt(bufferOffset), data, BigInt(dataOffset),\n          \
+                   size === undefined ? undefined : BigInt(size),\n        \
+                 ))),\n  \
+           renderBlendConstant: (renderPass, color) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
+               feWebGpuOperations[{blend_constant:?}](renderPassHandle, {{ case: {color_dict_case:?}, value: color }})),\n  \
+           renderDraw: (renderPass, vertexCount, instanceCount = 1, firstVertex = 0, firstInstance = 0) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
+               feWebGpuOperations[{draw:?}](\n        \
+                 renderPassHandle, vertexCount, instanceCount, firstVertex, firstInstance,\n      \
+               )),\n  \
+           renderDrawIndirect: (renderPass, buffer, offset = 0) =>\n    \
+             feWebGpuWebIdlRuntime.resources.withBorrowed(renderPass, renderPassHandle =>\n      \
+               feWebGpuWebIdlRuntime.resources.withBorrowed(buffer, bufferHandle =>\n        \
+                 feWebGpuOperations[{draw_indirect:?}](\n          \
+                   renderPassHandle, bufferHandle, BigInt(offset),\n        \
+                 ))),\n\
+         }}));\n",
+        fe_webidl_bindgen::HOST_RUNTIME_JS,
+        semantic,
+        RENDER_RUNTIME_BASE_JS,
+        module = plan.module,
+        queue_idle = queue_idle,
+        create_buffer = create_buffer,
+        write_buffer = write_buffer,
+        draw = draw,
+        draw_indirect = draw_indirect,
+    )
+});
 
 /// The fixed render runtime module's source text, for hosts (the standards
 /// `fe web dev`/`fe web precompile` bundle lane) that publish it
 /// content-addressed alongside a render bundle they compile outside
 /// [`WebBundle::write_atomic`]/[`WebBundle::materialized_files`].
 pub fn render_runtime_js() -> &'static str {
-    RENDER_RUNTIME_JS
+    RENDER_RUNTIME_JS.as_str()
 }
 const WEB_ACTOR_RUNTIME: &[(&str, &str)] = BROWSER_ACTOR_RUNTIME_FILES;
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
@@ -521,11 +613,15 @@ impl WebBuildOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WebActorProgram {
     pub actor: String,
     pub stages: Vec<WebActorStage>,
     pub resources: Vec<WebActorResource>,
+    /// CTFE-evaluated Fe raster and attachment plan. The compiler transports
+    /// the normalized Fe value generically; the vocabulary remains owned by
+    /// `std::webgpu::raster` rather than mirrored as Rust enums here.
+    pub raster: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -550,13 +646,30 @@ pub enum WebActorStageKind {
     /// into the transitional render manifest.
     Vertex {
         varying: CanonicalType,
-        vertex_count: u32,
+        draw: WebActorDraw,
+        instance_index: bool,
+        primitive: Option<serde_json::Value>,
     },
     Fragment,
     /// Authored fragment behavior paired with `Vertex` by exact nominal
     /// payload identity before this serializable-free descriptor is produced.
     RasterFragment {
         varying: CanonicalType,
+    },
+}
+
+/// Compiler-owned source of one authored raster draw. Direct counts remain
+/// compile-time Fe values; indirect draws retain the exact actor field that
+/// supplies their GPU-written four-word command. This type is never a page or
+/// browser API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebActorDraw {
+    Direct {
+        vertex_count: u32,
+        instance_count: u32,
+    },
+    Indirect {
+        resource_field_index: u32,
     },
 }
 
@@ -567,6 +680,7 @@ pub enum WebActorStageKind {
 pub struct WebActorPassCycle {
     pub group: String,
     pub repeat: u32,
+    pub inner: Option<Box<WebActorPassCycle>>,
 }
 
 /// Compiler-derived physical contraction applied at actor-cycle boundaries.
@@ -596,88 +710,71 @@ pub struct WebActorResource {
     pub kind: GpuResource,
     /// Type-derived logical policy. The fixed host may narrow physical access
     /// for a stage, but it may never grant more than this declaration.
-    pub policy: WebResourcePolicy,
+    pub policy: serde_json::Value,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceKind {
-    #[default]
-    Storage,
+fn legacy_resource_policy() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "storage",
+        "access": "read_write",
+        "residency": "actor_resident",
+        "initialization": { "kind": "zeroed" },
+        "recovery": "replay_recipe",
+        "visibility": "compute_fragment",
+    })
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceAccess {
-    ReadOnly,
-    WriteOnly,
-    #[default]
-    ReadWrite,
+fn is_default_resource_policy(policy: &serde_json::Value) -> bool {
+    *policy == legacy_resource_policy()
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceResidency {
-    Immutable,
-    #[default]
-    ActorResident,
-    FrameTransient,
-    Imported,
+fn normalized_resource_policy_field<'a>(
+    policy: &'a serde_json::Value,
+    field: &str,
+    resource: &str,
+) -> Result<&'a str, WebBundleError> {
+    policy
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{resource}` manifest policy has no scalar `{field}` field"
+            ))
+        })
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WebResourceInitialization {
-    #[default]
-    Zeroed,
-    ContentAddressed {
-        sha256: String,
-    },
-    Derived,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceRecovery {
-    #[default]
-    ReplayRecipe,
-    RestoreCheckpoint,
-    Regenerate,
-    NonRecoverable,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebResourceVisibility {
-    Compute,
-    Vertex,
-    Fragment,
-    #[default]
-    ComputeFragment,
-    VertexFragment,
-    All,
-}
-
-/// Orthogonal logical resource policy derived exclusively from Fe marker
-/// types. Its default is the historical mutable actor storage contract, so
-/// legacy manifests retain their compact spelling.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebResourcePolicy {
-    pub kind: WebResourceKind,
-    pub access: WebResourceAccess,
-    pub residency: WebResourceResidency,
-    pub initialization: WebResourceInitialization,
-    pub recovery: WebResourceRecovery,
-    pub visibility: WebResourceVisibility,
-}
-
-fn is_default_resource_policy(policy: &WebResourcePolicy) -> bool {
-    *policy == WebResourcePolicy::default()
+fn normalized_resource_initialization<'a>(
+    policy: &'a serde_json::Value,
+    resource: &str,
+) -> Result<(&'a str, Option<&'a str>), WebBundleError> {
+    let initialization = policy
+        .get("initialization")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{resource}` manifest policy has no initialization record"
+            ))
+        })?;
+    let kind = initialization
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{resource}` manifest initialization has no scalar kind"
+            ))
+        })?;
+    Ok((
+        kind,
+        initialization
+            .get("sha256")
+            .and_then(serde_json::Value::as_str),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebActorResourceElement {
     U32,
+    AtomicU32,
     F32,
     Record {
         fields: Vec<WebActorResourceField>,
@@ -827,6 +924,10 @@ fn compute_stage_shape(
         ));
     }
     if let (Some(taper), Some(cycle)) = (taper, cycle.as_ref()) {
+        let mut cycle = cycle;
+        while let Some(inner) = cycle.inner.as_deref() {
+            cycle = inner;
+        }
         let total_decrement = u64::from(taper.repeat_decrement)
             .checked_mul(u64::from(cycle.repeat - 1))
             .ok_or_else(|| {
@@ -1016,11 +1117,6 @@ fn compute_dispatch_shape(
             }
             let (dispatch, repeat, taper, cooperation, nested) =
                 compute_dispatch_shape(db, *inner)?;
-            if nested.is_some() {
-                return Err(WebBundleError::EntryDerivation(
-                    "nested actor pass cycles are not yet supported".to_owned(),
-                ));
-            }
             Ok((
                 dispatch,
                 repeat,
@@ -1029,6 +1125,7 @@ fn compute_dispatch_shape(
                 Some(WebActorPassCycle {
                     group: group.pretty_print(db).to_string(),
                     repeat: cycles,
+                    inner: nested.map(Box::new),
                 }),
             ))
         }
@@ -1143,11 +1240,240 @@ fn role_payload_ty<'db>(
     Ok(*payload)
 }
 
-fn raster_draw_count(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RasterDrawShape {
+    draw: WebActorDraw,
+    instance_index: bool,
+    primitive: Option<serde_json::Value>,
+}
+
+fn typed_primitive_policy(
     db: &DriverDataBase,
+    draw: TyId<'_>,
+    primitive: TyId<'_>,
+) -> Result<serde_json::Value, WebBundleError> {
+    let function =
+        projected_const_plan_function(db, draw, "draw primitive", "PrimitivePlan", |attrs| {
+            attrs.is_web_primitive_plan(db)
+        })?;
+    let value =
+        eval_body_owner_const(db, BodyOwner::Func(function), vec![primitive]).map_err(|error| {
+            WebBundleError::EntryDerivation(format!(
+                "draw has no valid Fe PrimitivePolicy evidence: {}",
+                describe_raster_ctfe_error(&error)
+            ))
+        })?;
+    // Const evaluation can expose a recovery Unit for an ill-typed generic
+    // application. That is not an absent policy or a request for defaults.
+    if !matches!(value.value(db), SemConstValue::Struct { ty, .. } if ty == function.return_ty(db)) {
+        return Err(WebBundleError::EntryDerivation(
+            "draw has no valid Fe PrimitivePolicy evidence: evaluation did not return PrimitivePlan".into(),
+        ));
+    }
+    project_manifest_const(db, value, "Fe primitive plan")
+}
+
+fn exact_indirect_resource_field(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+    requested: TyId<'_>,
+) -> Result<u32, WebBundleError> {
+    let requested = requested.as_view(db).unwrap_or(requested);
+    let assumptions = PredicateListId::empty_list(db);
+    let mut matches = Vec::new();
+    for (field_index, field) in actor.state.hir_fields(db).data(db).iter().enumerate() {
+        let Some(type_ref) = field.type_ref().to_opt() else {
+            continue;
+        };
+        let found = lower_hir_ty(db, type_ref, actor.state.scope(), assumptions);
+        let found = found.as_view(db).unwrap_or(found);
+        if found == requested {
+            matches.push((field_index, field));
+        }
+    }
+    let (field_index, field) = match matches.as_slice() {
+        [] => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "indirect triangle-list draw policy names `{}`, but the actor has no field of that exact resource type",
+                requested.pretty_print(db),
+            )));
+        }
+        [found] => *found,
+        found => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "indirect triangle-list draw policy names `{}`, but {count} actor fields have that exact resource type; use distinct nominal brands",
+                requested.pretty_print(db),
+                count = found.len(),
+            )));
+        }
+    };
+    let name = field
+        .name
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .unwrap_or_else(|| format!("field {field_index}"));
+    let resource = semantic_gpu_resource(db, requested)
+        .map_err(|message| {
+            WebBundleError::EntryDerivation(format!(
+                "indirect draw resource `{name}` is malformed: {message}"
+            ))
+        })?
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "indirect draw resource `{name}` has no GPU resource meaning"
+            ))
+        })?;
+    if resource.kind != GpuResource::Indirect {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "indirect triangle-list draw resource `{name}` must use the nominal Fe indirect-buffer family"
+        )));
+    }
+    if semantic_const_u32(db, resource.length_ty) != Some(4)
+        || !matches!(
+            resource
+                .element_ty
+                .as_view(db)
+                .unwrap_or(resource.element_ty)
+                .base_ty(db)
+                .data(db),
+            TyData::TyBase(TyBase::Prim(PrimTy::U32))
+        )
+    {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "indirect triangle-list draw resource `{name}` must contain exactly four `u32` words"
+        )));
+    }
+    Ok(u32::try_from(field_index).expect("actor field count fits in u32"))
+}
+
+fn raster_draw_shape_from_ty(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+    draw: TyId<'_>,
+) -> Result<RasterDrawShape, WebBundleError> {
+    let attrs = nominal_attrs(db, draw).ok_or_else(|| {
+        WebBundleError::EntryDerivation(
+            "vertex-stage draw policy is not an attributed nominal type".to_owned(),
+        )
+    })?;
+    match attrs.gpu_draw(db) {
+        Some(GpuDraw::Direct | GpuDraw::Indirect) => {
+            let [primitive, operand, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "draw policy requires a primitive policy and a count or exact argument resource".into()));
+            };
+            let primitive = Some(typed_primitive_policy(db, draw, *primitive)?);
+            let indirect = attrs.gpu_draw(db) == Some(GpuDraw::Indirect);
+            let draw = if indirect {
+                WebActorDraw::Indirect {
+                    resource_field_index: exact_indirect_resource_field(db, actor, *operand)?,
+                }
+            } else {
+                let vertex_count = semantic_const_u32(db, *operand).ok_or_else(|| {
+                    WebBundleError::EntryDerivation(
+                        "direct vertex count must be a concrete u32-sized integer".into(),
+                    )
+                })?;
+                WebActorDraw::Direct {
+                    vertex_count,
+                    instance_count: 1,
+                }
+            };
+            Ok(RasterDrawShape {
+                draw,
+                instance_index: indirect,
+                primitive,
+            })
+        }
+        Some(GpuDraw::TriangleList) => {
+            let [count, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "triangle-list draw policy requires one concrete vertex count".to_owned(),
+                ));
+            };
+            let count = semantic_const_u32(db, *count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "triangle-list vertex count must be a concrete u32-sized integer".to_owned(),
+                )
+            })?;
+            if count == 0 {
+                return Err(WebBundleError::EntryDerivation(
+                    "triangle-list vertex count must be nonzero".to_owned(),
+                ));
+            }
+            Ok(RasterDrawShape {
+                draw: WebActorDraw::Direct {
+                    vertex_count: count,
+                    instance_count: 1,
+                },
+                instance_index: false,
+                primitive: None,
+            })
+        }
+        Some(GpuDraw::Instanced) => {
+            let [inner, count, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "instanced draw policy requires one draw policy and one concrete instance count"
+                        .to_owned(),
+                ));
+            };
+            let count = semantic_const_u32(db, *count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "instanced draw count must be a concrete u32-sized integer".to_owned(),
+                )
+            })?;
+            let inner = raster_draw_shape_from_ty(db, actor, *inner)?;
+            let WebActorDraw::Direct {
+                vertex_count,
+                instance_count: inner_instances,
+            } = inner.draw
+            else {
+                return Err(WebBundleError::EntryDerivation(
+                    "an indirect draw already carries its instance count and cannot be wrapped in `Instanced`"
+                        .to_owned(),
+                ));
+            };
+            let instance_count = inner_instances.checked_mul(count).ok_or_else(|| {
+                WebBundleError::EntryDerivation(
+                    "nested instanced draw count exceeds the WebGPU u32 range".to_owned(),
+                )
+            })?;
+            Ok(RasterDrawShape {
+                draw: WebActorDraw::Direct {
+                    vertex_count,
+                    instance_count,
+                },
+                instance_index: true,
+                primitive: inner.primitive,
+            })
+        }
+        Some(GpuDraw::IndirectTriangleList) => {
+            let [resource, ..] = draw.generic_args(db) else {
+                return Err(WebBundleError::EntryDerivation(
+                    "indirect triangle-list draw policy requires one exact actor resource type"
+                        .to_owned(),
+                ));
+            };
+            Ok(RasterDrawShape {
+                draw: WebActorDraw::Indirect {
+                    resource_field_index: exact_indirect_resource_field(db, actor, *resource)?,
+                },
+                instance_index: true,
+                primitive: None,
+            })
+        }
+        None => Err(WebBundleError::EntryDerivation(
+            "vertex-stage draw policy has no recognized GPU draw attribute".to_owned(),
+        )),
+    }
+}
+
+fn raster_draw_shape(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
     behavior: hir::hir_def::Func<'_>,
     role_path: PathId<'_>,
-) -> Result<u32, WebBundleError> {
+) -> Result<RasterDrawShape, WebBundleError> {
     let role_ty = resolve_metadata_ty(db, role_path, behavior.scope()).ok_or_else(|| {
         WebBundleError::EntryDerivation("vertex-stage role did not resolve".to_owned())
     })?;
@@ -1156,32 +1482,7 @@ fn raster_draw_count(
             "vertex-stage role requires a Fe-authored draw policy".to_owned(),
         ));
     };
-    let attrs = nominal_attrs(db, *draw).ok_or_else(|| {
-        WebBundleError::EntryDerivation(
-            "vertex-stage draw policy is not an attributed nominal type".to_owned(),
-        )
-    })?;
-    if attrs.gpu_draw(db) != Some(GpuDraw::TriangleList) {
-        return Err(WebBundleError::EntryDerivation(
-            "authored raster currently requires `#[gpu_draw(triangle_list)]`".to_owned(),
-        ));
-    }
-    let [count, ..] = draw.generic_args(db) else {
-        return Err(WebBundleError::EntryDerivation(
-            "triangle-list draw policy requires one concrete vertex count".to_owned(),
-        ));
-    };
-    let count = semantic_const_u32(db, *count).ok_or_else(|| {
-        WebBundleError::EntryDerivation(
-            "triangle-list vertex count must be a concrete u32-sized integer".to_owned(),
-        )
-    })?;
-    if count == 0 {
-        return Err(WebBundleError::EntryDerivation(
-            "triangle-list vertex count must be nonzero".to_owned(),
-        ));
-    }
-    Ok(count)
+    raster_draw_shape_from_ty(db, actor, *draw)
 }
 
 fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
@@ -1194,11 +1495,12 @@ fn is_primitive(db: &DriverDataBase, ty: TyId<'_>, primitive: PrimTy) -> bool {
 
 fn raster_vertex_stage<'db>(
     db: &'db DriverDataBase,
+    actor: &SemanticActor<'db>,
     behavior: hir::hir_def::Func<'db>,
     role_path: PathId<'db>,
 ) -> Result<(WebActorStageKind, TyId<'db>), WebBundleError> {
     let payload = role_payload_ty(db, behavior, role_path, "vertex")?;
-    let vertex_count = raster_draw_count(db, behavior, role_path)?;
+    let draw = raster_draw_shape(db, actor, behavior, role_path)?;
     let args = behavior.arg_tys(db);
     let Some(vertex_index) = args.first() else {
         return Err(WebBundleError::EntryDerivation(
@@ -1210,6 +1512,20 @@ fn raster_vertex_stage<'db>(
         return Err(WebBundleError::EntryDerivation(
             "authored vertex behavior's first context argument must be exactly `u32`".to_owned(),
         ));
+    }
+    if draw.instance_index {
+        let Some(instance_index) = args.get(1) else {
+            return Err(WebBundleError::EntryDerivation(
+                "instanced vertex behavior must take a `u32` instance-index context after its vertex index"
+                    .to_owned(),
+            ));
+        };
+        if !is_primitive(db, *instance_index.skip_binder(), PrimTy::U32) {
+            return Err(WebBundleError::EntryDerivation(
+                "instanced vertex behavior's second context argument must be exactly `u32`"
+                    .to_owned(),
+            ));
+        }
     }
     let output = behavior.return_ty(db);
     if !nominal_attrs(db, output).is_some_and(|attrs| attrs.is_gpu_vertex_output(db)) {
@@ -1265,7 +1581,9 @@ fn raster_vertex_stage<'db>(
     Ok((
         WebActorStageKind::Vertex {
             varying,
-            vertex_count,
+            draw: draw.draw,
+            instance_index: draw.instance_index,
+            primitive: draw.primitive,
         },
         payload,
     ))
@@ -1389,21 +1707,102 @@ fn resource_element(
     Ok(WebActorResourceElement::Record { fields, span })
 }
 
-fn content_addressed_digest(
-    db: &DriverDataBase,
-    init_ty: TyId<'_>,
+fn projected_const_plan_function<'db>(
+    db: &'db DriverDataBase,
+    owner_ty: TyId<'db>,
+    context: &str,
+    plan_name: &str,
+    is_plan: impl Fn(hir::hir_def::AttrListId<'db>) -> bool,
+) -> Result<Func<'db>, WebBundleError> {
+    let owner_name = owner_ty.pretty_print(db);
+    let ingot = owner_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "{context} type `{owner_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = ingot
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|func| {
+            func.vis(db) == Visibility::Public
+                && func.is_const(db)
+                && !func.is_extern(db)
+                && func.body(db).is_some()
+                && func.params(db).next().is_none()
+                && matches!(
+                    func.hir_generic_params(db).data(db).as_slice(),
+                    [GenericParam::Type(_)]
+                )
+                && nominal_attrs(db, func.return_ty(db)).is_some_and(&is_plan)
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [function] => Ok(*function),
+        [] => Err(WebBundleError::EntryDerivation(format!(
+            "{context} type `{owner_name}` has no unique public generic Fe const evaluator returning the nominal {plan_name}"
+        ))),
+        _ => Err(WebBundleError::EntryDerivation(format!(
+            "{context} type `{owner_name}` has {} matching Fe {plan_name} evaluators; exactly one is required",
+            candidates.len()
+        ))),
+    }
+}
+
+fn projected_resource_digest(
+    initialization: &serde_json::Value,
     path: &str,
-) -> Result<String, WebBundleError> {
-    let init_ty = init_ty.as_view(db).unwrap_or(init_ty);
-    let [h0, h1, h2, h3, h4, h5, h6, h7] = init_ty.generic_args(db) else {
+) -> Result<Option<String>, WebBundleError> {
+    if let Some(kind) = initialization.as_str() {
+        return match kind {
+            "zeroed" | "derived" => Ok(None),
+            _ => Err(WebBundleError::EntryDerivation(format!(
+                "resource `{path}` has unsupported Fe initialization `{kind}`"
+            ))),
+        };
+    }
+    let object = initialization.as_object().ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` Fe initialization is not a projected enum value"
+        ))
+    })?;
+    if object.get("case").and_then(serde_json::Value::as_str) != Some("content_addressed") {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` content-addressed initialization requires exactly eight SHA-256 words"
+            "resource `{path}` has unsupported Fe initialization payload"
+        )));
+    }
+    let [digest] = object
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` content-addressed initialization has no digest payload"
+            ))
+        })?
+    else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires one digest payload"
         )));
     };
-    [h0, h1, h2, h3, h4, h5, h6, h7]
-        .into_iter()
+    let words = digest
+        .get("words")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` content-addressed initialization has no SHA-256 words"
+            ))
+        })?;
+    if words.len() != 8 {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "resource `{path}` content-addressed initialization requires eight SHA-256 words"
+        )));
+    }
+    words
+        .iter()
         .map(|word| {
-            semantic_const_u32(db, *word)
+            word.as_u64()
+                .and_then(|word| u32::try_from(word).ok())
                 .map(|word| format!("{word:08x}"))
                 .ok_or_else(|| {
                     WebBundleError::EntryDerivation(format!(
@@ -1412,132 +1811,107 @@ fn content_addressed_digest(
                 })
         })
         .collect::<Result<Vec<_>, _>>()
-        .map(|words| words.concat())
+        .map(|words| Some(words.concat()))
 }
 
-fn typed_resource_policy(
-    db: &DriverDataBase,
-    family: SemanticGpuResourceFamily<'_>,
+fn projected_resource_field<'a>(
+    plan: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
     path: &str,
-) -> Result<WebResourcePolicy, WebBundleError> {
-    let kind = nominal_attrs(db, family.kind_ty)
-        .and_then(|attrs| attrs.gpu_resource_kind(db))
+) -> Result<&'a str, WebBundleError> {
+    plan.get(field)
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
-                "resource `{path}` kind argument lacks #[gpu_resource_kind(...)] evidence"
+                "resource `{path}` Fe plan has no scalar `{field}` field"
             ))
-        })?;
-    let access = nominal_attrs(db, family.access_ty)
-        .and_then(|attrs| attrs.gpu_resource_access(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` access argument lacks #[gpu_resource_access(...)] evidence"
-            ))
-        })?;
-    let residency = nominal_attrs(db, family.residency_ty)
-        .and_then(|attrs| attrs.gpu_resource_residency(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` residency argument lacks #[gpu_resource_residency(...)] evidence"
-            ))
-        })?;
-    let initialization = nominal_attrs(db, family.init_ty)
-        .and_then(|attrs| attrs.gpu_resource_init(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` initialization argument lacks #[gpu_resource_init(...)] evidence"
-            ))
-        })?;
-    let recovery = nominal_attrs(db, family.recovery_ty)
-        .and_then(|attrs| attrs.gpu_resource_recovery(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` recovery argument lacks #[gpu_resource_recovery(...)] evidence"
-            ))
-        })?;
-    let visibility = nominal_attrs(db, family.visibility_ty)
-        .and_then(|attrs| attrs.gpu_resource_visibility(db))
-        .ok_or_else(|| {
-            WebBundleError::EntryDerivation(format!(
-                "resource `{path}` visibility argument lacks #[gpu_resource_visibility(...)] evidence"
-            ))
-        })?;
+        })
+}
 
-    let policy = WebResourcePolicy {
-        kind: match kind {
-            GpuResourceKind::Storage => WebResourceKind::Storage,
-        },
-        access: match access {
-            GpuResourceAccess::ReadOnly => WebResourceAccess::ReadOnly,
-            GpuResourceAccess::WriteOnly => WebResourceAccess::WriteOnly,
-            GpuResourceAccess::ReadWrite => WebResourceAccess::ReadWrite,
-        },
-        residency: match residency {
-            GpuResourceResidency::Immutable => WebResourceResidency::Immutable,
-            GpuResourceResidency::ActorResident => WebResourceResidency::ActorResident,
-            GpuResourceResidency::FrameTransient => WebResourceResidency::FrameTransient,
-            GpuResourceResidency::Imported => WebResourceResidency::Imported,
-        },
-        initialization: match initialization {
-            GpuResourceInit::Zeroed => WebResourceInitialization::Zeroed,
-            GpuResourceInit::ContentAddressed => WebResourceInitialization::ContentAddressed {
-                sha256: content_addressed_digest(db, family.init_ty, path)?,
-            },
-            GpuResourceInit::Derived => WebResourceInitialization::Derived,
-        },
-        recovery: match recovery {
-            GpuResourceRecovery::ReplayRecipe => WebResourceRecovery::ReplayRecipe,
-            GpuResourceRecovery::RestoreCheckpoint => WebResourceRecovery::RestoreCheckpoint,
-            GpuResourceRecovery::Regenerate => WebResourceRecovery::Regenerate,
-            GpuResourceRecovery::NonRecoverable => WebResourceRecovery::NonRecoverable,
-        },
-        visibility: match visibility {
-            GpuResourceVisibility::Compute => WebResourceVisibility::Compute,
-            GpuResourceVisibility::Vertex => WebResourceVisibility::Vertex,
-            GpuResourceVisibility::Fragment => WebResourceVisibility::Fragment,
-            GpuResourceVisibility::ComputeFragment => WebResourceVisibility::ComputeFragment,
-            GpuResourceVisibility::VertexFragment => WebResourceVisibility::VertexFragment,
-            GpuResourceVisibility::All => WebResourceVisibility::All,
-        },
-    };
-
-    if policy.residency == WebResourceResidency::Immutable
-        && policy.access != WebResourceAccess::ReadOnly
-    {
+/// Lower the generic Fe plan into the stable browser-manifest representation.
+/// This translates the Fe digest words into the target's canonical SHA-256
+/// spelling but does not restate or compose resource policy in Rust.
+fn normalize_projected_resource_plan(
+    projected: serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value, WebBundleError> {
+    let mut plan = projected.as_object().cloned().ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` Fe policy did not evaluate to a ResourcePlan record"
+        ))
+    })?;
+    let kind = projected_resource_field(&plan, "kind", path)?;
+    if kind != "storage" {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` immutable residency requires read-only access"
+            "resource `{path}` kind `{kind}` has no WebGPU buffer realization yet"
         )));
     }
-    if matches!(
-        policy.initialization,
-        WebResourceInitialization::ContentAddressed { .. }
-    ) && (policy.residency != WebResourceResidency::Immutable
-        || policy.access != WebResourceAccess::ReadOnly
-        || policy.recovery != WebResourceRecovery::ReplayRecipe)
-    {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` content-addressed initialization requires immutable, read-only, replayable policy"
-        )));
-    }
-    if policy.initialization == WebResourceInitialization::Derived
-        && policy.access == WebResourceAccess::ReadOnly
-    {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` derived initialization requires writable access"
-        )));
-    }
-    if policy.residency == WebResourceResidency::Imported {
+    projected_resource_field(&plan, "access", path)?;
+    let residency = projected_resource_field(&plan, "residency", path)?;
+    if residency == "imported" {
         return Err(WebBundleError::EntryDerivation(format!(
             "resource `{path}` imported residency has no authorized browser realization yet"
         )));
     }
-    if policy.recovery != WebResourceRecovery::ReplayRecipe {
+    let recovery = projected_resource_field(&plan, "recovery", path)?;
+    if recovery != "replay_recipe" {
         return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` requests {:?} recovery, which the fixed browser host does not realize yet",
-            policy.recovery
+            "resource `{path}` requests `{recovery}` recovery, which the fixed browser host does not realize yet"
         )));
     }
-    Ok(policy)
+    projected_resource_field(&plan, "visibility", path)?;
+    let initialization = plan.get("initialization").ok_or_else(|| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` Fe plan has no `initialization` field"
+        ))
+    })?;
+    let digest = projected_resource_digest(initialization, path)?;
+    let initialization_kind = if digest.is_some() {
+        "content_addressed"
+    } else {
+        initialization
+            .as_str()
+            .expect("fieldless initialization was checked")
+    };
+    plan.insert(
+        "initialization".to_owned(),
+        match digest {
+            Some(sha256) => serde_json::json!({
+                "kind": initialization_kind,
+                "sha256": sha256,
+            }),
+            None => serde_json::json!({ "kind": initialization_kind }),
+        },
+    );
+    Ok(serde_json::Value::Object(plan))
+}
+
+fn typed_resource_policy(
+    db: &DriverDataBase,
+    resource_ty: TyId<'_>,
+    path: &str,
+) -> Result<serde_json::Value, WebBundleError> {
+    let function = projected_const_plan_function(
+        db,
+        resource_ty,
+        &format!("resource `{path}`"),
+        "ResourcePlan",
+        |attrs| attrs.is_web_resource_plan(db),
+    )?;
+    let value = eval_body_owner_const(db, BodyOwner::Func(function), vec![resource_ty]).map_err(
+        |error| {
+            WebBundleError::EntryDerivation(format!(
+                "resource `{path}` has no valid Fe GpuResourcePolicy evidence: {}",
+                describe_raster_ctfe_error(&error)
+            ))
+        },
+    )?;
+    let projected = project_manifest_const(db, value, "Fe GPU resource plan")?;
+    normalize_projected_resource_plan(projected, path).map_err(|error| {
+        WebBundleError::EntryDerivation(format!(
+            "resource `{path}` has no valid Fe GpuResourcePolicy evidence: {error}"
+        ))
+    })
 }
 
 fn actor_resources(
@@ -1566,11 +1940,11 @@ fn actor_resources(
                     "actor storage resource fields must be named".to_owned(),
                 )
             })?;
-        let policy = resource
-            .family
-            .map(|family| typed_resource_policy(db, family, &name))
-            .transpose()?
-            .unwrap_or_default();
+        let policy = if resource.has_typed_policy {
+            typed_resource_policy(db, resource.resource_ty, &name)?
+        } else {
+            legacy_resource_policy()
+        };
         let length = semantic_const_u32(db, resource.length_ty).ok_or_else(|| {
             WebBundleError::EntryDerivation(format!(
                 "storage resource `{name}` length must be a concrete u32-sized integer"
@@ -1581,9 +1955,18 @@ fn actor_resources(
                 "storage resource `{name}` length must be nonzero"
             )));
         }
+        let mut element = resource_element(db, resource.element_ty, &name)?;
+        if normalized_resource_policy_field(&policy, "access", &name)? == "atomic_read_write" {
+            if element != WebActorResourceElement::U32 {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "atomic resource `{name}` requires a u32 element",
+                )));
+            }
+            element = WebActorResourceElement::AtomicU32;
+        }
         resources.push(WebActorResource {
             field_index: u32::try_from(field_index).unwrap(),
-            element: resource_element(db, resource.element_ty, &name)?,
+            element,
             name,
             length,
             kind: resource.kind,
@@ -1642,7 +2025,7 @@ pub fn actor_gpu_program(
             })?;
         let (kind, raster_payload) = match stage {
             GpuStage::Vertex => {
-                let (kind, payload) = raster_vertex_stage(db, *behavior, role_path)?;
+                let (kind, payload) = raster_vertex_stage(db, actor, *behavior, role_path)?;
                 (kind, Some(payload))
             }
             GpuStage::Fragment => (WebActorStageKind::Fragment, None),
@@ -1714,50 +2097,121 @@ pub fn actor_gpu_program(
         }
     }
     validate_actor_pass_cycles(&stages)?;
+    let raster = typed_raster_policy(db, actor)?;
+    if raster.is_some()
+        && !stages.iter().any(|stage| {
+            matches!(
+                stage.kind,
+                WebActorStageKind::Vertex { .. } | WebActorStageKind::Fragment
+            )
+        })
+    {
+        return Err(WebBundleError::EntryDerivation(
+            "RasterConfiguration requires at least one fullscreen or authored raster pass".into(),
+        ));
+    }
     Ok(Some(WebActorProgram {
         actor: actor_name,
         stages,
         resources: actor_resources(db, actor)?,
+        raster,
     }))
 }
 
 fn validate_actor_pass_cycles(stages: &[WebActorStage]) -> Result<(), WebBundleError> {
     let mut completed = std::collections::HashSet::new();
-    let mut active: Option<&str> = None;
-    let mut active_repeat = 0;
+    let mut active: Vec<&WebActorPassCycle> = Vec::new();
     for stage in stages {
-        let cycle = match &stage.kind {
+        let mut chain = Vec::new();
+        let mut cycle = match &stage.kind {
             WebActorStageKind::Compute { cycle, .. } => cycle.as_ref(),
             _ => None,
         };
-        match cycle {
-            Some(cycle) if active == Some(cycle.group.as_str()) => {
-                if active_repeat != cycle.repeat {
-                    return Err(WebBundleError::EntryDerivation(format!(
-                        "actor pass cycle `{}` uses inconsistent repeat counts",
-                        cycle.group
-                    )));
-                }
+        while let Some(member) = cycle {
+            if chain.iter().any(|prior: &&WebActorPassCycle| prior.group == member.group) {
+                return Err(WebBundleError::EntryDerivation(
+                    format!("actor pass cycle `{}` cannot contain itself", member.group),
+                ));
             }
-            Some(cycle) => {
-                if let Some(previous) = active.take() {
-                    completed.insert(previous.to_owned());
-                }
-                if completed.contains(&cycle.group) {
-                    return Err(WebBundleError::EntryDerivation(format!(
-                        "actor pass cycle `{}` must occupy one consecutive stage range",
-                        cycle.group
-                    )));
-                }
-                active = Some(cycle.group.as_str());
-                active_repeat = cycle.repeat;
-            }
-            None => {
-                if let Some(previous) = active.take() {
-                    completed.insert(previous.to_owned());
-                }
+            chain.push(member);
+            cycle = member.inner.as_deref();
+        }
+        let common = active.iter().zip(&chain)
+            .take_while(|(a, b)| a.group == b.group).count();
+        for (a, b) in active[..common].iter().zip(&chain[..common]) {
+            if a.repeat != b.repeat {
+                return Err(WebBundleError::EntryDerivation(
+                    format!("actor pass cycle `{}` uses inconsistent repeat counts", a.group),
+                ));
             }
         }
+        for previous in &active[common..] {
+            completed.insert(previous.group.as_str());
+        }
+        for next in &chain[common..] {
+            if completed.contains(next.group.as_str()) {
+                return Err(WebBundleError::EntryDerivation(
+                    format!("actor pass cycle `{}` must occupy one consecutive stage range under one parent", next.group),
+                ));
+            }
+        }
+        active = chain;
+    }
+    Ok(())
+}
+
+fn validate_pass_activation_cycles(passes: &[WebPass]) -> Result<(), WebBundleError> {
+    let mut index = 0;
+    while index < passes.len() {
+        let Some(cycle) = passes[index].cycle.as_ref() else {
+            index += 1;
+            continue;
+        };
+        let activation = passes[index].activation;
+        let mut end = index + 1;
+        while end < passes.len()
+            && passes[end]
+                .cycle
+                .as_ref()
+                .is_some_and(|next| next.group == cycle.group)
+        {
+            if passes[end].activation != activation {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor pass cycle {} mixes activation policies; every member of one ordered cycle must share one policy",
+                    cycle.group
+                )));
+            }
+            end += 1;
+        }
+        index = end;
+    }
+    Ok(())
+}
+
+fn validate_pass_preparation_cycles(passes: &[WebPass]) -> Result<(), WebBundleError> {
+    let mut index = 0;
+    while index < passes.len() {
+        let Some(cycle) = passes[index].cycle.as_ref() else {
+            index += 1;
+            continue;
+        };
+        let preparation = passes[index].preparation;
+        let mut end = index + 1;
+        while end < passes.len()
+            && passes[end]
+                .cycle
+                .as_ref()
+                .is_some_and(|next| next.group == cycle.group)
+        {
+            if passes[end].preparation != preparation {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "actor pass cycle {} mixes preparation policies; every member of one ordered cycle must share one policy",
+                    cycle.group
+                )));
+            }
+            end += 1;
+        }
+        index = end;
     }
     Ok(())
 }
@@ -1803,6 +2257,41 @@ fn behavior_surface_policy_ty<'db>(
             };
             Some(*policy_ty)
         })
+}
+
+fn behavior_pass_policy_ty<'db>(
+    db: &'db DriverDataBase,
+    behavior: Func<'db>,
+    control: GpuControl,
+    effect_name: &str,
+) -> Result<Option<TyId<'db>>, WebBundleError> {
+    let policies = behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .filter_map(|ty| {
+            let attrs = nominal_attrs(db, ty)?;
+            (attrs.gpu_control(db) == Some(control)).then_some(ty)
+        })
+        .map(|ty| {
+            let [policy_ty] = ty.generic_args(db) else {
+                return Err(WebBundleError::SurfaceProjection(format!(
+                    "{effect_name} must carry exactly one policy type"
+                )));
+            };
+            Ok(*policy_ty)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match policies.as_slice() {
+        [] => Ok(None),
+        [policy] => Ok(Some(*policy)),
+        _ => Err(WebBundleError::SurfaceProjection(format!(
+            "one GPU stage declares {} {effect_name} policies; at most one is allowed",
+            policies.len(),
+        ))),
+    }
 }
 
 fn actor_surface_quality_policy_tys<'db>(
@@ -1851,6 +2340,198 @@ fn actor_surface_recovery_policy_tys<'db>(
             Some(*policy_ty)
         })
         .collect()
+}
+
+fn typed_raster_policy(
+    db: &DriverDataBase,
+    actor: &SemanticActor<'_>,
+) -> Result<Option<serde_json::Value>, WebBundleError> {
+    let behaviors = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|behavior| {
+            behavior_surface_control_kind(db, *behavior) == Some(GpuControl::RasterPipeline)
+        })
+        .collect::<Vec<_>>();
+    let behavior = match behaviors.as_slice() {
+        [] => return Ok(None),
+        [behavior] => *behavior,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "GPU actor declares {} raster-configuration behaviors; exactly one is allowed",
+                behaviors.len()
+            )));
+        }
+    };
+    if !behavior.arg_tys(db).is_empty() {
+        return Err(WebBundleError::EntryDerivation(
+            "a raster-configuration behavior must be self-less and take no arguments".into(),
+        ));
+    }
+    if !nominal_attrs(db, behavior.return_ty(db)).is_some_and(|attrs| attrs.is_web_raster_plan(db))
+    {
+        return Err(WebBundleError::EntryDerivation(
+            "a raster-configuration behavior must return the nominal Fe RasterPlan record".into(),
+        ));
+    }
+    let value =
+        eval_body_owner_const(db, BodyOwner::Func(behavior), Vec::new()).map_err(|error| {
+            WebBundleError::EntryDerivation(format!(
+                "Fe raster configuration is not const-evaluable: {}",
+                describe_raster_ctfe_error(&error)
+            ))
+        })?;
+    project_manifest_const(db, value, "Fe raster plan").map(Some)
+}
+
+fn describe_raster_ctfe_error(error: &CtfeError<'_>) -> String {
+    match error {
+        CtfeError::NonConstCall { .. } => {
+            "the behavior (or something it calls) is not a `const fn`".into()
+        }
+        CtfeError::NotConstEvaluable { .. } => "the body is not const-evaluable".into(),
+        CtfeError::InvalidBody { .. } => "the body has type errors".into(),
+        CtfeError::StepLimitExceeded { .. } | CtfeError::RecursionLimitExceeded { .. } => {
+            "evaluation exceeded the const-evaluation budget".into()
+        }
+        CtfeError::CalleeError { source, .. } => describe_raster_ctfe_error(source),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Project one CTFE-normalized Fe value into manifest data without teaching
+/// the compiler the vocabulary of the plan it carries. Struct field names and
+/// enum cases come from the Fe declarations. Core `Option<T>` has its ordinary
+/// null/value transport; other payload enums retain an explicit generic tag.
+fn project_manifest_const(
+    db: &DriverDataBase,
+    value: SemConstId<'_>,
+    what: &str,
+) -> Result<serde_json::Value, WebBundleError> {
+    use serde_json::{Map, Number, Value};
+
+    let fail = |message: &str| WebBundleError::EntryDerivation(format!("{what} {message}"));
+    match value.value(db) {
+        SemConstValue::Unit => Ok(Value::Null),
+        SemConstValue::Scalar { value, .. } => match value {
+            SemConstScalar::Bool(value) => Ok(Value::Bool(value)),
+            SemConstScalar::Int { value } => {
+                let number = i64::try_from(&value)
+                    .map(Number::from)
+                    .or_else(|_| u64::try_from(&value).map(Number::from))
+                    .map_err(|_| fail("contains an integer outside the manifest number range"))?;
+                Ok(Value::Number(number))
+            }
+            SemConstScalar::Float { bits } => {
+                let value = f32::from_bits(bits);
+                let number = Number::from_f64(f64::from(value))
+                    .ok_or_else(|| fail("contains a non-finite float"))?;
+                Ok(Value::Number(number))
+            }
+            SemConstScalar::Bytes(bytes) => Ok(Value::Array(
+                bytes
+                    .into_iter()
+                    .map(|byte| Value::Number(Number::from(byte)))
+                    .collect(),
+            )),
+        },
+        SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => {
+            Ok(Value::Array(
+                elems
+                    .iter()
+                    .copied()
+                    .map(|element| project_manifest_const(db, element, what))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        SemConstValue::Struct { ty, fields } => {
+            let adt = ty
+                .adt_def(db)
+                .ok_or_else(|| fail("contains a value with no struct definition"))?;
+            let AdtRef::Struct(definition) = adt.adt_ref(db) else {
+                return Err(fail("contains a malformed struct value"));
+            };
+            let declarations = definition.hir_fields(db).data(db);
+            if declarations.len() != fields.len() {
+                return Err(fail("contains a struct with mismatched fields"));
+            }
+            let mut object = Map::new();
+            for (declaration, field) in declarations.iter().zip(fields.iter().copied()) {
+                let name = declaration
+                    .name
+                    .to_opt()
+                    .map(|name| name.data(db).to_string())
+                    .ok_or_else(|| fail("contains an unnamed struct field"))?;
+                object.insert(name, project_manifest_const(db, field, what)?);
+            }
+            Ok(Value::Object(object))
+        }
+        SemConstValue::Enum {
+            ty,
+            variant,
+            fields,
+        } => {
+            let adt = ty
+                .adt_def(db)
+                .ok_or_else(|| fail("contains a value with no enum definition"))?;
+            let AdtRef::Enum(definition) = adt.adt_ref(db) else {
+                return Err(fail("contains a malformed enum value"));
+            };
+            let enum_name = definition
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_string())
+                .ok_or_else(|| fail("contains an unnamed enum"))?;
+            let variant_name = EnumVariant::new(definition, variant.0 as usize)
+                .name(db)
+                .ok_or_else(|| fail("contains an unnamed enum variant"))?;
+            if enum_name == "Option" {
+                return match (variant_name, fields.as_ref()) {
+                    ("None", []) => Ok(Value::Null),
+                    ("Some", [field]) => project_manifest_const(db, *field, what),
+                    _ => Err(fail("contains a malformed Option value")),
+                };
+            }
+            let case = manifest_case_name(variant_name);
+            if fields.is_empty() {
+                return Ok(Value::String(case));
+            }
+            let mut object = Map::new();
+            object.insert("case".to_owned(), Value::String(case));
+            object.insert(
+                "fields".to_owned(),
+                Value::Array(
+                    fields
+                        .iter()
+                        .copied()
+                        .map(|field| project_manifest_const(db, field, what))
+                        .collect::<Result<_, _>>()?,
+                ),
+            );
+            Ok(Value::Object(object))
+        }
+        SemConstValue::TypeLevel { .. } => Err(fail("contains a type-level value")),
+    }
+}
+
+fn manifest_case_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut previous_is_lower_or_digit = false;
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_is_lower_or_digit {
+                result.push('_');
+            }
+            result.push(character.to_ascii_lowercase());
+            previous_is_lower_or_digit = false;
+        } else {
+            result.push(character);
+            previous_is_lower_or_digit =
+                character.is_ascii_lowercase() || character.is_ascii_digit();
+        }
+    }
+    result
 }
 
 fn actor_has_surface_pointer_motion(db: &DriverDataBase, actor: &SemanticActor<'_>) -> bool {
@@ -2641,6 +3322,34 @@ struct ResolvedSurfaceRecoveryPolicy<'db> {
     func: Func<'db>,
     event_first: bool,
     contract: TypedSurfaceRecoveryContract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedPassActivationContract {
+    params: Vec<WebControlWasmType>,
+    state_fields: usize,
+    state_tag_limits: Vec<(usize, u32)>,
+}
+
+/// A pure Fe predicate selected by the nominal `PassActivation<P>` effect on
+/// one or more GPU stages. Policy identity is compiler-only; the fixed host
+/// receives a dense ordinal and invokes a versioned Wasm export.
+#[derive(Debug, Clone)]
+struct ResolvedPassActivationPolicy<'db> {
+    policy_ty: TyId<'db>,
+    func: Func<'db>,
+    contract: TypedPassActivationContract,
+}
+
+/// A pure Fe residency decision selected by `PassPreparation<P>`. Its ABI is
+/// the same complete-state input shape as activation, but the single i32
+/// result is the nominal `PassPreparationMode` tag rather than a boolean.
+#[derive(Debug, Clone)]
+struct ResolvedPassPreparationPolicy<'db> {
+    policy_ty: TyId<'db>,
+    func: Func<'db>,
+    contract: TypedPassActivationContract,
+    mode_variants: u32,
 }
 
 fn typed_surface_transition_export(contract: &TypedSurfaceTransitionContract) -> &'static str {
@@ -3637,6 +4346,214 @@ fn resolve_surface_schedule_policy<'db>(
     }))
 }
 
+/// Common semantic projection for pass-local policies. Both activation and
+/// preparation consume the same complete actor-state value; only their
+/// nominal result type differs. Keeping that traversal here prevents the two
+/// physical concerns from acquiring subtly different actor semantics.
+fn resolve_pass_state_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+    control: GpuControl,
+    effect_name: &str,
+    result_description: &str,
+    result_matches: impl Fn(TyId<'db>, &CanonicalType) -> bool,
+) -> Result<
+    Option<(
+        TyId<'db>,
+        Func<'db>,
+        TypedPassActivationContract,
+        CanonicalType,
+    )>,
+    WebBundleError,
+> {
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor.behaviors.iter().any(|behavior| {
+                    behavior
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == source_entry)
+                })
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU pass `{source_entry}` has no containing actor"
+            ))
+        })?;
+    let behavior = actor
+        .behaviors
+        .iter()
+        .copied()
+        .find(|behavior| {
+            behavior
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == source_entry)
+        })
+        .expect("containing actor lookup proved the stage behavior");
+    let Some(policy_ty) = behavior_pass_policy_ty(db, behavior, control, effect_name)? else {
+        return Ok(None);
+    };
+    let expected_state = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
+        .map(|(state, _)| state)
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "{effect_name} on `{source_entry}` has no complete actor state"
+            ))
+        })?;
+    let policy_name = policy_ty.pretty_print(db);
+    let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "{effect_name} policy `{policy_name}` is not owned by a resolvable Fe ingot"
+        ))
+    })?;
+    let candidates = policy_ingot
+        .all_impls(db)
+        .iter()
+        .copied()
+        .filter(|impl_| impl_.admissible_inherent_impl_ty(db) == Some(policy_ty))
+        .flat_map(|impl_| impl_.funcs(db))
+        .filter(|func| {
+            func.vis(db) == Visibility::Public
+                && !func.is_extern(db)
+                && func.body(db).is_some()
+                && func.arg_tys(db).len() == 1
+                && canonical_type_from_semantic(
+                    db,
+                    *func.arg_tys(db)[0].skip_binder(),
+                    "pass_activation_state",
+                )
+                .is_ok_and(|state| state == expected_state)
+                && canonical_type_from_semantic(db, func.return_ty(db), "pass_policy_result")
+                    .is_ok_and(|result| result_matches(func.return_ty(db), &result))
+        })
+        .collect::<Vec<_>>();
+    let func = match candidates.as_slice() {
+        [func] => *func,
+        [] => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "{effect_name} policy `{policy_name}` has no public Fe implementation with complete actor state -> {result_description} shape"
+            )));
+        }
+        _ => {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "{effect_name} policy `{policy_name}` has {} implementations with complete actor state -> {result_description} shape; exactly one is required",
+                candidates.len()
+            )));
+        }
+    };
+    let mut params = Vec::new();
+    append_canonical_wasm_types(&expected_state, &mut params, "pass_activation_state")?;
+    let mut state_tag_limits = Vec::new();
+    let state_fields = surface_scalar_tag_limits(
+        &expected_state,
+        "pass_activation_state",
+        0,
+        &mut state_tag_limits,
+    )?;
+    if state_fields != params.len() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "PassActivation policy `{policy_name}` state flattened inconsistently: canonical shape has {state_fields} leaves but Wasm ABI has {}",
+            params.len()
+        )));
+    }
+    let result = canonical_type_from_semantic(db, func.return_ty(db), "pass_policy_result")
+        .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+    Ok(Some((
+        policy_ty,
+        func,
+        TypedPassActivationContract {
+            params,
+            state_fields,
+            state_tag_limits,
+        },
+        result,
+    )))
+}
+
+/// Resolve the pure policy selected by `PassActivation<P>` on one authored GPU
+/// stage. Exactly one public inherent function on `P` must consume the owning
+/// actor's complete non-resource state record and return `bool`. This makes
+/// activation a typed Fe effect while leaving the browser as a blind executor.
+fn resolve_pass_activation_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<ResolvedPassActivationPolicy<'db>>, WebBundleError> {
+    Ok(resolve_pass_state_policy(
+        db,
+        top_mod,
+        source_entry,
+        resource_field_indices,
+        GpuControl::PassActivation,
+        "PassActivation",
+        "bool",
+        |_ty, result| *result == CanonicalType::Bool,
+    )?
+    .map(
+        |(policy_ty, func, contract, _)| ResolvedPassActivationPolicy {
+            policy_ty,
+            func,
+            contract,
+        },
+    ))
+}
+
+/// Resolve the pure policy selected by `PassPreparation<P>`. Its result must
+/// be the nominal fieldless `PassPreparationMode` enum marked by the standard
+/// library, so numeric residency tags never leak into application source.
+fn resolve_pass_preparation_policy<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<ResolvedPassPreparationPolicy<'db>>, WebBundleError> {
+    let Some((policy_ty, func, contract, result)) = resolve_pass_state_policy(
+        db,
+        top_mod,
+        source_entry,
+        resource_field_indices,
+        GpuControl::PassPreparation,
+        "PassPreparation",
+        "nominal PassPreparationMode",
+        |ty, _| {
+            nominal_attrs(db, normalized_semantic_ty(db, ty))
+                .is_some_and(|attrs| attrs.is_web_pass_preparation_mode(db))
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    let CanonicalType::Variant(variants) = result else {
+        return Err(WebBundleError::SurfaceProjection(
+            "PassPreparationMode must be a fieldless enum".to_owned(),
+        ));
+    };
+    let names = variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+    if names != ["lazy", "visible_idle", "eager"]
+        || variants.iter().any(|variant| !variant.fields.is_empty())
+    {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "PassPreparationMode must define exactly Lazy, VisibleIdle, and Eager as ordered fieldless variants; found {names:?}",
+        )));
+    }
+    Ok(Some(ResolvedPassPreparationPolicy {
+        policy_ty,
+        func,
+        contract,
+        mode_variants: u32::try_from(variants.len()).expect("three preparation modes fit u32"),
+    }))
+}
+
 fn surface_quality_function_shape(db: &DriverDataBase, func: Func<'_>) -> bool {
     let arg_tys = func.arg_tys(db);
     arg_tys.len() == 1
@@ -4154,6 +5071,108 @@ fn with_typed_surface_recovery(
     )
 }
 
+fn typed_pass_activation_export(index: u32) -> String {
+    format!("{TYPED_PASS_ACTIVATION_EXPORT_PREFIX}{index}")
+}
+
+fn typed_pass_preparation_export(index: u32) -> String {
+    format!("{TYPED_PASS_PREPARATION_EXPORT_PREFIX}{index}")
+}
+
+fn with_typed_pass_state_policy(
+    options: WasmCompileOptions,
+    source: &str,
+    export: String,
+    contract: &TypedPassActivationContract,
+) -> WasmCompileOptions {
+    options.with_resident_policy(
+        source,
+        export,
+        true,
+        contract.state_fields,
+        0,
+        1,
+        contract.state_tag_limits.clone(),
+        Vec::new(),
+    )
+}
+
+fn with_typed_pass_activation(
+    options: WasmCompileOptions,
+    source: &str,
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> WasmCompileOptions {
+    // A pass activation predicate is the stateless specialization of the
+    // existing pure resident-policy lowerer: complete actor state is supplied
+    // as the fact record, no private policy state is retained, and one bool is
+    // returned. The authored function and policy type stay private.
+    with_typed_pass_state_policy(
+        options,
+        source,
+        typed_pass_activation_export(index),
+        contract,
+    )
+}
+
+fn with_typed_pass_preparation(
+    options: WasmCompileOptions,
+    source: &str,
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> WasmCompileOptions {
+    with_typed_pass_state_policy(
+        options,
+        source,
+        typed_pass_preparation_export(index),
+        contract,
+    )
+}
+
+fn verify_typed_pass_state_policy_export(
+    wasm: &[u8],
+    export: &str,
+    policy_kind: &str,
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> Result<(), WebBundleError> {
+    let (params, results) = wasm_export_signature(wasm, export).ok_or_else(|| {
+        WebBundleError::SurfaceProjection(format!(
+            "{policy_kind} policy {index} has no fixed Wasm export `{export}`"
+        ))
+    })?;
+    if params != contract.params || results != [WebControlWasmType::I32] {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "{policy_kind} policy {index} has measured Wasm signature {params:?} -> {results:?}; expected {:?} -> [I32] from the complete Fe actor state",
+            contract.params
+        )));
+    }
+    Ok(())
+}
+
+fn verify_typed_pass_activation_export(
+    wasm: &[u8],
+    index: u32,
+    contract: &TypedPassActivationContract,
+) -> Result<(), WebBundleError> {
+    let export = typed_pass_activation_export(index);
+    verify_typed_pass_state_policy_export(wasm, &export, "PassActivation", index, contract)
+}
+
+fn verify_typed_pass_preparation_export(
+    wasm: &[u8],
+    index: u32,
+    policy: &ResolvedPassPreparationPolicy<'_>,
+) -> Result<(), WebBundleError> {
+    if policy.mode_variants != 3 {
+        return Err(WebBundleError::SurfaceProjection(
+            "PassPreparation policy has an invalid mode cardinality".to_owned(),
+        ));
+    }
+    let export = typed_pass_preparation_export(index);
+    verify_typed_pass_state_policy_export(wasm, &export, "PassPreparation", index, &policy.contract)
+}
+
 fn validate_surface_schedule_pair(
     transition: Option<&TypedSurfaceTransitionContract>,
     policy: Option<&ResolvedSurfaceSchedulePolicy<'_>>,
@@ -4579,6 +5598,7 @@ fn project_surface(
             } else {
                 "fullscreen_fragment".to_string()
             },
+            raster: None,
         },
         params,
         state: WebSurfaceState {
@@ -4600,14 +5620,7 @@ fn web_surface_param(
     view_param: &ViewParam,
     member: &WebBindingMember,
 ) -> Result<WebSurfaceParam, WebBundleError> {
-    let kind = view_param.kind;
-    let (min, max, init, visible) = if kind.is_extent() {
-        // Extent-bound: the runtime writes the live canvas size into the member.
-        (None, None, None, false)
-    } else if matches!(kind, ViewParamKind::Fixed) {
-        // Projected constant: carried into the uniform record, no control.
-        (None, None, Some(view_param.init), false)
-    } else {
+    if view_param.bounded {
         if view_param.min >= view_param.max {
             return Err(WebBundleError::SurfaceProjection(format!(
                 "param `{}`: min ({}) must be less than max ({})",
@@ -4620,21 +5633,58 @@ fn web_surface_param(
                 view_param.name, view_param.init, view_param.min, view_param.max
             )));
         }
-        (
-            Some(view_param.min),
-            Some(view_param.max),
-            Some(view_param.init),
-            true,
-        )
-    };
+    }
+    let options = &view_param.presentation.options;
+    if view_param.presentation.widget == "select" {
+        let expected_max = options.len().checked_sub(1).ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "param `{}`: a select requires at least one Fe-authored option",
+                view_param.name
+            ))
+        })? as f32;
+        if view_param.kind != "int"
+            || !view_param.bounded
+            || view_param.min != 0.0
+            || view_param.max != expected_max
+            || view_param.init.round() != view_param.init
+        {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: {} named options require a zero-based integral initial value and bounds [0, {expected_max}]",
+                view_param.name,
+                options.len()
+            )));
+        }
+        if options
+            .iter()
+            .enumerate()
+            .any(|(index, label)| options[..index].contains(label))
+        {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: named choice labels must be unique",
+                view_param.name
+            )));
+        }
+    } else if !options.is_empty() {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "param `{}`: named options require a select presentation",
+            view_param.name
+        )));
+    }
     Ok(WebSurfaceParam {
         name: member.name.clone(),
         doc: member.doc.clone(),
-        kind: kind.as_str().to_string(),
-        min,
-        max,
-        init,
-        visible,
+        kind: view_param.kind.clone(),
+        min: view_param.bounded.then_some(view_param.min),
+        max: view_param.bounded.then_some(view_param.max),
+        init: view_param.initialized.then_some(view_param.init),
+        source: Some(view_param.source.clone()),
+        presentation: Some(WebParamPresentation {
+            widget: view_param.presentation.widget.clone(),
+            scale: view_param.presentation.scale.clone(),
+            readout: view_param.presentation.readout.clone(),
+            options: view_param.presentation.options.clone(),
+        }),
+        visible: view_param.presentation.visible,
     })
 }
 
@@ -4689,6 +5739,11 @@ pub struct WebBinding {
     pub name: String,
     pub access: WebBindingAccess,
     pub role: WebBindingRole,
+    /// Exact entry-point stages that can reach this physical binding. Added in
+    /// protocol v10 so the browser realizes compiler-derived visibility rather
+    /// than widening every binding to the enclosing pass's stage union.
+    #[serde(default)]
+    pub shader_stages: Vec<WebShaderStage>,
     pub stride: u32,
     pub span: u32,
     pub members: Vec<WebBindingMember>,
@@ -4741,6 +5796,7 @@ pub enum WebBuiltinSource {
     FragmentPositionX,
     FragmentPositionY,
     VertexIndex,
+    InstanceIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4782,12 +5838,45 @@ pub struct WebResource {
     pub stride: u32,
     pub span: u32,
     pub element: WebActorResourceElement,
-    #[serde(default, skip_serializing_if = "is_default_resource_policy")]
-    pub policy: WebResourcePolicy,
+    /// Minimal physical WebGPU capabilities derived by the compiler from the
+    /// Fe resource plan and pass effects. These are target facts, not authored
+    /// policy knobs.
+    #[serde(default = "legacy_buffer_usage")]
+    pub buffer_usage: Vec<WebBufferUsage>,
+    #[serde(
+        default = "legacy_resource_policy",
+        skip_serializing_if = "is_default_resource_policy"
+    )]
+    pub policy: serde_json::Value,
     /// Exact immutable bundle artifact used to initialize this resource.
     /// Absent for zeroed and GPU-derived storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<WebResourceArtifact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebBufferUsage {
+    Storage,
+    CopySrc,
+    CopyDst,
+    Indirect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebShaderStage {
+    Compute,
+    Vertex,
+    Fragment,
+}
+
+fn legacy_buffer_usage() -> Vec<WebBufferUsage> {
+    vec![
+        WebBufferUsage::Storage,
+        WebBufferUsage::CopyDst,
+        WebBufferUsage::CopySrc,
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4799,9 +5888,28 @@ pub struct WebResourceArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebPass {
+    /// CTFE-evaluated Fe primitive assembly for this draw, independent of the
+    /// count source and the other passes in the actor graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<serde_json::Value>,
     pub source_entry: String,
     pub shader: String,
     pub shader_bytes: u64,
+    /// Dense compiler-assigned identity of a pure Fe activation policy. The
+    /// fixed host invokes the corresponding versioned Wasm predicate once per
+    /// presentation and omits this pass when it returns false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<u32>,
+    /// Dense compiler-assigned identity of a pure Fe preparation policy. The
+    /// fixed host invokes the corresponding versioned Wasm decision when it
+    /// plans physical pipeline residency; this never grants execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<u32>,
+    /// Physical shader-stage demand derived from this Fe pass. The logical
+    /// resource visibility plan is validated as an upper bound before this
+    /// target fact reaches the browser.
+    #[serde(default)]
+    pub shader_stages: Vec<WebShaderStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<[u32; 3]>,
     /// Number of strictly ordered submissions of one compiled compute stage.
@@ -4828,13 +5936,49 @@ pub struct WebPass {
     /// type (`TriangleList<N>`), never page JavaScript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_vertices: Option<u32>,
+    /// Compiler-derived instance count. Presence means the Fe draw policy is
+    /// explicitly `Instanced<D, N>` and the authored vertex behavior receives
+    /// `instance_index` after `vertex_index`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_instances: Option<u32>,
+    /// Exact actor resource supplying `[vertex_count, instance_count,
+    /// first_vertex, first_instance]` to one GPU-resident non-indexed draw.
+    /// This is mutually exclusive with the direct count fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_indirect: Option<WebDrawIndirect>,
     pub layout: WebLayout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebDrawIndirect {
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub offset: u64,
+}
+
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebPassCycle {
     pub group: u32,
     pub repeat: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner: Option<Box<WebPassCycle>>,
+}
+
+fn lower_pass_cycle(cycle: WebActorPassCycle, groups: &mut Vec<String>) -> WebPassCycle {
+    let group = groups.iter().position(|group| group == &cycle.group)
+        .unwrap_or_else(|| {
+            groups.push(cycle.group);
+            groups.len() - 1
+        });
+    WebPassCycle {
+        group: u32::try_from(group).expect("actor pass cycle group count fits in u32"),
+        repeat: cycle.repeat,
+        inner: cycle.inner.map(|inner| Box::new(lower_pass_cycle(*inner, groups))),
+    }
 }
 
 const fn one_u32() -> u32 {
@@ -4850,6 +5994,11 @@ fn is_one_u32(value: &u32) -> bool {
 // retained for the round-trip tests. Nothing keys a manifest by hash/equality.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebBundleManifest {
+    /// Fe-authored render policy, independent of the optional UI view.
+    /// Protocol v11 moves this out of `surface.pipeline` so UI-free actors
+    /// cannot silently lose depth, multisampling, or color semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raster: Option<serde_json::Value>,
     pub protocol: String,
     pub protocol_version: u32,
     pub source_entry: String,
@@ -4925,9 +6074,14 @@ pub struct WebExtent {
 
 /// The render pipeline kind. An open vocabulary: `"fullscreen_fragment"` today;
 /// `"mesh_gpu"` etc. join in later rungs without a manifest-format change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebPipeline {
     pub kind: String,
+    /// Legacy v10-and-earlier location, retained for deserializing old bundles.
+    /// New bundles emit raster policy only in `WebBundleManifest::raster`,
+    /// independently of whether the actor has a UI description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raster: Option<serde_json::Value>,
 }
 
 /// One projected interactive parameter. `min`/`max`/`init` are absent for a
@@ -4938,8 +6092,8 @@ pub struct WebSurfaceParam {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
-    /// The kind vocabulary: `range` | `unit` | `angle` | `log` | `int` |
-    /// `fixed` | `extent_x` | `extent_y` | `toggle`.
+    /// Opaque Fe `ParamKind` case, retained for diagnostics and Fe semantics.
+    /// The browser must not infer value-source or presentation policy from it.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f32>,
@@ -4947,6 +6101,14 @@ pub struct WebSurfaceParam {
     pub max: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init: Option<f32>,
+    /// Fe-authored source of the current value. Added in protocol v9; absent
+    /// only while reading a legacy v4-v8 manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Fe-authored, target-neutral control presentation. The host realizes
+    /// this plan and never reconstructs it from `kind` in protocol v9.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<WebParamPresentation>,
     /// Whether the runtime renders a control for this param. Omitted (defaults
     /// true) for ordinary sliders; `false` for extent-bound and fixed params.
     #[serde(
@@ -4954,6 +6116,15 @@ pub struct WebSurfaceParam {
         skip_serializing_if = "is_true"
     )]
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebParamPresentation {
+    pub widget: String,
+    pub scale: String,
+    pub readout: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 fn web_surface_param_visible_default() -> bool {
@@ -5040,7 +6211,7 @@ pub struct WebCanonicalStatus {
     pub omission_reason: Option<String>,
 }
 
-// `WebBundle` embeds the v7 manifest (which carries f32 surface ranges), so it
+// `WebBundle` embeds the current manifest (which carries f32 surface ranges), so it
 // is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebBundle {
@@ -5070,9 +6241,10 @@ pub struct WebPassShader {
 fn web_resource_manifest(
     resource: &WebActorResource,
     binding: u32,
+    copy_source: bool,
 ) -> Result<WebResource, WebBundleError> {
     let span = match &resource.element {
-        WebActorResourceElement::U32 | WebActorResourceElement::F32 => 4,
+        WebActorResourceElement::U32 | WebActorResourceElement::AtomicU32 | WebActorResourceElement::F32 => 4,
         WebActorResourceElement::Record { span, .. } => *span,
     };
     let bytes = span.checked_mul(resource.length).ok_or_else(|| {
@@ -5081,14 +6253,32 @@ fn web_resource_manifest(
             resource.name
         ))
     })?;
-    let artifact = match &resource.policy.initialization {
-        WebResourceInitialization::ContentAddressed { sha256 } => Some(WebResourceArtifact {
+    let (initialization, digest) =
+        normalized_resource_initialization(&resource.policy, &resource.name)?;
+    let artifact = match (initialization, digest) {
+        ("content_addressed", Some(sha256)) => Some(WebResourceArtifact {
             path: format!("{RESOURCE_DIR}/sha256-{sha256}.bin"),
             bytes: u64::from(bytes),
-            sha256: sha256.clone(),
+            sha256: sha256.to_owned(),
         }),
-        WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+        ("zeroed" | "derived", None) => None,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{}` has an inconsistent normalized initialization plan",
+                resource.name
+            )));
+        }
     };
+    let mut buffer_usage = vec![WebBufferUsage::Storage];
+    if resource.kind == GpuResource::Indirect {
+        buffer_usage.push(WebBufferUsage::Indirect);
+    }
+    if artifact.is_some() {
+        buffer_usage.push(WebBufferUsage::CopyDst);
+    }
+    if copy_source {
+        buffer_usage.push(WebBufferUsage::CopySrc);
+    }
     Ok(WebResource {
         group: 0,
         binding,
@@ -5097,6 +6287,7 @@ fn web_resource_manifest(
         stride: span,
         span,
         element: resource.element.clone(),
+        buffer_usage,
         policy: resource.policy.clone(),
         artifact,
     })
@@ -5139,6 +6330,131 @@ fn select_resource_assets(
     Ok(selected)
 }
 
+fn resource_visibility_allows(
+    resource: &WebResource,
+    stage: WebShaderStage,
+) -> Result<bool, WebBundleError> {
+    let visibility =
+        normalized_resource_policy_field(&resource.policy, "visibility", &resource.name)?;
+    let allowed = match visibility {
+        "compute" => matches!(stage, WebShaderStage::Compute),
+        "vertex" => matches!(stage, WebShaderStage::Vertex),
+        "fragment" => matches!(stage, WebShaderStage::Fragment),
+        "compute_fragment" => {
+            matches!(stage, WebShaderStage::Compute | WebShaderStage::Fragment)
+        }
+        "vertex_fragment" => {
+            matches!(stage, WebShaderStage::Vertex | WebShaderStage::Fragment)
+        }
+        "all" => true,
+        unsupported => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "resource `{}` has unsupported Fe visibility `{unsupported}`",
+                resource.name
+            )));
+        }
+    };
+    Ok(allowed)
+}
+
+fn validate_resource_stage_visibility(
+    resources: &[WebResource],
+    passes: &[WebPass],
+) -> Result<(), WebBundleError> {
+    for pass in passes {
+        for binding in pass
+            .layout
+            .bindings
+            .iter()
+            .filter(|binding| binding.role == WebBindingRole::Resource)
+        {
+            let mut matches = resources
+                .iter()
+                .filter(|resource| resource.name == binding.name);
+            let resource = matches.next().ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!(
+                    "pass `{}` binds undeclared resource `{}` at physical slot {}:{}",
+                    pass.source_entry, binding.name, binding.group, binding.binding
+                ))
+            })?;
+            if matches.next().is_some() {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "pass `{}` cannot resolve non-unique resource identity `{}`",
+                    pass.source_entry, binding.name
+                )));
+            }
+            for stage in &binding.shader_stages {
+                if !resource_visibility_allows(resource, *stage)? {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "resource `{}` Fe visibility does not admit {:?} demand from pass `{}`",
+                        resource.name, stage, pass.source_entry
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+const PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE: usize = 8;
+
+fn validate_portable_pass_bindings(passes: &[WebPass]) -> Result<(), WebBundleError> {
+    for pass in passes {
+        for binding in &pass.layout.bindings {
+            if binding.shader_stages.is_empty() {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "pass `{}` binding `{}` has no compiler-derived shader stages",
+                    pass.source_entry, binding.name
+                )));
+            }
+            for (index, stage) in binding.shader_stages.iter().enumerate() {
+                if binding.shader_stages[..index].contains(stage) {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "pass `{}` binding `{}` repeats {:?} shader-stage demand",
+                        pass.source_entry, binding.name, stage
+                    )));
+                }
+                if !pass.shader_stages.contains(stage) {
+                    return Err(WebBundleError::EntryDerivation(format!(
+                        "pass `{}` binding `{}` demands {:?} outside the pass stage set",
+                        pass.source_entry, binding.name, stage
+                    )));
+                }
+            }
+        }
+
+        for stage in &pass.shader_stages {
+            let stage_bindings = pass
+                .layout
+                .bindings
+                .iter()
+                .filter(|binding| binding.shader_stages.contains(stage))
+                .collect::<Vec<_>>();
+            let count = stage_bindings.len();
+            if count <= PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE {
+                continue;
+            }
+            let role_count = |role| {
+                stage_bindings
+                    .iter()
+                    .filter(|binding| binding.role == role)
+                    .count()
+            };
+            return Err(WebBundleError::EntryDerivation(format!(
+                "pass `{}` ({:?}) requires {count} storage-buffer bindings in its {:?} shader stage: {} resource, {} input, {} output; the portable WebGPU limit is {}",
+                pass.source_entry,
+                pass.layout.mode,
+                stage,
+                role_count(WebBindingRole::Resource),
+                role_count(WebBindingRole::Input),
+                role_count(WebBindingRole::Output),
+                PORTABLE_STORAGE_BUFFERS_PER_SHADER_STAGE,
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn stage_external_resources(
     db: &DriverDataBase,
     package: &mir::RuntimePackage<'_>,
@@ -5147,11 +6463,32 @@ fn stage_external_resources(
     access: Access,
     leading_context_leaves: Option<u32>,
 ) -> Result<Vec<SpirvExternalResource>, WebBundleError> {
+    // Runtime symbols may be mangled when a reachable helper shares the
+    // stage's source name. Resolve the exact source function first; matching
+    // a bare emitted name would reject a valid actor (or select a helper).
+    let top_mod = package.top_mod(db);
+    let source_functions = top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|function| {
+            function.top_mod(db) == top_mod
+                && function.name(db).to_opt().is_some_and(|name| name.data(db) == entry)
+        })
+        .collect::<Vec<_>>();
+    let [source_function] = source_functions.as_slice() else {
+        return Err(WebBundleError::Lower(format!(
+            "GPU stage `{entry}` must select exactly one source function (found {})",
+            source_functions.len()
+        )));
+    };
+    let symbol = mir::runtime_package_symbol_for_func(db, *package, *source_function)
+        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
     let functions = package
         .functions(db)
         .into_iter()
         .filter(|function| {
-            function.linkage(db) == mir::RuntimeLinkage::Internal && function.symbol(db) == entry
+            function.linkage(db) == mir::RuntimeLinkage::Internal && function.symbol(db) == symbol
         })
         .collect::<Vec<_>>();
     let [function] = functions.as_slice() else {
@@ -5183,41 +6520,61 @@ fn stage_external_resources(
             resources.len()
         )));
     }
-    Ok(resources
+    resources
         .iter()
         .zip(arg_indices)
-        .map(|(resource, arg_index)| SpirvExternalResource {
-            arg_index,
-            group: resource.group,
-            binding: resource.binding,
-            name: resource.name.clone(),
-            access: match resource.policy.access {
-                WebResourceAccess::ReadOnly => Access::Read,
-                // WGSL/Naga have no write-only storage declaration. Fe's
-                // missing GpuReadable evidence still rejects authored loads;
-                // the physical carrier therefore uses read_write.
-                WebResourceAccess::WriteOnly => Access::ReadWrite,
-                WebResourceAccess::ReadWrite => access,
-            },
-            element: match &resource.element {
-                WebActorResourceElement::U32 => SpirvResourceElement::Scalar(SpirvScalarKind::U32),
-                WebActorResourceElement::F32 => SpirvResourceElement::Scalar(SpirvScalarKind::F32),
-                WebActorResourceElement::Record { fields, span } => SpirvResourceElement::Record {
-                    fields: fields
-                        .iter()
-                        .map(|field| SpirvResourceField {
-                            name: field.name.clone(),
-                            scalar: spirv_scalar_kind(field.scalar),
-                            offset: field.offset,
-                        })
-                        .collect(),
-                    span: *span,
+        .map(|(resource, arg_index)| {
+            Ok(SpirvExternalResource {
+                arg_index,
+                group: resource.group,
+                binding: resource.binding,
+                name: resource.name.clone(),
+                access: match normalized_resource_policy_field(
+                    &resource.policy,
+                    "access",
+                    &resource.name,
+                )? {
+                    "read_only" => Access::Read,
+                    // WGSL/Naga have no write-only storage declaration. Fe's
+                    // missing GpuReadable evidence still rejects authored loads;
+                    // the physical carrier therefore uses read_write.
+                    "write_only" => Access::ReadWrite,
+                    "read_write" => access,
+                    "atomic_read_write" => Access::ReadWrite,
+                    unsupported => {
+                        return Err(WebBundleError::EntryDerivation(format!(
+                            "resource `{}` has unsupported Fe access `{unsupported}`",
+                            resource.name
+                        )));
+                    }
                 },
-            },
-            stride: resource.stride,
-            length: resource.length,
+                element: match &resource.element {
+                    WebActorResourceElement::AtomicU32 => SpirvResourceElement::AtomicU32,
+                    WebActorResourceElement::U32 => {
+                        SpirvResourceElement::Scalar(SpirvScalarKind::U32)
+                    }
+                    WebActorResourceElement::F32 => {
+                        SpirvResourceElement::Scalar(SpirvScalarKind::F32)
+                    }
+                    WebActorResourceElement::Record { fields, span } => {
+                        SpirvResourceElement::Record {
+                            fields: fields
+                                .iter()
+                                .map(|field| SpirvResourceField {
+                                    name: field.name.clone(),
+                                    scalar: spirv_scalar_kind(field.scalar),
+                                    offset: field.offset,
+                                })
+                                .collect(),
+                            span: *span,
+                        }
+                    }
+                },
+                stride: resource.stride,
+                length: resource.length,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// One immutable file in a fully materialized [`WebBundle`].
@@ -5318,6 +6675,7 @@ enum ActorShaderCompileKind {
     Fragment,
     Raster {
         vertex_entry: String,
+        instance_index: bool,
     },
 }
 
@@ -5339,7 +6697,7 @@ fn plan_actor_shader_compile_units(
     while index < program.stages.len() {
         let stage = &program.stages[index];
         match &stage.kind {
-            WebActorStageKind::Vertex { .. } => {
+            WebActorStageKind::Vertex { instance_index, .. } => {
                 let Some(WebActorStage {
                     source_entry: fragment_entry,
                     kind: WebActorStageKind::RasterFragment { .. },
@@ -5355,6 +6713,7 @@ fn plan_actor_shader_compile_units(
                     source_entry: fragment_entry.clone(),
                     kind: ActorShaderCompileKind::Raster {
                         vertex_entry: stage.source_entry.clone(),
+                        instance_index: *instance_index,
                     },
                 });
                 index += 2;
@@ -5447,7 +6806,10 @@ fn compile_actor_shader_unit(
             compile_runtime_package_spirv_render_with_resources(db, &package, &external)
                 .map_err(|error| WebBundleError::Lower(error.to_string()))
         }
-        ActorShaderCompileKind::Raster { vertex_entry } => {
+        ActorShaderCompileKind::Raster {
+            vertex_entry,
+            instance_index,
+        } => {
             let package = mir::build_wasm_runtime_package_for_entries(
                 db,
                 top_mod,
@@ -5462,12 +6824,27 @@ fn compile_actor_shader_unit(
                 Access::Read,
                 None,
             )?;
-            compile_runtime_package_spirv_authored_raster_with_resources(
+            let builtin_arguments = if *instance_index {
+                vec![
+                    SpirvBuiltinArgument {
+                        arg_index: 0,
+                        source: SpirvBuiltinSource::VertexIndex,
+                    },
+                    SpirvBuiltinArgument {
+                        arg_index: 1,
+                        source: SpirvBuiltinSource::InstanceIndex,
+                    },
+                ]
+            } else {
+                Vec::new()
+            };
+            compile_runtime_package_spirv_authored_raster_with_interface(
                 db,
                 &package,
                 vertex_entry,
                 &unit.source_entry,
                 &external,
+                &builtin_arguments,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))
         }
@@ -5507,9 +6884,14 @@ fn compile_actor_shader_artifacts(
     for (batch_index, batch) in units.chunks(jobs).enumerate() {
         let started = std::time::Instant::now();
         if trace {
+            let labels = batch
+                .iter()
+                .map(|unit| format!("{}:{}", unit.kind.label(), unit.source_entry))
+                .collect::<Vec<_>>()
+                .join(",");
             eprintln!(
-                "[fe web compiler batch] begin batch={batch_index}, units={}, jobs={jobs}",
-                batch.len()
+                "[fe web compiler batch] begin batch={batch_index}, units={}, jobs={jobs}, stages={labels}",
+                batch.len(),
             );
         }
         let batch_db = source_db.replicate_inputs();
@@ -5549,6 +6931,13 @@ fn compile_actor_shader_artifacts(
         reclaim_completed_compiler_database();
         compiled.sort_by_key(|(stage_index, _)| *stage_index);
         for (stage_index, artifact) in compiled {
+            if trace && let Ok(artifact) = &artifact {
+                eprintln!(
+                    "[fe web compiler artifact] stage_index={stage_index}, wgsl_bytes={}, spirv_words={}",
+                    artifact.wgsl.as_ref().map_or(0, String::len),
+                    artifact.words.len(),
+                );
+            }
             artifacts[stage_index] = Some(artifact?);
         }
         if trace {
@@ -5581,6 +6970,9 @@ impl WebBundle {
         options: WebBuildOptions,
         program: WebActorProgram,
     ) -> Result<Self, WebBundleError> {
+        let trace = std::env::var_os("FE_WEB_STAGE_TRACE").is_some()
+            || std::env::var_os("FE_WASM_LOWER_TRACE").is_some();
+        let started = std::time::Instant::now();
         if options.canonical_policy != WebCanonicalPolicy::Disabled
             || !options.canonical_entries.is_empty()
         {
@@ -5607,7 +6999,9 @@ impl WebBundle {
                 if !fragment_entries.contains(&options.source_entry.as_str())
                     || !matches!(
                         program.stages.last().map(|stage| &stage.kind),
-                        Some(WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. })
+                        Some(
+                            WebActorStageKind::Fragment | WebActorStageKind::RasterFragment { .. }
+                        )
                     )
                 {
                     return Err(WebBundleError::EntryDerivation(format!(
@@ -5642,11 +7036,21 @@ impl WebBundle {
                 ));
             }
         }
+        let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
         let resources = program
             .resources
             .iter()
             .enumerate()
-            .map(|(binding, resource)| web_resource_manifest(resource, binding as u32))
+            .map(|(binding, resource)| {
+                let binding = binding as u32;
+                web_resource_manifest(
+                    resource,
+                    binding,
+                    readback
+                        .as_ref()
+                        .is_some_and(|contract| contract.binding == binding),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
         let resource_field_indices = program
@@ -5654,7 +7058,50 @@ impl WebBundle {
             .iter()
             .map(|resource| resource.field_index)
             .collect::<Vec<_>>();
-        let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
+        let mut pass_activation_policies = Vec::<ResolvedPassActivationPolicy<'_>>::new();
+        let mut stage_activation_indices = Vec::with_capacity(program.stages.len());
+        let mut pass_preparation_policies = Vec::<ResolvedPassPreparationPolicy<'_>>::new();
+        let mut stage_preparation_indices = Vec::with_capacity(program.stages.len());
+        for stage in &program.stages {
+            let activation = resolve_pass_activation_policy(
+                db,
+                top_mod,
+                &stage.source_entry,
+                &resource_field_indices,
+            )?;
+            let index = activation.map(|policy| {
+                if let Some(index) = pass_activation_policies
+                    .iter()
+                    .position(|existing| existing.policy_ty == policy.policy_ty)
+                {
+                    index as u32
+                } else {
+                    let index = pass_activation_policies.len();
+                    pass_activation_policies.push(policy);
+                    u32::try_from(index).expect("pass activation policy count fits in u32")
+                }
+            });
+            stage_activation_indices.push(index);
+            let preparation = resolve_pass_preparation_policy(
+                db,
+                top_mod,
+                &stage.source_entry,
+                &resource_field_indices,
+            )?;
+            let index = preparation.map(|policy| {
+                if let Some(index) = pass_preparation_policies
+                    .iter()
+                    .position(|existing| existing.policy_ty == policy.policy_ty)
+                {
+                    index as u32
+                } else {
+                    let index = pass_preparation_policies.len();
+                    pass_preparation_policies.push(policy);
+                    u32::try_from(index).expect("pass preparation policy count fits in u32")
+                }
+            });
+            stage_preparation_indices.push(index);
+        }
         let mut shader_artifacts = compile_actor_shader_artifacts(
             db,
             top_mod,
@@ -5662,6 +7109,12 @@ impl WebBundle {
             &resources,
             options.stage_compile_jobs,
         )?;
+        if trace {
+            eprintln!(
+                "[fe web actor graph] shader artifacts complete, elapsed_ms={}",
+                started.elapsed().as_millis(),
+            );
+        }
         let mut passes = Vec::with_capacity(program.stages.len());
         let mut pass_wgsl = Vec::with_capacity(program.stages.len());
         // The top-level compatibility artifact/layout follows the derived
@@ -5674,7 +7127,13 @@ impl WebBundle {
         let mut index = 0;
         while index < program.stages.len() {
             let stage = &program.stages[index];
-            if let WebActorStageKind::Vertex { vertex_count, .. } = &stage.kind {
+            if let WebActorStageKind::Vertex {
+                draw,
+                instance_index,
+                primitive,
+                ..
+            } = &stage.kind
+            {
                 let Some(WebActorStage {
                     source_entry: fragment_entry,
                     kind: WebActorStageKind::RasterFragment { .. },
@@ -5702,16 +7161,78 @@ impl WebBundle {
                     &resource_field_indices,
                 )?;
                 let path = format!("{PASS_DIR}/{index:03}-raster.wgsl");
+                let vertex_activation = stage_activation_indices[index];
+                let fragment_activation = stage_activation_indices[index + 1];
+                let activation = match (vertex_activation, fragment_activation) {
+                    (Some(vertex), Some(fragment)) if vertex != fragment => {
+                        return Err(WebBundleError::SurfaceProjection(format!(
+                            "raster pair `{}` / `{fragment_entry}` selects two different PassActivation policies",
+                            stage.source_entry
+                        )));
+                    }
+                    (Some(activation), _) | (_, Some(activation)) => Some(activation),
+                    (None, None) => None,
+                };
+                let vertex_preparation = stage_preparation_indices[index];
+                let fragment_preparation = stage_preparation_indices[index + 1];
+                let preparation = match (vertex_preparation, fragment_preparation) {
+                    (Some(vertex), Some(fragment)) if vertex != fragment => {
+                        return Err(WebBundleError::SurfaceProjection(format!(
+                            "raster pair `{}` / `{fragment_entry}` selects two different PassPreparation policies",
+                            stage.source_entry
+                        )));
+                    }
+                    (Some(preparation), _) | (_, Some(preparation)) => Some(preparation),
+                    (None, None) => None,
+                };
+                let (draw_vertices, draw_instances, draw_indirect) = match draw {
+                    WebActorDraw::Direct {
+                        vertex_count,
+                        instance_count,
+                    } => (
+                        Some(*vertex_count),
+                        instance_index.then_some(*instance_count),
+                        None,
+                    ),
+                    WebActorDraw::Indirect {
+                        resource_field_index,
+                    } => {
+                        let resource = program
+                            .resources
+                            .iter()
+                            .find(|resource| resource.field_index == *resource_field_index)
+                            .ok_or_else(|| {
+                                WebBundleError::Lower(format!(
+                                    "authored raster stage `{}` lost indirect actor resource field {}",
+                                    stage.source_entry, resource_field_index
+                                ))
+                            })?;
+                        (
+                            None,
+                            None,
+                            Some(WebDrawIndirect {
+                                resource: resource.name.clone(),
+                                offset: 0,
+                            }),
+                        )
+                    }
+                };
                 passes.push(WebPass {
+                    primitive: primitive.clone(),
                     source_entry: fragment_entry.clone(),
                     shader: path.clone(),
                     shader_bytes: shader.len() as u64,
+                    activation,
+                    preparation,
+                    shader_stages: vec![WebShaderStage::Vertex, WebShaderStage::Fragment],
                     dispatch: None,
                     repeat: 1,
                     taper: None,
                     cooperation: None,
                     cycle: None,
-                    draw_vertices: Some(*vertex_count),
+                    draw_vertices,
+                    draw_instances,
+                    draw_indirect,
                     layout: layout.clone(),
                 });
                 pass_wgsl.push(WebPassShader {
@@ -5776,29 +7297,27 @@ impl WebBundle {
                 &resource_field_indices,
             )?;
             let path = format!("{PASS_DIR}/{index:03}-{kind}.wgsl");
-            let cycle = cycle.map(|cycle| {
-                let group = cycle_groups
-                    .iter()
-                    .position(|group| group == &cycle.group)
-                    .unwrap_or_else(|| {
-                        cycle_groups.push(cycle.group);
-                        cycle_groups.len() - 1
-                    });
-                WebPassCycle {
-                    group: u32::try_from(group).expect("actor pass cycle group count fits in u32"),
-                    repeat: cycle.repeat,
-                }
-            });
+            let cycle = cycle.map(|cycle| lower_pass_cycle(cycle, &mut cycle_groups));
             passes.push(WebPass {
+                primitive: None,
                 source_entry: stage.source_entry.clone(),
                 shader: path.clone(),
                 shader_bytes: shader.len() as u64,
+                activation: stage_activation_indices[index],
+                preparation: stage_preparation_indices[index],
+                shader_stages: if dispatch.is_some() {
+                    vec![WebShaderStage::Compute]
+                } else {
+                    vec![WebShaderStage::Fragment]
+                },
                 dispatch,
                 repeat,
                 taper,
                 cooperation,
                 cycle,
                 draw_vertices: None,
+                draw_instances: None,
+                draw_indirect: None,
                 layout: layout.clone(),
             });
             pass_wgsl.push(WebPassShader {
@@ -5817,6 +7336,17 @@ impl WebBundle {
             }
             index += 1;
         }
+        if trace {
+            eprintln!(
+                "[fe web actor graph] pass manifests complete, passes={}, elapsed_ms={}",
+                passes.len(),
+                started.elapsed().as_millis(),
+            );
+        }
+        validate_resource_stage_visibility(&resources, &passes)?;
+        validate_portable_pass_bindings(&passes)?;
+        validate_pass_activation_cycles(&passes)?;
+        validate_pass_preparation_cycles(&passes)?;
         let (final_path, wgsl) = primary_shader.ok_or_else(|| {
             WebBundleError::EntryDerivation(
                 "GPU actor pass graph has no shader for its derived terminal entry".to_owned(),
@@ -5834,6 +7364,8 @@ impl WebBundle {
             || quality_policy.is_some()
             || recovery_policy.is_some()
             || readback.is_some()
+            || !pass_activation_policies.is_empty()
+            || !pass_preparation_policies.is_empty()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -5889,13 +7421,31 @@ impl WebBundle {
             if let Some(readback) = readback.as_ref() {
                 control_entries.push(readback.source_entry.clone());
             }
-            let internal_funcs = schedule_policy
+            let mut internal_funcs = schedule_policy
                 .as_ref()
                 .map(|policy| policy.func)
                 .into_iter()
                 .chain(quality_policy.as_ref().map(|policy| policy.func))
                 .chain(recovery_policy.as_ref().map(|policy| policy.func))
                 .collect::<Vec<_>>();
+            for policy in &pass_activation_policies {
+                if !internal_funcs.contains(&policy.func) {
+                    internal_funcs.push(policy.func);
+                }
+            }
+            for policy in &pass_preparation_policies {
+                if !internal_funcs.contains(&policy.func) {
+                    internal_funcs.push(policy.func);
+                }
+            }
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] building control package, entries={}, internal_funcs={}, elapsed_ms={}",
+                    control_entries.len(),
+                    internal_funcs.len(),
+                    started.elapsed().as_millis(),
+                );
+            }
             let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
                 db,
                 top_mod,
@@ -5903,6 +7453,12 @@ impl WebBundle {
                 &internal_funcs,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] control package complete, elapsed_ms={}",
+                    started.elapsed().as_millis(),
+                );
+            }
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
             if let Some(contract) = typed_transition.as_ref() {
                 wasm_options = with_typed_surface_export(
@@ -5952,10 +7508,45 @@ impl WebBundle {
                     &policy.contract,
                 );
             }
+            for (index, policy) in pass_activation_policies.iter().enumerate() {
+                let policy_instance_key =
+                    mir::runtime_package_instance_key_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_pass_activation(
+                    wasm_options,
+                    &policy_instance_key,
+                    u32::try_from(index).expect("pass activation policy count fits in u32"),
+                    &policy.contract,
+                );
+            }
+            for (index, policy) in pass_preparation_policies.iter().enumerate() {
+                let policy_instance_key =
+                    mir::runtime_package_instance_key_for_func(db, control_package, policy.func)
+                        .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = with_typed_pass_preparation(
+                    wasm_options,
+                    &policy_instance_key,
+                    u32::try_from(index).expect("pass preparation policy count fits in u32"),
+                    &policy.contract,
+                );
+            }
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] compiling control wasm, elapsed_ms={}",
+                    started.elapsed().as_millis(),
+                );
+            }
             let wasm =
                 compile_runtime_package_wasm_with_options(db, &control_package, wasm_options)
                     .map_err(|error| WebBundleError::Lower(error.to_string()))?
                     .bytes;
+            if trace {
+                eprintln!(
+                    "[fe web actor graph] control wasm complete, bytes={}, elapsed_ms={}",
+                    wasm.len(),
+                    started.elapsed().as_millis(),
+                );
+            }
             wasmparser::validate(&wasm)
                 .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
             if let Some(initializer) = initializer.as_ref() {
@@ -5963,6 +7554,20 @@ impl WebBundle {
             }
             if let Some(readback) = readback.as_ref() {
                 verify_typed_gpu_readback_exports(&wasm, readback)?;
+            }
+            for (index, policy) in pass_activation_policies.iter().enumerate() {
+                verify_typed_pass_activation_export(
+                    &wasm,
+                    u32::try_from(index).expect("pass activation policy count fits in u32"),
+                    &policy.contract,
+                )?;
+            }
+            for (index, policy) in pass_preparation_policies.iter().enumerate() {
+                verify_typed_pass_preparation_export(
+                    &wasm,
+                    u32::try_from(index).expect("pass preparation policy count fits in u32"),
+                    policy,
+                )?;
             }
             let control = control_export
                 .as_deref()
@@ -6002,6 +7607,7 @@ impl WebBundle {
             recovery_policy.is_some(),
         );
         let manifest = WebBundleManifest {
+            raster: program.raster.clone(),
             protocol: WEB_BUNDLE_PROTOCOL.to_owned(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
             source_entry: options.source_entry,
@@ -6055,7 +7661,8 @@ impl WebBundle {
         let actor_program =
             with_isolated_compiler_database(db, top_mod, "<actor-program>", actor_gpu_program)?;
         if let Some(program) = actor_program
-            && (!program.resources.is_empty()
+            && (program.raster.is_some()
+                || !program.resources.is_empty()
                 || program.stages.iter().any(|stage| {
                     matches!(
                         stage.kind,
@@ -6359,15 +7966,24 @@ impl WebBundle {
         project_actor_field_metadata(db, top_mod, &options.source_entry, &mut layout, &[])?;
         let surface = project_surface(db, top_mod, &options.source_entry, &layout, &[])?;
         let passes = vec![WebPass {
+            primitive: None,
             source_entry: options.source_entry.clone(),
             shader: WGSL_FILE.to_owned(),
             shader_bytes: wgsl.len() as u64,
+            activation: None,
+            preparation: None,
+            shader_stages: match options.mode {
+                WebBundleMode::Compute | WebBundleMode::Grid => vec![WebShaderStage::Compute],
+                WebBundleMode::Render => vec![WebShaderStage::Fragment],
+            },
             dispatch: None,
             repeat: 1,
             taper: None,
             cooperation: None,
             cycle: None,
             draw_vertices: None,
+            draw_instances: None,
+            draw_indirect: None,
             layout: layout.clone(),
         }];
 
@@ -6383,6 +7999,7 @@ impl WebBundle {
             recovery_policy.is_some(),
         );
         let manifest = WebBundleManifest {
+            raster: None,
             protocol: WEB_BUNDLE_PROTOCOL.to_string(),
             protocol_version: WEB_BUNDLE_PROTOCOL_VERSION,
             source_entry: options.source_entry,
@@ -6599,9 +8216,17 @@ impl WebBundle {
         }
         let mut materialized_resource_hashes = std::collections::BTreeSet::new();
         for resource in &self.manifest.resources {
-            let content_digest = match &resource.policy.initialization {
-                WebResourceInitialization::ContentAddressed { sha256 } => Some(sha256),
-                WebResourceInitialization::Zeroed | WebResourceInitialization::Derived => None,
+            let (initialization, digest) =
+                normalized_resource_initialization(&resource.policy, &resource.name)?;
+            let content_digest = match (initialization, digest) {
+                ("content_addressed", Some(sha256)) => Some(sha256),
+                ("zeroed" | "derived", None) => None,
+                _ => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "resource `{}` has an inconsistent normalized initialization plan",
+                        resource.name
+                    )));
+                }
             };
             match (content_digest, resource.artifact.as_ref()) {
                 (None, None) => continue,
@@ -6661,7 +8286,7 @@ impl WebBundle {
         if self.manifest.layout.mode == WebBundleMode::Render {
             push(
                 RENDER_RUNTIME_JS_FILE,
-                Arc::from(RENDER_RUNTIME_JS.as_bytes()),
+                Arc::from(render_runtime_js().as_bytes()),
             )?;
             let task_option = if has_scoped_tasks {
                 "scopedTasksUrl: \"./tasks/tasks.js\","
@@ -6995,6 +8620,15 @@ impl WebLayout {
                         Role::Output => WebBindingRole::Output,
                         Role::Resource => WebBindingRole::Resource,
                     },
+                    shader_stages: binding
+                        .stages
+                        .iter()
+                        .map(|stage| match stage {
+                            SpirvShaderStage::Compute => WebShaderStage::Compute,
+                            SpirvShaderStage::Vertex => WebShaderStage::Vertex,
+                            SpirvShaderStage::Fragment => WebShaderStage::Fragment,
+                        })
+                        .collect(),
                     stride: binding.stride,
                     span: binding.span,
                     members: binding
@@ -7055,6 +8689,7 @@ impl WebLayout {
                             WebBuiltinSource::FragmentPositionY
                         }
                         SpirvBuiltinSource::VertexIndex => WebBuiltinSource::VertexIndex,
+                        SpirvBuiltinSource::InstanceIndex => WebBuiltinSource::InstanceIndex,
                     },
                     scalar: scalar_kind(input.scalar),
                 })
@@ -7230,6 +8865,35 @@ mod tests {
     use common::InputDb;
     use url::Url;
 
+    #[test]
+    fn nested_cycle_ranges_reject_reopening_reparenting_and_self_nesting() {
+        fn cycle(group: &str, repeat: u32, inner: Option<WebActorPassCycle>) -> WebActorPassCycle {
+            WebActorPassCycle { group: group.into(), repeat, inner: inner.map(Box::new) }
+        }
+        fn stage(cycle: WebActorPassCycle) -> WebActorStage {
+            WebActorStage {
+                source_entry: "work".into(),
+                kind: WebActorStageKind::Compute {
+                    workgroup_size: [1,1,1], dispatch: [1,1,1], repeat: 1,
+                    taper: None, cooperation: None, cycle: Some(cycle), invocation_context: false,
+                },
+            }
+        }
+        let outer = cycle("job",2,None);
+        let inner = cycle("job",2,Some(cycle("round",3,None)));
+        assert!(validate_actor_pass_cycles(&[
+            stage(outer.clone()),stage(inner.clone()),stage(inner.clone()),stage(outer.clone())
+        ]).is_ok());
+        for invalid in [
+            vec![stage(cycle("job",2,Some(outer.clone())))],
+            vec![stage(inner.clone()),stage(outer.clone()),stage(inner.clone())],
+            vec![stage(inner.clone()),stage(cycle("other",2,Some(cycle("round",3,None))))],
+            vec![stage(inner.clone()),stage(cycle("job",2,Some(cycle("round",4,None))))],
+        ] {
+            assert!(validate_actor_pass_cycles(&invalid).is_err());
+        }
+    }
+
     const SOURCE: &str = r#"
 pub fn ignored(x: u32, y: u32) -> u32 {
     1 + x + y
@@ -7267,6 +8931,164 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(runtime.contains("100vh - var(--fe-surface-window-block-margin, 112px)"));
         assert!(runtime.contains("max-width: 100%"));
         assert!(runtime.contains("new ResizeObserver"));
+        assert!(runtime.contains("document.createElement(\"details\")"));
+        assert!(runtime.contains("controlsToggle.textContent = \"parameters\""));
+        assert!(runtime.contains("this._side.setAttribute(\"part\", \"side\")"));
+        assert!(runtime.contains("this._stage.setAttribute(\"part\", \"stage\")"));
+    }
+
+    #[test]
+    fn resident_surface_clock_is_delivered_without_synthetic_input() {
+        let runtime = render_runtime_js();
+        assert!(runtime.contains("this._surfaceFrameRequested = decision.requestFrame"));
+        assert!(
+            runtime
+                .contains("this._surfaceBoundaryEvent(SurfaceEventKind.AnimationFrame, timestamp)")
+        );
+        assert!(!runtime.contains("Fe requested presentation without pending surface input"));
+    }
+
+    #[test]
+    fn render_runtime_assembles_the_pinned_webgpu_webidl_transport() {
+        let runtime = render_runtime_js();
+        assert!(runtime.contains(fe_webidl_bindgen::HOST_RUNTIME_JS));
+        assert!(runtime.contains("gpu_queue_on_submitted_work_done"));
+        assert!(runtime.contains("gpu_device_create_buffer"));
+        assert!(runtime.contains("gpu_queue_write_buffer"));
+        assert!(runtime.contains("gpu_render_pass_encoder_draw"));
+        assert!(runtime.contains("gpu_render_pass_encoder_draw_indirect"));
+        assert!(runtime.contains("gpu_render_pass_encoder_set_blend_constant"));
+        assert_eq!(runtime.matches("[\"setBlendConstant\"](").count(), 1);
+        assert!(!RENDER_RUNTIME_BASE_JS.contains(".setBlendConstant("));
+        assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.withBorrowed"));
+        assert!(runtime.contains("feWebGpuWebIdlRuntime.resources.take(bufferHandle)"));
+        assert_eq!(
+            runtime.matches("[\"onSubmittedWorkDone\"]()").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert_eq!(
+            runtime.matches("[\"createBuffer\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert_eq!(
+            runtime.matches("[\"writeBuffer\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert_eq!(
+            runtime.matches("[\"draw\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert_eq!(
+            runtime.matches("[\"drawIndirect\"](").count(),
+            1,
+            "the sole standards call must come from generated Web IDL"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".onSubmittedWorkDone("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".createBuffer("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".writeBuffer("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".draw("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+        assert!(
+            !RENDER_RUNTIME_BASE_JS.contains(".drawIndirect("),
+            "the handwritten fixed runtime must not retain a standards-call fallback"
+        );
+
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("fe-render-runtime.mjs");
+            std::fs::write(&path, runtime).unwrap();
+            let output = std::process::Command::new("node")
+                .args(["--check", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "assembled render runtime is not valid JavaScript:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn render_runtime_executes_the_indirect_draw_manifest_contract() {
+        if !std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime_path = directory.path().join("fe-render-runtime.mjs");
+        std::fs::write(&runtime_path, render_runtime_js()).unwrap();
+        let runtime_url = Url::from_file_path(&runtime_path).unwrap();
+        let probe_path = directory.path().join("indirect-contract.mjs");
+        std::fs::write(
+            &probe_path,
+            format!(
+                r#"
+globalThis.HTMLElement = class {{}};
+globalThis.customElements = {{ define() {{}}, get() {{ return undefined; }} }};
+const runtime = await import({runtime_url:?});
+const usage = runtime.resourceBufferUsage(
+  {{ buffer_usage: ["storage", "indirect"] }},
+  {{ STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, INDIRECT: 8 }},
+  10,
+);
+if (usage !== 9) throw new Error(`unexpected indirect usage ${{usage}}`);
+const draw = runtime.rasterDrawShape({{
+  draw_indirect: {{ resource: "draw", offset: 16 }},
+}});
+if (draw.indirect.resource !== "draw" || draw.indirect.offset !== 16) {{
+  throw new Error(`unexpected indirect draw ${{JSON.stringify(draw)}}`);
+}}
+if (!runtime.requiresGpuPassGraph([{{ layout: {{ mode: "render" }}, draw_indirect: draw.indirect }}])) {{
+  throw new Error("indirect draw did not require the GPU pass graph");
+}}
+let rejected = false;
+try {{
+  runtime.rasterDrawShape({{
+    draw_vertices: 3,
+    draw_indirect: {{ resource: "draw", offset: 0 }},
+  }});
+}} catch {{
+  rejected = true;
+}}
+if (!rejected) throw new Error("mixed direct and indirect draw was accepted");
+"#,
+                runtime_url = runtime_url.as_str(),
+            ),
+        )
+        .unwrap();
+        let output = std::process::Command::new("node")
+            .arg(&probe_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "indirect runtime contract failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     fn wasm_exports(wasm: &[u8]) -> Vec<String> {

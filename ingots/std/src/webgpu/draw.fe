@@ -1,0 +1,83 @@
+//! Primitive assembly is independent of how a draw obtains its counts.
+//! These Fe values are evaluated at compile time and realized per raster pass.
+
+#[web_primitive_plan]
+pub struct PrimitivePlan { pub topology: PrimitiveTopology, pub front_face: FrontFace }
+pub enum PrimitiveTopology {
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip,
+}
+pub enum FrontFace {
+    Ccw,
+    Cw,
+}
+impl Copy for PrimitivePlan {}
+impl Copy for PrimitiveTopology {}
+impl Copy for FrontFace {}
+
+pub trait PrimitivePolicy {
+    const fn plan() -> PrimitivePlan
+}
+
+/// The shared CTFE projection boundary, also usable by ordinary Fe code.
+pub const fn primitive_plan<P: PrimitivePolicy>() -> PrimitivePlan {
+    P::plan()
+}
+
+pub struct PointTopology {}
+pub struct LineTopology {}
+pub struct LineStripTopology {}
+pub struct TriangleTopology {}
+pub struct TriangleStripTopology {}
+impl PrimitivePolicy for PointTopology {
+    const fn plan() -> PrimitivePlan {
+        PrimitivePlan { topology: PrimitiveTopology::PointList, front_face: FrontFace::Ccw }
+    }
+}
+impl PrimitivePolicy for LineTopology {
+    const fn plan() -> PrimitivePlan {
+        PrimitivePlan { topology: PrimitiveTopology::LineList, front_face: FrontFace::Ccw }
+    }
+}
+impl PrimitivePolicy for LineStripTopology {
+    const fn plan() -> PrimitivePlan {
+        PrimitivePlan { topology: PrimitiveTopology::LineStrip, front_face: FrontFace::Ccw }
+    }
+}
+impl PrimitivePolicy for TriangleTopology {
+    const fn plan() -> PrimitivePlan {
+        PrimitivePlan { topology: PrimitiveTopology::TriangleList, front_face: FrontFace::Ccw }
+    }
+}
+impl PrimitivePolicy for TriangleStripTopology {
+    const fn plan() -> PrimitivePlan {
+        PrimitivePlan { topology: PrimitiveTopology::TriangleStrip, front_face: FrontFace::Ccw }
+    }
+}
+
+/// Change orientation without changing primitive assembly or draw counts.
+pub struct Clockwise<P> {}
+impl<P: PrimitivePolicy> PrimitivePolicy for Clockwise<P> {
+    const fn plan() -> PrimitivePlan {
+        PrimitivePlan { topology: P::plan().topology, front_face: FrontFace::Cw }
+    }
+}
+
+/// Non-indexed draw with a compile-time vertex count. Zero is a valid no-op.
+#[gpu_draw(direct)]
+pub struct DirectDraw<Primitive, const VERTICES: usize> {}
+
+/// GPU-resident `[vertex_count, instance_count, first_vertex, first_instance]`.
+/// `Args` identifies one exact actor indirect resource; no CPU readback occurs.
+#[gpu_draw(indirect)]
+pub struct IndirectDraw<Primitive, Args> {}
+
+pub type PointList<const N: usize> = DirectDraw<PointTopology, N>
+pub type LineList<const N: usize> = DirectDraw<LineTopology, N>
+pub type LineStrip<const N: usize> = DirectDraw<LineStripTopology, N>
+pub type TriangleList<const N: usize> = DirectDraw<TriangleTopology, N>
+pub type TriangleStrip<const N: usize> = DirectDraw<TriangleStripTopology, N>
+pub type IndirectTriangleList<Args> = IndirectDraw<TriangleTopology, Args>

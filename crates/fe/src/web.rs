@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::OnceLock,
     time::{Instant, UNIX_EPOCH},
@@ -241,6 +241,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             (ingot.root_mod(&db), Some((url, ingot)), canonical)
         }
     };
+    let mut resource_roots = BTreeSet::from([resource_root.clone()]);
     tracing::info!(
         target: "fe_web",
         phase = "target",
@@ -305,6 +306,15 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             elapsed_ms = phase_started.elapsed().as_millis() as u64,
             "dependency diagnostics clean"
         );
+        for dependency_url in seen {
+            let Ok(path) = dependency_url.to_file_path() else {
+                continue;
+            };
+            let Ok(path) = Utf8PathBuf::from_path_buf(path) else {
+                continue;
+            };
+            resource_roots.insert(path);
+        }
     }
     // Derive the terminal entry and mode from the module's `actor` declaration when
     // not given explicitly; when supplied, they are reconciled against the
@@ -327,8 +337,10 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
     });
     options = options.with_canonical_entries(canonical_entries.iter().cloned());
-    for asset in load_resource_assets(&resource_root)? {
-        options = options.with_resource_asset(asset);
+    for root in resource_roots {
+        for asset in load_resource_assets(&root)? {
+            options = options.with_resource_asset(asset);
+        }
     }
     tracing::info!(
         target: "fe_web",
@@ -1254,6 +1266,36 @@ mod tests {
                 .iter()
                 .find(|file| file.path() == artifact.path)
                 .expect("published resource bytes")
+                .bytes(),
+            b"0123456789abcde\n"
+        );
+    }
+
+    #[test]
+    fn web_compile_discovers_verified_resource_assets_from_dependencies() {
+        let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codegen/tests/fixtures/actor_content_addressed_dependency")
+            .canonicalize_utf8()
+            .unwrap();
+        let bundle = compile(&request(
+            fixture.as_str(),
+            "paint",
+            WebMode::Render,
+            [None, None, None],
+            WebCanonicalPolicy::Disabled,
+            &[],
+        ))
+        .expect("content-addressed dependency bundle");
+        let artifact = bundle.manifest.resources[0]
+            .artifact
+            .as_ref()
+            .expect("dependency resource artifact");
+        let materialized = bundle.materialized_files().unwrap();
+        assert_eq!(
+            materialized
+                .iter()
+                .find(|file| file.path() == artifact.path)
+                .expect("published dependency resource bytes")
                 .bytes(),
             b"0123456789abcde\n"
         );

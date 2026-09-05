@@ -1,0 +1,5 @@
+[ingot]
+name = "actor_sample_coverage"
+version = "0.1.0"
+[dependencies]
+std = { path = "../../../../../ingots/std" }

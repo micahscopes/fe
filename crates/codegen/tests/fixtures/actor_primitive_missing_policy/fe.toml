@@ -1,0 +1,6 @@
+[ingot]
+name = "actor_primitive_missing_policy"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../../../../../ingots/std" }

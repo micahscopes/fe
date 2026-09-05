@@ -772,7 +772,7 @@ fn production_sparse_base_trace_lowers_to_browser_webgpu() {
             matches!(entry, "hash_fri_leaves" | "reduce_fri_tree")
                 .then_some(fe_codegen::WebDispatchCooperation { repeat_batch: 8 }),
         );
-        let cycle = pass.cycle.expect("every FRI round phase must be cycled");
+        let cycle = pass.cycle.as_ref().expect("every FRI round phase must be cycled");
         assert_eq!(cycle.group, 0);
         assert_eq!(cycle.repeat, FRI_ROUNDS);
     }

@@ -9,6 +9,7 @@ mir = { path = "../mir", package = "fe-mir" }
 hir.workspace = true
 common.workspace = true
 fe-host-abi = { path = "../host-abi" }
+fe-webidl-bindgen = { path = "../webidl-bindgen" }
 hex = "0.4"
 num-bigint.workspace = true
 rustc-hash.workspace = true
@@ -57,7 +58,6 @@ driver.workspace = true
 test-utils.workspace = true
 url.workspace = true
 hir = { workspace = true, features = ["testutils"] }
-fe-webidl-bindgen = { path = "../webidl-bindgen" }
 fe-compiler-protocol = { path = "../compiler-protocol" }
 fe-host-runtime = { path = "../host-runtime" }
 # Execution harness for the Fe -> wasm acceptance test (mirrors the Sonatina

@@ -31,12 +31,16 @@ where N > 0 {
     OrbitWriter { orbit: writer.orbit, cursor: writer.cursor + 1 }
 }
 
+fn advance<const N: usize>(_ writer: OrbitWriter<N>) -> OrbitWriter<N> {
+    OrbitWriter { orbit: writer.orbit, cursor: writer.cursor + 1 }
+}
+
 actor KnownColor uses (Program<WebGpuBackend>) {
     orbit: Shared<ComplexF32Bits, 1>,
 
     fn seed(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
         let writer: OrbitWriter<1> = OrbitWriter { orbit: self.orbit, cursor: 0 }
-        let complete = write_known(writer)
+        let complete = advance(write_known(writer))
     }
 
     fn paint(self, px: i32, py: i32) -> i32 uses (Pixel) {

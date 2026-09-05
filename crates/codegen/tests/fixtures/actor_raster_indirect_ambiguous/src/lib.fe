@@ -1,0 +1,31 @@
+use std::webgpu::{
+    ClipPosition, DrawIndirectBuffer, FragmentStage, GpuProgram, IndirectTriangleList,
+    RasterVertex, VertexStage, WebGpuBackend,
+}
+
+struct SharedDraw {}
+struct Varying { value: f32 }
+impl Copy for Varying {}
+
+actor AmbiguousIndirectDraw uses (GpuProgram<WebGpuBackend>) {
+    first: DrawIndirectBuffer<SharedDraw>,
+    second: DrawIndirectBuffer<SharedDraw>,
+
+    fn vertices(self, vertex_index: u32, instance_index: u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying, IndirectTriangleList<DrawIndirectBuffer<SharedDraw>>>)
+    {
+        RasterVertex {
+            position: ClipPosition {
+                x: if vertex_index == 0 { -0.5 } else { 0.5 },
+                y: if instance_index == 0 { -0.5 } else { 0.5 },
+                z: 0.0,
+                w: 1.0,
+            },
+            varying: Varying { value: 1.0 },
+        }
+    }
+
+    fn shade(self, varying: Varying) -> u32 uses (FragmentStage<Varying>) {
+        if varying.value > 0.5 { 4294901760 } else { 4278190335 }
+    }
+}

@@ -17,6 +17,13 @@ use super::web::{
 }
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
+pub use draw::{
+    PrimitivePlan, PrimitiveTopology, FrontFace, PrimitivePolicy, primitive_plan,
+    PointTopology, LineTopology, LineStripTopology, TriangleTopology, TriangleStripTopology,
+    Clockwise, DirectDraw, IndirectDraw, PointList, LineList, LineStrip, TriangleList,
+    TriangleStrip, IndirectTriangleList,
+}
+
 pub use layout::{
     GpuLayout,
     StorageGpuLayout,
@@ -27,26 +34,47 @@ pub use layout::{
 }
 pub use resource::{
     ActorResident,
+    AtomicReadWrite,
+    AtomicStorageBuffer,
     AllShaderStages,
     ComputeFragment,
     ComputeOnly,
     ContentAddressed,
     Derived,
+    DrawIndirectBuffer,
     DynamicStorageBuffer,
     FragmentOnly,
     FrameTransient,
     GpuBuffer,
     GpuReadable,
     GpuResourceFamily,
+    GpuResourcePolicy,
     GpuWritable,
     Immutable,
     ImmutableStorageBuffer,
     Imported,
+    IndirectBuffer,
     NonRecoverable,
     ReadOnly,
+    ReadbackBuffer,
+    ReadbackWords,
     ReadWrite,
     Regenerate,
     ReplayRecipe,
+    ResourceAccess,
+    ResourceAccessPolicy,
+    ResourceDigest,
+    ResourceInitialization,
+    ResourceInitializationPolicy,
+    ResourceKind,
+    ResourceKindPolicy,
+    ResourcePlan,
+    ResourceRecovery,
+    ResourceRecoveryPolicy,
+    ResourceResidency,
+    ResourceResidencyPolicy,
+    ResourceVisibility,
+    ResourceVisibilityPolicy,
     RestoreCheckpoint,
     StorageBuffer,
     StorageKind,
@@ -54,6 +82,75 @@ pub use resource::{
     VertexOnly,
     WriteOnly,
     Zeroed,
+    resource_plan,
+}
+pub use raster::{
+    AdditiveColor,
+    BlendComponent,
+    BlendFactor,
+    BlendOperation,
+    BlendState,
+    ColorTarget,
+    COLOR_WRITE_RED,
+    COLOR_WRITE_GREEN,
+    COLOR_WRITE_BLUE,
+    COLOR_WRITE_ALPHA,
+    COLOR_WRITE_ALL,
+    PremultipliedAlpha,
+    RasterBlendPolicy,
+    RasterBlendConstant,
+    ReplaceColor,
+    StraightAlpha,
+    WithBlendConstant,
+    AttachmentLoad,
+    AttachmentOps,
+    AttachmentStore,
+    ClearColor,
+    ClearThenLoadStore,
+    ColorAttachmentPlan,
+    ColorOnly,
+    CompareAlways,
+    CompareNever,
+    CompareEqual,
+    CompareNotEqual,
+    CompareGreater,
+    CompareGreaterEqual,
+    CompareLess,
+    CompareLessEqual,
+    CullBack,
+    CullFront,
+    CullNone,
+    DepthAttachment,
+    Depth24LessEqual,
+    Depth24LessEqualMsaa4,
+    Depth24Plus,
+    Depth32Float,
+    DepthCompare,
+    DepthFormat,
+    DepthPlan,
+    DepthReadOnly,
+    DepthTest,
+    DepthWrite,
+    EnabledDepthFormat,
+    FaceCull,
+    NoDepth,
+    OpaqueBlack,
+    RasterAttachmentPolicy,
+    RasterColorPolicy,
+    RasterConfiguration,
+    RasterDepthCompare,
+    RasterDepthPolicy,
+    RasterDepthWrite,
+    RasterFaceCull,
+    RasterPolicy,
+    RasterSamples,
+    RasterPlan,
+    RasterState,
+    Samples1,
+    Samples4,
+    WithSampleMask,
+    WithAlphaToCoverage,
+    raster_plan,
 }
 
 // mb2 CE-3: the completion-cell control-effects vocabulary now lives
@@ -230,13 +327,20 @@ pub struct CooperativeDispatch<
 /// The compiler and fixed host execute that complete body `N` times. This lets
 /// Fe express a dependency such as challenge, fold, commit, and bind once,
 /// while a typed protocol schedule supplies its round count.
+/// Policies may nest: the outer group repeats the complete inner schedule.
+/// A group occupies one consecutive range under one parent and cannot contain
+/// itself. Tapering uses the innermost cycle's iteration, resetting per parent.
 #[gpu_dispatch(cycled)]
 pub struct CycledDispatch<Group, Dispatch, const N: usize> {}
 
-/// One non-indexed triangle-list draw. Vertex/index-buffer variants can join
-/// this policy family without changing the stage role or browser ABI.
-#[gpu_draw(triangle_list)]
-pub struct TriangleList<const VERTICES: usize> {}
+/// Repeat one draw policy over a compile-time number of instances.
+///
+/// The vertex behavior receives `vertex_index` followed by `instance_index`.
+/// Keeping instancing as a compositional policy lets the same primitive
+/// topology acquire per-instance transforms, LoD keys, or material identity
+/// without expanding those values into one flattened vertex stream.
+#[gpu_draw(instanced)]
+pub struct Instanced<Draw, const INSTANCES: usize> {}
 
 /// The gesture-driven control-state role of an actor behavior (R3 param
 /// gestures): a `self`-taking behavior that maps raw gesture deltas (pan
@@ -272,6 +376,12 @@ pub struct SurfaceTransition {}
 /// application state at initialization, extent, and restoration boundaries;
 /// frame calls carry raw inputs plus inert external resource slots.
 pub struct LatestPerFrame {}
+
+/// Present every browser animation frame while the surface is visible and the
+/// device is usable. Application input remains an independent typed queue;
+/// the presentation clock itself is also delivered to the surface transition,
+/// allowing animation state to be derived in Fe without a browser-side timer.
+pub struct ContinuousFrames {}
 
 /// Sample the newest raw input record at the next available presentation
 /// frame. Older queued records are discarded by an explicit Fe effect.
@@ -314,6 +424,36 @@ pub struct SurfaceQuality<P> {}
 /// graphs that have no application transition or presentation scheduler.
 #[gpu_control(surface_recovery)]
 pub struct SurfaceRecovery<P> {}
+
+/// Select a pure Fe policy that decides whether the adorned GPU stage belongs
+/// to the current presentation subgraph. `P` must provide exactly one public
+/// inherent function from the owning actor's complete non-resource state to
+/// `bool`. The compiler memoizes every physical pipeline, evaluates each
+/// distinct policy once per presentation, and omits inactive command encoding.
+/// No application-specific selector or threshold is projected into the host.
+#[gpu_control(pass_activation)]
+pub struct PassActivation<P> {}
+
+/// Decide when one compiled pass should become resident. `Lazy` preserves
+/// first-use realization, `VisibleIdle` prepares without blocking readiness
+/// once the surface is visible, and `Eager` completes preparation before the
+/// first presentation. The enum is returned by an ordinary pure Fe policy;
+/// the browser never infers preparation from an application mode or name.
+#[web_pass_preparation_mode]
+pub enum PassPreparationMode {
+    Lazy,
+    VisibleIdle,
+    Eager,
+}
+
+impl Copy for PassPreparationMode {}
+
+/// Select a pure Fe pass-preparation policy. `P` must provide exactly one
+/// public inherent function from the owning actor's complete non-resource
+/// state to `PassPreparationMode`. Preparation changes only physical pipeline
+/// residency; `PassActivation` remains the sole authority over execution.
+#[gpu_control(pass_preparation)]
+pub struct PassPreparation<P> {}
 
 /// Request raw uncaptured primary-pointer motion for this GPU actor while
 /// retaining the standard captured primary drag lifecycle. Without this
@@ -514,6 +654,71 @@ impl ResponsiveBacking {
     }
 }
 
+fn frame_schedule(
+    _ state: SurfaceScheduleState,
+    _ event: SurfaceScheduleEvent,
+    _ continuous: bool,
+) -> SurfaceScheduleStep {
+    let mut presenting: bool = state.presenting
+    let mut visible: bool = state.visible
+    let mut device_lost: bool = state.device_lost
+    let mut present: bool = false
+    let mut request_frame: bool = false
+    let mut last_presented_at: f32 = state.last_presented_at
+    let deadline: f32 = state.deadline
+    let mut observed_inputs: u32 = state.observed_inputs
+    let demand = continuous || event.pending_events > 0
+
+    if event.kind.is_application_input() {
+        observed_inputs = observed_inputs + 1
+        request_frame = visible && device_lost == false && presenting == false && demand
+    }
+
+    match event.kind {
+        SurfaceEventKind::AnimationFrame => {
+            if visible && device_lost == false && presenting == false && demand {
+                presenting = true
+                present = true
+                last_presented_at = event.timestamp
+            }
+        }
+        SurfaceEventKind::GpuComplete => {
+            presenting = false
+            request_frame = visible && device_lost == false && demand
+        }
+        SurfaceEventKind::Visible => {
+            visible = true
+            request_frame = device_lost == false && presenting == false && demand
+        }
+        SurfaceEventKind::Hidden => {
+            visible = false
+        }
+        SurfaceEventKind::DeviceLost => {
+            device_lost = true
+            presenting = false
+        }
+        SurfaceEventKind::DeviceRecovered => {
+            device_lost = false
+            request_frame = visible && presenting == false && demand
+        }
+        _ => {}
+    }
+
+    SurfaceScheduleStep {
+        state: SurfaceScheduleState {
+            presenting: presenting,
+            visible: visible,
+            device_lost: device_lost,
+            last_presented_at: last_presented_at,
+            deadline: deadline,
+            observed_inputs: observed_inputs,
+        },
+        present: present,
+        request_frame: request_frame,
+        queue: SurfaceQueueAction::Retain,
+    }
+}
+
 impl LatestPerFrame {
     /// Keep at most one presentation in flight. Browser input remains raw and
     /// queued until an animation-frame fact arrives while the surface is
@@ -523,63 +728,19 @@ impl LatestPerFrame {
         _ state: own SurfaceScheduleState,
         _ event: own SurfaceScheduleEvent,
     ) -> SurfaceScheduleStep {
-        let mut presenting: bool = state.presenting
-        let mut visible: bool = state.visible
-        let mut device_lost: bool = state.device_lost
-        let mut present: bool = false
-        let mut request_frame: bool = false
-        let mut last_presented_at: f32 = state.last_presented_at
-        let deadline: f32 = state.deadline
-        let mut observed_inputs: u32 = state.observed_inputs
+        frame_schedule(state, event, false)
+    }
+}
 
-        if event.kind.is_application_input() {
-            observed_inputs = observed_inputs + 1
-            request_frame = visible && device_lost == false && presenting == false && event.pending_events > 0
-        }
-
-        match event.kind {
-            SurfaceEventKind::AnimationFrame => {
-                if visible && device_lost == false && presenting == false && event.pending_events > 0 {
-                    presenting = true
-                    present = true
-                    last_presented_at = event.timestamp
-                }
-            }
-            SurfaceEventKind::GpuComplete => {
-                presenting = false
-                request_frame = visible && device_lost == false && event.pending_events > 0
-            }
-            SurfaceEventKind::Visible => {
-                visible = true
-                request_frame = device_lost == false && presenting == false && event.pending_events > 0
-            }
-            SurfaceEventKind::Hidden => {
-                visible = false
-            }
-            SurfaceEventKind::DeviceLost => {
-                device_lost = true
-                presenting = false
-            }
-            SurfaceEventKind::DeviceRecovered => {
-                device_lost = false
-                request_frame = visible && presenting == false && event.pending_events > 0
-            }
-            _ => {}
-        }
-
-        SurfaceScheduleStep {
-            state: SurfaceScheduleState {
-                presenting: presenting,
-                visible: visible,
-                device_lost: device_lost,
-                last_presented_at: last_presented_at,
-                deadline: deadline,
-                observed_inputs: observed_inputs,
-            },
-            present: present,
-            request_frame: request_frame,
-            queue: SurfaceQueueAction::Retain,
-        }
+impl ContinuousFrames {
+    /// Keep at most one presentation in flight and request its successor only
+    /// after the GPU completes. Visibility and device facts stop and resume the
+    /// chain without moving animation policy into the browser host.
+    pub fn decide(
+        _ state: own SurfaceScheduleState,
+        _ event: own SurfaceScheduleEvent,
+    ) -> SurfaceScheduleStep {
+        frame_schedule(state, event, true)
     }
 }
 
@@ -689,32 +850,6 @@ impl DropWhilePresenting {
         step.with_queue(queue: queue)
     }
 }
-
-/// GPU storage whose completed contents are transported as one typed actor
-/// message `M`. `T` and `N` retain the ordinary storage element and extent
-/// contract; `M` is a compile-time brand consumed by `ReadbackTransition<M>`.
-/// The fixed host sees only a compiler-generated binary entry and opaque bytes.
-#[gpu_resource(readback)]
-pub struct ReadbackBuffer<T, const N: usize, M> { binding: u32 }
-
-impl<T, const N: usize, M> core::marker::Copy for ReadbackBuffer<T, N, M> {}
-
-impl<T, const N: usize, M> ReadbackBuffer<T, N, M> {
-    #[gpu_intrinsic(storage_load)]
-    pub fn load(self, index: u32) -> T {
-        core::panic()
-    }
-
-    #[gpu_intrinsic(storage_store)]
-    pub fn store(self, index: u32, value: T) {
-        core::panic()
-    }
-}
-
-/// The browser readback transport is word-addressed. Application message
-/// identity remains the nominal `M`, while codec derivation writes ordinary
-/// `u32` words without repeating the physical element type at use sites.
-pub type ReadbackWords<M, const N: usize> = ReadbackBuffer<u32, N, M>
 
 /// WebGPU class-typed reference: a bind-group BINDING INDEX, which is what a
 /// WebGPU resource honestly is at the API boundary (not a pointer). `T` and `S`

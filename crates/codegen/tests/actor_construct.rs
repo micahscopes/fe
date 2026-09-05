@@ -20,11 +20,9 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalType, WasmCompileOptions, WebActorPassCycle, WebActorResourceElement,
-    WebActorStageKind, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
-    WebResourceAccess, WebResourceInitialization, WebResourceKind, WebResourcePolicy,
-    WebResourceRecovery, WebResourceResidency, WebResourceVisibility, actor_gpu_program,
-    actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
+    CanonicalType, WasmCompileOptions, WebActorDraw, WebActorPassCycle, WebActorResourceElement,
+    WebActorStageKind, WebBufferUsage, WebBuildOptions, WebBuiltinSource, WebBundle, WebBundleMode,
+    actor_gpu_program, actor_web_entry, compile_runtime_package_spirv_compute_with_resources,
     compile_runtime_package_spirv_render_with_resources, compile_runtime_package_wasm_with_options,
     resolve_web_entry,
 };
@@ -37,6 +35,252 @@ use url::Url;
 fn ingot_root(relative: &str) -> Url {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
     Url::from_directory_path(path.canonicalize().unwrap()).unwrap()
+}
+
+#[test]
+fn nested_actor_cycles_preserve_shared_stages_and_parent_order() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_nested_cycles");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::compute("finish", None))
+        .expect("nested actor stages compile once");
+    let passes = &bundle.manifest.passes;
+    assert_eq!(passes.len(), 6);
+    assert_eq!(bundle.pass_wgsl.len(), 6);
+    assert!(passes[0].cycle.is_none() && passes[5].cycle.is_none());
+    let outer = passes[1].cycle.as_ref().unwrap();
+    assert_eq!(outer.repeat, 2);
+    assert!(outer.inner.is_none());
+    assert_eq!(passes[4].cycle.as_ref(), Some(outer));
+    let nested = passes[2].cycle.as_ref().unwrap();
+    assert_eq!(nested.group, outer.group);
+    assert_eq!(nested.repeat, outer.repeat);
+    let inner = nested.inner.as_ref().unwrap();
+    assert_ne!(inner.group, outer.group);
+    assert_eq!(inner.repeat, 3);
+    assert!(inner.inner.is_none());
+    assert_eq!(passes[3].cycle.as_ref(), Some(nested));
+}
+
+#[test]
+fn actor_stage_and_reachable_helper_may_share_a_source_name() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_stage_same_name");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::compute("initialize", None))
+        .expect("select the actor stage by identity, not its unmangled source name");
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert!(bundle.pass_wgsl[0].source.contains("@compute"));
+}
+
+#[test]
+fn repeated_resource_loop_remains_a_shared_shader_helper() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_loop_helper");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("paint", None))
+        .expect("resource loop actor compiles");
+    let shader = &bundle.pass_wgsl[0].source;
+    assert!(shader.contains("fn walk_values"), "repeated resource loop was expanded:\n{shader}");
+    assert_eq!(shader.matches("loop {").count(), 1, "one shared loop:\n{shader}");
+    assert!(!shader.contains("fn tiny_passthrough"), "tiny wrappers should still inline:\n{shader}");
+}
+
+#[test]
+fn atomic_resource_policy_and_operations_reach_real_shader_atomics() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_atomic_claims");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("paint", None))
+        .expect("typed atomic actor compiles");
+    assert_eq!(bundle.manifest.resources.len(), 2);
+    let claims = &bundle.manifest.resources[0];
+    assert_eq!(claims.name, "claims");
+    assert_eq!(claims.element, WebActorResourceElement::AtomicU32);
+    assert_eq!(claims.policy["access"], "atomic_read_write");
+    assert_eq!(claims.policy["visibility"], "compute");
+    assert_eq!(claims.buffer_usage, [WebBufferUsage::Storage]);
+    assert_eq!(bundle.manifest.passes.len(), 4);
+    let initialize = &bundle.pass_wgsl[0].source;
+    assert_eq!(initialize.matches("atomicStore(").count(), 2, "{initialize}");
+    let shader = &bundle.pass_wgsl[1].source;
+    assert!(shader.contains("array<atomic<u32>>"), "{shader}");
+    assert_eq!(shader.matches("atomicAdd(").count(), 2, "unused return must not erase the second update: {shader}");
+    assert!(shader.contains("atomicMin("), "{shader}");
+    let observe = &bundle.pass_wgsl[2].source;
+    assert_eq!(observe.matches("atomicLoad(").count(), 3, "unused observation must survive: {observe}");
+    assert!(!bundle.pass_wgsl[3].source.contains("atomic<u32>"), "unused atomics must not widen fragment bindings");
+    // Optional diagnostic transport of the actual compiler output. Browser
+    // tests must not replace these Fe-authored stages with lookalike WGSL.
+    if std::env::var_os("FE_PRINT_ATOMIC_ACTOR").is_some() {
+        let passes: Vec<_> = bundle.manifest.passes.iter().zip(&bundle.pass_wgsl)
+            .map(|(declaration, shader)| serde_json::json!({
+                "declaration": declaration, "wgsl": shader.source,
+            })).collect();
+        println!("ATOMIC_ACTOR_BEGIN\n{}\nATOMIC_ACTOR_END", serde_json::json!({
+            "resources": bundle.manifest.resources, "passes": passes,
+        }));
+    }
+}
+
+#[test]
+fn authored_raster_prunes_compute_only_atomics_but_keeps_actor_allocation() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_atomic_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("compute-only atomic storage must not poison an authored raster pair");
+    assert_eq!(bundle.manifest.resources.len(), 2);
+    assert_eq!(bundle.manifest.resources[0].element, WebActorResourceElement::AtomicU32);
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert!(bundle.pass_wgsl[0].source.contains("atomicStore("));
+    let raster = &bundle.manifest.passes[1];
+    let resources = raster.layout.bindings.iter()
+        .filter(|b| b.role == fe_codegen::WebBindingRole::Resource)
+        .collect::<Vec<_>>();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].name, "colors");
+    assert_eq!(resources[0].shader_stages, [fe_codegen::WebShaderStage::Fragment]);
+    assert!(!bundle.pass_wgsl[1].source.contains("claims"));
+    assert!(!bundle.pass_wgsl[1].source.contains("atomic<u32>"));
+}
+
+#[test]
+fn atomic_resource_access_cannot_be_confused_with_ordinary_access() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_atomic_access_rejected");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let diagnostics = db.run_on_top_mod(ingot_top_mod(&db, &url)).format_diags(&db);
+    assert!(!diagnostics.contains("`AtomicStorageBuffer` is not found"), "missing API is not access enforcement: {diagnostics}");
+    for name in ["load", "store", "atomic_add", "atomic_load", "atomic_store"] {
+        assert!(diagnostics.contains(&format!("`{name}`")), "missing rejection for {name}: {diagnostics}");
+    }
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn indirect_raster_draw_is_derived_from_one_exact_fe_resource_type() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_indirect");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "indirect raster diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("indirect raster plan")
+        .expect("GPU actor");
+    assert_eq!(program.resources.len(), 1);
+    assert_eq!(program.resources[0].name, "draw");
+    assert_eq!(program.resources[0].kind, GpuResource::Indirect);
+    let WebActorStageKind::Vertex {
+        draw: WebActorDraw::Indirect {
+            resource_field_index,
+        },
+        instance_index,
+        ..
+    } = &program.stages[1].kind
+    else {
+        panic!("expected indirect authored vertex stage");
+    };
+    assert_eq!(*resource_field_index, program.resources[0].field_index);
+    assert!(*instance_index);
+
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("indirect authored raster bundle");
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    let prepare = &bundle.manifest.passes[0];
+    let raster = &bundle.manifest.passes[1];
+    assert_eq!(prepare.source_entry, "prepare");
+    assert_eq!(raster.source_entry, "shade");
+    assert_eq!(raster.draw_vertices, None);
+    assert_eq!(raster.draw_instances, None);
+    let indirect = raster
+        .draw_indirect
+        .as_ref()
+        .expect("indirect draw command");
+    assert_eq!(indirect.resource, "draw");
+    assert_eq!(indirect.offset, 0);
+    assert_eq!(raster.layout.builtin_inputs.len(), 2);
+    assert_eq!(
+        raster.layout.builtin_inputs[0].source,
+        WebBuiltinSource::VertexIndex
+    );
+    assert_eq!(
+        raster.layout.builtin_inputs[1].source,
+        WebBuiltinSource::InstanceIndex
+    );
+    assert!(
+        raster
+            .layout
+            .bindings
+            .iter()
+            .all(|binding| binding.name != "draw"),
+        "the draw-command resource is not a shader binding in a stage that does not read it"
+    );
+    assert_eq!(
+        bundle.manifest.resources[0].buffer_usage,
+        [WebBufferUsage::Storage, WebBufferUsage::Indirect]
+    );
+}
+
+#[test]
+fn indirect_raster_draw_rejects_a_resource_type_the_actor_does_not_own() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_indirect_missing");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "fixture diagnostics:\n{diagnostics}"
+    );
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("has no field of that exact resource type"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn indirect_raster_draw_rejects_ambiguous_resource_identity() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_indirect_ambiguous");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "fixture diagnostics:\n{diagnostics}"
+    );
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("actor fields have that exact resource type"),
+        "unexpected diagnostic: {error}"
+    );
 }
 
 fn ingot_top_mod<'db>(db: &'db DriverDataBase, url: &Url) -> TopLevelMod<'db> {
@@ -138,7 +382,7 @@ fn flags_contradicting_the_actor_are_rejected() {
 }
 
 #[test]
-fn actor_without_a_unique_fragment_behavior_is_rejected() {
+fn actor_without_a_unique_terminal_gpu_behavior_is_rejected() {
     // Two role-marked behaviors in one actor: no unique render entry to pick.
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_two_fragment");
@@ -147,13 +391,13 @@ fn actor_without_a_unique_fragment_behavior_is_rejected() {
     let err = actor_web_entry(&db, top_mod).unwrap_err();
     assert!(format!("{err}").contains("fragment-stage"), "{err}");
 
-    // An actor with the placement row but no fragment behavior at all.
+    // An actor with the placement row but no GPU stage behavior at all.
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_no_fragment");
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let err = actor_web_entry(&db, top_mod).unwrap_err();
-    assert!(format!("{err}").contains("gpu_stage(fragment)"), "{err}");
+    assert!(format!("{err}").contains("GPU stage attribute"), "{err}");
 }
 
 #[test]
@@ -177,7 +421,12 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert_eq!(program.stages[1].source_entry, "shade");
     let WebActorStageKind::Vertex {
         varying: vertex,
-        vertex_count,
+        draw:
+            WebActorDraw::Direct {
+                vertex_count,
+                instance_count: 1,
+            },
+        ..
     } = &program.stages[0].kind
     else {
         panic!(
@@ -230,14 +479,82 @@ fn authored_raster_roles_derive_one_nominal_typed_varying() {
     assert_eq!(bundle.manifest.passes.len(), 1);
     let pass = &bundle.manifest.passes[0];
     assert_eq!(pass.draw_vertices, Some(3));
+    assert_eq!(pass.draw_instances, None);
     assert_eq!(pass.layout.vertex_entry.as_deref(), Some("fe_vertex_main"));
-    assert_eq!(pass.layout.fragment_entry.as_deref(), Some("fe_fragment_main"));
+    assert_eq!(
+        pass.layout.fragment_entry.as_deref(),
+        Some("fe_fragment_main")
+    );
     assert_eq!(pass.layout.bindings.len(), 1);
     assert_eq!(pass.layout.bindings[0].members[0].name, "tint");
+    assert_eq!(
+        pass.layout.bindings[0].shader_stages,
+        [fe_codegen::WebShaderStage::Fragment],
+        "the scalar state binding is physically visible only to the stage that reads it"
+    );
     assert!(bundle.wgsl.contains("@vertex"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("@fragment"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("@location(3)"), "{}", bundle.wgsl);
     assert!(bundle.wgsl.contains("unpack4x8unorm"), "{}", bundle.wgsl);
+}
+
+#[test]
+fn authored_raster_instancing_is_derived_from_the_fe_draw_policy() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_instanced");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "instanced raster diagnostics:\n{diagnostics}"
+    );
+
+    let program = actor_gpu_program(&db, top_mod)
+        .expect("instanced raster plan")
+        .expect("GPU actor");
+    let WebActorStageKind::Vertex {
+        draw: WebActorDraw::Direct {
+            vertex_count,
+            instance_count,
+        },
+        instance_index,
+        ..
+    } = &program.stages[0].kind
+    else {
+        panic!("expected authored vertex stage");
+    };
+    assert_eq!(
+        (*vertex_count, *instance_count, *instance_index),
+        (3, 4, true)
+    );
+
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("shade", None))
+        .expect("instanced authored raster bundle");
+    let [pass] = bundle.manifest.passes.as_slice() else {
+        panic!("expected one instanced raster pass");
+    };
+    assert_eq!(pass.draw_vertices, Some(3));
+    assert_eq!(pass.draw_instances, Some(4));
+    assert_eq!(pass.layout.builtin_inputs.len(), 2);
+    assert_eq!(
+        pass.layout.builtin_inputs[0].source,
+        WebBuiltinSource::VertexIndex
+    );
+    assert_eq!(
+        pass.layout.builtin_inputs[1].source,
+        WebBuiltinSource::InstanceIndex
+    );
+    assert!(
+        bundle.wgsl.contains("@builtin(vertex_index)"),
+        "{}",
+        bundle.wgsl
+    );
+    assert!(
+        bundle.wgsl.contains("@builtin(instance_index)"),
+        "{}",
+        bundle.wgsl
+    );
 }
 
 #[test]
@@ -250,7 +567,10 @@ fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
     assert!(!driver::init_ingot(&mut db, &url));
     let top_mod = ingot_top_mod(&db, &url);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-    assert!(diagnostics.is_empty(), "raster resource diagnostics:\n{diagnostics}");
+    assert!(
+        diagnostics.is_empty(),
+        "raster resource diagnostics:\n{diagnostics}"
+    );
 
     let bundle = WebBundle::compile(
         &db,
@@ -268,18 +588,123 @@ fn authored_raster_shares_one_content_addressed_resource_across_both_stages() {
     assert_eq!(binding.role, fe_codegen::WebBindingRole::Resource);
     assert_eq!(binding.name, "fixture");
     assert_eq!(binding.binding, 0);
+    assert_eq!(
+        binding.shader_stages,
+        [
+            fe_codegen::WebShaderStage::Vertex,
+            fe_codegen::WebShaderStage::Fragment,
+        ],
+        "one logical resource retains the exact union of stages that consume it"
+    );
     assert_eq!(pass.layout.vertex_entry.as_deref(), Some("fe_vertex_main"));
-    assert_eq!(pass.layout.fragment_entry.as_deref(), Some("fe_fragment_main"));
-    assert!(bundle.wgsl.contains("var<storage> fixture"), "{}", bundle.wgsl);
+    assert_eq!(
+        pass.layout.fragment_entry.as_deref(),
+        Some("fe_fragment_main")
+    );
+    assert!(
+        bundle.wgsl.contains("var<storage> fixture"),
+        "{}",
+        bundle.wgsl
+    );
 
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("one content-addressed actor resource must be materialized once")
     };
     assert_eq!(
-        resource.policy.initialization,
-        WebResourceInitialization::ContentAddressed {
-            sha256: SHA256.to_owned(),
-        }
+        resource.policy["initialization"],
+        serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 })
+    );
+}
+
+#[test]
+fn authored_raster_binding_budget_is_validated_per_shader_stage() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_raster_stage_partition");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "stage-partitioned raster diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("shade", Some("stage-partitioned-raster.fe".to_owned())),
+    )
+    .expect("a binding union above eight is portable when each shader stage stays below eight");
+    let [pass] = bundle.manifest.passes.as_slice() else {
+        panic!("one authored raster pair must produce one pass")
+    };
+    assert!(
+        pass.layout.bindings.len() > 8,
+        "the regression must exercise a union larger than the per-stage limit"
+    );
+    let resources = pass
+        .layout
+        .bindings
+        .iter()
+        .filter(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+        .collect::<Vec<_>>();
+    assert_eq!(resources.len(), 10);
+    assert_eq!(
+        resources
+            .iter()
+            .filter(|binding| { binding.shader_stages == [fe_codegen::WebShaderStage::Vertex] })
+            .count(),
+        5
+    );
+    assert_eq!(
+        resources
+            .iter()
+            .filter(|binding| { binding.shader_stages == [fe_codegen::WebShaderStage::Fragment] })
+            .count(),
+        5
+    );
+}
+
+#[test]
+fn mutable_storage_can_flow_from_compute_to_vertex_with_exact_physical_stages() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_mutable_storage_vertex");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "mutable vertex diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("shade", Some("mutable-vertex.fe".to_owned())),
+    )
+    .expect("mutable storage should be admitted across compute and vertex stages");
+    let [compute, raster] = bundle.manifest.passes.as_slice() else {
+        panic!("expected one compute pass followed by one raster pass")
+    };
+    let compute_resource = compute
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+        .expect("compute resource binding");
+    let raster_resource = raster
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+        .expect("raster resource binding");
+    assert_eq!(
+        compute_resource.shader_stages,
+        [fe_codegen::WebShaderStage::Compute]
+    );
+    assert_eq!(
+        raster_resource.shader_stages,
+        [fe_codegen::WebShaderStage::Vertex],
+        "broad logical admission must still lower to exact pass-local visibility",
     );
 }
 
@@ -305,7 +730,10 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
     assert!(matches!(
         program.stages[1].kind,
         WebActorStageKind::Vertex {
-            vertex_count: 6,
+            draw: WebActorDraw::Direct {
+                vertex_count: 6,
+                instance_count: 1,
+            },
             ..
         }
     ));
@@ -313,6 +741,38 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
         program.stages[2].kind,
         WebActorStageKind::RasterFragment { .. }
     ));
+    assert_eq!(
+        program.raster.as_ref().expect("Fe-authored raster plan"),
+        &serde_json::json!({
+            "sample_count": 4,
+            "sample_mask": 4294967295_u32,
+            "alpha_to_coverage": false,
+            "cull_mode": "none",
+            "color": {
+                "clear": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
+                "blend": null,
+                "write_mask": 15,
+                "blend_constant": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0 },
+                "ops": {
+                    "first_load": "clear",
+                    "following_load": "load",
+                    "store": "store",
+                },
+            },
+            "depth": {
+                "format": "depth24_plus",
+                "compare": "less_equal",
+                "write_enabled": true,
+                "clear": 1.0,
+                "ops": {
+                    "first_load": "clear",
+                    "following_load": "load",
+                    "store": "store",
+                },
+            },
+        }),
+        "the manifest plan is the generic projection of the Fe CTFE value",
+    );
     assert_eq!(
         actor_web_entry(&db, top_mod).unwrap(),
         Some(("background".to_owned(), WebBundleMode::Render)),
@@ -406,6 +866,141 @@ fn fullscreen_and_authored_raster_form_one_ordered_fe_pass_graph() {
         !exports.iter().any(|name| name == "decide_fixture"),
         "the authored policy method must remain private",
     );
+}
+
+#[test]
+fn primitive_policy_requires_fe_trait_evidence_before_shader_lowering() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_primitive_missing_policy");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let error = actor_gpu_program(&db, top_mod).unwrap_err();
+    assert!(
+        error.to_string().contains("PrimitivePolicy evidence"),
+        "{error}"
+    );
+}
+
+#[test]
+fn primitive_policies_compose_with_direct_instanced_and_indirect_counts() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_primitive_topologies");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None)).unwrap();
+    let draws = bundle
+        .manifest
+        .passes
+        .iter()
+        .filter(|pass| pass.primitive.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(draws.len(), 7);
+    assert_eq!(
+        draws
+            .iter()
+            .map(|pass| pass.primitive.as_ref().unwrap()["topology"]
+                .as_str()
+                .unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "point_list",
+            "line_list",
+            "line_strip",
+            "triangle_list",
+            "triangle_strip",
+            "line_strip",
+            "point_list"
+        ]
+    );
+    assert_eq!(draws[1].draw_instances, Some(2));
+    assert_eq!(draws[2].primitive.as_ref().unwrap()["front_face"], "cw");
+    assert_eq!(
+        draws[5].draw_indirect.as_ref().unwrap().resource,
+        "commands"
+    );
+    assert_eq!(draws[6].draw_vertices, Some(0));
+    assert_eq!(bundle.manifest.resources.len(), 1);
+    assert!(
+        bundle.manifest.resources[0]
+            .buffer_usage
+            .contains(&WebBufferUsage::Indirect)
+    );
+}
+
+#[test]
+fn fullscreen_only_actor_retains_raster_policy_without_resources_or_ui() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_fullscreen_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None)).unwrap();
+    assert!(bundle.manifest.surface.is_none());
+    assert!(bundle.manifest.resources.is_empty());
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    let raster = bundle.manifest.raster.as_ref().unwrap();
+    assert_eq!(raster["sample_count"], 4);
+    assert_eq!(raster["depth"]["format"], "depth24_plus");
+}
+
+#[test]
+fn alpha_blend_and_channel_permissions_are_projected_from_fe() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_alpha_raster");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let program = actor_gpu_program(&db, top_mod).unwrap().unwrap();
+    let color = &program.raster.as_ref().unwrap()["color"];
+    assert_eq!(color["write_mask"], 7);
+    assert_eq!(
+        color["blend_constant"],
+        serde_json::json!({"r":0.25,"g":0.5,"b":0.75,"a":1.0})
+    );
+    assert_eq!(
+        color["blend"],
+        serde_json::json!({
+            "color": {"operation":"add","src_factor":"src_alpha","dst_factor":"one_minus_src_alpha"},
+            "alpha": {"operation":"add","src_factor":"one","dst_factor":"one_minus_src_alpha"},
+        })
+    );
+    let bundle =
+        WebBundle::compile(&db, top_mod, WebBuildOptions::render("background", None)).unwrap();
+    assert!(
+        bundle.manifest.surface.is_none(),
+        "this actor deliberately has no UI view"
+    );
+    assert_eq!(
+        bundle.manifest.raster, program.raster,
+        "render semantics must survive without a view"
+    );
+}
+
+#[test]
+fn sample_coverage_and_depth_comparison_are_composed_in_fe() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_sample_coverage");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let program = actor_gpu_program(&db, top_mod).unwrap().unwrap();
+    let raster = program.raster.as_ref().unwrap();
+    assert_eq!(raster["sample_count"], 4);
+    assert_eq!(raster["sample_mask"], 4294967295_u32);
+    assert_eq!(raster["alpha_to_coverage"], true);
+    assert_eq!(raster["color"]["blend"], serde_json::Value::Null);
+    assert_eq!(raster["depth"]["compare"], "not_equal");
+    assert_eq!(raster["depth"]["write_enabled"], false);
+    let bundle = WebBundle::compile(&db, top_mod, WebBuildOptions::render("fragment", None))
+        .expect("compile native sample coverage");
+    assert_eq!(bundle.manifest.raster.as_ref(), Some(raster));
 }
 
 #[test]
@@ -538,6 +1133,14 @@ fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
     assert!(compute_wgsl.contains("var<storage, read_write> orbit"));
     assert!(compute_wgsl.contains(".re_bits = 1065353216u"));
     assert!(compute_wgsl.contains(".im_bits = 3221225472u"));
+    assert!(
+        compute_wgsl.contains("fn write_known") && compute_wgsl.matches("write_known").count() >= 2,
+        "the helper which stores through a resource must remain callable:\n{compute_wgsl}",
+    );
+    assert!(
+        !compute_wgsl.contains("fn advance"),
+        "a pure resource-cursor wrapper should inline before scalar cleanup:\n{compute_wgsl}",
+    );
 
     let fragment_package =
         mir::build_wasm_runtime_package_for_entry(&db, top_mod, "paint").unwrap();
@@ -551,6 +1154,109 @@ fn attributed_storage_intrinsics_compile_to_compute_and_fragment_wgsl() {
     assert!(fragment_wgsl.contains("var<storage> orbit"));
     assert!(fragment_wgsl.contains("].re_bits"));
     assert!(fragment_wgsl.contains("].im_bits"));
+}
+
+#[test]
+fn pass_layouts_prune_dormant_resources_without_losing_actor_identity() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_liveness");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "resource-liveness fixture diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("resource-liveness.fe".to_owned())),
+    )
+    .expect("more than eight actor resources are portable when each pass uses a small subset");
+    assert_eq!(bundle.manifest.resources.len(), 10);
+    assert_eq!(
+        bundle
+            .manifest
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "dormant_0",
+            "compute_left",
+            "dormant_2",
+            "fragment_value",
+            "dormant_4",
+            "dormant_5",
+            "compute_right",
+            "dormant_7",
+            "dormant_8",
+            "dormant_9",
+        ],
+        "the global manifest retains stable allocation and recovery identity"
+    );
+    let pass_resources = |pass: &fe_codegen::WebPass| {
+        pass.layout
+            .bindings
+            .iter()
+            .filter(|binding| binding.role == fe_codegen::WebBindingRole::Resource)
+            .map(|binding| (binding.name.clone(), binding.binding))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bundle.manifest.passes.len(), 2);
+    assert_eq!(
+        pass_resources(&bundle.manifest.passes[0]),
+        vec![
+            ("compute_left".to_owned(), 0),
+            ("compute_right".to_owned(), 1)
+        ],
+    );
+    assert_eq!(
+        pass_resources(&bundle.manifest.passes[1]),
+        vec![("fragment_value".to_owned(), 0)],
+    );
+    for binding in &bundle.manifest.passes[0].layout.bindings {
+        assert_eq!(binding.shader_stages, [fe_codegen::WebShaderStage::Compute]);
+    }
+    for binding in &bundle.manifest.passes[1].layout.bindings {
+        assert_eq!(
+            binding.shader_stages,
+            [fe_codegen::WebShaderStage::Fragment]
+        );
+    }
+    assert!(!bundle.pass_wgsl[0].source.contains("dormant_"));
+    assert!(!bundle.pass_wgsl[1].source.contains("dormant_"));
+}
+
+#[test]
+fn pass_layouts_reject_a_genuinely_overbudget_shader_stage() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_overbudget");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "resource-overbudget fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("resource-overbudget.fe".to_owned())),
+    )
+    .expect_err("eight live resources plus scalar input storage exceed the portable limit");
+    let message = format!("{error}");
+    assert!(
+        message.contains("requires 9 storage-buffer bindings in its Compute shader stage"),
+        "{message}"
+    );
+    assert!(
+        message.contains("8 resource, 1 input, 0 output"),
+        "{message}"
+    );
+    assert!(message.contains("portable WebGPU limit is 8"), "{message}");
 }
 
 #[test]
@@ -680,23 +1386,59 @@ fn typed_resource_policy_projects_to_manifest_and_narrows_physical_access() {
     };
     assert_eq!(
         resource.policy,
-        WebResourcePolicy {
-            kind: WebResourceKind::Storage,
-            access: WebResourceAccess::ReadOnly,
-            residency: WebResourceResidency::ActorResident,
-            initialization: WebResourceInitialization::Zeroed,
-            recovery: WebResourceRecovery::ReplayRecipe,
-            visibility: WebResourceVisibility::Fragment,
-        }
+        serde_json::json!({
+            "kind": "storage",
+            "access": "read_only",
+            "residency": "actor_resident",
+            "initialization": { "kind": "zeroed" },
+            "recovery": "replay_recipe",
+            "visibility": "fragment",
+        })
     );
     let policy_json = &serde_json::to_value(&bundle.manifest).unwrap()["resources"][0]["policy"];
     assert_eq!(policy_json["access"], "read_only");
     assert_eq!(policy_json["visibility"], "fragment");
+    assert_eq!(
+        resource.buffer_usage,
+        [fe_codegen::WebBufferUsage::Storage],
+        "zero-initialized shader storage needs no copy capability"
+    );
     assert!(bundle.pass_wgsl[0].source.contains("var<storage> palette"));
     assert!(
         !bundle.pass_wgsl[0]
             .source
             .contains("var<storage, read_write> palette")
+    );
+    assert_eq!(
+        bundle.manifest.passes[0].shader_stages,
+        [fe_codegen::WebShaderStage::Fragment]
+    );
+}
+
+#[test]
+fn resource_visibility_is_an_enforced_fe_capability() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_resource_invalid_visibility");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "visibility fixture diagnostics:\n{diagnostics}"
+    );
+
+    let error = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("invalid-visibility.fe".to_owned())),
+    )
+    .expect_err("fragment-only storage must reject compute-stage demand");
+    let message = error.to_string();
+    assert!(
+        message.contains("Fe visibility")
+            && message.contains("Compute")
+            && message.contains("inspect"),
+        "unexpected resource visibility error: {message}"
     );
 }
 
@@ -737,7 +1479,7 @@ fn invalid_immutable_policy_fails_closed_before_shader_lowering() {
     assert!(
         error
             .to_string()
-            .contains("immutable residency requires read-only access"),
+            .contains("no valid Fe GpuResourcePolicy evidence"),
         "unexpected invalid immutable policy error: {error}"
     );
 }
@@ -775,20 +1517,29 @@ fn content_addressed_resource_is_verified_selected_and_materialized() {
             .with_resource_asset(BYTES.to_vec()),
     )
     .expect("verified content-addressed bundle");
-    assert_eq!(bundle.manifest.protocol_version, 7);
+    assert_eq!(
+        bundle.manifest.protocol_version,
+        fe_codegen::WEB_BUNDLE_PROTOCOL_VERSION
+    );
     let [resource] = bundle.manifest.resources.as_slice() else {
         panic!("content actor must derive exactly one resource")
     };
     assert_eq!(
-        resource.policy.initialization,
-        WebResourceInitialization::ContentAddressed {
-            sha256: SHA256.to_owned(),
-        }
+        resource.policy["initialization"],
+        serde_json::json!({ "kind": "content_addressed", "sha256": SHA256 })
     );
     let artifact = resource.artifact.as_ref().expect("resource artifact");
     assert_eq!(artifact.path, format!("resources/sha256-{SHA256}.bin"));
     assert_eq!(artifact.bytes, BYTES.len() as u64);
     assert_eq!(artifact.sha256, SHA256);
+    assert_eq!(
+        resource.buffer_usage,
+        [
+            fe_codegen::WebBufferUsage::Storage,
+            fe_codegen::WebBufferUsage::CopyDst,
+        ],
+        "content-addressed initialization requires upload but not readback"
+    );
 
     let materialized = bundle
         .materialized_files()
@@ -827,7 +1578,7 @@ fn content_addressed_resource_length_is_checked_against_layout() {
 }
 
 #[test]
-fn attributed_actor_builds_a_materialized_v7_pass_graph() {
+fn attributed_actor_builds_a_materialized_v10_pass_graph() {
     let mut db = DriverDataBase::default();
     let url = ingot_root("tests/fixtures/actor_compute_storage");
     assert!(!driver::init_ingot(&mut db, &url));
@@ -837,9 +1588,12 @@ fn attributed_actor_builds_a_materialized_v7_pass_graph() {
         top_mod,
         WebBuildOptions::render("paint", Some("known-color.fe".to_owned())),
     )
-    .expect("v7 actor pass graph");
+    .expect("v10 actor pass graph");
 
-    assert_eq!(bundle.manifest.protocol_version, 7);
+    assert_eq!(
+        bundle.manifest.protocol_version,
+        fe_codegen::WEB_BUNDLE_PROTOCOL_VERSION
+    );
     assert!(bundle.wasm.is_empty(), "resource graph has no CPU fallback");
     assert_eq!(bundle.manifest.artifacts.wasm, None);
     assert_eq!(bundle.manifest.resources.len(), 1);
@@ -957,6 +1711,39 @@ fn nominal_readback_derives_one_binary_actor_boundary_without_manifest_semantics
     .expect("typed readback bundle");
     assert!(!bundle.wasm.is_empty());
     assert_eq!(bundle.manifest.resources.len(), 1);
+    assert_eq!(
+        bundle.manifest.resources[0].buffer_usage,
+        [
+            fe_codegen::WebBufferUsage::Storage,
+            fe_codegen::WebBufferUsage::CopySrc,
+        ],
+        "the Fe readback effect is the sole source of COPY_SRC capability"
+    );
+    assert_eq!(
+        bundle.manifest.resources[0].policy,
+        serde_json::json!({
+            "kind": "storage",
+            "access": "read_write",
+            "residency": "actor_resident",
+            "initialization": { "kind": "derived" },
+            "recovery": "replay_recipe",
+            "visibility": "compute_fragment",
+        }),
+        "ReadbackBuffer must obtain its complete logical policy from Fe"
+    );
+    assert_eq!(
+        bundle
+            .manifest
+            .passes
+            .iter()
+            .map(|pass| pass.shader_stages.as_slice())
+            .collect::<Vec<_>>(),
+        [
+            [fe_codegen::WebShaderStage::Compute].as_slice(),
+            [fe_codegen::WebShaderStage::Fragment].as_slice(),
+        ],
+        "physical stage demand must be derived from the authored Fe pass graph"
+    );
     let manifest = serde_json::to_value(&bundle.manifest).unwrap();
     let resource = manifest["resources"][0].as_object().unwrap();
     assert!(
@@ -1195,6 +1982,7 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     let cycle = WebActorPassCycle {
         group: "ProtocolRound".to_owned(),
         repeat: 3,
+        inner: None,
     };
     assert_eq!(
         program.stages[0].kind,
@@ -1245,8 +2033,8 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
             repeat_decrement: 1,
         })
     );
-    let first_cycle = passes[0].cycle.expect("first cycle member");
-    let second_cycle = passes[1].cycle.expect("second cycle member");
+    let first_cycle = passes[0].cycle.as_ref().expect("first cycle member");
+    let second_cycle = passes[1].cycle.as_ref().expect("second cycle member");
     assert_eq!(first_cycle.group, 0);
     assert_eq!(first_cycle.repeat, 3);
     assert_eq!(second_cycle, first_cycle);
@@ -1259,6 +2047,74 @@ fn cycled_dispatch_derives_one_ordered_actor_body_from_nominal_fe_types() {
     assert_eq!(encoded["passes"][1]["taper"]["repeat_decrement"], 1);
     assert_eq!(encoded["passes"][1]["cooperation"]["repeat_batch"], 2);
     assert!(encoded["passes"][2].get("cycle").is_none());
+}
+
+#[test]
+fn typed_pass_activation_selects_memoized_subgraphs_without_host_semantics() {
+    let mut db = DriverDataBase::default();
+    let url = ingot_root("tests/fixtures/actor_pass_activation");
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top_mod = ingot_top_mod(&db, &url);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "pass activation fixture diagnostics:\n{diagnostics}"
+    );
+
+    let bundle = WebBundle::compile(
+        &db,
+        top_mod,
+        WebBuildOptions::render("paint", Some("pass-activation.fe".to_owned())),
+    )
+    .expect("typed pass activation graph");
+    let passes = &bundle.manifest.passes;
+    assert_eq!(passes.len(), 4);
+    assert_eq!(passes[0].activation, Some(0));
+    assert_eq!(passes[1].activation, Some(1));
+    assert_eq!(passes[2].activation, Some(1));
+    assert_eq!(passes[3].activation, None);
+    assert_eq!(passes[0].preparation, Some(0));
+    assert_eq!(passes[1].preparation, Some(1));
+    assert_eq!(passes[2].preparation, Some(1));
+    assert_eq!(passes[3].preparation, None);
+    assert_eq!(passes[1].cycle, passes[2].cycle);
+
+    let encoded = serde_json::to_value(&bundle.manifest).expect("manifest JSON");
+    assert_eq!(encoded["passes"][0]["activation"], 0);
+    assert_eq!(encoded["passes"][1]["activation"], 1);
+    assert!(encoded["passes"][3].get("activation").is_none());
+    assert_eq!(encoded["passes"][0]["preparation"], 0);
+    assert_eq!(encoded["passes"][1]["preparation"], 1);
+    assert!(encoded["passes"][3].get("preparation").is_none());
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bundle.wasm).expect("activation Wasm");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("activation instance");
+    let analytic = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_activation_v1_0")
+        .expect("analytic predicate");
+    let pullback = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_activation_v1_1")
+        .expect("pullback predicate");
+    let analytic_preparation = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_preparation_v1_0")
+        .expect("analytic preparation policy");
+    let pullback_preparation = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "fe_pass_preparation_v1_1")
+        .expect("pullback preparation policy");
+    assert_eq!(analytic.call(&mut store, (0.0, 9.0)).unwrap(), 1);
+    assert_eq!(pullback.call(&mut store, (0.0, 9.0)).unwrap(), 0);
+    assert_eq!(analytic.call(&mut store, (1.0, 9.0)).unwrap(), 0);
+    assert_eq!(pullback.call(&mut store, (1.0, 9.0)).unwrap(), 1);
+    assert_eq!(
+        analytic_preparation.call(&mut store, (0.0, 9.0)).unwrap(),
+        2
+    );
+    assert_eq!(
+        pullback_preparation.call(&mut store, (0.0, 9.0)).unwrap(),
+        1
+    );
 }
 
 #[test]

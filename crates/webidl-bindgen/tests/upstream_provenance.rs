@@ -1,5 +1,8 @@
 use fe_compiler_protocol::{InterfaceFunction, InterfaceManifest};
 use fe_webidl_bindgen::{
+    WEBGPU_BUFFER_CREATE_PROVENANCE, WEBGPU_BUFFER_CREATE_WEBIDL, WEBGPU_BUFFER_WRITE_PROVENANCE,
+    WEBGPU_BUFFER_WRITE_WEBIDL, WEBGPU_QUEUE_IDLE_PROVENANCE, WEBGPU_QUEUE_IDLE_WEBIDL,
+    WEBGPU_RENDER_RUNTIME_PROVENANCE, WEBGPU_RENDER_RUNTIME_WEBIDL, WEBGPU_WEBIDL_MODULE,
     adapter_operation_metadata, build_adapter_plan, emit_fe_flat_host_imports,
     emit_js_canonical_adapter, parse, select_adapter_operations,
 };
@@ -17,6 +20,535 @@ fn import(name: &str) -> InterfaceFunction {
         params: Vec::new(),
         results: Vec::new(),
     }
+}
+
+#[test]
+fn pinned_webgpu_queue_idle_selection_has_exact_provenance_and_generated_names() {
+    let provenance: serde_json::Value = serde_json::from_str(WEBGPU_QUEUE_IDLE_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["revision"],
+        "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279"
+    );
+    assert_eq!(provenance["license"], "MIT");
+    assert_eq!(
+        provenance["sources"][0]["git_blob"],
+        "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6"
+    );
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!("{:x}", Sha256::digest(WEBGPU_QUEUE_IDLE_WEBIDL.as_bytes()))
+    );
+
+    let world = parse(WEBGPU_QUEUE_IDLE_WEBIDL).unwrap();
+    assert_eq!(
+        world
+            .interfaces
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["GPUQueue"]
+    );
+    let plan = build_adapter_plan(&world, "webgpu-queue-idle", WEBGPU_WEBIDL_MODULE).unwrap();
+    let functions = plan.resources[0]
+        .functions
+        .iter()
+        .map(|function| function.import_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        functions,
+        [
+            "gpu_queue_on_submitted_work_done",
+            "gpu_queue_resource_drop",
+        ]
+    );
+    let raw = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    assert!(
+        raw.contains(
+            "gpu_queue_on_submitted_work_done(self_: GPUQueue) -> Pending<WasmBackend, ()>"
+        )
+    );
+    assert!(!raw.contains("g_p_u_queue"), "{raw}");
+}
+
+#[test]
+fn pinned_webgpu_buffer_create_selection_has_exact_provenance_and_generated_shape() {
+    let provenance: serde_json::Value =
+        serde_json::from_str(WEBGPU_BUFFER_CREATE_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["revision"],
+        "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279"
+    );
+    assert_eq!(provenance["license"], "MIT");
+    assert_eq!(
+        provenance["sources"][0]["git_blob"],
+        "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6"
+    );
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(WEBGPU_BUFFER_CREATE_WEBIDL.as_bytes())
+        )
+    );
+
+    let world = parse(WEBGPU_BUFFER_CREATE_WEBIDL).unwrap();
+    assert_eq!(
+        world
+            .dictionaries
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["GPUBufferDescriptor", "GPUObjectDescriptorBase"]
+    );
+    let descriptor = &world.dictionaries["GPUBufferDescriptor"];
+    assert_eq!(
+        descriptor.inherits.as_deref(),
+        Some("GPUObjectDescriptorBase")
+    );
+    let plan = build_adapter_plan(&world, "webgpu-buffer-create", WEBGPU_WEBIDL_MODULE).unwrap();
+    let create = plan
+        .resources
+        .iter()
+        .find(|resource| resource.name == "GPUDevice")
+        .unwrap()
+        .functions
+        .iter()
+        .find(|function| function.member_name == "createBuffer")
+        .unwrap();
+    assert_eq!(create.import_name, "gpu_device_create_buffer");
+    let host_descriptor = plan
+        .host_abi
+        .types
+        .iter()
+        .find(|definition| definition.name == "GPUBufferDescriptor")
+        .expect("host ABI should contain the descriptor record");
+    let fe_host_abi::TypeDefKind::Record { fields } = &host_descriptor.kind else {
+        panic!("GPUBufferDescriptor should lower as a record");
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["label", "size", "usage", "mappedAtCreation"],
+        "inherited dictionary fields must stay parent-first",
+    );
+    assert!(
+        fields
+            .iter()
+            .all(|field| !matches!(field.type_, fe_host_abi::Type::Option(_))),
+        "required and default-materialized descriptor fields must be concrete: {fields:?}",
+    );
+    let fe = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    for declaration in [
+        "pub label: BrowserString",
+        "pub size: u64",
+        "pub usage: u32",
+        "pub mapped_at_creation: bool",
+        "gpu_device_create_buffer(self_: GPUDevice, descriptor: GPUBufferDescriptor) -> GPUBuffer",
+    ] {
+        assert!(
+            fe.contains(declaration),
+            "missing `{declaration}` in:\n{fe}"
+        );
+    }
+    let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
+    assert!(adapter.contains("fromFeDictionary_GPUBufferDescriptor(desc"));
+    assert!(adapter.contains("[\"createBuffer\"]("));
+}
+
+#[test]
+fn pinned_webgpu_buffer_write_selection_preserves_fe_argument_semantics() {
+    let provenance: serde_json::Value =
+        serde_json::from_str(WEBGPU_BUFFER_WRITE_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["revision"],
+        "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279"
+    );
+    assert_eq!(
+        provenance["sources"][0]["git_blob"],
+        "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6"
+    );
+    assert_eq!(
+        provenance["sources"][1]["revision"],
+        "8f182624f632a0ce485e236edbc1df18ca385b1d"
+    );
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(WEBGPU_BUFFER_WRITE_WEBIDL.as_bytes())
+        )
+    );
+
+    let world = parse(WEBGPU_BUFFER_WRITE_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-buffer-write", WEBGPU_WEBIDL_MODULE).unwrap();
+    let write = plan
+        .resources
+        .iter()
+        .find(|resource| resource.name == "GPUQueue")
+        .unwrap()
+        .functions
+        .iter()
+        .find(|function| function.member_name == "writeBuffer")
+        .unwrap();
+    assert_eq!(write.import_name, "gpu_queue_write_buffer");
+
+    let fe = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap();
+    assert!(fe.contains("data: BrowserBytes"), "{fe}");
+    assert!(fe.contains("dataOffset: u64"), "{fe}");
+    assert!(fe.contains("size: Option<u64>"), "{fe}");
+
+    let transport = fe_webidl_bindgen::build_transport_plan(&plan).unwrap();
+    let write = transport
+        .functions
+        .iter()
+        .find(|function| function.import_name == "gpu_queue_write_buffer")
+        .unwrap();
+    assert_eq!(
+        write.core,
+        Some(fe_webidl_bindgen::CoreSignature {
+            params: vec![
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+                fe_webidl_bindgen::CoreValueType::I32,
+                fe_webidl_bindgen::CoreValueType::I64,
+            ],
+            results: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn consolidated_render_runtime_profile_is_exactly_the_selected_proven_operations() {
+    let provenance: serde_json::Value =
+        serde_json::from_str(WEBGPU_RENDER_RUNTIME_PROVENANCE).unwrap();
+    assert_eq!(
+        provenance["selection"]["sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(WEBGPU_RENDER_RUNTIME_WEBIDL.as_bytes())
+        )
+    );
+    let world = parse(WEBGPU_RENDER_RUNTIME_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-render-runtime", WEBGPU_WEBIDL_MODULE).unwrap();
+    let mut operations = plan
+        .resources
+        .iter()
+        .flat_map(|resource| &resource.functions)
+        .filter(|function| {
+            function.invocation != fe_webidl_bindgen::AdapterInvocation::ResourceDrop
+        })
+        .map(|function| function.import_name.as_str())
+        .collect::<Vec<_>>();
+    operations.sort_unstable();
+    assert_eq!(
+        operations,
+        [
+            "gpu_device_create_buffer",
+            "gpu_queue_on_submitted_work_done",
+            "gpu_queue_write_buffer",
+            "gpu_render_pass_encoder_draw",
+            "gpu_render_pass_encoder_draw_indirect",
+            "gpu_render_pass_encoder_set_blend_constant",
+        ]
+    );
+
+    // The rich adapter preserves WebGPU's binary64 color union. The legacy
+    // flat Fe emitter cannot invent an f64 language/ABI carrier; assert that
+    // limitation instead of narrowing the official dictionary to f32.
+    let unsupported = emit_fe_flat_host_imports(&world, WEBGPU_WEBIDL_MODULE).unwrap_err();
+    assert!(unsupported.to_string().contains("double"));
+    // Keep the previous flat draw-signature gate on its supported subset.
+    let mut flat = world.clone();
+    flat.interfaces.get_mut("GPURenderPassEncoder").unwrap().members.retain(|member| {
+        !matches!(member, fe_webidl_bindgen::Member::Operation(operation) if operation.name == "setBlendConstant")
+    });
+    flat.dictionaries.remove("GPUColorDict");
+    flat.typedefs.remove("GPUColor");
+    let fe = emit_fe_flat_host_imports(&flat, WEBGPU_WEBIDL_MODULE).unwrap();
+    assert!(fe.contains(
+        "gpu_render_pass_encoder_draw(self_: GPURenderPassEncoder, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32)"
+    ));
+    assert!(fe.contains(
+        "gpu_render_pass_encoder_draw_indirect(self_: GPURenderPassEncoder, indirectBuffer: GPUBuffer, indirectOffset: u64)"
+    ));
+}
+
+#[test]
+fn generated_webgpu_render_commands_preserve_draw_shape_and_resource_borrows() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = parse(WEBGPU_RENDER_RUNTIME_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-render-runtime", WEBGPU_WEBIDL_MODULE).unwrap();
+    let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "fe-webidl-webgpu-render-commands-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let adapter_path = directory.join("adapter.mjs");
+    let test_path = directory.join("test.mjs");
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let runtime_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/browser-runtime/host-runtime.js")
+        .canonicalize()
+        .unwrap();
+    let script = format!(
+        r#"
+import {{ createFeHostAdapter }} from {adapter_url:?};
+import {{ createFeHostRuntime }} from {runtime_url:?};
+
+const runtime = createFeHostRuntime();
+const adapter = createFeHostAdapter({{}}, runtime);
+const operations = adapter.imports[{module:?}];
+const calls = [];
+const buffer = Object.freeze({{ identity: "indirect-buffer" }});
+const renderPass = {{
+  draw(...args) {{ calls.push(["draw", ...args]); }},
+  drawIndirect(...args) {{ calls.push(["drawIndirect", ...args]); }},
+  setBlendConstant(color) {{ calls.push(["setBlendConstant", color]); }},
+}};
+
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  operations.gpu_render_pass_encoder_draw(passHandle, 12, 7, 3, 2));
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  runtime.resources.withBorrowed(buffer, bufferHandle =>
+    operations.gpu_render_pass_encoder_draw_indirect(passHandle, bufferHandle, 32n)));
+
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  operations.gpu_render_pass_encoder_set_blend_constant(passHandle, {{ case: {color_dict_case:?}, value: {{ r: 0.2, g: 0.4, b: 0.6, a: 0.8 }} }}));
+runtime.resources.withBorrowed(renderPass, passHandle =>
+  operations.gpu_render_pass_encoder_set_blend_constant(passHandle, {{ case: {color_sequence_case:?}, value: [0.1, 0.3, 0.5, 0.7] }}));
+if (calls.length !== 4) throw new Error(`unexpected call count: ${{calls.length}}`);
+if (calls[0][0] !== "draw" || calls[0].slice(1).join(",") !== "12,7,3,2")
+  throw new Error(`direct draw shape changed: ${{JSON.stringify(calls[0])}}`);
+if (calls[1][0] !== "drawIndirect" || calls[1][1] !== buffer || calls[1][2] !== 32)
+  throw new Error(`indirect draw shape changed: ${{JSON.stringify(calls[1])}}`);
+if (calls[2][1].a !== 0.8 || calls[2][1].r !== 0.2 || calls[3][1][3] !== 0.7)
+  throw new Error("blend constant union conversion changed its values");
+if (runtime.inventory().resources !== 0)
+  throw new Error("render-command borrows escaped their synchronous calls");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        runtime_url = format!("file://{}", runtime_path.display()),
+        module = WEBGPU_WEBIDL_MODULE,
+        color_dict_case = fe_webidl_bindgen::canonical_union_case_name(
+            &fe_webidl_bindgen::TypeRef::Named("GPUColorDict".into())
+        ),
+        color_sequence_case = fe_webidl_bindgen::canonical_union_case_name(
+            &fe_webidl_bindgen::TypeRef::Sequence(Box::new(fe_webidl_bindgen::TypeRef::F64))
+        ),
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("node")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "generated WebGPU render-command adapter failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_webgpu_buffer_create_adapter_preserves_defaults_and_owned_result() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = parse(WEBGPU_BUFFER_CREATE_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-buffer-create", WEBGPU_WEBIDL_MODULE).unwrap();
+    let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "fe-webidl-webgpu-buffer-create-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let adapter_path = directory.join("adapter.mjs");
+    let test_path = directory.join("test.mjs");
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let runtime_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/browser-runtime/host-runtime.js")
+        .canonicalize()
+        .unwrap();
+    let script = format!(
+        r#"
+import {{ createFeHostAdapter }} from {adapter_url:?};
+import {{ createFeHostRuntime }} from {runtime_url:?};
+
+const runtime = createFeHostRuntime();
+const adapter = createFeHostAdapter({{}}, runtime);
+const operations = adapter.imports[{module:?}];
+let observed;
+const buffer = Object.freeze({{ identity: "buffer" }});
+const device = {{
+  createBuffer(descriptor) {{ observed = descriptor; return buffer; }},
+}};
+const realized = runtime.resources.withBorrowed(device, deviceHandle => {{
+  const bufferHandle = operations.gpu_device_create_buffer(
+    deviceHandle,
+    {{ size: 64n, usage: 0x80 }},
+  );
+  return runtime.resources.take(bufferHandle);
+}});
+if (realized !== buffer) throw new Error("owned GPUBuffer result was not transferred");
+if (observed.size !== 64 || observed.usage !== 0x80 ||
+    observed.label !== "" || observed.mappedAtCreation !== false)
+  throw new Error(`descriptor defaults were not preserved: ${{JSON.stringify(observed)}}`);
+if (runtime.inventory().resources !== 0)
+  throw new Error("createBuffer retained a host resource after transfer");
+
+let rangeError;
+try {{
+  runtime.resources.withBorrowed(
+    device,
+    deviceHandle => operations.gpu_device_create_buffer(
+      deviceHandle,
+      {{ size: 9007199254740992n, usage: 0x80 }},
+    ),
+  );
+}} catch (error) {{ rangeError = error; }}
+if (!(rangeError instanceof RangeError) || runtime.inventory().resources !== 0)
+  throw new Error("unsafe GPUSize64 conversion did not fail closed and retire its device borrow");
+
+let observedError;
+try {{
+  runtime.resources.withBorrowed(
+    {{ createBuffer() {{ throw new Error("create failed"); }} }},
+    deviceHandle => operations.gpu_device_create_buffer(
+      deviceHandle,
+      {{ size: 4, usage: 0x80 }},
+    ),
+  );
+}} catch (error) {{ observedError = error; }}
+if (observedError?.message !== "create failed" || runtime.inventory().resources !== 0)
+  throw new Error("failed createBuffer did not preserve error and retire its device borrow");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        runtime_url = format!("file://{}", runtime_path.display()),
+        module = WEBGPU_WEBIDL_MODULE,
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("node")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "generated WebGPU createBuffer adapter failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_webgpu_queue_idle_adapter_scopes_the_borrow_through_settlement() {
+    if !std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let world = parse(WEBGPU_QUEUE_IDLE_WEBIDL).unwrap();
+    let plan = build_adapter_plan(&world, "webgpu-queue-idle", WEBGPU_WEBIDL_MODULE).unwrap();
+    let adapter = emit_js_canonical_adapter(&world, &plan).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "fe-webidl-webgpu-queue-idle-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let adapter_path = directory.join("adapter.mjs");
+    let test_path = directory.join("test.mjs");
+    std::fs::write(&adapter_path, adapter).unwrap();
+    let runtime_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/browser-runtime/host-runtime.js")
+        .canonicalize()
+        .unwrap();
+    let script = format!(
+        r#"
+import {{ createFeHostAdapter }} from {adapter_url:?};
+import {{ createFeHostRuntime }} from {runtime_url:?};
+
+const runtime = createFeHostRuntime();
+const adapter = createFeHostAdapter({{}}, runtime);
+const queueOps = adapter.imports[{module:?}];
+let calls = 0;
+let resolveIdle;
+let borrowedHandle;
+const queue = {{
+  onSubmittedWorkDone() {{
+    calls += 1;
+    return new Promise(resolve => {{ resolveIdle = resolve; }});
+  }},
+}};
+const pending = runtime.resources.withBorrowed(queue, handle => {{
+  borrowedHandle = handle;
+  return queueOps.gpu_queue_on_submitted_work_done(handle);
+}});
+if (calls !== 1 || runtime.inventory().resources !== 1)
+  throw new Error("queue borrow was not retained through the pending promise");
+resolveIdle();
+await pending;
+if (runtime.inventory().resources !== 0)
+  throw new Error("resolved queue borrow was not retired");
+let stale = false;
+try {{ runtime.resources.borrow(borrowedHandle); }} catch (error) {{ stale = error.code === "stale_handle"; }}
+if (!stale) throw new Error("retired queue handle remained usable");
+
+const rejection = new Error("queue rejected");
+let observed;
+try {{
+  await runtime.resources.withBorrowed(
+    {{ onSubmittedWorkDone() {{ return Promise.reject(rejection); }} }},
+    handle => queueOps.gpu_queue_on_submitted_work_done(handle),
+  );
+}} catch (error) {{ observed = error; }}
+if (observed !== rejection || runtime.inventory().resources !== 0)
+  throw new Error("rejected queue promise did not preserve error and retire its borrow");
+"#,
+        adapter_url = format!("file://{}", adapter_path.display()),
+        runtime_url = format!("file://{}", runtime_path.display()),
+        module = WEBGPU_WEBIDL_MODULE,
+    );
+    std::fs::write(&test_path, script).unwrap();
+    let output = std::process::Command::new("node")
+        .arg(&test_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "generated WebGPU queue-idle adapter failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

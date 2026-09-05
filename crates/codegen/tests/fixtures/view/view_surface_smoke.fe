@@ -3,13 +3,14 @@
 //! `Param` constructor and must type-check clean with no compiler change (the
 //! const-projection seam that EVALUATES `view()` is R1b).
 
-use std::web::view::{Extent, Param, Surface}
+use std::web::view::{ChoiceOptions, Extent, Param, Surface}
 
 struct SmokeParams {
     gain: Param,
     theta: Param,
     scale: Param,
     steps: Param,
+    mode: Param,
     res: Param,
 }
 
@@ -23,6 +24,15 @@ pub const fn smoke_view() -> Surface<SmokeParams> {
             theta: Param::angle(init: 0.6),
             scale: Param::range(min: 0.5, max: 4.0, init: 1.6),
             steps: Param::int(min: 1.0, max: 8.0, init: 3.0),
+            mode: Param::choice(
+                options: ChoiceOptions::four(
+                    first: "grid",
+                    second: "atlas",
+                    third: "fan",
+                    fourth: "blue noise",
+                ),
+                init: 1.0,
+            ),
             res: Param::extent_x(),
         },
     }

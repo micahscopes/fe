@@ -1,0 +1,86 @@
+use std::webgpu::{
+    ActorResident,
+    ClipPosition,
+    FragmentOnly,
+    FragmentStage,
+    GpuBuffer,
+    GpuProgram,
+    RasterVertex,
+    ReadOnly,
+    ReplayRecipe,
+    StorageKind,
+    TriangleList,
+    VertexOnly,
+    VertexStage,
+    WebGpuBackend,
+    Zeroed,
+}
+
+pub type VertexWords = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    VertexOnly,
+    1,
+    f32,
+>
+
+pub type FragmentWords = GpuBuffer<
+    StorageKind,
+    ReadOnly,
+    ActorResident,
+    Zeroed,
+    ReplayRecipe,
+    FragmentOnly,
+    1,
+    f32,
+>
+
+struct StageValue { value: f32 }
+impl Copy for StageValue {}
+
+actor StagePartitionedRaster uses (GpuProgram<WebGpuBackend>) {
+    vertex_0: VertexWords,
+    vertex_1: VertexWords,
+    vertex_2: VertexWords,
+    vertex_3: VertexWords,
+    vertex_4: VertexWords,
+    fragment_0: FragmentWords,
+    fragment_1: FragmentWords,
+    fragment_2: FragmentWords,
+    fragment_3: FragmentWords,
+    fragment_4: FragmentWords,
+
+    fn vertices(self, vertex_index: u32) -> RasterVertex<StageValue>
+        uses (VertexStage<StageValue, TriangleList<3>>)
+    {
+        let value = self.vertex_0.load(index: 0)
+            + self.vertex_1.load(index: 0)
+            + self.vertex_2.load(index: 0)
+            + self.vertex_3.load(index: 0)
+            + self.vertex_4.load(index: 0)
+        RasterVertex {
+            position: ClipPosition {
+                x: if vertex_index == 1 { 3.0 } else { -1.0 },
+                y: if vertex_index == 2 { 3.0 } else { -1.0 },
+                z: 0.0,
+                w: 1.0,
+            },
+            varying: StageValue { value: value },
+        }
+    }
+
+    fn shade(self, varying: StageValue) -> u32
+        uses (FragmentStage<StageValue>)
+    {
+        let value = varying.value
+            + self.fragment_0.load(index: 0)
+            + self.fragment_1.load(index: 0)
+            + self.fragment_2.load(index: 0)
+            + self.fragment_3.load(index: 0)
+            + self.fragment_4.load(index: 0)
+        if value == 0.0 { 4278190335 } else { 4294901760 }
+    }
+}

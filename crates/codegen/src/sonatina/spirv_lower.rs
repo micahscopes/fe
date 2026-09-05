@@ -767,6 +767,7 @@ fn select_profitable_naga_helpers(
     selected
 }
 
+
 fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
     // Helper eligibility should not depend on lowering artifacts such as an
     // empty entry jump or a return-only cursor wrapper. Normalize every body,
@@ -864,22 +865,35 @@ fn spirv_profitable_helper_dependency_closure(
         if roots.contains(&function_ref) {
             continue;
         }
-        let Some(instruction_count) = module.func_store.try_view(function_ref, |function| {
-            function
+        let expanded_calls = expansion_counts.get(&function_ref).copied().unwrap_or_default();
+        let Some((instruction_count, repeated_loop)) = module.func_store.try_view(function_ref, |function| {
+            let instruction_count = function
                 .layout
                 .iter_block()
                 .map(|block| function.layout.iter_inst(block).count())
-                .sum::<usize>()
+                .sum::<usize>();
+            // A loop is substantive work even when its buffer operations are
+            // delegated to another helper. Preserve repeated loop bodies rather
+            // than classifying them as tiny resource-passing wrappers. This is
+            // only a cost preference: normal ABI, effect and structurizer checks
+            // still decide whether the function can actually remain callable.
+            let repeated_loop = expanded_calls > 1 && {
+                let mut cfg = sonatina_ir::ControlFlowGraph::default();
+                cfg.compute(function);
+                let mut domtree = sonatina_codegen::domtree::DomTree::new();
+                domtree.compute(&cfg);
+                let mut loops = sonatina_codegen::loop_analysis::LoopTree::new();
+                loops.compute(&cfg, &domtree);
+                loops.loops().next().is_some()
+            };
+            (instruction_count, repeated_loop)
         }) else {
             continue;
         };
         if spirv_resource_passthrough_outline_worthy(
-            expansion_counts
-                .get(&function_ref)
-                .copied()
-                .unwrap_or_default(),
+            expanded_calls,
             instruction_count,
-        ) {
+        ) || repeated_loop {
             pending.push(function_ref);
         }
     }

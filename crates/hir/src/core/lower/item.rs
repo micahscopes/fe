@@ -123,6 +123,7 @@ const HOST_RESULT_TARGETS: &str = "extern functions";
 const HOST_TRAIT_TARGETS: &str = "traits";
 const HOST_TYPE_TARGETS: &str = "structs";
 const HOST_BACKEND_TARGETS: &str = "structs";
+const PASS_PREPARATION_MODE_TARGETS: &str = "enums";
 
 fn target(kind: &'static str, name: Option<String>) -> AttrTarget {
     AttrTarget::new(kind, name)
@@ -151,6 +152,7 @@ fn validate_mod_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -174,6 +176,7 @@ pub(super) fn validate_module_inner_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -220,6 +223,7 @@ fn validate_func_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -254,42 +258,12 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported(
                 "gpu_resource",
                 GPU_IDENT_FORM,
-                "`#[gpu_resource(storage)]`, `#[gpu_resource(storage_family)]`, or `#[gpu_resource(readback)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_kind",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_kind(storage)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_access",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_access(read_only)]`, `#[gpu_resource_access(write_only)]`, or `#[gpu_resource_access(read_write)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_residency",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_residency(immutable)]`, `#[gpu_resource_residency(actor_resident)]`, `#[gpu_resource_residency(frame_transient)]`, or `#[gpu_resource_residency(imported)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_init",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_init(zeroed)]`, `#[gpu_resource_init(content_addressed)]`, or `#[gpu_resource_init(derived)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_recovery",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_recovery(replay_recipe)]`, `#[gpu_resource_recovery(restore_checkpoint)]`, `#[gpu_resource_recovery(regenerate)]`, or `#[gpu_resource_recovery(nonrecoverable)]`",
-            ),
-            AttrRule::supported(
-                "gpu_resource_visibility",
-                GPU_IDENT_FORM,
-                "`#[gpu_resource_visibility(compute)]`, `#[gpu_resource_visibility(vertex)]`, `#[gpu_resource_visibility(fragment)]`, `#[gpu_resource_visibility(compute_fragment)]`, `#[gpu_resource_visibility(vertex_fragment)]`, or `#[gpu_resource_visibility(all)]`",
+                "`#[gpu_resource(storage)]`, `#[gpu_resource(storage_family)]`, `#[gpu_resource(readback)]`, or `#[gpu_resource(indirect)]`",
             ),
             AttrRule::supported(
                 "gpu_control",
                 GPU_IDENT_FORM,
-                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, `#[gpu_control(surface_recovery)]`, or `#[gpu_control(surface_pointer_motion)]`",
+                "`#[gpu_control(surface)]`, `#[gpu_control(typed_surface)]`, `#[gpu_control(surface_schedule)]`, `#[gpu_control(surface_quality)]`, `#[gpu_control(surface_recovery)]`, `#[gpu_control(pass_activation)]`, `#[gpu_control(pass_preparation)]`, `#[gpu_control(raster_pipeline)]`, or `#[gpu_control(surface_pointer_motion)]`",
             ),
             AttrRule::supported("web_surface_event", BARE_FORM, "`#[web_surface_event]`"),
             AttrRule::supported(
@@ -332,13 +306,20 @@ fn validate_struct_attrs<'db>(
                 BARE_FORM,
                 "`#[web_surface_recovery_step]`",
             ),
+            AttrRule::supported("web_raster_plan", BARE_FORM, "`#[web_raster_plan]`"),
+            AttrRule::supported("web_primitive_plan", BARE_FORM, "`#[web_primitive_plan]`"),
+            AttrRule::supported("web_resource_plan", BARE_FORM, "`#[web_resource_plan]`"),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported(
                 "gpu_dispatch",
                 GPU_IDENT_FORM,
                 "`#[gpu_dispatch(fixed)]`, `#[gpu_dispatch(repeated)]`, `#[gpu_dispatch(tapered)]`, `#[gpu_dispatch(cooperative)]`, or `#[gpu_dispatch(cycled)]`",
             ),
-            AttrRule::supported("gpu_draw", GPU_IDENT_FORM, "`#[gpu_draw(triangle_list)]`"),
+            AttrRule::supported(
+                "gpu_draw",
+                GPU_IDENT_FORM,
+                "`#[gpu_draw(direct)]`, `#[gpu_draw(indirect)]`, `#[gpu_draw(instanced)]`, or legacy triangle-list draw forms",
+            ),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
             AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
@@ -356,6 +337,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -387,6 +369,7 @@ fn validate_trait_attrs<'db>(
             ),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
@@ -412,6 +395,11 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::supported(
+                "web_pass_preparation_mode",
+                BARE_FORM,
+                "`#[web_pass_preparation_mode]`",
+            ),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
@@ -451,6 +439,7 @@ fn validate_unsupported_item_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
 }
@@ -485,6 +474,7 @@ fn validate_extern_attrs<'db>(
             AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
             AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
             AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("web_pass_preparation_mode", PASS_PREPARATION_MODE_TARGETS),
         ],
     );
     validate_attr_alias_exclusive(ctxt, attrs, target, "host_import", "wasm_import");

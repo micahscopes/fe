@@ -1,0 +1,35 @@
+use std::webgpu::{
+    ClipPosition, FragmentStage, GpuProgram, RasterConfiguration, RasterPlan,
+    RasterVertex, TriangleList, VertexStage, WebGpuBackend, raster_plan,
+    RasterState, DepthTest, Depth24Plus, CompareNotEqual, DepthReadOnly,
+    Samples4, CullNone, OpaqueBlack, ClearThenLoadStore,
+    WithSampleMask, WithAlphaToCoverage,
+}
+
+type Coverage = WithSampleMask<WithAlphaToCoverage<RasterState<
+    DepthTest<Depth24Plus, CompareNotEqual, DepthReadOnly, ClearThenLoadStore>,
+    Samples4, CullNone, OpaqueBlack<ClearThenLoadStore>,
+>>, 0xffffffff>
+
+struct Varying { x: f32 }
+impl Copy for Varying {}
+
+actor CoverageSurface uses (GpuProgram<WebGpuBackend>) {
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Coverage>()
+    }
+    fn vertices(self, index: u32) -> RasterVertex<Varying>
+    uses (VertexStage<Varying, TriangleList<3>>) {
+        let x = if index == 0 { -0.7 } else if index == 1 { 0.7 } else { 0.0 }
+        let y = if index == 2 { 0.7 } else { -0.7 }
+        RasterVertex {
+            position: ClipPosition { x: x, y: y, z: 0.5, w: 1.0 },
+            varying: Varying { x: x },
+        }
+    }
+    fn fragment(self, v: Varying) -> i32 uses (FragmentStage<Varying>) {
+        // White RGB, alpha 128/255. ReplaceColor deliberately avoids applying
+        // alpha twice: coverage is the sole attenuation in this fixture.
+        -2130706433
+    }
+}

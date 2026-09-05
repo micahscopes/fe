@@ -1,4 +1,4 @@
-// fe render runtime (compiler-emitted, protocol fe-web-bundle v4/v5/v6/v7).
+// fe render runtime (compiler-emitted, protocol fe-web-bundle v4-v10).
 //
 // The ONE fixed, versioned, demo-blind WebGPU/wasm render kernel driver
 // shipped by the Fe toolchain. It defines the `<fe-surface>` custom element
@@ -15,6 +15,10 @@
 //   - legacy bundles may fall back to module.wasm per pixel in a 2D canvas.
 // v7 adds authenticated immutable resource artifacts and replays them after
 // device replacement.
+// v8 adds compiler-derived minimal buffer usages and pass-stage visibility;
+// missing physical capability data fails closed for newly emitted bundles.
+// v9 adds Fe-authored parameter presentation plans. v10 narrows every WebGPU
+// binding to the exact compiler-derived shader stages that can reach it.
 // Uniform controls are generated from the manifest's input binding members.
 //
 // One shared WebGPU adapter/device serves every surface mounted on a page,
@@ -39,6 +43,124 @@ const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
 // `SurfaceQuality<P>` artifacts own all responsive/coarse-pointer policy in Fe.
 const CPU_MAX_DIMENSION = 256;
 const GPU_BYTES_PER_ROW_ALIGNMENT = 256;
+
+/** Mechanically realize compiler-derived physical buffer capabilities.
+ * Missing data retains the broad v6/v7 compatibility allocation; every v8
+ * compiler bundle carries an explicit minimal set. */
+export function resourceBufferUsage(
+  resource,
+  constants = globalThis.GPUBufferUsage,
+  protocolVersion = 7,
+) {
+  if (resource.buffer_usage === undefined && protocolVersion >= 8) {
+    throw new Error("fe render runtime: v8 resource is missing compiler-derived buffer_usage");
+  }
+  const capabilities = resource.buffer_usage ?? ["storage", "copy_dst", "copy_src"];
+  if (!Array.isArray(capabilities) || capabilities.length === 0) {
+    throw new Error("fe render runtime: resource buffer_usage must be a non-empty array");
+  }
+  if (!constants) {
+    throw new Error("fe render runtime: GPUBufferUsage constants are unavailable");
+  }
+  let usage = 0;
+  const seen = new Set();
+  for (const capability of capabilities) {
+    if (seen.has(capability)) {
+      throw new Error(`fe render runtime: duplicate resource buffer usage ${capability}`);
+    }
+    seen.add(capability);
+    switch (capability) {
+      case "storage":
+        usage |= constants.STORAGE;
+        break;
+      case "copy_src":
+        usage |= constants.COPY_SRC;
+        break;
+      case "copy_dst":
+        usage |= constants.COPY_DST;
+        break;
+      case "indirect":
+        usage |= constants.INDIRECT;
+        break;
+      default:
+        throw new Error(`fe render runtime: unsupported resource buffer usage ${capability}`);
+    }
+  }
+  return usage;
+}
+
+function shaderStagesVisibility(stages, constants, subject) {
+  if (!Array.isArray(stages) || stages.length === 0 || !constants) {
+    throw new Error(`fe render runtime: invalid ${subject} shader_stages`);
+  }
+  let visibility = 0;
+  const seen = new Set();
+  for (const stage of stages) {
+    if (seen.has(stage)) {
+      throw new Error(`fe render runtime: duplicate ${subject} shader stage ${stage}`);
+    }
+    seen.add(stage);
+    switch (stage) {
+      case "compute":
+        visibility |= constants.COMPUTE;
+        break;
+      case "vertex":
+        visibility |= constants.VERTEX;
+        break;
+      case "fragment":
+        visibility |= constants.FRAGMENT;
+        break;
+      default:
+        throw new Error(`fe render runtime: unsupported ${subject} shader stage ${stage}`);
+    }
+  }
+  return visibility;
+}
+
+/** Mechanically realize compiler-derived pass stage demand. */
+export function passShaderVisibility(
+  pass,
+  constants = globalThis.GPUShaderStage,
+  protocolVersion = 7,
+) {
+  let stages = pass.shader_stages;
+  if ((!Array.isArray(stages) || stages.length === 0) && protocolVersion >= 8) {
+    throw new Error("fe render runtime: v8 pass is missing compiler-derived shader_stages");
+  }
+  stages ??= pass.layout.mode === "compute"
+    ? ["compute"]
+    : pass.draw_vertices !== undefined || pass.draw_indirect !== undefined
+      ? ["vertex", "fragment"]
+      : ["fragment"];
+  return shaderStagesVisibility(stages, constants, "pass");
+}
+
+/** Realize the exact compiler-derived visibility of one physical binding. */
+export function bindingShaderVisibility(
+  binding,
+  pass,
+  constants = globalThis.GPUShaderStage,
+  protocolVersion = 9,
+) {
+  const stages = binding.shader_stages;
+  if ((!Array.isArray(stages) || stages.length === 0) && protocolVersion >= 10) {
+    throw new Error("fe render runtime: v10 binding is missing compiler-derived shader_stages");
+  }
+  if (!Array.isArray(stages) || stages.length === 0) {
+    return passShaderVisibility(pass, constants, protocolVersion);
+  }
+  if (protocolVersion >= 8) {
+    passShaderVisibility(pass, constants, protocolVersion);
+    for (const stage of stages) {
+      if (!pass.shader_stages.includes(stage)) {
+        throw new Error(
+          `fe render runtime: binding shader stage ${stage} is outside its pass stage set`,
+        );
+      }
+    }
+  }
+  return shaderStagesVisibility(stages, constants, "binding");
+}
 
 /** Preserve aspect while enforcing an implementation resource ceiling. */
 export function fitBackingExtent(width, height, maxDimension = Infinity) {
@@ -88,7 +210,7 @@ export function unpackCanvasReadback(bytes, width, height, bytesPerRow, format) 
 function encodeCanvasReadback(device, encoder, texture, width, height, format) {
   const bytesPerRow = Math.ceil((width * 4) / GPU_BYTES_PER_ROW_ALIGNMENT) *
     GPU_BYTES_PER_ROW_ALIGNMENT;
-  const buffer = device.createBuffer({
+  const buffer = createGpuBuffer(device, {
     size: bytesPerRow * height,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
@@ -125,7 +247,7 @@ async function readCanvasReadback(readback) {
  * The compiler-selected binding and exact physical extent are resolved before
  * this helper is called. Message meaning remains in the receiving Fe type. */
 function encodeGpuBufferReadback(device, encoder, source, byteLength) {
-  const buffer = device.createBuffer({
+  const buffer = createGpuBuffer(device, {
     size: byteLength,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
@@ -150,18 +272,53 @@ export async function readGpuBufferSnapshot(readback) {
   }
 }
 
-export function rasterDrawVertexCount(pass) {
-  const count = pass.draw_vertices ?? 3;
-  if (!Number.isSafeInteger(count) || count <= 0) {
-    throw new Error(`fe render runtime: invalid compiler-derived raster vertex count ${count}`);
+function destroyGpuBuffers(buffers) {
+  for (const buffer of new Set(buffers)) {
+    try {
+      buffer?.destroy();
+    } catch {
+      // Device loss may already have invalidated the allocation.
+    }
   }
-  return count;
 }
 
-export function requiresGpuPassGraph(passes, resources = []) {
-  return resources.length > 0 || passes.some(
-    (pass) => pass.layout.mode === "compute" || pass.draw_vertices !== undefined,
+export function rasterDrawShape(pass) {
+  if (pass.draw_indirect !== undefined) {
+    if (pass.draw_vertices !== undefined || pass.draw_instances !== undefined) {
+      throw new Error("fe render runtime: indirect and direct raster draws are mutually exclusive");
+    }
+    const { resource, offset = 0 } = pass.draw_indirect ?? {};
+    if (typeof resource !== "string" || resource.length === 0) {
+      throw new Error("fe render runtime: indirect raster draw requires one compiler-derived resource");
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset % 4 !== 0) {
+      throw new Error(`fe render runtime: invalid indirect draw byte offset ${offset}`);
+    }
+    return { indirect: { resource, offset } };
+  }
+  if (pass.draw_instances !== undefined && pass.draw_vertices === undefined) {
+    throw new Error("fe render runtime: compiler-derived instances require an authored raster draw");
+  }
+  const vertices = pass.draw_vertices ?? 3;
+  const instances = pass.draw_instances ?? 1;
+  if (!Number.isSafeInteger(vertices) || vertices < 0 || vertices > 0xffffffff) {
+    throw new Error(`fe render runtime: invalid compiler-derived raster vertex count ${vertices}`);
+  }
+  if (!Number.isSafeInteger(instances) || instances < 0 || instances > 0xffffffff) {
+    throw new Error(`fe render runtime: invalid compiler-derived raster instance count ${instances}`);
+  }
+  return { vertices, instances };
+}
+
+export function requiresGpuPassGraph(passes, resources = [], raster = null) {
+  return raster != null || resources.length > 0 || passes.some(
+    (pass) => pass.layout.mode === "compute" ||
+      pass.draw_vertices !== undefined || pass.draw_indirect !== undefined,
   );
+}
+
+function isAuthoredRasterPass(pass) {
+  return pass.draw_vertices !== undefined || pass.draw_indirect !== undefined;
 }
 
 /** Fixed tags of the append-only Fe `SurfaceEventKind` enum. These are browser
@@ -187,6 +344,15 @@ export const SurfaceQueueAction = Object.freeze({
   Retain: 0,
   KeepLatest: 1,
   Drop: 2,
+});
+
+/** Fixed tags of Fe's pass-preparation effect. These determine only when a
+ * physical pipeline is compiled; `PassActivation` independently decides
+ * whether that pipeline may execute in a presentation. */
+export const PassPreparationMode = Object.freeze({
+  Lazy: 0,
+  VisibleIdle: 1,
+  Eager: 2,
 });
 
 /** Fixed tags of Fe's device-recovery effect. Every canonical surface policy
@@ -412,9 +578,64 @@ function publishSharedGpuQueueIdle(gpu) {
   return sharedGpuQueueIdle.publish(gpu?.generation ?? sharedGpuGeneration);
 }
 
+let generatedWebGpuOperations;
+
+/** Install the compiler-assembled official-WebIDL transport used by this fixed
+ * host. Fe owns resource and scheduling semantics; these generated operations
+ * perform only browser standards calls. */
+export function installGeneratedWebGpuOperations(operations) {
+  if (!operations || typeof operations !== "object" ||
+      typeof operations.queueIdle !== "function" ||
+      typeof operations.bufferCreate !== "function" ||
+      typeof operations.bufferWrite !== "function" ||
+      typeof operations.renderDraw !== "function" ||
+      typeof operations.renderBlendConstant !== "function" ||
+      typeof operations.renderDrawIndirect !== "function") {
+    throw new TypeError("fe render runtime: generated WebGPU operations are incomplete");
+  }
+  if (generatedWebGpuOperations !== undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are already installed");
+  }
+  generatedWebGpuOperations = Object.freeze(operations);
+}
+
 async function awaitSharedGpuQueueIdle(gpu) {
-  await gpu.device.queue.onSubmittedWorkDone();
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  await generatedWebGpuOperations.queueIdle(gpu.device.queue);
   return publishSharedGpuQueueIdle(gpu);
+}
+
+function createGpuBuffer(device, descriptor) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  return generatedWebGpuOperations.bufferCreate(device, descriptor);
+}
+
+function writeGpuBuffer(queue, buffer, offset, bytes) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("fe render runtime: GPU buffer writes require a byte view");
+  }
+  generatedWebGpuOperations.bufferWrite(queue, buffer, offset, bytes);
+}
+
+function drawGpu(renderPass, vertexCount, instanceCount) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  generatedWebGpuOperations.renderDraw(renderPass, vertexCount, instanceCount);
+}
+
+function drawGpuIndirect(renderPass, buffer, offset) {
+  if (generatedWebGpuOperations === undefined) {
+    throw new Error("fe render runtime: generated WebGPU operations are unavailable");
+  }
+  generatedWebGpuOperations.renderDrawIndirect(renderPass, buffer, offset);
 }
 
 function publishGpuUnavailable(reason = GpuDeviceLossReason.NotLost) {
@@ -718,18 +939,241 @@ function resolveCanvas(canvasOption) {
   return canvasOption;
 }
 
-/**
- * The initial uniform vector from the declared v5 `surface`: each member takes
- * its param's `init`, and an extent-bound member (`extent_x`/`extent_y`) takes
- * the live canvas size. No search, no guessing.
+/** Resolve one Fe-authored parameter plan. Only legacy v4-v8 manifests infer
+ * the plan from `kind`; protocol v9 requires the explicit CTFE projection. */
+export function surfaceParamPlan(param, protocolVersion) {
+  if (protocolVersion < 9) {
+    return {
+      source: param.kind === "extent_x"
+        ? "surface_width"
+        : param.kind === "extent_y" ? "surface_height" : "initial",
+      widget: param.visible === false
+        ? "hidden"
+        : param.kind === "toggle" ? "checkbox" : "range",
+      scale: param.kind === "log" ? "logarithmic" : "linear",
+      readout: param.kind === "int"
+        ? "integer"
+        : param.kind === "toggle" ? "toggle" : "scalar",
+    };
+  }
+  const source = param.source;
+  const presentation = param.presentation;
+  if (!presentation ||
+      !["initial", "surface_width", "surface_height"].includes(source) ||
+      !["hidden", "range", "checkbox", "select"].includes(presentation.widget) ||
+      !["linear", "logarithmic"].includes(presentation.scale) ||
+      !["scalar", "integer", "toggle"].includes(presentation.readout)) {
+    throw new Error("fe render runtime: protocol v9 param is missing a supported Fe presentation plan");
+  }
+  if ((presentation.widget === "hidden") !== (param.visible === false)) {
+    throw new Error("fe render runtime: Fe param visibility disagrees with its presentation widget");
+  }
+  if (presentation.widget === "checkbox" &&
+      (presentation.scale !== "linear" || presentation.readout !== "toggle")) {
+    throw new Error("fe render runtime: checkbox presentation requires linear toggle semantics");
+  }
+  if (presentation.widget === "range" && presentation.readout === "toggle") {
+    throw new Error("fe render runtime: range presentation cannot use a toggle readout");
+  }
+  if (presentation.widget === "select" &&
+      (presentation.scale !== "linear" || presentation.readout !== "integer")) {
+    throw new Error("fe render runtime: select presentation requires linear integer semantics");
+  }
+  const options = presentation.options ?? [];
+  if (!Array.isArray(options) || options.some(label => typeof label !== "string" || label.length === 0)) {
+    throw new Error("fe render runtime: Fe param options must be non-empty strings");
+  }
+  if (presentation.widget === "select") {
+    const min = Math.ceil(param.min);
+    const max = Math.floor(param.max);
+    if (min !== 0 || options.length !== max + 1) {
+      throw new Error("fe render runtime: select options disagree with Fe ordinal bounds");
+    }
+  } else if (options.length !== 0) {
+    throw new Error("fe render runtime: only select presentations may carry options");
+  }
+  return { source, ...presentation };
+}
+
+/** Aggregate the unique shader payload behind a pass graph. The compatibility
+ * `artifacts.wgsl_bytes` field names only the primary pass, so it is not a
+ * bundle total once a surface contains multiple GPU stages. */
+export function wgslPayloadSummary(manifest) {
+  const passes = Array.isArray(manifest?.passes) ? manifest.passes : [];
+  if (passes.length === 0) {
+    const bytes = manifest?.artifacts?.wgsl_bytes;
+    return {
+      bytes: Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : 0,
+      shaders: manifest?.artifacts?.wgsl ? 1 : 0,
+    };
+  }
+  const shaders = new Map();
+  for (const pass of passes) {
+    if (typeof pass?.shader !== "string" ||
+        !Number.isSafeInteger(pass.shader_bytes) || pass.shader_bytes < 0) {
+      throw new Error("fe render runtime: pass graph has invalid WGSL payload metadata");
+    }
+    const previous = shaders.get(pass.shader);
+    if (previous !== undefined && previous !== pass.shader_bytes) {
+      throw new Error(
+        `fe render runtime: WGSL payload \`${pass.shader}\` has conflicting byte lengths`,
+      );
+    }
+    shaders.set(pass.shader, pass.shader_bytes);
+  }
+  return {
+    bytes: [...shaders.values()].reduce((sum, bytes) => sum + bytes, 0),
+    shaders: shaders.size,
+  };
+}
+
+/** Decode compiler-owned loop structure without expanding repeated commands.
+ * This is a physical interpreter; group identities/counts originate in Fe.
  */
-function surfaceInitialUniforms(members, surface, width, height) {
+export function planPassSchedule(records) {
+  const entries = [], closed = new Set();
+  let active = [];
+  for (const record of records) {
+    const chain = [], seen = new Set();
+    for (let cycle = record.pass.cycle; cycle != null; cycle = cycle.inner) {
+      if (!Number.isSafeInteger(cycle.group) || cycle.group < 0 || cycle.group > 0xffffffff ||
+          !Number.isSafeInteger(cycle.repeat) || cycle.repeat < 1 || cycle.repeat > 65535 ||
+          record.pass.layout.mode !== "compute" || seen.has(cycle.group)) {
+        throw new Error("fe render runtime: invalid compiler-derived actor pass cycle");
+      }
+      seen.add(cycle.group); chain.push(cycle);
+    }
+    let common = 0;
+    while (common < active.length && common < chain.length && active[common].group === chain[common].group) {
+      if (active[common].repeat !== chain[common].repeat) {
+        throw new Error("fe render runtime: inconsistent actor cycle repeat counts");
+      }
+      common += 1;
+    }
+    for (const cycle of active.slice(common)) closed.add(cycle.group);
+    for (const cycle of chain.slice(common)) {
+      if (closed.has(cycle.group)) throw new Error("fe render runtime: actor cycle reopened under another range or parent");
+    }
+    entries.push({record, chain}); active = chain;
+  }
+  const range = (start, end, depth) => {
+    const body = [];
+    for (let i = start; i < end;) {
+      const cycle = entries[i].chain[depth];
+      if (!cycle) { body.push({record: entries[i].record}); i += 1; continue; }
+      let next = i + 1;
+      while (next < end && entries[next].chain[depth]?.group === cycle.group) next += 1;
+      body.push({repeat: cycle.repeat, body: range(i, next, depth + 1)});
+      i = next;
+    }
+    return body;
+  };
+  return range(0, entries.length, 0);
+}
+
+/** Evaluate every distinct compiler-derived Fe pass policy exactly once for
+ * one presentation and retain only records in the active subgraph. Pipeline
+ * records themselves remain resident and are never rebuilt on mode changes. */
+export function selectActivePassRecords(passRecords, activationKernels, uniforms) {
+  const decisions = new Map();
+  return passRecords.filter((record) => {
+    const activation = record.pass.activation;
+    if (activation === undefined || activation === null) return true;
+    if (!Number.isSafeInteger(activation) || activation < 0) {
+      throw new Error("fe render runtime: invalid compiler-derived pass activation ordinal");
+    }
+    if (!decisions.has(activation)) {
+      const kernel = activationKernels[activation];
+      if (typeof kernel !== "function") {
+        throw new Error(`fe render runtime: missing Fe pass activation policy ${activation}`);
+      }
+      const decision = kernel(...uniforms);
+      if (decision !== 0 && decision !== 1) {
+        throw new Error(`fe render runtime: Fe pass activation policy ${activation} returned a non-bool value`);
+      }
+      decisions.set(activation, decision === 1);
+    }
+    return decisions.get(activation);
+  });
+}
+
+/** Evaluate each distinct compiler-derived preparation policy once and group
+ * its physical pass records by the Fe-selected residency mode. Passes without
+ * a `PassPreparation` effect remain lazy and need no host-side policy. */
+export function selectPreparedPassRecords(passRecords, preparationKernels, uniforms) {
+  const decisions = new Map();
+  const plan = { visibleIdle: [], eager: [] };
+  for (const record of passRecords) {
+    const preparation = record.pass.preparation;
+    if (preparation === undefined || preparation === null) continue;
+    if (!Number.isSafeInteger(preparation) || preparation < 0) {
+      throw new Error("fe render runtime: invalid compiler-derived pass preparation ordinal");
+    }
+    if (!decisions.has(preparation)) {
+      const kernel = preparationKernels[preparation];
+      if (typeof kernel !== "function") {
+        throw new Error(`fe render runtime: missing Fe pass preparation policy ${preparation}`);
+      }
+      const decision = kernel(...uniforms);
+      if (!Number.isSafeInteger(decision) ||
+          decision < PassPreparationMode.Lazy || decision > PassPreparationMode.Eager) {
+        throw new Error(`fe render runtime: Fe pass preparation policy ${preparation} returned an invalid mode`);
+      }
+      decisions.set(preparation, decision);
+    }
+    const decision = decisions.get(preparation);
+    if (decision === PassPreparationMode.VisibleIdle) plan.visibleIdle.push(record);
+    if (decision === PassPreparationMode.Eager) plan.eager.push(record);
+  }
+  return plan;
+}
+
+/** Realize one compiler-derived pass on first demand. A mode switch pays
+ * shader fetch and asynchronous pipeline creation at most once while the graph
+ * is resident; inactive policies retain neither source text nor GPU state. */
+export function realizePassPipeline(device, record) {
+  if (record.pipeline) return Promise.resolve(record.pipeline);
+  if (record.pipelinePromise) return record.pipelinePromise;
+  let pending;
+  pending = (async () => {
+    try {
+      const shaderSource = record.shaderSource ?? await (
+        await fetchOrThrow(record.shaderUrl, "WGSL pass shader")
+      ).text();
+      const module = record.shaderModule ?? device.createShaderModule({ code: shaderSource });
+      record.shaderModule = module;
+      record.shaderSource = null;
+      const pipeline = record.pass.layout.mode === "compute"
+        ? await device.createComputePipelineAsync({
+            ...record.pipelineDescriptor,
+            compute: { ...record.pipelineDescriptor.compute, module },
+          })
+        : await device.createRenderPipelineAsync({
+            ...record.pipelineDescriptor,
+            vertex: { ...record.pipelineDescriptor.vertex, module },
+            fragment: { ...record.pipelineDescriptor.fragment, module },
+          });
+      record.pipeline = pipeline;
+      return pipeline;
+    } finally {
+      if (record.pipelinePromise === pending) record.pipelinePromise = null;
+    }
+  })();
+  record.pipelinePromise = pending;
+  return pending;
+}
+
+/** The initial uniform vector from the declared surface. Protocol v9 consumes
+ * the explicit Fe value source; earlier versions retain their isolated
+ * compatibility interpretation. */
+function surfaceInitialUniforms(members, surface, width, height, protocolVersion) {
   const byName = new Map(surface.params.map((param) => [param.name, param]));
   return members.map((member) => {
     const param = byName.get(member.name);
     if (!param) return 0;
-    if (param.kind === "extent_x") return width;
-    if (param.kind === "extent_y") return height;
+    const plan = surfaceParamPlan(param, protocolVersion);
+    if (plan.source === "surface_width") return width;
+    if (plan.source === "surface_height") return height;
     return typeof param.init === "number" ? param.init : 0;
   });
 }
@@ -747,15 +1191,16 @@ function undeclaredViewInitialUniforms(members) {
 
 /** Overwrite only the extent-bound members of `uniforms` (leaving every other
  * live/user-adjusted value untouched); used on mount AND on every resize. */
-function withExtentUniforms(members, surface, uniforms, width, height) {
+function withExtentUniforms(members, surface, uniforms, width, height, protocolVersion) {
   if (!surface) return uniforms;
   const byName = new Map(surface.params.map((param) => [param.name, param]));
   const next = uniforms.slice();
   members.forEach((member, index) => {
     const param = byName.get(member.name);
     if (!param) return;
-    if (param.kind === "extent_x") next[index] = width;
-    else if (param.kind === "extent_y") next[index] = height;
+    const plan = surfaceParamPlan(param, protocolVersion);
+    if (plan.source === "surface_width") next[index] = width;
+    else if (plan.source === "surface_height") next[index] = height;
   });
   return next;
 }
@@ -769,7 +1214,176 @@ function writeUniformBuffer(device, uniformBuffer, span, members, uniforms) {
     else if (member.scalar === "u32") view.setUint32(member.offset, value >>> 0, true);
     else view.setInt32(member.offset, value | 0, true);
   });
-  device.queue.writeBuffer(uniformBuffer, 0, buffer);
+  writeGpuBuffer(device.queue, uniformBuffer, 0, new Uint8Array(buffer));
+}
+
+/** Validate and translate the compiler-derived Fe raster policy into the
+ * corresponding WebGPU descriptor vocabulary. No application state or
+ * rendering choice is made here. */
+function attachmentOps(policy, label) {
+  if (!policy || !["clear", "load"].includes(policy.first_load) ||
+      !["clear", "load"].includes(policy.following_load) ||
+      !["store", "discard"].includes(policy.store)) {
+    throw new Error(`fe render runtime: invalid derived ${label} attachment operations`);
+  }
+  return {
+    firstLoad: policy.first_load,
+    followingLoad: policy.following_load,
+    store: policy.store,
+  };
+}
+
+function blendComponent(component) {
+  const operations = ["add", "subtract", "reverse-subtract", "min", "max"];
+  const factors = ["zero", "one", "src", "one-minus-src", "src-alpha", "one-minus-src-alpha",
+    "dst", "one-minus-dst", "dst-alpha", "one-minus-dst-alpha", "src-alpha-saturated",
+    "constant", "one-minus-constant"];
+  const operation = component?.operation?.replaceAll?.("_", "-");
+  const srcFactor = component?.src_factor?.replaceAll?.("_", "-");
+  const dstFactor = component?.dst_factor?.replaceAll?.("_", "-");
+  if (!operations.includes(operation) || !factors.includes(srcFactor) || !factors.includes(dstFactor) ||
+      (["min", "max"].includes(operation) && (srcFactor !== "one" || dstFactor !== "one"))) {
+    throw new Error("fe render runtime: invalid derived blend component");
+  }
+  return { operation, srcFactor, dstFactor };
+}
+
+export function rasterColorTarget(format, raster) {
+  return { format, writeMask: raster.color.writeMask ?? 15,
+    ...(raster.color.blend ? { blend: raster.color.blend } : {}) };
+}
+
+export function rasterMultisample(raster) {
+  return { count: raster.sampleCount, mask: raster.sampleMask,
+    alphaToCoverageEnabled: raster.alphaToCoverage };
+}
+
+export function rasterPrimitive(pass, raster) {
+  const policy = pass.primitive;
+  const topology = policy === undefined ? "triangle-list" : policy?.topology?.replaceAll?.("_", "-");
+  const frontFace = policy === undefined ? "ccw" : policy?.front_face;
+  if (!["point-list", "line-list", "line-strip", "triangle-list", "triangle-strip"].includes(topology) ||
+      !["ccw", "cw"].includes(frontFace)) {
+    throw new Error("fe render runtime: invalid Fe primitive assembly policy");
+  }
+  return { topology, frontFace, cullMode: raster.cullMode };
+}
+
+export function rasterPlan(surface, authoredRaster) {
+  // v11 render policy is independent of the UI; retain old bundle decoding.
+  const policy = authoredRaster ?? surface?.pipeline?.raster;
+  if (!policy) {
+    return {
+      sampleCount: 1,
+      sampleMask: 0xffffffff,
+      alphaToCoverage: false,
+      cullMode: "none",
+      color: {
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        firstLoad: "clear",
+        followingLoad: "load",
+        store: "store",
+        blend: null,
+        writeMask: 15,
+        blendConstant: { r: 0, g: 0, b: 0, a: 0 },
+      },
+      depth: null,
+    };
+  }
+  if (policy.sample_count !== 1 && policy.sample_count !== 4) {
+    throw new Error("fe render runtime: invalid derived raster sample count");
+  }
+  const sampleMask = policy.sample_mask === undefined ? 0xffffffff : policy.sample_mask;
+  const alphaToCoverage = policy.alpha_to_coverage === undefined ? false : policy.alpha_to_coverage;
+  if (!Number.isInteger(sampleMask) || sampleMask < 0 || sampleMask > 0xffffffff ||
+      typeof alphaToCoverage !== "boolean" || (alphaToCoverage && policy.sample_count === 1)) {
+    throw new Error("fe render runtime: invalid derived multisample mask or alpha coverage");
+  }
+  if (!["none", "front", "back"].includes(policy.cull_mode)) {
+    throw new Error("fe render runtime: invalid derived raster cull mode");
+  }
+  const clear = policy.color?.clear;
+  if (!clear || ![clear.r, clear.g, clear.b, clear.a].every(Number.isFinite)) {
+    throw new Error("fe render runtime: invalid derived color clear value");
+  }
+  const color = {
+    clearValue: { r: clear.r, g: clear.g, b: clear.b, a: clear.a },
+    ...attachmentOps(policy.color.ops, "color"),
+    blend: policy.color.blend == null ? null : {
+      color: blendComponent(policy.color.blend.color),
+      alpha: blendComponent(policy.color.blend.alpha),
+    },
+    writeMask: policy.color.write_mask ?? 15,
+    blendConstant: policy.color.blend_constant ?? { r: 0, g: 0, b: 0, a: 0 },
+  };
+  if (!Number.isInteger(color.writeMask) || color.writeMask < 0 || color.writeMask > 15 ||
+      ![color.blendConstant.r, color.blendConstant.g, color.blendConstant.b, color.blendConstant.a].every(Number.isFinite)) {
+    throw new Error("fe render runtime: invalid derived color write mask or blend constant");
+  }
+  const format = {
+    depth24_plus: "depth24plus",
+    depth32_float: "depth32float",
+  }[policy.depth?.format];
+  const compare = {
+    never: "never",
+    less: "less",
+    equal: "equal",
+    less_equal: "less-equal",
+    greater: "greater",
+    not_equal: "not-equal",
+    greater_equal: "greater-equal",
+    always: "always",
+  }[policy.depth?.compare];
+  const depth = policy.depth
+    ? {
+        format,
+        compare,
+        writeEnabled: policy.depth.write_enabled === true,
+        clearValue: policy.depth.clear,
+        ...attachmentOps(policy.depth.ops, "depth"),
+      }
+    : null;
+  if (depth && (
+    !depth.format || !depth.compare || !Number.isFinite(depth.clearValue) ||
+    depth.clearValue < 0 || depth.clearValue > 1
+  )) {
+    throw new Error("fe render runtime: invalid derived depth policy");
+  }
+  return { sampleCount: policy.sample_count, sampleMask, alphaToCoverage, cullMode: policy.cull_mode, color, depth };
+}
+
+function releaseRasterAttachments(gpu) {
+  for (const texture of [gpu?.multisampleTexture, gpu?.depthTexture]) {
+    try { texture?.destroy(); } catch { /* device loss already released it */ }
+  }
+  if (!gpu) return;
+  gpu.multisampleTexture = null;
+  gpu.depthTexture = null;
+  gpu.attachmentWidth = 0;
+  gpu.attachmentHeight = 0;
+}
+
+function ensureRasterAttachments(gpu, width, height) {
+  const { raster } = gpu;
+  if (
+    gpu.attachmentWidth === width && gpu.attachmentHeight === height &&
+    (raster.sampleCount === 1 || gpu.multisampleTexture) &&
+    (!raster.depth || gpu.depthTexture)
+  ) return;
+  releaseRasterAttachments(gpu);
+  const common = {
+    size: { width, height, depthOrArrayLayers: 1 },
+    sampleCount: raster.sampleCount,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  };
+  if (raster.sampleCount === 4) {
+    gpu.multisampleTexture = gpu.device.createTexture({ ...common, format: gpu.format });
+  }
+  if (raster.depth) {
+    gpu.depthTexture = gpu.device.createTexture({ ...common, format: raster.depth.format });
+  }
+  gpu.attachmentWidth = width;
+  gpu.attachmentHeight = height;
 }
 
 function presentFrame(device, context, pipeline, bindGroup, capture) {
@@ -787,7 +1401,7 @@ function presentFrame(device, context, pipeline, bindGroup, capture) {
   });
   pass.setPipeline(pipeline);
   if (bindGroup) pass.setBindGroup(0, bindGroup);
-  pass.draw(3);
+  drawGpu(pass, 3, 1);
   pass.end();
   const readback = capture
     ? encodeCanvasReadback(device, encoder, texture, capture.width, capture.height, capture.format)
@@ -818,12 +1432,17 @@ const SHADOW_CSS = `
         max-width: 100%; margin-inline: auto;
         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
         color: #cfd6e4; }
-.root { display: flex; flex-direction: column; gap: 10px; }
+.root { position: relative; display: flex; flex-direction: column; gap: 10px; }
 .stage { position: relative; width: 100%; background: #000; border-radius: 10px; overflow: hidden;
          box-shadow: 0 8px 40px #0008; }
 .surface-canvas { display: block; width: 100%; height: auto; }
 .surface-canvas[hidden] { display: none; }
 .side { display: grid; gap: 10px; }
+.side:not([open]) > :not(summary) { display: none; }
+.side summary { list-style: none; }
+.side summary::-webkit-details-marker { display: none; }
+.side summary::before { content: "▸ "; color: #6f7889; }
+.side[open] summary::before { content: "▾ "; }
 .badge { justify-self: start; display: inline-block; padding: 2px 7px; border-radius: 6px;
          font-size: 11px; font-weight: 600; }
 .badge.webgpu { background: #10281a; color: #5bffa0; }
@@ -834,6 +1453,8 @@ const SHADOW_CSS = `
 .control label { display: flex; justify-content: space-between; color: #96a0b5; }
 .control b { color: #cfd6e4; font-weight: 600; }
 .control input[type=range] { width: 100%; accent-color: #5b8cff; }
+.control select { width: 100%; color: #cfd6e4; background: #151923; border: 1px solid #333a4b;
+  border-radius: 5px; padding: 5px 7px; font: inherit; }
 .control.notice { color: #d9a441; font-size: 12px; padding: 6px 8px; border: 1px dashed #4a3a1a;
                    border-radius: 6px; background: #221a0c; }
 .meta { font-size: 12px; color: #6b7688; }
@@ -891,6 +1512,10 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceScheduleKernel = null;
     this._surfaceRecoveryKernel = null;
     this._surfaceQualityKernel = null;
+    this._passActivationKernels = [];
+    this._passPreparationKernels = [];
+    this._passPreparationObserver = null;
+    this._passPreparationIdle = null;
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
@@ -908,6 +1533,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._recoveryWasLive = false;
     this._gestureListeners = null; // { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel }
     this._gestureFrame = null;
+    this._surfaceFrameRequested = false;
     this._gesturePresenting = false;
     this._gestureDirty = false;
     this._presentationTail = Promise.resolve();
@@ -1087,7 +1713,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       const manifestUrl = new URL(manifestAttr, this.baseURI);
       const manifest = await (await fetchOrThrow(manifestUrl, "manifest")).json();
-      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7].includes(manifest.protocol_version)) {
+      if (manifest.protocol !== "fe-web-bundle" || ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(manifest.protocol_version)) {
         throw new Error(
           `fe render runtime: unsupported manifest protocol ${manifest.protocol}@${manifest.protocol_version}`,
         );
@@ -1098,9 +1724,11 @@ export class FeSurfaceElement extends HTMLElement {
         ? manifest.passes
         : [{ source_entry: manifest.source_entry, shader: manifest.artifacts.wgsl, layout: manifest.layout }];
       this._resources = manifest.resources || [];
-      this._graph = requiresGpuPassGraph(this._passes, this._resources);
+      this._graph = requiresGpuPassGraph(this._passes, this._resources,
+        manifest.raster ?? manifest.surface?.pipeline?.raster);
       this._hasRenderPass = this._passes.some((pass) => pass.layout.mode === "render");
       const fragmentPass = [...this._passes].reverse().find((pass) => pass.layout.mode === "render");
+      this._renderPass = fragmentPass ?? null;
       this._layout = fragmentPass?.layout ?? manifest.layout;
       this._surface = manifest.surface || null;
       this._surfaceParamIndexByName = new Map(
@@ -1164,6 +1792,8 @@ export class FeSurfaceElement extends HTMLElement {
       this._surfaceScheduleKernel = null;
       this._surfaceRecoveryKernel = null;
       this._surfaceQualityKernel = null;
+      this._passActivationKernels = [];
+      this._passPreparationKernels = [];
       this._gpuReadbackKernel = null;
       this._gpuReadbackBinding = null;
       this._gpuReadbackResource = null;
@@ -1271,6 +1901,36 @@ export class FeSurfaceElement extends HTMLElement {
         throw new Error("fe render runtime: surface quality export is not callable");
       }
       this._surfaceQualityKernel = surfaceQuality ?? null;
+      const activationIndices = [...new Set(
+        this._passes
+          .map(pass => pass.activation)
+          .filter(index => index !== undefined && index !== null),
+      )].sort((left, right) => left - right);
+      for (let ordinal = 0; ordinal < activationIndices.length; ordinal += 1) {
+        if (activationIndices[ordinal] !== ordinal) {
+          throw new Error("fe render runtime: pass activation ordinals must be dense from zero");
+        }
+        const kernel = instance?.exports[`fe_pass_activation_v1_${ordinal}`];
+        if (typeof kernel !== "function") {
+          throw new Error(`fe render runtime: pass activation policy ${ordinal} has no callable Fe export`);
+        }
+        this._passActivationKernels.push(kernel);
+      }
+      const preparationIndices = [...new Set(
+        this._passes
+          .map(pass => pass.preparation)
+          .filter(index => index !== undefined && index !== null),
+      )].sort((left, right) => left - right);
+      for (let ordinal = 0; ordinal < preparationIndices.length; ordinal += 1) {
+        if (preparationIndices[ordinal] !== ordinal) {
+          throw new Error("fe render runtime: pass preparation ordinals must be dense from zero");
+        }
+        const kernel = instance?.exports[`fe_pass_preparation_v1_${ordinal}`];
+        if (typeof kernel !== "function") {
+          throw new Error(`fe render runtime: pass preparation policy ${ordinal} has no callable Fe export`);
+        }
+        this._passPreparationKernels.push(kernel);
+      }
       if (this._control) {
         const controlFn = instance?.exports[this._control.export];
         if (typeof controlFn === "function") {
@@ -1288,7 +1948,13 @@ export class FeSurfaceElement extends HTMLElement {
       this._uniforms = this._initialOverride ??
         (authoredInitial === undefined
           ? (this._surface
-            ? surfaceInitialUniforms(this._members, this._surface, DEFAULT_SIZE, DEFAULT_SIZE)
+            ? surfaceInitialUniforms(
+              this._members,
+              this._surface,
+              DEFAULT_SIZE,
+              DEFAULT_SIZE,
+              manifest.protocol_version,
+            )
             : undeclaredViewInitialUniforms(this._members))
           : this._surfaceReplyValues(authoredInitial, "surface initializer"));
       this._startScopedTasks();
@@ -1355,8 +2021,13 @@ export class FeSurfaceElement extends HTMLElement {
     this._root = document.createElement("div");
     this._root.className = "root";
 
-    this._side = document.createElement("div");
+    this._side = document.createElement("details");
     this._side.className = "side";
+    this._side.setAttribute("part", "side");
+    this._side.open = true;
+    const controlsToggle = document.createElement("summary");
+    controlsToggle.setAttribute("part", "controls-toggle");
+    controlsToggle.textContent = "parameters";
     this._badge = document.createElement("span");
     this._badge.className = "badge";
     this._badge.setAttribute("part", "badge");
@@ -1366,7 +2037,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._meta = document.createElement("div");
     this._meta.className = "meta";
     this._meta.setAttribute("part", "meta");
-    this._side.append(this._badge, this._panel, this._meta);
+    this._side.append(controlsToggle, this._badge, this._panel, this._meta);
 
     const captionWrap = document.createElement("div");
     captionWrap.className = "caption";
@@ -1386,6 +2057,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._stage) return;
     this._stage = document.createElement("div");
     this._stage.className = "stage";
+    this._stage.setAttribute("part", "stage");
     this._posterCanvas = document.createElement("canvas");
     this._posterCanvas.className = "surface-canvas poster";
     this._posterCanvas.setAttribute("part", "canvas");
@@ -1478,7 +2150,14 @@ export class FeSurfaceElement extends HTMLElement {
     this._backingWidth = width;
     this._backingHeight = height;
     this._replaceSurfaceState(
-      withExtentUniforms(this._members, this._surface, this._uniforms, width, height),
+      withExtentUniforms(
+        this._members,
+        this._surface,
+        this._uniforms,
+        width,
+        height,
+        this._manifest?.protocol_version ?? 8,
+      ),
     );
     this._applyExtentAndFilter(width, height);
     return changed;
@@ -1581,111 +2260,216 @@ export class FeSurfaceElement extends HTMLElement {
       ]),
     ).then(entries => new Map(entries));
     const resourceBuffers = new Map();
-    for (const resource of this._resources) {
-      if (resource.group !== 0) {
-        throw new Error("fe render runtime: pass graphs currently require resource group 0");
+    const ownedBuffers = new Set();
+    try {
+      for (const resource of this._resources) {
+        if (resource.group !== 0) {
+          throw new Error("fe render runtime: pass graphs currently require resource group 0");
+        }
+        const buffer = createGpuBuffer(device, {
+          size: Math.max(4, resource.stride * resource.length),
+          usage: resourceBufferUsage(resource, undefined, this._manifest.protocol_version),
+        });
+        ownedBuffers.add(buffer);
+        resourceBuffers.set(resource.name, buffer);
+        const initialBytes = resourceInitialBytes.get(resource.name);
+        if (initialBytes) writeGpuBuffer(device.queue, buffer, 0, initialBytes);
       }
-      const buffer = device.createBuffer({
-        size: Math.max(4, resource.stride * resource.length),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-      });
-      resourceBuffers.set(resource.name, buffer);
-      const initialBytes = resourceInitialBytes.get(resource.name);
-      if (initialBytes) device.queue.writeBuffer(buffer, 0, initialBytes);
-    }
 
-    const passRecords = [];
-    for (let index = 0; index < this._passes.length; index++) {
-      const pass = this._passes[index];
-      // Fetch and realize one shader at a time. A proof graph may contain many
-      // independently scheduled passes, and retaining every source while
-      // synchronously constructing every pipeline can monopolize the page
-      // thread and overwhelm the browser GPU process. Async pipeline creation
-      // gives the browser an explicit scheduling boundary after each pass and
-      // bounds live source text without changing the Fe-authored pass order.
-      const shaderSource = await (
-        await fetchOrThrow(this._passShaderUrls[index], "WGSL pass shader")
-      ).text();
-      const module = device.createShaderModule({ code: shaderSource });
-      const visibility = pass.layout.mode === "compute"
-        ? GPUShaderStage.COMPUTE
-        : pass.draw_vertices
-          ? GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT
-          : GPUShaderStage.FRAGMENT;
-      const layoutEntries = [];
-      const groupEntries = [];
-      const inputs = [];
-      const outputs = [];
-      for (const binding of pass.layout.bindings) {
-        if (binding.group !== 0) {
-          throw new Error("fe render runtime: pass graphs currently require binding group 0");
+      const raster = rasterPlan(this._surface, this._manifest.raster);
+      const passRecords = [];
+      for (let index = 0; index < this._passes.length; index++) {
+        const pass = this._passes[index];
+        const layoutEntries = [];
+        const groupEntries = [];
+        const inputs = [];
+        const outputs = [];
+        for (const binding of pass.layout.bindings) {
+          const visibility = bindingShaderVisibility(
+            binding,
+            pass,
+            undefined,
+            this._manifest.protocol_version,
+          );
+          if (binding.group !== 0) {
+            throw new Error("fe render runtime: pass graphs currently require binding group 0");
+          }
+          if (binding.role === "resource") {
+            const buffer = resourceBuffers.get(binding.name);
+            if (!buffer) {
+              throw new Error(`fe render runtime: resource \`${binding.name}\` is undeclared`);
+            }
+            layoutEntries.push({
+              binding: binding.binding,
+              visibility,
+              buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
+            });
+            groupEntries.push({ binding: binding.binding, resource: { buffer } });
+          } else if (binding.role === "input") {
+            const buffer = createGpuBuffer(device, {
+              size: Math.max(16, binding.span),
+              usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            ownedBuffers.add(buffer);
+            layoutEntries.push({
+              binding: binding.binding,
+              visibility,
+              buffer: { type: "read-only-storage" },
+            });
+            groupEntries.push({ binding: binding.binding, resource: { buffer } });
+            inputs.push({ binding, buffer });
+          } else if (binding.role === "output") {
+            // Compiler-internal channels, including the checked-arithmetic trap
+            // word, are pass-local. They are deliberately not graph resources:
+            // external actor storage remains shared by resource identity while
+            // these buffers are rebuilt with the pass on device recovery.
+            const buffer = createGpuBuffer(device, {
+              size: Math.max(4, binding.span),
+              usage: GPUBufferUsage.STORAGE,
+            });
+            ownedBuffers.add(buffer);
+            layoutEntries.push({
+              binding: binding.binding,
+              visibility,
+              buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
+            });
+            groupEntries.push({ binding: binding.binding, resource: { buffer } });
+            outputs.push({ binding, buffer });
+          }
         }
-        if (binding.role === "resource") {
-          const buffer = resourceBuffers.get(binding.name);
-          if (!buffer) throw new Error(`fe render runtime: resource \`${binding.name}\` is undeclared`);
-          layoutEntries.push({
-            binding: binding.binding,
-            visibility,
-            buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
-          });
-          groupEntries.push({ binding: binding.binding, resource: { buffer } });
-        } else if (binding.role === "input") {
-          const buffer = device.createBuffer({
-            size: Math.max(16, binding.span),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-          });
-          layoutEntries.push({
-            binding: binding.binding,
-            visibility,
-            buffer: { type: "read-only-storage" },
-          });
-          groupEntries.push({ binding: binding.binding, resource: { buffer } });
-          inputs.push({ binding, buffer });
-        } else if (binding.role === "output") {
-          // Compiler-internal channels, including the checked-arithmetic trap
-          // word, are pass-local. They are deliberately not graph resources:
-          // external actor storage remains shared by resource identity while
-          // these buffers are rebuilt with the pass on device recovery.
-          const buffer = device.createBuffer({
-            size: Math.max(4, binding.span),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-          });
-          layoutEntries.push({
-            binding: binding.binding,
-            visibility,
-            buffer: { type: binding.access === "read" ? "read-only-storage" : "storage" },
-          });
-          groupEntries.push({ binding: binding.binding, resource: { buffer } });
-          outputs.push({ binding, buffer });
+        const bindGroupLayout = layoutEntries.length
+          ? device.createBindGroupLayout({ entries: layoutEntries })
+          : null;
+        const bindGroup = bindGroupLayout
+          ? device.createBindGroup({ layout: bindGroupLayout, entries: groupEntries })
+          : null;
+        const pipelineLayout = bindGroupLayout
+          ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
+          : "auto";
+        const pipelineDescriptor = pass.layout.mode === "compute"
+          ? {
+              layout: pipelineLayout,
+              compute: { entryPoint: pass.layout.entry_point },
+            }
+          : {
+              layout: pipelineLayout,
+              vertex: { entryPoint: pass.layout.vertex_entry },
+              fragment: {
+                entryPoint: pass.layout.fragment_entry,
+                targets: [rasterColorTarget(format, raster)],
+              },
+              primitive: rasterPrimitive(pass, raster),
+              multisample: rasterMultisample(raster),
+              ...(isAuthoredRasterPass(pass) && raster.depth
+                ? {
+                    depthStencil: {
+                      format: raster.depth.format,
+                      depthWriteEnabled: raster.depth.writeEnabled,
+                      depthCompare: raster.depth.compare,
+                    },
+                  }
+                : {}),
+            };
+        const indirectBuffer = pass.draw_indirect === undefined
+          ? null
+          : resourceBuffers.get(pass.draw_indirect.resource);
+        if (pass.draw_indirect !== undefined && !indirectBuffer) {
+          throw new Error(
+            `fe render runtime: indirect draw resource \`${pass.draw_indirect.resource}\` is undeclared`,
+          );
         }
+        passRecords.push({
+          pass,
+          pipeline: null,
+          pipelinePromise: null,
+          shaderModule: null,
+          shaderSource: null,
+          shaderUrl: this._passShaderUrls[index],
+          pipelineDescriptor,
+          bindGroup,
+          inputs,
+          outputs,
+          indirectBuffer,
+        });
       }
-      const bindGroupLayout = layoutEntries.length
-        ? device.createBindGroupLayout({ entries: layoutEntries })
-        : null;
-      const bindGroup = bindGroupLayout
-        ? device.createBindGroup({ layout: bindGroupLayout, entries: groupEntries })
-        : null;
-      const pipelineLayout = bindGroupLayout
-        ? device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
-        : "auto";
-      const pipeline = pass.layout.mode === "compute"
-        ? await device.createComputePipelineAsync({
-            layout: pipelineLayout,
-            compute: { module, entryPoint: pass.layout.entry_point },
-          })
-        : await device.createRenderPipelineAsync({
-            layout: pipelineLayout,
-            vertex: { module, entryPoint: pass.layout.vertex_entry },
-            fragment: {
-              module,
-              entryPoint: pass.layout.fragment_entry,
-              targets: [{ format }],
-            },
-            primitive: { topology: "triangle-list" },
-          });
-      passRecords.push({ pass, pipeline, bindGroup, inputs, outputs });
+      return {
+        device,
+        generation,
+        format,
+        passRecords,
+        resourceBuffers,
+        ownedBuffers,
+        raster,
+      };
+    } catch (error) {
+      destroyGpuBuffers(ownedBuffers);
+      throw error;
     }
-    return { device, generation, format, passRecords, resourceBuffers };
+  }
+
+  _cancelPassPreparation() {
+    this._passPreparationObserver?.disconnect();
+    this._passPreparationObserver = null;
+    const pending = this._passPreparationIdle;
+    this._passPreparationIdle = null;
+    if (!pending) return;
+    if (pending.kind === "idle" && typeof cancelIdleCallback === "function") {
+      cancelIdleCallback(pending.handle);
+    } else {
+      clearTimeout(pending.handle);
+    }
+  }
+
+  _scheduleVisibleIdlePreparation(gpu, records) {
+    if (records.length === 0) return;
+    const schedule = () => {
+      if (this._gpu !== gpu || this._passPreparationIdle) return;
+      const run = () => {
+        this._passPreparationIdle = null;
+        if (this._gpu !== gpu) return;
+        (async () => {
+          for (const record of records) {
+            await realizePassPipeline(gpu.device, record);
+          }
+        })()
+          .catch((error) => {
+            this._pipelineError = error;
+            console.warn("[fe web] visible-idle pass preparation failed:", error);
+          });
+      };
+      if (typeof requestIdleCallback === "function") {
+        this._passPreparationIdle = {
+          kind: "idle",
+          handle: requestIdleCallback(run, { timeout: 500 }),
+        };
+      } else {
+        this._passPreparationIdle = { kind: "timeout", handle: setTimeout(run, 0) };
+      }
+    };
+    if (typeof IntersectionObserver !== "function") {
+      schedule();
+      return;
+    }
+    this._passPreparationObserver?.disconnect();
+    this._passPreparationObserver = new IntersectionObserver((entries) => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      this._passPreparationObserver?.disconnect();
+      this._passPreparationObserver = null;
+      schedule();
+    });
+    this._passPreparationObserver.observe(this);
+  }
+
+  async _preparePassGraph(gpu) {
+    const plan = selectPreparedPassRecords(
+      gpu.passRecords,
+      this._passPreparationKernels,
+      this._uniforms,
+    );
+    for (const record of plan.eager) {
+      await realizePassPipeline(gpu.device, record);
+    }
+    this._scheduleVisibleIdlePreparation(gpu, plan.visibleIdle);
   }
 
   async _ensurePipeline() {
@@ -1697,6 +2481,7 @@ export class FeSurfaceElement extends HTMLElement {
     try {
       if (this._graph) {
         this._gpu = await this._buildPassGraph(device, gpu.generation);
+        await this._preparePassGraph(this._gpu);
         return this._gpu;
       }
       const wgsl = await (await fetchOrThrow(this._wgslUrl, "WGSL shader")).text();
@@ -1707,7 +2492,7 @@ export class FeSurfaceElement extends HTMLElement {
       let uniformBuffer = null;
       let pipelineLayout = "auto";
       if (this._inputBinding) {
-        uniformBuffer = device.createBuffer({
+        uniformBuffer = createGpuBuffer(device, {
           size: Math.max(16, this._inputBinding.span),
           usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
@@ -1715,7 +2500,12 @@ export class FeSurfaceElement extends HTMLElement {
           entries: [
             {
               binding: this._inputBinding.binding,
-              visibility: GPUShaderStage.FRAGMENT,
+              visibility: bindingShaderVisibility(
+                this._inputBinding,
+                this._renderPass,
+                undefined,
+                this._manifest.protocol_version,
+              ),
               buffer: { type: "read-only-storage" },
             },
           ],
@@ -1749,6 +2539,7 @@ export class FeSurfaceElement extends HTMLElement {
           : "[fe web] WebGPU pipeline init failed, using wasm fallback:",
         error,
       );
+      if (this._graph) this._releaseGpuResources();
       return null;
     }
   }
@@ -1764,7 +2555,16 @@ export class FeSurfaceElement extends HTMLElement {
     if (this._graph) {
       const gpu = this._gpu;
       const { device, passRecords } = gpu;
-      for (const record of passRecords) {
+      const activePassRecords = selectActivePassRecords(
+        passRecords,
+        this._passActivationKernels,
+        uniforms,
+      );
+      for (const record of activePassRecords) await realizePassPipeline(device, record);
+      if (activePassRecords.some(record => record.pass.layout.mode !== "compute")) {
+        ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
+      }
+      for (const record of activePassRecords) {
         for (const input of record.inputs) {
           const values = input.binding.members.map((member) => {
             const index = this._memberIndexByName.get(member.name);
@@ -1784,6 +2584,7 @@ export class FeSurfaceElement extends HTMLElement {
       let encoderMode = null;
       let texture = null;
       let rendered = false;
+      let depthRendered = false;
       const submitEncoder = () => {
         if (!encoded) return;
         device.queue.submit([encoder.finish()]);
@@ -1860,68 +2661,66 @@ export class FeSurfaceElement extends HTMLElement {
         } else {
           if (encoderMode === "compute") submitEncoder();
           texture ??= context.getCurrentTexture();
+          const targetView = texture.createView();
+          const multisampleView = gpu.multisampleTexture?.createView() ?? null;
+          const colorAttachment = {
+            view: multisampleView ?? targetView,
+            clearValue: gpu.raster.color.clearValue,
+            loadOp: rendered
+              ? gpu.raster.color.followingLoad
+              : gpu.raster.color.firstLoad,
+            storeOp: gpu.raster.color.store,
+          };
+          if (multisampleView) colorAttachment.resolveTarget = targetView;
+          const usesDepth = Boolean(isAuthoredRasterPass(record.pass) && gpu.depthTexture);
+          const depthStencilAttachment = usesDepth
+            ? {
+                view: gpu.depthTexture.createView(),
+                depthClearValue: gpu.raster.depth.clearValue,
+                depthLoadOp: depthRendered
+                  ? gpu.raster.depth.followingLoad
+                  : gpu.raster.depth.firstLoad,
+                depthStoreOp: gpu.raster.depth.store,
+              }
+            : undefined;
           const render = encoder.beginRenderPass({
-            colorAttachments: [{
-              view: texture.createView(),
-              clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              // Ordered Fe render stages compose onto one presentation target:
-              // the first establishes it, while later authored raster/fullscreen
-              // stages preserve prior color and update only their covered pixels.
-              // This rule is derived from pass order; no manifest flag or
-              // application-specific host branch chooses overlay behavior.
-              loadOp: rendered ? "load" : "clear",
-              storeOp: "store",
-            }],
+            colorAttachments: [colorAttachment],
+            depthStencilAttachment,
           });
           render.setPipeline(record.pipeline);
+          if (gpu.raster.color.blend) {
+            generatedWebGpuOperations.renderBlendConstant(render, gpu.raster.color.blendConstant);
+          }
           if (record.bindGroup) render.setBindGroup(0, record.bindGroup);
-          render.draw(rasterDrawVertexCount(record.pass));
+          const draw = rasterDrawShape(record.pass);
+          if (draw.indirect) {
+            drawGpuIndirect(render, record.indirectBuffer, draw.indirect.offset);
+          } else {
+            drawGpu(render, draw.vertices, draw.instances);
+          }
           render.end();
           rendered = true;
+          depthRendered ||= usesDepth;
           encoded = true;
           encoderMode = "render";
         }
       };
-      let passIndex = 0;
-      while (passIndex < passRecords.length) {
-        const record = passRecords[passIndex];
-        const cycle = record.pass.cycle;
-        if (cycle === undefined || cycle === null) {
-          await executeRecord(record);
-          passIndex += 1;
-          continue;
-        }
-        if (
-          !Number.isSafeInteger(cycle.group) || cycle.group < 0 || cycle.group > 0xffffffff ||
-          !Number.isSafeInteger(cycle.repeat) || cycle.repeat < 1 || cycle.repeat > 65535
-        ) {
-          throw new Error("fe render runtime: invalid compiler-derived actor pass cycle");
-        }
-        let cycleEnd = passIndex;
-        while (cycleEnd < passRecords.length) {
-          const member = passRecords[cycleEnd];
-          const memberCycle = member.pass.cycle;
-          if (memberCycle === undefined || memberCycle === null || memberCycle.group !== cycle.group) {
-            break;
+      const executeSchedule = async (body, iteration = null) => {
+        for (const node of body) {
+          if (node.record) {
+            await executeRecord(node.record, iteration);
+          } else {
+            // Preserve dependency order and bounded encoders at every nesting
+            // level. Inner iteration counters reset for each enclosing job.
+            submitEncoder();
+            for (let inner = 0; inner < node.repeat; inner += 1) {
+              await executeSchedule(node.body, inner);
+              submitEncoder();
+            }
           }
-          if (memberCycle.repeat !== cycle.repeat || member.pass.layout.mode !== "compute") {
-            throw new Error("fe render runtime: inconsistent compiler-derived actor pass cycle");
-          }
-          cycleEnd += 1;
         }
-        // A cycle is a compiler-derived dependency body. Queue submissions are
-        // ordered, so bounding each iteration in its own command buffer keeps
-        // the semantic phase order while avoiding protocol-sized encoders that
-        // destabilize browser WebGPU implementations.
-        submitEncoder();
-        for (let iteration = 0; iteration < cycle.repeat; iteration += 1) {
-          for (let memberIndex = passIndex; memberIndex < cycleEnd; memberIndex += 1) {
-            await executeRecord(passRecords[memberIndex], iteration);
-          }
-          submitEncoder();
-        }
-        passIndex = cycleEnd;
-      }
+      };
+      await executeSchedule(planPassSchedule(activePassRecords));
       if (capture && !texture) {
         throw new Error("fe render runtime: cannot capture a pass graph with no render pass");
       }
@@ -2434,19 +3233,17 @@ export class FeSurfaceElement extends HTMLElement {
    * live transition; this keeps an off-screen gallery from pinning every
    * demo's device resources at once. */
   _releaseGpuResources() {
+    this._cancelPassPreparation();
     const gpu = this._gpu;
     this._gpu = null;
     if (!gpu) return;
-    const buffers = gpu.resourceBuffers
-      ? [...new Set(gpu.resourceBuffers.values())]
-      : [gpu.uniformBuffer].filter(Boolean);
-    for (const buffer of buffers) {
-      try {
-        buffer.destroy();
-      } catch {
-        // Device loss may already have invalidated the allocation.
-      }
-    }
+    releaseRasterAttachments(gpu);
+    const buffers = gpu.ownedBuffers
+      ? [...gpu.ownedBuffers]
+      : gpu.resourceBuffers
+        ? [...new Set(gpu.resourceBuffers.values())]
+        : [gpu.uniformBuffer].filter(Boolean);
+    destroyGpuBuffers(buffers);
   }
 
   _deviceRecoveryRequired() {
@@ -2591,6 +3388,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._actor = null;
     if (this._gestureFrame !== null) cancelAnimationFrame(this._gestureFrame);
     this._gestureFrame = null;
+    this._surfaceFrameRequested = false;
     this._gestureDirty = false;
     this._pendingSurfaceEvents = [];
     this._surfaceTransitionMemory = null;
@@ -2606,6 +3404,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._recoveryObservedLoss = false;
     this._recoveryWasLive = false;
     this._surfaceQualityKernel = null;
+    this._passActivationKernels = [];
+    this._passPreparationKernels = [];
     this._unwireResizeObserver();
     if (this._liveContext) {
       try {
@@ -3171,7 +3971,23 @@ export class FeSurfaceElement extends HTMLElement {
     includePending = false,
   ) {
     if (!this._surfaceTransitionKernel) return null;
-    const event = {
+    const event = this._surfaceBoundaryEvent(kind, timestamp);
+    const next = this._surfaceTransitionSchedule === "resident"
+      ? this._runSurfaceFrame([
+          ...(includePending ? this._pendingSurfaceEvents.splice(0) : []),
+          event,
+        ])
+      : this._runSurfaceTransition(event);
+    if (!next) return null;
+    this._uniforms = next;
+    this._refreshControlValues();
+    return next;
+  }
+
+  /** Construct one fixed standards-boundary surface fact. The same typed
+   * record feeds compatibility transitions and resident continuous frames. */
+  _surfaceBoundaryEvent(kind, timestamp = globalThis.performance?.now?.() ?? 0) {
+    return {
       mx: 0,
       my: 0,
       dx: 0,
@@ -3186,16 +4002,6 @@ export class FeSurfaceElement extends HTMLElement {
       paramIndex: 0,
       paramValue: 0,
     };
-    const next = this._surfaceTransitionSchedule === "resident"
-      ? this._runSurfaceFrame([
-          ...(includePending ? this._pendingSurfaceEvents.splice(0) : []),
-          event,
-        ])
-      : this._runSurfaceTransition(event);
-    if (!next) return null;
-    this._uniforms = next;
-    this._refreshControlValues();
-    return next;
   }
 
   /** Invoke the generated resident Fe presentation policy. Private policy
@@ -3277,6 +4083,16 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
+  /** Realize the selected Fe policy's bounded queue and browser-frame effects.
+   * The remembered request lets a Visible fact arrive before `_enterLive`
+   * without losing the first continuous frame. */
+  _realizeSurfaceSchedule(decision) {
+    if (!decision) return;
+    this._applySurfaceQueueAction(decision);
+    this._surfaceFrameRequested = decision.requestFrame;
+    if (this._surfaceFrameRequested) this._scheduleGestureFrame();
+  }
+
   /** Notify Fe that one untouched application input entered the raw queue.
    * Fe alone chooses retention and whether the browser should request a frame. */
   _notifyScheduledInput(kind, timestamp) {
@@ -3287,8 +4103,7 @@ export class FeSurfaceElement extends HTMLElement {
     if (decision.present) {
       throw new Error("fe render runtime: Fe requested presentation outside an animation frame");
     }
-    this._applySurfaceQueueAction(decision);
-    if (decision.requestFrame) this._scheduleGestureFrame();
+    this._realizeSurfaceSchedule(decision);
   }
 
   /** Deliver a standards fact to the resident Fe scheduling policy without
@@ -3302,8 +4117,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._deliverSurfaceBoundary(kind, timestamp, false);
     }
     const decision = this._runSurfaceSchedule(kind, timestamp);
-    this._applySurfaceQueueAction(decision);
-    if (decision?.requestFrame) this._scheduleGestureFrame();
+    this._realizeSurfaceSchedule(decision);
     return decision;
   }
 
@@ -3346,7 +4160,8 @@ export class FeSurfaceElement extends HTMLElement {
   _scheduleGestureFrame() {
     if (this._gestureFrame !== null || this._fsm !== "live") return;
     if (this._surfaceScheduleKernel) {
-      if (this._pendingSurfaceEvents.length === 0) return;
+      if (!this._surfaceFrameRequested) return;
+      this._surfaceFrameRequested = false;
     } else if (this._gesturePresenting || !this._gestureDirty) {
       return;
     }
@@ -3363,16 +4178,13 @@ export class FeSurfaceElement extends HTMLElement {
         SurfaceEventKind.AnimationFrame,
         timestamp,
       );
-      this._applySurfaceQueueAction(decision);
-      if (decision?.requestFrame) this._scheduleGestureFrame();
+      this._realizeSurfaceSchedule(decision);
       if (!decision?.present) return;
-      if (this._pendingSurfaceEvents.length === 0) {
-        throw new Error(
-          "fe render runtime: Fe requested presentation without pending surface input",
-        );
-      }
 
-      const events = this._pendingSurfaceEvents.splice(0);
+      const events = [
+        ...this._pendingSurfaceEvents.splice(0),
+        this._surfaceBoundaryEvent(SurfaceEventKind.AnimationFrame, timestamp),
+      ];
       const next = this._surfaceTransitionSchedule === "resident"
         ? this._runSurfaceFrame(events)
         : null;
@@ -3387,8 +4199,7 @@ export class FeSurfaceElement extends HTMLElement {
         if (queue?.onSubmittedWorkDone) await awaitSharedGpuQueueIdle(this._gpu);
       } finally {
         const complete = this._runSurfaceSchedule(SurfaceEventKind.GpuComplete);
-        this._applySurfaceQueueAction(complete);
-        if (complete?.requestFrame) this._scheduleGestureFrame();
+        this._realizeSurfaceSchedule(complete);
       }
       return;
     }
@@ -3453,9 +4264,9 @@ export class FeSurfaceElement extends HTMLElement {
 
   /**
    * Controls generated from the declared v5 `surface.params`: real label (the
-   * field name), doc hover, range/step/init by kind. Extent-bound and fixed
-   * params are not user-visible. Each param maps to its uniform member by
-   * NAME (the reconciled binding key).
+   * field name), doc hover, range, scale, readout, and widget from the explicit
+   * Fe presentation plan. Each param maps to its uniform member by NAME (the
+   * reconciled binding key).
    */
   _renderControls() {
     this._updateBadge();
@@ -3474,7 +4285,11 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     this._surface.params.forEach((param, paramIndex) => {
-      if (param.visible === false) return;
+      const presentation = surfaceParamPlan(
+        param,
+        this._manifest?.protocol_version ?? 8,
+      );
+      if (presentation.widget === "hidden") return;
       const index = this._memberIndexByName.get(param.name);
       if (index === undefined) return;
       const member = this._members[index];
@@ -3485,11 +4300,17 @@ export class FeSurfaceElement extends HTMLElement {
       if (doc) row.title = doc;
       const label = document.createElement("label");
       const value = document.createElement("b");
-      const isInt = param.kind === "int";
-      const isToggle = param.kind === "toggle";
+      const isInt = presentation.readout === "integer";
+      const isToggle = presentation.readout === "toggle";
+      const optionLabels = presentation.options ?? [];
       const min = typeof param.min === "number" ? param.min : 0;
       const max = typeof param.max === "number" ? param.max : 1;
-      const isLog = param.kind === "log" && min > 0 && max > min;
+      const isLog = presentation.scale === "logarithmic";
+      if (isLog && !(min > 0 && max > min)) {
+        throw new Error(
+          `fe render runtime: logarithmic param \`${param.name}\` requires positive ordered bounds`,
+        );
+      }
       const encode = isLog
         ? (v) => Math.log10(Math.max(min, Math.min(max, +v)))
         : (v) => +v;
@@ -3497,6 +4318,9 @@ export class FeSurfaceElement extends HTMLElement {
       const format = (v) => {
         const number = +v;
         if (isToggle) return number >= 0.5 ? "on" : "off";
+        if (presentation.widget === "select") {
+          return optionLabels[Math.round(number) - Math.ceil(min)] ?? number.toFixed(0);
+        }
         if (isInt) return number.toFixed(0);
         if (isLog && (number < 0.01 || number >= 1000)) return number.toExponential(2);
         return Number(number.toPrecision(8)).toString();
@@ -3505,14 +4329,28 @@ export class FeSurfaceElement extends HTMLElement {
       const name = document.createElement("span");
       name.textContent = param.name;
       label.append(name, value);
-      const input = document.createElement("input");
-      input.type = isToggle ? "checkbox" : "range";
-      if (isToggle) {
+      const input = document.createElement(
+        presentation.widget === "select" ? "select" : "input",
+      );
+      if (presentation.widget === "select") {
+        for (let optionValue = Math.ceil(min); optionValue <= Math.floor(max); optionValue += 1) {
+          const option = document.createElement("option");
+          option.value = String(optionValue);
+          option.textContent = optionLabels[optionValue - Math.ceil(min)] ?? String(optionValue);
+          input.append(option);
+        }
+        input.value = String(Math.round(this._uniforms[index]));
+        input.oninput = () => {
+          this._applyParamEdit(index, +input.value, paramIndex);
+        };
+      } else if (presentation.widget === "checkbox") {
+        input.type = "checkbox";
         input.checked = this._uniforms[index] >= 0.5;
         input.oninput = () => {
           this._applyParamEdit(index, input.checked ? 1 : 0, paramIndex);
         };
       } else {
+        input.type = "range";
         const inputMin = isLog ? Math.log10(min) : min;
         const inputMax = isLog ? Math.log10(max) : max;
         input.min = String(inputMin);
@@ -3553,9 +4391,13 @@ export class FeSurfaceElement extends HTMLElement {
     const wasm = this._wasmUrl
       ? link(this._wasmUrl.href, `wasm ${this._manifest.artifacts.wasm_bytes} B`, "wasm") + ` · `
       : "";
+    const wgsl = wgslPayloadSummary(this._manifest);
+    const wgslLabel = wgsl.shaders > 1
+      ? `wgsl ${wgsl.bytes} B / ${wgsl.shaders} shaders`
+      : `wgsl ${wgsl.bytes} B`;
     this._meta.innerHTML =
       `entry ${this._manifest.source_entry} · ` + wasm +
-      link(this._wgslUrl.href, `wgsl ${this._manifest.artifacts.wgsl_bytes} B`, "wgsl") +
+      link(this._wgslUrl.href, wgslLabel, "wgsl") +
       ` · path ${this._mode} · fe ${this._manifest.provenance.compiler_version} · ` +
       link(this._manifestUrl.href, `manifest`, "manifest");
   }

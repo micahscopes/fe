@@ -1,0 +1,43 @@
+use std::webgpu::{
+    ClipPosition, ComputeInvocation, ComputeSurface, FixedDispatch, FragmentStage, GpuProgram,
+    RasterVertex, StorageBuffer, TriangleList, VertexStage, WebGpuBackend, Workgroup,
+}
+
+struct Position { intensity: f32 }
+impl Copy for Position {}
+
+actor MutableVertexTriangle uses (GpuProgram<WebGpuBackend>) {
+    positions: StorageBuffer<f32, 6>,
+
+    fn prepare(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        if invocation.global.x == 0 {
+            self.positions.store(index: 0, value: -0.8)
+            self.positions.store(index: 1, value: -0.8)
+            self.positions.store(index: 2, value: 0.8)
+            self.positions.store(index: 3, value: -0.8)
+            self.positions.store(index: 4, value: 0.0)
+            self.positions.store(index: 5, value: 0.8)
+        }
+    }
+
+    fn vertices(self, vertex_index: u32) -> RasterVertex<Position>
+        uses (VertexStage<Position, TriangleList<3>>)
+    {
+        let offset = vertex_index * 2
+        RasterVertex {
+            position: ClipPosition {
+                x: self.positions.load(index: offset),
+                y: self.positions.load(index: offset + 1),
+                z: 0.0,
+                w: 1.0,
+            },
+            varying: Position { intensity: 1.0 },
+        }
+    }
+
+    fn shade(self, varying: Position) -> u32 uses (FragmentStage<Position>) {
+        if varying.intensity > 0.5 { 4294901760 } else { 4278190335 }
+    }
+}

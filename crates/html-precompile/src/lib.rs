@@ -62,10 +62,10 @@ pub const SURFACE_ELEMENT_TAG: &str = "fe-surface";
 /// static import instead). Injected at most once per document, the same
 /// idempotent posture as [`BOOTSTRAP_MARKER`].
 pub const SURFACE_RUNTIME_MARKER: &str = "data-fe-surface-runtime";
-/// Transitional ordinary-asset publication marker. It lets authored pages
-/// name inspectable text assets (notably their Fe source) without a JSON asset
-/// manifest; production precompilation content-addresses the bytes and rewrites
-/// the standard `href` in place.
+/// Ordinary text-asset publication marker. It lets authored anchors and link
+/// elements name inspectable sources or shared stylesheets without a JSON
+/// asset manifest; precompilation content-addresses the bytes and rewrites the
+/// standard `href` in place.
 pub const PUBLISH_ASSET_MARKER: &str = "data-fe-publish";
 pub const PUBLISHED_ASSET_DIGEST_ATTR: &str = "data-fe-published-sha256";
 const BOOTSTRAP_SOURCE: &str = include_str!("../assets/bootstrap.js");
@@ -735,12 +735,7 @@ pub fn discover_external_dependencies(
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     let mut published_links = Vec::new();
-    collect_elements_with_attr(
-        &dom.document,
-        "a",
-        PUBLISH_ASSET_MARKER,
-        &mut published_links,
-    );
+    collect_publishable_links(&dom.document, &mut published_links);
     for link in published_links {
         let href = attr(&link, "href").ok_or_else(|| PrecompileError::SourceLoad {
             url: document_url.to_string(),
@@ -908,12 +903,7 @@ pub fn verify_precompiled_site(index_path: &Path) -> Result<VerificationReport, 
         verified.insert(path);
     }
     let mut published_assets = Vec::new();
-    collect_elements_with_attr(
-        &dom.document,
-        "a",
-        PUBLISHED_ASSET_DIGEST_ATTR,
-        &mut published_assets,
-    );
+    collect_published_asset_links(&dom.document, &mut published_assets);
     for (position, asset) in published_assets.iter().enumerate() {
         let context = format!("published text asset #{}", position + 1);
         let reference = required_attr(asset, "href", &context)?;
@@ -1102,7 +1092,7 @@ fn verify_render_deployment(
             context: format!("{context} manifest {}", manifest.display()),
             detail: "render manifest has no protocol_version".to_owned(),
         })?;
-    if !(4..=7).contains(&version) {
+    if !(4..=13).contains(&version) {
         return Err(VerificationError {
             context: format!("{context} manifest {}", manifest.display()),
             detail: format!("unsupported fe-web-bundle protocol version {version}"),
@@ -1118,6 +1108,50 @@ fn verify_render_deployment(
         context: format!("{context} manifest {}", manifest.display()),
         detail: "render manifest has no parent directory".to_owned(),
     })?;
+
+    if version >= 9 {
+        if let Some(surface) = value.get("surface") {
+            let params = surface
+                .get("params")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| VerificationError {
+                    context: format!("{context} surface params"),
+                    detail: "protocol v9 surface has no params array".to_owned(),
+                })?;
+            for (index, param) in params.iter().enumerate() {
+                let param_context = format!("{context} surface param #{}", index + 1);
+                if !param
+                    .get("source")
+                    .is_some_and(serde_json::Value::is_string)
+                {
+                    return Err(VerificationError {
+                        context: param_context,
+                        detail: "protocol v9 param has no Fe-authored value source".to_owned(),
+                    });
+                }
+                let Some(presentation) = param
+                    .get("presentation")
+                    .and_then(serde_json::Value::as_object)
+                else {
+                    return Err(VerificationError {
+                        context: param_context,
+                        detail: "protocol v9 param has no Fe-authored presentation".to_owned(),
+                    });
+                };
+                if ["widget", "scale", "readout"].into_iter().any(|field| {
+                    !presentation
+                        .get(field)
+                        .is_some_and(serde_json::Value::is_string)
+                }) {
+                    return Err(VerificationError {
+                        context: param_context,
+                        detail: "protocol v9 param presentation is structurally incomplete"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+    }
 
     let primary_ref = artifacts
         .get("wgsl")
@@ -1186,9 +1220,78 @@ fn verify_render_deployment(
         }
     }
 
-    if let Some(passes) = value.get("passes").and_then(serde_json::Value::as_array) {
+    let passes = value.get("passes").and_then(serde_json::Value::as_array);
+    if version >= 10 && passes.is_none() {
+        return Err(VerificationError {
+            context: format!("{context} manifest passes"),
+            detail: "protocol v10 requires an explicit passes array".to_owned(),
+        });
+    }
+    if let Some(passes) = passes {
         for (index, pass) in passes.iter().enumerate() {
             let pass_context = format!("{context} pass #{}", index + 1);
+            let pass_stages = if version >= 8 {
+                let stages = pass["shader_stages"]
+                    .as_array()
+                    .ok_or_else(|| VerificationError {
+                        context: pass_context.clone(),
+                        detail: "protocol v8 pass has no shader_stages array".to_owned(),
+                    })?;
+                let mut seen = BTreeSet::new();
+                if stages.is_empty()
+                    || stages.iter().any(|stage| {
+                        let Some(stage) = stage.as_str() else {
+                            return true;
+                        };
+                        !matches!(stage, "compute" | "vertex" | "fragment") || !seen.insert(stage)
+                    })
+                {
+                    return Err(VerificationError {
+                        context: pass_context.clone(),
+                        detail: "protocol v8 pass has invalid shader_stages".to_owned(),
+                    });
+                }
+                Some(seen)
+            } else {
+                None
+            };
+            if version >= 10 {
+                let bindings = pass
+                    .get("layout")
+                    .and_then(|layout| layout.get("bindings"))
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| VerificationError {
+                        context: pass_context.clone(),
+                        detail: "protocol v10 pass has no layout bindings array".to_owned(),
+                    })?;
+                for (binding_index, binding) in bindings.iter().enumerate() {
+                    let binding_context = format!("{pass_context} binding #{}", binding_index + 1);
+                    let stages = binding["shader_stages"]
+                        .as_array()
+                        .ok_or_else(|| VerificationError {
+                            context: binding_context.clone(),
+                            detail: "protocol v10 binding has no shader_stages array".to_owned(),
+                        })?;
+                    let mut seen = BTreeSet::new();
+                    let invalid = stages.is_empty()
+                        || stages.iter().any(|stage| {
+                            let Some(stage) = stage.as_str() else {
+                                return true;
+                            };
+                            !matches!(stage, "compute" | "vertex" | "fragment")
+                                || !seen.insert(stage)
+                                || !pass_stages
+                                    .as_ref()
+                                    .is_some_and(|pass_stages| pass_stages.contains(stage))
+                        });
+                    if invalid {
+                        return Err(VerificationError {
+                            context: binding_context,
+                            detail: "protocol v10 binding has invalid shader_stages".to_owned(),
+                        });
+                    }
+                }
+            }
             let shader_ref = pass["shader"].as_str().ok_or_else(|| VerificationError {
                 context: pass_context.clone(),
                 detail: "pass has no shader path".to_owned(),
@@ -1203,9 +1306,10 @@ fn verify_render_deployment(
     if version >= 7 && value.get("resources").is_none() {
         return Err(VerificationError {
             context: format!("{context} manifest resources"),
-            detail: "protocol v7 requires an explicit resources array".to_owned(),
+            detail: "protocol v7+ requires an explicit resources array".to_owned(),
         });
     }
+    let mut indirect_resources = BTreeSet::new();
     if let Some(resources) = value.get("resources") {
         let resources = resources.as_array().ok_or_else(|| VerificationError {
             context: format!("{context} manifest resources"),
@@ -1213,6 +1317,45 @@ fn verify_render_deployment(
         })?;
         for (index, resource) in resources.iter().enumerate() {
             let resource_context = format!("{context} resource #{}", index + 1);
+            if version >= 8 {
+                let usages = resource["buffer_usage"].as_array().ok_or_else(|| {
+                    VerificationError {
+                        context: resource_context.clone(),
+                        detail: "protocol v8 resource has no buffer_usage array".to_owned(),
+                    }
+                })?;
+                let mut seen = BTreeSet::new();
+                if usages.is_empty()
+                    || usages.iter().any(|usage| {
+                        let Some(usage) = usage.as_str() else {
+                            return true;
+                        };
+                        !matches!(usage, "storage" | "copy_src" | "copy_dst" | "indirect")
+                            || !seen.insert(usage)
+                    })
+                {
+                    return Err(VerificationError {
+                        context: resource_context.clone(),
+                        detail: "protocol v8 resource has invalid buffer_usage".to_owned(),
+                    });
+                }
+                if seen.contains("indirect") {
+                    let name = resource["name"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .ok_or_else(|| VerificationError {
+                            context: resource_context.clone(),
+                            detail: "indirect resource has no stable name".to_owned(),
+                        })?;
+                    if !seen.contains("storage") || !indirect_resources.insert(name.to_owned()) {
+                        return Err(VerificationError {
+                            context: resource_context.clone(),
+                            detail: "indirect resource must have unique identity and storage usage"
+                                .to_owned(),
+                        });
+                    }
+                }
+            }
             let initialization = resource
                 .get("policy")
                 .and_then(|policy| policy.get("initialization"));
@@ -1300,6 +1443,46 @@ fn verify_render_deployment(
                     verify_generated_browser_artifact(&artifact_path, artifact, &resource_context)?;
                     verified.insert(artifact_path);
                 }
+            }
+        }
+    }
+
+    if let Some(passes) = passes {
+        for (index, pass) in passes.iter().enumerate() {
+            let Some(indirect) = pass.get("draw_indirect").filter(|value| !value.is_null()) else {
+                continue;
+            };
+            let pass_context = format!("{context} pass #{}", index + 1);
+            if pass
+                .get("draw_vertices")
+                .is_some_and(|value| !value.is_null())
+                || pass
+                    .get("draw_instances")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return Err(VerificationError {
+                    context: pass_context,
+                    detail: "indirect and direct raster draws are mutually exclusive".to_owned(),
+                });
+            }
+            let resource = indirect["resource"]
+                .as_str()
+                .filter(|resource| indirect_resources.contains(*resource))
+                .ok_or_else(|| VerificationError {
+                    context: pass_context.clone(),
+                    detail: "indirect draw does not name a deployed indirect resource".to_owned(),
+                })?;
+            let offset = indirect
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if offset % 4 != 0 {
+                return Err(VerificationError {
+                    context: pass_context,
+                    detail: format!(
+                        "indirect draw resource `{resource}` has unaligned byte offset {offset}"
+                    ),
+                });
             }
         }
     }
@@ -3248,7 +3431,7 @@ fn publish_linked_text_assets(
     assets: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PrecompileError> {
     let mut links = Vec::new();
-    collect_elements_with_attr(root, "a", PUBLISH_ASSET_MARKER, &mut links);
+    collect_publishable_links(root, &mut links);
     for link in links {
         let href = attr(&link, "href").ok_or_else(|| PrecompileError::SourceLoad {
             url: document_url.to_string(),
@@ -3297,6 +3480,16 @@ fn publish_linked_text_assets(
         set_attr(&link, PUBLISHED_ASSET_DIGEST_ATTR, &digest);
     }
     Ok(())
+}
+
+fn collect_publishable_links(root: &Handle, output: &mut Vec<Handle>) {
+    collect_elements_with_attr(root, "a", PUBLISH_ASSET_MARKER, output);
+    collect_elements_with_attr(root, "link", PUBLISH_ASSET_MARKER, output);
+}
+
+fn collect_published_asset_links(root: &Handle, output: &mut Vec<Handle>) {
+    collect_elements_with_attr(root, "a", PUBLISHED_ASSET_DIGEST_ATTR, output);
+    collect_elements_with_attr(root, "link", PUBLISHED_ASSET_DIGEST_ATTR, output);
 }
 
 fn publish_bootstrap(
@@ -4166,7 +4359,9 @@ mod tests {
         }];
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&bundle.manifest_json).unwrap();
-        manifest["protocol_version"] = serde_json::json!(7);
+        manifest["protocol_version"] = serde_json::json!(8);
+        manifest["passes"][0]["shader_stages"] = serde_json::json!(["compute"]);
+        manifest["passes"][1]["shader_stages"] = serde_json::json!(["fragment"]);
         manifest["resources"] = serde_json::json!([{
             "group": 0,
             "binding": 0,
@@ -4175,6 +4370,7 @@ mod tests {
             "stride": 4,
             "span": 4,
             "element": "U32",
+            "buffer_usage": ["storage", "copy_dst"],
             "policy": {
                 "kind": "storage",
                 "access": "read_only",
@@ -4189,6 +4385,59 @@ mod tests {
                 "sha256": sha256
             }
         }]);
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        bundle
+    }
+
+    fn fake_v10_binding_stage_bundle() -> RenderBundleArtifact {
+        let mut bundle = fake_render_graph_bundle();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(10);
+        manifest["resources"] = serde_json::json!([]);
+        manifest["passes"][0]["shader_stages"] = serde_json::json!(["compute"]);
+        manifest["passes"][0]["layout"] = serde_json::json!({
+            "bindings": [{ "shader_stages": ["compute"] }]
+        });
+        manifest["passes"][1]["shader_stages"] = serde_json::json!(["fragment"]);
+        manifest["passes"][1]["layout"] = serde_json::json!({
+            "bindings": [{ "shader_stages": ["fragment"] }]
+        });
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        bundle
+    }
+
+    fn fake_indirect_raster_bundle() -> RenderBundleArtifact {
+        let mut bundle = fake_render_graph_bundle();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(10);
+        manifest["resources"] = serde_json::json!([{
+            "group": 0,
+            "binding": 0,
+            "name": "draw",
+            "length": 4,
+            "stride": 4,
+            "span": 4,
+            "element": "U32",
+            "buffer_usage": ["storage", "indirect"],
+            "policy": {
+                "kind": "storage",
+                "access": "read_write",
+                "residency": "actor_resident",
+                "initialization": { "kind": "derived" },
+                "recovery": "replay_recipe",
+                "visibility": "compute"
+            }
+        }]);
+        manifest["passes"][0]["shader_stages"] = serde_json::json!(["compute"]);
+        manifest["passes"][0]["layout"] = serde_json::json!({ "bindings": [] });
+        manifest["passes"][1]["shader_stages"] = serde_json::json!(["vertex", "fragment"]);
+        manifest["passes"][1]["layout"] = serde_json::json!({ "bindings": [] });
+        manifest["passes"][1]["draw_indirect"] = serde_json::json!({
+            "resource": "draw",
+            "offset": 0
+        });
         bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
         bundle
     }
@@ -4328,6 +4577,69 @@ mod tests {
                 .assets
                 .keys()
                 .any(|path| path.contains("fe-render-runtime-"))
+        );
+    }
+
+    #[test]
+    fn protocol_v9_deployment_requires_fe_authored_param_plans() {
+        let mut bundle = fake_attributed_render_bundle(None);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(9);
+        manifest["resources"] = serde_json::json!([]);
+        manifest["surface"] = serde_json::json!({
+            "params": [{
+                "name": "gain",
+                "kind": "opaque",
+                "source": "initial",
+                "presentation": {
+                    "widget": "range",
+                    "scale": "linear",
+                    "readout": "scalar"
+                }
+            }]
+        });
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            r#"<script type="application/fe" data-fe-src="sketches/demo" data-fe-render></script>"#,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(bundle.clone())),
+        )
+        .unwrap();
+
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+
+        let manifest_path = output
+            .assets
+            .keys()
+            .find(|path| path.ends_with(".json"))
+            .map(|path| deployment.path().join(path))
+            .unwrap();
+        let mut published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        published["surface"]["params"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source");
+        let bytes = serde_json::to_vec(&published).unwrap();
+        let old_name = manifest_path.file_name().unwrap().to_str().unwrap();
+        let new_name = format!("fe-render-{}.json", &sha256_hex(&bytes)[..16]);
+        let new_manifest_path = manifest_path.with_file_name(&new_name);
+        std::fs::write(&new_manifest_path, bytes).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        let index_path = deployment.path().join("index.html");
+        let html = std::fs::read_to_string(&index_path)
+            .unwrap()
+            .replace(old_name, &new_name);
+        std::fs::write(&index_path, html).unwrap();
+        let error = verify_precompiled_site(&index_path).unwrap_err();
+        assert!(
+            error.detail.contains("no Fe-authored value source"),
+            "unexpected v9 verification error: {error}"
         );
     }
 
@@ -4538,6 +4850,102 @@ mod tests {
         let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
         assert_eq!(report.modules, 1);
         assert_eq!(report.files, output.assets.len());
+    }
+
+    #[test]
+    fn protocol_v11_deployment_preserves_view_independent_raster_policy() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let mut bundle = fake_v10_binding_stage_bundle();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&bundle.manifest_json).unwrap();
+        manifest["protocol_version"] = serde_json::json!(11);
+        manifest.as_object_mut().unwrap().remove("surface");
+        let raster = serde_json::json!({"sample_count": 4, "cull_mode": "none"});
+        manifest["raster"] = raster.clone();
+        bundle.manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(bundle.clone())),
+        )
+        .unwrap();
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+        let bytes = output
+            .assets
+            .iter()
+            .find(|(name, _)| name.ends_with(".json"))
+            .unwrap()
+            .1;
+        let published: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(published["raster"], raster);
+        assert!(published.get("surface").is_none());
+    }
+
+    #[test]
+    fn protocol_v10_deployment_requires_exact_binding_stage_sets() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(fake_v10_binding_stage_bundle())),
+        )
+        .unwrap();
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        verify_precompiled_site(&deployment.path().join("index.html"))
+            .expect("compiler-derived binding stages must verify");
+
+        let manifest_path = output
+            .assets
+            .keys()
+            .find(|path| path.ends_with(".json"))
+            .map(|path| deployment.path().join(path))
+            .unwrap();
+        let mut published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        published["passes"][0]["layout"]["bindings"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("shader_stages");
+        let bytes = serde_json::to_vec(&published).unwrap();
+        let old_name = manifest_path.file_name().unwrap().to_str().unwrap();
+        let new_name = format!("fe-render-{}.json", &sha256_hex(&bytes)[..16]);
+        let new_manifest_path = manifest_path.with_file_name(&new_name);
+        std::fs::write(&new_manifest_path, bytes).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        let index_path = deployment.path().join("index.html");
+        let html = std::fs::read_to_string(&index_path)
+            .unwrap()
+            .replace(old_name, &new_name);
+        std::fs::write(&index_path, html).unwrap();
+        let error = verify_precompiled_site(&index_path).unwrap_err();
+        assert!(
+            error.detail.contains("binding has no shader_stages"),
+            "unexpected v10 verification error: {error}"
+        );
+    }
+
+    #[test]
+    fn deployment_verifies_a_storage_written_indirect_raster_draw() {
+        let html = r#"<!doctype html><script type="application/fe" data-fe-src="sketches/graph" data-fe-render></script>"#;
+        let output = precompile_html_with_render_lane(
+            "https://example.test/index.html",
+            html,
+            "runtime-js",
+            |_| panic!("no application/fe source files"),
+            |_url, _entry| Ok(Some(fake_indirect_raster_bundle())),
+        )
+        .unwrap();
+        let deployment = tempfile::tempdir().unwrap();
+        write_publication(deployment.path(), &output);
+        let report = verify_precompiled_site(&deployment.path().join("index.html")).unwrap();
+        assert_eq!(report.modules, 1);
     }
 
     #[test]
@@ -5666,17 +6074,23 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
     #[test]
     fn inspectable_text_assets_publish_without_an_asset_manifest_and_verify_digest() {
         let document = "https://example.test/gallery.html";
-        let html = r#"<!doctype html><html><body>
+        let html = r#"<!doctype html><html><head>
+<link rel="stylesheet" href="./demo.css" data-fe-publish>
+</head><body>
 <script type="application/fe">pub fn main() {}</script>
 <a href="./demo.fe" data-fe-publish data-fe-action="100">source</a>
 </body></html>"#;
         assert_eq!(
             discover_external_dependencies(document, html).unwrap(),
-            ["https://example.test/demo.fe"]
+            [
+                "https://example.test/demo.css",
+                "https://example.test/demo.fe",
+            ]
         );
-        let output = precompile_html(document, html, |url| {
-            assert_eq!(url.as_str(), "https://example.test/demo.fe");
-            Ok("actor Demo {}\n".to_owned())
+        let output = precompile_html(document, html, |url| match url.as_str() {
+            "https://example.test/demo.css" => Ok("body { color: hotpink; }\n".to_owned()),
+            "https://example.test/demo.fe" => Ok("actor Demo {}\n".to_owned()),
+            other => panic!("unexpected published asset {other}"),
         })
         .unwrap();
         let source_path = output
@@ -5685,9 +6099,16 @@ if (output.length !== 1 || output[0] < before || output[0] > after) {{
             .find(|path| path.starts_with("assets/fe-authored-") && path.ends_with(".fe"))
             .unwrap();
         assert_eq!(output.assets[source_path], b"actor Demo {}\n");
+        let style_path = output
+            .assets
+            .keys()
+            .find(|path| path.starts_with("assets/fe-authored-") && path.ends_with(".css"))
+            .unwrap();
+        assert_eq!(output.assets[style_path], b"body { color: hotpink; }\n");
         assert!(!output.html.contains("data-fe-publish=\"\""));
         assert!(output.html.contains(PUBLISHED_ASSET_DIGEST_ATTR));
         assert!(output.html.contains(source_path));
+        assert!(output.html.contains(style_path));
 
         let root = tempfile::tempdir().unwrap();
         write_publication(root.path(), &output);

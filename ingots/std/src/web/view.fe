@@ -19,7 +19,7 @@
 //! values: the generated Wasm calls `Param::drive` below.
 
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
-use core::num::FloatRounding
+use core::num::{FloatRounding, IntDowncast}
 
 /// Append-only identities for raw browser and presentation facts delivered to
 /// a surface actor. The fieldless enum is the single Fe source of this fixed
@@ -49,8 +49,10 @@ pub enum SurfaceEventKind {
 impl Copy for SurfaceEventKind {}
 
 impl SurfaceEventKind {
-    /// True only for facts that may mutate application state. Presentation
-    /// clock/lifecycle variants are consumed by the resident scheduler.
+    /// True only for raw browser facts admitted to the pending application
+    /// input queue. Presentation-clock and lifecycle facts reach the resident
+    /// scheduler directly; a permitted frame may additionally deliver its
+    /// typed clock fact to the surface transition.
     pub fn is_application_input(self) -> bool {
         match self {
             SurfaceEventKind::Gesture => true,
@@ -223,10 +225,10 @@ impl SurfaceScheduleStep {
     }
 }
 
-/// How a param presents and is driven by the runtime. The variant NAME is the
-/// projected `kind` string (snake_cased), so this enum is the single source of
-/// the kind vocabulary; the compiler reads the variant name off the evaluated
-/// value, there is no numeric channel.
+/// How Fe drives a parameter's semantic value. The variant NAME is retained as
+/// an opaque projected diagnostic; `ParamPresentation` independently denotes
+/// how a view displays it, so the host never infers presentation from this
+/// enum.
 pub enum ParamKind {
     /// A linear slider over `[min, max]`.
     Range,
@@ -244,13 +246,155 @@ pub enum ParamKind {
     ExtentX,
     /// Bound to the live canvas height in pixels.
     ExtentY,
-    /// A user-visible boolean control transported as canonical `0.0 | 1.0`
-    /// scalar state. The fixed browser host presents this kind as a checkbox;
-    /// Fe still owns initialization, normalization, and application policy.
+    /// Boolean semantics transported as canonical `0.0 | 1.0` scalar state.
+    /// Its checkbox presentation is independently explicit below.
     Toggle,
 }
 
 impl Copy for ParamKind {}
+
+/// Where a surface parameter obtains its current host fact. The fixed browser
+/// adapter realizes these sources; it does not infer them from `ParamKind`.
+pub enum ParamValueSource {
+    Initial,
+    SurfaceWidth,
+    SurfaceHeight,
+}
+
+/// Browser-neutral control shape requested by the Fe surface declaration.
+pub enum ParamWidget {
+    Hidden,
+    Range,
+    Checkbox,
+    /// A finite integral choice, realized by browser hosts as a native select.
+    Select,
+}
+
+/// Mapping between a range widget's normalized visual axis and its semantic
+/// value. This remains independent of `ParamKind`: applications may introduce
+/// new drive semantics while reusing an existing presentation mapping.
+pub enum ParamScale {
+    Linear,
+    Logarithmic,
+}
+
+/// Formatting semantics for the current value shown beside a control.
+pub enum ParamReadout {
+    Scalar,
+    Integer,
+    Toggle,
+}
+
+impl Copy for ParamValueSource {}
+impl Copy for ParamWidget {}
+impl Copy for ParamScale {}
+impl Copy for ParamReadout {}
+
+/// One const-packed choice label. Four ordinary `u64` lanes keep the generic
+/// surface transition's params record recursively scalar on wasm32; the
+/// compiler reconstructs the original Fe-authored `String<31>` only while
+/// projecting the target-neutral presentation plan.
+struct ChoiceLabel {
+    low_0: u64,
+    low_1: u64,
+    low_2: u64,
+    low_3: u64,
+}
+
+impl Copy for ChoiceLabel {}
+
+impl ChoiceLabel {
+    const fn empty() -> Self {
+        Self { low_0: 0, low_1: 0, low_2: 0, low_3: 0 }
+    }
+
+    const fn from_string(value: String<31>) -> Self {
+        let word: u256 = value as u256
+        Self {
+            low_0: word.downcast_truncate(),
+            low_1: (word >> 64).downcast_truncate(),
+            low_2: (word >> 128).downcast_truncate(),
+            low_3: (word >> 192).downcast_truncate(),
+        }
+    }
+}
+
+/// A small, explicitly ordered set of human-readable choice labels. The
+/// scalar state remains the zero-based ordinal expected by shaders and Wasm;
+/// these packed lanes exist only to carry Fe-authored const data into the
+/// compiler-projected presentation plan.
+pub struct ChoiceOptions {
+    first: ChoiceLabel,
+    second: ChoiceLabel,
+    third: ChoiceLabel,
+    fourth: ChoiceLabel,
+    count: u32,
+    max: f32,
+}
+
+impl Copy for ChoiceOptions {}
+
+impl ChoiceOptions {
+    const fn empty() -> Self {
+        Self {
+            first: ChoiceLabel::empty(),
+            second: ChoiceLabel::empty(),
+            third: ChoiceLabel::empty(),
+            fourth: ChoiceLabel::empty(),
+            count: 0,
+            max: 0.0,
+        }
+    }
+
+    pub const fn two(first: String<31>, second: String<31>) -> Self {
+        Self {
+            first: ChoiceLabel::from_string(value: first),
+            second: ChoiceLabel::from_string(value: second),
+            third: ChoiceLabel::empty(),
+            fourth: ChoiceLabel::empty(),
+            count: 2,
+            max: 1.0,
+        }
+    }
+
+    pub const fn three(
+        first: String<31>, second: String<31>, third: String<31>,
+    ) -> Self {
+        Self {
+            first: ChoiceLabel::from_string(value: first),
+            second: ChoiceLabel::from_string(value: second),
+            third: ChoiceLabel::from_string(value: third),
+            fourth: ChoiceLabel::empty(),
+            count: 3,
+            max: 2.0,
+        }
+    }
+
+    pub const fn four(
+        first: String<31>, second: String<31>, third: String<31>, fourth: String<31>,
+    ) -> Self {
+        Self {
+            first: ChoiceLabel::from_string(value: first),
+            second: ChoiceLabel::from_string(value: second),
+            third: ChoiceLabel::from_string(value: third),
+            fourth: ChoiceLabel::from_string(value: fourth),
+            count: 4,
+            max: 3.0,
+        }
+    }
+}
+
+/// A complete Fe-authored control presentation. This is target-neutral data:
+/// Leptos, a Web Component, or another view may realize the same denotation.
+pub struct ParamPresentation {
+    widget: ParamWidget,
+    scale: ParamScale,
+    readout: ParamReadout,
+    visible: bool,
+    options: ChoiceOptions,
+}
+
+impl Copy for ParamPresentation {}
 
 /// One declared interactive parameter. `min`/`max`/`init` are plain data; range
 /// sanity (min < max, init in range) is checked at the projection boundary, not
@@ -261,6 +405,14 @@ pub struct Param {
     min: f32,
     max: f32,
     init: f32,
+    /// Whether this declaration carries an inclusive range. This is authored
+    /// by the Fe constructors and projected as data; the compiler does not
+    /// infer presentation policy from `ParamKind`.
+    bounded: bool,
+    /// Whether `init` participates in initial surface state.
+    initialized: bool,
+    source: ParamValueSource,
+    presentation: ParamPresentation,
     drag_x_per_px: f32,
     drag_y_per_px: f32,
     wheel_per_notch: f32,
@@ -269,9 +421,44 @@ pub struct Param {
 }
 
 impl Param {
-    const fn new(_ kind: ParamKind, _ min: f32, _ max: f32, _ init: f32) -> Param {
+    const fn control(
+        _ kind: ParamKind,
+        _ min: f32,
+        _ max: f32,
+        _ init: f32,
+        _ widget: ParamWidget,
+        _ scale: ParamScale,
+        _ readout: ParamReadout,
+    ) -> Param {
         Param {
             kind: kind, min: min, max: max, init: init,
+            bounded: true, initialized: true,
+            source: ParamValueSource::Initial,
+            presentation: ParamPresentation {
+                widget: widget, scale: scale, readout: readout, visible: true,
+                options: ChoiceOptions::empty(),
+            },
+            drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
+            wheel_in_factor: 1.0, wheel_out_factor: 1.0,
+        }
+    }
+
+    const fn binding(
+        _ kind: ParamKind,
+        _ value: f32,
+        _ initialized: bool,
+        _ source: ParamValueSource,
+    ) -> Param {
+        Param {
+            kind: kind, min: value, max: value, init: value,
+            bounded: false, initialized: initialized, source: source,
+            presentation: ParamPresentation {
+                widget: ParamWidget::Hidden,
+                scale: ParamScale::Linear,
+                readout: ParamReadout::Scalar,
+                visible: false,
+                options: ChoiceOptions::empty(),
+            },
             drag_x_per_px: 0.0, drag_y_per_px: 0.0, wheel_per_notch: 0.0,
             wheel_in_factor: 1.0, wheel_out_factor: 1.0,
         }
@@ -279,27 +466,71 @@ impl Param {
 
     /// A linear slider over `[min, max]`, starting at `init`.
     pub const fn range(min: f32, max: f32, init: f32) -> Param {
-        Param::new(ParamKind::Range, min, max, init)
+        Param::control(
+            ParamKind::Range, min, max, init,
+            ParamWidget::Range, ParamScale::Linear, ParamReadout::Scalar,
+        )
     }
 
     /// A linear slider over `[0, 1]`, starting at `init`.
     pub const fn unit(init: f32) -> Param {
-        Param::new(ParamKind::Unit, 0.0, 1.0, init)
+        Param::control(
+            ParamKind::Unit, 0.0, 1.0, init,
+            ParamWidget::Range, ParamScale::Linear, ParamReadout::Scalar,
+        )
     }
 
     /// An angle in radians over `[0, TAU]`, starting at `init`.
     pub const fn angle(init: f32) -> Param {
-        Param::new(ParamKind::Angle, 0.0, 6.2831855, init)
+        Param::control(
+            ParamKind::Angle, 0.0, 6.2831855, init,
+            ParamWidget::Range, ParamScale::Linear, ParamReadout::Scalar,
+        )
     }
 
     /// A logarithmic slider over `[min, max]`, starting at `init`.
     pub const fn log(min: f32, max: f32, init: f32) -> Param {
-        Param::new(ParamKind::Log, min, max, init)
+        Param::control(
+            ParamKind::Log, min, max, init,
+            ParamWidget::Range, ParamScale::Logarithmic, ParamReadout::Scalar,
+        )
     }
 
     /// An integer slider over `[min, max]`, starting at `init`.
     pub const fn int(min: f32, max: f32, init: f32) -> Param {
-        Param::new(ParamKind::Int, min, max, init)
+        Param::control(
+            ParamKind::Int, min, max, init,
+            ParamWidget::Range, ParamScale::Linear, ParamReadout::Integer,
+        )
+    }
+
+    /// A finite named choice transported as a zero-based scalar ordinal.
+    ///
+    /// The value remains the same GPU-friendly scalar carried by `int`; only
+    /// its target-neutral presentation differs. Browser hosts realize this as
+    /// a native `<select>` instead of a scrubber.
+    pub const fn choice(options: ChoiceOptions, init: f32) -> Param {
+        let result = Param::control(
+            ParamKind::Int, 0.0, options.max, init,
+            ParamWidget::Select, ParamScale::Linear, ParamReadout::Integer,
+        )
+        Param {
+            kind: result.kind, min: result.min, max: result.max, init: result.init,
+            bounded: result.bounded, initialized: result.initialized,
+            source: result.source,
+            presentation: ParamPresentation {
+                widget: result.presentation.widget,
+                scale: result.presentation.scale,
+                readout: result.presentation.readout,
+                visible: result.presentation.visible,
+                options: options,
+            },
+            drag_x_per_px: result.drag_x_per_px,
+            drag_y_per_px: result.drag_y_per_px,
+            wheel_per_notch: result.wheel_per_notch,
+            wheel_in_factor: result.wheel_in_factor,
+            wheel_out_factor: result.wheel_out_factor,
+        }
     }
 
     /// A checkbox starting either unchecked or checked. Its scalar carrier is
@@ -307,31 +538,36 @@ impl Param {
     /// code can immediately interpret it as an enum or boolean policy.
     pub const fn toggle(init: bool) -> Param {
         let value: f32 = if init { 1.0 } else { 0.0 }
-        Param::new(ParamKind::Toggle, 0.0, 1.0, value)
+        Param::control(
+            ParamKind::Toggle, 0.0, 1.0, value,
+            ParamWidget::Checkbox, ParamScale::Linear, ParamReadout::Toggle,
+        )
     }
 
     /// A constant value carried into the uniform record but not shown as a
     /// control.
     pub const fn fixed(_ value: f32) -> Param {
-        Param::new(ParamKind::Fixed, value, value, value)
+        Param::binding(ParamKind::Fixed, value, true, ParamValueSource::Initial)
     }
 
     /// Bound to the live canvas width in pixels. The runtime writes the actual
     /// backing-store width into this member each configure, so the kernel is
     /// resolution-exact with no `const RESOLUTION` and no ABI change.
     pub const fn extent_x() -> Param {
-        Param::new(ParamKind::ExtentX, 0.0, 0.0, 0.0)
+        Param::binding(ParamKind::ExtentX, 0.0, false, ParamValueSource::SurfaceWidth)
     }
 
     /// Bound to the live canvas height in pixels.
     pub const fn extent_y() -> Param {
-        Param::new(ParamKind::ExtentY, 0.0, 0.0, 0.0)
+        Param::binding(ParamKind::ExtentY, 0.0, false, ParamValueSource::SurfaceHeight)
     }
 
     /// Add `delta_x * per_px` to this value for each captured drag event.
     pub const fn drag_x(self, per_px: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized,
+            source: self.source, presentation: self.presentation,
             drag_x_per_px: per_px, drag_y_per_px: self.drag_y_per_px,
             wheel_per_notch: self.wheel_per_notch,
             wheel_in_factor: self.wheel_in_factor,
@@ -343,6 +579,8 @@ impl Param {
     pub const fn drag_y(self, per_px: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized,
+            source: self.source, presentation: self.presentation,
             drag_x_per_px: self.drag_x_per_px, drag_y_per_px: per_px,
             wheel_per_notch: self.wheel_per_notch,
             wheel_in_factor: self.wheel_in_factor,
@@ -357,6 +595,8 @@ impl Param {
     pub const fn wheel(self, per_notch: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized,
+            source: self.source, presentation: self.presentation,
             drag_x_per_px: self.drag_x_per_px,
             drag_y_per_px: self.drag_y_per_px,
             wheel_per_notch: per_notch,
@@ -370,6 +610,8 @@ impl Param {
     pub const fn wheel_scale(self, in_factor: f32, out_factor: f32) -> Param {
         Param {
             kind: self.kind, min: self.min, max: self.max, init: self.init,
+            bounded: self.bounded, initialized: self.initialized,
+            source: self.source, presentation: self.presentation,
             drag_x_per_px: self.drag_x_per_px,
             drag_y_per_px: self.drag_y_per_px,
             wheel_per_notch: self.wheel_per_notch,

@@ -1,0 +1,6 @@
+[ingot]
+name = "actor_fullscreen_raster"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../../../../../ingots/std" }

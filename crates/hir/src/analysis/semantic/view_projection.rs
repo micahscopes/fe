@@ -44,67 +44,27 @@ pub struct ViewSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewParam {
     pub name: String,
-    pub kind: ViewParamKind,
+    /// Opaque snake-case spelling of the Fe enum variant. The compiler does
+    /// not own or exhaustively mirror the parameter vocabulary.
+    pub kind: String,
     pub min: f32,
     pub max: f32,
     pub init: f32,
+    pub bounded: bool,
+    pub initialized: bool,
+    pub source: String,
+    pub presentation: ViewParamPresentation,
 }
 
-/// The presentation/drive kind, read off the evaluated `ParamKind` enum
-/// variant. The variant NAME is the single source of the kind vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewParamKind {
-    Range,
-    Unit,
-    Angle,
-    Log,
-    Int,
-    Fixed,
-    ExtentX,
-    ExtentY,
-    Toggle,
-}
-
-impl ViewParamKind {
-    /// The projected snake-case kind string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Range => "range",
-            Self::Unit => "unit",
-            Self::Angle => "angle",
-            Self::Log => "log",
-            Self::Int => "int",
-            Self::Fixed => "fixed",
-            Self::ExtentX => "extent_x",
-            Self::ExtentY => "extent_y",
-            Self::Toggle => "toggle",
-        }
-    }
-
-    /// Whether this param is bound to the live canvas size rather than a slider.
-    pub fn is_extent(self) -> bool {
-        matches!(self, Self::ExtentX | Self::ExtentY)
-    }
-
-    /// Whether this param is a user-visible control (not fixed / extent-bound).
-    pub fn is_visible(self) -> bool {
-        !matches!(self, Self::Fixed | Self::ExtentX | Self::ExtentY)
-    }
-
-    fn from_variant_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "Range" => Self::Range,
-            "Unit" => Self::Unit,
-            "Angle" => Self::Angle,
-            "Log" => Self::Log,
-            "Int" => Self::Int,
-            "Fixed" => Self::Fixed,
-            "ExtentX" => Self::ExtentX,
-            "ExtentY" => Self::ExtentY,
-            "Toggle" => Self::Toggle,
-            _ => return None,
-        })
-    }
+/// Opaque projection of the Fe-owned `ParamPresentation` value. Strings are
+/// enum-variant spellings, not a compiler-owned presentation vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewParamPresentation {
+    pub widget: String,
+    pub scale: String,
+    pub readout: String,
+    pub visible: bool,
+    pub options: Vec<String>,
 }
 
 /// Why a `view()` projection could not be produced. Both variants carry a
@@ -229,28 +189,229 @@ fn read_f32<'db>(
     }
 }
 
-fn read_kind<'db>(
+fn read_bool<'db>(
     db: &'db dyn HirAnalysisDb,
     value: SemConstId<'db>,
-) -> Result<ViewParamKind, ViewProjectionError> {
+    what: &str,
+) -> Result<bool, ViewProjectionError> {
+    match value.value(db) {
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(value),
+            ..
+        } => Ok(value),
+        _ => Err(ViewProjectionError::Shape(format!(
+            "{what} is not a bool scalar"
+        ))),
+    }
+}
+
+fn read_u64<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<u64, ViewProjectionError> {
+    match value.value(db) {
+        SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } => value
+            .to_u64()
+            .ok_or_else(|| ViewProjectionError::Shape(format!("{what} is not a u64"))),
+        _ => Err(ViewProjectionError::Shape(format!(
+            "{what} is not an integer scalar"
+        ))),
+    }
+}
+
+fn read_choice_label<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<String, ViewProjectionError> {
+    let mut lanes = [None; 4];
+    for (field_name, field) in struct_named_fields(db, value, what)? {
+        let index = match field_name.as_str() {
+            "low_0" => 0,
+            "low_1" => 1,
+            "low_2" => 2,
+            "low_3" => 3,
+            _ => continue,
+        };
+        lanes[index] = Some(read_u64(
+            db,
+            field,
+            &format!("{what} packed lane `{field_name}`"),
+        )?);
+    }
+    let mut bytes = Vec::with_capacity(32);
+    for (index, lane) in lanes.into_iter().enumerate().rev() {
+        bytes.extend_from_slice(
+            &lane
+                .ok_or_else(|| {
+                    ViewProjectionError::Shape(format!("{what} has no packed lane `low_{index}`"))
+                })?
+                .to_be_bytes(),
+        );
+    }
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len());
+    let bytes = &bytes[first..];
+    if bytes.contains(&0) {
+        return Err(ViewProjectionError::Shape(format!(
+            "{what} contains an embedded NUL"
+        )));
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|error| ViewProjectionError::Shape(format!("{what} is not UTF-8: {error}")))
+}
+
+fn walk_choice_options<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    name: &str,
+) -> Result<Vec<String>, ViewProjectionError> {
+    let fields = struct_named_fields(db, value, &format!("param `{name}` choice options"))?;
+    let mut labels = Vec::with_capacity(4);
+    let mut count = None;
+    for (field_name, field) in fields {
+        match field_name.as_str() {
+            "first" | "second" | "third" | "fourth" => labels.push(read_choice_label(
+                db,
+                field,
+                &format!("param `{name}` choice option `{field_name}`"),
+            )?),
+            "count" => {
+                count = Some(read_u32(
+                    db,
+                    field,
+                    &format!("param `{name}` choice option count"),
+                )?)
+            }
+            _ => {}
+        }
+    }
+    let count = count.ok_or_else(|| {
+        ViewProjectionError::Shape(format!("param `{name}` choice options have no `count`"))
+    })? as usize;
+    if count > labels.len() {
+        return Err(ViewProjectionError::Shape(format!(
+            "param `{name}` declares {count} choice options but carries only {} labels",
+            labels.len()
+        )));
+    }
+    labels.truncate(count);
+    if labels.iter().any(String::is_empty) {
+        return Err(ViewProjectionError::Shape(format!(
+            "param `{name}` has an empty visible choice label"
+        )));
+    }
+    Ok(labels)
+}
+
+fn snake_case_variant(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for (index, character) in name.chars().enumerate() {
+        if character.is_uppercase() {
+            if index != 0 {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+fn read_enum_case<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    what: &str,
+) -> Result<String, ViewProjectionError> {
     let SemConstValue::Enum { ty, variant, .. } = value.value(db) else {
-        return Err(ViewProjectionError::Shape(
-            "`kind` is not an enum value".into(),
-        ));
+        return Err(ViewProjectionError::Shape(format!(
+            "{what} is not an enum value"
+        )));
     };
     let adt = ty
         .adt_def(db)
-        .ok_or_else(|| ViewProjectionError::Shape("`kind`'s type is not an enum".into()))?;
+        .ok_or_else(|| ViewProjectionError::Shape(format!("{what}'s type is not an enum")))?;
     let AdtRef::Enum(enum_) = adt.adt_ref(db) else {
-        return Err(ViewProjectionError::Shape(
-            "`kind`'s type is not an enum".into(),
-        ));
+        return Err(ViewProjectionError::Shape(format!(
+            "{what}'s type is not an enum"
+        )));
     };
     let variant_name = EnumVariant::new(enum_, variant.0 as usize)
         .name(db)
-        .ok_or_else(|| ViewProjectionError::Shape("`kind` variant has no name".into()))?;
-    ViewParamKind::from_variant_name(variant_name).ok_or_else(|| {
-        ViewProjectionError::Shape(format!("unknown `ParamKind` variant `{variant_name}`"))
+        .ok_or_else(|| ViewProjectionError::Shape(format!("{what} variant has no name")))?;
+    Ok(snake_case_variant(variant_name))
+}
+
+fn walk_param_presentation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    name: &str,
+) -> Result<ViewParamPresentation, ViewProjectionError> {
+    let mut widget = None;
+    let mut scale = None;
+    let mut readout = None;
+    let mut visible = None;
+    let mut options = None;
+    for (field_name, field) in
+        struct_named_fields(db, value, &format!("param `{name}` presentation"))?
+    {
+        match field_name.as_str() {
+            "widget" => {
+                widget = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation widget"),
+                )?)
+            }
+            "scale" => {
+                scale = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation scale"),
+                )?)
+            }
+            "readout" => {
+                readout = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation readout"),
+                )?)
+            }
+            "visible" => {
+                visible = Some(read_bool(
+                    db,
+                    field,
+                    &format!("param `{name}` presentation visible"),
+                )?)
+            }
+            "options" => options = Some(walk_choice_options(db, field, name)?),
+            _ => {}
+        }
+    }
+    Ok(ViewParamPresentation {
+        widget: widget.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `widget`"))
+        })?,
+        scale: scale.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `scale`"))
+        })?,
+        readout: readout.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `readout`"))
+        })?,
+        visible: visible.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `visible`"))
+        })?,
+        options: options.ok_or_else(|| {
+            ViewProjectionError::Shape(format!("param `{name}` presentation has no `options`"))
+        })?,
     })
 }
 
@@ -320,12 +481,32 @@ fn walk_param<'db>(
     let mut min = None;
     let mut max = None;
     let mut init = None;
+    let mut bounded = None;
+    let mut initialized = None;
+    let mut source = None;
+    let mut presentation = None;
     for (field_name, field) in struct_named_fields(db, value, &format!("param `{name}`"))? {
         match field_name.as_str() {
-            "kind" => kind = Some(read_kind(db, field)?),
+            "kind" => kind = Some(read_enum_case(db, field, &format!("param `{name}` kind"))?),
             "min" => min = Some(read_f32(db, field, &format!("param `{name}` min"))?),
             "max" => max = Some(read_f32(db, field, &format!("param `{name}` max"))?),
             "init" => init = Some(read_f32(db, field, &format!("param `{name}` init"))?),
+            "bounded" => bounded = Some(read_bool(db, field, &format!("param `{name}` bounded"))?),
+            "initialized" => {
+                initialized = Some(read_bool(
+                    db,
+                    field,
+                    &format!("param `{name}` initialized"),
+                )?)
+            }
+            "source" => {
+                source = Some(read_enum_case(
+                    db,
+                    field,
+                    &format!("param `{name}` source"),
+                )?)
+            }
+            "presentation" => presentation = Some(walk_param_presentation(db, field, &name)?),
             _ => {}
         }
     }
@@ -337,11 +518,25 @@ fn walk_param<'db>(
         max.ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `max`")))?;
     let init =
         init.ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `init`")))?;
+    let bounded = bounded
+        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `bounded`")))?;
+    let initialized = initialized.ok_or_else(|| {
+        ViewProjectionError::Shape(format!("param `{name}` has no `initialized`"))
+    })?;
+    let source = source
+        .ok_or_else(|| ViewProjectionError::Shape(format!("param `{name}` has no `source`")))?;
+    let presentation = presentation.ok_or_else(|| {
+        ViewProjectionError::Shape(format!("param `{name}` has no `presentation`"))
+    })?;
     Ok(ViewParam {
         name,
         kind,
         min,
         max,
         init,
+        bounded,
+        initialized,
+        source,
+        presentation,
     })
 }

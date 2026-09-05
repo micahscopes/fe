@@ -6,22 +6,138 @@
 //! final parameter so a partially applied family can be rebound without
 //! pretending that changing element type executes a pure GPU map.
 
-/// Storage-buffer physical role. Vertex, index, uniform, indirect, and staging
+/// One Fe-authored logical GPU-resource plan. The compiler evaluates this
+/// value for a concrete resource type, then derives target-specific bindings,
+/// layouts, usages, and cache identities from it.
+#[web_resource_plan]
+pub struct ResourcePlan {
+    kind: ResourceKind,
+    access: ResourceAccess,
+    residency: ResourceResidency,
+    initialization: ResourceInitialization,
+    recovery: ResourceRecovery,
+    visibility: ResourceVisibility,
+}
+
+pub enum ResourceKind {
+    Storage,
+}
+
+pub enum ResourceAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+    AtomicReadWrite,
+}
+
+pub enum ResourceResidency {
+    Immutable,
+    ActorResident,
+    FrameTransient,
+    Imported,
+}
+
+pub struct ResourceDigest {
+    words: [u32; 8],
+}
+
+pub enum ResourceInitialization {
+    Zeroed,
+    ContentAddressed(ResourceDigest),
+    Derived,
+}
+
+pub enum ResourceRecovery {
+    ReplayRecipe,
+    RestoreCheckpoint,
+    Regenerate,
+    NonRecoverable,
+}
+
+pub enum ResourceVisibility {
+    Compute,
+    Vertex,
+    Fragment,
+    ComputeFragment,
+    VertexFragment,
+    All,
+}
+
+impl Copy for ResourcePlan {}
+impl Copy for ResourceKind {}
+impl Copy for ResourceAccess {}
+impl Copy for ResourceResidency {}
+impl Copy for ResourceDigest {}
+impl Copy for ResourceInitialization {}
+impl Copy for ResourceRecovery {}
+impl Copy for ResourceVisibility {}
+
+pub trait GpuResourcePolicy {
+    const fn plan() -> ResourcePlan
+}
+
+pub trait ResourceKindPolicy {
+    const fn kind() -> ResourceKind
+}
+
+pub trait ResourceAccessPolicy {
+    const fn access() -> ResourceAccess
+}
+
+/// Residency is indexed by access so illegal custody/access combinations have
+/// no evidence. In particular, immutable storage is read-only by construction.
+pub trait ResourceResidencyPolicy<Access> {
+    const fn residency() -> ResourceResidency
+}
+
+pub trait ResourceInitializationPolicy<Access, Residency, Recovery> {
+    const fn initialization() -> ResourceInitialization
+}
+
+pub trait ResourceRecoveryPolicy {
+    const fn recovery() -> ResourceRecovery
+}
+
+pub trait ResourceVisibilityPolicy {
+    const fn visibility() -> ResourceVisibility
+}
+
+/// Storage-buffer logical role. Vertex, index, uniform, indirect, and staging
 /// roles join this family in their own implementation slices.
-#[gpu_resource_kind(storage)]
 pub struct StorageKind {}
 
+impl ResourceKindPolicy for StorageKind {
+    const fn kind() -> ResourceKind { ResourceKind::Storage }
+}
+
 /// Shader reads are admitted and stores are rejected by missing evidence.
-#[gpu_resource_access(read_only)]
 pub struct ReadOnly {}
 
 /// Shader stores are admitted and loads are rejected by missing evidence.
-#[gpu_resource_access(write_only)]
 pub struct WriteOnly {}
 
 /// Both shader loads and stores are admitted.
-#[gpu_resource_access(read_write)]
 pub struct ReadWrite {}
+
+/// Atomic u32 storage. Deliberately supplies neither GpuReadable nor
+/// GpuWritable: ordinary buffer methods cannot bypass atomic access.
+pub struct AtomicReadWrite {}
+
+impl ResourceAccessPolicy for AtomicReadWrite {
+    const fn access() -> ResourceAccess { ResourceAccess::AtomicReadWrite }
+}
+
+impl ResourceAccessPolicy for ReadOnly {
+    const fn access() -> ResourceAccess { ResourceAccess::ReadOnly }
+}
+
+impl ResourceAccessPolicy for WriteOnly {
+    const fn access() -> ResourceAccess { ResourceAccess::WriteOnly }
+}
+
+impl ResourceAccessPolicy for ReadWrite {
+    const fn access() -> ResourceAccess { ResourceAccess::ReadWrite }
+}
 
 pub trait GpuReadable {}
 pub trait GpuWritable {}
@@ -32,23 +148,34 @@ impl GpuWritable for WriteOnly {}
 impl GpuWritable for ReadWrite {}
 
 /// Immutable logical bytes may share one physical realization per device.
-#[gpu_resource_residency(immutable)]
 pub struct Immutable {}
 
 /// Mutable logical state retained for the lifetime of its owning actor.
-#[gpu_resource_residency(actor_resident)]
 pub struct ActorResident {}
 
 /// Pass-graph-local storage whose lifetime can be derived from graph use.
-#[gpu_resource_residency(frame_transient)]
 pub struct FrameTransient {}
 
 /// A resource imported from an explicitly authorized external owner.
-#[gpu_resource_residency(imported)]
 pub struct Imported {}
 
+impl ResourceResidencyPolicy<ReadOnly> for Immutable {
+    const fn residency() -> ResourceResidency { ResourceResidency::Immutable }
+}
+
+impl<Access> ResourceResidencyPolicy<Access> for ActorResident {
+    const fn residency() -> ResourceResidency { ResourceResidency::ActorResident }
+}
+
+impl<Access> ResourceResidencyPolicy<Access> for FrameTransient {
+    const fn residency() -> ResourceResidency { ResourceResidency::FrameTransient }
+}
+
+impl<Access> ResourceResidencyPolicy<Access> for Imported {
+    const fn residency() -> ResourceResidency { ResourceResidency::Imported }
+}
+
 /// Deterministic all-zero initialization.
-#[gpu_resource_init(zeroed)]
 pub struct Zeroed {}
 
 /// Exact immutable bytes addressed by their SHA-256 digest.
@@ -57,7 +184,6 @@ pub struct Zeroed {}
 /// the eight constants concatenate to the ordinary 64-character SHA-256 hex
 /// identity. The artifact byte length is independently derived from `N` and
 /// `GpuLayout<StorageLayout, T>`.
-#[gpu_resource_init(content_addressed)]
 pub struct ContentAddressed<
     const H0: u32,
     const H1: u32,
@@ -70,42 +196,106 @@ pub struct ContentAddressed<
 > {}
 
 /// Contents are produced by an authored GPU pass rather than host bytes.
-#[gpu_resource_init(derived)]
 pub struct Derived {}
 
+impl<Access, Residency, Recovery> ResourceInitializationPolicy<Access, Residency, Recovery>
+    for Zeroed
+{
+    const fn initialization() -> ResourceInitialization {
+        ResourceInitialization::Zeroed
+    }
+}
+
+impl<
+    const H0: u32,
+    const H1: u32,
+    const H2: u32,
+    const H3: u32,
+    const H4: u32,
+    const H5: u32,
+    const H6: u32,
+    const H7: u32,
+> ResourceInitializationPolicy<ReadOnly, Immutable, ReplayRecipe>
+    for ContentAddressed<H0, H1, H2, H3, H4, H5, H6, H7>
+{
+    const fn initialization() -> ResourceInitialization {
+        ResourceInitialization::ContentAddressed(ResourceDigest {
+            words: [H0, H1, H2, H3, H4, H5, H6, H7],
+        })
+    }
+}
+
+impl<Access: GpuWritable, Residency, Recovery>
+    ResourceInitializationPolicy<Access, Residency, Recovery> for Derived
+{
+    const fn initialization() -> ResourceInitialization {
+        ResourceInitialization::Derived
+    }
+}
+
 /// Recreate the physical resource by replaying its deterministic recipe.
-#[gpu_resource_recovery(replay_recipe)]
 pub struct ReplayRecipe {}
 
 /// Restore the newest explicit actor checkpoint after device replacement.
-#[gpu_resource_recovery(restore_checkpoint)]
 pub struct RestoreCheckpoint {}
 
 /// Ask an authored producer to regenerate contents after device replacement.
-#[gpu_resource_recovery(regenerate)]
 pub struct Regenerate {}
 
 /// Device loss terminates this logical resource instead of manufacturing data.
-#[gpu_resource_recovery(nonrecoverable)]
 pub struct NonRecoverable {}
 
-#[gpu_resource_visibility(compute)]
+impl ResourceRecoveryPolicy for ReplayRecipe {
+    const fn recovery() -> ResourceRecovery { ResourceRecovery::ReplayRecipe }
+}
+
+impl ResourceRecoveryPolicy for RestoreCheckpoint {
+    const fn recovery() -> ResourceRecovery { ResourceRecovery::RestoreCheckpoint }
+}
+
+impl ResourceRecoveryPolicy for Regenerate {
+    const fn recovery() -> ResourceRecovery { ResourceRecovery::Regenerate }
+}
+
+impl ResourceRecoveryPolicy for NonRecoverable {
+    const fn recovery() -> ResourceRecovery { ResourceRecovery::NonRecoverable }
+}
+
 pub struct ComputeOnly {}
 
-#[gpu_resource_visibility(vertex)]
 pub struct VertexOnly {}
 
-#[gpu_resource_visibility(fragment)]
 pub struct FragmentOnly {}
 
-#[gpu_resource_visibility(compute_fragment)]
 pub struct ComputeFragment {}
 
-#[gpu_resource_visibility(vertex_fragment)]
 pub struct VertexFragment {}
 
-#[gpu_resource_visibility(all)]
 pub struct AllShaderStages {}
+
+impl ResourceVisibilityPolicy for ComputeOnly {
+    const fn visibility() -> ResourceVisibility { ResourceVisibility::Compute }
+}
+
+impl ResourceVisibilityPolicy for VertexOnly {
+    const fn visibility() -> ResourceVisibility { ResourceVisibility::Vertex }
+}
+
+impl ResourceVisibilityPolicy for FragmentOnly {
+    const fn visibility() -> ResourceVisibility { ResourceVisibility::Fragment }
+}
+
+impl ResourceVisibilityPolicy for ComputeFragment {
+    const fn visibility() -> ResourceVisibility { ResourceVisibility::ComputeFragment }
+}
+
+impl ResourceVisibilityPolicy for VertexFragment {
+    const fn visibility() -> ResourceVisibility { ResourceVisibility::VertexFragment }
+}
+
+impl ResourceVisibilityPolicy for AllShaderStages {
+    const fn visibility() -> ResourceVisibility { ResourceVisibility::All }
+}
 
 /// Element-rebinding evidence for a logical GPU resource family.
 ///
@@ -148,6 +338,34 @@ impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, X>
 }
 
 impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
+    GpuResourcePolicy for
+    GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, T>
+    where Kind: ResourceKindPolicy,
+          Access: ResourceAccessPolicy,
+          Residency: ResourceResidencyPolicy<Access>,
+          Init: ResourceInitializationPolicy<Access, Residency, Recovery>,
+          Recovery: ResourceRecoveryPolicy,
+          Visibility: ResourceVisibilityPolicy
+{
+    const fn plan() -> ResourcePlan {
+        ResourcePlan {
+            kind: Kind::kind(),
+            access: Access::access(),
+            residency: Residency::residency(),
+            initialization: Init::initialization(),
+            recovery: Recovery::recovery(),
+            visibility: Visibility::visibility(),
+        }
+    }
+}
+
+/// Evaluate the complete logical plan for one concrete resource family. The
+/// compiler supplies `R`; application authors never add a redundant behavior.
+pub const fn resource_plan<R: GpuResourcePolicy>() -> ResourcePlan {
+    R::plan()
+}
+
+impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
     GpuBuffer<Kind, Access, Residency, Init, Recovery, Visibility, N, T>
     where Access: GpuReadable
 {
@@ -167,14 +385,128 @@ impl<Kind, Access, Residency, Init, Recovery, Visibility, const N: usize, T>
     }
 }
 
+impl<Kind, Residency, Init, Recovery, Visibility, const N: usize>
+    GpuBuffer<Kind, AtomicReadWrite, Residency, Init, Recovery, Visibility, N, u32>
+{
+    /// Device-scope relaxed addition modulo 2^32; returns the previous value.
+    /// This does not publish unrelated writes or synchronize workgroups.
+    #[gpu_intrinsic(storage_atomic_add)]
+    pub fn atomic_add(self, index: u32, value: u32) -> u32 { core::panic() }
+
+    /// Device-scope relaxed unsigned minimum; returns the previous value.
+    /// Separate producer/consumer dispatches when using this for ownership.
+    #[gpu_intrinsic(storage_atomic_min)]
+    pub fn atomic_min(self, index: u32, value: u32) -> u32 { core::panic() }
+
+    /// Device-scope relaxed read. A dispatch boundary is still needed when
+    /// consuming non-atomic data produced by other workgroups.
+    #[gpu_intrinsic(storage_atomic_load)]
+    pub fn atomic_load(self, index: u32) -> u32 { core::panic() }
+
+    /// Device-scope relaxed write, including initialization of claim words.
+    /// Initialization and competing claims belong in separate dispatches.
+    #[gpu_intrinsic(storage_atomic_store)]
+    pub fn atomic_store(self, index: u32, value: u32) { core::panic() }
+}
+
+/// Zero-initialized, compute-local atomic words in the ordinary resource family.
+pub type AtomicStorageBuffer<const N: usize> = GpuBuffer<
+    StorageKind, AtomicReadWrite, ActorResident, Zeroed, ReplayRecipe, ComputeOnly, N, u32,
+>
+
+/// One nominal GPU-written command buffer consumed by a later indirect draw.
+///
+/// `Brand` gives independently authored draw streams distinct type identity.
+/// The browser never observes it; the compiler uses the complete concrete type
+/// to resolve the draw policy to exactly one actor field. `N` and `T` remain
+/// explicit so future indexed or multi-draw command records can reuse the same
+/// family without adding a parallel resource mechanism.
+#[gpu_resource(indirect)]
+pub struct IndirectBuffer<Brand, const N: usize, T> { binding: u32 }
+
+impl<Brand, const N: usize, T> core::marker::Copy for IndirectBuffer<Brand, N, T> {}
+
+impl<Brand, const N: usize, T> GpuResourcePolicy for IndirectBuffer<Brand, N, T> {
+    const fn plan() -> ResourcePlan {
+        ResourcePlan {
+            kind: ResourceKind::Storage,
+            access: ResourceAccess::ReadWrite,
+            residency: ResourceResidency::ActorResident,
+            initialization: ResourceInitialization::Derived,
+            recovery: ResourceRecovery::ReplayRecipe,
+            visibility: ResourceVisibility::Compute,
+        }
+    }
+}
+
+impl<Brand, const N: usize, T> IndirectBuffer<Brand, N, T> {
+    #[gpu_intrinsic(storage_load)]
+    pub fn load(self, index: u32) -> T {
+        core::panic()
+    }
+
+    #[gpu_intrinsic(storage_store)]
+    pub fn store(self, index: u32, value: T) {
+        core::panic()
+    }
+}
+
+/// Four words consumed by `drawIndirect` for one non-indexed draw.
+pub type DrawIndirectBuffer<Brand> = IndirectBuffer<Brand, 4, u32>
+
+/// GPU storage whose completed contents are transported as one typed actor
+/// message `M`. `T` and `N` retain the ordinary storage element and extent
+/// contract; `M` is a compile-time brand consumed by `ReadbackTransition<M>`.
+/// The fixed host sees only a compiler-generated binary entry and opaque bytes.
+#[gpu_resource(readback)]
+pub struct ReadbackBuffer<T, const N: usize, M> { binding: u32 }
+
+impl<T, const N: usize, M> core::marker::Copy for ReadbackBuffer<T, N, M> {}
+
+impl<T, const N: usize, M> GpuResourcePolicy for ReadbackBuffer<T, N, M> {
+    const fn plan() -> ResourcePlan {
+        ResourcePlan {
+            kind: ResourceKind::Storage,
+            access: ResourceAccess::ReadWrite,
+            residency: ResourceResidency::ActorResident,
+            initialization: ResourceInitialization::Derived,
+            recovery: ResourceRecovery::ReplayRecipe,
+            visibility: ResourceVisibility::ComputeFragment,
+        }
+    }
+}
+
+impl<T, const N: usize, M> ReadbackBuffer<T, N, M> {
+    #[gpu_intrinsic(storage_load)]
+    pub fn load(self, index: u32) -> T {
+        core::panic()
+    }
+
+    #[gpu_intrinsic(storage_store)]
+    pub fn store(self, index: u32, value: T) {
+        core::panic()
+    }
+}
+
+/// The browser readback transport is word-addressed. Application message
+/// identity remains the nominal `M`, while codec derivation writes ordinary
+/// `u32` words without repeating the physical element type at use sites.
+pub type ReadbackWords<M, const N: usize> = ReadbackBuffer<u32, N, M>
+
 /// Source-compatible mutable storage with deterministic zero initialization.
+///
+/// This logical family admits every shader stage. The compiler independently
+/// derives the exact stages that can reach each resource for every physical
+/// pass, so broad authoring compatibility does not broaden bind-group layouts.
+/// `DynamicStorageBuffer` remains available when an API boundary intentionally
+/// requires a narrower stage capability.
 pub type StorageBuffer<T, const N: usize> = GpuBuffer<
     StorageKind,
     ReadWrite,
     ActorResident,
     Zeroed,
     ReplayRecipe,
-    ComputeFragment,
+    AllShaderStages,
     N,
     T,
 >

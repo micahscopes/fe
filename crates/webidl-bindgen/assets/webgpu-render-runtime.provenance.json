@@ -1,0 +1,56 @@
+{
+  "schema": "fe-webidl-upstream-provenance/v1",
+  "repository": "https://github.com/w3c/webref",
+  "revision": "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279",
+  "license": "MIT and BSD-3-Clause",
+  "sources": [
+    {
+      "repository": "https://github.com/w3c/webref",
+      "revision": "f3b81966c45f34f62df20e7f8d6f66d5b5ba9279",
+      "path": "ed/idl/webgpu.idl",
+      "url": "https://github.com/w3c/webref/blob/f3b81966c45f34f62df20e7f8d6f66d5b5ba9279/ed/idl/webgpu.idl",
+      "license": "MIT",
+      "git_blob": "3360beca8efc5c6a3dc46dcd7822f1e4a2bb46f6",
+      "sha256": "7ec751c047d7098d8582ef28bc9b5f90be43d3cd80c929167c187f28cb738c2e"
+    },
+    {
+      "repository": "https://github.com/whatwg/webidl",
+      "revision": "8f182624f632a0ce485e236edbc1df18ca385b1d",
+      "path": "index.bs",
+      "url": "https://github.com/whatwg/webidl/blob/8f182624f632a0ce485e236edbc1df18ca385b1d/index.bs",
+      "license": "BSD-3-Clause for incorporated source code",
+      "git_blob": "b86a151ef24d5451a3fa21d8f8755d1f35259b33",
+      "sha256": "5a8f271d1191fc189a77afa2b7aab3b91bc73c8e3df00a8c8a105df73eb233af"
+    }
+  ],
+  "selection": {
+    "path": "webgpu-render-runtime.webidl",
+    "sha256": "1751d1a224177ec6f6fdbe08ee600108cab6347bdb7844f63547e7da40148194",
+    "source_ranges": [
+      "webgpu.idl:10-12",
+      "webgpu.idl:142-143",
+      "webgpu.idl:152",
+      "webgpu.idl:171",
+      "webgpu.idl:174-175",
+      "webgpu.idl:186",
+      "webgpu.idl:195-200",
+      "webgpu.idl:202",
+      "webgpu.idl:1060-1061",
+      "webgpu.idl:1069",
+      "webgpu.idl:1077",
+      "webgpu.idl:1082",
+      "webgpu.idl:1140",
+      "webgpu.idl:1146-1147",
+      "webgpu.idl:1153",
+      "webgpu.idl:1155",
+      "webgpu.idl:1186-1187",
+      "webgpu.idl:1190",
+      "webgpu.idl:1192-1197",
+      "webgpu.idl:1209",
+      "webgpu.idl:1338",
+      "webgpu.idl:1341",
+      "webgpu.idl:1350-1356",
+      "index.bs:15086-15090"
+    ]
+  }
+}

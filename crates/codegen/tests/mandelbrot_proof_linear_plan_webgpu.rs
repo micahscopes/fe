@@ -18,8 +18,8 @@ fn repo_root() -> PathBuf {
 
 #[test]
 fn production_sparse_linear_plan_lowers_in_isolation() {
-    let dir = repo_root()
-        .join("crates/codegen/tests/fixtures/mandelbrot_proof_linear_plan_webgpu_ingot");
+    let dir =
+        repo_root().join("crates/codegen/tests/fixtures/mandelbrot_proof_linear_plan_webgpu_ingot");
     let mut db = DriverDataBase::default();
     let url = Url::from_directory_path(&dir)
         .unwrap_or_else(|_| panic!("invalid ingot path {}", dir.display()));

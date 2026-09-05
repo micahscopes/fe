@@ -364,6 +364,29 @@ export function createHostWasmCodecSession({
     }
   }
 
+  function directOption(shape) {
+    return shape.kind === "variant"
+      && shape.value.cases.length === 2
+      && shape.value.cases[0].name === "some"
+      && shape.value.cases[0].payload !== null
+      && shape.value.cases[1].name === "none"
+      && shape.value.cases[1].payload === null;
+  }
+
+  function skipFlat(layout, state) {
+    if (layout.flat.mode !== "direct") {
+      throw new TypeError("an indirect payload cannot occur in a direct variant");
+    }
+    state.index += layout.flat.types.length;
+  }
+
+  function appendFlatZeros(layout, output) {
+    if (layout.flat.mode !== "direct") {
+      throw new TypeError("an indirect payload cannot occur in a direct variant");
+    }
+    for (const type of layout.flat.types) output.push(type === "i64" ? 0n : 0);
+  }
+
   function liftFlat(layout, coreArgs, state, ownership = "value") {
     if (layout.flat.mode === "indirect") {
       throw new TypeError("indirect values are represented by their pointer");
@@ -429,6 +452,20 @@ export function createHostWasmCodecSession({
         const allowed = shape.value.count === 32 ? 0xffffffff : (2 ** shape.value.count) - 1;
         if ((bits & ~allowed) !== 0) throw new TypeError("malformed flags");
         return bits;
+      }
+      case "variant": {
+        if (!directOption(shape)) {
+          throw new TypeError("only Option may use the direct Fe variant ABI");
+        }
+        const tag = Number(coreArgs[state.index++]) >>> 0;
+        if (tag >= shape.value.cases.length) throw new TypeError("malformed variant tag");
+        let payload;
+        shape.value.cases.forEach((case_, index) => {
+          if (!case_.payload) return;
+          if (index === tag) payload = liftFlat(case_.payload, coreArgs, state, ownership);
+          else skipFlat(case_.payload, state);
+        });
+        return tag === 1 ? undefined : payload;
       }
       default:
         throw new TypeError(`${shape.kind} cannot use a direct core signature`);
@@ -506,6 +543,19 @@ export function createHostWasmCodecSession({
           throw new TypeError("malformed flags");
         }
         output.push(value >>> 0);
+        return;
+      }
+      case "variant": {
+        if (!directOption(shape)) {
+          throw new TypeError("only Option may use the direct Fe variant ABI");
+        }
+        const tag = value === undefined ? 1 : 0;
+        output.push(tag);
+        shape.value.cases.forEach((case_, index) => {
+          if (!case_.payload) return;
+          if (index === tag) lowerFlat(case_.payload, value, output, ownership);
+          else appendFlatZeros(case_.payload, output);
+        });
         return;
       }
       default:

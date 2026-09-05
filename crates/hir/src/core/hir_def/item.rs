@@ -771,6 +771,13 @@ pub struct Func<'db> {
 }
 
 impl<'db> Func<'db> {
+    /// Raw generic parameters for structural compiler-discovery contracts.
+    /// Consumers must validate parameter kinds rather than relying on a
+    /// function name or source position.
+    pub fn hir_generic_params(self, db: &'db dyn HirDb) -> GenericParamListId<'db> {
+        self.generic_params(db)
+    }
+
     pub fn modifiers(self, db: &'db dyn HirDb) -> FuncModifiers {
         self.metadata(db).modifiers
     }

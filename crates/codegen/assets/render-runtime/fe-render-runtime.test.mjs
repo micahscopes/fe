@@ -7,9 +7,347 @@ import test from "node:test";
 // constructing a surface or pretending to be a browser.
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
+const { rasterPlan, rasterColorTarget, rasterPrimitive, rasterMultisample } = await import("./fe-render-runtime.js");
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, rasterDrawVertexCount, readGpuBufferSnapshot, requiresGpuPassGraph, unpackCanvasReadback, writeSurfaceEventBatch } =
+const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
+
+test("Fe pass activation selects a memoized subgraph once per policy", () => {
+  const records = [
+    { pass: { source_entry: "background" } },
+    { pass: { source_entry: "analytic", activation: 0 } },
+    { pass: { source_entry: "pullback-a", activation: 1 } },
+    { pass: { source_entry: "pullback-b", activation: 1 } },
+  ];
+  const calls = [0, 0];
+  const kernels = [
+    (mode) => { calls[0] += 1; return mode < 0.5 ? 1 : 0; },
+    (mode) => { calls[1] += 1; return mode >= 0.5 ? 1 : 0; },
+  ];
+  assert.deepEqual(
+    selectActivePassRecords(records, kernels, [0]).map(record => record.pass.source_entry),
+    ["background", "analytic"],
+  );
+  assert.deepEqual(calls, [1, 1]);
+  calls[0] = 0;
+  calls[1] = 0;
+  assert.deepEqual(
+    selectActivePassRecords(records, kernels, [1]).map(record => record.pass.source_entry),
+    ["background", "pullback-a", "pullback-b"],
+  );
+  assert.deepEqual(calls, [1, 1], "one policy shared by two passes is evaluated once");
+});
+
+test("selected pass pipelines are realized lazily and memoized while resident", async () => {
+  const calls = { modules: 0, compute: 0, render: 0 };
+  const device = {
+    createShaderModule() {
+      calls.modules += 1;
+      return { kind: "module" };
+    },
+    async createComputePipelineAsync(descriptor) {
+      calls.compute += 1;
+      assert.equal(descriptor.compute.module.kind, "module");
+      return { kind: "compute" };
+    },
+    async createRenderPipelineAsync() {
+      calls.render += 1;
+      return { kind: "render" };
+    },
+  };
+  const record = {
+    pass: { layout: { mode: "compute" } },
+    pipeline: null,
+    shaderModule: null,
+    shaderSource: "@compute @workgroup_size(1) fn sample() {}",
+    pipelineDescriptor: { compute: { entryPoint: "sample" } },
+  };
+  const first = realizePassPipeline(device, record);
+  const second = realizePassPipeline(device, record);
+  assert.equal(first, second);
+  assert.deepEqual(await Promise.all([first, second]), [record.pipeline, record.pipeline]);
+  assert.deepEqual(calls, { modules: 1, compute: 1, render: 0 });
+});
+
+test("Fe pass preparation groups policies without granting activation", () => {
+  const records = [
+    { pass: { source_entry: "always-lazy" } },
+    { pass: { source_entry: "analytic", preparation: 0 } },
+    { pass: { source_entry: "pullback-a", preparation: 1 } },
+    { pass: { source_entry: "pullback-b", preparation: 1 } },
+  ];
+  const calls = [0, 0];
+  const plan = selectPreparedPassRecords(records, [
+    () => { calls[0] += 1; return PassPreparationMode.Eager; },
+    () => { calls[1] += 1; return PassPreparationMode.VisibleIdle; },
+  ], []);
+  assert.deepEqual(
+    plan.eager.map(record => record.pass.source_entry),
+    ["analytic"],
+  );
+  assert.deepEqual(
+    plan.visibleIdle.map(record => record.pass.source_entry),
+    ["pullback-a", "pullback-b"],
+  );
+  assert.deepEqual(calls, [1, 1]);
+  assert.throws(
+    () => selectPreparedPassRecords(
+      [{ pass: { source_entry: "bad", preparation: 0 } }],
+      [() => 3],
+      [],
+    ),
+    /returned an invalid mode/,
+  );
+});
+
+test("asynchronous pass preparation shares one resident pipeline promise", async () => {
+  const calls = { modules: 0, pipelines: 0 };
+  const device = {
+    createShaderModule() {
+      calls.modules += 1;
+      return { kind: "module" };
+    },
+    async createComputePipelineAsync(descriptor) {
+      calls.pipelines += 1;
+      assert.equal(descriptor.compute.module.kind, "module");
+      await Promise.resolve();
+      return { kind: "prepared-compute" };
+    },
+  };
+  const record = {
+    pass: { layout: { mode: "compute" } },
+    pipeline: null,
+    pipelinePromise: null,
+    shaderModule: null,
+    shaderSource: "@compute @workgroup_size(1) fn sample() {}",
+    pipelineDescriptor: { compute: { entryPoint: "sample" } },
+  };
+  const first = realizePassPipeline(device, record);
+  const second = realizePassPipeline(device, record);
+  assert.equal(first, second);
+  assert.deepEqual(await Promise.all([first, second]), [record.pipeline, record.pipeline]);
+  assert.deepEqual(calls, { modules: 1, pipelines: 1 });
+});
+
+test("WGSL summary aggregates unique pass shaders rather than the primary artifact", () => {
+  assert.deepEqual(
+    wgslPayloadSummary({
+      artifacts: { wgsl: "last.wgsl", wgsl_bytes: 790 },
+      passes: [
+        { shader: "patch.wgsl", shader_bytes: 17549 },
+        { shader: "handle.wgsl", shader_bytes: 2400 },
+        { shader: "last.wgsl", shader_bytes: 790 },
+        { shader: "patch.wgsl", shader_bytes: 17549 },
+      ],
+    }),
+    { bytes: 20739, shaders: 3 },
+  );
+  assert.deepEqual(
+    wgslPayloadSummary({ artifacts: { wgsl: "one.wgsl", wgsl_bytes: 790 } }),
+    { bytes: 790, shaders: 1 },
+  );
+});
+
+installGeneratedWebGpuOperations({
+  renderBlendConstant: (pass, color) => pass.setBlendConstant(color),
+  queueIdle: queue => queue.onSubmittedWorkDone(),
+  bufferCreate: (device, descriptor) => device.createBuffer(descriptor),
+  bufferWrite: (queue, buffer, offset, bytes) =>
+    queue.writeBuffer(buffer, offset, bytes),
+  renderDraw: (pass, vertexCount, instanceCount, firstVertex, firstInstance) =>
+    pass.draw(vertexCount, instanceCount, firstVertex, firstInstance),
+  renderDrawIndirect: (pass, buffer, offset) =>
+    pass.drawIndirect(buffer, offset),
+});
+
+test("Fe primitive plans preserve all native topologies and winding per pass", () => {
+  const raster = { cullMode: "back" };
+  for (const topology of ["point_list", "line_list", "line_strip", "triangle_list", "triangle_strip"]) {
+    for (const front_face of ["ccw", "cw"]) {
+      assert.deepEqual(rasterPrimitive({primitive: {topology, front_face}}, raster), {
+        topology: topology.replaceAll("_", "-"), frontFace: front_face, cullMode: "back",
+      });
+    }
+  }
+  assert.deepEqual(rasterPrimitive({}, raster), { topology: "triangle-list", frontFace: "ccw", cullMode: "back" });
+  assert.throws(() => rasterPrimitive({primitive: {topology: "quads", front_face: "ccw"}}, raster), /invalid Fe primitive/);
+  assert.throws(() => rasterPrimitive({primitive: null}, raster), /invalid Fe primitive/);
+  assert.throws(() => rasterPrimitive({primitive: {topology: "line_list", front_face: "unknown"}}, raster), /invalid Fe primitive/);
+});
+
+test("Fe color targets preserve blend components, write masks, and constants", () => {
+  assert.equal(requiresGpuPassGraph([{layout: {mode: "render"}}], [], {sample_count: 4}), true,
+    "a fullscreen-only shader still requires its authored raster policy");
+  const component = (src, dst, operation = "add") => ({ operation, src_factor: src, dst_factor: dst });
+  const policy = {
+    sample_count: 4, cull_mode: "none", depth: null,
+    color: {
+      clear: { r: 0, g: 0, b: 0, a: 1 },
+      ops: { first_load: "clear", following_load: "load", store: "store" },
+      write_mask: 7, blend_constant: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 },
+      blend: { color: component("src_alpha", "one_minus_src_alpha"), alpha: component("one", "one_minus_src_alpha") },
+    },
+  };
+  const plan = () => rasterPlan({ pipeline: { raster: policy } });
+  assert.deepEqual(rasterPlan(null, policy), plan(), "render policy must not depend on a UI view");
+  assert.deepEqual(rasterColorTarget("bgra8unorm", plan()), {
+    format: "bgra8unorm", writeMask: 7,
+    blend: {
+      color: { operation: "add", srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" },
+      alpha: { operation: "add", srcFactor: "one", dstFactor: "one-minus-src-alpha" },
+    },
+  });
+  assert.deepEqual(plan().color.blendConstant, policy.color.blend_constant);
+  // Every portable factor travels independently in either component. Do not
+  // accidentally make the presets the only representable native blend states.
+  const factors = ["zero", "one", "src", "one_minus_src", "src_alpha", "one_minus_src_alpha",
+    "dst", "one_minus_dst", "dst_alpha", "one_minus_dst_alpha", "src_alpha_saturated",
+    "constant", "one_minus_constant"];
+  for (const operation of ["add", "subtract", "reverse_subtract"]) {
+    for (const src of factors) for (const dst of factors) {
+      policy.color.blend.color = component(src, dst, operation);
+      assert.deepEqual(plan().color.blend.color, {
+        operation: operation.replaceAll("_", "-"),
+        srcFactor: src.replaceAll("_", "-"), dstFactor: dst.replaceAll("_", "-"),
+      });
+    }
+  }
+  for (const operation of ["min", "max"]) {
+    policy.color.blend.color = component("one", "one", operation);
+    assert.equal(plan().color.blend.color.operation, operation);
+  }
+  for (const [operation, src, dst] of [["max", "src_alpha", "one"], ["multiply", "one", "one"], ["add", "src1", "one"]]) {
+    policy.color.blend.color = component(src, dst, operation);
+    assert.throws(plan, /invalid derived blend component/);
+  }
+  policy.color.blend = null;
+  assert.deepEqual(rasterColorTarget("bgra8unorm", plan()), { format: "bgra8unorm", writeMask: 7 });
+  policy.color.write_mask = 16;
+  assert.throws(plan, /invalid derived color write mask/);
+  policy.color.write_mask = 0;
+  assert.equal(plan().color.writeMask, 0);
+  policy.color.blend_constant.a = NaN;
+  assert.throws(plan, /invalid derived color write mask or blend constant/);
+});
+
+test("Fe multisampling and all core depth comparisons reach native descriptors", () => {
+  const ops = { first_load: "clear", following_load: "load", store: "store" };
+  const policy = {
+    sample_count: 4, sample_mask: 5, alpha_to_coverage: true, cull_mode: "none",
+    color: { clear: {r: 0, g: 0, b: 0, a: 1}, ops },
+    depth: {format: "depth24_plus", compare: "equal", write_enabled: false, clear: 1, ops},
+  };
+  const plan = () => rasterPlan(null, policy);
+  assert.deepEqual(rasterMultisample(plan()), {count: 4, mask: 5, alphaToCoverageEnabled: true});
+  for (const compare of ["never", "less", "equal", "less_equal", "greater", "not_equal", "greater_equal", "always"]) {
+    policy.depth.compare = compare;
+    assert.equal(plan().depth.compare, compare.replaceAll("_", "-"));
+  }
+  for (const mask of [0, 1, 5, 15, 0x80000000, 0xffffffff]) {
+    policy.sample_mask = mask;
+    assert.equal(rasterMultisample(plan()).mask, mask);
+  }
+  for (const mask of [-1, 0x100000000, 1.5, NaN, null, "15"]) {
+    policy.sample_mask = mask;
+    assert.throws(plan, /invalid derived multisample/);
+  }
+  delete policy.sample_mask;
+  assert.equal(plan().sampleMask, 0xffffffff, "old bundles preserve all samples");
+  policy.sample_count = 1;
+  assert.throws(plan, /invalid derived multisample/);
+  for (const enabled of [1, "true", null]) {
+    policy.alpha_to_coverage = enabled;
+    assert.throws(plan, /invalid derived multisample/);
+  }
+  delete policy.alpha_to_coverage;
+  assert.deepEqual(rasterMultisample(plan()), {count: 1, mask: 0xffffffff, alphaToCoverageEnabled: false});
+});
+
+test("compiler-derived resource usage maps exactly and legacy manifests stay compatible", () => {
+  const constants = { STORAGE: 0x80, COPY_SRC: 0x04, COPY_DST: 0x08 };
+  assert.equal(resourceBufferUsage({ buffer_usage: ["storage"] }, constants), 0x80);
+  assert.equal(
+    resourceBufferUsage({ buffer_usage: ["storage", "copy_dst"] }, constants),
+    0x88,
+  );
+  assert.equal(
+    resourceBufferUsage({ buffer_usage: ["storage", "copy_src"] }, constants),
+    0x84,
+  );
+  assert.equal(resourceBufferUsage({}, constants, 7), 0x8c);
+  assert.throws(
+    () => resourceBufferUsage({}, constants, 8),
+    /v8 resource is missing compiler-derived buffer_usage/,
+  );
+  assert.throws(
+    () => resourceBufferUsage({ buffer_usage: ["storage", "storage"] }, constants),
+    /duplicate resource buffer usage/,
+  );
+  assert.throws(
+    () => resourceBufferUsage({ buffer_usage: ["storage", "map_read"] }, constants),
+    /unsupported resource buffer usage/,
+  );
+});
+
+test("compiler-derived pass stages map exactly and v8 omissions fail closed", () => {
+  const constants = { COMPUTE: 0x04, VERTEX: 0x01, FRAGMENT: 0x02 };
+  assert.equal(
+    passShaderVisibility({ shader_stages: ["compute"] }, constants, 8),
+    0x04,
+  );
+  assert.equal(
+    passShaderVisibility({ shader_stages: ["vertex", "fragment"] }, constants, 8),
+    0x03,
+  );
+  assert.equal(
+    passShaderVisibility({ layout: { mode: "render" }, draw_vertices: 3 }, constants, 7),
+    0x03,
+  );
+  assert.throws(
+    () => passShaderVisibility({ layout: { mode: "render" } }, constants, 8),
+    /v8 pass is missing compiler-derived shader_stages/,
+  );
+});
+
+test("compiler-derived binding stages stay narrow and v10 omissions fail closed", () => {
+  const constants = { COMPUTE: 0x04, VERTEX: 0x01, FRAGMENT: 0x02 };
+  const pass = { shader_stages: ["vertex", "fragment"] };
+  assert.equal(
+    bindingShaderVisibility({ shader_stages: ["vertex"] }, pass, constants, 10),
+    0x01,
+  );
+  assert.equal(
+    bindingShaderVisibility({ shader_stages: ["fragment"] }, pass, constants, 10),
+    0x02,
+  );
+  assert.equal(
+    bindingShaderVisibility(
+      { shader_stages: ["vertex", "fragment"] },
+      pass,
+      constants,
+      10,
+    ),
+    0x03,
+  );
+  assert.equal(
+    bindingShaderVisibility({}, pass, constants, 9),
+    0x03,
+    "v9 manifests retain pass-wide binding visibility",
+  );
+  assert.throws(
+    () => bindingShaderVisibility({}, pass, constants, 10),
+    /v10 binding is missing compiler-derived shader_stages/,
+  );
+  assert.throws(
+    () => bindingShaderVisibility(
+      { shader_stages: ["compute"] },
+      pass,
+      constants,
+      10,
+    ),
+    /outside its pass stage set/,
+  );
+});
 
 test("immutable resource artifacts are authenticated on every realization", async () => {
   const expected = new TextEncoder().encode("0123456789abcde\n");
@@ -339,6 +677,61 @@ test("legacy CPU backing ceiling preserves aspect instead of cropping work", () 
   assert.deepEqual(fitBackingExtent(512, 256), { width: 512, height: 256 });
 });
 
+test("protocol v9 realizes explicit Fe param plans without inferring from kind", () => {
+  const param = {
+    kind: "deliberately_misleading",
+    visible: true,
+    source: "surface_width",
+    presentation: { widget: "range", scale: "logarithmic", readout: "integer", options: [] },
+  };
+  assert.deepEqual(surfaceParamPlan(param, 9), {
+    source: "surface_width",
+    widget: "range",
+    scale: "logarithmic",
+    readout: "integer",
+    options: [],
+  });
+  assert.throws(
+    () => surfaceParamPlan({ kind: "range", visible: true }, 9),
+    /missing a supported Fe presentation plan/,
+  );
+  assert.deepEqual(
+    surfaceParamPlan({ kind: "extent_y", visible: false }, 8),
+    { source: "surface_height", widget: "hidden", scale: "linear", readout: "scalar" },
+    "the kind-derived path is isolated to legacy protocols",
+  );
+});
+
+test("protocol v9 preserves Fe-authored names for scalar select ordinals", () => {
+  const plan = surfaceParamPlan({
+    kind: "int",
+    visible: true,
+    source: "initial",
+    min: 0,
+    max: 3,
+    presentation: {
+      widget: "select",
+      scale: "linear",
+      readout: "integer",
+      options: ["regular grid", "atlas charts", "eight-chart fan", "pullback blue noise"],
+    },
+  }, 9);
+  assert.deepEqual(plan.options, [
+    "regular grid", "atlas charts", "eight-chart fan", "pullback blue noise",
+  ]);
+  assert.throws(
+    () => surfaceParamPlan({
+      kind: "int",
+      visible: true,
+      source: "initial",
+      min: 0,
+      max: 2,
+      presentation: { widget: "select", scale: "linear", readout: "integer", options: ["a", "b"] },
+    }, 9),
+    /options disagree with Fe ordinal bounds/,
+  );
+});
+
 test("fixed host supplies raw capability facts and realizes Fe backing extent exactly", () => {
   const oldDpr = globalThis.devicePixelRatio;
   const oldMatchMedia = globalThis.matchMedia;
@@ -408,15 +801,25 @@ test("live resize re-runs the Fe policy against current GPU facts and realizes i
   surface._backingWidth = 400;
   surface._backingHeight = 200;
   surface._uniforms = [400, 200, 9];
+  surface._manifest = { protocol_version: 9 };
   surface._members = [
     { name: "width" },
     { name: "height" },
     { name: "scene" },
   ];
   surface._surface = { params: [
-    { name: "width", kind: "extent_x" },
-    { name: "height", kind: "extent_y" },
-    { name: "scene", kind: "drag_x" },
+    {
+      name: "width", kind: "misleading", visible: false, source: "surface_width",
+      presentation: { widget: "hidden", scale: "linear", readout: "scalar" },
+    },
+    {
+      name: "height", kind: "misleading", visible: false, source: "surface_height",
+      presentation: { widget: "hidden", scale: "linear", readout: "scalar" },
+    },
+    {
+      name: "scene", kind: "misleading", visible: false, source: "initial",
+      presentation: { widget: "hidden", scale: "linear", readout: "scalar" },
+    },
   ] };
   surface._adoptedCanvas = null;
   surface._liveCanvas = { width: 400, height: 200 };
@@ -634,6 +1037,90 @@ test("poster-only surfaces destroy all retained GPU buffers exactly once", () =>
   surface._gpu = { uniformBuffer: { destroy: () => trace.push("uniform") } };
   surface._releaseGpuResources();
   assert.deepEqual(trace, ["shared", "output", "uniform"]);
+
+  const resource = { destroy: () => trace.push("owned-resource") };
+  const passInput = { destroy: () => trace.push("owned-input") };
+  const passOutput = { destroy: () => trace.push("owned-output") };
+  surface._gpu = {
+    resourceBuffers: new Map([["resource", resource]]),
+    ownedBuffers: new Set([resource, passInput, passOutput]),
+  };
+  surface._releaseGpuResources();
+  assert.deepEqual(trace, [
+    "shared",
+    "output",
+    "uniform",
+    "owned-resource",
+    "owned-input",
+    "owned-output",
+  ]);
+});
+
+test("failed lazy pipeline realization releases resources and pass-local buffers", async () => {
+  const oldBufferUsage = globalThis.GPUBufferUsage;
+  const oldShaderStage = globalThis.GPUShaderStage;
+  try {
+    globalThis.GPUBufferUsage = { STORAGE: 0x80, COPY_SRC: 0x04, COPY_DST: 0x08 };
+    globalThis.GPUShaderStage = { COMPUTE: 0x04, VERTEX: 0x01, FRAGMENT: 0x02 };
+    const descriptors = [];
+    const destroyed = [];
+    const device = {
+      createBuffer(descriptor) {
+        const index = descriptors.length;
+        descriptors.push(descriptor);
+        return { destroy() { destroyed.push(index); } };
+      },
+      createShaderModule() { return {}; },
+      createBindGroupLayout() { return {}; },
+      createBindGroup() { return {}; },
+      createPipelineLayout() { return {}; },
+      async createComputePipelineAsync() { throw new Error("deliberate pipeline failure"); },
+      queue: { writeBuffer() {} },
+    };
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._layout = { color_target_format: "rgba8unorm" };
+    surface._surface = null;
+    surface._manifest = { protocol_version: 8 };
+    surface._manifestUrl = new URL("https://example.test/manifest.json");
+    surface._passShaderUrls = [new URL("data:text/plain,@compute @workgroup_size(1) fn main() {}")];
+    surface._resources = [{
+      group: 0,
+      binding: 0,
+      name: "state",
+      stride: 4,
+      length: 1,
+      buffer_usage: ["storage"],
+    }];
+    surface._passes = [{
+      shader_stages: ["compute"],
+      layout: {
+        mode: "compute",
+        entry_point: "main",
+        bindings: [
+          { group: 0, binding: 0, name: "state", role: "resource", access: "read_write" },
+          { group: 0, binding: 1, name: "input", role: "input", access: "read", span: 4 },
+          { group: 0, binding: 2, name: "output", role: "output", access: "read_write", span: 4 },
+        ],
+      },
+    }];
+
+    const graph = await surface._buildPassGraph(device, 1);
+    await assert.rejects(
+      realizePassPipeline(device, graph.passRecords[0]),
+      /deliberate pipeline failure/,
+    );
+    surface._gpu = graph;
+    surface._releaseGpuResources();
+    assert.deepEqual(
+      descriptors.map(descriptor => descriptor.usage),
+      [0x80, 0x88, 0x80],
+      "resource, host input, and GPU-only output receive only required usage bits",
+    );
+    assert.deepEqual(destroyed, [0, 1, 2]);
+  } finally {
+    globalThis.GPUBufferUsage = oldBufferUsage;
+    globalThis.GPUShaderStage = oldShaderStage;
+  }
 });
 
 test("mobile pointer capture is single-owner and restores native touch scrolling", () => {
@@ -760,12 +1247,29 @@ test("Fe-selected surface pointer motion delivers hover without weakening captur
   );
 });
 
-test("fixed host consumes the Fe-derived authored-raster draw count", () => {
-  assert.equal(rasterDrawVertexCount({ draw_vertices: 7 }), 7);
-  assert.equal(rasterDrawVertexCount({}), 3, "legacy fullscreen render remains three vertices");
+test("fixed host consumes the Fe-derived authored-raster draw shape", () => {
+  assert.deepEqual(rasterDrawShape({ draw_vertices: 7, draw_instances: 11 }), {
+    vertices: 7,
+    instances: 11,
+  });
+  assert.deepEqual(
+    rasterDrawShape({}),
+    { vertices: 3, instances: 1 },
+    "legacy fullscreen render remains one three-vertex instance",
+  );
   assert.throws(
-    () => rasterDrawVertexCount({ draw_vertices: 0 }),
+    () => rasterDrawShape({ draw_vertices: -1 }),
     /invalid compiler-derived raster vertex count/,
+  );
+  assert.deepEqual(rasterDrawShape({draw_vertices: 0, draw_instances: 0}), {vertices: 0, instances: 0});
+  assert.throws(() => rasterDrawShape({draw_vertices: 0x100000000}), /invalid compiler-derived raster vertex count/);
+  assert.throws(
+    () => rasterDrawShape({ draw_vertices: 3, draw_instances: -1 }),
+    /invalid compiler-derived raster instance count/,
+  );
+  assert.throws(
+    () => rasterDrawShape({ draw_instances: 2 }),
+    /instances require an authored raster draw/,
   );
 });
 
@@ -781,7 +1285,7 @@ test("one authored raster pass takes the GPU pass-graph path", () => {
   );
 });
 
-test("pass graphs fetch and realize pipelines sequentially through async WebGPU", async () => {
+test("selected pass graphs fetch and realize pipelines sequentially through async WebGPU", async () => {
   globalThis.GPUShaderStage = { COMPUTE: 1, VERTEX: 2, FRAGMENT: 4 };
   const previousFetch = globalThis.fetch;
   const trace = [];
@@ -831,6 +1335,7 @@ test("pass graphs fetch and realize pipelines sequentially through async WebGPU"
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._layout = { color_target_format: "rgba8unorm" };
   surface._manifestUrl = new URL("https://example.test/proof/manifest.json");
+  surface._manifest = { protocol_version: 7 };
   surface._passShaderUrls = [
     new URL("https://example.test/proof/first.wgsl"),
     new URL("https://example.test/proof/second.wgsl"),
@@ -858,6 +1363,10 @@ test("pass graphs fetch and realize pipelines sequentially through async WebGPU"
   try {
     const graph = await surface._buildPassGraph(device, 7);
     assert.equal(graph.generation, 7);
+    assert.deepEqual(trace, [], "layout construction must not fetch inactive pass shaders");
+    for (const record of graph.passRecords) {
+      await realizePassPipeline(device, record);
+    }
     assert.deepEqual(graph.passRecords.map(record => record.pipeline.kind), [
       "compute",
       "render",
@@ -887,7 +1396,7 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
       return {
         setPipeline() {},
         setBindGroup() {},
-        draw(count) { draws.push(count); },
+        draw(vertices, instances) { draws.push([vertices, instances]); },
         end() {},
       };
     },
@@ -906,6 +1415,17 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
   surface._graph = true;
   surface._gpu = {
     device,
+    raster: {
+      sampleCount: 1,
+      cullMode: "none",
+      color: {
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        firstLoad: "clear",
+        followingLoad: "load",
+        store: "store",
+      },
+      depth: null,
+    },
     passRecords: [
       { pass: { layout: { mode: "render" } }, pipeline: {}, bindGroup: null, inputs: [] },
       { pass: { layout: { mode: "render" }, draw_vertices: 54 }, pipeline: {}, bindGroup: null, inputs: [] },
@@ -914,7 +1434,7 @@ test("ordered render passes clear once and preserve earlier Fe-authored color", 
 
   await surface._presentOn(context, []);
   assert.deepEqual(loadOps, ["clear", "load"]);
-  assert.deepEqual(draws, [3, 54]);
+  assert.deepEqual(draws, [[3, 1], [54, 1]]);
 });
 
 test("typed actor readback follows all Fe GPU passes in the same submission", async () => {
@@ -1366,7 +1886,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
 
   assert.equal(transitionCalls, 1);
   assert.equal(renders, 1);
-  assert.deepEqual(allocations, [[156, 4]]);
+  assert.deepEqual(allocations, [[208, 4]]);
   assert.deepEqual(transportedEvents, [
     {
       mx: 100, my: 110, dx: 3, dy: -2, wheelDelta: 0,
@@ -1382,6 +1902,11 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
       mx: 109, my: 117, dx: 5, dy: -1, wheelDelta: -40,
       wheelMode: 1, buttons: 0, timestamp: 3, width: 512, height: 256,
       eventKind: SurfaceEventKind.Gesture, paramIndex: 0, paramValue: 0,
+    },
+    {
+      mx: 0, my: 0, dx: 0, dy: 0, wheelDelta: 0,
+      wheelMode: 0, buttons: 0, timestamp: 10, width: 512, height: 256,
+      eventKind: SurfaceEventKind.AnimationFrame, paramIndex: 0, paramValue: 0,
     },
   ]);
   assert.deepEqual(surface._uniforms, [42]);
@@ -1406,7 +1931,7 @@ test("a burst crosses into the Fe transition once at the presentation boundary",
   await surface._flushGestureFrame(20);
   assert.equal(transitionCalls, 2);
   assert.equal(renders, 2);
-  assert.deepEqual(allocations, [[156, 4], [52, 4]]);
+  assert.deepEqual(allocations, [[208, 4], [104, 4]]);
   assert.deepEqual(surface._uniforms, [43]);
   assert.deepEqual(stateReplacementCalls, [[41]]);
   assert.deepEqual(transitionArgCounts, [2, 2]);
@@ -1611,7 +2136,11 @@ test("gesture and parameter edits stay in one ordered raw batch until Fe admits 
   assert.equal(transported.length, 1);
   assert.deepEqual(
     transported[0].map(event => event.eventKind),
-    [SurfaceEventKind.Gesture, SurfaceEventKind.ParamEdit],
+    [
+      SurfaceEventKind.Gesture,
+      SurfaceEventKind.ParamEdit,
+      SurfaceEventKind.AnimationFrame,
+    ],
   );
 });
 

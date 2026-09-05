@@ -47,51 +47,10 @@ pub enum GpuResource {
     /// Storage-written bytes returned through one compiler-derived typed
     /// message transition after GPU completion.
     Readback,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceKind {
-    Storage,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceAccess {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceResidency {
-    Immutable,
-    ActorResident,
-    FrameTransient,
-    Imported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceInit {
-    Zeroed,
-    ContentAddressed,
-    Derived,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceRecovery {
-    ReplayRecipe,
-    RestoreCheckpoint,
-    Regenerate,
-    NonRecoverable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuResourceVisibility {
-    Compute,
-    Vertex,
-    Fragment,
-    ComputeFragment,
-    VertexFragment,
-    All,
+    /// Storage-written arguments consumed directly by a GPU draw command.
+    /// The resource remains ordinary shader storage for authored compute
+    /// stages while its physical buffer also carries WebGPU INDIRECT usage.
+    Indirect,
 }
 
 /// GPU operation implemented directly by the compiler backend.
@@ -99,6 +58,10 @@ pub enum GpuResourceVisibility {
 pub enum GpuIntrinsic {
     StorageLoad,
     StorageStore,
+    StorageAtomicAdd,
+    StorageAtomicMin,
+    StorageAtomicLoad,
+    StorageAtomicStore,
 }
 
 /// Fixed-runtime control role carried by a nominal actor behavior type.
@@ -109,6 +72,16 @@ pub enum GpuControl {
     SurfaceSchedule,
     SurfaceQuality,
     SurfaceRecovery,
+    /// A pure Fe policy that decides whether one compiled GPU pass belongs to
+    /// the current presentation subgraph. The host observes only an opaque
+    /// policy ordinal and a fixed Wasm predicate export.
+    PassActivation,
+    /// A pure Fe policy that selects when a compiled GPU pass should be made
+    /// resident ahead of demand. The host observes only an opaque policy
+    /// ordinal and a fixed Wasm decision export.
+    PassPreparation,
+    /// Compile-time Fe behavior returning the actor's raster plan.
+    RasterPipeline,
     /// Opt a surface into uncaptured primary-pointer motion in addition to
     /// the default captured-drag lifecycle.
     SurfacePointerMotion,
@@ -138,7 +111,13 @@ pub enum GpuDispatch {
 /// Primitive topology carried by a nominal authored-raster draw type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuDraw {
+    Direct,
+    Indirect,
     TriangleList,
+    Instanced,
+    /// A non-indexed triangle-list draw whose four WebGPU arguments are read
+    /// from one exact nominal actor resource selected by the policy type.
+    IndirectTriangleList,
 }
 
 /// A target-neutral description of an aggregate result returned indirectly by
@@ -562,69 +541,7 @@ impl<'db> AttrListId<'db> {
             "storage" => Some(GpuResource::Storage),
             "storage_family" => Some(GpuResource::StorageFamily),
             "readback" => Some(GpuResource::Readback),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_kind(self, db: &'db dyn HirDb) -> Option<GpuResourceKind> {
-        match self.single_ident_arg(db, "gpu_resource_kind")?.as_str() {
-            "storage" => Some(GpuResourceKind::Storage),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_access(self, db: &'db dyn HirDb) -> Option<GpuResourceAccess> {
-        match self.single_ident_arg(db, "gpu_resource_access")?.as_str() {
-            "read_only" => Some(GpuResourceAccess::ReadOnly),
-            "write_only" => Some(GpuResourceAccess::WriteOnly),
-            "read_write" => Some(GpuResourceAccess::ReadWrite),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_residency(self, db: &'db dyn HirDb) -> Option<GpuResourceResidency> {
-        match self
-            .single_ident_arg(db, "gpu_resource_residency")?
-            .as_str()
-        {
-            "immutable" => Some(GpuResourceResidency::Immutable),
-            "actor_resident" => Some(GpuResourceResidency::ActorResident),
-            "frame_transient" => Some(GpuResourceResidency::FrameTransient),
-            "imported" => Some(GpuResourceResidency::Imported),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_init(self, db: &'db dyn HirDb) -> Option<GpuResourceInit> {
-        match self.single_ident_arg(db, "gpu_resource_init")?.as_str() {
-            "zeroed" => Some(GpuResourceInit::Zeroed),
-            "content_addressed" => Some(GpuResourceInit::ContentAddressed),
-            "derived" => Some(GpuResourceInit::Derived),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_recovery(self, db: &'db dyn HirDb) -> Option<GpuResourceRecovery> {
-        match self.single_ident_arg(db, "gpu_resource_recovery")?.as_str() {
-            "replay_recipe" => Some(GpuResourceRecovery::ReplayRecipe),
-            "restore_checkpoint" => Some(GpuResourceRecovery::RestoreCheckpoint),
-            "regenerate" => Some(GpuResourceRecovery::Regenerate),
-            "nonrecoverable" => Some(GpuResourceRecovery::NonRecoverable),
-            _ => None,
-        }
-    }
-
-    pub fn gpu_resource_visibility(self, db: &'db dyn HirDb) -> Option<GpuResourceVisibility> {
-        match self
-            .single_ident_arg(db, "gpu_resource_visibility")?
-            .as_str()
-        {
-            "compute" => Some(GpuResourceVisibility::Compute),
-            "vertex" => Some(GpuResourceVisibility::Vertex),
-            "fragment" => Some(GpuResourceVisibility::Fragment),
-            "compute_fragment" => Some(GpuResourceVisibility::ComputeFragment),
-            "vertex_fragment" => Some(GpuResourceVisibility::VertexFragment),
-            "all" => Some(GpuResourceVisibility::All),
+            "indirect" => Some(GpuResource::Indirect),
             _ => None,
         }
     }
@@ -633,6 +550,10 @@ impl<'db> AttrListId<'db> {
         match self.single_ident_arg(db, "gpu_intrinsic")?.as_str() {
             "storage_load" => Some(GpuIntrinsic::StorageLoad),
             "storage_store" => Some(GpuIntrinsic::StorageStore),
+            "storage_atomic_add" => Some(GpuIntrinsic::StorageAtomicAdd),
+            "storage_atomic_min" => Some(GpuIntrinsic::StorageAtomicMin),
+            "storage_atomic_load" => Some(GpuIntrinsic::StorageAtomicLoad),
+            "storage_atomic_store" => Some(GpuIntrinsic::StorageAtomicStore),
             _ => None,
         }
     }
@@ -644,6 +565,9 @@ impl<'db> AttrListId<'db> {
             "surface_schedule" => Some(GpuControl::SurfaceSchedule),
             "surface_quality" => Some(GpuControl::SurfaceQuality),
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
+            "pass_activation" => Some(GpuControl::PassActivation),
+            "pass_preparation" => Some(GpuControl::PassPreparation),
+            "raster_pipeline" => Some(GpuControl::RasterPipeline),
             "surface_pointer_motion" => Some(GpuControl::SurfacePointerMotion),
             "readback" => Some(GpuControl::Readback),
             _ => None,
@@ -700,7 +624,11 @@ impl<'db> AttrListId<'db> {
 
     pub fn gpu_draw(self, db: &'db dyn HirDb) -> Option<GpuDraw> {
         match self.single_ident_arg(db, "gpu_draw")?.as_str() {
+            "direct" => Some(GpuDraw::Direct),
+            "indirect" => Some(GpuDraw::Indirect),
             "triangle_list" => Some(GpuDraw::TriangleList),
+            "instanced" => Some(GpuDraw::Instanced),
+            "indirect_triangle_list" => Some(GpuDraw::IndirectTriangleList),
             _ => None,
         }
     }
@@ -767,6 +695,30 @@ impl<'db> AttrListId<'db> {
 
     pub fn is_web_surface_recovery_step(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_surface_recovery_step")
+    }
+
+    /// Marks the nominal Fe enum returned by a pass-preparation policy.
+    pub fn is_web_pass_preparation_mode(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_pass_preparation_mode")
+    }
+
+    /// Marks the Fe record returned by a raster-configuration behavior. The
+    /// record's enum vocabulary is authored in Fe; the compiler only projects
+    /// its evaluated physical value into a render bundle.
+    pub fn is_web_raster_plan(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_raster_plan")
+    }
+
+    /// Marks the Fe record returned by the generic GPU-resource policy
+    /// evaluator. Resource vocabulary and composition remain authored in Fe;
+    /// compiler consumers only project the resulting concrete value.
+    pub fn is_web_resource_plan(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_resource_plan")
+    }
+
+    /// Fe-owned primitive assembly and winding plan, evaluated per draw.
+    pub fn is_web_primitive_plan(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_primitive_plan")
     }
 
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {

@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    resolve_web_entry, WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode,
+    WebBindingAccess, WebBindingRole, WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry,
 };
 use hir::hir_def::HirIngot;
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
+use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use url::Url;
