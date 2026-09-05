@@ -67,6 +67,17 @@ These Sonatina changes are not yet in Fe's published dependency pin and have
 not been pushed here. Signed operations, Naga support, and Fe's checked trap
 wiring remain open; the checked-i32 Fe regression is still red.
 
+The next local Sonatina slice implements `Saddo`, `Ssubo`, `Smulo`, and `Usubo`
+with common result transport. Signed narrow values are extended from their
+semantic width before checking wider exact results; signed i64 multiplication
+checks unsigned magnitudes without trapping on MIN / -1 or zero. The combined
+oracle now checks 8,310 cases for all six overflow operations at five widths,
+using independent i128/u128 arithmetic. All 31 Wasm-backend tests passed in
+0.06s: `/workspace/scratch/mb2-sonatina-all-overflow-wasm-release.log`.
+This closes the Wasm instruction slice, not Cranelift/Naga or Fe integration.
+The frontend still drops checked arithmetic flags and its regression remains
+red. The local backend changes have not been pushed or pinned by Fe.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
