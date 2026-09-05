@@ -21,6 +21,26 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Residual-call result ownership now belongs to the preconstruction body storage
+plan: `ea871358d` on mb2 (`6d00c2cc5` in the cleanup worktree). The plan keeps
+callee-allocated result storage distinct from argument materialization and
+derives temporary lifetime from both. Call emission consumes that result fact
+instead of querying indirect-return classification again. This also records
+arena use for a returned object when no argument requires allocation.
+
+The isolated storage increment passed 26 focused release tests against Fe's
+unchanged published Sonatina pin `54c6c633`: one plan matrix (0.01s), three
+Shader IR/validation tests (9.32s), seventeen typed-allocation execution and
+rejection tests (25.40s), and five canonical-arena tests (7.76s). Build: 3m22s.
+Logs: `/workspace/scratch/mb2-call-result-storage-isolated-{build,plan,shader,typed,arena}.log`.
+The first mixed-worktree attempt failed because pending arithmetic emission
+requires the newer local backend: the published Naga translator rejected
+`uaddo`, and Wasm reported i64/i32 mismatches. The arithmetic patch was isolated
+out for the successful gates and restored afterward, not included in this
+commit. Complete synthesized-allocation planning and deletion of post-hoc
+empty-frame cleanup remain open. No capstone or Chrome performance claim
+follows from these focused tests.
+
 Generic numeric identity consolidation landed as `2ac48d96a` (cleanup
 `dd3c45e15`). HIR now owns the twelve existing checked-arithmetic,
 saturating-arithmetic, bitcast, and integer-truncation declaration spellings,
