@@ -113,6 +113,25 @@ this patch does not bypass that capability boundary. Chrome hardware execution,
 Fe checked trap wiring, and outlined overflow-helper integration remain open.
 The new Sonatina commit is local, not pushed or pinned by Fe.
 
+Fe checked add/sub/mul wiring is now implemented but uncommitted in the cleanup
+worktree. It emits Sonatina's signed/unsigned two-result operations at the
+scalar's semantic width and branches to the existing trap block on overflow.
+This deletes the usize-only helper and its widening multiply. Checked unsigned
+division/remainder also receive an explicit zero-divisor guard instead of
+depending on Wasm-specific trapping behavior. Against local Sonatina `e9232245`,
+the original checked-i32 regression passes (2.30s), the source-level signed and
+unsigned 8/16/32/64-bit matrix passes all 80 cases (16.33s), and the existing
+usize array-index overflow regression passes (1.85s). Logs:
+`/workspace/scratch/mb2-fe-checked-integration-release.log`,
+`/workspace/scratch/mb2-fe-checked-widths-release.log`, and
+`/workspace/scratch/mb2-fe-checked-usize-regression-release.log`.
+The first gate rebuilt the patched dependencies and Fe in release (6m10s).
+The local Cargo override's six lockfile source removals were restored after
+testing. Fe's published dependency remains unchanged, so this is candidate
+integration evidence, not a landed frontend repair. Signed division/remainder,
+power, saturation, complete intrinsic gating, and shader/native integration
+gates remain unfinished. No new full-prover or Chrome claim follows.
+
 The scalar-suffixed arithmetic/comparison and resource vocabularies remain
 unfinished; this is not the complete intrinsic capability system.
 
