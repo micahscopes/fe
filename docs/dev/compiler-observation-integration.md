@@ -134,6 +134,41 @@ time. The candidate used the explicit local Sonatina overlay against 931b141c.
 It is not a fresh-checkout or browser-execution gate, and the Fe candidate must
 not be described as a landed production optimization yet.
 
+### Complete argument/result transport checkpoint (2026-09-05)
+
+Extending the same planned representation to eligible private arguments closes
+the remaining expansion: all 19 production stages pass the unchanged validation
+and size gate. Backend WGSL totals 2,706,004 bytes (baseline 12,936,420), with the
+largest stage at 235,398 bytes. linear_ports is 153,718 bytes and its
+sparse_linear_copy_plan helper is 24,628 bytes. control_relation is 178,401 bytes;
+absorb_sparse_control_link is 27,394 bytes. The full instrumented test takes
+172.99 seconds. These are emitted-code and compilation measurements, not GPU
+execution or proof-generation timings.
+
+The argument plan is recorded at private signature declaration and consumed by
+parameter binding and call preparation. Resource-bearing products, explicit
+typed borrows, addressable parameter slots, external interfaces and Wasm keep
+their existing distinct transport. Existing aggregate child values are reused
+directly rather than recursively projected and reconstructed.
+
+The five focused Fe shader/lowerer tests pass. The broader lowerer module run is
+25/26: authored_mvt5_specialization_measures_smaller_nested_residual expects
+(102, 6) but observes (8, 8). Saved older binary fe_codegen-fe6d5edd75ca8533 fails
+identically before this argument/result transport work. Do not silently update
+that structural-count expectation or describe the broader module suite as green.
+
+Capture: /workspace/scratch/mb2-bloat-native-arguments-20260905/.
+Census: /workspace/scratch/mb2-native-arguments-census-20260905.jsonl.
+Logs: /workspace/scratch/mb2-native-abi-lowerer-regressions-20260905.log and
+/workspace/scratch/mb2-mvt5-prior-binary-20260905.log.
+
+The Fe checkpoint pins Sonatina 5d2d82be7449729b066768dac81974cf78280510. Validation
+used the explicit local dependency override; publication and a fresh-checkout
+gate remain pending. Publish Sonatina before publishing the Fe dependency pin.
+Concurrent Quilting changes in Sonatina's working tree are not included in that
+pin. Browser execution and independent proof-oracle validation remain required
+before claiming a production prover improvement.
+
 Full capture provenance and a reproducible literal-text census are recorded in
 /workspace/scratch/mb2-bloat-diagnosis-20260905.md. The exact composition artifacts
 are under /workspace/scratch/mb2-bloat-composition-20260905. They are suitable for

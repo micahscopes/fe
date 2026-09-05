@@ -76,7 +76,7 @@ use sonatina_ir::{
         cmp::{Eq as CmpEq, Feq, Fle, Flt, IsZero, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{
-            Alloca, Gep, MemAllocDynamic, MemCheckpoint, MemRewind, Memcopy, Mload, Mstore,
+            Alloca, ExtractValue, Gep, InsertValue, MemAllocDynamic, MemCheckpoint, MemRewind, Memcopy, Mload, Mstore,
             ObjIndex, ObjLoad, ObjProj, ObjStore,
         },
         logic::{And, Or, Xor},
@@ -3931,6 +3931,7 @@ where
     /// validated core-Wasm arity limit. The caller materializes a fresh arena
     /// copy, preserving Fe value semantics, and the callee receives one i32.
     indirect_aggregate_params: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
+    native_value_params: FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, Type>>,
     /// Private functions whose oversized aggregate result is transferred as one
     /// arena pointer. The caller's enclosing arena lifetime owns that fresh
     /// value; host-visible results never use this internal representation.
@@ -4265,6 +4266,7 @@ where
             typed_private_layout_names: FxHashMap::default(),
             typed_private_borrow_params: FxHashMap::default(),
             indirect_aggregate_params: FxHashMap::default(),
+            native_value_params: FxHashMap::default(),
             indirect_aggregate_returns: HashSet::new(),
             address_carried_aggregate_values: FxHashMap::default(),
             resumable_continuations,
@@ -5787,7 +5789,18 @@ where
             } else if let Some(elem_tys) =
                 self.semantic_scalar_tuple_element_tys(semantic_ty, &param.class)?
             {
-                args.extend(elem_tys);
+                if matches!(linkage, Linkage::Private)
+                    && elem_tys.len() > 1
+                    && elem_tys.iter().all(|ty| matches!(ty, Type::I1 | Type::I32 | Type::F32))
+                    && !matches!(body.local(param.local).map(|local| &local.root),
+                        Some(RuntimeLocalRoot::Slot(_)))
+                    && let Some(ty) = self.typed_private_type_for_class(&param.class)?
+                {
+                    self.native_value_params.entry(body.owner).or_default().insert(param.local, ty);
+                    args.push(ty);
+                } else {
+                    args.extend(elem_tys);
+                }
             } else if matches!(linkage, Linkage::Private)
                 && self.is_memory_lowerable_object_ref(&param.class)
             {
@@ -5825,6 +5838,15 @@ where
                         vec![self.gpu_resource_type(semantic_ty)?]
                     } else if let Some(ty) = semantic_ty
                         .and_then(|semantic_ty| self.semantic_scalar_ty_r1(semantic_ty, class))
+                    {
+                        vec![ty]
+                    } else if matches!(linkage, Linkage::Private)
+                        && semantic_ty.map(|semantic_ty|
+                            self.semantic_scalar_tuple_element_tys(semantic_ty, class))
+                            .transpose()?.flatten().is_some_and(|lanes|
+                                lanes.len() > 1 && lanes.iter().all(|ty|
+                                    matches!(ty, Type::I1 | Type::I32 | Type::F32)))
+                        && let Some(ty) = self.typed_private_type_for_class(class)?
                     {
                         vec![ty]
                     } else if let Some(elem_tys) = semantic_ty
@@ -10272,6 +10294,7 @@ fn derive_binding_facts(body: &RuntimeBody<'_>) -> BindingFacts {
 enum LocalValueRepresentation {
     Single(Type),
     Flattened(Vec<Type>),
+    NativeAggregate(Type),
 }
 
 /// The SSA declaration and its planned physical carrier remain one binding.
@@ -10424,6 +10447,26 @@ impl<'db> BodyLocalStoragePlan<'db> {
             }
         }
 
+
+        // Shader-private products are SSA values, not necessarily scalar lanes.
+        // Parameters retain their independently selected physical call ABI.
+        for (index, representation) in values.iter_mut().enumerate() {
+            let local = RLocalId::from_u32(index as u32);
+            if let Some(ty) = module.native_value_params.get(&body.owner)
+                .and_then(|params| params.get(&local))
+            {
+                *representation = Some(LocalValueRepresentation::NativeAggregate(*ty));
+                continue;
+            }
+            if matches!(representation, Some(LocalValueRepresentation::Flattened(lanes))
+                if lanes.iter().all(|ty| matches!(ty, Type::I1 | Type::I32 | Type::F32)))
+                && !body.signature.params.iter().any(|param| param.local == local)
+                && let Some(class) = body.value_class(local)
+                && let Some(ty) = module.typed_private_type_for_class(class)?
+            {
+                *representation = Some(LocalValueRepresentation::NativeAggregate(ty));
+            }
+        }
 
         let reachable = compute_reachable_blocks(body);
         let mut plan = Self {
@@ -10608,7 +10651,14 @@ impl<'db> BodyLocalStoragePlan<'db> {
             let source = body.value_class(*arg).ok_or_else(|| {
                 LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
             })?;
-            let storage = if let Some(pointee) = module
+            let storage = if let Some(ty) = module.native_value_params.get(&callee)
+                .and_then(|params| params.get(&prepared_param.local))
+            {
+                if !source.shares_runtime_rep_with(module.db, param) {
+                    return Err(LowerError::Internal("native call argument changed runtime class".to_owned()));
+                }
+                CallArgumentStorage::NativeValue(*ty)
+            } else if let Some(pointee) = module
                 .typed_private_borrow_pointee(callee, prepared_param.local)
             {
                 let source_pointee = match source {
@@ -10696,6 +10746,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
 #[derive(Clone)]
 enum CallArgumentStorage<'db> {
     Flat,
+    NativeValue(Type),
     TypedBorrow,
     OwnedDeepCopy(LayoutId<'db>),
     OwnedMaterialization,
@@ -10813,6 +10864,7 @@ where
     /// (`aggregate_make`), passed as flattened params, and returned as flattened
     /// results.
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
+    native_aggregate_values: HashSet<RLocalId>,
     /// Fixed function-private objects preserved as typed Sonatina pointers for
     /// the shader path. Their scalar helper ABI is unchanged, and the backend
     /// independently verifies that no pointer escapes its allocation function.
@@ -10884,6 +10936,7 @@ where
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
         let mut vars = FxHashMap::default();
         let mut tuple_vars = FxHashMap::default();
+        let mut native_aggregate_values = HashSet::new();
         for (index, representation) in values.into_iter().enumerate() {
             let local = RLocalId::from_u32(index as u32);
             match representation {
@@ -10902,6 +10955,12 @@ where
                         types.into_iter().map(|ty| fb.declare_var(ty)).collect(),
                     );
                 }
+                Some(LocalValueRepresentation::NativeAggregate(ty)) => {
+                    native_aggregate_values.insert(local);
+                    vars.insert(local, LocalSsaBinding {
+                        variable: fb.declare_var(ty), carrier: ty,
+                    });
+                }
                 None => {}
             }
         }
@@ -10917,6 +10976,7 @@ where
             call_storage,
             vars,
             tuple_vars,
+            native_aggregate_values,
             typed_private_locals,
             materialized_param_slots,
             indirect_aggregate_params,
@@ -11191,6 +11251,12 @@ where
                 // R2.1: a scalar-tuple destination is produced element-wise (one
                 // SSA def per element word), not as a single value, so it takes a
                 // dedicated arm rather than the single-`ValueId` `lower_expr` path.
+                if self.native_aggregate_values.contains(dst) {
+                    let value = self.lower_native_aggregate_assign(*dst, expr)?;
+                    let variable = self.var_for(*dst)?;
+                    self.fb.def_var(variable, value);
+                    return Ok(());
+                }
                 if self.tuple_vars.contains_key(dst) {
                     return self.lower_tuple_assign(*dst, expr);
                 }
@@ -11525,6 +11591,23 @@ where
             }
             match storage {
                 CallArgumentStorage::Flat => values.extend(self.local_flat_values(*arg)?),
+                CallArgumentStorage::NativeValue(ty) => {
+                    let value = if self.native_aggregate_values.contains(arg) {
+                        self.local_value(*arg)?
+                    } else {
+                        let leaves = self.local_flat_values(*arg)?;
+                        let mut cursor = 0;
+                        let value = self.assemble_native_value(ty, &leaves, &mut cursor)?;
+                        if cursor != leaves.len() {
+                            return Err(LowerError::Internal("native argument leaf arity changed".to_owned()));
+                        }
+                        value
+                    };
+                    if self.fb.type_of(value) != ty {
+                        return Err(LowerError::Internal("native argument physical type changed".to_owned()));
+                    }
+                    values.push(value);
+                }
                 CallArgumentStorage::TypedBorrow => values.push(self.local_value(*arg)?),
                 CallArgumentStorage::OwnedDeepCopy(layout) => {
                     let source = self.local_value(*arg)?;
@@ -11961,9 +12044,166 @@ where
         }
     }
 
-    /// Snapshot a local's leaves in DFS declaration order before callers write
-    /// any destination variables.
+    fn native_value_fields(&self, ty: Type) -> Result<Option<Vec<Type>>, LowerError> {
+        use sonatina_ir::types::CompoundType;
+        match ty.resolve_compound(&self.module.builder.ctx) {
+            Some(CompoundType::Struct(data)) => Ok(Some(data.fields.clone())),
+            Some(CompoundType::Array { elem, len }) => Ok(Some(vec![elem; len])),
+            None if matches!(ty, Type::I1 | Type::I32 | Type::F32) => Ok(None),
+            _ => Err(LowerError::Internal("unsupported native aggregate value type".to_owned())),
+        }
+    }
+
+    fn assemble_native_value(
+        &mut self, ty: Type, leaves: &[ValueId], cursor: &mut usize,
+    ) -> Result<ValueId, LowerError> {
+        let Some(fields) = self.native_value_fields(ty)? else {
+            let value = *leaves.get(*cursor).ok_or_else(||
+                LowerError::Internal("missing native aggregate leaf".to_owned()))?;
+            if self.fb.type_of(value) != ty {
+                return Err(LowerError::Internal(format!(
+                    "native aggregate leaf {} has type {:?}, expected {ty:?}",
+                    *cursor, self.fb.type_of(value),
+                )));
+            }
+            *cursor += 1;
+            return Ok(value);
+        };
+        let mut value = self.fb.make_undef_value(ty);
+        for (index, field) in fields.into_iter().enumerate() {
+            let child = self.assemble_native_value(field, leaves, cursor)?;
+            let index = self.fb.make_imm_value(index as i32);
+            value = self.fb.insert_inst(InsertValue::new(self.inst_set(), value, index, child), ty);
+        }
+        Ok(value)
+    }
+
+    fn project_native_leaves(
+        &mut self, value: ValueId, leaves: &mut Vec<ValueId>,
+    ) -> Result<(), LowerError> {
+        let Some(fields) = self.native_value_fields(self.fb.type_of(value))? else {
+            leaves.push(value);
+            return Ok(());
+        };
+        for (index, field) in fields.into_iter().enumerate() {
+            let index = self.fb.make_imm_value(index as i32);
+            let child = self.fb.insert_inst(ExtractValue::new(self.inst_set(), value, index), field);
+            self.project_native_leaves(child, leaves)?;
+        }
+        Ok(())
+    }
+
+    fn native_value_from_leaves(
+        &mut self,
+        _class: &RuntimeClass<'db>,
+        ty: Type,
+        leaves: &[ValueId],
+    ) -> Result<ValueId, LowerError> {
+        let mut cursor = 0;
+        let value = self.assemble_native_value(ty, leaves, &mut cursor)?;
+        if cursor != leaves.len() {
+            return Err(LowerError::Internal("native aggregate leaf arity changed".to_owned()));
+        }
+        Ok(value)
+    }
+
+    fn lower_native_aggregate_assign(
+        &mut self, dst: RLocalId, expr: &RExpr<'db>,
+    ) -> Result<ValueId, LowerError> {
+        let ty = self.vars[&dst].carrier;
+        let class = self.body.value_class(dst).cloned().ok_or_else(||
+            LowerError::Internal("native aggregate destination has no class".to_owned()))?;
+        match expr {
+            RExpr::Use(source) if self.native_aggregate_values.contains(source) => {
+                let value = self.local_value(*source)?;
+                if self.fb.type_of(value) != ty {
+                    return Err(LowerError::Internal("native value copy changed type".to_owned()));
+                }
+                Ok(value)
+            }
+            RExpr::Load { place } => {
+                if let Some((pointer, source_class)) = self.typed_private_place(place)? {
+                    if !source_class.shares_runtime_rep_with(self.module.db, &class) {
+                        return Err(LowerError::Internal("native aggregate load changed class".to_owned()));
+                    }
+                    return Ok(self.fb.insert_inst(Mload::new(self.inst_set(), pointer, ty), ty));
+                }
+                self.lower_flat_to_native_assign(dst, expr, &class, ty)
+            }
+            RExpr::AggregateExtract { value, index }
+                if self.native_aggregate_values.contains(value) =>
+            {
+                let source = self.local_value(*value)?;
+                let index = self.fb.make_imm_value(*index as i32);
+                Ok(self.fb.insert_inst(ExtractValue::new(self.inst_set(), source, index), ty))
+            }
+            RExpr::AggregateMake { fields, .. } => {
+                let field_types = self.native_value_fields(ty)?.ok_or_else(||
+                    LowerError::Internal("native constructor has no aggregate fields".to_owned()))?;
+                if field_types.len() != fields.len() {
+                    return Err(LowerError::Internal("native constructor field arity changed".to_owned()));
+                }
+                let mut value = self.fb.make_undef_value(ty);
+                for (index, (field, field_ty)) in fields.iter().zip(field_types).enumerate() {
+                    let child = if self.native_aggregate_values.contains(field) {
+                        let child = self.local_value(*field)?;
+                        if self.fb.type_of(child) != field_ty {
+                            return Err(LowerError::Internal("native constructor field type changed".to_owned()));
+                        }
+                        child
+                    } else {
+                        let leaves = self.local_flat_values(*field)?;
+                        let mut cursor = 0;
+                        let child = self.assemble_native_value(field_ty, &leaves, &mut cursor)?;
+                        if cursor != leaves.len() {
+                            return Err(LowerError::Internal("native constructor field leaf arity changed".to_owned()));
+                        }
+                        child
+                    };
+                    let index = self.fb.make_imm_value(index as i32);
+                    value = self.fb.insert_inst(InsertValue::new(self.inst_set(), value, index, child), ty);
+                }
+                Ok(value)
+            }
+            RExpr::Call { callee, args } if self.module.func_map.get(callee)
+                .and_then(|callee| self.module.builder.ctx.get_sig(*callee))
+                .is_some_and(|signature| signature.ret_tys() == [ty]) =>
+            {
+                self.lower_call(*callee, args)
+            }
+            // Existing external/flat interfaces and enum payload extraction
+            // still supply scalar lanes. Adapt at that boundary, not at every
+            // subsequent use of the resulting native value.
+            RExpr::Use(_) | RExpr::Call { .. } | RExpr::EnumExtract { .. }
+            | RExpr::AggregateExtract { .. } | RExpr::Placeholder { .. } =>
+                self.lower_flat_to_native_assign(dst, expr, &class, ty),
+            _ => Err(LowerError::Unsupported(format!(
+                "native aggregate assignment does not support {expr:?}"
+            ))),
+        }
+    }
+
+    fn lower_flat_to_native_assign(
+        &mut self, dst: RLocalId, expr: &RExpr<'db>, class: &RuntimeClass<'db>, ty: Type,
+    ) -> Result<ValueId, LowerError> {
+        let mut types = Vec::new();
+        self.local_flat_shape(dst)?.leaf_types(&mut types);
+        let variables = types.into_iter().map(|ty| self.fb.declare_var(ty)).collect::<Vec<_>>();
+        self.tuple_vars.insert(dst, variables.clone());
+        let result = self.lower_tuple_assign(dst, expr);
+        self.tuple_vars.remove(&dst);
+        result?;
+        let leaves = variables.into_iter().map(|variable| self.fb.use_var(variable)).collect::<Vec<_>>();
+        self.native_value_from_leaves(class, ty, &leaves)
+    }
+
     fn local_flat_values(&mut self, local: RLocalId) -> Result<Vec<ValueId>, LowerError> {
+        if self.native_aggregate_values.contains(&local) {
+            let value = self.local_value(local)?;
+            let mut leaves = Vec::new();
+            self.project_native_leaves(value, &mut leaves)?;
+            return Ok(leaves);
+        }
         if let Some(vars) = self.tuple_vars.get(&local).cloned() {
             return Ok(vars.iter().map(|var| self.fb.use_var(*var)).collect());
         }
@@ -12650,6 +12890,7 @@ where
             }
             RExpr::AggregateExtract { value, index } => {
                 if self.tuple_vars.contains_key(value)
+                    || self.native_aggregate_values.contains(value)
                     || self.is_address_carried_aggregate_value(*value)
                 {
                     let source_class = self.body.value_class(*value).ok_or_else(|| {
@@ -13591,6 +13832,12 @@ where
                     "shader typed-private copy source and destination layouts differ: {source_class:?} / {destination_class:?}"
                 )));
             }
+            if self.native_aggregate_values.contains(&source) {
+                let value = self.local_value(source)?;
+                let ty = self.fb.type_of(value);
+                self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                return Ok(());
+            }
             let leaves = if self.is_address_carried_aggregate_value(source) {
                 let shape = self.local_flat_shape(source)?;
                 let mut leaves = Vec::with_capacity(shape.leaf_count());
@@ -13901,6 +14148,16 @@ where
             return Err(LowerError::Internal(format!(
                 "typed materialization source {src:?} changed pointee class"
             )));
+        }
+        if self.native_aggregate_values.contains(&src) {
+            let value = self.local_value(src)?;
+            let pointer = if local.storage_root == dst {
+                self.fb.insert_inst(Alloca::new(self.inst_set(), local.pointee_ty), local.pointer_ty)
+            } else {
+                self.local_value(local.storage_root)?
+            };
+            self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, local.pointee_ty));
+            return Ok(pointer);
         }
         let leaves = if self.is_address_carried_aggregate_value(src) {
             let shape = self.local_flat_shape(src)?;
@@ -15491,6 +15748,29 @@ where
                 // ABI even though their function-local representation is one
                 // canonical-arena pointer, so load their leaves before rewinding
                 // the scoped arena. Every other return is the single-value form.
+                let function = self.module.func_map[&self.body.owner];
+                let signature = self.module.builder.ctx.get_sig(function).ok_or_else(||
+                    LowerError::Internal("return has no declared physical signature".to_owned()))?;
+                if let [ty] = signature.ret_tys()
+                    && matches!(ty.resolve_compound(&self.module.builder.ctx),
+                        Some(sonatina_ir::types::CompoundType::Struct(_)
+                            | sonatina_ir::types::CompoundType::Array { .. }))
+                {
+                    let result = if self.native_aggregate_values.contains(value) {
+                        self.local_value(*value)?
+                    } else {
+                        let leaves = self.local_flat_values(*value)?;
+                        let class = self.body.signature.ret.clone().ok_or_else(||
+                            LowerError::Internal("aggregate return lost its class".to_owned()))?;
+                        self.native_value_from_leaves(&class, *ty, &leaves)?
+                    };
+                    if self.fb.type_of(result) != *ty {
+                        return Err(LowerError::Internal("aggregate return changed physical type".to_owned()));
+                    }
+                    self.rewind_scoped_arena();
+                    self.fb.insert_inst_no_result(Return::new_single(is, result));
+                    return Ok(());
+                }
                 let return_class = self.body.signature.ret.clone();
                 let flattened = match return_class {
                     Some(class) => {
@@ -16251,14 +16531,24 @@ pub fn kernel(_ seed: u32) -> u32 {
         for function in module.funcs() {
             module.ctx.func_sig(function, |signature| {
                 if signature.name() == "advance" {
-                    eprintln!("state-return ABI: {:?} -> {:?}", signature.args(), signature.ret_tys());
+                    assert!(matches!(signature.ret_tys(), [ty]
+                        if matches!(ty.resolve_compound(&module.ctx),
+                            Some(sonatina_ir::types::CompoundType::Struct(_)))),
+                        "private shader state must return one structured value, not scalar lanes");
                 }
             });
         }
-        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+        let artifact = crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
             &db, &package, [1, 1, 1],
         )
         .expect("snapshot-observing state chain should reach validated SPIR-V");
+        let wgsl = artifact.wgsl.as_deref().expect("WGSL artifact");
+        let parsed = naga::front::wgsl::parse_str(wgsl).expect("snapshot WGSL reparses");
+        let (_, helper) = parsed.functions.iter().find(|(_, function)|
+            function.name.as_deref().is_some_and(|name| name.contains("advance")))
+            .expect("state-return helper must remain outlined");
+        assert!(matches!(parsed.types[helper.result.as_ref().unwrap().ty].inner,
+            naga::TypeInner::Struct { .. }), "outlined state result must remain structured");
         let bytes = crate::BackendKind::Wasm
             .create()
             .compile(
