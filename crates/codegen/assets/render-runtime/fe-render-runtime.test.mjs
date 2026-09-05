@@ -158,6 +158,8 @@ installGeneratedWebGpuOperations({
     pass.draw(vertexCount, instanceCount, firstVertex, firstInstance),
   renderDrawIndirect: (pass, buffer, offset) =>
     pass.drawIndirect(buffer, offset),
+  computeDispatchIndirect: (pass, buffer, offset) =>
+    pass.dispatchWorkgroupsIndirect(buffer, offset),
 });
 
 test("Fe primitive plans preserve all native topologies and winding per pass", () => {
@@ -1496,6 +1498,63 @@ test("typed actor readback follows all Fe GPU passes in the same submission", as
     ["submit"],
     ["deliver", staging, 4],
   ]);
+});
+
+test("GPU-resident dispatch preserves command identity and actor-cycle ordering without readback", async () => {
+  const trace = [];
+  const command = Object.freeze({ name: "work-command" });
+  const device = {
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          let name;
+          return {
+            setPipeline(pipeline) { name = pipeline.name; },
+            dispatchWorkgroups(x, y, z) { trace.push([name, "fixed", x, y, z]); },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              assert.equal(buffer, command);
+              trace.push([name, "indirect", offset]);
+            },
+            end() {},
+          };
+        },
+        finish() { return {}; },
+        copyBufferToBuffer() { assert.fail("dispatch counts must remain GPU-resident"); },
+      };
+    },
+    queue: {
+      submit() { trace.push(["submit"]); },
+      writeBuffer() { assert.fail("the host must not write dispatch counts"); },
+      onSubmittedWorkDone() { assert.fail("dispatch must not require a CPU wait"); },
+    },
+  };
+  const record = (name, indirect) => ({
+    pass: { layout: { mode: "compute" }, cycle: { group: 0, repeat: 2 },
+      ...(indirect ? { dispatch_indirect: { resource: "work-command", offset: 0 } }
+        : { dispatch: [1, 1, 1] }) },
+    pipeline: { name }, inputs: [], bindGroup: null,
+    dispatchIndirectBuffer: indirect ? command : null,
+  });
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._graph = true;
+  surface._memberIndexByName = new Map();
+  surface._gpu = { device, passRecords: [record("schedule", false), record("work", true)] };
+  await surface._presentOn({}, []);
+  assert.deepEqual(trace, [
+    ["schedule", "fixed", 1, 1, 1], ["work", "indirect", 0], ["submit"],
+    ["schedule", "fixed", 1, 1, 1], ["work", "indirect", 0], ["submit"],
+  ]);
+
+  const invalid = record("work", true);
+  surface._gpu.passRecords = [invalid];
+  invalid.pass.dispatch = [1, 1, 1];
+  await assert.rejects(surface._presentOn({}, []), /ambiguous dispatch sources/);
+  delete invalid.pass.dispatch;
+  invalid.pass.taper = { shifts: [1, 0, 0], repeat_decrement: 0 };
+  await assert.rejects(surface._presentOn({}, []), /indirect dispatch cannot be host-tapered/);
+  delete invalid.pass.taper;
+  invalid.dispatchIndirectBuffer = null;
+  await assert.rejects(surface._presentOn({}, []), /no dispatch source/);
 });
 
 test("typed actor readback transfers exact opaque bytes into resident Fe state", async () => {
