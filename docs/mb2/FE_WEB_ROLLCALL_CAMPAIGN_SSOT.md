@@ -21,6 +21,18 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Current isolated sparse linear-plan measurement: 86,684 bundle WGSL bytes,
+2,782 reparsed Naga expressions, 30 helpers, and zero entry private heap bytes.
+Exact-function merging reduces 261 functions to 83 (5,215 to 1,836 instructions);
+entry structurization has 23 reachable blocks and four duplicated occurrences.
+The instrumented release gate passed in 35.71s against cleanup `ba040459e` plus
+the pending arithmetic integration and published Sonatina `2804b9ca`.
+This is compilation/validation, not GPU execution or proof generation. It is
+not a controlled A/B against older shader sizes. Study input provenance and
+trace locations are recorded in
+`/workspace/scratch/mb2-direct-naga-study-inputs/PRODUCTION_BASELINE.md`.
+The direct scratch emitter and final falsification report remain outstanding.
+
 The storage-plan mutation regression landed on mb2 as `4c1d850f5`
 (`ba040459e` in cleanup). It runs real function lowering with an unchanged
 derived plan and four corruptions: prologue/block allocation counts and
