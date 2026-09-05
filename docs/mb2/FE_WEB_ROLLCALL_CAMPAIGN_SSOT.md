@@ -45,8 +45,9 @@ tests. It is not yet the public Fe legality query; Fe's classifier remains.
 Evidence: `/workspace/scratch/mb2-sonatina-helper-plan-release.log`.
 The subsequent shared body query also passed sixteen helper tests and shares
 one structured CFG across resource variants. Fe's cleanup integration removes
-its duplicate instruction/control preflight and trace classifiers, with gates
-running in `/workspace/scratch/mb2-fe-helper-body-query-release.log`. The full
+its duplicate instruction/control preflight and trace classifiers, with all
+nine selected gates passing in
+`/workspace/scratch/mb2-fe-helper-body-query-release.log`. The full
 contextual type/resource ABI query and authored-raster ABI consolidation remain.
 Fe's corresponding integration is pending in `codex/mb2-boundary-cleanup`, whose
 `docs/mb2/FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md` records the detailed execution
