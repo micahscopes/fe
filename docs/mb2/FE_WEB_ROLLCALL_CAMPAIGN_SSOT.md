@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `e3d00226`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `678fb936`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -221,6 +221,22 @@ This report is still internal. Typed-local and physical-ABI outcomes must join
 the public selection query; authored-raster entry preparation remains separate.
 Missing logical resource identities can still prevent deriving downstream
 entry-rooted bindings. No missing identity is invented to recover a candidate.
+
+Sonatina `678fb936` feeds per-function typed-local rejections into the shared
+physical ABI planner. Root-local validity remains mandatory before entry
+preparation; helper storage failures now close over dependent callers in the
+same plan that handles signature failures, preserving independent children
+and siblings. The new regression uses a representable 20,000-byte typed array
+that exceeds the private-storage policy: successful type interning cannot
+authorize the helper. Both focused helper-report tests passed, and all 117
+backend tests passed with llvmpipe in 3.24s. Evidence:
+`/workspace/scratch/mb2-sonatina-typed-physical-report-release.log` and
+`/workspace/scratch/mb2-sonatina-typed-physical-report-suite-release.log`.
+The complete-context requirement still precedes physical planning. Combining
+partial context outcomes with physical selection, exposing the public query,
+and replacing Fe's classifier remain open. Authored raster retains its current
+entry preparation and supported local subset; no new raster capability is
+implied by sharing the planner's rejection input.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
