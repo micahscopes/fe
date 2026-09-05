@@ -381,24 +381,6 @@ fn evaluate_int_const_expr_impl<'db>(
     expected_ty: TyId<'db>,
     allow_numeric_calls: bool,
 ) -> Option<ConstTyId<'db>> {
-    fn numeric_call_kind(name: &str) -> Option<&str> {
-        match name {
-            "add" | "sub" | "mul" | "div" | "rem" | "pow" | "shl" | "shr" | "bitand" | "bitor"
-            | "bitxor" => Some(name),
-            _ => {
-                let op = name
-                    .strip_prefix("__checked_")
-                    .or_else(|| name.strip_prefix("__"))?;
-                [
-                    "_u8", "_u16", "_u32", "_u64", "_u128", "_u256", "_usize", "_i8", "_i16",
-                    "_i32", "_i64", "_i128", "_i256", "_isize", "_bool",
-                ]
-                .iter()
-                .find_map(|suffix| op.strip_suffix(suffix))
-            }
-        }
-    }
-
     fn eval_int_value<'db>(
         db: &'db dyn HirAnalysisDb,
         ty: TyId<'db>,
@@ -489,42 +471,43 @@ fn evaluate_int_const_expr_impl<'db>(
                 let (bits, signed) = int_ty_shape(db, *to)?;
                 Some(normalize_int_to_shape(value, bits, signed))
             }
-            ConstExpr::ExternConstFnCall { func, args, .. }
-            | ConstExpr::UserConstFnCall { func, args, .. }
-                if allow_numeric_calls =>
-            {
-                let op = numeric_call_kind(func.name(db).to_opt()?.data(db))?;
+            ConstExpr::ExternConstFnCall { func, args, .. } if allow_numeric_calls => {
+                use super::corelib::{ScalarNumericIntrinsicOp as Op, scalar_numeric_intrinsic_func_kind};
+                let kind = scalar_numeric_intrinsic_func_kind(db, *func)?;
+                if TyId::new(db, TyData::TyBase(kind.scalar.into())) != expected_ty {
+                    return None;
+                }
                 let args = args
                     .iter()
                     .map(|arg| eval_int_value(db, *arg, expected_ty, true))
                     .collect::<Option<Vec<_>>>()?;
-                Some(match (op, args.as_slice()) {
-                    ("add", [lhs, rhs]) => normalize(lhs.clone() + rhs),
-                    ("sub", [lhs, rhs]) => normalize(lhs.clone() - rhs),
-                    ("mul", [lhs, rhs]) => normalize(lhs.clone() * rhs),
-                    ("div", [lhs, rhs]) => {
+                Some(match (kind.op, args.as_slice()) {
+                    (Op::Add, [lhs, rhs]) => normalize(lhs.clone() + rhs),
+                    (Op::Sub, [lhs, rhs]) => normalize(lhs.clone() - rhs),
+                    (Op::Mul, [lhs, rhs]) => normalize(lhs.clone() * rhs),
+                    (Op::Div, [lhs, rhs]) => {
                         if rhs.is_zero() {
                             return None;
                         }
                         normalize(lhs.clone() / rhs)
                     }
-                    ("rem", [lhs, rhs]) => {
+                    (Op::Rem, [lhs, rhs]) => {
                         if rhs.is_zero() {
                             return None;
                         }
                         normalize(lhs.clone() % rhs)
                     }
-                    ("pow", [lhs, rhs]) => {
+                    (Op::Pow, [lhs, rhs]) => {
                         if rhs.sign() == Sign::Minus {
                             return None;
                         }
                         normalize(lhs.clone().pow(rhs.to_u32()?))
                     }
-                    ("shl", [lhs, rhs]) => normalize(lhs.clone() << rhs.to_usize()?),
-                    ("shr", [lhs, rhs]) => normalize(lhs.clone() >> rhs.to_usize()?),
-                    ("bitand", [lhs, rhs]) => normalize(lhs & rhs),
-                    ("bitor", [lhs, rhs]) => normalize(lhs | rhs),
-                    ("bitxor", [lhs, rhs]) => normalize(lhs ^ rhs),
+                    (Op::Shl, [lhs, rhs]) => normalize(lhs.clone() << rhs.to_usize()?),
+                    (Op::Shr, [lhs, rhs]) => normalize(lhs.clone() >> rhs.to_usize()?),
+                    (Op::Bitand, [lhs, rhs]) => normalize(lhs & rhs),
+                    (Op::Bitor, [lhs, rhs]) => normalize(lhs | rhs),
+                    (Op::Bitxor, [lhs, rhs]) => normalize(lhs ^ rhs),
                     _ => return None,
                 })
             }
