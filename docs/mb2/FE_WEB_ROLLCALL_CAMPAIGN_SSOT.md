@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `23f8507b`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `f9e96fcd`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -318,6 +318,21 @@ This closes the raster root-CFG preparation gap described above. The public
 contextual capability query and Fe classifier deletion remain unfinished.
 No fresh Chrome or production shader-size measurement is claimed for this
 refactor. The Sonatina commit is local; live Fe still uses its published pin.
+
+Sonatina `f9e96fcd` preserves the partial helper-selection report through entry
+preparation. Previously that boundary immediately required completeness and
+discarded independent helper plans after any helper rejection. Emission now
+consumes the completeness check explicitly, before emitting any helper body.
+Three preparation tests passed, including an unsupported helper and dependent
+parent alongside an independently valid leaf. All 117 backend tests passed
+with llvmpipe in 2.50s. Evidence:
+`/workspace/scratch/mb2-sonatina-entry-partial-selection-release.log` and
+`/workspace/scratch/mb2-sonatina-entry-partial-selection-suite-release.log`.
+Entry-body validity remains a prerequisite: the initial regression with an
+i256 result directly in the entry correctly failed its carrier check. A public
+pre-outlining query must distinguish invalid entry operations from call-boundary
+shapes requiring legalization; this report is not yet that public query.
+No new browser, shader-size, or live Fe integration claim accompanies this gate.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
