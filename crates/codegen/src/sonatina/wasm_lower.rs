@@ -10476,7 +10476,6 @@ impl<'db> BodyLocalStoragePlan<'db> {
             )));
         }
         let mut arguments = Vec::with_capacity(args.len());
-        let mut materializes = false;
         for (arg, prepared_param) in args.iter().zip(params) {
             let param = &prepared_param.class;
             let source = body.value_class(*arg).ok_or_else(|| {
@@ -10525,7 +10524,6 @@ impl<'db> BodyLocalStoragePlan<'db> {
                             module.function_symbol(callee),
                         )));
                     }
-                    materializes = true;
                     if indirect {
                         if !matches!(param, RuntimeClass::AggregateValue { .. })
                             || !source.shares_runtime_rep_with(module.db, param)
@@ -10557,17 +10555,12 @@ impl<'db> BodyLocalStoragePlan<'db> {
             };
             arguments.push(storage);
         }
-        let lifetime = if !materializes {
-            CallTemporaryLifetime::None
-        } else if scoped_arena {
-            CallTemporaryLifetime::CallerFrame
-        } else if module.indirect_aggregate_returns.contains(&callee) {
-            // Rewinding at this call would invalidate its returned aggregate.
-            CallTemporaryLifetime::EnclosingResult
+        let result = if module.indirect_aggregate_returns.contains(&callee) {
+            CallResultStorage::EnclosingArena
         } else {
-            CallTemporaryLifetime::CallScope
+            CallResultStorage::Direct
         };
-        Ok(CallStoragePlan { arguments, lifetime })
+        Ok(CallStoragePlan::new(arguments, result, scoped_arena))
     }
 }
 
@@ -10588,7 +10581,7 @@ impl CallArgumentStorage<'_> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CallTemporaryLifetime {
     None,
     CallerFrame,
@@ -10596,10 +10589,39 @@ enum CallTemporaryLifetime {
     CallScope,
 }
 
+/// Result storage ownership is independent of argument adaptation: a call
+/// with only scalar arguments can still return callee-allocated storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallResultStorage {
+    Direct,
+    EnclosingArena,
+}
+
 #[derive(Clone)]
 struct CallStoragePlan<'db> {
     arguments: Vec<CallArgumentStorage<'db>>,
+    result: CallResultStorage,
     lifetime: CallTemporaryLifetime,
+}
+
+impl<'db> CallStoragePlan<'db> {
+    fn new(
+        arguments: Vec<CallArgumentStorage<'db>>,
+        result: CallResultStorage,
+        scoped_arena: bool,
+    ) -> Self {
+        let lifetime = if !arguments.iter().any(CallArgumentStorage::materializes) {
+            CallTemporaryLifetime::None
+        } else if scoped_arena {
+            CallTemporaryLifetime::CallerFrame
+        } else if result == CallResultStorage::EnclosingArena {
+            // Rewinding at this call would invalidate its returned aggregate.
+            CallTemporaryLifetime::EnclosingResult
+        } else {
+            CallTemporaryLifetime::CallScope
+        };
+        Self { arguments, result, lifetime }
+    }
 }
 
 struct PortableFunctionLowerer<'ctx, 'db, 'a, I>
@@ -11307,6 +11329,10 @@ where
                 self.module.function_symbol(callee),
             ))
         })?;
+        // Callee-allocated results belong to our enclosing frame even when
+        // argument preparation emits no allocation. Consume the body plan,
+        // rather than reclassifying return ownership in each call emitter.
+        self.canonical_arena_used |= plan.result == CallResultStorage::EnclosingArena;
         let mut values = Vec::new();
         let mut call_checkpoint = None;
         for (arg, storage) in args.iter().zip(plan.arguments) {
@@ -15289,12 +15315,6 @@ where
             Call::new(is, callee_ref, arg_vals.into_iter().collect()),
             ret_ty,
         );
-        // An indirect aggregate result is allocated in the callee but owned by
-        // this function's enclosing arena frame. It is therefore a real use of
-        // our checkpoint even when this body emits no MemAllocDynamic itself.
-        if self.module.indirect_aggregate_returns.contains(&callee) {
-            self.canonical_arena_used = true;
-        }
         self.rewind_call_arena(call_checkpoint);
         Ok(result)
     }
@@ -15633,6 +15653,28 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_storage_plan_keeps_result_ownership_independent_of_arguments() {
+        for scoped_arena in [false, true] {
+            for result in [CallResultStorage::Direct, CallResultStorage::EnclosingArena] {
+                for arguments in [vec![], vec![CallArgumentStorage::Flat], vec![CallArgumentStorage::TypedBorrow]] {
+                    let plan = CallStoragePlan::new(arguments, result, scoped_arena);
+                    assert_eq!(plan.result, result);
+                    assert_eq!(plan.lifetime, CallTemporaryLifetime::None);
+                }
+                for argument in [CallArgumentStorage::OwnedMaterialization, CallArgumentStorage::BorrowMaterialization] {
+                    let plan = CallStoragePlan::new(vec![CallArgumentStorage::Flat, argument], result, scoped_arena);
+                    assert_eq!(plan.result, result);
+                    assert_eq!(plan.lifetime, match (scoped_arena, result) {
+                        (true, _) => CallTemporaryLifetime::CallerFrame,
+                        (false, CallResultStorage::EnclosingArena) => CallTemporaryLifetime::EnclosingResult,
+                        (false, CallResultStorage::Direct) => CallTemporaryLifetime::CallScope,
+                    });
+                }
+            }
+        }
+    }
 
     #[test]
     fn residual_intrinsic_gate_runs_on_rmir_without_sonatina() {
