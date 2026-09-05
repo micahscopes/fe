@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `e2128b46`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `2d8e7b75`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -265,6 +265,19 @@ Evidence: `/workspace/scratch/mb2-sonatina-entry-interface-release.log` and
 This is interface analysis, not complete request legality: body-dependent mode
 checks and paired authored-raster preparation remain separate. The public
 capability query and Fe classifier replacement are still pending.
+
+Sonatina `2d8e7b75` moves the existing grid/batch/compute/fullscreen body-mode
+checks before helper body emission. Interface and body preparation still
+precede this gate; this is not a new complete capability query. The impossible
+simultaneous render/grid guard is deleted because `ShaderPipeline` already
+excludes that state. A focused derived-body contract test covers incompatible
+allocations, arena use, traps, and their compatible counterparts. It passed;
+all 117 backend tests passed with llvmpipe in 2.70s. Evidence:
+`/workspace/scratch/mb2-sonatina-entry-mode-release.log` and
+`/workspace/scratch/mb2-sonatina-entry-mode-suite-release.log`.
+The accepted mode surface is preserved; no shader-size improvement is claimed.
+Paired authored-raster preparation and public contextual-query integration
+remain open, as do the broader CFG and intrinsic-capability tasks.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
