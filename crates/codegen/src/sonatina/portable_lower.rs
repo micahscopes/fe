@@ -19,12 +19,13 @@
 //! (`lower_runtime.rs`): the EVM path hardcodes `Type::I256` as the word in ~90
 //! places and lowers Fe's checked arithmetic to `uaddo` + an EVM `revert` panic
 //! block (see `emit_panic_revert`), which is EVM-native. A faithful portable
-//! rewrite of that lowerer is target-backend scale. Here we lower clean MIR directly:
-//! at the MIR level `a + b` is `RExpr::Binary { op: Arith(Add), .. }` with no
-//! overflow machinery attached, so we emit a plain portable `arith::Add`. The
-//! Checked wasm32 `usize` add/sub/mul are explicitly guarded. Other checked
-//! arithmetic remains supported only where the portable backend implements its
-//! exact semantics; unsupported cases fail closed.
+//! rewrite of that lowerer is target-backend scale. Here we lower runtime MIR
+//! directly. Primitive arithmetic arrives as `IntrinsicArith`, including its
+//! checked flag. Checked wasm32 `usize` add/sub/mul are explicitly guarded.
+//! Known semantic debt: ordinary integer arithmetic still uses the legacy R1
+//! wrapping realization even when marked checked. Non-overflowing inputs are
+//! required for source-level arithmetic parity on that path. This is not a
+//! fail-closed implementation of general checked arithmetic.
 //!
 //! It reuses Sonatina's `FunctionBuilder` SSA-variable machinery (declare/def/
 //! use + `seal_all`) exactly as the EVM lowerer does, so loop-carried values

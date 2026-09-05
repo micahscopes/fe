@@ -53,6 +53,16 @@ these small results. Evidence logs are under `/workspace/scratch/`:
 `mb2-direct-naga-resource-chrome-20260905.log`, and
 `mb2-direct-naga-resource-negative-20260905.log`.
 
+The exact-pin production baseline for the typed-storage fixture emits 1,941
+WGSL bytes and passes five non-overflowing inputs in Chrome. Its artifact has
+no trap channel: the shared portable lowerer still ignores ordinary integer
+`IntrinsicArith.checked`, apart from protected narrowed-`usize` operations.
+The scratch emitter preserves checked u32 addition. This is a live semantic
+mismatch, not evidence of an optimization advantage. The existing legacy
+wrapping behavior must be made explicit in the boundary account; neither an
+overflow-parity claim nor a silent weakening of the source oracle is acceptable.
+The study has not established a production backend preference.
+
 ### Target entry and Wasm synthesis separation (2026-09-05)
 
 Published Fe `3b7fcea19` pins published Sonatina `1bbd24a0`. The latter
