@@ -47,6 +47,44 @@ fn ty_check_standalone(fixture: Fixture<&str>) {
 }
 
 #[test]
+fn generic_numeric_intrinsic_identity_evaluates_at_compile_time() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_numeric_intrinsic_identity.fe".into(),
+        r#"
+extern {
+    const fn __checked_add(_: i32, _: i32) -> i32
+    const fn __checked_sub(_: i32, _: i32) -> i32
+    const fn __checked_mul(_: i32, _: i32) -> i32
+    const fn __checked_div(_: i32, _: i32) -> i32
+    const fn __checked_rem(_: i32, _: i32) -> i32
+    const fn __checked_pow(_: i32, _: i32) -> i32
+    const fn __checked_neg(_: i32) -> i32
+    const fn __saturating_add(_: i32, _: i32) -> i32
+    const fn __saturating_sub(_: i32, _: i32) -> i32
+    const fn __saturating_mul(_: i32, _: i32) -> i32
+    const fn __bitcast(_: u32) -> i32
+    const fn __int_truncate(_: u32) -> u8
+}
+static_assert(__checked_add(40, 2) == 42)
+static_assert(__checked_sub(44, 2) == 42)
+static_assert(__checked_mul(6, 7) == 42)
+static_assert(__checked_div(84, 2) == 42)
+static_assert(__checked_rem(85, 43) == 42)
+static_assert(__checked_pow(2, 5) == 32)
+static_assert(__checked_neg(-42) == 42)
+static_assert(__saturating_add(2147483647, 1) == 2147483647)
+static_assert(__saturating_sub(-2147483648, 1) == -2147483648)
+static_assert(__saturating_mul(2147483647, 2) == 2147483647)
+static_assert(__bitcast(4294967295) == -1)
+static_assert(__int_truncate(258) == 2)
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn never_type_is_not_type_applicable() {
     let db = HirAnalysisTestDb::default();
     let never = TyId::never(&db);

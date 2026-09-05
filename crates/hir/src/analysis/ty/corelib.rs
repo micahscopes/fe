@@ -120,6 +120,50 @@ pub fn lib_trait_matches<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>, pa
     actual_suffix == target_suffix
 }
 
+/// Identity of the generic numeric intrinsic declarations. The declaration
+/// vocabulary is shared by CTFE and runtime lowering, not target policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum GenericNumericIntrinsicKind {
+    Bitcast,
+    IntTruncate,
+    SaturatingAdd,
+    SaturatingSub,
+    SaturatingMul,
+    CheckedBinary(ArithBinOp),
+    CheckedNeg,
+}
+
+impl GenericNumericIntrinsicKind {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "__bitcast" => Self::Bitcast,
+            "__int_truncate" => Self::IntTruncate,
+            "__saturating_add" => Self::SaturatingAdd,
+            "__saturating_sub" => Self::SaturatingSub,
+            "__saturating_mul" => Self::SaturatingMul,
+            "__checked_add" => Self::CheckedBinary(ArithBinOp::Add),
+            "__checked_sub" => Self::CheckedBinary(ArithBinOp::Sub),
+            "__checked_mul" => Self::CheckedBinary(ArithBinOp::Mul),
+            "__checked_div" => Self::CheckedBinary(ArithBinOp::Div),
+            "__checked_rem" => Self::CheckedBinary(ArithBinOp::Rem),
+            "__checked_pow" => Self::CheckedBinary(ArithBinOp::Pow),
+            "__checked_neg" => Self::CheckedNeg,
+            _ => return None,
+        })
+    }
+}
+
+#[salsa::tracked]
+pub fn generic_numeric_intrinsic_func_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> Option<GenericNumericIntrinsicKind> {
+    if func.body(db).is_some() {
+        return None;
+    }
+    GenericNumericIntrinsicKind::from_name(func.name(db).to_opt()?.data(db).as_str())
+}
+
 /// Identity of the existing bodyless floating-point intrinsic declarations.
 /// Recognition lives here; evaluation and target support remain separate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]

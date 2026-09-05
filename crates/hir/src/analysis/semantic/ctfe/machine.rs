@@ -171,6 +171,8 @@ enum EvmModularArithmetic {
 
 #[derive(Clone, Copy)]
 enum NumericExternIntrinsic {
+    Bitcast,
+    IntTruncate,
     CheckedBinary(ArithBinOp),
     WrappingBinary(ArithBinOp),
     SaturatingBinary(SaturatingArithmetic),
@@ -1056,7 +1058,18 @@ fn int_bounds(bits: u16, signed: bool) -> (BigInt, BigInt) {
 }
 
 fn numeric_extern_intrinsic(name: &str) -> Option<NumericExternIntrinsic> {
-    use crate::analysis::ty::corelib::F32IntrinsicKind;
+    use crate::analysis::ty::corelib::{F32IntrinsicKind, GenericNumericIntrinsicKind};
+    if let Some(kind) = GenericNumericIntrinsicKind::from_name(name) {
+        return Some(match kind {
+            GenericNumericIntrinsicKind::Bitcast => NumericExternIntrinsic::Bitcast,
+            GenericNumericIntrinsicKind::IntTruncate => NumericExternIntrinsic::IntTruncate,
+            GenericNumericIntrinsicKind::CheckedBinary(op) => NumericExternIntrinsic::CheckedBinary(op),
+            GenericNumericIntrinsicKind::CheckedNeg => NumericExternIntrinsic::CheckedNeg,
+            GenericNumericIntrinsicKind::SaturatingAdd => NumericExternIntrinsic::SaturatingBinary(SaturatingArithmetic::Add),
+            GenericNumericIntrinsicKind::SaturatingSub => NumericExternIntrinsic::SaturatingBinary(SaturatingArithmetic::Sub),
+            GenericNumericIntrinsicKind::SaturatingMul => NumericExternIntrinsic::SaturatingBinary(SaturatingArithmetic::Mul),
+        });
+    }
     if let Some(kind) = F32IntrinsicKind::from_name(name) {
         // Exact evaluation is the canonical refinement of relaxed min/max.
         let operation = match kind {
@@ -1078,16 +1091,6 @@ fn numeric_extern_intrinsic(name: &str) -> Option<NumericExternIntrinsic> {
         return Some(NumericExternIntrinsic::Float(operation));
     }
     Some(match name {
-        "__checked_add" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Add),
-        "__checked_sub" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Sub),
-        "__checked_mul" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Mul),
-        "__checked_div" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Div),
-        "__checked_rem" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Rem),
-        "__checked_pow" => NumericExternIntrinsic::CheckedBinary(ArithBinOp::Pow),
-        "__checked_neg" => NumericExternIntrinsic::CheckedNeg,
-        "__saturating_add" => NumericExternIntrinsic::SaturatingBinary(SaturatingArithmetic::Add),
-        "__saturating_sub" => NumericExternIntrinsic::SaturatingBinary(SaturatingArithmetic::Sub),
-        "__saturating_mul" => NumericExternIntrinsic::SaturatingBinary(SaturatingArithmetic::Mul),
         "__not_bool" => NumericExternIntrinsic::BoolNot,
         "__bitand_bool" => NumericExternIntrinsic::BoolBinary(ArithBinOp::BitAnd),
         "__bitor_bool" => NumericExternIntrinsic::BoolBinary(ArithBinOp::BitOr),
@@ -1961,10 +1964,6 @@ impl<'db> CtfeMachine<'db> {
             "size_of" => self.eval_intrinsic_size_of(instance, result_ty, args, origin),
             "__as_bytes" => self.eval_intrinsic_as_bytes(result_ty, args, origin),
             "__keccak256" => self.eval_intrinsic_keccak(result_ty, args, origin),
-            "__bitcast" => self.eval_intrinsic_bitcast(result_ty, args, origin),
-            "__int_truncate" => {
-                self.eval_intrinsic_int_truncate(frame_idx, result_ty, args, origin)
-            }
             name => self.eval_numeric_extern_intrinsic(frame_idx, name, result_ty, args, origin),
         }
     }
@@ -1982,6 +1981,8 @@ impl<'db> CtfeMachine<'db> {
         };
 
         match kind {
+            NumericExternIntrinsic::Bitcast => self.eval_intrinsic_bitcast(result_ty, args, origin),
+            NumericExternIntrinsic::IntTruncate => self.eval_intrinsic_int_truncate(frame_idx, result_ty, args, origin),
             NumericExternIntrinsic::CheckedBinary(op) => {
                 let (lhs, rhs) = expect_binary_args(args, origin)?;
                 if self.is_type_level(lhs) || self.is_type_level(rhs) {
