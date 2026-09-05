@@ -167,6 +167,18 @@ budget validation; multi-invocation execution gates; host failure observation
 through Fe actor/effect handling; raster-consumer policy; and the real browser
 graph regression. The focused shader test is not production graph integration.
 
+Multi-invocation follow-up: Sonatina `69db8e22` adds a two-invocation fixture
+with separate input/output/trap lanes and one shared atomic epoch word. All
+three focused release tests pass. Chrome on AMD RDNA3 executes its 884-byte
+shader and again returns `[1,33,1,303,0,33]`: mixed failure/success retains
+failure, dependent work is suppressed, and explicit reset admits a new epoch.
+No validation errors or device loss. Logs are
+`/workspace/scratch/mb2-graph-failure-multi-{test,chrome}-20260905.log`.
+This closes the focused mixed-invocation gate, not broad stress testing or Fe
+graph integration. Both epoch commits remain local; Fe currently pins the
+preceding published `8b011e5b`. Coordinated publication is needed before a
+portable Fe dependency-pin update; no unpublished pin has been committed.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader
