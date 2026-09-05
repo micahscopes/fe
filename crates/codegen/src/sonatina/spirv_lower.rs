@@ -6,7 +6,11 @@
 //! migration. Validation establishes artifact validity, not execution
 //! or numerical correctness on a device.
 
-use crate::sonatina::{LowerError, wasm_lower::compile_runtime_package_shader_ir};
+use crate::sonatina::{
+    LowerError,
+    bloat_capture::{CaptureConfig, CaptureObserver, Intervention},
+    wasm_lower::compile_runtime_package_shader_ir,
+};
 use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
@@ -82,8 +86,11 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     // Preserve runtime section identity while the shared lowerer constructs the
     // shader module. Root optimization at those declarations, not module order.
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
-    let backend = SpirvBackend::new()
-        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2]);
+    let backend = SpirvBackend::new().with_workgroup_size(
+        workgroup_size[0],
+        workgroup_size[1],
+        workgroup_size[2],
+    );
     let preserved_helpers = inline_spirv_calls(&mut module, &entry_functions, &backend)?;
     ensure_spirv_entry_calls_lowerable(&module, &entry_functions, &preserved_helpers)?;
 
@@ -174,23 +181,128 @@ fn compile_webgpu_request(
         | ShaderPipeline::LegacyScalar { entry, .. }
         | ShaderPipeline::LegacyGrid { entry, .. } => vec![entry],
     };
+    let pipeline_name = match request.pipeline {
+        ShaderPipeline::Compute { .. } => "compute",
+        ShaderPipeline::Raster { .. } => "raster",
+        ShaderPipeline::Fullscreen { .. } => "fullscreen",
+        ShaderPipeline::LegacyScalar { .. } => "legacy_scalar",
+        ShaderPipeline::LegacyGrid { .. } => "legacy_grid",
+    };
+    let strict_observation = std::env::var_os("FE_OBSERVE_STRICT").is_some();
+    let mut capture = match std::env::var_os("FE_BLOAT_CAPTURE_DIR") {
+        None => None,
+        Some(directory) => {
+            let environment = ["FE_BLOAT_CAPTURE_DIR", "FE_BLOAT_FORCE_INLINE_HELPERS"]
+                .into_iter()
+                .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
+                .collect();
+            let intervention = match std::env::var("FE_BLOAT_FORCE_INLINE_HELPERS") {
+                Ok(requested) => Intervention::ForceInlineNamedRetainedHelpers { requested },
+                Err(_) => Intervention::None,
+            };
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| LowerError::Spirv(error.to_string()))?
+                .as_nanos();
+            let observer = CaptureObserver::new(
+                CaptureConfig {
+                    directory: directory.into(),
+                    request_id: format!("request-{}-{nonce}-{pipeline_name}", std::process::id()),
+                    environment,
+                    intervention,
+                    strict: strict_observation,
+                    max_events: std::env::var("FE_OBSERVE_MAX_EVENTS")
+                        .ok()
+                        .map(|value| value.parse::<usize>())
+                        .transpose()
+                        .map_err(|error| {
+                            LowerError::Spirv(format!("invalid observation event budget: {error}"))
+                        })?
+                        .unwrap_or(100_000),
+                },
+                module,
+                &roots,
+                pipeline_name,
+            );
+            match observer {
+                Ok(observer) => Some(observer),
+                Err(error) if strict_observation => return Err(capture_error(error)),
+                Err(error) => {
+                    eprintln!("fe observation unavailable: {error}");
+                    None
+                }
+            }
+        }
+    };
     trace_contextual_helper_analysis(module, &request, "before_inline");
-    let preserved_helpers = inline_spirv_calls_from_roots(
-        module, &roots, |module| NagaBackend::analyze_request_helpers(module, &request),
-    )?;
+    let preserved_helpers = match inline_spirv_calls_from_roots(
+        module,
+        &roots,
+        |module| NagaBackend::analyze_request_helpers(module, &request),
+        capture.as_mut(),
+    ) {
+        Ok(helpers) => helpers,
+        Err(error) => {
+            if let Some(observer) = capture.take() {
+                observer
+                    .fail(&error.to_string(), "unknown")
+                    .map_err(|capture_error| {
+                        LowerError::Spirv(format!(
+                            "{error}; bloat capture failure record: {capture_error}"
+                        ))
+                    })?;
+            }
+            return Err(error);
+        }
+    };
     trace_contextual_helper_analysis(module, &request, "after_inline");
     for &entry in &roots {
-        ensure_spirv_entry_calls_lowerable(module, &[entry], &preserved_helpers)?;
+        if let Err(error) = ensure_spirv_entry_calls_lowerable(module, &[entry], &preserved_helpers)
+        {
+            if let Some(observer) = capture.take() {
+                observer
+                    .fail(&error.to_string(), "final")
+                    .map_err(|capture_error| {
+                        LowerError::Spirv(format!(
+                            "{error}; bloat capture failure record: {capture_error}"
+                        ))
+                    })?;
+            }
+            return Err(error);
+        }
     }
-    NagaBackend::compile_request(module, &request).map_err(|errors| {
-        LowerError::Spirv(
-            errors
-                .iter()
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    })
+    match NagaBackend::compile_request(module, &request) {
+        Ok(artifact) => {
+            if let Some(observer) = capture.take() {
+                if let Err(error) = observer.complete(&artifact, "final") {
+                    if strict_observation {
+                        return Err(capture_error(error));
+                    }
+                    eprintln!("fe observation incomplete: {error}");
+                }
+            }
+            Ok(artifact)
+        }
+        Err(errors) => {
+            let error = LowerError::Spirv(
+                errors
+                    .iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+            if let Some(observer) = capture.take() {
+                observer
+                    .fail(&error.to_string(), "final")
+                    .map_err(|capture_error| {
+                        LowerError::Spirv(format!(
+                            "{error}; bloat capture failure record: {capture_error}"
+                        ))
+                    })?;
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Observe the backend query at the two integration boundaries. This trace
@@ -205,11 +317,18 @@ fn trace_contextual_helper_analysis(
     }
     match NagaBackend::analyze_request_helpers(module, request) {
         Ok(analysis) => {
-            eprintln!("fe naga helper query: phase={phase}, callable={}, rejected={}",
-                analysis.callable.len(), analysis.rejected.len());
+            eprintln!(
+                "fe naga helper query: phase={phase}, callable={}, rejected={}",
+                analysis.callable.len(),
+                analysis.rejected.len()
+            );
             for (function, reason) in analysis.rejected {
-                eprintln!("fe naga helper rejection: phase={phase}, function={}, reason={reason}",
-                    module.ctx.func_sig(function, |signature| signature.name().to_owned()));
+                eprintln!(
+                    "fe naga helper rejection: phase={phase}, function={}, reason={reason}",
+                    module
+                        .ctx
+                        .func_sig(function, |signature| signature.name().to_owned())
+                );
             }
         }
         Err(errors) => {
@@ -326,7 +445,12 @@ pub fn compile_runtime_package_spirv_render_with_resources(
     let entry = entry_functions.first().copied().ok_or_else(|| {
         LowerError::Spirv("render package has no runtime section entry".to_owned())
     })?;
-    compile_webgpu_request(&mut module, ShaderPipeline::Fullscreen { entry }, resources, &[])
+    compile_webgpu_request(
+        &mut module,
+        ShaderPipeline::Fullscreen { entry },
+        resources,
+        &[],
+    )
 }
 
 /// Lower two Fe behaviors as one authored raster module. The package must
@@ -384,11 +508,19 @@ pub fn compile_runtime_package_spirv_authored_raster_with_interface(
     // Resolve the public API's names only among declared runtime entries, once.
     // Optimization, legality checking and emission all retain these identities.
     let resolve = |name: &str| {
-        entry_functions.iter().copied().find(|&entry| {
-            module.ctx.func_sig(entry, |signature| signature.name() == name)
-        }).ok_or_else(|| LowerError::Spirv(format!(
-            "raster runtime entry `{name}` is absent after lowering"
-        )))
+        entry_functions
+            .iter()
+            .copied()
+            .find(|&entry| {
+                module
+                    .ctx
+                    .func_sig(entry, |signature| signature.name() == name)
+            })
+            .ok_or_else(|| {
+                LowerError::Spirv(format!(
+                    "raster runtime entry `{name}` is absent after lowering"
+                ))
+            })
     };
     let vertex = resolve(vertex_entry)?;
     let fragment = resolve(fragment_entry)?;
@@ -428,24 +560,58 @@ fn inline_spirv_calls(
     let entry = roots.first().copied().ok_or_else(|| {
         LowerError::Spirv("shader package has no runtime section entry".to_owned())
     })?;
-    inline_spirv_calls_from_roots(module, &[entry], |module| {
-        backend.analyze_entry_helpers(module, entry)
-    })
+    inline_spirv_calls_from_roots(
+        module,
+        &[entry],
+        |module| backend.analyze_entry_helpers(module, entry),
+        None,
+    )
 }
 
 fn inline_spirv_calls_from_roots(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
-    analyze: impl FnOnce(&sonatina_ir::Module) -> Result<
+    analyze: impl FnOnce(
+        &sonatina_ir::Module,
+    ) -> Result<
         sonatina_codegen::isa::naga::ShaderHelperAnalysis,
         Vec<sonatina_codegen::isa::naga::SpirvError>,
     >,
+    mut capture: Option<&mut CaptureObserver>,
 ) -> Result<std::collections::HashSet<sonatina_ir::module::FuncRef>, LowerError> {
     let trace = std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some();
     let trace_clones = std::env::var_os("FE_SPIRV_INLINE_TRACE_CLONES").is_some();
+    if let Some(observer) = capture.as_deref_mut() {
+        observer
+            .stage(module, roots, "pre-merge", "pre_merge", &[], true, None)
+            .map_err(capture_error)?;
+    }
     let functions_before_merge = module.funcs().len();
     let instructions_before_merge = spirv_module_instruction_count(module);
     let merge_stats = run_exact_private_func_merge(module, roots);
+    if let Some(observer) = capture.as_deref_mut() {
+        observer
+            .stage(
+                module,
+                roots,
+                "post-merge",
+                "post_merge",
+                &["pre-merge"],
+                true,
+                None,
+            )
+            .or_else(|error| observer.record_error(error))
+            .map_err(capture_error)?;
+        observer
+            .exact_merge(
+                merge_stats.candidate_functions,
+                merge_stats.merged_functions,
+                merge_stats.rewritten_references,
+                merge_stats.refinement_rounds,
+            )
+            .or_else(|error| observer.record_error(error))
+            .map_err(capture_error)?;
+    }
     if trace {
         eprintln!(
             "fe spirv exact function merge: candidates={}, merged={}, rewritten_refs={}, rounds={}, functions={}->{}, instructions={}->{}",
@@ -477,7 +643,7 @@ fn inline_spirv_calls_from_roots(
     // Retain every declared function because the stock dead-function pass's
     // object-root model is not populated by the wasm-path module lowerer.
     let mut inliner_config = spirv_inliner_config();
-    inliner_config.record_full_clone_ids = trace_clones;
+    inliner_config.record_full_clone_ids = trace_clones || capture.is_some();
     // GVN's sparse predicated solver can require many GiB on one generated
     // proof entry after only a few frontiers. It is not a legality pass, and
     // the local CFG/SCCP sequence already removes the dead structure exposed
@@ -496,9 +662,53 @@ fn inline_spirv_calls_from_roots(
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "pre");
     }
     normalize_spirv_helper_graph(module);
-    let analysis = analyze(module).map_err(|errors| LowerError::Spirv(errors.iter()
-        .map(ToString::to_string).collect::<Vec<_>>().join("; ")))?;
-    let preserved_helpers = select_profitable_naga_helpers(module, roots, analysis, trace);
+    if let Some(observer) = capture.as_deref_mut() {
+        observer
+            .stage(
+                module,
+                roots,
+                "normalized",
+                "normalized_helper_graph",
+                &["post-merge"],
+                true,
+                None,
+            )
+            .or_else(|error| observer.record_error(error))
+            .map_err(capture_error)?;
+    }
+    let analysis = analyze(module).map_err(|errors| {
+        LowerError::Spirv(
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })?;
+    if let Some(observer) = capture.as_deref_mut() {
+        observer
+            .helper_analysis(module, &analysis)
+            .or_else(|error| observer.record_error(error))
+            .map_err(capture_error)?;
+    }
+    let selection = select_profitable_naga_helpers(module, roots, analysis, trace)?;
+    if let Some(observer) = capture.as_deref_mut() {
+        observer
+            .helper_selection(
+                module,
+                &selection.baseline,
+                &selection.selected,
+                &selection.forced_inline,
+                &selection.consequential_inline,
+            )
+            .or_else(|error| observer.record_error(error))
+            .map_err(capture_error)?;
+    }
+    let preserved_helpers = selection
+        .selected
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
     if !preserved_helpers.is_empty() {
         let helpers = preserved_helpers.iter().copied().collect::<Vec<_>>();
         run_function_passes_on(
@@ -525,7 +735,15 @@ fn inline_spirv_calls_from_roots(
         );
     }
     let mut clone_records = Vec::new();
+    let mut previous_stage = "normalized".to_owned();
     for frontier in 0..MAX_FRONTIERS {
+        inliner_config.record_full_clone_ids = trace_clones
+            || capture
+                .as_ref()
+                .is_some_and(|observer| observer.is_recording());
+        if !inliner_config.record_full_clone_ids {
+            clone_records.clear();
+        }
         let consumed_growth =
             spirv_root_instruction_count(module, roots).saturating_sub(initial_root_insts);
         let Some(remaining_growth) = MAX_ROOT_GROWTH.checked_sub(consumed_growth) else {
@@ -537,7 +755,29 @@ fn inline_spirv_calls_from_roots(
         inliner_config.max_total_growth = remaining_growth;
         let stats = Inliner::new(inliner_config).run_one_frontier_from_roots(module, roots);
         let changed = stats.changed;
-        clone_records.extend(stats.full_clone_records);
+        let after_inline_stage = format!("frontier-{frontier:02}-after-inline");
+        if let Some(observer) = capture.as_deref_mut() {
+            observer
+                .stage(
+                    module,
+                    roots,
+                    &after_inline_stage,
+                    "rooted_frontier_after_inline",
+                    &[&previous_stage],
+                    false,
+                    Some(&stats),
+                )
+                .or_else(|error| observer.record_error(error))
+                .map_err(capture_error)?;
+        }
+        let new_records = stats.full_clone_records;
+        if let Some(observer) = capture.as_deref_mut() {
+            observer
+                .inline_events(module, &new_records, frontier, &after_inline_stage)
+                .or_else(|error| observer.record_error(error))
+                .map_err(capture_error)?;
+        }
+        clone_records.extend(new_records);
         if trace {
             eprintln!(
                 "fe spirv rooted inliner: frontier={frontier}, changed={}, after_inline_insts={}",
@@ -553,31 +793,48 @@ fn inline_spirv_calls_from_roots(
                 "after_inline",
             );
         }
-        if trace {
-            for pass in cleanup {
-                eprintln!(
-                    "fe spirv rooted cleanup: frontier={frontier}, pass={}, before_insts={}",
-                    pass.as_str(),
-                    spirv_root_instruction_count(module, roots)
-                );
-                run_function_passes_on(module, roots, &[pass]);
-                eprintln!(
-                    "fe spirv rooted cleanup: frontier={frontier}, pass={}, after_insts={}",
-                    pass.as_str(),
-                    spirv_root_instruction_count(module, roots)
-                );
-                if trace_clones {
-                    trace_spirv_full_inline_clone_survival(
-                        module,
-                        &clone_records,
-                        frontier,
-                        pass.as_str(),
-                    );
-                }
-            }
-        } else {
-            run_function_passes_on(module, roots, &cleanup);
+        if let Some(observer) = capture.as_deref_mut() {
+            observer
+                .clone_census(
+                    module,
+                    &clone_records,
+                    frontier,
+                    "after_inline",
+                    &after_inline_stage,
+                )
+                .or_else(|error| observer.record_error(error))
+                .map_err(capture_error)?;
         }
+        let mut cleanup_predecessor = after_inline_stage;
+        cleanup_predecessor = observe_cleanup(
+            module,
+            roots,
+            &cleanup,
+            capture.as_deref_mut(),
+            &clone_records,
+            frontier,
+            &format!("frontier-{frontier:02}-cleanup"),
+            "rooted_frontier_cleanup",
+            cleanup_predecessor,
+            trace,
+            trace_clones,
+        )?;
+        let after_cleanup_stage = format!("frontier-{frontier:02}-after-cleanup");
+        if let Some(observer) = capture.as_deref_mut() {
+            observer
+                .stage(
+                    module,
+                    roots,
+                    &after_cleanup_stage,
+                    "rooted_frontier_after_cleanup",
+                    &[&cleanup_predecessor],
+                    false,
+                    None,
+                )
+                .or_else(|error| observer.record_error(error))
+                .map_err(capture_error)?;
+        }
+        previous_stage = after_cleanup_stage;
         if trace {
             eprintln!(
                 "fe spirv rooted inliner: frontier={frontier}, after_cleanup_insts={}",
@@ -589,31 +846,19 @@ fn inline_spirv_calls_from_roots(
         }
     }
     let final_cleanup = spirv_post_inline_cleanup_passes();
-    if trace {
-        for pass in final_cleanup {
-            eprintln!(
-                "fe spirv post-inline cleanup: pass={}, before_insts={}",
-                pass.as_str(),
-                spirv_root_instruction_count(module, roots)
-            );
-            run_function_passes_on(module, roots, &[pass]);
-            eprintln!(
-                "fe spirv post-inline cleanup: pass={}, after_insts={}",
-                pass.as_str(),
-                spirv_root_instruction_count(module, roots)
-            );
-            if trace_clones {
-                trace_spirv_full_inline_clone_survival(
-                    module,
-                    &clone_records,
-                    MAX_FRONTIERS,
-                    pass.as_str(),
-                );
-            }
-        }
-    } else {
-        run_function_passes_on(module, roots, &final_cleanup);
-    }
+    previous_stage = observe_cleanup(
+        module,
+        roots,
+        &final_cleanup,
+        capture.as_deref_mut(),
+        &clone_records,
+        MAX_FRONTIERS,
+        "post-inline-cleanup",
+        "post_inline_cleanup",
+        previous_stage,
+        trace,
+        trace_clones,
+    )?;
     if let Some((directory, sequence)) = &snapshot {
         write_spirv_inline_snapshot(module, roots, Path::new(directory), *sequence, "post");
     }
@@ -628,6 +873,20 @@ fn inline_spirv_calls_from_roots(
         affected.sort_unstable_by_key(|function| function.as_u32());
         affected.dedup();
         run_function_passes_on(module, &affected, &spirv_post_inline_cleanup_passes());
+    }
+    if let Some(observer) = capture.as_deref_mut() {
+        observer
+            .stage(
+                module,
+                roots,
+                "final",
+                "final_shader_ir",
+                &[&previous_stage],
+                true,
+                None,
+            )
+            .or_else(|error| observer.record_error(error))
+            .map_err(capture_error)?;
     }
     if trace {
         eprintln!(
@@ -650,6 +909,116 @@ fn inline_spirv_calls_from_roots(
         );
     }
     Ok(preserved_helpers)
+}
+
+fn capture_error(error: String) -> LowerError {
+    LowerError::Spirv(format!("bloat capture: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_cleanup(
+    module: &sonatina_ir::Module,
+    roots: &[sonatina_ir::module::FuncRef],
+    passes: &[Pass],
+    capture: Option<&mut CaptureObserver>,
+    records: &[FullInlineCloneRecord],
+    frontier: usize,
+    prefix: &str,
+    kind: &str,
+    previous: String,
+    trace: bool,
+    trace_clones: bool,
+) -> Result<String, LowerError> {
+    use sonatina_codegen::optim::pipeline::{
+        PassObservation, PassObserver, run_function_passes_on_observed,
+    };
+    if capture.is_none() && !trace && !trace_clones {
+        run_function_passes_on(module, roots, passes);
+        return Ok(previous);
+    }
+    struct Observer<'a> {
+        capture: Option<&'a mut CaptureObserver>,
+        roots: &'a [sonatina_ir::module::FuncRef],
+        records: &'a [FullInlineCloneRecord],
+        frontier: usize,
+        prefix: &'a str,
+        kind: &'a str,
+        previous: String,
+        trace: bool,
+        trace_clones: bool,
+        error: Option<String>,
+    }
+    impl PassObserver for Observer<'_> {
+        fn before_pass(&mut self, event: PassObservation, module: &sonatina_ir::Module) {
+            if self.trace {
+                eprintln!(
+                    "fe spirv observed cleanup: pass={}, before_insts={}",
+                    event.pass.as_str(),
+                    spirv_root_instruction_count(module, self.roots)
+                );
+            }
+        }
+        fn after_pass(&mut self, event: PassObservation, module: &sonatina_ir::Module) {
+            let stage = format!("{}-{:02}-{}", self.prefix, event.index, event.pass.as_str());
+            if self.error.is_none() {
+                if let Some(capture) = self.capture.as_deref_mut() {
+                    let result = capture
+                        .stage(
+                            module,
+                            self.roots,
+                            &stage,
+                            self.kind,
+                            &[&self.previous],
+                            false,
+                            None,
+                        )
+                        .and_then(|()| {
+                            capture.clone_census(
+                                module,
+                                self.records,
+                                self.frontier,
+                                event.pass.as_str(),
+                                &stage,
+                            )
+                        });
+                    self.error = result.or_else(|error| capture.record_error(error)).err();
+                }
+            }
+            if self.trace {
+                eprintln!(
+                    "fe spirv observed cleanup: pass={}, after_insts={}",
+                    event.pass.as_str(),
+                    spirv_root_instruction_count(module, self.roots)
+                );
+            }
+            if self.trace_clones {
+                trace_spirv_full_inline_clone_survival(
+                    module,
+                    self.records,
+                    self.frontier,
+                    event.pass.as_str(),
+                );
+            }
+            self.previous = stage;
+        }
+    }
+    let mut observer = Observer {
+        capture,
+        roots,
+        records,
+        frontier,
+        prefix,
+        kind,
+        previous,
+        trace,
+        trace_clones,
+        error: None,
+    };
+    run_function_passes_on_observed(module, roots, passes, &mut observer);
+    if let Some(error) = observer.error {
+        return Err(capture_error(error));
+    }
+    Ok(observer.previous)
 }
 
 fn trace_spirv_full_inline_clone_survival(
@@ -691,7 +1060,6 @@ fn trace_spirv_full_inline_clone_survival(
     }
 }
 
-
 fn spirv_helper_resource_root_type(module: &sonatina_ir::Module, ty: sonatina_ir::Type) -> bool {
     let Some(sonatina_ir::types::CompoundType::ObjRef(referent)) = ty.resolve_compound(&module.ctx)
     else {
@@ -703,7 +1071,6 @@ fn spirv_helper_resource_root_type(module: &sonatina_ir::Module, ty: sonatina_ir
     )
 }
 
-
 /// Profitability is a frontend policy over backend-authorized helpers, not a
 /// second ABI classifier. Resource-only wrappers stay inline unless their
 /// measured expansion or a profitable caller justifies retaining them.
@@ -712,16 +1079,21 @@ fn select_profitable_naga_helpers(
     roots: &[sonatina_ir::module::FuncRef],
     analysis: sonatina_codegen::isa::naga::ShaderHelperAnalysis,
     trace: bool,
-) -> std::collections::HashSet<sonatina_ir::module::FuncRef> {
+) -> Result<HelperSelection, LowerError> {
     let counts = spirv_root_expansion_counts(module, roots);
     let dependencies = spirv_profitable_helper_dependency_closure(module, roots, &counts);
     let mut selected = std::collections::HashSet::new();
-    for helper in analysis.callable {
+    for helper in &analysis.callable {
         let carries_resource = module.ctx.func_sig(helper.function, |signature| {
-            signature.args().iter().chain(signature.ret_tys()).copied()
+            signature
+                .args()
+                .iter()
+                .chain(signature.ret_tys())
+                .copied()
                 .any(|ty| spirv_helper_resource_root_type(module, ty))
         });
-        if !carries_resource || helper.accesses_resource
+        if !carries_resource
+            || helper.accesses_resource
             || spirv_resource_passthrough_outline_worthy(
                 counts.get(&helper.function).copied().unwrap_or_default(),
                 helper.instruction_count,
@@ -732,13 +1104,153 @@ fn select_profitable_naga_helpers(
         }
     }
     if trace {
-        for (function, reason) in analysis.rejected {
-            eprintln!("fe naga rejected helper: function={}, reason={reason}",
-                module.ctx.func_sig(function, |signature| signature.name().to_owned()));
+        for (function, reason) in &analysis.rejected {
+            eprintln!(
+                "fe naga rejected helper: function={}, reason={reason}",
+                module
+                    .ctx
+                    .func_sig(*function, |signature| signature.name().to_owned())
+            );
         }
     }
-    // Keep the retained set closed: a helper is independently lowerable only
-    // when every direct callee is retained under the same scalar ABI.
+    close_retained_helper_set(module, &mut selected);
+    let baseline_set = selected.clone();
+    let requested = force_inline_helper_names()?;
+    if requested.is_empty() {
+        let mut baseline = baseline_set.into_iter().collect::<Vec<_>>();
+        baseline.sort_unstable_by_key(|function| function.as_u32());
+        return Ok(HelperSelection {
+            selected: baseline.clone(),
+            baseline,
+            forced_inline: Vec::new(),
+            consequential_inline: Vec::new(),
+        });
+    }
+    let mut forced_inline = Vec::new();
+    for requested_name in requested {
+        let callable = analysis
+            .callable
+            .iter()
+            .filter(|helper| {
+                module.ctx.func_sig(helper.function, |signature| {
+                    signature.name() == requested_name
+                })
+            })
+            .map(|helper| helper.function)
+            .collect::<Vec<_>>();
+        let rejections = analysis
+            .rejected
+            .iter()
+            .filter(|(function, _)| {
+                module
+                    .ctx
+                    .func_sig(*function, |signature| signature.name() == requested_name)
+            })
+            .map(|(_, reason)| reason.as_str())
+            .collect::<Vec<_>>();
+        validate_force_inline_resolution(
+            &requested_name,
+            callable.len(),
+            &rejections,
+            callable
+                .first()
+                .is_some_and(|function| baseline_set.contains(function)),
+        )?;
+        match callable.as_slice() {
+            [function] => forced_inline.push(*function),
+            _ => unreachable!("validated one callable helper"),
+        }
+    }
+    for function in &forced_inline {
+        selected.remove(function);
+    }
+    close_retained_helper_set(module, &mut selected);
+    let mut consequential_inline = baseline_set
+        .difference(&selected)
+        .copied()
+        .filter(|function| !forced_inline.contains(function))
+        .collect::<Vec<_>>();
+    let mut baseline = baseline_set.into_iter().collect::<Vec<_>>();
+    let mut selected = selected.into_iter().collect::<Vec<_>>();
+    baseline.sort_unstable_by_key(|function| function.as_u32());
+    selected.sort_unstable_by_key(|function| function.as_u32());
+    forced_inline.sort_unstable_by_key(|function| function.as_u32());
+    consequential_inline.sort_unstable_by_key(|function| function.as_u32());
+    Ok(HelperSelection {
+        baseline,
+        selected,
+        forced_inline,
+        consequential_inline,
+    })
+}
+
+fn validate_force_inline_resolution(
+    requested_name: &str,
+    callable_count: usize,
+    rejection_reasons: &[&str],
+    unique_is_baseline_retained: bool,
+) -> Result<(), LowerError> {
+    match callable_count {
+        0 if rejection_reasons.is_empty() => Err(LowerError::Spirv(format!(
+            "FE_BLOAT_FORCE_INLINE_HELPERS names unknown helper `{requested_name}`"
+        ))),
+        0 => Err(LowerError::Spirv(format!(
+            "FE_BLOAT_FORCE_INLINE_HELPERS helper `{requested_name}` was rejected by the backend: {}",
+            rejection_reasons.join("; ")
+        ))),
+        1 if !unique_is_baseline_retained => Err(LowerError::Spirv(format!(
+            "FE_BLOAT_FORCE_INLINE_HELPERS helper `{requested_name}` is backend-callable but was not retained by the baseline frontend policy"
+        ))),
+        1 => Ok(()),
+        count => Err(LowerError::Spirv(format!(
+            "FE_BLOAT_FORCE_INLINE_HELPERS helper name `{requested_name}` is ambiguous across {count} backend-callable functions"
+        ))),
+    }
+}
+
+struct HelperSelection {
+    baseline: Vec<sonatina_ir::module::FuncRef>,
+    selected: Vec<sonatina_ir::module::FuncRef>,
+    forced_inline: Vec<sonatina_ir::module::FuncRef>,
+    consequential_inline: Vec<sonatina_ir::module::FuncRef>,
+}
+
+fn force_inline_helper_names() -> Result<Vec<String>, LowerError> {
+    parse_force_inline_helper_names(std::env::var_os("FE_BLOAT_FORCE_INLINE_HELPERS"))
+}
+
+fn parse_force_inline_helper_names(
+    raw: Option<std::ffi::OsString>,
+) -> Result<Vec<String>, LowerError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let raw = raw.into_string().map_err(|_| {
+        LowerError::Spirv("FE_BLOAT_FORCE_INLINE_HELPERS is not valid UTF-8".into())
+    })?;
+    let mut names = Vec::new();
+    for name in raw.split(',').map(str::trim) {
+        if name.is_empty() {
+            return Err(LowerError::Spirv(
+                "FE_BLOAT_FORCE_INLINE_HELPERS contains an empty helper name".into(),
+            ));
+        }
+        if names.iter().any(|existing| existing == name) {
+            return Err(LowerError::Spirv(format!(
+                "FE_BLOAT_FORCE_INLINE_HELPERS repeats helper `{name}`"
+            )));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(names)
+}
+
+/// Keep the retained set closed: a helper is independently lowerable only
+/// when every direct callee is retained under the same scalar ABI.
+fn close_retained_helper_set(
+    module: &sonatina_ir::Module,
+    selected: &mut std::collections::HashSet<sonatina_ir::module::FuncRef>,
+) {
     loop {
         let rejected = selected
             .iter()
@@ -764,9 +1276,7 @@ fn select_profitable_naga_helpers(
             selected.remove(&function);
         }
     }
-    selected
 }
-
 
 fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
     // Helper eligibility should not depend on lowering artifacts such as an
@@ -865,35 +1375,39 @@ fn spirv_profitable_helper_dependency_closure(
         if roots.contains(&function_ref) {
             continue;
         }
-        let expanded_calls = expansion_counts.get(&function_ref).copied().unwrap_or_default();
-        let Some((instruction_count, repeated_loop)) = module.func_store.try_view(function_ref, |function| {
-            let instruction_count = function
-                .layout
-                .iter_block()
-                .map(|block| function.layout.iter_inst(block).count())
-                .sum::<usize>();
-            // A loop is substantive work even when its buffer operations are
-            // delegated to another helper. Preserve repeated loop bodies rather
-            // than classifying them as tiny resource-passing wrappers. This is
-            // only a cost preference: normal ABI, effect and structurizer checks
-            // still decide whether the function can actually remain callable.
-            let repeated_loop = expanded_calls > 1 && {
-                let mut cfg = sonatina_ir::ControlFlowGraph::default();
-                cfg.compute(function);
-                let mut domtree = sonatina_codegen::domtree::DomTree::new();
-                domtree.compute(&cfg);
-                let mut loops = sonatina_codegen::loop_analysis::LoopTree::new();
-                loops.compute(&cfg, &domtree);
-                loops.loops().next().is_some()
-            };
-            (instruction_count, repeated_loop)
-        }) else {
+        let expanded_calls = expansion_counts
+            .get(&function_ref)
+            .copied()
+            .unwrap_or_default();
+        let Some((instruction_count, repeated_loop)) =
+            module.func_store.try_view(function_ref, |function| {
+                let instruction_count = function
+                    .layout
+                    .iter_block()
+                    .map(|block| function.layout.iter_inst(block).count())
+                    .sum::<usize>();
+                // A loop is substantive work even when its buffer operations are
+                // delegated to another helper. Preserve repeated loop bodies rather
+                // than classifying them as tiny resource-passing wrappers. This is
+                // only a cost preference: normal ABI, effect and structurizer checks
+                // still decide whether the function can actually remain callable.
+                let repeated_loop = expanded_calls > 1 && {
+                    let mut cfg = sonatina_ir::ControlFlowGraph::default();
+                    cfg.compute(function);
+                    let mut domtree = sonatina_codegen::domtree::DomTree::new();
+                    domtree.compute(&cfg);
+                    let mut loops = sonatina_codegen::loop_analysis::LoopTree::new();
+                    loops.compute(&cfg, &domtree);
+                    loops.loops().next().is_some()
+                };
+                (instruction_count, repeated_loop)
+            })
+        else {
             continue;
         };
-        if spirv_resource_passthrough_outline_worthy(
-            expanded_calls,
-            instruction_count,
-        ) || repeated_loop {
+        if spirv_resource_passthrough_outline_worthy(expanded_calls, instruction_count)
+            || repeated_loop
+        {
             pending.push(function_ref);
         }
     }
@@ -916,7 +1430,6 @@ fn spirv_profitable_helper_dependency_closure(
     }
     required
 }
-
 
 fn write_spirv_inline_snapshot(
     module: &sonatina_ir::Module,
@@ -1098,5 +1611,60 @@ fn ensure_spirv_entry_calls_lowerable(
             "SPIR-V entry `{entry_name}` retains a call outside the automatically lowerable helper graph after bounded inlining: {callee}"
         ))),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod bloat_policy_tests {
+    use super::{parse_force_inline_helper_names, validate_force_inline_resolution};
+
+    #[test]
+    fn named_force_inline_policy_is_explicit_and_deduplicated() {
+        assert!(parse_force_inline_helper_names(None).unwrap().is_empty());
+        assert_eq!(
+            parse_force_inline_helper_names(Some("mix_words, helper_b".into())).unwrap(),
+            ["mix_words", "helper_b"]
+        );
+        assert!(
+            parse_force_inline_helper_names(Some("mix_words,mix_words".into()))
+                .unwrap_err()
+                .to_string()
+                .contains("repeats")
+        );
+        assert!(
+            parse_force_inline_helper_names(Some("mix_words,".into()))
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+    }
+
+    #[test]
+    fn named_policy_rejects_unknown_rejected_unretained_and_ambiguous_helpers() {
+        assert!(
+            validate_force_inline_resolution("missing", 0, &[], false)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown")
+        );
+        assert!(
+            validate_force_inline_resolution("bad_abi", 0, &["unsupported pointer"], false)
+                .unwrap_err()
+                .to_string()
+                .contains("rejected by the backend")
+        );
+        assert!(
+            validate_force_inline_resolution("inline_already", 1, &[], false)
+                .unwrap_err()
+                .to_string()
+                .contains("not retained")
+        );
+        assert!(
+            validate_force_inline_resolution("duplicate", 2, &[], true)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        validate_force_inline_resolution("mix_words", 1, &[], true).unwrap();
     }
 }

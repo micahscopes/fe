@@ -1,6 +1,50 @@
 # Compiler observation integration
 
-Status: integration contract, not a claim that the observer is on mb2.
+Status: first recorder slice integrated into the shared worktree; broader corpus
+and overhead gates remain open. See the checkpoint below for the measured scope.
+
+## First recorder checkpoint (2026-09-05)
+
+Sonatina commit ca5210d1ff41af48d893c82f2a8380ada3e3f5c6 adds caller-owned,
+typed pass-boundary callbacks inside the existing selected-function pass round.
+It preserves analysis lifetime and scheduling. All 49 pipeline tests passed.
+This is the existing mb2-task-borrows integration line, not a new task branch.
+
+Fe adapts the pilot hooks into typed producer-owned records and preserves the
+fe-bloat-event/1 JSONL projection. Request configuration is supplied by the shader
+driver. The recorder reads no environment variables and has no global request
+counter. Environment variables remain a driver-level compatibility interface:
+
+- FE_BLOAT_CAPTURE_DIR enables capture into new request directories.
+- FE_OBSERVE_MAX_EVENTS controls the event budget (maximum 100,000).
+- FE_OBSERVE_STRICT makes recording errors fail the gate explicitly.
+- FE_BLOAT_FORCE_INLINE_HELPERS remains an independent experimental policy knob.
+
+Ordinary event exhaustion produces a readable incomplete prefix, emits an
+out-of-band diagnostic and leaves compilation successful. A failed capture stops
+subsequent snapshot extraction and, at the next frontier, releases clone records
+unless the separately requested legacy clone trace still needs them. This does
+not yet establish a strict bound on a single inliner frontier's peak memory.
+
+The first complete and budget-truncated requests, exact artifacts, producer patch
+and consumer instructions are under
+/workspace/scratch/mb2-observe-compat-20260905/README.md. The original capture used
+an explicit local overlay of the committed Sonatina revision. It must not be
+relabeled as a published-pin run. Four Fe recorder unit tests passed. Both requests
+imported and artifact-verified through Riffcat, with complete and incomplete status
+respectively. Replaying the complete capture twice produced identical JSON.
+
+For the small scalar fixture, capture off/on and budget exhaustion produced
+identical 518-byte WGSL and 1,300-byte SPIR-V. Baseline, forced-inline and truncated
+outputs each passed a 2,313-pixel independent oracle on software Vulkan (llvmpipe).
+The wrong-result shader failed at pixel (1,0). These results are not Chrome,
+physical-GPU performance, broad corpus neutrality or Mandelbrot proof generation.
+
+Published-pin follow-up: the locked release build without any Cargo patch overlay
+passed against published Sonatina ca5210d1. Its capture harness under
+/workspace/scratch/mb2-observe-published-20260905 passed observer-on/off WGSL and
+SPIR-V equality again. Baseline artifacts also matched the original overlay run
+byte for byte. The manifest and lockfile now use the published git revision.
 
 ## Outcome
 

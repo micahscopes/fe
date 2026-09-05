@@ -1,4 +1,6 @@
 mod binding_facts;
+#[cfg(feature = "spirv-backend")]
+mod bloat_capture;
 mod lower_runtime;
 mod materialized_task;
 #[cfg(all(
