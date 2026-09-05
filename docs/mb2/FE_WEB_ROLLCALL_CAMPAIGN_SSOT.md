@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `74448e60`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `4a018ab9`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -196,10 +196,18 @@ identity, while retaining an independent helper's exact argument identity.
 The focused regression and all 117 backend tests passed (suite 2.44s):
 `/workspace/scratch/mb2-sonatina-resource-result-report-release.log` and
 `/workspace/scratch/mb2-sonatina-resource-result-report-suite-release.log`.
-This is still not the public Fe query. Entry-rooted resource-variant propagation
-can fail before ABI planning, and the separate reports must be combined before
-deleting Fe's classifier. Invalid entry-resource declarations remain global
-request errors, not recoverable helper outcomes.
+Sonatina `4a018ab9` now retains per-helper resource-variant outcomes as well.
+Conflicting resource aliases in one helper do not discard an independent
+sibling's proven entry-rooted identity or prevent propagating it to a child.
+The focused regression passed, including rejection of partial reports for
+emission and of conflicting entry declarations as global request errors.
+All 117 backend tests passed with llvmpipe in 2.62s. Evidence:
+`/workspace/scratch/mb2-sonatina-resource-variant-report-release.log` and
+`/workspace/scratch/mb2-sonatina-resource-variant-report-suite-release.log`.
+This is still not the public Fe query: the separate reports must be combined
+before deleting Fe's classifier. An identity binding alone never authorizes
+emission of its rejected owner. The newer Sonatina commits remain local and
+unpushed; this reporting change makes no shader-size or browser-speed claim.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
