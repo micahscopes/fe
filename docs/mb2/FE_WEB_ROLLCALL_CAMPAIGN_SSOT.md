@@ -21,6 +21,16 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+The storage-plan mutation regression landed on mb2 as `4c1d850f5`
+(`ba040459e` in cleanup). It runs real function lowering with an unchanged
+derived plan and four corruptions: prologue/block allocation counts and
+prologue/block retained-result counts. Each corruption must report the
+function, site, planned count, and emitted count before finishing the function.
+The release gate passed in cleanup against the published `2804b9ca` integration
+candidate (12.02s after a 4m20s Rust build). The cherry-pick is test-only; no
+production or pin change is included, and no rerun against live mb2's older pin
+is claimed. Log: `/workspace/scratch/mb2-arena-plan-mutation.log`.
+
 Grid request migration is committed in cleanup as `b1f65e3dd`, pending final
 dependency reconciliation before integration on mb2. It routes the grid word
 interface through the explicit WebGPU request, replacing its legacy builder
