@@ -98,6 +98,42 @@ live across calls, branches/loops and aliasing negatives, followed by the exact
 production capture and independent proof oracle. Measure final artifacts and
 execution separately. No production size or runtime improvement has landed yet.
 
+### Native-value experiment, not yet promoted (2026-09-05)
+
+The local Fe candidate now carries eligible private shader products through SSA
+construction, projection, copies and helper returns. Resource-bearing products
+retain their resource-aware transport, rather than reinterpreting resource
+identities as ordinary fields. Sonatina commits f8b1bcda, c7359895, 8a5802c5 and
+931b141c add aggregate projection, insertion/construction and aggregate phi
+transport. These commits are local, not the published Fe dependency pin.
+
+Focused release gates preserve the one-allocation storage-reuse expectation,
+typed borrows, the Wasm snapshot oracle, and an outlined WGSL struct-returning
+helper. Sonatina's construction and snapshot tests execute on llvmpipe; all 20
+phi-filtered regression tests pass, including simultaneous aggregate swaps.
+
+The first complete native-value capture emitted 15,066,556 backend WGSL bytes.
+It exposed an additional constructor round trip: existing structured children
+were projected into scalar leaves and rebuilt. Preserving those children directly
+reduced the next complete capture to 8,499,913 bytes, versus the earlier
+12,936,420-byte baseline. All 19 stages compile and validate, but the unchanged
+size gate still fails for control_relation (1,339,122 backend bytes).
+
+The linear_ports shader is now 460,011 bytes, and sparse_linear_copy_plan is
+101,986 bytes, versus 1,011,478 and 690,388 respectively in the baseline.
+Remaining control_relation cost is concentrated in absorb_sparse_control_link
+(668,493 bytes). Its emitted calls still split structured records into long
+scalar argument lists, including individual call statements over 4,200 bytes.
+Private argument transport is therefore the next boundary to inspect, not a
+reason to relax the size gate or change the authored proof.
+
+Artifacts: /workspace/scratch/mb2-bloat-native-preserved-fields-20260905/ and
+/workspace/scratch/mb2-native-preserved-fields-census-20260905.jsonl. The release
+test took 203.53 seconds, including instrumentation; this is not proof-generation
+time. The candidate used the explicit local Sonatina overlay against 931b141c.
+It is not a fresh-checkout or browser-execution gate, and the Fe candidate must
+not be described as a landed production optimization yet.
+
 Full capture provenance and a reproducible literal-text census are recorded in
 /workspace/scratch/mb2-bloat-diagnosis-20260905.md. The exact composition artifacts
 are under /workspace/scratch/mb2-bloat-composition-20260905. They are suitable for
