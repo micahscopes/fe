@@ -38,7 +38,7 @@ canonical arena (5), resident lifecycle (1), raster (4), and compute resources
 `/workspace/scratch/mb2-binding-facts-resource-release.log`.
 
 The explicit Sonatina Shader ISA and Naga target/profile implementation remain
-on the local Sonatina line (now `4a018ab9`, extending `9fcfcef1`); publication
+on the local Sonatina line (now `e3d00226`, extending `9fcfcef1`); publication
 has not been authorized. The newest backend extraction plans contextual
 helper ABIs before emitting helper bodies and passed sixteen focused release
 tests. It is not yet the public Fe legality query; Fe's classifier remains.
@@ -208,6 +208,19 @@ This is still not the public Fe query: the separate reports must be combined
 before deleting Fe's classifier. An identity binding alone never authorizes
 emission of its rejected owner. The newer Sonatina commits remain local and
 unpushed; this reporting change makes no shader-size or browser-speed claim.
+
+Sonatina `e3d00226` combines logical-result, resource-variant, and memory
+analysis in `EntryHelperContextReport`. The existing emitter obtains its
+context only through the report's complete-result gate, including the proven
+entry-arena requirement. A resource rejection no longer prevents independent
+memory analysis from running. The contextual regression passed, and all 117
+backend tests passed with llvmpipe in 6.78s. Evidence:
+`/workspace/scratch/mb2-sonatina-context-report-release.log` and
+`/workspace/scratch/mb2-sonatina-context-report-suite-release.log`.
+This report is still internal. Typed-local and physical-ABI outcomes must join
+the public selection query; authored-raster entry preparation remains separate.
+Missing logical resource identities can still prevent deriving downstream
+entry-rooted bindings. No missing identity is invented to recover a candidate.
 
 Published-prerequisite reconciliation: live mb2 was still pinned to
 `ece351bda158009412bff7a20e8f8c2b0d25debe`, not the cleanup worktree's
