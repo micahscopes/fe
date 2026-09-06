@@ -21,6 +21,22 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina now normalizes reachable explicit-default `BrTable` instructions into
+the existing structured-control vocabulary before both helper analysis and
+compilation. One edge block per original destination preserves phi predecessor
+identity when multiple cases share a target. Normalization uses a derived module
+copy only when needed and leaves caller-owned IR unchanged. Default-less tables
+fail before mutation; a second normalization is a no-op. Two unit tests pass,
+and the integrated shared-case/default execution passes on llvmpipe. After
+correcting two diagnostic-order regressions, all 138 shader-backend tests pass
+(8.14s). The no-default-feature release check also passes (10.19s).
+Evidence under `/workspace/scratch/`: `mb2-switch-normalization-tests-20260905.log`,
+`mb2-switch-integration-20260905.log`, `mb2-switch-backend-suite-fixed-20260905.log`,
+and `mb2-switch-no-feature-check-20260905.log`. This is not yet Fe switch emission,
+exhaustive nested-loop/trap coverage, browser validation, or a measured reduction
+in the production shader. Equality-ladder recovery remains. The Sonatina slice
+is committed locally; publication and Fe dependency integration remain open.
+
 Sonatina `a4cd40dc` restores the no-default-feature build by putting Naga's
 `emit_expr` behind the existing `spirv-backend` feature guard. The unguarded
 helper referenced the optional Naga crate and produced nine resolution errors.
