@@ -21,6 +21,22 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina `14c26bee` closes a switch-in-loop merge-selection failure exposed by
+the next execution gate. Whole-function post-dominance selected the eventual
+loop exit instead of a shared continuation within the iteration. The structurer
+now prefers a proven iteration-local join, and preserves an enclosing local
+stop when the other branch terminates. No switch-name or kernel exception is
+used. The regression exercises repeated case destinations, a default exit,
+and a loop-carried phi across eight invocations, producing
+`[0, 1, 2, 2, 2, 2, 2, 2]` on lavapipe. All 139 shader-backend tests pass (8.24s),
+and all 30 structurizer unit tests pass (0.02s), in release mode. Evidence:
+`/workspace/scratch/mb2-switch-loop-stop-fix-20260905.log` and
+`/workspace/scratch/mb2-switch-loop-structurize-20260905.log`. The preceding
+failure is retained in `mb2-switch-loop-execution-20260905.log`. This adds loop
+coverage, not exhaustive CFG closure, Chrome validation, or a size reduction.
+The fix is committed on the Sonatina mb2 task line, not yet published or pinned
+by Fe. No push was performed.
+
 Sonatina now normalizes reachable explicit-default `BrTable` instructions into
 the existing structured-control vocabulary before both helper analysis and
 compilation. One edge block per original destination preserves phi predecessor
