@@ -119,7 +119,7 @@ pub use web_bundle::{
     WebBufferUsage, WebGeneratedArtifact, WebGeneratedArtifactKind, WebHostResponsibility,
     WebGraphFailureBinding, WebLayout, WebPass, WebPassCycle, WebPassShader, WebProvenance, WebResource, WebResourceArtifact,
     WebResourceAsset, WebResult, WebScalarKind, WebShaderStage, WebSourceProvenance,
-    WebSurfacePointerMotion, actor_gpu_program, actor_web_entry, render_runtime_js,
+    WebSurfacePointerMotion, actor_gpu_program, actor_web_entry, compile_actor_shader_stage, render_runtime_js,
     resolve_web_entry,
 };
 #[cfg(all(

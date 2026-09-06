@@ -801,3 +801,35 @@ candidate; uncontrolled inlining is not justified by this evidence.
 
 The browser still returns no WebGPU adapter. No atlas execution timing or
 runtime improvement is claimed by these compile/capture gates.
+
+### Isolated actor-stage experiments
+
+`compile_actor_shader_stage` compiles one planned actor compute or fragment
+entry through the same interface/resource and shader lowering used by bundles.
+Authored vertex/fragment pairs stay together, selected by fragment entry. It
+does not emit a runnable actor or bypass graph prerequisites. Resource manifest
+derivation is shared with the full-bundle path, not copied into a diagnostic.
+
+The release `actor_stage_compile` gate compares six compute stages and one
+typed raster pair to complete bundle output; the raster fixture has ten global
+resources partitioned across stages. Unknown entries, ordinary helpers and a
+vertex-only selection are rejected. Both tests pass.
+
+Example: `cargo run --release -p fe-codegen --example bloat_actor_stage --
+INGOT_DIRECTORY STAGE NEW_OUTPUT_DIRECTORY`. Existing capture and named inline
+intervention environment controls apply. The output includes exact shader files,
+hashes and compilation timing, not GPU timing. Each invocation refuses to
+overwrite an existing evidence directory.
+
+The real atlas reservation-stage baseline matches its full-build shader hash
+exactly. Same-binary experiments: baseline 14,234 B WGSL / 12,108 B SPIR-V;
+force-inline reserve 13,446 / 11,232 B; force-inline reserve_ranges 13,005 /
+10,528 B. Riff-cat records that the latter also consequentially inlines reserve.
+This exposes the closed retention-set policy; it is not a measurement of
+inlining a small callee inside a retained caller. No production retention
+policy changes follow from this limited experiment yet. Source/compiler match
+across captures; the deliberate intervention and evidence paths are reported
+environment differences, not silently discarded by the comparison tool.
+
+Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/actor-stage-retention-experiment.md`
+and the actor-stage-reserve-* artifact/capture directories.

@@ -6924,6 +6924,49 @@ fn compile_actor_shader_unit(
     }
 }
 
+fn actor_shader_resources(
+    program: &WebActorProgram,
+    readback_binding: Option<u32>,
+) -> Result<Vec<WebResource>, WebBundleError> {
+    program.resources.iter().enumerate().map(|(binding, resource)| {
+        let binding = u32::try_from(binding).map_err(|_| {
+            WebBundleError::EntryDerivation("actor resource binding exceeds u32".to_owned())
+        })?;
+        web_resource_manifest(resource, binding, readback_binding == Some(binding))
+    }).collect()
+}
+
+/// Compile one actor shader unit using the same authored interfaces and lowering
+/// path as a complete web bundle. Intended for compiler analysis and source views.
+///
+/// `source_entry` must uniquely name a planned compute/fragment entry; an authored
+/// raster vertex/fragment pair is selected by its fragment entry and compiled
+/// together. Resource identity, builtins, dispatch and layouts remain derived
+/// from Fe. This does not produce a runnable actor: prerequisites, scheduling,
+/// assets, activation policies and persistent state still belong to its graph.
+pub fn compile_actor_shader_stage(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+) -> Result<SpirvArtifact, WebBundleError> {
+    let program = actor_gpu_program(db, top_mod)?.ok_or_else(|| {
+        WebBundleError::EntryDerivation("module has no attributed GPU actor".to_owned())
+    })?;
+    let (terminal_entry, _) = actor_web_entry(db, top_mod)?.ok_or_else(|| {
+        WebBundleError::EntryDerivation("GPU actor has no derived terminal entry".to_owned())
+    })?;
+    let units = plan_actor_shader_compile_units(&program)?;
+    let matches = units.iter().filter(|unit| unit.source_entry == source_entry).collect::<Vec<_>>();
+    let [unit] = matches.as_slice() else {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "expected one actor shader unit named `{source_entry}`, found {}", matches.len()
+        )));
+    };
+    let readback = typed_gpu_readback_contract(db, top_mod, &terminal_entry, &program)?;
+    let resources = actor_shader_resources(&program, readback.as_ref().map(|contract| contract.binding))?;
+    compile_actor_shader_unit(db, top_mod, unit, &resources)
+}
+
 /// Compile actor shaders in small, independent Salsa demand batches.
 ///
 /// Each batch owns one input-equivalent database. Salsa forks that database for
@@ -7110,21 +7153,9 @@ impl WebBundle {
             }
         }
         let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
-        let resources = program
-            .resources
-            .iter()
-            .enumerate()
-            .map(|(binding, resource)| {
-                let binding = binding as u32;
-                web_resource_manifest(
-                    resource,
-                    binding,
-                    readback
-                        .as_ref()
-                        .is_some_and(|contract| contract.binding == binding),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let resources = actor_shader_resources(
+            &program, readback.as_ref().map(|contract| contract.binding),
+        )?;
         let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
         let resource_field_indices = program
             .resources
