@@ -63,6 +63,24 @@ Evidence: `/workspace/scratch/mb2-shader-driver-rename-20260905/` and the adjace
 remain explicit migration work: their native i64 behavior must not be silently
 reclassified under WebGPU's narrower environment. No size reduction is claimed.
 
+Remaining representation audit (source inspection, not a runtime finding):
+`normalize_portable_body` unconditionally invokes
+`lower_usize_array_place_classes` and `narrow_usize_scalars`, both using the
+32-bit `USIZE_WASM_REPR`, for all admitted ISAs. The native constructor also
+uses this normalization even though its Sonatina pointer representation is
+64-bit. `is_wasm32_usize_rep_bridge` is likewise shared by place lowering.
+This is a concrete unresolved target-realization assumption, not evidence
+that all canonical transports should become native pointers. Core-Wasm arity
+and flattened-local budgets, in contrast, are explicitly Wasm32-gated.
+Before changing widths, separate semantic index width from canonical arena
+offsets and external descriptor layout in the representation policy. Cover
+scalar parameters/results, constants above `u32::MAX`, nested aggregate fields,
+array projections, and call interfaces together; changing only scalar locals
+would leave inconsistent layouts. Native allocation modernization remains
+separately scoped, but the current width choice must become explicit rather
+than being inferred from the shared normalizer. No native-width correction or
+new performance result is claimed by this audit.
+
 Sonatina `b8239f8d` tightens the remaining legacy adapter: Naga validation now
 enables only `SHADER_INT64`, not every optional capability. A nonconstant i64
 entry still produces native SPIR-V, while an explicit WebGPU request rejects
