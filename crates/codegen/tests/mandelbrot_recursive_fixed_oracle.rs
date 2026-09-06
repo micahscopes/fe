@@ -6702,6 +6702,72 @@ fn production_sparse_proof_browser_words_match_independent_model() {
     }
 }
 
+/// Prepare an isolated production-kernel gate from the independent model,
+/// rather than running the GPU against uninitialized prerequisite columns.
+/// This exports test inputs only, never a generated proof or a GPU receipt.
+#[test]
+#[ignore = "exports explicit independent inputs for a real-Chrome linear-plan gate"]
+fn export_production_linear_plan_browser_inputs() {
+    let destination = PathBuf::from(
+        std::env::var_os("MB2_LINEAR_PLAN_INPUT_DIR")
+            .expect("set MB2_LINEAR_PLAN_INPUT_DIR to a new directory"),
+    );
+    std::fs::create_dir(&destination).expect("input destination must be new");
+    let point = ComplexFx {
+        real: fixed(true, 3, 4),
+        imaginary: fixed(false, 1, 8),
+    };
+    let current = ComplexFx {
+        real: fixed(false, 5, 4),
+        imaginary: fixed(true, 3, 8),
+    };
+    let expected = expected_sparse_production_base_trace_words(&point, &current);
+    assert_eq!(expected.len(), PRODUCTION_TRACE_ROWS * SPARSE_BASE_FIELDS);
+    // Independent schema: the 52-word linear plan precedes the 14-word
+    // boundary plan. One workgroup exercises 64 rows of the production shader;
+    // untouched rows and every other column must retain their model values.
+    const LINEAR_WORDS: usize = 52;
+    const BOUNDARY_WORDS: usize = 14;
+    const EXECUTED_ROWS: usize = 64;
+    let linear_start = SPARSE_BASE_FIELDS - BOUNDARY_WORDS - LINEAR_WORDS;
+    let mut input = expected.clone();
+    for column in linear_start..linear_start + LINEAR_WORDS {
+        for row in 0..EXECUTED_ROWS {
+            input[column * PRODUCTION_TRACE_ROWS + row] = u32::MAX;
+        }
+    }
+    assert_ne!(
+        input, expected,
+        "negative control must differ before execution"
+    );
+    for (name, words) in [("input.u32le", &input), ("expected.u32le", &expected)] {
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        std::fs::write(destination.join(name), bytes).unwrap();
+    }
+    let metadata = serde_json::json!({
+        "schema": "mb2-linear-plan-execution-input/1",
+        "trace_rows": PRODUCTION_TRACE_ROWS,
+        "fields": SPARSE_BASE_FIELDS,
+        "executed_rows": EXECUTED_ROWS,
+        "linear_start": linear_start,
+        "linear_words": LINEAR_WORDS,
+        "validity_initial": 1,
+        "dispatch": [1, 1, 1],
+        "point": ["-3/4", "1/8"],
+        "current": ["5/4", "-3/8"],
+        "scope": "isolated partition kernel, not a complete proof",
+    });
+    std::fs::write(
+        destination.join("metadata.json"),
+        serde_json::to_vec_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "exported {} independent words; {EXECUTED_ROWS} rows need recomputation",
+        expected.len()
+    );
+}
+
 #[test]
 #[ignore = "requires an explicit real-Chrome production LDE receipt"]
 fn production_sparse_lde_browser_codewords_match_independent_plonky3() {

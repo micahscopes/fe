@@ -62,6 +62,32 @@ evidence, not Fe recorder captures or Riffcat attribution.
 
 ### Production linear-plan browser checkpoint (2026-09-05)
 
+Independent-input execution now passes in real Chrome on AMD RDNA 3. The exact
+92,088-byte captured shader (SHA256
+`84b59ce0870a92259d258f985b125701b2e71ed55718d62fde182ddd50b1ae01`)
+reconstructs 3,328 poisoned linear-plan words across 64 rows (one workgroup).
+All 1,064,960 base-trace words match the independent Rust model, including
+untouched rows and columns; all validity words remain one and trap words zero.
+A single-word expected-output mutation is rejected. Compilation diagnostics,
+scoped validation, uncaptured errors, and device loss are all clear.
+
+The ignored `export_production_linear_plan_browser_inputs` test reuses the
+existing independent base-trace model, not the Fe/Wasm implementation. Its
+release run passes in 0.07s after a 52.48s Rust build. Browser pipeline creation
+takes 52.1ms and dispatch plus full-buffer readback takes 66.1ms in this run.
+These are warm-state, isolated-kernel observations, not complete-proof or
+4,096-row performance claims. Each 4.26MB input/oracle transport takes about
+0.85-0.89s over the diagnostic connection and is separate from GPU timing.
+This gate does not establish full graph exactness or recursive proof generation.
+
+Evidence: `/workspace/scratch/mb2-boundary-capstone-20260905/input-export.log`,
+`chrome-execution.log`, and `independent-input/` in the same directory.
+The browser harness is
+`/workspace/scratch/mb2-native-shader-chrome-smoke-20260905.mjs` with
+`--linear-plan-input` selecting those inputs. The compiler artifact is the
+existing verified Riffcat capture below; browser execution is separate evidence,
+not an imported Riffcat execution receipt.
+
 Fresh production linear-plan checkpoint on Fe `839584cbb`, Sonatina `ecb58efe`:
 the focused release artifact gate passes in 12.64s with observation enabled.
 Riffcat imports and verifies its complete compute capture: 3,842 all-module
