@@ -47,6 +47,11 @@ through Naga-validated SPIR-V. Evidence:
 `/workspace/scratch/mb2-prepared-interfaces-20260905.log`. No measured speed or
 memory reduction is claimed, and initial RMIR preparation still legitimately
 reads source runtime bodies.
+A focused follow-up mutation gate consumes every prepared body, confirms that
+typed-borrow analysis still succeeds through the retained callee interface,
+then checks rejection after removing that interface or deleting its parameters.
+It passes in release mode (1.32s). Evidence:
+`/workspace/scratch/mb2-retained-interface-mutation-20260905.log`.
 The focused Wasm execution regression
 `nested_aggregate_value_survives_a_resumable_frame` also passes in release mode
 (1.30s), preserving nested values through synthesized suspension/resumption.

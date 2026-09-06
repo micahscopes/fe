@@ -14043,6 +14043,60 @@ pub fn probe(_ input: Wide) -> u32 { input.values[0] }
     }
 
     #[test]
+    fn typed_borrow_analysis_retains_prepared_interfaces_after_body_consumption() {
+        let source = r#"
+struct Pair { left: u32, right: u32 }
+fn leaf(_ pair: ref Pair) -> u32 { pair.left + pair.right }
+fn middle(_ pair: ref Pair) -> u32 { leaf(ref pair) }
+pub fn kernel(_ value: u32) -> u32 {
+    let pair = Pair { left: value, right: value + 1 }
+    middle(ref pair)
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///retained_borrow_interface.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let isa = sonatina_ir::isa::shader::Shader::new(TargetTriple::new(
+            Architecture::Shader, Vendor::Unknown, OperatingSystem::Unknown,
+        ));
+        let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
+        let mut module = PortableModuleLowerer::new(
+            &db, builder, &isa, &package, HashSet::new(), &[],
+        ).unwrap();
+        let caller = *module.prepared_bodies.keys().find(|&&instance| {
+            module.function_symbol(instance) == "middle"
+        }).expect("prepared middle helper");
+        let body = module.prepared_bodies[&caller].clone();
+        let (&root, pointee) = module.typed_private_borrow_params[&caller].iter().next()
+            .expect("certified borrow parameter");
+        let pointee = pointee.clone();
+        let callee = body.blocks.iter().flat_map(|block| &block.stmts).find_map(|stmt| {
+            match stmt {
+                RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } => Some(*callee),
+                _ => None,
+            }
+        }).expect("retained call to leaf");
+        module.prepared_bodies.clear();
+        let analyze = |module: &PortableModuleLowerer<'_, '_, _>| {
+            module.typed_private_component(
+                &body, root, pointee.clone(), TypedPrivateRootKind::Parameter,
+                &module.typed_private_borrow_params,
+            ).map(|_| ())
+        };
+        assert!(analyze(&module).is_ok(), "consumed bodies must not invalidate prepared interfaces");
+        let interface = module.prepared_interfaces.remove(&callee).unwrap();
+        assert_eq!(analyze(&module).unwrap_err(), "missing-prepared-callee-interface");
+        module.prepared_interfaces.insert(callee, interface);
+        module.prepared_interfaces.get_mut(&callee).unwrap().params.clear();
+        assert_eq!(analyze(&module).unwrap_err(), "prepared-callee-arity-mismatch");
+    }
+
+    #[test]
     fn shader_ir_preserves_proven_nested_borrows_as_typed_pointers() {
         let source = r#"
 struct Cell { left: u32, right: u32 }
