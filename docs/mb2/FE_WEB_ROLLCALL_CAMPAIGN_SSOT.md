@@ -21,6 +21,19 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+The Sonatina structurizer now documents its actual supported CFG closure at
+the implementation entry point, replacing the inaccurate claim that arbitrary
+reducible CFGs are accepted. It distinguishes canonical loop exits, terminal
+corridors, unsupported switches and mixed exits, region duplication, and the
+emitter's remaining phi/return/trap obligations. This is documentation of
+existing behavior, not a normalization implementation. All 30 structurizer
+tests pass in the release binary used for the diagnostic experiment:
+`/workspace/scratch/mb2-structurize-closure-suite-20260905.log`. That binary
+included an additional repeated-failure assertion, subsequently removed after
+32 repetitions did not reproduce diagnostic instability; no diagnostic-order
+fix is claimed or retained. Switch normalization and the broader phase-6 gates
+remain open. The Sonatina documentation commit is local, not published.
+
 The governing [boundary design and historical execution record](FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md)
 is now carried on shared mb2, recovered from the former cleanup worktree.
 Its historical pending markers do not override this ledger. The bounded
