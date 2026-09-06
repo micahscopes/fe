@@ -493,6 +493,20 @@ Do not reconstruct liveness from WGSL names or sum counts across entry points.
 These new direct Sonatina unit gates do not currently produce Fe recorder
 captures; their test results must not be labeled Riffcat-verified comparisons.
 
+Aggregate projection follow-through: Sonatina `8308464a` forwards an already
+evaluated component when `ExtractValue` sees a Naga struct/array `Compose`.
+It does not reload memory or mutate the aggregate. The focused regression
+constructs an old pair and an updated pair, then reads both snapshots; the
+outlined helper has no residual Compose/AccessIndex expressions and executes
+to 90 on lavapipe. All 137 Naga/SPIR-V integration tests pass (21.88s), including
+the new test, against the same release binary. Logs:
+`/workspace/scratch/mb2-compose-projection-20260905.log` and
+`mb2-compose-projection-suite-20260905.log` in the same directory.
+This is a direct backend regression, not a Riffcat production comparison.
+Production bytes/timing delta, Chrome execution, and Fe pin integration are
+not established for this commit; it is committed but unpublished. E4 remains
+open until the matching production comparison executes.
+
 Production linear-plan inline triage (2026-09-05): replay of the complete
 `request-521696-1788655041184817160-compute` capture separates two causes.
 `f220` (`sparse_linear_copy_plan`) is backend-callable with 12 physical

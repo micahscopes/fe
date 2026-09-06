@@ -523,6 +523,10 @@ evidence and a decision; it does not justify dropping its correctness gate.
   final module size, pipeline time and execution. Prior flattened-ABI results
   are not a substitute. No global inline policy change from a single fixture.
 - [ ] E4, remaining representation round trips.
+  Sonatina `8308464a` now forwards projections of already-composed SSA
+  aggregates, preserving old snapshots. The focused regression has no residual
+  construction/projection expressions and executes to 90; all 137 integration
+  tests pass on lavapipe. Production delta and Fe pin integration remain open.
   First measured intervention: Sonatina `1bbd24a0` folds type-compatible zero
   insertion into zero aggregates. Six aggregate GPU regressions and the signed
   zero unit gate pass. The 19-stage capture totals 2,531,533 bytes; the reducer
