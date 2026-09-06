@@ -40,12 +40,14 @@ fn production_sparse_linear_plan_lowers_in_isolation() {
     let (entry, mode) = resolve_web_entry(&db, top_mod, None, None)
         .expect("the actor should derive its typed WebGPU entry");
     assert_eq!(mode, WebBundleMode::Render);
+    let lowering_started = std::time::Instant::now();
     let bundle = fe_codegen::WebBundle::compile(
         &db,
         top_mod,
         WebBuildOptions::render(entry, Some("mandelbrot_sparse_linear_plan".into())),
     )
     .expect("the isolated linear-plan pass should lower");
+    let lowering_elapsed = lowering_started.elapsed();
 
     assert_eq!(bundle.manifest.passes.len(), 2);
     let pass = &bundle.manifest.passes[0];
@@ -60,4 +62,20 @@ fn production_sparse_linear_plan_lowers_in_isolation() {
     )
     .validate(&module)
     .expect("linear-plan WGSL should validate");
+    let expression_count: usize = module.functions.iter()
+        .map(|(_, function)| function.expressions.len())
+        .chain(module.entry_points.iter().map(|entry| entry.function.expressions.len()))
+        .sum();
+    eprintln!(
+        "linear-plan artifact: wgsl_bytes={}, naga_expressions={}, naga_helpers={}, bundle_compile_ms={}",
+        bundle.pass_wgsl[0].source.len(), expression_count, module.functions.len(),
+        lowering_elapsed.as_millis(),
+    );
+    // Export the exact compiled manifest and artifacts for external browser
+    // diagnosis. Publication rejects an existing destination; the browser
+    // must not accidentally test a stale or mixed bundle. This gate itself
+    // validates artifacts only, not dispatch inputs or proof correctness.
+    if let Some(destination) = std::env::var_os("FE_TEST_BUNDLE_DIR") {
+        bundle.write_atomic(destination).expect("publish isolated linear-plan bundle");
+    }
 }

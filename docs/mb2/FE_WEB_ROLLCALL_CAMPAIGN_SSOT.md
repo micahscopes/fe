@@ -62,6 +62,37 @@ evidence, not Fe recorder captures or Riffcat attribution.
 
 ### Intrinsic return classification (2026-09-05)
 
+Fresh production linear-plan checkpoint on Fe `839584cbb`, Sonatina `ecb58efe`:
+the focused release artifact gate passes in 12.64s with observation enabled.
+Riffcat imports and verifies its complete compute capture: 3,842 all-module
+Sonatina instructions, 634 root instructions, 83 recorded functions, 92,088
+backend WGSL bytes, and 51,836 SPIR-V bytes. The source digest covers the
+fixture only, not its dependency closure; the recorded tracked dirty-patch
+digest includes unrelated shared edits. These are scoped observations, not
+cross-version causality evidence.
+
+The exact saved shader (`84b59ce0870a92259d258f985b125701b2e71ed55718d62fde182ddd50b1ae01`)
+did not finish the Chrome compile-only gate within the MCP 60-second request
+timeout. Page delivery succeeded; no dispatch was submitted. The current
+harness cannot distinguish a stall in `getCompilationInfo` from pipeline
+creation. Its isolated page was closed, leaving the six existing user pages
+present. A subsequent 881-byte control compiles on AMD RDNA3 in 2.2ms with no
+validation errors or device loss. This does not prove a GPU crash or diagnose
+the production stall. The shader has 33 WGSL functions and no emitted
+`fe_heap` declaration; byte-arena pressure alone is not an established cause.
+
+The isolated test now optionally publishes its exact bundle through
+`FE_TEST_BUNDLE_DIR` and prints size, reparsed Naga expression/helper counts,
+and bundle compilation time. Export passes in 12.50s total, 9,744ms bundle
+compilation: 92,084 outer-bundle WGSL bytes, 2,869 Naga expressions, 32 helpers.
+The four-byte backend/bundle difference is removal of trailing spaces on four
+attribute lines, not optimization. The older 56,001-byte checkpoint predates
+semantic changes; no claim that the increase is entirely accidental or entirely
+necessary has been established. Evidence and exact bundle are under
+`/workspace/scratch/mb2-boundary-capstone-20260905/`. Next browser diagnosis must
+separate module-info and pipeline phases before another production attempt,
+then execute with a correctly initialized workspace and independent oracle.
+
 Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses
 `is_runtime_intrinsic_name` or a separate f32 name decoder to select extern
 return representation. It delegates to the existing HIR function-identity
