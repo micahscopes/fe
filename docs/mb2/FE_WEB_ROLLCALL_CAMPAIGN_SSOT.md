@@ -38,6 +38,10 @@ snapshot lowering, and preparation past the specialization limit. Logs:
 gate, not a shader-size or browser-execution claim. Other analysis-time raw-body
 fallbacks remain to reconcile with retained prepared interfaces, particularly
 where a callee body has already been consumed during streaming emission.
+The focused Wasm execution regression
+`nested_aggregate_value_survives_a_resumable_frame` also passes in release mode
+(1.30s), preserving nested values through synthesized suspension/resumption.
+Evidence: `/workspace/scratch/mb2-prepared-body-resumable-20260905.log`.
 
 The Fe-side `spirv_lower.rs` module is now named `shader_driver.rs`, reflecting
 its actual ownership: request construction and profitability policy, not Naga
