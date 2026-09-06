@@ -53,6 +53,7 @@ pub use native::{
 };
 #[cfg(feature = "spirv-backend")]
 pub use spirv_lower::{
+    ComputeShaderInterface,
     compile_render_wgsl, compile_runtime_package_spirv,
     compile_runtime_package_spirv_authored_raster,
     compile_runtime_package_spirv_authored_raster_with_interface,

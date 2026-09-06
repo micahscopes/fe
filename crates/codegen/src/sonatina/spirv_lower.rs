@@ -15,7 +15,7 @@ use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use mir::{RuntimePackage, build_wasm_runtime_package_for_entry};
 use sonatina_codegen::isa::naga::{
-    NagaBackend, ShaderCompileRequest, ShaderEncoding, ShaderEnvironment, ShaderPipeline,
+    GraphFailureBinding, NagaBackend, ShaderCompileRequest, ShaderEncoding, ShaderEnvironment, ShaderPipeline,
     ShaderTargetContract,
 };
 use sonatina_codegen::isa::spirv::{
@@ -116,23 +116,37 @@ pub fn compile_runtime_package_spirv_compute_with_resources(
     compile_runtime_package_spirv_compute_with_interface(
         db,
         package,
-        workgroup_size,
-        [1, 1, 1],
-        resources,
-        &[],
+        ComputeShaderInterface {
+            workgroup_size,
+            dispatch_grid: [1, 1, 1],
+            resources,
+            builtin_arguments: &[],
+            graph_failure: None,
+        },
     )
 }
 
-/// Lower an explicit compute stage whose complete interface was derived from
-/// Fe types. Builtin arguments are source parameters supplied directly by the
+/// Complete physical interface of one Fe-derived compute stage.
+/// Builtin arguments are source parameters supplied directly by the
 /// physical shader invocation context rather than a host-populated buffer.
+#[derive(Clone, Copy)]
+pub struct ComputeShaderInterface<'a> {
+    pub workgroup_size: [u32; 3],
+    pub dispatch_grid: [u32; 3],
+    pub resources: &'a [SpirvExternalResource],
+    pub builtin_arguments: &'a [SpirvBuiltinArgument],
+    /// Optional shared graph epoch. The graph owner must allocate and reset
+    /// this binding, and consume its status before accepting graph results.
+    /// Sonatina validates collision, resource budget, and compute admission.
+    pub graph_failure: Option<GraphFailureBinding>,
+}
+
+/// Compile one complete physical compute interface without an implicit graph
+/// failure policy or mutable backend mode.
 pub fn compile_runtime_package_spirv_compute_with_interface(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
-    workgroup_size: [u32; 3],
-    dispatch_grid: [u32; 3],
-    resources: &[SpirvExternalResource],
-    builtin_arguments: &[SpirvBuiltinArgument],
+    interface: ComputeShaderInterface<'_>,
 ) -> Result<SpirvArtifact, LowerError> {
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
 
@@ -143,11 +157,12 @@ pub fn compile_runtime_package_spirv_compute_with_interface(
         &mut module,
         ShaderPipeline::Compute {
             entry,
-            workgroup_size,
-            dispatch_grid,
+            workgroup_size: interface.workgroup_size,
+            dispatch_grid: interface.dispatch_grid,
         },
-        resources,
-        builtin_arguments,
+        interface.resources,
+        interface.builtin_arguments,
+        interface.graph_failure,
     )
 }
 
@@ -159,6 +174,7 @@ fn compile_webgpu_request(
     pipeline: ShaderPipeline,
     resources: &[SpirvExternalResource],
     builtin_arguments: &[SpirvBuiltinArgument],
+    graph_failure: Option<GraphFailureBinding>,
 ) -> Result<SpirvArtifact, LowerError> {
     let target = ShaderTargetContract::new(
         ShaderEnvironment::WebGpu,
@@ -168,6 +184,7 @@ fn compile_webgpu_request(
     let mut request = ShaderCompileRequest::new(&target, pipeline);
     request.resources = resources;
     request.builtin_arguments = builtin_arguments;
+    request.graph_failure = graph_failure;
     // Establish the complete browser request before helper selection. The
     // contextual backend query needs resource identity and stage restrictions,
     // not only the types visible in an isolated helper signature.
@@ -451,7 +468,7 @@ pub fn compile_runtime_package_spirv_render(
     let entry = entry_functions.first().copied().ok_or_else(|| {
         LowerError::Spirv("render package has no runtime section entry".to_owned())
     })?;
-    compile_webgpu_request(&mut module, ShaderPipeline::Fullscreen { entry }, &[], &[])
+    compile_webgpu_request(&mut module, ShaderPipeline::Fullscreen { entry }, &[], &[], None)
 }
 
 /// Lower a fragment stage whose compiler-described storage resources are
@@ -471,6 +488,7 @@ pub fn compile_runtime_package_spirv_render_with_resources(
         ShaderPipeline::Fullscreen { entry },
         resources,
         &[],
+        None,
     )
 }
 
@@ -550,6 +568,7 @@ pub fn compile_runtime_package_spirv_authored_raster_with_interface(
         ShaderPipeline::Raster { vertex, fragment },
         resources,
         builtin_arguments,
+        None,
     )
 }
 

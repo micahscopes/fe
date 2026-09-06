@@ -6854,10 +6854,13 @@ fn compile_actor_shader_unit(
             compile_runtime_package_spirv_compute_with_interface(
                 db,
                 &package,
-                *workgroup_size,
-                *dispatch,
-                &external,
-                &builtin_arguments,
+                crate::ComputeShaderInterface {
+                    workgroup_size: *workgroup_size,
+                    dispatch_grid: *dispatch,
+                    resources: &external,
+                    builtin_arguments: &builtin_arguments,
+                    graph_failure: None,
+                },
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))
         }

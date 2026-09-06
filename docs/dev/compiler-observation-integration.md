@@ -511,3 +511,23 @@ retains the ordinary `__add_u32` call. Expose source function identity versus
 dedicated intrinsic operations from producer facts, without classifying calls
 by spelling. Preserve the missing later-stage evidence and dirty-producer
 qualification. These snapshots were inspected manually, not imported successfully.
+
+Target-contract observation gap, reproduced by the Fe epoch request gate:
+`/workspace/scratch/mb2-fe-epoch-request-20260905/capture/` contains three
+complete requests and a backend-rejected binding collision. All four import
+and replay successfully. The plain and epoch-enabled requests each retain
+15 Sonatina instructions, 10 in the root, and two functions, but produce
+626 versus 881 WGSL bytes (1508 versus 1820 SPIR-V bytes). This is required
+graph-failure machinery, not optimization regression or extra Fe computation.
+The wrapper is introduced during Naga construction after the recorded IR.
+
+Request: record the explicit shader environment, encodings, and optional graph
+failure binding as typed request facts. Comparisons should flag contract
+differences before offering size conclusions. Acceptance: distinguish these
+two captures without inferring atomics from WGSL spelling or user labels;
+preserve the collision request as failed with no emitted artifact. Current
+replay correctly preserves completion/failure and exact bytes, but does not
+explain this target-contract difference itself. Producer was Fe `4c6192b2c`
+plus the uncommitted compute-interface/test change and existing shared edits,
+with pinned Sonatina `ecb58efe`. Imported settings record the whole tracked
+dirty patch SHA256; the fixture source digest is recorded separately.

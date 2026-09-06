@@ -205,10 +205,13 @@ fn typed_region_writes_execute_on_browser_profile_webgpu() {
     let artifact = fe_codegen::compile_runtime_package_spirv_compute_with_interface(
         &db,
         &package,
-        [1, 1, 1],
-        [1, 1, 1],
-        &[tape],
-        &[],
+        fe_codegen::ComputeShaderInterface {
+            workgroup_size: [1, 1, 1],
+            dispatch_grid: [1, 1, 1],
+            resources: &[tape],
+            builtin_arguments: &[],
+            graph_failure: None,
+        },
     )
     .expect("typed region writer should lower to browser WebGPU");
     let wgsl = artifact.wgsl.as_deref().expect("typed region browser WGSL");

@@ -235,6 +235,24 @@ Artifacts: `/workspace/scratch/mb2-epoch-counter-20260905/` (774-byte scoped,
 507-byte plain WGSL). This is a deliberate contract difference, not an
 optimization comparison or production Fe pass-graph integration.
 
+Fe compute-request integration now carries an explicit `ComputeShaderInterface`
+including the optional backend graph-failure binding. Existing actor and oracle
+callers explicitly retain `None`; no production graph is silently opted in.
+The Fe-authored division/store fixture passes the release artifact gate (1.69s):
+graphless interface bytes equal the existing resource wrapper, an epoch request
+preserves the trap descriptor, and a colliding resource fails in Sonatina.
+Both changed oracle callers also compile in release mode; that is not their
+full execution gate. Exact scoped WGSL is 881 bytes, SHA256
+`30aa8d8763e4b72ed93f8bf599ec824310cc5a6c467cbe141c1d7c87366ba7c7`.
+Chrome/AMD RDNA3 returns `[1,33,1,303,0,33]` in one submission: failure survives,
+dependent work is suppressed, and explicit reset succeeds. No validation
+errors or device loss. This still permits post-trap stores in the first failed
+invocation. Logs and artifacts: `/workspace/scratch/mb2-fe-epoch-request-20260905/`.
+Riffcat imports/replays three complete requests and the intentional collision
+failure; target-contract comparison remains an explicitly recorded tooling gap.
+Next: production shared resource allocation/reset, typed Fe failure delivery,
+and raster-consumer policy, not another backend implementation.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader

@@ -85,6 +85,7 @@ pub use sonatina::{
 };
 #[cfg(feature = "spirv-backend")]
 pub use sonatina::{
+    ComputeShaderInterface,
     compile_render_wgsl, compile_runtime_package_spirv,
     compile_runtime_package_spirv_authored_raster,
     compile_runtime_package_spirv_authored_raster_with_interface,

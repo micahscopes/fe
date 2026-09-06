@@ -301,10 +301,13 @@ fn compile_proof_compute_stage(
     fe_codegen::compile_runtime_package_spirv_compute_with_interface(
         &db,
         &package,
-        [1, 1, 1],
-        [1, 1, 1],
-        &proof_gpu_resources(resource_arg_offset),
-        &builtins,
+        fe_codegen::ComputeShaderInterface {
+            workgroup_size: [1, 1, 1],
+            dispatch_grid: [1, 1, 1],
+            resources: &proof_gpu_resources(resource_arg_offset),
+            builtin_arguments: &builtins,
+            graph_failure: None,
+        },
     )
     .unwrap_or_else(|error| panic!("{entry} browser WebGPU lowering: {error}"))
 }
