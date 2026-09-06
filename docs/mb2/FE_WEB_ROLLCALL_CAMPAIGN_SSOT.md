@@ -21,6 +21,18 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina `8f352c8a` adds Wasmtime execution of the phi-bearing normalized switch
+loop, alongside its existing lavapipe gate. Bounds 0 through 7 return
+`min(bound, 2)` on both paths (focused test: 0.23s). The release CPU suites also
+pass: 30 Cranelift, 31 Wasm, and one Wasm numeric conversion test. Evidence:
+`/workspace/scratch/mb2-switch-loop-wasm-parity-20260905.log` and
+`/workspace/scratch/mb2-switch-cpu-parity-20260905.log`. The current Wasm backend
+uses Waffle, not the Naga region-tree structurizer; the misleading structurizer
+module description was corrected. This is behavior parity through separate
+backend implementations, not a shared-structurizer claim or a Fe emission gate.
+The shared Fe Cargo files are undergoing a separate pin update and were left
+untouched by this slice. No push was performed.
+
 Sonatina `f302003c` removes unnecessary switch forwarding blocks. Only targets
 with an original-source phi input need a shared edge block; phi-free targets
 are branched to directly. An outlined-helper execution regression exposed the
