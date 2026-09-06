@@ -493,6 +493,37 @@ Do not reconstruct liveness from WGSL names or sum counts across entry points.
 These new direct Sonatina unit gates do not currently produce Fe recorder
 captures; their test results must not be labeled Riffcat-verified comparisons.
 
+Execution-evidence link gap, reproduced by the production linear-plan gate:
+the complete capture at
+`/workspace/scratch/mb2-boundary-capstone-20260905/capture/request-521696-1788655041184817160-compute.capture.json`
+replays 3,842 module instructions, 634 root instructions, and 92,088 WGSL bytes.
+The exact WGSL SHA256 is
+`84b59ce0870a92259d258f985b125701b2e71ed55718d62fde182ddd50b1ae01`.
+Its successful AMD RDNA 3 Chrome execution is currently recorded separately in
+`/workspace/scratch/mb2-boundary-capstone-20260905/chrome-execution.log`.
+One workgroup reconstructs 3,328 poisoned words, with zero mismatches across
+1,064,960 checked words, validity intact and no traps or device loss.
+
+Request: support an optional hash-linked execution-evidence sidecar, not a
+second browser runner. Preserve input and expected-output hashes, dispatch,
+adapter/backend, diagnostics, oracle scope, and explicit unknown cache state.
+Show module/pipeline creation, input transport, submission/readback and host
+comparison as distinct timings. This run measures 52.1ms pipeline creation,
+66.1ms dispatch plus readback, and roughly 0.85-0.89s per input transport.
+It does not measure GPU timestamp duration or full-proof generation. Do not
+promote an external runner's success claim into compiler equivalence proof.
+Acceptance: join this result only to its exact artifact, reject a mismatched
+artifact hash, and retain failed/partial execution independently of a complete
+compiler capture. Keep execution and compilation completion statuses separate.
+The existing input exporter is committed on Fe as `8b027599d`.
+
+Related diagnostic presentation: rejected target requests should retain phase,
+classification and target requirement. Missing output is unknown/not emitted,
+never a zero-byte optimization win. The existing failed binding-collision
+capture below is a concrete acceptance input. Typed `fe.shader_request`
+presentation and RMIR-only ingestion remain higher-value extensions than a
+competing recorder or consumer-owned compiler legality analysis.
+
 RMIR-only ingestion gap, reproduced during intrinsic identity cleanup:
 `riffcat-bloat import-fe` rejects
 `/workspace/scratch/mb2-intrinsic-identity-wasm-20260905.log` with

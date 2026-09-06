@@ -60,6 +60,20 @@ work. Fe remains pinned to `ecb58efe`; its portable dependency pin and fresh Fe
 gates must follow publication. Direct Sonatina tests are execution/validation
 evidence, not Fe recorder captures or Riffcat attribution.
 
+Sonatina `8e6c270c` adds early core-WebGPU dispatch admission to the same
+target contract used by helper analysis and compilation. It checks nonzero
+workgroup dimensions, per-axis defaults (256/256/64), 256 total invocations,
+and 65,535 workgroups per dispatch axis. Unsupported requests fail before an
+unsupported helper body is lowered, including SPIR-V-only WebGPU requests.
+Raster/fullscreen requests are not treated as compute dimensions. Legacy
+unprofiled entry points retain their existing behavior; negotiated larger
+device limits and compatibility-mode limits are not claimed by this profile.
+All 20 Naga module tests pass in release mode, including threshold and overflow
+inputs. Evidence: `/workspace/scratch/mb2-shader-dispatch-limits-20260905.log`
+and `mb2-shader-dispatch-limits-suite-20260905.log` in the same directory.
+This is committed but unpublished on the shared Sonatina line, not yet in
+Fe's pinned dependency. No browser or shader-size improvement is claimed.
+
 ### Production linear-plan browser checkpoint (2026-09-05)
 
 Independent-input execution now passes in real Chrome on AMD RDNA 3. The exact
