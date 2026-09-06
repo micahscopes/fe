@@ -21,6 +21,21 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina `9d2bf212` fixes a trap-default switch rejection: merge analysis treated
+a phi-bearing return like a bare terminal, accepting an earlier candidate that
+another live path bypassed. Value-carrying return blocks now participate in the
+downstream-bypass check before being classified as terminal. This is a general
+join rule, not a switch exception. The mutated default-trap fixture compiles
+with a shader trap binding, returns 40/40/7 for cases 0/1/2 in Wasmtime, and
+actually traps for inputs 3 through 7. All 140 backend tests pass (6.36s) and
+30 structurizer tests pass (0.01s). Evidence:
+`/workspace/scratch/mb2-switch-trap-live-join-20260905.log` and
+`/workspace/scratch/mb2-switch-trap-structurize-20260905.log`; baseline failure:
+`/workspace/scratch/mb2-switch-default-trap-20260905.log`. The original
+nontrapping fixture still executes on lavapipe. The new shader trap path has
+artifact coverage, not GPU trap-readback or Chrome execution coverage.
+Publication remains awaiting approval; the shared Fe pin was not changed.
+
 Sonatina `8f352c8a` adds Wasmtime execution of the phi-bearing normalized switch
 loop, alongside its existing lavapipe gate. Bounds 0 through 7 return
 `min(bound, 2)` on both paths (focused test: 0.23s). The release CPU suites also
