@@ -575,6 +575,27 @@ Evidence: `/workspace/scratch/mb2-compose-matched-baseline-20260905/`
 plus adjacent `mb2-compose-matched-baseline-20260905.log`. The locked release
 test passes in 14.24s; bundle compilation takes 11.385s in this one run.
 
+Saved-artifact software-Vulkan follow-up: the opt-in
+`saved_linear_plan_matches_independent_inputs` test loads the exact WGSL and
+independent input files without compiling Fe. It requires an adapter (no skip
+success), records shader/input/oracle hashes, dispatches one 64-lane workgroup,
+and compares all trace words, validity and traps. Run alone with `--ignored
+--exact` and `MB2_LINEAR_PLAN_WGSL`/`MB2_LINEAR_PLAN_INPUT_DIR` set explicitly.
+Both the 84KB candidate and 92KB baseline reach submission but exceed the 30s
+completion deadline on llvmpipe LLVM 21.1.8 / Mesa 26.0.5. Baseline module and
+pipeline preparation alone takes 52.16s. Neither execution is green and this
+does not isolate the candidate change. Logs:
+`/workspace/scratch/mb2-compose-saved-lavapipe-20260905.log` and
+`mb2-baseline-saved-lavapipe-20260905.log`.
+
+The first diagnostic harness had a late-callback send unwrap during timeout
+unwinding; that was removed. The baseline then exposed wgpu queue teardown
+panicking while an outstanding submission timed out. The opt-in harness now
+exits nonzero directly on poll failure instead of unwinding through that
+driver state. This containment path is not a shader fix and does not imply
+driver cancellation. No further production execution retries were made.
+The final harness is compile-checked, not reported as an executed passing gate.
+
 Production linear-plan inline triage (2026-09-05): replay of the complete
 `request-521696-1788655041184817160-compute` capture separates two causes.
 `f220` (`sparse_linear_copy_plan`) is backend-callable with 12 physical
