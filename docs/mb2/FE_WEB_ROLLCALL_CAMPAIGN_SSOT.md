@@ -534,6 +534,11 @@ evidence and a decision; it does not justify dropping its correctness gate.
   881-byte control compiles immediately afterward. Candidate browser exactness
   and clean single-change attribution remain open. Evidence and hashes are in
   the observation record, not a claimed completed E4 gate.
+  A fresh published-pin baseline on unchanged Fe compiler/application source
+  now reproduces the old artifact hash exactly. Riffcat aligns source/settings
+  and confirms unchanged final Sonatina counts, 8,080 fewer WGSL bytes and 392
+  fewer SPIR-V bytes in the candidate. This closes the compiler-side comparison
+  caveat for that pair, not the pending Chrome exactness/pin gates.
   First measured intervention: Sonatina `1bbd24a0` folds type-compatible zero
   insertion into zero aggregates. Six aggregate GPU regressions and the signed
   zero unit gate pass. The 19-stage capture totals 2,531,533 bytes; the reducer

@@ -555,6 +555,26 @@ Logs: `/workspace/scratch/mb2-compose-production-chrome-extended-20260905.log`,
 `mb2-compose-production-baseline-control-20260905.log`, and
 `mb2-compose-browser-systeminfo-20260905.json` in the same directory.
 
+Matched-producer follow-up: a fresh published-pin build on Fe `6e31d9752`
+reproduces the original WGSL hash exactly. There are no compiler/application
+source changes between Fe `590414488` and `6e31d9752`, and the tracked dirty
+patch digest is identical in both runs. Riffcat now reports source/settings
+aligned with no setting differences; the capture-directory environment path
+differs, and compiler identity intentionally differs. Final Sonatina counts
+are unchanged. WGSL falls from 92,088 to 84,008 raw bytes (8,080 bytes, 8.8%);
+SPIR-V falls from 51,836 to 51,444 bytes (392 bytes, 0.76%). Reparsed bundled
+Naga expressions fall from 2,869 to 2,552 (11.0%). This localizes the observed
+reduction after Sonatina IR, consistent with aggregate projection forwarding,
+not reduced Fe monomorphization or an inlining-policy change. The Sonatina
+revision range also contains the separately tested legacy capability and
+early dispatch-limit checks. No execution speedup is inferred from these sizes.
+The earlier producer-alignment caveat is superseded for this fresh pair, not
+for arbitrary captures or the still-open candidate Chrome execution gate.
+Evidence: `/workspace/scratch/mb2-compose-matched-baseline-20260905/`
+(`compute.capture.json`, verified `comparison.json`, raw requests and bundle),
+plus adjacent `mb2-compose-matched-baseline-20260905.log`. The locked release
+test passes in 14.24s; bundle compilation takes 11.385s in this one run.
+
 Production linear-plan inline triage (2026-09-05): replay of the complete
 `request-521696-1788655041184817160-compute` capture separates two causes.
 `f220` (`sparse_linear_copy_plan`) is backend-callable with 12 physical
