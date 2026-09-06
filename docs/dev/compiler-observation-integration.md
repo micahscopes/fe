@@ -42,6 +42,17 @@ partial observation, and strict failure handling. The evidence log is
 
 ## First recorder checkpoint (2026-09-05)
 
+### Atlas loop-merge pin comparison
+
+Published Sonatina `14c26bee` (switch normalization and iteration-local merge
+correction) passes all five Fe scalar/grid observation regressions in release.
+The unchanged current triangle atlas source compiles all 56 passes; each pass's
+published shader is byte-identical to the `a4cd40dc` baseline. Riff-cat verifies
+the retirement comparison: 77 final IR instructions and five prepared duplicate
+block occurrences remain. This is a correctness integration with **zero measured
+shader-size improvement for this corpus**, not an atlas performance fix.
+Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/loop-merge-comparison.md`.
+
 Sonatina commit ca5210d1ff41af48d893c82f2a8380ada3e3f5c6 adds caller-owned,
 typed pass-boundary callbacks inside the existing selected-function pass round.
 It preserves analysis lifetime and scheduling. All 49 pipeline tests passed.
