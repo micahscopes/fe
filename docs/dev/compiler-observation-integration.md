@@ -753,3 +753,30 @@ and compatibility gates; the preceding Chrome evidence covers execution.
 Consumer follow-up: present these as typed target-contract differences rather
 than raw metadata strings, retaining old-capture unknown coverage and the
 explicit resource/builtin coverage limitation. No consumer rewrite is required.
+
+### Quilting shared-corridor cleanup checkpoint
+
+The Sonatina pin advances to `0c9a8bd08586da1c8526afa323549e0572db4a63`.
+Besides the intervening switch/return fixes, this includes opt-in scalar CSE
+and branch-only short-circuit folding in CFG cleanup. Scalar CSE remains
+unscheduled: its captured-helper reductions were small and did not explain
+the two largest retirement helpers.
+
+The branch fold combines already-available boolean conditions only when shared
+successor phi inputs agree. It introduces no speculative loads/calls or code
+motion. On the same captured retirement IR, one fold changes structured body
+positions from 28 to 22 and duplicate positions from 5 to 0, with the 85 IR
+instructions unchanged. Neighbor traversal and candidate initialization retain
+their separate 17/21 duplicate positions; this is not a complete bloat fix.
+
+Sonatina release gates: 166 optimizer tests, 17 CFG-editor tests, 30 structurer
+tests. These include Wasmtime truth-table checks for all four branch polarities.
+Fe's five scalar/grid observation tests pass on the exact pin, including checked
+multiply and division/remainder trap captures. Artifact-size and browser runtime
+results for the complete atlas remain pending; a structural reduction is not
+yet a measured WGSL reduction. The comparison source is unchanged at Quilting-fe
+`1e8e5f98`, with preserved dirty patch SHA256
+`b28ec1c98707899bb7830b50ec74f0193f8829544433082d65bc57ad9d8bdd43`.
+
+Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/conditional-bridge-investigation.md`
+and `conditional-bridge-fe-observation-tests.log` in the same directory.
