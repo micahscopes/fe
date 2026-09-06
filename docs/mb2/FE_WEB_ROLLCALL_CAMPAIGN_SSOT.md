@@ -93,6 +93,27 @@ necessary has been established. Evidence and exact bundle are under
 separate module-info and pipeline phases before another production attempt,
 then execute with a correctly initialized workspace and independent oracle.
 
+Phased Chrome follow-up on the same 92,088-byte shader succeeds. Module-only
+validation takes 0.6ms for creation, 23.5ms for compilation info, and 0.3ms for
+the error scope, with no diagnostics. A subsequent pipeline probe takes 0.7ms
+for creation, 25.2ms for compilation info, 49ms for compute-pipeline creation,
+and 0.4ms for the error scope (75.6ms total). Both run on AMD RDNA3 without
+validation errors or observed device loss, submit no dispatch, and close only
+their isolated page. The initial 60-second timeout is not reproduced; cache
+state or transient load remains an unproven explanation, not a diagnosed
+compiler regression or a cold-start performance result. Logs:
+`chrome-module-phased.log` and `chrome-pipeline-phased.log` in the capstone
+evidence directory. The scratch harness now bounds each async compilation
+phase at 15 seconds and reports the phase on failure.
+
+Execution must use the real prerequisite state: the compact pass binds
+`base_trace` (1,064,960 u32 words), `validity` (4,096 words), and its private
+trap output (4,096 words); the declared 217-word transition workspace is pruned
+from this pass. Inspection finds actual `base_trace` loads as well as stores.
+Zero-initializing arbitrary inputs and calling the isolated pass would not
+establish its proof semantics. The next execution gate must supply preceding
+trace state and compare the resulting partition against the independent oracle.
+
 ### Intrinsic return classification (2026-09-05)
 
 Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses
