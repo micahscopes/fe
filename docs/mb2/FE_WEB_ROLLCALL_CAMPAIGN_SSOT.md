@@ -27,6 +27,18 @@ Its historical pending markers do not override this ledger. The bounded
 direct-route study is closed as inconclusive for production, with its missing
 comparative gates explicitly recorded. No permanent second backend was added.
 
+Portable signature and body emission now require the prepared runtime body;
+neither silently reconstructs raw RMIR when that body is missing. A mutation
+regression removes the prepared entry before each phase and checks the explicit
+internal error. All 28 portable-lowering unit tests pass in release mode
+(36.10s), including Shader/native ISA selection, typed-private storage and
+snapshot lowering, and preparation past the specialization limit. Logs:
+`/workspace/scratch/mb2-prepared-body-invariant-20260905.log` and
+`/workspace/scratch/mb2-prepared-body-suite-20260905.log`. This is an invariant
+gate, not a shader-size or browser-execution claim. Other analysis-time raw-body
+fallbacks remain to reconcile with retained prepared interfaces, particularly
+where a callee body has already been consumed during streaming emission.
+
 The Fe-side `spirv_lower.rs` module is now named `shader_driver.rs`, reflecting
 its actual ownership: request construction and profitability policy, not Naga
 construction or output encoding. Public compatibility entry points remain

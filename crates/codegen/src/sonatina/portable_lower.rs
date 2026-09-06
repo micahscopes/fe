@@ -5593,7 +5593,9 @@ where
             .prepared_bodies
             .get(&instance)
             .cloned()
-            .unwrap_or_else(|| instance.body(self.db));
+            .ok_or_else(|| LowerError::Internal(format!(
+                "missing prepared runtime body for `{symbol}` during signature lowering"
+            )))?;
         // R2.1: a scalar-tuple param/return FLATTENS into N wasm scalar
         // params/results (one per element word); every other param/return maps
         // 1:1 through `ty_for_class` exactly as before. The flattening order is
@@ -5756,7 +5758,9 @@ where
             let body = self
                 .prepared_bodies
                 .remove(&instance)
-                .unwrap_or_else(|| instance.body(self.db));
+                .ok_or_else(|| LowerError::Internal(format!(
+                    "missing prepared runtime body for `{symbol}` during body lowering"
+                )))?;
             if body.blocks.is_empty() {
                 continue;
             }
@@ -13769,6 +13773,43 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_prepared_body_never_relowers_raw_rmir() {
+        for during_signature in [true, false] {
+            let mut db = DriverDataBase::default();
+            let url = Url::parse("file:///missing_prepared_body.fe").unwrap();
+            db.workspace().touch(&mut db, url.clone(), Some(
+                "pub fn probe(_ value: u32) -> u32 { value }".to_owned(),
+            ));
+            let file = db.workspace().get(&db, &url).unwrap();
+            let package = mir::build_wasm_runtime_package_for_entry(
+                &db, db.top_mod(file), "probe",
+            ).unwrap();
+            let isa = create_wasm32_isa();
+            let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
+            let mut module = PortableModuleLowerer::new(
+                &db, builder, &isa, &package, HashSet::new(), &[],
+            ).unwrap();
+            if !during_signature {
+                module.declare_functions().unwrap();
+            }
+            let instance = *module.prepared_bodies.keys().find(|&&instance| {
+                module.function_symbol(instance) == "probe"
+            }).expect("prepared probe");
+            module.prepared_bodies.remove(&instance).unwrap();
+            let result = if during_signature {
+                module.declare_functions()
+            } else {
+                module.lower_bodies()
+            };
+            let error = result.expect_err("missing normalized body must fail closed").to_string();
+            let phase = if during_signature { "signature" } else { "body" };
+            assert!(error.contains(&format!(
+                "missing prepared runtime body for `probe` during {phase} lowering"
+            )), "{error}");
+        }
+    }
 
     #[test]
     fn arena_plan_mismatch_fails_before_finishing_function() {
