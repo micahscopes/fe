@@ -1,0 +1,29 @@
+use core::marker::Copy
+use std::webgpu::{AtomicStorageBuffer,StorageBuffer,GpuProgram,WebGpuBackend,
+    ComputeSurface,Workgroup,FixedDispatch}
+
+struct EmptyPolicy {}
+impl Copy for EmptyPolicy {}
+struct Base<P:Copy> {policy:P,data:StorageBuffer<u32,4>}
+impl<P:Copy> Copy for Base<P> {}
+struct Nested<P:Copy> {base:Base<P>,occupancy:AtomicStorageBuffer<4>}
+impl<P:Copy> Copy for Nested<P> {}
+struct Occupancy {words:AtomicStorageBuffer<4>}
+impl Copy for Occupancy {}
+
+fn read(_ data:StorageBuffer<u32,4>,_ occupancy:Occupancy)->u32 {
+    data.load(index:0)+occupancy.words.atomic_load(index:0)
+}
+impl<P:Copy> Nested<P> {
+    fn sample(self)->u32 {
+        read(self.base.data,Occupancy {words:self.occupancy})
+    }
+}
+actor NestedPolicyProbe uses (GpuProgram<WebGpuBackend>) {
+    data:StorageBuffer<u32,4>,
+    occupancy:AtomicStorageBuffer<4>,
+    fn probe(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let policy=Nested {base:Base {policy:EmptyPolicy {},data:self.data},occupancy:self.occupancy}
+        self.data.store(index:1,value:policy.sample())
+    }
+}

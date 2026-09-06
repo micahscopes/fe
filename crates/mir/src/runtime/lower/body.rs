@@ -2196,6 +2196,7 @@ impl<'db> RmirEmitter<'db> {
             return false;
         }
         let mut value = self.runtime_value(base);
+        let mut semantic_ty = self.locals[value.index()].semantic_ty;
         let Some(mut class) = self.value_class(value).cloned() else {
             return false;
         };
@@ -2218,6 +2219,36 @@ impl<'db> RmirEmitter<'db> {
             return false;
         }
         for (path_idx, elem) in path.iter().enumerate() {
+            // Each intermediate is the projected product, not the final leaf.
+            // Resource lowering consults this type as well as its runtime class.
+            semantic_ty = hir::analysis::place::projectable_place_ty(self.db, semantic_ty);
+            semantic_ty = match elem {
+                Projection::Field(field) => *self
+                    .semantic_body
+                    .owner
+                    .normalized_field_types(self.db, semantic_ty)
+                    .get(*field)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing projected field {field} of {}",
+                            semantic_ty.pretty_print(self.db)
+                        )
+                    }),
+                Projection::Index(IndexSource::Constant(_)) => {
+                    let (_, args) = semantic_ty.decompose_ty_app(self.db);
+                    *args.first().expect("array projection has an element type")
+                }
+                Projection::VariantField {
+                    variant, field_idx, ..
+                } => {
+                    self.semantic_body.owner.normalized_enum_variant_field_tys(
+                        self.db, semantic_ty, *variant,
+                    )[*field_idx]
+                }
+                Projection::Deref
+                | Projection::Index(IndexSource::Dynamic(_))
+                | Projection::Discriminant => return false,
+            };
             let step = match elem {
                 Projection::Field(field) => {
                     let field = FieldIndex((*field).try_into().expect("field index fits in u16"));
@@ -2268,7 +2299,7 @@ impl<'db> RmirEmitter<'db> {
                     self.push_value_extract_step(bb, dst, value, step);
                 } else {
                     let temp = self.alloc_runtime_temp(
-                        self.locals[dst.index()].semantic_ty,
+                        semantic_ty,
                         RuntimeCarrier::Value(extracted_class),
                     );
                     self.push_value_extract_step(bb, temp, value, step);
@@ -2284,7 +2315,7 @@ impl<'db> RmirEmitter<'db> {
                 return true;
             }
             let temp = self.alloc_runtime_temp(
-                self.locals[dst.index()].semantic_ty,
+                semantic_ty,
                 RuntimeCarrier::Value(extracted_class.clone()),
             );
             self.push_value_extract_step(bb, temp, value, step);
