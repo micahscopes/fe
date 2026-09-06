@@ -493,6 +493,25 @@ Do not reconstruct liveness from WGSL names or sum counts across entry points.
 These new direct Sonatina unit gates do not currently produce Fe recorder
 captures; their test results must not be labeled Riffcat-verified comparisons.
 
+Production linear-plan inline triage (2026-09-05): replay of the complete
+`request-521696-1788655041184817160-compute` capture separates two causes.
+`f220` (`sparse_linear_copy_plan`) is backend-callable with 12 physical
+parameters. Its one full-inline event copies 2,130 instructions; the following
+SCCP frontier reduces surviving original instruction IDs to 325, unchanged
+through final recorded cleanup. `f83` (`encode__g1bad`) is instead rejected for
+an unsupported compound ABI type. Its one 249-instruction full-inline event
+has only 16 original IDs surviving final cleanup. Display names come from the
+producer's normalized-stage function records, not inference from WGSL names.
+
+Decision: neither raw clone count is evidence of recoverable output bloat.
+Do not relax ABI legality or globally retain large helpers on these counts.
+Any E3 retention comparison must account for lost constant propagation and
+execute the exact independently checked inputs. Original-ID survival does not
+count newly rewritten descendants and cannot be converted proportionally into
+WGSL bytes. The next promising measurement is aggregate transport/projection
+cost in surviving code, rather than automatically outlining these two bodies.
+This narrows the experiment without claiming E2 or E3 complete.
+
 Execution-evidence link gap, reproduced by the production linear-plan gate:
 the complete capture at
 `/workspace/scratch/mb2-boundary-capstone-20260905/capture/request-521696-1788655041184817160-compute.capture.json`
