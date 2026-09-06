@@ -60,7 +60,7 @@ work. Fe remains pinned to `ecb58efe`; its portable dependency pin and fresh Fe
 gates must follow publication. Direct Sonatina tests are execution/validation
 evidence, not Fe recorder captures or Riffcat attribution.
 
-### Intrinsic return classification (2026-09-05)
+### Production linear-plan browser checkpoint (2026-09-05)
 
 Fresh production linear-plan checkpoint on Fe `839584cbb`, Sonatina `ecb58efe`:
 the focused release artifact gate passes in 12.64s with observation enabled.
@@ -92,6 +92,8 @@ necessary has been established. Evidence and exact bundle are under
 `/workspace/scratch/mb2-boundary-capstone-20260905/`. Next browser diagnosis must
 separate module-info and pipeline phases before another production attempt,
 then execute with a correctly initialized workspace and independent oracle.
+
+### Intrinsic return classification (2026-09-05)
 
 Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses
 `is_runtime_intrinsic_name` or a separate f32 name decoder to select extern
