@@ -3,6 +3,43 @@
 Status: first recorder slice integrated into the shared worktree; broader corpus
 and overhead gates remain open. See the checkpoint below for the measured scope.
 
+## Prepared helper structure (2026-09-05)
+
+Helper-analysis records now include `prepared_structure` at both `normalized`
+and `final` IR stages. Sonatina supplies counts from each logical helper's
+prepared control-flow region tree: reachable/referenced blocks, block occurrences,
+duplicated occurrences, regions, loops, conditionals, exits, and continues.
+These precede Naga control compaction. They are not execution counts or emitted
+byte attribution, and are not multiplied by resource-specialized variants.
+Duplicate occurrences can be necessary under the selected structuring strategy;
+their presence alone does not prove an optimization is sound.
+
+Use riff-catalog `a775b71` or newer to import these fields. Older strict importers
+reject them rather than silently discard evidence. The updated consumer preserves
+old captures with no structure field, and retains the new counts in typed
+decisions in JSON reports. A missing field means unknown, not zero.
+
+Six recorder unit tests and five scalar/grid observation tests pass against
+Sonatina `6a5de427`. The scalar-helper pilot additionally verifies identical
+observer-off/on WGSL (1,107 bytes) and SPIR-V (1,940 bytes), and its complete
+capture imports and replays with both stage measurements. These numbers belong
+to the small scalar fixture, not a Quilting shader or a GPU execution benchmark.
+
+Run the pilot with `bloat_capture_kernel OUTPUT_DIRECTORY scalar` to exercise
+the checked scalar envelope. The original/default `render` envelope remains
+separate: currently its checked helper needs a trap channel absent from the
+fullscreen path. That failure is preserved, not hidden by replacing checked
+arithmetic with wrapping operations. `bloat_gpu_oracle` accepts only render
+artifacts; it does not certify the scalar envelope.
+
+Sonatina `a4cd40dc` includes the observation API and the optional-feature build
+guard, without the subsequent switch-normalization change. Fresh gates on this
+exact published pin are recorded separately from the preceding pilot.
+All five `scalar_shader_observation` release tests pass on `a4cd40dc`, including
+the new stage/count assertions, byte equality, checked multiply/divide/remainder,
+partial observation, and strict failure handling. The evidence log is
+`/laboratory/quilting/scratch/wgsl-codegen-review-20260905/scalar-helper-structure-feature-fix-tests.log`.
+
 ## First recorder checkpoint (2026-09-05)
 
 Sonatina commit ca5210d1ff41af48d893c82f2a8380ada3e3f5c6 adds caller-owned,

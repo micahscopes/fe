@@ -161,6 +161,38 @@ struct Callable {
     instructions: usize,
     accesses_resource: bool,
     maximum_physical_parameters: usize,
+    prepared_structure: PreparedStructure,
+}
+
+/// Static occurrences in one logical helper's prepared region tree, before
+/// Naga compaction. Not multiplied by resource variants or dynamic executions.
+#[derive(Serialize)]
+struct PreparedStructure {
+    region_nodes: usize,
+    reachable_blocks: usize,
+    referenced_blocks: usize,
+    block_occurrences: usize,
+    duplicated_block_occurrences: usize,
+    loops: usize,
+    conditionals: usize,
+    loop_exits: usize,
+    loop_continues: usize,
+}
+
+impl From<sonatina_codegen::structurize::StructuredCfgStats> for PreparedStructure {
+    fn from(stats: sonatina_codegen::structurize::StructuredCfgStats) -> Self {
+        Self {
+            region_nodes: stats.region_nodes,
+            reachable_blocks: stats.reachable_blocks,
+            referenced_blocks: stats.referenced_blocks,
+            block_occurrences: stats.block_occurrences,
+            duplicated_block_occurrences: stats.duplicated_block_occurrences,
+            loops: stats.loops,
+            conditionals: stats.conditionals,
+            loop_exits: stats.loop_exits,
+            loop_continues: stats.loop_continues,
+        }
+    }
 }
 #[derive(Serialize)]
 struct ScopedFunction {
@@ -448,6 +480,7 @@ impl CaptureObserver {
         &mut self,
         module: &Module,
         analysis: &ShaderHelperAnalysis,
+        stage: &'static str,
     ) -> Result<(), String> {
         if !self.is_recording() {
             return Ok(());
@@ -467,7 +500,7 @@ impl CaptureObserver {
             })
             .collect::<Vec<_>>();
         self.event(Event::HelperAnalysis {
-            stage: "normalized",
+            stage,
             callable: callable,
             backend_rejected: rejected,
             evidence: evidence("sonatina-naga-helper-analysis"),
@@ -876,6 +909,7 @@ fn callable_helper(module: &Module, helper: &ShaderCallableHelper) -> Callable {
         instructions: helper.instruction_count,
         accesses_resource: helper.accesses_resource,
         maximum_physical_parameters: helper.maximum_physical_parameters,
+        prepared_structure: helper.structured.into(),
     }
 }
 fn function_id(function: FuncRef) -> String {
@@ -935,6 +969,49 @@ fn write_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_structure_preserves_stage_and_static_counts() {
+        use sonatina_codegen::structurize::StructuredCfgStats;
+        for stage in ["normalized", "final"] {
+            let event = Event::HelperAnalysis {
+                stage,
+                callable: vec![Callable {
+                    function: "f7".into(),
+                    display_name: "shared_continuation".into(),
+                    variants: 3,
+                    instructions: 76,
+                    accesses_resource: true,
+                    maximum_physical_parameters: 4,
+                    prepared_structure: StructuredCfgStats {
+                        region_nodes: 12,
+                        reachable_blocks: 8,
+                        referenced_blocks: 8,
+                        block_occurrences: 10,
+                        duplicated_block_occurrences: 2,
+                        loops: 1,
+                        conditionals: 3,
+                        loop_exits: 1,
+                        loop_continues: 0,
+                    }.into(),
+                }],
+                backend_rejected: vec![],
+                evidence: evidence("sonatina-naga-helper-analysis"),
+            };
+            let value = serde_json::to_value(event).unwrap();
+            assert_eq!(value["stage"], stage);
+            let counts = &value["callable"][0]["prepared_structure"];
+            assert_eq!(counts["duplicated_block_occurrences"], 2);
+            assert_eq!(counts["block_occurrences"], 10);
+            assert_eq!(counts["referenced_blocks"], 8);
+            assert_eq!(counts["reachable_blocks"], 8);
+            assert_eq!(counts["region_nodes"], 12);
+            assert_eq!(counts["loops"], 1);
+            assert_eq!(counts["conditionals"], 3);
+            assert_eq!(counts["loop_exits"], 1);
+            assert_eq!(counts["loop_continues"], 0);
+        }
+    }
 
     #[test]
     fn request_facts_preserve_backend_contract_without_module_inference() {

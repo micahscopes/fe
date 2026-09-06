@@ -1,5 +1,7 @@
-//! Compile the small scalar-helper Render fixture with and without one named
+//! Compile the small scalar-helper fixture with and without one named
 //! force-inline intervention, preserving exact WGSL and structured captures.
+//! The optional scalar envelope preserves checked arithmetic and a trap channel;
+//! it is a separate diagnostic, not a replacement for the render execution gate.
 
 use std::{
     error::Error,
@@ -29,28 +31,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output = arguments
         .first()
         .map(PathBuf::from)
-        .ok_or("usage: bloat_capture_kernel OUTPUT_DIRECTORY")?;
+        .ok_or("usage: bloat_capture_kernel OUTPUT_DIRECTORY [render|scalar]")?;
+    let pipeline = arguments.get(1).and_then(|arg| arg.to_str()).unwrap_or("render");
+    if arguments.len() > 2 || !matches!(pipeline, "render" | "scalar") {
+        return Err("expected render or scalar pipeline".into());
+    }
     fs::create_dir(&output)?;
-    let observer_disabled = run_child(&output, "observer-disabled", None, false)?;
-    let baseline = run_child(&output, "baseline", None, true)?;
+    let observer_disabled = run_child(&output, "observer-disabled", None, false, pipeline)?;
+    let baseline = run_child(&output, "baseline", None, true, pipeline)?;
     if observer_disabled["wgsl_sha256"] != baseline["wgsl_sha256"] {
         return Err("enabling capture changed the baseline WGSL".into());
     }
     if observer_disabled["spirv_sha256"] != baseline["spirv_sha256"] {
         return Err("enabling capture changed the baseline SPIR-V".into());
     }
-    let variant = run_child(&output, "force-inline-mix-words", Some("mix_words"), true)?;
+    let variant = run_child(&output, "force-inline-mix-words", Some("mix_words"), true, pipeline)?;
     let summary = serde_json::json!({
         "schema": "fe-bloat-scalar-helper-pilot/1",
         "source": "crates/codegen/tests/fixtures/spirv/scalar_helper_call_render.fe",
         "virtual_source_url": SOURCE_URL,
         "source_sha256": hex::encode(Sha256::digest(SOURCE.as_bytes())),
         "compiler_version": env!("CARGO_PKG_VERSION"),
+        "pipeline": pipeline,
         "observer_disabled": observer_disabled,
         "baseline": baseline,
         "variant": variant,
         "timing_note": "Frontend package construction and shader lowering/backend/observer wall times are separate single observations, not precision benchmarks.",
-        "claim_limit": "Successful compilation proves backend validation. GPU behavior is checked separately by bloat_gpu_oracle."
+        "claim_limit": "Successful compilation proves backend validation, not execution. bloat_gpu_oracle supports only the render envelope; scalar requires its own execution gate."
     });
     write_new(
         &output.join("compile-summary.json"),
@@ -65,9 +72,10 @@ fn run_child(
     label: &str,
     force_inline: Option<&str>,
     capture: bool,
+    pipeline: &str,
 ) -> Result<serde_json::Value, Box<dyn Error>> {
     let mut command = Command::new(std::env::current_exe()?);
-    command.arg("--compile-one").arg(output).arg(label);
+    command.arg("--compile-one").arg(output).arg(label).arg(pipeline);
     if capture {
         command.env(
             "FE_BLOAT_CAPTURE_DIR",
@@ -94,11 +102,12 @@ fn run_child(
 }
 
 fn compile_one_child(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Error>> {
-    if arguments.len() != 3 {
-        return Err("internal usage: --compile-one OUTPUT_DIRECTORY LABEL".into());
+    if arguments.len() != 4 {
+        return Err("internal usage: --compile-one OUTPUT_DIRECTORY LABEL PIPELINE".into());
     }
     let output = PathBuf::from(&arguments[1]);
     let label = arguments[2].to_str().ok_or("label is not UTF-8")?;
+    let pipeline = arguments[3].to_str().ok_or("pipeline is not UTF-8")?;
     let mut db = DriverDataBase::default();
     let url = Url::parse(SOURCE_URL)?;
     db.workspace()
@@ -108,7 +117,11 @@ fn compile_one_child(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Err
     let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))?;
     let frontend_elapsed = frontend_started.elapsed();
     let shader_started = Instant::now();
-    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)?;
+    let artifact = match pipeline {
+        "render" => fe_codegen::compile_runtime_package_spirv_render(&db, &package)?,
+        "scalar" => fe_codegen::compile_runtime_package_spirv_with_workgroup(&db, &package, [1, 1, 1])?,
+        _ => return Err("expected render or scalar pipeline".into()),
+    };
     let shader_elapsed = shader_started.elapsed();
     let spirv = artifact
         .words
@@ -118,7 +131,7 @@ fn compile_one_child(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Err
     write_new(&output.join(format!("{label}.spv")), &spirv)?;
     let wgsl = artifact
         .wgsl
-        .ok_or("Render compilation did not emit WGSL")?;
+        .ok_or("Compilation did not emit WGSL")?;
     let path = output.join(format!("{label}.wgsl"));
     write_new(&path, wgsl.as_bytes())?;
     let wgsl_name = path
@@ -136,6 +149,7 @@ fn compile_one_child(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Err
         "{}",
         serde_json::to_string(&serde_json::json!({
             "label": label,
+            "pipeline": pipeline,
             "intervention": std::env::var("FE_BLOAT_FORCE_INLINE_HELPERS").ok().map_or_else(
                 || serde_json::json!({"kind": "none"}),
                 |helper| serde_json::json!({"kind": "force_inline_named_retained_helper", "helper": helper})),

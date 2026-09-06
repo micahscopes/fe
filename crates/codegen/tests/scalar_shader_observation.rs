@@ -78,6 +78,18 @@ fn check_capture(pipeline: &str, operation: &str) {
             .any(|e| e["event"] == "stage" && e["stage_id"] == "pre-merge")
     );
     assert!(records.iter().any(|e| e["event"] == "capture_completed"));
+    for stage in ["normalized", "final"] {
+        let analysis = records.iter().find(|event| {
+            event["event"] == "helper_analysis" && event["stage"] == stage
+        }).expect("capture must record both helper planning boundaries");
+        for helper in analysis["callable"].as_array().unwrap() {
+            let structure = &helper["prepared_structure"];
+            let occurrences = structure["block_occurrences"].as_u64().unwrap();
+            let referenced = structure["referenced_blocks"].as_u64().unwrap();
+            let duplicates = structure["duplicated_block_occurrences"].as_u64().unwrap();
+            assert_eq!(occurrences.checked_sub(referenced), Some(duplicates));
+        }
+    }
     let request = request_directory(&directory.path().join("complete/capture"));
     for artifact in ["shader.wgsl", "shader.spv"] {
         assert_eq!(

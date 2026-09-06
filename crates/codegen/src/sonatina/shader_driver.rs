@@ -225,7 +225,7 @@ fn compile_observed_shader(
     roots: &[sonatina_ir::module::FuncRef],
     pipeline_name: &str,
     shader_request: Option<ShaderRequestFacts>,
-    analyze: impl FnOnce(
+    analyze: impl Fn(
         &sonatina_ir::Module,
     ) -> Result<
         sonatina_codegen::isa::naga::ShaderHelperAnalysis,
@@ -602,7 +602,7 @@ pub fn compile_render_wgsl<'db>(
 fn inline_spirv_calls_from_roots(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
-    analyze: impl FnOnce(
+    analyze: impl Fn(
         &sonatina_ir::Module,
     ) -> Result<
         sonatina_codegen::isa::naga::ShaderHelperAnalysis,
@@ -718,7 +718,7 @@ fn inline_spirv_calls_from_roots(
     })?;
     if let Some(observer) = capture.as_deref_mut() {
         observer
-            .helper_analysis(module, &analysis)
+            .helper_analysis(module, &analysis, "normalized")
             .or_else(|error| observer.record_error(error))
             .map_err(capture_error)?;
     }
@@ -918,6 +918,15 @@ fn inline_spirv_calls_from_roots(
             )
             .or_else(|error| observer.record_error(error))
             .map_err(capture_error)?;
+        if observer.is_recording() {
+            let observation = match analyze(module) {
+                Ok(analysis) => observer.helper_analysis(module, &analysis, "final"),
+                Err(errors) => Err(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
+            };
+            observation
+                .or_else(|error| observer.record_error(error))
+                .map_err(capture_error)?;
+        }
     }
     if trace {
         eprintln!(
