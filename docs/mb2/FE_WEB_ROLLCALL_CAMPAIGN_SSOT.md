@@ -21,6 +21,18 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina `474399c2` closes the default-trap GPU readback gap below. The grid
+execution helper can now bind the emitted trap channel and read one status word
+per invocation alongside results. The normalized switch yields 40/40/7 with
+zero trap flags for selectors 0/1/2, and nonzero trap flags for selectors 3..7
+on lavapipe. The existing two-buffer grid path remains unchanged for callers
+without traps. All 140 backend tests pass in release (6.42s), including the
+Wasm trap checks. Evidence:
+`/workspace/scratch/mb2-switch-gpu-trap-readback-20260905.log`. The shared tree
+also contained another contributor's uncommitted `dominator_cse` module; this
+slice did not modify or commit it. This is software-Vulkan execution, not a
+Chrome run or a production prover result. No push or Fe pin update was made.
+
 Sonatina `9d2bf212` fixes a trap-default switch rejection: merge analysis treated
 a phi-bearing return like a bare terminal, accepting an earlier candidate that
 another live path bypassed. Value-carrying return blocks now participate in the
