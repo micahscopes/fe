@@ -902,3 +902,29 @@ and `continue-merge-actor-retire/` (capture, verified comparison and census).
 Capture ID: 25b40f662a7335578443b814c359a7ba511c34fc8bf9d2b1bf7c29620b52e9de.
 Full corpus receipt: continue-merge-triangle-comparison.json. CLI SHA256:
 9f161cca823c24a00de0bed39036be6a944d76650211a3d3a0ea0a9eb09d02ac.
+
+### Unused expressions introduced during Naga lowering
+
+Sonatina 6f83f93c421b5f67ba5381fce54ed0b063b21800 uses pinned Naga's
+expression compaction after validation, then revalidates moved handles before
+emission. `KeepUnused::Yes` retains declared interfaces and named objects.
+This is not dead-store removal or resource pruning: calls, stores and atomics
+remain statement roots. A focused regression removes an unnamed dead struct
+while preserving its live counterpart and an effectful call with unused result.
+
+Same-source retirement capture: raw WGSL 50,412 -> 49,680 B (-732, 1.45%);
+SPIR-V 37,768 -> 36,244 B. Final Sonatina IR remains 48 functions / 776
+instructions. Verified Riff-cat census: main 7,256 -> 6,724 B; grid_window
+6,523 -> 6,384 B. The four unused invocation-coordinate constructions no longer
+appear. This is a small late-stage cleanup, not an explanation of all bloat.
+
+Release gates: 12 Naga unit tests, five atomic integration checks, a guarded
+trap compilation/validation check, and two Fe actor-stage/full-bundle parity
+checks pass. Compute integration has eight passes and one execution failure:
+no native GPU adapter is available. Chrome also returns no adapter. No GPU
+equivalence or speedup claim follows. Extra validation cost and the full atlas
+corpus still require measurement.
+
+Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/naga-expression-actor-retire/`.
+Capture ID bcc4a974212bb9ad1cec817cc5717f46f1f46e1811aa9ec54ec11d12d9a3510d.
+Compiler example SHA256 caf13828c05a999d9d0b794b7770fe9f352e391f8b7ecce6c3a4723fd6716c08.
