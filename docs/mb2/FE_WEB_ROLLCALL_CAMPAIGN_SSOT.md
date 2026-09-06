@@ -33,6 +33,17 @@ also contained another contributor's uncommitted `dominator_cse` module; this
 slice did not modify or commit it. This is software-Vulkan execution, not a
 Chrome run or a production prover result. No push or Fe pin update was made.
 
+Explicit target follow-up (`57d06bca`): the switched helper now uses Shader ISA
+and is checked through `ShaderCompileRequest` with WebGPU/WGSL/SPIR-V and the
+existing grid ABI. Analysis retains exactly one callable helper; the explicit
+request emits byte-identical WGSL and SPIR-V to the compatibility request and
+rejects the same default-less helper with function-qualified diagnostics. The
+focused release execution gate passes (0.22s):
+`/workspace/scratch/mb2-switch-explicit-request-20260905.log`. This covers the
+new request API, not migration away from the grid ABI itself. Shared Fe commit
+`9b2ae0cc4` currently pins `14c26bee`; the subsequent normalization fixes and
+gates above still need publication and repinning before Fe enum emission changes.
+
 Sonatina `9d2bf212` fixes a trap-default switch rejection: merge analysis treated
 a phi-bearing return like a bare terminal, accepting an earlier candidate that
 another live path bypassed. Value-carrying return blocks now participate in the
