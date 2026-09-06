@@ -21,6 +21,15 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina `a4cd40dc` restores the no-default-feature build by putting Naga's
+`emit_expr` behind the existing `spirv-backend` feature guard. The unguarded
+helper referenced the optional Naga crate and produced nine resolution errors.
+`cargo check --release -p sonatina-codegen` now passes (10.74s). Evidence:
+`/workspace/scratch/mb2-naga-feature-guard-20260905.log`; the failing check is
+`/workspace/scratch/mb2-switch-normalization-check-20260905.log`. This is a
+feature-boundary fix, not a shader behavior or performance change, and remains
+local to the Sonatina line until publication and Fe repinning.
+
 The Sonatina structurizer now documents its actual supported CFG closure at
 the implementation entry point, replacing the inaccurate claim that arbitrary
 reducible CFGs are accepted. It distinguishes canonical loop exits, terminal
