@@ -539,6 +539,22 @@ the exported bundle. Adjacent logs are `mb2-compose-production-20260905.log`,
 `mb2-compose-production-chrome-20260905.log`, and
 `mb2-compose-production-control-20260905.log`.
 
+Browser follow-up: a deliberate 45s observation of the exact 84,008-byte
+candidate also times out in pipeline creation; the exact earlier 92,088-byte
+baseline then does the same. Neither run submits work or reports device loss
+through its device promise. This does not isolate an optimization regression,
+and outstanding driver work means it does not exonerate the candidate either.
+Heavy browser trials stopped after this comparison. Read-only CDP
+`SystemInfo.getInfo` subsequently reports Chrome 152.0.7977.64,
+`processCrashCount: 3`, no enumerated GPU identity, and `webgpu`, `vulkan` and
+OpenGL disabled, despite the preceding requestAdapter reports of AMD RDNA 3.
+Those are distinct observations, not proof of which trial caused a crash or
+of heap pressure. A fresh healthy host session is needed for a trustworthy
+matched browser gate. No browser restart or user-tab closure was performed.
+Logs: `/workspace/scratch/mb2-compose-production-chrome-extended-20260905.log`,
+`mb2-compose-production-baseline-control-20260905.log`, and
+`mb2-compose-browser-systeminfo-20260905.json` in the same directory.
+
 Production linear-plan inline triage (2026-09-05): replay of the complete
 `request-521696-1788655041184817160-compute` capture separates two causes.
 `f220` (`sparse_linear_copy_plan`) is backend-callable with 12 physical
