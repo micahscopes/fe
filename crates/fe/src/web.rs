@@ -359,8 +359,10 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         source = %path,
         passes = bundle.pass_wgsl.len(),
         wasm_bytes = bundle.wasm.len(),
-        wgsl_bytes = bundle.wgsl.len()
-            + bundle.pass_wgsl.iter().map(|shader| shader.source.len()).sum::<usize>(),
+        wgsl_bytes = shader_payload_bytes(
+            bundle.wgsl.len(),
+            bundle.pass_wgsl.iter().map(|shader| shader.source.len()),
+        ),
         elapsed_ms = phase_started.elapsed().as_millis() as u64,
         total_elapsed_ms = compile_started.elapsed().as_millis() as u64,
         "finished web compilation"
@@ -754,14 +756,12 @@ fn render_compile_with_cache_root_and_compiler(
         "compiling render bundle"
     );
     let artifact = compile_bundle(&path, entry, source_audit)?;
-    let emitted_bytes = artifact.wgsl.len()
+    let emitted_bytes = shader_payload_bytes(
+        artifact.wgsl.len(),
+        artifact.pass_wgsl.iter().map(|shader| shader.bytes.len()),
+    )
         + artifact.manifest_json.len()
-        + artifact.wasm.as_ref().map_or(0, Vec::len)
-        + artifact
-            .pass_wgsl
-            .iter()
-            .map(|shader| shader.bytes.len())
-            .sum::<usize>();
+        + artifact.wasm.as_ref().map_or(0, Vec::len);
     tracing::info!(
         target: "fe_web",
         phase = "render_bundle",
@@ -1088,9 +1088,29 @@ fn authored_source_kind(path: &Utf8PathBuf) -> WebAuthoredSourceKind {
     }
 }
 
+// In a multipass bundle, the primary shader aliases the final pass artifact.
+// Count published pass payloads, not that additional in-memory alias. Equal
+// contents at different pass paths are still separate payloads, not deduplicated.
+fn shader_payload_bytes(primary: usize, passes: impl IntoIterator<Item = usize>) -> usize {
+    let mut passes = passes.into_iter();
+    match passes.next() {
+        Some(first) => first + passes.sum::<usize>(),
+        None => primary,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shader_payload_measurement_does_not_double_count_primary_pass() {
+        assert_eq!(shader_payload_bytes(80, []), 80);
+        assert_eq!(shader_payload_bytes(80, [80]), 80);
+        assert_eq!(shader_payload_bytes(80, [20, 80]), 100);
+        assert_eq!(shader_payload_bytes(80, [80, 80]), 160);
+        assert_eq!(shader_payload_bytes(80, [0]), 0);
+    }
 
     fn cache_dependencies(contents: &str) -> SourceDependencyInventory {
         let url = "file:///cache-test/src/lib.fe".to_owned();
