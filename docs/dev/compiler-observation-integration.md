@@ -868,3 +868,37 @@ Source is Quilting-fe 1e8e5f9 plus unchanged recorded b28ec1c9 dirty patch;
 Fe's unrelated provider/test overlay is preserved. Chromium was rechecked and
 still returns no adapter. No runtime speedup or full-atlas generation success
 is implied; algorithmic neighbor searches and structural duplication remain.
+
+### Iteration-local continue joins
+
+Sonatina 515d57de027ba94ba6b2f55fd43dd60c9fc864d2 fixes a later expansion
+stage, not missing scalar DCE. An enclosing-loop continue ends the current
+iteration; it need not pass through the remaining live join. Preserve that
+join explicitly in nested guards, including when a continue corridor performs
+state updates before its backedge. Keep live-bypass rejection and exact
+predecessor/phi transport. Non-loop merge policy is unchanged.
+
+The backend's 31 structurizer tests and a generated-WGSL validation regression
+pass in release mode. Fe's two actor-stage parity and five scalar observation
+tests also pass. The actual retirement shader through the production stage API
+shrinks 53,782 -> 50,095 raw WGSL bytes. Riff-cat's artifact-verified census
+localizes the change to next_indexed (9,335 -> 5,709 B) and main
+(7,039 -> 6,978 B); every other function region has the same digest.
+next_indexed stays at 71 final IR instructions while prepared duplicated
+body positions fall 17 -> 2. Earlier CSE cannot remove duplication which is
+introduced afterward during structured-region reconstruction.
+
+The expanded regression asserts one owner of the live tail and its return,
+not zero duplication globally: shared continue-update corridors may retain
+mutually exclusive copies. Tests are validation evidence, not GPU execution.
+The full 56-stage atlas compiles: published WGSL 897,217 -> 885,912 B
+(-11,305 B). Fourteen stages shrink, none grows, and 42 are unchanged.
+The file/manifest comparison checks resource contracts, stage order, layouts
+and dispatches, all unchanged. This is a per-pass sum, not unique-content size.
+Chrome still returns no adapter. No runtime speedup is claimed.
+
+Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/continue-merge-investigation.md`
+and `continue-merge-actor-retire/` (capture, verified comparison and census).
+Capture ID: 25b40f662a7335578443b814c359a7ba511c34fc8bf9d2b1bf7c29620b52e9de.
+Full corpus receipt: continue-merge-triangle-comparison.json. CLI SHA256:
+9f161cca823c24a00de0bed39036be6a944d76650211a3d3a0ea0a9eb09d02ac.
