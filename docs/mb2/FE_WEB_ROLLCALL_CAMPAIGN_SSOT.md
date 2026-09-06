@@ -35,9 +35,18 @@ internal error. All 28 portable-lowering unit tests pass in release mode
 snapshot lowering, and preparation past the specialization limit. Logs:
 `/workspace/scratch/mb2-prepared-body-invariant-20260905.log` and
 `/workspace/scratch/mb2-prepared-body-suite-20260905.log`. This is an invariant
-gate, not a shader-size or browser-execution claim. Other analysis-time raw-body
-fallbacks remain to reconcile with retained prepared interfaces, particularly
-where a callee body has already been consumed during streaming emission.
+gate, not a shader-size or browser-execution claim. The follow-up removes the
+remaining prepared-map-to-raw-body fallbacks in portable analysis. Typed-borrow
+and Wasm ABI analyses require prepared bodies; callee signature inspection uses
+retained prepared interfaces even after streaming emission consumes a body.
+Read-only analyses borrow bodies instead of cloning them. Typed-use closure
+also rejects mismatched argument/parameter counts before pairing them. The
+missing-body mutation now covers all four analysis/emission phases. All 28
+portable-lowering tests pass again (39.33s), including nested typed borrows
+through Naga-validated SPIR-V. Evidence:
+`/workspace/scratch/mb2-prepared-interfaces-20260905.log`. No measured speed or
+memory reduction is claimed, and initial RMIR preparation still legitimately
+reads source runtime bodies.
 The focused Wasm execution regression
 `nested_aggregate_value_survives_a_resumable_frame` also passes in release mode
 (1.30s), preserving nested values through synthesized suspension/resumption.

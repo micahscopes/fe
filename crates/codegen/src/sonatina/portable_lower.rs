@@ -4147,7 +4147,7 @@ where
             indirect_aggregate_safe_bodies: HashSet::new(),
             arena_owned_locals: FxHashMap::default(),
         };
-        lowerer.typed_private_borrow_params = lowerer.derive_typed_private_borrow_params();
+        lowerer.typed_private_borrow_params = lowerer.derive_typed_private_borrow_params()?;
         if lowerer.isa.triple().architecture == Architecture::Wasm32 {
             let (indirect_params, indirect_returns) = lowerer.derive_wasm_indirect_aggregate_abi()?;
             lowerer.indirect_aggregate_params = indirect_params;
@@ -4287,9 +4287,9 @@ where
 
     fn derive_typed_private_borrow_params(
         &self,
-    ) -> FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>> {
+    ) -> Result<FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>>, LowerError> {
         if self.private_place_materialization != PrivatePlaceMaterialization::ShaderTypedWhenLegal {
-            return FxHashMap::default();
+            return Ok(FxHashMap::default());
         }
 
         let mut selected = FxHashMap::default();
@@ -4301,8 +4301,10 @@ where
             let body = self
                 .prepared_bodies
                 .get(&instance)
-                .cloned()
-                .unwrap_or_else(|| instance.body(self.db));
+                .ok_or_else(|| LowerError::Internal(format!(
+                    "missing prepared runtime body for `{}` during typed-borrow analysis",
+                    self.function_symbol(instance)
+                )))?;
             let mut params = FxHashMap::default();
             for param in &body.signature.params {
                 let RuntimeClass::Ref {
@@ -4335,8 +4337,10 @@ where
                 let caller_body = self
                     .prepared_bodies
                     .get(&caller_instance)
-                    .cloned()
-                    .unwrap_or_else(|| caller_instance.body(self.db));
+                    .ok_or_else(|| LowerError::Internal(format!(
+                        "missing prepared runtime body for `{}` during typed-borrow analysis",
+                        self.function_symbol(caller_instance)
+                    )))?;
                 for block in &caller_body.blocks {
                     for stmt in &block.stmts {
                         let RStmt::Assign {
@@ -4349,12 +4353,14 @@ where
                         let Some(callee_params) = selected.get(callee) else {
                             continue;
                         };
-                        let callee_body = self
-                            .prepared_bodies
+                        let callee_interface = self
+                            .prepared_interfaces
                             .get(callee)
-                            .cloned()
-                            .unwrap_or_else(|| callee.body(self.db));
-                        for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
+                            .ok_or_else(|| LowerError::Internal(format!(
+                                "missing prepared runtime interface for `{}` during typed-borrow analysis",
+                                self.function_symbol(*callee)
+                            )))?;
+                        for (argument, parameter) in args.iter().zip(&callee_interface.params)
                         {
                             let Some(pointee) = callee_params.get(&parameter.local) else {
                                 continue;
@@ -4416,8 +4422,10 @@ where
                 let body = self
                     .prepared_bodies
                     .get(&instance)
-                    .cloned()
-                    .unwrap_or_else(|| instance.body(self.db));
+                    .ok_or_else(|| LowerError::Internal(format!(
+                        "missing prepared runtime body for `{}` during typed-borrow analysis",
+                        self.function_symbol(instance)
+                    )))?;
                 for (&parameter, pointee) in params {
                     if let Err(reason) = self.typed_private_component(
                         &body,
@@ -4458,7 +4466,7 @@ where
                 selected.values().map(FxHashMap::len).sum::<usize>(),
             )
         });
-        selected
+        Ok(selected)
     }
 
     fn typed_private_borrow_origin(
@@ -4695,12 +4703,16 @@ where
                         expr: RExpr::Call { callee, args },
                         ..
                     } => {
-                        let callee_body = self
-                            .prepared_bodies
+                        // Bodies are consumed during streaming emission; their
+                        // prepared interfaces remain authoritative throughout.
+                        let callee_interface = self
+                            .prepared_interfaces
                             .get(callee)
-                            .cloned()
-                            .unwrap_or_else(|| callee.body(self.db));
-                        for (argument, parameter) in args.iter().zip(&callee_body.signature.params)
+                            .ok_or("missing-prepared-callee-interface")?;
+                        if args.len() != callee_interface.params.len() {
+                            return Err("prepared-callee-arity-mismatch");
+                        }
+                        for (argument, parameter) in args.iter().zip(&callee_interface.params)
                         {
                             if let Some(argument_pointee) = member_pointees.get(argument)
                                 && selected
@@ -5164,8 +5176,10 @@ where
             let body = self
                 .prepared_bodies
                 .get(&instance)
-                .cloned()
-                .unwrap_or_else(|| instance.body(self.db));
+                .ok_or_else(|| LowerError::Internal(format!(
+                    "missing prepared runtime body for `{}` during Wasm ABI analysis",
+                    self.function_symbol(instance)
+                )))?;
             let symbol = self.function_symbol(instance);
             let linkage = self.effective_linkage(function);
             let mut arities = Vec::with_capacity(body.signature.params.len());
@@ -13776,7 +13790,7 @@ mod tests {
 
     #[test]
     fn missing_prepared_body_never_relowers_raw_rmir() {
-        for during_signature in [true, false] {
+        for phase in ["signature", "body", "Wasm ABI", "typed-borrow"] {
             let mut db = DriverDataBase::default();
             let url = Url::parse("file:///missing_prepared_body.fe").unwrap();
             db.workspace().touch(&mut db, url.clone(), Some(
@@ -13791,22 +13805,27 @@ mod tests {
             let mut module = PortableModuleLowerer::new(
                 &db, builder, &isa, &package, HashSet::new(), &[],
             ).unwrap();
-            if !during_signature {
+            if phase == "body" {
                 module.declare_functions().unwrap();
             }
             let instance = *module.prepared_bodies.keys().find(|&&instance| {
                 module.function_symbol(instance) == "probe"
             }).expect("prepared probe");
             module.prepared_bodies.remove(&instance).unwrap();
-            let result = if during_signature {
-                module.declare_functions()
-            } else {
-                module.lower_bodies()
+            let result = match phase {
+                "signature" => module.declare_functions(),
+                "body" => module.lower_bodies(),
+                "Wasm ABI" => module.derive_wasm_indirect_aggregate_abi().map(|_| ()),
+                "typed-borrow" => {
+                    module.private_place_materialization = PrivatePlaceMaterialization::ShaderTypedWhenLegal;
+                    module.derive_typed_private_borrow_params().map(|_| ())
+                }
+                _ => unreachable!(),
             };
             let error = result.expect_err("missing normalized body must fail closed").to_string();
-            let phase = if during_signature { "signature" } else { "body" };
+            let operation = if matches!(phase, "signature" | "body") { "lowering" } else { "analysis" };
             assert!(error.contains(&format!(
-                "missing prepared runtime body for `probe` during {phase} lowering"
+                "missing prepared runtime body for `probe` during {phase} {operation}"
             )), "{error}");
         }
     }
@@ -13836,7 +13855,7 @@ mod tests {
             }).expect("probe declaration");
             let function = module.func_map[&instance];
             let body = module.prepared_bodies.remove(&instance)
-                .unwrap_or_else(|| instance.body(&db));
+                .expect("prepared probe body");
             let mut lowerer = PortableFunctionLowerer::new(
                 &mut module, body, function, false, false, HashSet::new(), false,
             ).unwrap();
