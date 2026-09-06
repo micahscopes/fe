@@ -780,3 +780,24 @@ yet a measured WGSL reduction. The comparison source is unchanged at Quilting-fe
 
 Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/conditional-bridge-investigation.md`
 and `conditional-bridge-fe-observation-tests.log` in the same directory.
+
+Full follow-through: the unchanged 56-pass atlas compiles. Riff-cat verified
+retirement's raw WGSL 57,430 -> 55,772 B and helper 9,272 -> 7,614 B; final
+prepared duplication is 5 -> 0 with 77 IR instructions unchanged. However,
+the actual published pass total grows 914,742 -> 915,373 B (+631 B), so this
+is **not a whole-atlas size win**. Retirement/repair savings are offset by
+allocation/selection growth. Keep raw-capture and published-file byte boundaries
+distinct.
+
+Riff-cat localized one contributor: reserve_ranges was previously rejected for
+a multiply consumed return corridor, which also forced reserve into its caller.
+Both are now callable/retained. The current backend accepts the same 25-instruction
+reserve_ranges even without the new scalar CSE or branch fold. Thus the pin's
+intervening return/merge fixes changed helper handling independently; the full
+delta cannot be assigned solely to the branch fold. Captures and exact sizes
+are in `conditional-bridge-investigation.md`, including the reserve comparison.
+Reviewing retention costs of newly supported single-use helpers is a next
+candidate; uncontrolled inlining is not justified by this evidence.
+
+The browser still returns no WebGPU adapter. No atlas execution timing or
+runtime improvement is claimed by these compile/capture gates.
