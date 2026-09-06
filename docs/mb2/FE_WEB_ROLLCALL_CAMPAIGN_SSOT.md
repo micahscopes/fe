@@ -527,6 +527,13 @@ evidence and a decision; it does not justify dropping its correctness gate.
   aggregates, preserving old snapshots. The focused regression has no residual
   construction/projection expressions and executes to 90; all 137 integration
   tests pass on lavapipe. Production delta and Fe pin integration remain open.
+  Local-override production follow-up emits 84,004 bundled WGSL bytes/2,552
+  Naga expressions, versus the earlier 92,084/2,869. Riffcat verifies artifacts
+  but flags differing producer settings. Chrome pipeline creation times out at
+  the 15s observation deadline without dispatch or reported device loss; an
+  881-byte control compiles immediately afterward. Candidate browser exactness
+  and clean single-change attribution remain open. Evidence and hashes are in
+  the observation record, not a claimed completed E4 gate.
   First measured intervention: Sonatina `1bbd24a0` folds type-compatible zero
   insertion into zero aggregates. Six aggregate GPU regressions and the signed
   zero unit gate pass. The 19-stage capture totals 2,531,533 bytes; the reducer

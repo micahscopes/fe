@@ -507,6 +507,38 @@ Production bytes/timing delta, Chrome execution, and Fe pin integration are
 not established for this commit; it is committed but unpublished. E4 remains
 open until the matching production comparison executes.
 
+Production projection candidate: Fe `590414488` with an explicit local
+Sonatina `8308464a` override passes the isolated release lowering gate. Bundled
+WGSL is 84,004 bytes and reparsed Naga has 2,552 expressions/32 helpers, versus
+92,084 bytes and 2,869 expressions/32 helpers in the earlier checkpoint.
+The raw captured WGSL is 84,008 bytes (the existing four-byte formatting
+difference), SHA256
+`f9fe53f047e3c36bc9a17db2c9b50a25bc2ad7d22ff7fd1370d08fe8acde643c`.
+SPIR-V is 51,444 bytes. Bundle compilation is 10.394s, not a measured speedup.
+Riffcat imports and verifies the complete capture, but correctly refuses
+single-policy attribution across the differing producer/dirty-source settings.
+Tracked dirty patch SHA256 at the candidate run is
+`10e857f28e248c513f441ee20e8997aa4cc4120b3e1310d4a3009af6457f8220`;
+fixture-only source SHA256 remains `0e22d40d34d6d2ae25424017d376f02bd79d3dce9cb3ad555dc073c88ac43cbb`.
+The local override is `/workspace/scratch/sonatina-mb2-proof-path-patch.toml`;
+Fe's tracked Cargo manifest and lockfile remain unchanged after the run.
+
+Chrome accepts module diagnostics but pipeline creation reaches the 15s
+observation deadline. No dispatch occurs and no device loss is reported. A
+subsequent 881-byte control creates its pipeline in 3.2ms on AMD RDNA 3 with
+no diagnostics/loss. Do not call the candidate execution green, attribute the
+timeout to heap pressure, or infer cancellation of driver work from the host
+deadline. No repeated production retry was performed. The earlier 92KB exact
+kernel execution remains valid evidence for that earlier artifact only.
+Next gate: a matched-producer baseline/candidate and bounded browser pipeline
+observation that distinguishes cold compilation from a terminal failure.
+
+Evidence directory: `/workspace/scratch/mb2-compose-production-20260905/`
+contains `compute.capture.json`, verified `comparison.json`, raw requests and
+the exported bundle. Adjacent logs are `mb2-compose-production-20260905.log`,
+`mb2-compose-production-chrome-20260905.log`, and
+`mb2-compose-production-control-20260905.log`.
+
 Production linear-plan inline triage (2026-09-05): replay of the complete
 `request-521696-1788655041184817160-compute` capture separates two causes.
 `f220` (`sparse_linear_copy_plan`) is backend-callable with 12 physical
