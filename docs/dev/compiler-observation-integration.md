@@ -936,3 +936,30 @@ CLI SHA256 b58a945da6e2dee03a759cdae5bce1692e1ac849a4209af43aae6bc213bc2dd6.
 Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/naga-expression-actor-retire/`.
 Capture ID bcc4a974212bb9ad1cec817cc5717f46f1f46e1811aa9ec54ec11d12d9a3510d.
 Compiler example SHA256 caf13828c05a999d9d0b794b7770fe9f352e391f8b7ecce6c3a4723fd6716c08.
+
+### Guarded unsigned subtraction
+
+Sonatina bc7e1c7969b806fb11adfb67dc0e5f3e912a12b4 lets checked arithmetic
+reuse a dominating unsigned comparison of the exact subtraction operands.
+It reuses the existing dominator tree and conservative undef-taint analysis.
+Only single-predecessor selected edges supply guard facts; ordinary merges,
+changed SSA operands and signed relations do not establish unsigned safety.
+
+Four new proof tests, eighteen range-analysis tests, eight loop-strength tests
+and fifty optimizer-pipeline tests pass. Wasm execution checks optimized and
+unoptimized guarded/unguarded subtraction over 4,096 input pairs, including
+unsigned extremes and the signed boundary. Two Fe stage/bundle parity tests
+and five scalar observation tests pass. This is not GPU execution evidence.
+
+Same-source retirement: raw WGSL 49,680 -> 49,278 B; SPIR-V 36,244 -> 36,044 B.
+Verified Riff-cat census isolates the entire text change to grid_window,
+6,384 -> 5,982 B; every other function region is byte-identical. Its final IR
+instruction count remains 69: instruction kinds and branch behavior matter,
+not just the count. The two guarded underflow comparisons are absent in the
+emitted WGSL; unrelated arithmetic/trap checks remain. No runtime speedup or
+full-atlas result is inferred from this single-stage measurement.
+
+Evidence root: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/`.
+Capture: guarded-subtraction-actor-retire/capture.json,
+e71412d908fd9f5257f28ab1933c9ea55172b3bb22774e1c47591954f1503a0d.
+Compiler example SHA256 178889d8464c99cac1fea2cc71fb09d56a474b04f056c283e51587e975edec64.
