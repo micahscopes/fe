@@ -2276,6 +2276,17 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   async _buildPassGraph(device, generation) {
+    // A graph epoch is shared across dependent dispatches, unlike the local
+    // trap output below. Until the graph owner supplies allocation, reset, and
+    // typed Fe failure delivery, accepting this contract would silently give
+    // each pass an independent status word and lose failure propagation.
+    for (const pass of this._passes) {
+      if (pass.layout.graph_failure != null) {
+        throw new Error(
+          `fe render runtime: pass ${pass.source_entry ?? "<unnamed>"} requires graph failure epoch ownership and Fe failure delivery; this runtime does not yet implement that contract`,
+        );
+      }
+    }
     const format = this._layout.color_target_format || navigator.gpu.getPreferredCanvasFormat();
     const resourceInitialBytes = await Promise.all(
       this._resources.map(async resource => [

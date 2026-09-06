@@ -12,6 +12,26 @@ const { rasterPlan, rasterColorTarget, rasterPrimitive, rasterMultisample } = aw
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
+test("graph failure contracts fail closed before resource or device access", async () => {
+  for (const graphFailure of [{ group: 0, binding: 2 }, {}, false]) {
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._passes = [
+      { source_entry: "first", layout: { mode: "compute" } },
+      { source_entry: "dependent", layout: { mode: "compute", graph_failure: graphFailure } },
+    ];
+    Object.defineProperty(surface, "_layout", {
+      get() { assert.fail("unsupported graph must not begin physical realization"); },
+    });
+    const device = new Proxy({}, {
+      get() { assert.fail("unsupported graph must not access the device"); },
+    });
+    await assert.rejects(
+      surface._buildPassGraph(device, 1),
+      /pass dependent requires graph failure epoch ownership and Fe failure delivery/,
+    );
+  }
+});
+
 test("Fe pass activation selects a memoized subgraph once per policy", () => {
   const records = [
     { pass: { source_entry: "background" } },

@@ -253,6 +253,16 @@ failure; target-contract comparison remains an explicitly recorded tooling gap.
 Next: production shared resource allocation/reset, typed Fe failure delivery,
 and raster-consumer policy, not another backend implementation.
 
+Runtime admission now rejects any non-null `graph_failure` descriptor before
+pass-graph buffer/device realization. Previously the generic output branch
+would silently allocate one status buffer per pass, violating shared epoch
+ownership. The runtime gate covers a valid descriptor and malformed object/
+boolean values, with device and layout access poisoned to prove early rejection.
+All 71 render-runtime and pass-schedule tests pass under Bun (60.41s), log
+`/workspace/scratch/mb2-epoch-runtime-admission-20260905.log`. This is a temporary
+fail-closed boundary to replace with the complete typed lifecycle, not an
+implementation of production graph recovery or a change to legacy graphs.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader
