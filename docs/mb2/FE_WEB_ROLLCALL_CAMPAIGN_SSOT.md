@@ -21,6 +21,21 @@ burn-down, not a second checklist.
 
 ## Current priority: compiler boundary consolidation
 
+Sonatina `f302003c` removes unnecessary switch forwarding blocks. Only targets
+with an original-source phi input need a shared edge block; phi-free targets
+are branched to directly. An outlined-helper execution regression exposed the
+extra corridor as a structurizer rejection. The fix simplifies normalization
+instead of adding another corridor exception. Helper normalization failures now
+identify the function and FuncRef in both analysis and compilation. All 140
+backend tests pass (6.34s); the subsequent strengthened phi-bearing loop fixture
+and both other switch execution tests pass (0.40s). Two normalization unit tests
+pass (0.01s), including the six-block minimal topology, predecessor equality,
+idempotence, and rejection without mutation. Logs under `/workspace/scratch/`:
+`mb2-switch-minimal-edges-20260905.log`, `mb2-switch-phi-closure-20260905.log`, and
+`mb2-switch-minimal-edge-units-20260905.log`. These are release/lavapipe and unit
+gates, not Chrome or production shader-size evidence. Publication and Fe pinning
+remain open. This supersedes the unconditional edge-block description below.
+
 Sonatina `14c26bee` closes a switch-in-loop merge-selection failure exposed by
 the next execution gate. Whole-function post-dominance selected the eventual
 loop exit instead of a shared continuation within the iteration. The structurer
