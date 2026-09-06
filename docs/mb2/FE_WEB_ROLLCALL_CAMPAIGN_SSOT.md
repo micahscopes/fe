@@ -219,9 +219,21 @@ manifests omitting either field:
 No production actor pass opts in yet. Allocation/reset, the Fe-owned failure
 transition and host consumption must land together before enabling it. Do not
 route arithmetic failure through `SurfaceRecoveryEvent`, which describes device
-lifecycle. Add a same-compute-pass repeated-dispatch execution gate as well:
-the current Chrome epoch probes separate dispatches with compute-pass boundaries,
-whereas the production runtime can batch repeated dispatches in one pass.
+lifecycle.
+
+Same-compute-pass repetition is now executed, matching the runtime's batching
+shape. Sonatina `2ff1dc90` emits scoped and unscoped shaders from one counter
+fixture. The counter increments before the possible trap; each compute pass
+dispatches twice. Chrome/AMD RDNA3 returns `[1,1,1,0,0,2]` for the scoped
+shader (epoch-status/counter pairs): one execution before failure, zero in the
+dependent pass, then two healthy executions after reset. The unscoped negative
+control returns `[0,2,0,2,0,2]` and fails both suppression checks, as required.
+Both runs have no validation errors or device loss. Three release backend tests
+pass. Logs: `mb2-epoch-counter-test-20260905.log` and
+`mb2-epoch-counter-{scoped,plain}-chrome-20260905.log` under `/workspace/scratch/`.
+Artifacts: `/workspace/scratch/mb2-epoch-counter-20260905/` (774-byte scoped,
+507-byte plain WGSL). This is a deliberate contract difference, not an
+optimization comparison or production Fe pass-graph integration.
 
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
