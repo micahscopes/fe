@@ -34,6 +34,19 @@ included an additional repeated-failure assertion, subsequently removed after
 fix is claimed or retained. Switch normalization and the broader phase-6 gates
 remain open. The Sonatina documentation commit is local, not published.
 
+Switch ownership audit: EVM `lower_runtime::lower_terminator` already preserves
+`SwitchScalar` as Sonatina `BrTable`. Portable lowering instead expands
+`MatchEnumTag` into `CmpEq`/`Br` ladders and rejects `SwitchScalar` through its
+unsupported-terminator arm. Naga's `compact_naga_equality_ladder` reconstructs
+some native switches only after region emission, while `Structurer::term`
+classifies `BrTable` as unsupported. The next control-normalization slice must
+therefore land Sonatina switch support before changing Fe emission. Its gates
+must cover repeated/shared destinations and exact predecessor-phi transport,
+default/trap paths, nested loop exits, and repeated normalization. Do not
+delete equality-ladder recovery until the new route covers its useful inputs
+and has measured artifact results. This is a source-level ownership finding,
+not a claimed shader reduction or completed switch implementation.
+
 The governing [boundary design and historical execution record](FE_SONATINA_SHADER_BOUNDARY_CLEANUP.md)
 is now carried on shared mb2, recovered from the former cleanup worktree.
 Its historical pending markers do not override this ledger. The bounded
