@@ -38,6 +38,28 @@ Evidence: `/workspace/scratch/mb2-shader-driver-rename-20260905/` and the adjace
 remain explicit migration work: their native i64 behavior must not be silently
 reclassified under WebGPU's narrower environment. No size reduction is claimed.
 
+Sonatina `b8239f8d` tightens the remaining legacy adapter: Naga validation now
+enables only `SHADER_INT64`, not every optional capability. A nonconstant i64
+entry still produces native SPIR-V, while an explicit WebGPU request rejects
+the same entry even when requesting only SPIR-V. All 19 Naga module tests pass.
+The broader integration run initially passed 97 tests and failed 39 solely at
+adapter discovery (`Backends(0x0)`). Re-running the same binary with the Vulkan
+loader and lavapipe ICD explicitly supplied passes all 136 tests (10.05s),
+including executed checks on llvmpipe (LLVM 21.1.8, 256 bits). This is not a
+fresh Chrome/hardware gate or a complete Vulkan target profile.
+
+Evidence logs: `/workspace/scratch/mb2-legacy-naga-capabilities-20260905.log`,
+`mb2-legacy-naga-capabilities-suite-20260905.log`,
+`mb2-legacy-naga-capabilities-integration-20260905.log`, and
+`mb2-legacy-naga-capabilities-lavapipe-20260905.log` in the same directory.
+Execution environment: `TMPDIR=/workspace/tmp`,
+`LD_LIBRARY_PATH=/nix/store/7krvb015vp4wq7lj6v3wadjy4q9asc8q-vulkan-loader-1.4.341.0/lib`,
+`VK_ICD_FILENAMES=/run/current-system/sw/share/vulkan/icd.d/lvp_icd.x86_64.json`.
+The change is committed on the shared Sonatina line, not published by this
+work. Fe remains pinned to `ecb58efe`; its portable dependency pin and fresh Fe
+gates must follow publication. Direct Sonatina tests are execution/validation
+evidence, not Fe recorder captures or Riffcat attribution.
+
 ### Intrinsic return classification (2026-09-05)
 
 Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses
