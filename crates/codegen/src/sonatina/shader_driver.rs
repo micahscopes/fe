@@ -1,5 +1,9 @@
 //! Fe shader driver for the Sonatina Naga backend.
 //!
+//! This module owns request construction and Fe's optimization profitability
+//! policy. It does not emit SPIR-V or WGSL: Sonatina owns physical interface
+//! legality, Naga construction, target validation, and artifact encoding.
+//!
 //! Shared portable lowering constructs a module under the Shader ISA. Browser
 //! compute and raster requests explicitly select WebGPU capabilities and
 //! WGSL/SPIR-V encodings. Legacy scalar/grid capability adapters remain pending

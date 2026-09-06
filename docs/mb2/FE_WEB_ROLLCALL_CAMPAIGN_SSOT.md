@@ -27,6 +27,17 @@ Its historical pending markers do not override this ledger. The bounded
 direct-route study is closed as inconclusive for production, with its missing
 comparative gates explicitly recorded. No permanent second backend was added.
 
+The Fe-side `spirv_lower.rs` module is now named `shader_driver.rs`, reflecting
+its actual ownership: request construction and profitability policy, not Naga
+construction or output encoding. Public compatibility entry points remain
+unchanged. The focused Fe epoch/plain artifact gate passes and both WGSL/SPIR-V
+pairs are byte-identical across the move. The legacy i64 keystone artifact gate
+also passes (1.28s); this is artifact validation, not a fresh execution gate.
+Evidence: `/workspace/scratch/mb2-shader-driver-rename-20260905/` and the adjacent
+`mb2-shader-driver-rename-20260905.log`. Legacy scalar/grid capability adapters
+remain explicit migration work: their native i64 behavior must not be silently
+reclassified under WebGPU's narrower environment. No size reduction is claimed.
+
 ### Intrinsic return classification (2026-09-05)
 
 Intrinsic return-classification follow-up (2026-09-05): RMIR no longer uses

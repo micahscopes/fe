@@ -14091,7 +14091,7 @@ pub fn kernel(_ value: u32) -> u32 {
             "typed private helpers should not retain empty canonical-arena frames"
         );
 
-        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+        crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
             &db,
             &package,
             [1, 1, 1],
@@ -14151,7 +14151,7 @@ pub fn kernel(_ seed: u32) -> u32 {
             "the private value helper should retain a typed pointer parameter"
         );
 
-        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+        crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
             &db,
             &package,
             [1, 1, 1],
@@ -14223,7 +14223,7 @@ pub fn kernel(_ seed: u32) -> u32 {
             "fixed typed-private values should not fall back to the byte arena"
         );
 
-        crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+        crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
             &db,
             &package,
             [1, 1, 1],
@@ -14275,7 +14275,7 @@ pub fn kernel(_ seed: u32) -> u32 {
                 }
             });
         }
-        let artifact = crate::sonatina::spirv_lower::compile_runtime_package_spirv_with_workgroup(
+        let artifact = crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
             &db, &package, [1, 1, 1],
         )
         .expect("snapshot-observing state chain should reach validated SPIR-V");
