@@ -922,8 +922,16 @@ Release gates: 12 Naga unit tests, five atomic integration checks, a guarded
 trap compilation/validation check, and two Fe actor-stage/full-bundle parity
 checks pass. Compute integration has eight passes and one execution failure:
 no native GPU adapter is available. Chrome also returns no adapter. No GPU
-equivalence or speedup claim follows. Extra validation cost and the full atlas
-corpus still require measurement.
+equivalence or speedup claim follows.
+
+The full 56-pass atlas also compiles and preserves resource contracts, layouts,
+dispatches and order. Published per-pass WGSL sum: 886,599 -> 863,032 B
+(-23,567 B, 2.66%). Fifty-three passes shrink, none grows; two change text at
+equal size and one is byte-identical. Lowering took 99,889 ms and the full build
+120,274 ms in this run. The preceding run took 100,495 / 120,562 ms; these single
+observations are not a controlled compilation-speed benchmark. Receipt:
+`naga-expression-triangle-comparison.json` in the same scratch evidence root.
+CLI SHA256 b58a945da6e2dee03a759cdae5bce1692e1ac849a4209af43aae6bc213bc2dd6.
 
 Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/naga-expression-actor-retire/`.
 Capture ID bcc4a974212bb9ad1cec817cc5717f46f1f46e1811aa9ec54ec11d12d9a3510d.
