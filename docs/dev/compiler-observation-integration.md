@@ -833,3 +833,38 @@ environment differences, not silently discarded by the comparison tool.
 
 Evidence: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/actor-stage-retention-experiment.md`
 and the actor-stage-reserve-* artifact/capture directories.
+
+### Bounded single-use resource-root policy
+
+Follow-up matched probes supported a narrow automatic profitability policy:
+inline a backend-authorized, resource-accessing helper only when its rooted
+expansion count is one and a single-block shader entry calls it directly.
+Respect explicit Never, preserve ordinary scalar helpers and resource-only
+wrappers, and spend a separate 512-source-instruction optional budget, ordered
+by cost then stable function ID. This does not enable arbitrary inlining inside
+retained callers or borrow the legality inliner's large growth fuse.
+
+Release gates: 3 policy tests, 2 isolated/full actor-stage parity tests and 5
+scalar shader observation tests pass. The unchanged real atlas source compiles
+all 56 stages. Actual published WGSL totals are **915,373 -> 897,217 B**
+(-18,156 B, approximately 2%): 35 stages shrink, none grows, 21 are unchanged.
+Comparison checks manifest sizes against files, stage order, resource contracts,
+layouts and dispatches. It counts each pass once, not the primary artifact again.
+This is textual artifact evidence, not semantic equivalence or GPU timing.
+
+Riff-cat imported and artifact-verified the four isolated stage comparisons and
+full-build retirement comparison. Reservation stays unchanged; copy/select/
+prefix reproduce the earlier controlled reductions. Automatic profitability
+reasons currently require the separate trace; a typed observation gap is
+recorded rather than mislabeling automatic decisions as forced inlining.
+
+Evidence under `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/`:
+`resource-root-triangle-comparison.json`, `compare-atlas-bundles.mjs`,
+`resource-root-retirement.capture.json`, `actor-stage-retention-experiment.md`,
+and `resource-root-budgeted-{unit,integration}-tests.log`.
+The tested CLI SHA256 is
+`2a99cb3e244c679765a1f2063fa130c812ea79629ef8311d82041ddf6ad1a9c7`.
+Source is Quilting-fe 1e8e5f9 plus unchanged recorded b28ec1c9 dirty patch;
+Fe's unrelated provider/test overlay is preserved. Chromium was rechecked and
+still returns no adapter. No runtime speedup or full-atlas generation success
+is implied; algorithmic neighbor searches and structural duplication remain.

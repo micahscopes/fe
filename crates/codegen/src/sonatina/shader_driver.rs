@@ -1122,8 +1122,22 @@ fn select_profitable_naga_helpers(
 ) -> Result<HelperSelection, LowerError> {
     let counts = spirv_root_expansion_counts(module, roots);
     let dependencies = spirv_profitable_helper_dependency_closure(module, roots, &counts);
+    let linear_root_calls = roots.iter().flat_map(|&root| {
+        module.func_store.try_view(root, |function| {
+            if function.layout.iter_block().count() != 1 { return Vec::new(); }
+            function.layout.iter_block().flat_map(|block| function.layout.iter_inst(block))
+                .filter_map(|inst| function.dfg.call_info(inst).map(|call| call.callee()))
+                .collect::<Vec<_>>()
+        }).unwrap_or_default()
+    }).collect::<std::collections::HashSet<_>>();
+    // Optional profitability work gets a small, separate IR budget. It must
+    // not spend the legality inliner's large OOM fuse on generated proof bodies.
+    // Cheapest-first plus stable IDs makes the budget independent of map order.
+    let mut optional_inline_budget = 512usize;
+    let mut helpers = analysis.callable.iter().collect::<Vec<_>>();
+    helpers.sort_by_key(|helper| (helper.instruction_count, helper.function.as_u32()));
     let mut selected = std::collections::HashSet::new();
-    for helper in &analysis.callable {
+    for helper in helpers {
         let carries_resource = module.ctx.func_sig(helper.function, |signature| {
             signature
                 .args()
@@ -1132,6 +1146,20 @@ fn select_profitable_naga_helpers(
                 .copied()
                 .any(|ty| spirv_helper_resource_root_type(module, ty))
         });
+        if inline_single_use_resource_root(
+            counts.get(&helper.function).copied().unwrap_or_default(),
+            linear_root_calls.contains(&helper.function),
+            carries_resource,
+            helper.accesses_resource,
+            module.ctx.inline_hint(helper.function),
+        ) && helper.instruction_count <= optional_inline_budget {
+            optional_inline_budget -= helper.instruction_count;
+            if trace {
+                eprintln!("fe naga helper profitability: inline single-use resource helper at linear root: {}",
+                    module.ctx.func_sig(helper.function, |signature| signature.name().to_owned()));
+            }
+            continue;
+        }
         if !carries_resource
             || helper.accesses_resource
             || spirv_resource_passthrough_outline_worthy(
@@ -1400,6 +1428,23 @@ fn spirv_resource_passthrough_outline_worthy(
         >= MIN_AVOIDED_SOURCE_INSTRUCTIONS
 }
 
+// At a single straight-line shader entry use, outlining cannot share the helper
+// body across IR call sites. Inlining exposes resource offsets/arguments to
+// cleanup without forcing any retained caller out. Emitted-size profitability
+// still requires measurement; this is not a claim about backend region copies.
+// This intentionally does not change the callable-scalar-helper contract or the
+// policy for resource passthrough wrappers, repeated uses, or explicit noinline.
+fn inline_single_use_resource_root(
+    expanded_calls: usize,
+    called_from_linear_root: bool,
+    carries_resource: bool,
+    accesses_resource: bool,
+    hint: sonatina_ir::InlineHint,
+) -> bool {
+    expanded_calls == 1 && called_from_linear_root && carries_resource && accesses_resource
+        && hint != sonatina_ir::InlineHint::Never
+}
+
 fn spirv_profitable_helper_dependency_closure(
     module: &sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
@@ -1652,6 +1697,20 @@ fn ensure_spirv_entry_calls_lowerable(
 #[cfg(test)]
 mod bloat_policy_tests {
     use super::{parse_force_inline_helper_names, validate_force_inline_resolution};
+
+    #[test]
+    fn single_use_resource_root_policy_preserves_sharing_and_authored_boundaries() {
+        use sonatina_ir::InlineHint;
+        use super::inline_single_use_resource_root as choose;
+        assert!(choose(1, true, true, true, InlineHint::Auto));
+        assert!(!choose(0, true, true, true, InlineHint::Auto));
+        assert!(!choose(2, true, true, true, InlineHint::Auto));
+        assert!(!choose(129, true, true, true, InlineHint::Auto));
+        assert!(!choose(1, false, true, true, InlineHint::Auto));
+        assert!(!choose(1, true, false, true, InlineHint::Auto));
+        assert!(!choose(1, true, true, false, InlineHint::Auto));
+        assert!(!choose(1, true, true, true, InlineHint::Never));
+    }
 
     #[test]
     fn named_force_inline_policy_is_explicit_and_deduplicated() {
