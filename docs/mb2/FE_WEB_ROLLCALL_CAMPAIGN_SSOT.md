@@ -263,6 +263,15 @@ All 71 render-runtime and pass-schedule tests pass under Bun (60.41s), log
 fail-closed boundary to replace with the complete typed lifecycle, not an
 implementation of production graph recovery or a change to legacy graphs.
 
+The recorder now projects typed backend request facts through an importer-
+compatible reserved metadata entry. Riffcat's verified comparison detects the
+plain/epoch contract difference automatically rather than treating the 255-byte
+WGSL increase as unexplained growth. Five recorder tests and the Fe artifact
+gate pass. Capture-on/off WGSL and SPIR-V are identical for both contracts.
+Evidence: `/workspace/scratch/mb2-request-facts-20260905/`. Resource/builtin
+descriptions and typed consumer presentation remain follow-ups; no compiler
+legality decision depends on observation.
+
 Unsigned intrinsic division/remainder now explicitly guard a zero divisor in
 portable lowering, matching the EVM source contract without depending on
 Wasm's implicit trap. The focused Wasm gate passes (2.60s), as do five shader

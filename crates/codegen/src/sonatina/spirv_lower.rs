@@ -8,7 +8,7 @@
 
 use crate::sonatina::{
     LowerError,
-    bloat_capture::{CaptureConfig, CaptureObserver, Intervention},
+    bloat_capture::{CaptureConfig, CaptureObserver, Intervention, ShaderRequestFacts},
     portable_lower::compile_runtime_package_shader_ir,
 };
 use compiler_db::DriverDataBase;
@@ -98,6 +98,7 @@ pub fn compile_runtime_package_spirv_with_workgroup(
         &mut module,
         &[entry],
         "legacy_scalar",
+        None,
         |module| backend.analyze_entry_helpers(module, entry),
         |module| backend.compile_entry(module, entry),
         |_, _| {},
@@ -206,6 +207,7 @@ fn compile_webgpu_request(
         module,
         &roots,
         pipeline_name,
+        Some(ShaderRequestFacts::from_request(&request)),
         |module| NagaBackend::analyze_request_helpers(module, &request),
         |module| NagaBackend::compile_request(module, &request),
         |module, phase| trace_contextual_helper_analysis(module, &request, phase),
@@ -218,6 +220,7 @@ fn compile_observed_shader(
     module: &mut sonatina_ir::Module,
     roots: &[sonatina_ir::module::FuncRef],
     pipeline_name: &str,
+    shader_request: Option<ShaderRequestFacts>,
     analyze: impl FnOnce(
         &sonatina_ir::Module,
     ) -> Result<
@@ -250,6 +253,7 @@ fn compile_observed_shader(
                     directory: directory.into(),
                     request_id: format!("request-{}-{nonce}-{pipeline_name}", std::process::id()),
                     environment,
+                    shader_request,
                     intervention,
                     strict: strict_observation,
                     max_events: std::env::var("FE_OBSERVE_MAX_EVENTS")
@@ -421,6 +425,7 @@ pub fn compile_runtime_package_spirv_grid(
         &mut module,
         &[entry],
         "legacy_grid",
+        None,
         |module| backend.analyze_entry_helpers(module, entry),
         |module| backend.compile_entry(module, entry),
         |_, _| {},

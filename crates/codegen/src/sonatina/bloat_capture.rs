@@ -15,7 +15,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sonatina_codegen::{
     isa::{
-        naga::{ShaderCallableHelper, ShaderHelperAnalysis},
+        naga::{ShaderCallableHelper, ShaderCompileRequest, ShaderEncoding, ShaderEnvironment, ShaderHelperAnalysis, ShaderPipeline},
         spirv::SpirvArtifact,
     },
     optim::inliner::{FullInlineCloneRecord, InlineStats},
@@ -187,9 +187,62 @@ pub(crate) struct CaptureConfig {
     pub directory: PathBuf,
     pub request_id: String,
     pub environment: BTreeMap<String, String>,
+    pub shader_request: Option<ShaderRequestFacts>,
     pub intervention: Intervention,
     pub strict: bool,
     pub max_events: usize,
+}
+
+/// Observational projection of the backend-owned target contract. These facts
+/// never participate in legality or helper selection. The compatibility event
+/// transports the versioned JSON under a reserved producer metadata key until
+/// consumers admit a dedicated typed request field.
+#[derive(Serialize)]
+pub(crate) struct ShaderRequestFacts {
+    schema: &'static str,
+    environment: &'static str,
+    encodings: Vec<&'static str>,
+    private_heap_words: u32,
+    workgroup_size: Option<[u32; 3]>,
+    dispatch_grid: Option<[u32; 3]>,
+    graph_failure: Option<ShaderBindingFact>,
+}
+
+#[derive(Serialize)]
+struct ShaderBindingFact {
+    group: u32,
+    binding: u32,
+}
+
+impl ShaderRequestFacts {
+    pub(crate) fn from_request(request: &ShaderCompileRequest<'_>) -> Self {
+        let (workgroup_size, dispatch_grid) = match request.pipeline {
+            ShaderPipeline::Compute { workgroup_size, dispatch_grid, .. } =>
+                (Some(workgroup_size), Some(dispatch_grid)),
+            ShaderPipeline::LegacyScalar { workgroup_size, .. }
+            | ShaderPipeline::LegacyGrid { workgroup_size, .. } => (Some(workgroup_size), None),
+            ShaderPipeline::Raster { .. } | ShaderPipeline::Fullscreen { .. } => (None, None),
+        };
+        Self {
+            schema: "fe-shader-request/1",
+            environment: match request.target.environment() {
+                ShaderEnvironment::WebGpu => "webgpu",
+                ShaderEnvironment::Vulkan => "vulkan",
+                ShaderEnvironment::WebGl2 => "webgl2",
+            },
+            encodings: request.target.encodings().iter().map(|encoding| match encoding {
+                ShaderEncoding::Wgsl => "wgsl",
+                ShaderEncoding::Spirv => "spirv",
+                ShaderEncoding::GlslEs => "glsl_es",
+            }).collect(),
+            private_heap_words: request.private_heap_words,
+            workgroup_size,
+            dispatch_grid,
+            graph_failure: request.graph_failure.map(|binding| ShaderBindingFact {
+                group: binding.group, binding: binding.binding,
+            }),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -216,11 +269,15 @@ impl CaptureObserver {
         self.failure.is_none()
     }
     pub(crate) fn new(
-        config: CaptureConfig,
+        mut config: CaptureConfig,
         module: &Module,
         roots: &[FuncRef],
         pipeline: &str,
     ) -> Result<Self, String> {
+        config.environment.insert(
+            "fe.shader_request".to_owned(),
+            serde_json::to_string(&config.shader_request).map_err(|error| error.to_string())?,
+        );
         let base = config.directory;
         fs::create_dir_all(&base).map_err(|error| {
             format!(
@@ -878,6 +935,30 @@ fn write_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_facts_preserve_backend_contract_without_module_inference() {
+        use sonatina_codegen::isa::naga::{GraphFailureBinding, ShaderTargetContract};
+        let target = ShaderTargetContract::new(
+            ShaderEnvironment::WebGpu, [ShaderEncoding::Wgsl, ShaderEncoding::Spirv],
+        ).unwrap();
+        let mut request = ShaderCompileRequest::new(&target, ShaderPipeline::Compute {
+            entry: FuncRef::from_u32(0), workgroup_size: [2, 1, 1], dispatch_grid: [3, 1, 1],
+        });
+        request.private_heap_words = 32;
+        let plain = serde_json::to_value(ShaderRequestFacts::from_request(&request)).unwrap();
+        assert_eq!(plain["schema"], "fe-shader-request/1");
+        assert_eq!(plain["environment"], "webgpu");
+        assert_eq!(plain["encodings"], serde_json::json!(["wgsl", "spirv"]));
+        assert_eq!(plain["private_heap_words"], 32);
+        assert_eq!(plain["workgroup_size"], serde_json::json!([2, 1, 1]));
+        assert_eq!(plain["dispatch_grid"], serde_json::json!([3, 1, 1]));
+        assert!(plain["graph_failure"].is_null());
+        request.graph_failure = Some(GraphFailureBinding { group: 1, binding: 7 });
+        let scoped = serde_json::to_value(ShaderRequestFacts::from_request(&request)).unwrap();
+        assert_eq!(scoped["graph_failure"], serde_json::json!({"group": 1, "binding": 7}));
+        assert_ne!(plain, scoped);
+    }
 
     fn writer(directory: &Path, strict: bool, max_events: usize) -> CaptureObserver {
         CaptureObserver {

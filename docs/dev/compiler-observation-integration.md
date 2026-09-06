@@ -531,3 +531,24 @@ explain this target-contract difference itself. Producer was Fe `4c6192b2c`
 plus the uncommitted compute-interface/test change and existing shared edits,
 with pinned Sonatina `ecb58efe`. Imported settings record the whole tracked
 dirty patch SHA256; the fixture source digest is recorded separately.
+
+Producer follow-through: `ShaderRequestFacts` now derives environment, encoding
+selection, requested private-heap words, compute dimensions, and optional epoch
+binding directly from `ShaderCompileRequest`. The existing strict importer
+rejects new event fields, so the compatibility projection places a versioned
+JSON object (`fe-shader-request/1`) in `environment["fe.shader_request"]`.
+This reserved entry is producer metadata, not a process environment variable.
+Legacy adapters without an explicit request project JSON `null`, not a guessed
+WebGPU profile. Resource/builtin argument descriptions remain outside this
+snapshot; equality is not a complete interface or behavior certificate.
+
+Fresh captures: `/workspace/scratch/mb2-request-facts-20260905/capture/`.
+All four import and replay through the existing consumer. Verified comparison
+between the second (plain) and third (epoch) requests now reports the exact
+epoch difference in `environment_differences`, without CLI setting hints.
+Five recorder tests pass, the Fe artifact gate passes, and capture-on/off
+WGSL/SPIR-V files are byte-identical for both variants. These are observation
+and compatibility gates; the preceding Chrome evidence covers execution.
+Consumer follow-up: present these as typed target-contract differences rather
+than raw metadata strings, retaining old-capture unknown coverage and the
+explicit resource/builtin coverage limitation. No consumer rewrite is required.
