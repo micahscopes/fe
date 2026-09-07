@@ -13,6 +13,41 @@ const { BufferPublicationWriter, BufferPublicationBindings } = await import("./f
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
+test("declarative upgrade boots once after all initial attribute reactions", async () => {
+  for (const manual of [false, true]) {
+    const surface = Object.create(FeSurfaceElement.prototype);
+    const attributes = new Map([
+      ["manifest", "scene.json"], ["data-fe-scoped-tasks", "tasks.js"],
+      ["state", "live"], ...(manual ? [["boot", "manual"]] : []),
+    ]);
+    Object.assign(surface, {
+      isConnected: true, _booted: false, _fsm: "cold",
+      _readyPromise: Promise.resolve(), _scopedTaskMachines: null,
+      getAttribute: name => attributes.get(name) ?? null,
+      _stopScopedTasks() {},
+    });
+    let boots = 0;
+    surface._bootSurface = () => { boots++; };
+    // Custom-element upgrade invokes these before connectedCallback, not
+    // while detached. This ordering previously started two competing boots.
+    for (const name of ["manifest", "data-fe-scoped-tasks", "state"]) {
+      surface.attributeChangedCallback(name, null, attributes.get(name));
+    }
+    assert.equal(boots, 0);
+    surface.connectedCallback();
+    assert.equal(boots, manual ? 0 : 1);
+    await surface.load();
+    assert.equal(boots, 1, "explicit load remains idempotent after automatic boot");
+    attributes.set("manifest", "replacement.json");
+    surface.attributeChangedCallback("manifest", "scene.json", "replacement.json");
+    assert.equal(boots, 2, "a later connected source replacement still reboots");
+    surface.isConnected = false;
+    surface.attributeChangedCallback("manifest", "replacement.json", "detached.json");
+    assert.equal(boots, 2);
+    surface.disconnectedCallback();
+  }
+});
+
 test("graph failure contracts fail closed before resource or device access", async () => {
   for (const graphFailure of [{ group: 0, binding: 2 }, {}, false]) {
     const surface = Object.create(FeSurfaceElement.prototype);

@@ -1821,8 +1821,10 @@ export class FeSurfaceElement extends HTMLElement {
       return;
     }
     if (name === "manifest" || name === "data-fe-scoped-tasks") {
-      if (this.isConnected && (this._booted || this.getAttribute("boot") !== "manual")) {
-        this._booted = true;
+      // During upgrade, initial attribute reactions precede connectedCallback
+      // even though isConnected is already true. Connection owns the first
+      // boot; these reactions must not create overlapping Wasm/task owners.
+      if (this.isConnected && this._booted) {
         this._bootSurface();
       }
       return;
