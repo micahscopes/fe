@@ -3719,6 +3719,17 @@ fn resumable_plan_can_rewind_segment_arena<'db>(
     Ok(())
 }
 
+/// Nominal actor transports that copy their payload before returning a token.
+fn copied_actor_pending_effect<'db>(
+    db: &'db DriverDataBase,
+    callee: RuntimeInstance<'db>,
+) -> bool {
+    matches!(
+        mir::runtime_actor_effect_kind(db, callee),
+        Some(mir::RuntimeActorEffectFuncKind::AskBegin | mir::RuntimeActorEffectFuncKind::SendBegin)
+    )
+}
+
 /// Recover the exact SSA lineage of a token consumed by `Suspend`. Portable
 /// normalization may preserve a scalar newtype through ordinary copies or a
 /// one-field aggregate projection, so the call destination which minted the
@@ -3824,12 +3835,12 @@ where
     /// scoped arena. Cache the decision before full MIR bodies are released.
     resumable_scoped_arena_bodies: HashSet<RuntimeInstance<'db>>,
     /// Closed Fe wrappers which return one scalar pending token minted by the
-    /// nominal actor AskBegin effect. The wrapper chain may inspect or forward
-    /// the borrowed request while the enclosing segment is live, but cannot
+    /// nominal actor AskBegin/SendBegin effect. The wrapper chain may inspect
+    /// or forward the borrowed request while the enclosing segment is live, but cannot
     /// cross any other effect boundary or persist that transport.
     resumable_pending_producer_bodies: HashSet<RuntimeInstance<'db>>,
     /// Exact SSA lineages of pending tokens followed by a compiler-materialized
-    /// suspension. Only nominal actor AskBegin producer chains may borrow
+    /// suspension. Only nominal copied actor-message producer chains may borrow
     /// request storage that the enclosing segment later rewinds.
     resumable_pending_producers: FxHashMap<RuntimeInstance<'db>, HashSet<RLocalId>>,
     /// Owners whose complete result and every persisted suspension frame are
@@ -6737,9 +6748,16 @@ where
             .iter()
             .filter(|(instance, _)| !resumable_owners.contains(instance))
             .filter_map(|(instance, body)| {
-                self.analyze_resumable_arena_body(body, None)
-                    .ok()
-                    .map(|analysis| (*instance, analysis))
+                match self.analyze_resumable_arena_body(body, None) {
+                    Ok(analysis) => Some((*instance, analysis)),
+                    Err(reason) => {
+                        wasm_lower_trace_detail(|| format!(
+                            "reject callee from resumable arena, symbol={}, reason={reason}",
+                            self.function_symbol(*instance),
+                        ));
+                        None
+                    }
+                }
             })
             .collect::<FxHashMap<_, _>>();
         let mut safe = analyses.keys().copied().collect::<HashSet<_>>();
@@ -6765,9 +6783,10 @@ where
     }
 
     /// Admit the ordinary Fe mailbox/provider wrappers between a task and the
-    /// nominal AskBegin import. This is deliberately a dataflow proof rather
+    /// nominal AskBegin or SendBegin import. Both transports copy their payload
+    /// before returning the scalar pending token. This is a dataflow proof rather
     /// than a symbol-name exception: every exit must return a token produced
-    /// by AskBegin (possibly through another admitted wrapper), and every
+    /// by one of those imports (possibly through an admitted wrapper), and every
     /// other call must already belong to the pure resumable arena closure.
     fn derive_resumable_pending_producer_bodies(&self) -> HashSet<RuntimeInstance<'db>> {
         let resumable_owners = self
@@ -6811,8 +6830,7 @@ where
             })
         };
         let producer_call = |callee: RuntimeInstance<'db>| {
-            mir::runtime_actor_effect_kind(self.db, callee)
-                == Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+            copied_actor_pending_effect(self.db, callee)
                 || admitted.contains(&callee)
         };
         let mut exits = 0_usize;
@@ -6900,8 +6918,7 @@ where
                     }
                     match expr {
                         RExpr::Call { callee, .. } => {
-                            mir::runtime_actor_effect_kind(self.db, *callee)
-                                == Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+                            copied_actor_pending_effect(self.db, *callee)
                                 || admitted.contains(callee)
                         }
                         RExpr::Use(source) => self
@@ -6995,8 +7012,7 @@ where
                         RExpr::Call { callee, .. } => {
                             let copied_actor_request = pending_producers
                                 .is_some_and(|pending| pending.contains(dst))
-                                && (mir::runtime_actor_effect_kind(self.db, *callee)
-                                    == Some(mir::RuntimeActorEffectFuncKind::AskBegin)
+                                && (copied_actor_pending_effect(self.db, *callee)
                                     || self.resumable_pending_producer_bodies.contains(callee));
                             if copied_actor_request {
                                 if body
@@ -7004,7 +7020,7 @@ where
                                     .is_none_or(|class| class.contains_transport(self.db))
                                 {
                                     return Err(
-                                        "actor request does not produce a scalar pending token",
+                                        "copied actor message does not produce a scalar pending token",
                                     );
                                 }
                                 continue;
@@ -7027,6 +7043,12 @@ where
                         RExpr::Builtin(builtin) if scoped_arena_builtin_is_pure(builtin) => {}
                         RExpr::Builtin(_) => {
                             return Err("effectful builtin remains in resumable segment");
+                        }
+                        RExpr::Placeholder { class }
+                            if self.scalar_tuple_element_tys(class)
+                                .is_some_and(|leaves| leaves.is_empty()) => {
+                            // Same Known-bound range unit admitted by ordinary
+                            // scoped calls: no bits or storage can escape.
                         }
                         RExpr::Placeholder { .. } => {
                             return Err("placeholder remains in resumable segment");

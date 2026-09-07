@@ -574,13 +574,17 @@ actor Clock {{
         TickProjection {{ value: self.value, messages: self.messages }}
     }}
 
-    fn heartbeat() -> u32 uses (ScopedTask) {{
+    fn heartbeat(self) -> u32 uses (ScopedTask) {{
         with (
             ActorSink<WasmBackend, {event_ty}> = BrowserActorSink {{}},
             Suspend<WasmBackend, u32> = Resumable {{}},
         ) {{
+            let mut accumulated: u32 = 0
+            for _ in 0 .. ((self.value + 5) as usize) {{
+                accumulated += 1
+            }}
             let message: ActorMessage<{event_ty}> = ActorMessage::new(
-                {event_ty} {{ kind: TickKind::Add, value: 7 }}
+                {event_ty} {{ kind: TickKind::Add, value: accumulated }}
             )
             let outcome: TaskOutcome<u32, ()> = message.send()
             match outcome {{
@@ -2053,7 +2057,22 @@ const initial = instance.exports.fe_actor_initialize_v1();
 if (initial[0] !== 2 || initial[1] !== 0) throw new Error(`bad initial state ${{initial}}`);
 const machines = Object.values(createMaterializedTaskRegistry(instance.exports));
 if (machines.length !== 1) throw new Error("expected one generated task");
-const output = await broker.run(machines[0], []);
+// Model a caller-owned canonical response below this task's temporary storage.
+// Both dynamic range construction and the copied event must be reclaimed
+// without reclaiming that caller storage or corrupting persistent actor state.
+const cursor = instance.exports.fe_cabi_checkpoint();
+const guard = instance.exports.cabi_realloc(0, 0, 4, 16);
+new Uint32Array(instance.exports.memory.buffer, guard, 4).fill(0x13579bdf);
+const afterGuard = instance.exports.fe_cabi_checkpoint();
+const output = await broker.run(machines[0], initial);
+if (instance.exports.fe_cabi_checkpoint() !== afterGuard) {{
+  throw new Error("typed send/range task leaked scratch above its caller's allocation");
+}}
+if (new Uint32Array(instance.exports.memory.buffer, guard, 4).some(v => v !== 0x13579bdf)) {{
+  throw new Error("typed send/range task corrupted caller storage");
+}}
+instance.exports.fe_cabi_post_return(guard, 16, 4);
+if (instance.exports.fe_cabi_checkpoint() !== cursor) throw new Error("caller release drifted");
 const projected = instance.exports.fe_actor_project_v1();
 if (output.length !== 1 || output[0] !== 71) throw new Error(`bad task output ${{output}}`);
 if (accepted.length !== 1 || accepted[0][0] !== 0 || accepted[0][1] !== 7) {{
