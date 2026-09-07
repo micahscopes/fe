@@ -8,9 +8,49 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 const { rasterPlan, rasterColorTarget, rasterPrimitive, rasterMultisample } = await import("./fe-render-runtime.js");
-const { BufferPublicationWriter, BufferPublicationBindings } = await import("./fe-render-runtime.js");
+const { BufferPublicationWriter, BufferPublicationBindings, FeSurfaceElement } = await import("./fe-render-runtime.js");
 
-const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+test("continuous controls preserve authored values without an invented step lattice", () => {
+  const previousDocument = globalThis.document;
+  const element = () => ({ children: [], append(...children) { this.children.push(...children); }, setAttribute() {} });
+  globalThis.document = { createElement: element };
+  try {
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._updateBadge = () => {};
+    surface.getAttribute = () => null;
+    surface._panel = element();
+    surface._manifest = { protocol_version: 10 };
+    const declarations = [
+      ["focus", 0.1, 4, 1, "linear", "scalar"],
+      ["twist", -Math.PI, Math.PI, 0, "linear", "scalar"],
+      ["density", 0.1, 10, 1, "logarithmic", "scalar"],
+      ["level", 0, 8, 4, "linear", "integer"],
+    ];
+    surface._surface = { params: declarations.map(([name, min, max, init, scale, readout]) => ({
+      name, min, max, init, source: "initial", visible: true,
+      presentation: { widget: "range", scale, readout, options: [] },
+    })) };
+    surface._members = declarations.map(([name]) => ({ name }));
+    surface._memberIndexByName = new Map(declarations.map(([name], i) => [name, i]));
+    surface._uniforms = declarations.map(([, , , init]) => init);
+    surface._renderControls();
+    assert.deepEqual(surface._controlRows.map(r => r.input.step), ["any", "any", "any", "1"]);
+    assert.deepEqual(surface._controlRows.map(r => r.input.value), ["1", "0", "0", "4"]);
+    const edits = [];
+    surface._applyParamEdit = (...args) => edits.push(args);
+    surface._controlRows[0].input.value = "1.234567";
+    surface._controlRows[0].input.oninput();
+    assert.deepEqual(edits, [[0, 1.234567, 0]]);
+    surface._refreshControlValues();
+    assert.equal(surface._controlRows[0].input.value, "1");
+    assert.equal(surface._controlRows[1].input.value, "0");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+const { GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("declarative upgrade boots once after all initial attribute reactions", async () => {

@@ -4614,7 +4614,9 @@ export class FeSurfaceElement extends HTMLElement {
         const inputMax = isLog ? Math.log10(max) : max;
         input.min = String(inputMin);
         input.max = String(inputMax);
-        input.step = isInt ? "1" : String((inputMax - inputMin) / 200 || 0.01);
+        // Fe scalar ranges are continuous. An invented 200-step lattice
+        // silently changes authored/reset values (including exact neutrals).
+        input.step = isInt ? "1" : "any";
         input.value = String(encode(this._uniforms[index]));
         input.oninput = () => {
           this._applyParamEdit(index, decode(input.value), paramIndex);
