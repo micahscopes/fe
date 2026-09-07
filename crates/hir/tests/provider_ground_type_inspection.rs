@@ -3,6 +3,44 @@ use fe_hir::{
 };
 
 #[test]
+fn provider_reflected_labels_compare_by_text_across_record_owners() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_label_equality.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Locate { fn index(self) -> u32 }
+struct Schema { readout:u32, selected:u32 }
+struct Provider {}
+impl Derive<Locate> for Provider {
+    const fn derive<T>(ev:own Evidence<Locate<T>>) -> Evidence<Locate<T>>
+        uses (reflect:Reflect<T>, builder:mut ImplBuilder<Locate<T>>)
+    {
+        let ordinal:u32=0
+        for declared in builder.ty<Schema>().fields() {
+            for field in reflect.fields() {
+                if declared.name() == field.name() {
+                    if declared.name() != "selected" || ordinal != 1 {
+                        builder.emit_method("wrong_label", builder.int(0))
+                    }
+                    builder.emit_method("index", builder.int(ordinal))
+                }
+            }
+            ordinal=ordinal+1
+        }
+        builder.finish()
+        ev
+    }
+}
+struct Target {selected:u32}
+derive Locate for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn route_parse_constructors_do_not_require_copy_evidence() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

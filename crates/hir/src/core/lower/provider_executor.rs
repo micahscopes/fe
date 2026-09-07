@@ -1509,8 +1509,23 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             // integer comparator. Pure decision, no emission.
             Expr::Bin(lhs, rhs, BinOp::Comp(op)) => {
                 let (lhs, rhs, op) = (*lhs, *rhs, *op);
-                let lhs = self.int_value(lhs)?;
-                let rhs = self.int_value(rhs)?;
+                let left = self.eval_expr(lhs)?;
+                let right = self.eval_expr(rhs)?;
+                // Reflected labels are ordinary compile-time strings. Their
+                // equality is textual, unlike nominal field-handle identity.
+                if let (Value::Str(left), Value::Str(right)) = (&left, &right) {
+                    return match op {
+                        CompBinOp::Eq => Ok(Value::Bool(left == right)),
+                        CompBinOp::NotEq => Ok(Value::Bool(left != right)),
+                        _ => Err(self.unsupported_expr(expr)),
+                    };
+                }
+                let Value::Int(lhs) = left else {
+                    return Err(self.unsupported_expr(lhs));
+                };
+                let Value::Int(rhs) = right else {
+                    return Err(self.unsupported_expr(rhs));
+                };
                 let cmp = match op {
                     CompBinOp::Eq => TermCmpOp::Eq,
                     CompBinOp::NotEq => TermCmpOp::Ne,
