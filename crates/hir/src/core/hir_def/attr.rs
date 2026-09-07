@@ -80,6 +80,7 @@ pub enum GpuControl {
     /// resident ahead of demand. The host observes only an opaque policy
     /// ordinal and a fixed Wasm decision export.
     PassPreparation,
+    BufferPublication,
     /// Compile-time Fe behavior returning the actor's raster plan.
     RasterPipeline,
     /// Opt a surface into uncaptured primary-pointer motion in addition to
@@ -568,6 +569,7 @@ impl<'db> AttrListId<'db> {
             "surface_recovery" => Some(GpuControl::SurfaceRecovery),
             "pass_activation" => Some(GpuControl::PassActivation),
             "pass_preparation" => Some(GpuControl::PassPreparation),
+            "buffer_publication" => Some(GpuControl::BufferPublication),
             "raster_pipeline" => Some(GpuControl::RasterPipeline),
             "surface_pointer_motion" => Some(GpuControl::SurfacePointerMotion),
             "readback" => Some(GpuControl::Readback),
@@ -716,6 +718,9 @@ impl<'db> AttrListId<'db> {
     /// compiler consumers only project the resulting concrete value.
     pub fn is_web_resource_plan(self, db: &'db dyn HirDb) -> bool {
         self.has_marker_attr(db, "web_resource_plan")
+    }
+    pub fn is_web_buffer_publication(self, db: &'db dyn HirDb) -> bool {
+        self.has_marker_attr(db, "web_buffer_publication")
     }
 
     /// Fe-owned primitive assembly and winding plan, evaluated per draw.

@@ -4566,6 +4566,61 @@ fn resolve_pass_activation_policy<'db>(
     ))
 }
 
+struct ResolvedBufferPublication<'db> {
+    policy_ty: TyId<'db>,
+    func: Func<'db>,
+    binding: u32,
+}
+
+fn resolve_buffer_publication<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
+    source_entry: &str,
+    program: &WebActorProgram,
+    resource_field_indices: &[u32],
+) -> Result<Option<ResolvedBufferPublication<'db>>, WebBundleError> {
+    let Some((policy_ty, func, _, result)) = resolve_pass_state_policy(
+        db, top_mod, source_entry, resource_field_indices,
+        GpuControl::BufferPublication, "PublishBuffer", "BufferPublication<Resource>",
+        |ty, _| nominal_attrs(db, ty).is_some_and(|attrs| attrs.is_web_buffer_publication(db)),
+    )? else { return Ok(None); };
+    let expected = CanonicalType::Record(vec![
+        CanonicalField { name: "version".into(), ty: CanonicalType::Record(vec![
+            CanonicalField { name: "epoch".into(), ty: CanonicalType::U32 },
+            CanonicalField { name: "revision".into(), ty: CanonicalType::U32 },
+        ]) },
+        CanonicalField { name: "source".into(), ty: CanonicalType::Bytes },
+        CanonicalField { name: "target_byte_offset".into(), ty: CanonicalType::U32 },
+    ]);
+    if result != expected {
+        return Err(WebBundleError::SurfaceProjection("invalid nominal BufferPublication layout".into()));
+    }
+    let return_ty = normalized_semantic_ty(db, func.return_ty(db));
+    let [target_ty] = return_ty.generic_args(db) else {
+        return Err(WebBundleError::SurfaceProjection("BufferPublication requires one destination type".into()));
+    };
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors.iter().find(|actor| actor.state.name(db).to_opt()
+        .is_some_and(|name| name.data(db) == &program.actor))
+        .ok_or_else(|| WebBundleError::SurfaceProjection("publication has no owning actor".into()))?;
+    let fields = actor.state.hir_fields(db).data(db);
+    let mut matches = Vec::new();
+    for (binding, resource) in program.resources.iter().enumerate() {
+        let field = &fields[resource.field_index as usize];
+        let reference = field.type_ref().to_opt().ok_or_else(||
+            WebBundleError::SurfaceProjection("publication destination has no type".into()))?;
+        let ty = lower_hir_ty(db, reference, actor.state.scope(), PredicateListId::empty_list(db));
+        if normalized_semantic_ty(db, ty) == normalized_semantic_ty(db, *target_ty) {
+            matches.push(binding as u32);
+        }
+    }
+    let [binding] = matches.as_slice() else {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "PublishBuffer destination must match exactly one actor resource, found {}", matches.len())));
+    };
+    Ok(Some(ResolvedBufferPublication { policy_ty, func, binding: *binding }))
+}
+
 /// Resolve the pure policy selected by `PassPreparation<P>`. Its result must
 /// be the nominal fieldless `PassPreparationMode` enum marked by the standard
 /// library, so numeric residency tags never leak into application source.
@@ -7163,7 +7218,7 @@ impl WebBundle {
             }
         }
         let readback = typed_gpu_readback_contract(db, top_mod, &options.source_entry, &program)?;
-        let resources = actor_shader_resources(
+        let mut resources = actor_shader_resources(
             &program, readback.as_ref().map(|contract| contract.binding),
         )?;
         let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
@@ -7176,7 +7231,28 @@ impl WebBundle {
         let mut stage_activation_indices = Vec::with_capacity(program.stages.len());
         let mut pass_preparation_policies = Vec::<ResolvedPassPreparationPolicy<'_>>::new();
         let mut stage_preparation_indices = Vec::with_capacity(program.stages.len());
+        let mut publications = Vec::<ResolvedBufferPublication<'_>>::new();
         for stage in &program.stages {
+            if let Some(policy) = resolve_buffer_publication(
+                db, top_mod, &stage.source_entry, &program, &resource_field_indices,
+            )? {
+                if let Some(previous) = publications.iter().find(|p| p.binding == policy.binding) {
+                    if previous.policy_ty != policy.policy_ty {
+                        return Err(WebBundleError::SurfaceProjection(
+                            "multiple publication policies target one resource".into()));
+                    }
+                } else {
+                    let resource = &mut resources[policy.binding as usize];
+                    if resource.policy["residency"] != "actor_resident" || resource.artifact.is_some() {
+                        return Err(WebBundleError::SurfaceProjection(
+                            "runtime publications require actor-resident storage without an initial artifact".into()));
+                    }
+                    if !resource.buffer_usage.contains(&WebBufferUsage::CopyDst) {
+                        resource.buffer_usage.push(WebBufferUsage::CopyDst);
+                    }
+                    publications.push(policy);
+                }
+            }
             let activation = resolve_pass_activation_policy(
                 db,
                 top_mod,
@@ -7499,6 +7575,7 @@ impl WebBundle {
             || readback.is_some()
             || !pass_activation_policies.is_empty()
             || !pass_preparation_policies.is_empty()
+            || !publications.is_empty()
             || scoped_task_count != 0
         {
             // A pass graph remains GPU-only for all rendering and resource
@@ -7573,6 +7650,11 @@ impl WebBundle {
                     internal_funcs.push(policy.func);
                 }
             }
+            for publication in &publications {
+                if !internal_funcs.contains(&publication.func) {
+                    internal_funcs.push(publication.func);
+                }
+            }
             if trace {
                 eprintln!(
                     "[fe web actor graph] building control package, entries={}, internal_funcs={}, elapsed_ms={}",
@@ -7596,6 +7678,13 @@ impl WebBundle {
                 );
             }
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
+            for (index, publication) in publications.iter().enumerate() {
+                let symbol = mir::runtime_package_symbol_for_func(db, control_package, publication.func)
+                    .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+                wasm_options = wasm_options
+                    .with_export_alias(symbol, format!("fe_buffer_publication_v1_{index}"))
+                    .with_fixed_i32_export(format!("fe_buffer_publication_binding_v1_{index}"), publication.binding as i32);
+            }
             if scoped_task_count != 0 {
                 (scoped_tasks, structured_children) = compile_scoped_task_support(
                     db, top_mod, control_package, scoped_task_count, true,

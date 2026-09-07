@@ -663,6 +663,9 @@ export class BufferPublicationWriter {
         !Number.isSafeInteger(buffer.size) || targetByteOffset + byteLength > buffer.size) {
       throw new RangeError("buffer publication exceeds source or destination bounds");
     }
+    // Pending/no-new-data is a no-op, not an acknowledgement. In particular it
+    // must not overwrite the receipt for an earlier non-empty appended range.
+    if (byteLength === 0) return false;
     const previous = this.#receipts.get(buffer);
     if (previous) {
       if (previous.memory !== memory || previous.queue !== queue) {
@@ -681,14 +684,69 @@ export class BufferPublicationWriter {
     }
     // Construct the view only now: memory.grow may have detached an earlier
     // buffer. GPUQueue.writeBuffer copies its source during this call.
-    if (byteLength !== 0) {
-      writeGpuBuffer(queue, buffer, targetByteOffset,
-        new Uint8Array(memory.buffer, sourceByteOffset, byteLength));
-    }
+    writeGpuBuffer(queue, buffer, targetByteOffset,
+      new Uint8Array(memory.buffer, sourceByteOffset, byteLength));
     this.#receipts.set(buffer, {
       queue, memory, epoch, revision, sourceByteOffset, targetByteOffset, byteLength,
     });
     return true;
+  }
+}
+
+/** Fixed discovery of compiler-resolved Fe publication policies. No application
+ * buffer name, source function name or packing schema is accepted here. */
+export class BufferPublicationBindings {
+  #writer = new BufferPublicationWriter();
+  #memory;
+  #policies = [];
+
+  constructor(exports, resources) {
+    this.#memory = exports.memory;
+    const prefix = "fe_buffer_publication_v1_";
+    const indices = Object.keys(exports).filter(name => name.startsWith(prefix))
+      .map(name => Number(name.slice(prefix.length))).sort((a,b)=>a-b);
+    const targets = new Set();
+    for (let ordinal=0; ordinal<indices.length; ordinal++) {
+      if (indices[ordinal] !== ordinal) throw new Error("non-dense Fe publication ordinals");
+      const kernel = exports[`${prefix}${ordinal}`];
+      const target = exports[`fe_buffer_publication_binding_v1_${ordinal}`];
+      if (typeof kernel !== "function" || typeof target !== "function") {
+        throw new Error("incomplete Fe publication exports");
+      }
+      const index = target();
+      if (!Number.isSafeInteger(index) || index<0 || !resources[index]) {
+        throw new Error("invalid compiler-resolved publication destination");
+      }
+      const resource = resources[index];
+      if (targets.has(index) || resource.policy?.residency !== "actor_resident" ||
+          !resource.buffer_usage?.includes("copy_dst") || resource.artifact) {
+        throw new Error("incompatible publication resource custody");
+      }
+      targets.add(index);
+      this.#policies.push({kernel, resource});
+    }
+    if (indices.length && !(this.#memory instanceof WebAssembly.Memory)) {
+      throw new Error("Fe publications have no owning Wasm memory");
+    }
+  }
+
+  write(gpu, state) {
+    for (const {kernel, resource} of this.#policies) {
+      const buffer = gpu.resourceBuffers.get(resource.name);
+      if (!buffer) throw new Error("publication destination has no physical buffer");
+      const reply = kernel(...state);
+      if (!Array.isArray(reply) || reply.length !== 5) {
+        throw new Error("invalid Fe BufferPublication result shape");
+      }
+      if (reply.some(value=>!Number.isInteger(value)||value < -0x8000_0000||value > 0xffff_ffff)) {
+        throw new Error("invalid Fe BufferPublication scalar");
+      }
+      const [epoch,revision,sourceByteOffset,byteLength,targetByteOffset] = reply;
+      this.#writer.write(gpu.device.queue,buffer,this.#memory,{
+        epoch:epoch>>>0,revision:revision>>>0,sourceByteOffset:sourceByteOffset>>>0,
+        byteLength:byteLength>>>0,targetByteOffset:targetByteOffset>>>0,
+      });
+    }
   }
 }
 
@@ -1576,6 +1634,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._scopedTaskBroker = null;
     this._scopedTaskMachines = null;
     this._scopedTaskLifetime = null;
+    this._bufferPublications = null;
     this._scopedTasksNeedReboot = false;
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
@@ -1833,6 +1892,7 @@ export class FeSurfaceElement extends HTMLElement {
         const scopedTasks = await this._prepareScopedTasks(wasmModule);
         instance = await WebAssembly.instantiate(wasmModule, scopedTasks?.imports ?? {});
         this._attachScopedTasks(scopedTasks, instance);
+        this._bufferPublications = new BufferPublicationBindings(instance.exports, this._resources);
         this._kernel = instance.exports[manifest.source_entry];
         if (!this._graph && typeof this._kernel !== "function") {
           throw new Error(`fe render runtime: wasm export \`${manifest.source_entry}\` not found`);
@@ -2655,6 +2715,7 @@ export class FeSurfaceElement extends HTMLElement {
         uniforms,
       );
       for (const record of activePassRecords) await realizePassPipeline(device, record);
+      this._bufferPublications?.write(gpu, uniforms);
       if (activePassRecords.some(record => record.pass.layout.mode !== "compute")) {
         ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
       }
@@ -3507,6 +3568,7 @@ export class FeSurfaceElement extends HTMLElement {
 
   _teardown() {
     this._stopScopedTasks();
+    this._bufferPublications = null;
     this._scopedTaskBroker = null;
     this._scopedTaskMachines = null;
     this._scopedTasksNeedReboot = false;

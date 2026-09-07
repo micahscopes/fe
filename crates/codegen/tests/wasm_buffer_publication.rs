@@ -5,6 +5,96 @@ use fe_codegen::{WasmCompileOptions, compile_runtime_package_wasm_with_options};
 use url::Url;
 
 #[test]
+fn raster_publications_resolve_nominal_targets_and_execute_fe_policy() {
+    let base = include_str!("fixtures/actor_raster_typed/src/lib.fe");
+    let source = format!(
+        r#"
+use core::BrowserBytes
+use std::webgpu::{{StorageBuffer, BufferPublication, PublicationVersion, PublishBuffer}}
+type Target = StorageBuffer<u32, 4>
+struct State {{ tint: f32 }}
+struct Upload {{}}
+impl Upload {{
+    pub fn publication(_ state: State) -> BufferPublication<Target> {{
+        BufferPublication {{ version: PublicationVersion {{ epoch: 1, revision: if state.tint < 1.5 {{ 1 }} else {{ 2 }} }},
+            source: BrowserBytes {{ ptr: 1024, len: 4 }}, target_byte_offset: 0 }}
+    }}
+}}
+{}
+"#,
+        base.replace("    tint: f32,", "    payload: Target,\n    tint: f32,")
+            .replace(
+                "uses (FragmentStage<MeshVarying>)",
+                "uses (FragmentStage<MeshVarying>, PublishBuffer<Upload>)"
+            )
+            .replace(
+                "shade_color(varying.heat, self.tint)",
+                "shade_color(varying.heat, self.tint) ^ self.payload.load(index: 0)"
+            )
+    );
+    for (duplicate, absent) in [(false, false), (true, false), (false, true)] {
+        let source = if duplicate {
+            source.replace(
+                "    payload: Target,",
+                "    payload: Target,\n    other: Target,",
+            )
+        } else if absent {
+            source.replace(
+                "    payload: Target,",
+                "    payload: StorageBuffer<u32, 8>,",
+            )
+        } else {
+            source.clone()
+        };
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///raster_publication.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let result = fe_codegen::WebBundle::compile(
+            &db,
+            top,
+            fe_codegen::WebBuildOptions::render("shade", None),
+        );
+        if duplicate || absent {
+            let error = result
+                .err()
+                .expect("ambiguous or missing target must fail")
+                .to_string();
+            assert!(error.contains("exactly one actor resource"), "{error}");
+            continue;
+        }
+        let bundle = result.unwrap();
+        if let Some(path) = std::env::var_os("FE_PUBLICATION_TEST_SITE") {
+            bundle.write_atomic(std::path::Path::new(&path)).unwrap();
+        }
+        assert!(
+            bundle.manifest.resources[0]
+                .buffer_usage
+                .contains(&fe_codegen::WebBufferUsage::CopyDst)
+        );
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &bundle.wasm).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let binding = instance
+            .get_typed_func::<(), u32>(&mut store, "fe_buffer_publication_binding_v1_0")
+            .unwrap();
+        assert_eq!(binding.call(&mut store, ()).unwrap(), 0);
+        let policy = instance
+            .get_typed_func::<f32, (u32, u32, u32, u32, u32)>(
+                &mut store,
+                "fe_buffer_publication_v1_0",
+            )
+            .unwrap();
+        assert_eq!(policy.call(&mut store, 0.5).unwrap(), (1, 1, 1024, 4, 0));
+        assert_eq!(policy.call(&mut store, 2.0).unwrap(), (1, 2, 1024, 4, 0));
+    }
+}
+
+#[test]
 fn packed_word_publications_preserve_identity_and_check_byte_arithmetic() {
     let source = r#"
 use core::{BrowserList, BrowserPtr}

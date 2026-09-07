@@ -309,6 +309,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported("web_raster_plan", BARE_FORM, "`#[web_raster_plan]`"),
             AttrRule::supported("web_primitive_plan", BARE_FORM, "`#[web_primitive_plan]`"),
             AttrRule::supported("web_resource_plan", BARE_FORM, "`#[web_resource_plan]`"),
+            AttrRule::supported("web_buffer_publication", BARE_FORM, "`#[web_buffer_publication]`"),
             AttrRule::supported("gpu_workgroup", BARE_FORM, "`#[gpu_workgroup]`"),
             AttrRule::supported(
                 "gpu_dispatch",

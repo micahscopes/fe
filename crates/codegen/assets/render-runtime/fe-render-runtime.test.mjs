@@ -8,7 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 const { rasterPlan, rasterColorTarget, rasterPrimitive, rasterMultisample } = await import("./fe-render-runtime.js");
-const { BufferPublicationWriter } = await import("./fe-render-runtime.js");
+const { BufferPublicationWriter, BufferPublicationBindings } = await import("./fe-render-runtime.js");
 
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
@@ -192,6 +192,8 @@ test("buffer publications use fresh Wasm views and suppress only identical submi
   new Uint8Array(memory.buffer,4,4).set([1,2,3,4]);
   assert.equal(writer.write(queue,buffer,memory,p),true);
   assert.equal(writer.write(queue,buffer,memory,p),false);
+  assert.equal(writer.write(queue,buffer,memory,{...p,sourceByteOffset:0,targetByteOffset:0,byteLength:0}),false);
+  assert.equal(writer.write(queue,buffer,memory,p),false);
   memory.grow(1);
   new Uint8Array(memory.buffer,4,4).set([5,6,7,8]);
   assert.equal(writer.write(queue,buffer,memory,{...p,revision:2}),true);
@@ -221,6 +223,29 @@ test("buffer publication validation and synchronous write failures publish no re
   assert.equal(count,2);
   assert.throws(()=>writer.write(queue,buffer,new WebAssembly.Memory({initial:1}),p),/ownership/);
   assert.throws(()=>writer.write({},buffer,memory,p),/ownership/);
+});
+
+test("compiler-resolved publications update existing graph buffers from Fe state", () => {
+  const memory=new WebAssembly.Memory({initial:1});
+  new Uint8Array(memory.buffer,1024,4).set([7,0,0,0]);
+  const calls=[], seen=[];
+  const queue={writeBuffer:(buffer,offset,bytes)=>calls.push([...bytes])};
+  const resource={name:'opaque-compiler-resource',policy:{residency:'actor_resident'},buffer_usage:['copy_dst']};
+  const exports={memory,
+    fe_buffer_publication_v1_0:revision=>{seen.push(revision);return [1,revision,1024,4,0];},
+    fe_buffer_publication_binding_v1_0:()=>0};
+  const publications=new BufferPublicationBindings(exports,[resource]);
+  const gpu={device:{queue},resourceBuffers:new Map([[resource.name,{size:16}]])};
+  publications.write(gpu,[1]);
+  publications.write(gpu,[1]);
+  new Uint8Array(memory.buffer,1024,4).set([9,0,0,0]);
+  publications.write(gpu,[2]);
+  assert.deepEqual(seen,[1,1,2]);
+  assert.deepEqual(calls,[[7,0,0,0],[9,0,0,0]]);
+  assert.throws(()=>new BufferPublicationBindings({...exports,fe_buffer_publication_binding_v1_0:()=>8},[resource]),/destination/);
+  assert.throws(()=>new BufferPublicationBindings(exports,[{...resource,policy:{residency:'immutable'}}]),/custody/);
+  const malformed=new BufferPublicationBindings({...exports,fe_buffer_publication_v1_0:()=>[1,NaN,0,4,0]},[resource]);
+  assert.throws(()=>malformed.write(gpu,[1]),/scalar/);
 });
 
 test("Fe primitive plans preserve all native topologies and winding per pass", () => {

@@ -13,17 +13,25 @@ impl Copy for PublicationVersion {}
 /// `source` borrows already packed bytes in the producer's Wasm memory. The
 /// owner must keep them alive and unchanged through synchronous host transfer;
 /// this value grants no permission to reset its arena or send it to a worker.
+/// An empty source is a no-op and does not acknowledge a new version or range.
 ///
 /// GPU struct packing is deliberately not inferred from a BrowserList<T>:
 /// Wasm object layout and GPU storage layout need not coincide. The word
 /// constructor is exact for an already packed u32 stream; other layouts must
 /// supply bytes produced using their own layout evidence.
+#[web_buffer_publication]
 pub struct BufferPublication<Resource> {
     pub version: PublicationVersion,
     pub source: BrowserBytes,
     pub target_byte_offset: u32,
 }
 impl<Resource> Copy for BufferPublication<Resource> {}
+
+/// Attach a publication policy to a GPU stage. The policy consumes the
+/// complete non-resource actor state and returns BufferPublication<Resource>.
+/// The destination must resolve uniquely among the actor's resource fields.
+#[gpu_control(buffer_publication)]
+pub struct PublishBuffer<Policy> {}
 
 impl<Resource> BufferPublication<Resource> {
     /// Construct a byte range from packed words without allocation or copying.
