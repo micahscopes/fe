@@ -6738,21 +6738,37 @@ fn stage_external_resources(
         )));
     };
     let body = function.instance(db).body(db);
-    let context_offset = leading_context_leaves
-        .map(|leaves| leaves.saturating_sub(1))
-        .unwrap_or(0);
-    let arg_indices = body
-        .signature
-        .params
-        .iter()
-        .enumerate()
-        .filter_map(|(index, param)| {
-            let ty = body.local(param.local)?.semantic_ty;
-            nominal_attrs(db, ty)
-                .is_some_and(|attrs| attrs.gpu_resource(db).is_some())
-                .then_some(index as u32 + context_offset)
-        })
-        .collect::<Vec<_>>();
+    // Resource arguments refer to the lowered kernel ABI, not source parameter
+    // ordinals. Any earlier product state can contribute multiple scalar lanes,
+    // even when no invocation-context parameter is present. Count those leaves
+    // through the same canonical transport projection used for actor state.
+    let mut arg_indices = Vec::new();
+    let mut next_arg = 0_u32;
+    for (index, param) in body.signature.params.iter().enumerate() {
+        let ty = body.local(param.local).ok_or_else(|| {
+            WebBundleError::Lower(format!("GPU stage `{entry}` parameter {index} has no local"))
+        })?.semantic_ty;
+        let resource = nominal_attrs(db, ty)
+            .is_some_and(|attrs| attrs.gpu_resource(db).is_some());
+        let width = if resource {
+            arg_indices.push(next_arg);
+            1
+        } else if index == 0 && leading_context_leaves.is_some() {
+            leading_context_leaves.unwrap()
+        } else {
+            let label = format!("GPU stage `{entry}` parameter {index}");
+            let canonical = canonical_type_from_semantic(db, ty, &label)
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            let mut lanes = Vec::new();
+            append_canonical_wasm_types(&canonical, &mut lanes, &label)?;
+            u32::try_from(lanes.len()).map_err(|_| {
+                WebBundleError::Lower(format!("{label} has too many scalar leaves"))
+            })?
+        };
+        next_arg = next_arg.checked_add(width).ok_or_else(|| {
+            WebBundleError::Lower(format!("GPU stage `{entry}` argument count overflow"))
+        })?;
+    }
     if arg_indices.len() != resources.len() {
         return Err(WebBundleError::EntryDerivation(format!(
             "GPU stage exposes {} attributed resource arguments but the actor declares {} resources",
