@@ -148,4 +148,22 @@ mod tests {
         assert_eq!(segments.next().unwrap().ident().unwrap().text(), "Dep");
         assert!(segments.next().is_none());
     }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn nested_qualified_type_is_a_generic_argument_not_a_shift() {
+        use crate::ast::GenericArgsOwner;
+        for is_expr in [false, true] {
+            let mut parser = Parser::new(
+                Lexer::new("Wrapped<<T as Model>::Point>"), RecoveryMode::Recover,
+            );
+            parser.parse(PathScope::new(is_expr)).unwrap();
+            let (node, errors) = parser.finish_to_node();
+            assert!(errors.is_empty(), "{errors:?}");
+            let path = Path::cast(node).unwrap();
+            let segment = path.segments().next().unwrap();
+            let args = segment.generic_args().expect("qualified argument retained");
+            assert_eq!(args.iter().count(), 1);
+        }
+    }
 }

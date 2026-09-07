@@ -2,7 +2,7 @@ use crate::{ParseError, SyntaxKind};
 
 use super::{
     Parser, define_scope,
-    expr::{is_lshift, is_lt_eq},
+    expr::is_lt_eq,
     param::{GenericArgListScope, TraitRefScope},
     token_stream::TokenStream,
     type_::parse_type,
@@ -40,7 +40,11 @@ impl super::Parse for PathSegmentScope {
                 parser.bump();
 
                 if parser.current_kind_same_line() == Some(SyntaxKind::Lt)
-                    && !(is_lt_eq(parser) || is_lshift(parser))
+                    // `Container<<T as Trait>::Item>` begins with two `<`
+                    // tokens too. The generic-list dry run distinguishes that
+                    // qualified type from a shift; rejecting `<<` up front
+                    // silently loses valid generic arguments in type paths.
+                    && !is_lt_eq(parser)
                     && parser.dry_run(|parser| {
                         parser.parses_without_error(GenericArgListScope::new(self.is_expr))
                     })
