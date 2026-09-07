@@ -70,3 +70,18 @@ Final release receipts for this extension:
 Logs: `associated-helper-planned-20260907.log`,
 `associated-helper-boundaries-final-20260907.log`, and
 `edge-patch-planned-20260907.log` in `/laboratory/quilting/scratch/`.
+
+## Associated fields at the web state boundary
+
+The integrated viewer exposed a separate canonical-interface omission:
+instantiating `Control<Model>` substituted its argument but left a closed
+associated projection in a field type. Canonical state derivation then rejected
+the field instead of resolving it. Record and variant field derivation now use
+the existing semantic normalizer before selecting the canonical layout. This
+does not add a new transport or flatten application state by hand.
+
+Release canonical-interface tests: **18 passed**, including nested associated
+record/variant layout and continued rejection of an associated `u256` field.
+Receipt: `/laboratory/quilting/scratch/canonical-associated-fields-20260907.log`.
+The real cross-ingot viewer build and browser execution remain separate gates;
+these unit results alone do not establish either.

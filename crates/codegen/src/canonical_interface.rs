@@ -15,6 +15,8 @@ use hir::{
         ty::{
             adt_def::AdtRef,
             const_ty::{ConstTyData, EvaluatedConstTy},
+            normalize::normalize_ty,
+            trait_resolution::PredicateListId,
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
@@ -743,7 +745,14 @@ pub fn canonical_type_from_semantic<'db>(
             let field_tys = variant
                 .field_tys(db)
                 .into_iter()
-                .map(|field| field.instantiate(db, args))
+                .map(|field| {
+                    normalize_ty(
+                        db,
+                        field.instantiate(db, args),
+                        enum_.scope(),
+                        PredicateListId::empty_list(db),
+                    )
+                })
                 .collect::<Vec<_>>();
             let fields = match variant.kind(db) {
                 VariantKind::Unit => Vec::new(),
@@ -858,6 +867,15 @@ pub fn canonical_type_from_semantic<'db>(
     }
     let mut fields = Vec::with_capacity(field_views.len());
     for (field, field_ty) in field_views.into_iter().zip(field_types) {
+        // Instantiation substitutes the model parameter, but can leave a
+        // closed associated projection such as <Plane as Model>::Point.
+        // Resolve that semantic type before selecting its canonical shape.
+        let field_ty = normalize_ty(
+            db,
+            field_ty,
+            struct_.scope(),
+            PredicateListId::empty_list(db),
+        );
         let name = field
             .name(db)
             .map(|name| name.data(db).to_string())
@@ -1887,6 +1905,49 @@ pub fn update(request: Request) -> Response {
             ]
         );
         assert_eq!((lane.response.size, lane.response.align), (8, 4));
+    }
+
+    #[test]
+    fn closed_associated_fields_have_canonical_record_and_variant_shapes() {
+        let declaration = semantic_lane(
+            r#"
+trait Model { type Point }
+struct Point { x:f32, y:f32, z:f32 }
+struct Plane {}
+impl Model for Plane {type Point=Point}
+struct Control<M:Model> { point:M::Point, weight:f32 }
+struct Request { control:Control<Plane> }
+enum Response<M:Model> { Ready {point:M::Point}, Empty }
+pub fn update(request:Request)->Response<Plane> {
+    Response::Ready {point:request.control.point}
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+        let lane = &manifest.lanes[0];
+        assert_eq!((lane.request.size, lane.request.align), (16, 4));
+        assert_eq!((lane.response.size, lane.response.align), (16, 4));
+    }
+
+    #[test]
+    fn associated_fields_do_not_admit_unsupported_wide_values() {
+        let error = semantic_lane(
+            r#"
+trait Model { type Point }
+struct Wide {}
+impl Model for Wide {type Point=u256}
+struct Control<M:Model> { point:M::Point }
+struct Request { control:Control<Wide> }
+struct Response { ok:bool }
+pub fn update(request:Request)->Response {Response {ok:true}}
+"#,
+            "update",
+        )
+        .unwrap_err();
+        assert!(error.contains("request.control.point"), "{error}");
+        assert!(error.contains("unsupported canonical primitive"), "{error}");
     }
 
     #[test]
