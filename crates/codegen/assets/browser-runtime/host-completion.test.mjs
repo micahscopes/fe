@@ -1220,6 +1220,32 @@ describe("browser HostTimer/Recv completion broker", () => {
     expect(broker.cancelAll()).toBe(2);
   });
 
+  test("concurrent completions borrow canonical storage only during synchronous resume", async () => {
+    const broker = createHostCompletionBroker();
+    const stack = [];
+    const events = [];
+    let finish;
+    const ready = new Promise(resolve => { finish = resolve; });
+    const runs = Array.from({length: 4}, (_, id) => broker.run(machine(() => {
+      const token = broker.completions.begin(`parallel/${id}`, () => ready, 1,
+        () => {
+          stack.push(id);
+          events.push(["lower", id]);
+          return [BigInt(id)];
+        }, committed => {
+          expect(committed).toBe(true);
+          expect(stack.pop()).toBe(id);
+          events.push(["release", id]);
+        });
+      return [1, 0n, token];
+    }), []));
+    finish();
+    expect(await Promise.all(runs)).toEqual([[0n], [1n], [2n], [3n]]);
+    expect(stack).toEqual([]);
+    expect(events).toEqual(Array.from({length: 4}, (_, id) =>
+      [["lower", id], ["release", id]]).flat());
+  });
+
   test("generated storage is released when the Fe continuation traps", async () => {
     const broker = createHostCompletionBroker();
     let released = 0;

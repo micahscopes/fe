@@ -1106,25 +1106,32 @@ export function createHostCompletionBroker(options = {}) {
           loserToken: undefined,
         });
       }
-      if (delivery.trace !== undefined) {
-        const lowered = lowerCompletionTrace(delivery.trace);
-        try {
-          return Object.freeze({
-            outcome: materializeTaskOutcome(pending, lowered.trace),
-            cancelled: delivery.cancelled,
-            raceSide: undefined,
-            loserToken: undefined,
-            release: lowered.release,
-          });
-        } catch (error) {
-          if (lowered.release !== undefined) lowered.release(false);
-          throw error;
-        }
-      }
       return delivery;
     } finally {
       if (signal !== undefined) signal.removeEventListener("abort", onAbort);
       slots.delete(token);
+    }
+  };
+
+  // Canonical allocations must not cross an await, including the implicit
+  // promise boundary when an async helper returns. Concurrent ready tasks may
+  // otherwise allocate A, B and then release A first, violating the guest's
+  // checked LIFO arena. Keep lowering, resume and release in one synchronous
+  // turn; only the opaque standards value crosses the asynchronous boundary.
+  const materializeDelivery = (pending, delivery) => {
+    if (delivery.trace === undefined) return delivery;
+    const lowered = lowerCompletionTrace(delivery.trace);
+    try {
+      return Object.freeze({
+        outcome: materializeTaskOutcome(pending, lowered.trace),
+        cancelled: delivery.cancelled,
+        raceSide: undefined,
+        loserToken: undefined,
+        release: lowered.release,
+      });
+    } catch (error) {
+      if (lowered.release !== undefined) lowered.release(false);
+      throw error;
     }
   };
 
@@ -1163,7 +1170,8 @@ export function createHostCompletionBroker(options = {}) {
     const signal = abortSignal(runOptions.signal);
     let step = invokeMachine(() => machine.start(input));
     while (step.kind === "suspended") {
-      const delivery = await awaitPending(step.pending, signal);
+      const delivery = materializeDelivery(step.pending,
+        await awaitPending(step.pending, signal));
       const tokenCheckpoint = nextToken;
       let resumed;
       let resumeError;
