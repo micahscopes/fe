@@ -1325,6 +1325,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
 
         let cond_bb = self.new_block();
         let body_bb = self.new_block();
+        let advance_bb = self.new_block();
         let exit_bb = self.new_block();
         self.set_synthetic_terminator(self.current, STerminatorKind::Goto(cond_bb));
 
@@ -1347,7 +1348,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         );
 
         self.loop_stack.push(LoopScope {
-            continue_bb: cond_bb,
+            continue_bb: advance_bb,
             break_bb: exit_bb,
         });
         self.switch_to(body_bb);
@@ -1367,6 +1368,12 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         self.bind_pattern(pat, elem);
         let _ = self.lower_expr(body_expr);
         if !self.is_terminated(self.current) {
+            self.set_synthetic_terminator(self.current, STerminatorKind::Goto(advance_bb));
+        }
+        // Both normal fallthrough and `continue` must advance the sequence.
+        // Sending continue directly to cond_bb repeats the same element.
+        self.switch_to(advance_bb);
+        {
             let one = self.emit_expr(
                 usize_ty,
                 SExpr::Const(SConst::Value(int_const(
