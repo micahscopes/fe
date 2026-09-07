@@ -84,8 +84,8 @@ use sonatina_ir::{
         cmp::{Eq as CmpEq, Feq, Fle, Flt, IsZero, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{
-            Alloca, ExtractValue, Gep, InsertValue, MemAllocDynamic, MemCheckpoint, MemRewind,
-            Memcopy, Mload, Mstore, ObjIndex, ObjLoad, ObjProj, ObjStore,
+            Alloca, ExtractValue, Gep, InsertValue, MemAllocDynamic, MemCheckpoint, MemRewind, Memcopy, Mload, Mstore,
+            ObjIndex, ObjLoad, ObjProj, ObjStore,
         },
         logic::{And, Or, Xor},
         native::inst_set::NativeInstSet,
@@ -152,14 +152,11 @@ impl PortableLoweringPolicy {
                 private_place_materialization: PrivatePlaceMaterialization::ShaderTypedWhenLegal,
                 aggregate_copy_lowering: AggregateCopyLowering::Memcopy,
             }),
-            #[cfg(any(
-                test,
-                all(
-                    feature = "native-backend",
-                    not(target_arch = "wasm32"),
-                    any(target_arch = "x86_64", target_arch = "aarch64"),
-                )
-            ))]
+            #[cfg(any(test, all(
+                feature = "native-backend",
+                not(target_arch = "wasm32"),
+                any(target_arch = "x86_64", target_arch = "aarch64"),
+            )))]
             Architecture::X86_64 | Architecture::Aarch64 => Ok(Self {
                 validate_host_enum_params: true,
                 enable_scoped_arena: false,
@@ -249,6 +246,7 @@ const MAX_WASM_FUNCTION_RETURNS: usize = 1000;
 /// choice rather than an authored reference or an ABI change.
 const MAX_WASM_FLATTENED_LOCAL_AGGREGATE: usize = 1000;
 
+
 fn gpu_intrinsic(db: &DriverDataBase, instance: RuntimeInstance<'_>) -> Option<GpuIntrinsic> {
     let semantic = instance.key(db).semantic(db)?;
     let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
@@ -272,6 +270,7 @@ fn semantic_const_u32(db: &DriverDataBase, ty: TyId<'_>) -> Option<u32> {
     u32::try_from(value.data(db).clone()).ok()
 }
 
+
 /// Build the shared Sonatina module for a shader target. Shader entrypoints
 /// never receive untyped host values: compiler-derived WebGPU bindings and the
 /// resident Wasm wrapper mediate that boundary. Accordingly this path omits
@@ -283,11 +282,11 @@ pub(crate) fn compile_runtime_package_shader_ir(
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, Vec<FuncRef>), LowerError> {
     let isa = sonatina_ir::isa::shader::Shader::new(TargetTriple::new(
-        Architecture::Shader,
-        Vendor::Unknown,
-        OperatingSystem::Unknown,
+        Architecture::Shader, Vendor::Unknown, OperatingSystem::Unknown,
     ));
-    let lowerer = lower_portable_bodies(&isa, db, package, HashSet::new(), &[])?;
+    let lowerer = lower_portable_bodies(
+        &isa, db, package, HashSet::new(), &[],
+    )?;
     let entries = shader_runtime_entries(&lowerer)?;
     Ok((lowerer.finish(), entries))
 }
@@ -308,21 +307,11 @@ fn lower_portable_bodies<'db, 'a, I: Isa<InstSet = NativeInstSet>>(
     export_aliases: &[(String, String)],
 ) -> Result<PortableModuleLowerer<'db, 'a, I>, LowerError> {
     validate_portable_intrinsic_calls(db, package, isa.triple().architecture)?;
-    wasm_lower_trace(|| {
-        format!(
-            "begin runtime package, functions={}",
-            package.functions(db).len()
-        )
-    });
+    wasm_lower_trace(|| format!("begin runtime package, functions={}", package.functions(db).len()));
     observe_runtime_package(db, package);
     let builder = ModuleBuilder::new(ModuleCtx::new(isa));
     let mut lowerer = PortableModuleLowerer::new(
-        db,
-        builder,
-        isa,
-        package,
-        wrapped_lane_names,
-        export_aliases,
+        db, builder, isa, package, wrapped_lane_names, export_aliases,
     )?;
     wasm_lower_trace(|| "prepared portable runtime bodies".to_owned());
     lowerer.declare_functions()?;
@@ -345,9 +334,8 @@ fn validate_portable_intrinsic_calls(
         let Some(semantic) = function.instance(db).key(db).semantic(db) else {
             continue;
         };
-        let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
-            continue;
-        };
+        let hir::analysis::ty::ty_check::BodyOwner::Func(func) =
+            semantic.key(db).owner(db) else { continue };
         use hir::analysis::ty::corelib::{
             f32_intrinsic_func_kind, generic_numeric_intrinsic_func_kind,
             scalar_numeric_intrinsic_func_kind,
@@ -361,10 +349,7 @@ fn validate_portable_intrinsic_calls(
         } else {
             continue;
         };
-        let name = func
-            .name(db)
-            .to_opt()
-            .expect("recognized intrinsic has a name");
+        let name = func.name(db).to_opt().expect("recognized intrinsic has a name");
         return Err(LowerError::Unsupported(format!(
             "{architecture:?} target: intrinsic `{}` ({kind}) needs dedicated Sonatina lowering and must not become an external call; rejected before Sonatina construction",
             name.data(db),
@@ -372,6 +357,7 @@ fn validate_portable_intrinsic_calls(
     }
     Ok(())
 }
+
 
 /// Section identity defines the legacy primary entry. Explicit public exports
 /// additionally admit paired stages without scanning arbitrary declarations.
@@ -381,15 +367,9 @@ fn shader_runtime_entries<I: Isa<InstSet = NativeInstSet>>(
     let db = lowerer.db;
     let package = lowerer.package;
     let section_instances = package.root_objects(db).into_iter().flat_map(|object| {
-        object
-            .sections(db)
-            .iter()
-            .map(|section| section.entry.instance(db))
-            .collect::<Vec<_>>()
+        object.sections(db).iter().map(|section| section.entry.instance(db)).collect::<Vec<_>>()
     });
-    let export_instances = package
-        .functions(db)
-        .into_iter()
+    let export_instances = package.functions(db).into_iter()
         .filter(|function| function.linkage(db) == RuntimeLinkage::Internal)
         .map(|function| function.instance(db));
     let mut entries = Vec::new();
@@ -870,7 +850,13 @@ pub(crate) fn compile_runtime_package_native(
         Vendor::Unknown,
         OperatingSystem::Native,
     ));
-    let lowerer = lower_portable_bodies(&isa, db, package, HashSet::new(), &[])?;
+    let lowerer = lower_portable_bodies(
+        &isa,
+        db,
+        package,
+        HashSet::new(),
+        &[],
+    )?;
     Ok(lowerer.finish())
 }
 
@@ -4163,8 +4149,7 @@ where
         };
         lowerer.typed_private_borrow_params = lowerer.derive_typed_private_borrow_params()?;
         if lowerer.isa.triple().architecture == Architecture::Wasm32 {
-            let (indirect_params, indirect_returns) =
-                lowerer.derive_wasm_indirect_aggregate_abi()?;
+            let (indirect_params, indirect_returns) = lowerer.derive_wasm_indirect_aggregate_abi()?;
             lowerer.indirect_aggregate_params = indirect_params;
             lowerer.indirect_aggregate_returns = indirect_returns;
         }
@@ -4302,8 +4287,7 @@ where
 
     fn derive_typed_private_borrow_params(
         &self,
-    ) -> Result<FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>>, LowerError>
-    {
+    ) -> Result<FxHashMap<RuntimeInstance<'db>, FxHashMap<RLocalId, RuntimeClass<'db>>>, LowerError> {
         if self.private_place_materialization != PrivatePlaceMaterialization::ShaderTypedWhenLegal {
             return Ok(FxHashMap::default());
         }
@@ -4314,12 +4298,13 @@ where
                 continue;
             }
             let instance = function.instance(self.db);
-            let body = self.prepared_bodies.get(&instance).ok_or_else(|| {
-                LowerError::Internal(format!(
+            let body = self
+                .prepared_bodies
+                .get(&instance)
+                .ok_or_else(|| LowerError::Internal(format!(
                     "missing prepared runtime body for `{}` during typed-borrow analysis",
                     self.function_symbol(instance)
-                ))
-            })?;
+                )))?;
             let mut params = FxHashMap::default();
             for param in &body.signature.params {
                 let RuntimeClass::Ref {
@@ -4349,12 +4334,13 @@ where
             let mut round = Vec::new();
             for caller in self.functions_in_declaration_order() {
                 let caller_instance = caller.instance(self.db);
-                let caller_body = self.prepared_bodies.get(&caller_instance).ok_or_else(|| {
-                    LowerError::Internal(format!(
+                let caller_body = self
+                    .prepared_bodies
+                    .get(&caller_instance)
+                    .ok_or_else(|| LowerError::Internal(format!(
                         "missing prepared runtime body for `{}` during typed-borrow analysis",
                         self.function_symbol(caller_instance)
-                    ))
-                })?;
+                    )))?;
                 for block in &caller_body.blocks {
                     for stmt in &block.stmts {
                         let RStmt::Assign {
@@ -4374,7 +4360,8 @@ where
                                 "missing prepared runtime interface for `{}` during typed-borrow analysis",
                                 self.function_symbol(*callee)
                             )))?;
-                        for (argument, parameter) in args.iter().zip(&callee_interface.params) {
+                        for (argument, parameter) in args.iter().zip(&callee_interface.params)
+                        {
                             let Some(pointee) = callee_params.get(&parameter.local) else {
                                 continue;
                             };
@@ -4432,12 +4419,13 @@ where
                 }
             }
             for (&instance, params) in &selected {
-                let body = self.prepared_bodies.get(&instance).ok_or_else(|| {
-                    LowerError::Internal(format!(
+                let body = self
+                    .prepared_bodies
+                    .get(&instance)
+                    .ok_or_else(|| LowerError::Internal(format!(
                         "missing prepared runtime body for `{}` during typed-borrow analysis",
                         self.function_symbol(instance)
-                    ))
-                })?;
+                    )))?;
                 for (&parameter, pointee) in params {
                     if let Err(reason) = self.typed_private_component(
                         &body,
@@ -4724,7 +4712,8 @@ where
                         if args.len() != callee_interface.params.len() {
                             return Err("prepared-callee-arity-mismatch");
                         }
-                        for (argument, parameter) in args.iter().zip(&callee_interface.params) {
+                        for (argument, parameter) in args.iter().zip(&callee_interface.params)
+                        {
                             if let Some(argument_pointee) = member_pointees.get(argument)
                                 && selected
                                     .get(callee)
@@ -5184,12 +5173,13 @@ where
             {
                 continue;
             }
-            let body = self.prepared_bodies.get(&instance).ok_or_else(|| {
-                LowerError::Internal(format!(
+            let body = self
+                .prepared_bodies
+                .get(&instance)
+                .ok_or_else(|| LowerError::Internal(format!(
                     "missing prepared runtime body for `{}` during Wasm ABI analysis",
                     self.function_symbol(instance)
-                ))
-            })?;
+                )))?;
             let symbol = self.function_symbol(instance);
             let linkage = self.effective_linkage(function);
             let mut arities = Vec::with_capacity(body.signature.params.len());
@@ -5617,11 +5607,9 @@ where
             .prepared_bodies
             .get(&instance)
             .cloned()
-            .ok_or_else(|| {
-                LowerError::Internal(format!(
-                    "missing prepared runtime body for `{symbol}` during signature lowering"
-                ))
-            })?;
+            .ok_or_else(|| LowerError::Internal(format!(
+                "missing prepared runtime body for `{symbol}` during signature lowering"
+            )))?;
         // R2.1: a scalar-tuple param/return FLATTENS into N wasm scalar
         // params/results (one per element word); every other param/return maps
         // 1:1 through `ty_for_class` exactly as before. The flattening order is
@@ -5684,19 +5672,12 @@ where
             {
                 if matches!(linkage, Linkage::Private)
                     && elem_tys.len() > 1
-                    && elem_tys
-                        .iter()
-                        .all(|ty| matches!(ty, Type::I1 | Type::I32 | Type::F32))
-                    && !matches!(
-                        body.local(param.local).map(|local| &local.root),
-                        Some(RuntimeLocalRoot::Slot(_))
-                    )
+                    && elem_tys.iter().all(|ty| matches!(ty, Type::I1 | Type::I32 | Type::F32))
+                    && !matches!(body.local(param.local).map(|local| &local.root),
+                        Some(RuntimeLocalRoot::Slot(_)))
                     && let Some(ty) = self.typed_private_type_for_class(&param.class)?
                 {
-                    self.native_value_params
-                        .entry(body.owner)
-                        .or_default()
-                        .insert(param.local, ty);
+                    self.native_value_params.entry(body.owner).or_default().insert(param.local, ty);
                     args.push(ty);
                 } else {
                     args.extend(elem_tys);
@@ -5741,22 +5722,11 @@ where
                     {
                         vec![ty]
                     } else if matches!(linkage, Linkage::Private)
-                        && semantic_ty
-                            .map(|semantic_ty| {
-                                self.semantic_scalar_tuple_element_tys(
-                                    body.owner,
-                                    semantic_ty,
-                                    class,
-                                )
-                            })
-                            .transpose()?
-                            .flatten()
-                            .is_some_and(|lanes| {
-                                lanes.len() > 1
-                                    && lanes
-                                        .iter()
-                                        .all(|ty| matches!(ty, Type::I1 | Type::I32 | Type::F32))
-                            })
+                        && semantic_ty.map(|semantic_ty|
+                            self.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, class))
+                            .transpose()?.flatten().is_some_and(|lanes|
+                                lanes.len() > 1 && lanes.iter().all(|ty|
+                                    matches!(ty, Type::I1 | Type::I32 | Type::F32)))
                         && let Some(ty) = self.typed_private_type_for_class(class)?
                     {
                         vec![ty]
@@ -5799,11 +5769,12 @@ where
                     format!("lower function progress, completed={}/{total}", index + 1)
                 });
             }
-            let body = self.prepared_bodies.remove(&instance).ok_or_else(|| {
-                LowerError::Internal(format!(
+            let body = self
+                .prepared_bodies
+                .remove(&instance)
+                .ok_or_else(|| LowerError::Internal(format!(
                     "missing prepared runtime body for `{symbol}` during body lowering"
-                ))
-            })?;
+                )))?;
             if body.blocks.is_empty() {
                 continue;
             }
@@ -5916,6 +5887,7 @@ where
         }
         Ok(())
     }
+
 
     /// The single Sonatina value type for a runtime class. Recursive product
     /// values are handled by `flat_shape`; materialized objects are i32 arena
@@ -6386,8 +6358,7 @@ where
                                 // the scalar's contents may still be an arbitrary
                                 // integer and must not acquire pointer provenance.
                                 seeds.push(destination);
-                            } else if let Some(source) = Self::arena_owned_place_source(body, place)
-                            {
+                            } else if let Some(source) = Self::arena_owned_place_source(body, place) {
                                 local_dependents
                                     .entry((*instance, source))
                                     .or_default()
@@ -6685,28 +6656,26 @@ where
             .prepared_bodies
             .iter()
             .filter(|(instance, _)| !resumable_owners.contains(instance))
-            .filter_map(
-                |(instance, body)| match self.analyze_scoped_arena_body(body) {
-                    Ok(analysis) => Some((*instance, analysis)),
-                    Err(reason) => {
-                        if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some()
-                            || self.indirect_aggregate_returns.contains(instance)
-                            || self
-                                .indirect_aggregate_params
-                                .get(instance)
-                                .is_some_and(|params| !params.is_empty())
-                        {
-                            wasm_lower_trace_detail(|| {
-                                format!(
-                                    "reject body from scoped arena, symbol={}, reason={reason}",
-                                    self.function_symbol(*instance),
-                                )
-                            });
-                        }
-                        None
+            .filter_map(|(instance, body)| match self.analyze_scoped_arena_body(body) {
+                Ok(analysis) => Some((*instance, analysis)),
+                Err(reason) => {
+                    if std::env::var_os("FE_WASM_LOWER_TRACE_DETAIL").is_some()
+                        || self.indirect_aggregate_returns.contains(instance)
+                        || self
+                            .indirect_aggregate_params
+                            .get(instance)
+                            .is_some_and(|params| !params.is_empty())
+                    {
+                        wasm_lower_trace_detail(|| {
+                            format!(
+                                "reject body from scoped arena, symbol={}, reason={reason}",
+                                self.function_symbol(*instance),
+                            )
+                        });
                     }
-                },
-            )
+                    None
+                }
+            })
             .collect::<FxHashMap<_, _>>();
         let mut safe = analyses.keys().copied().collect::<HashSet<_>>();
         loop {
@@ -7250,11 +7219,8 @@ where
                         .iter()
                         .zip(&callee_body.signature.params)
                         .any(|(arg, param)| {
-                            (!self.scoped_arena_param_is_admissible(
-                                callee_body,
-                                param.local,
-                                &param.class,
-                            ) && !self.arena_owned_local(callee_body, param.local))
+                            (!self.scoped_arena_param_is_admissible(callee_body, param.local, &param.class)
+                                && !self.arena_owned_local(callee_body, param.local))
                                 || (body
                                     .value_class(*arg)
                                     .is_some_and(|class| class.contains_transport(self.db))
@@ -7745,9 +7711,7 @@ where
         class: &RuntimeClass<'db>,
         active: &mut HashSet<LayoutId<'db>>,
     ) -> Result<Option<FlatShape>, LowerError> {
-        let semantic_ty = owner
-            .key(self.db)
-            .semantic(self.db)
+        let semantic_ty = owner.key(self.db).semantic(self.db)
             .map(|instance| instance.normalized_ty(self.db, semantic_ty))
             .unwrap_or(semantic_ty);
         let semantic_ty = semantic_ty.as_view(self.db).unwrap_or(semantic_ty);
@@ -7778,12 +7742,8 @@ where
                             for (field_ty, field_class) in
                                 semantic_fields.into_iter().zip(&struct_layout.fields)
                             {
-                                let Some(field) = self.semantic_flat_shape_visit(
-                                    owner,
-                                    field_ty,
-                                    field_class,
-                                    active,
-                                )?
+                                let Some(field) =
+                                    self.semantic_flat_shape_visit(owner, field_ty, field_class, active)?
                                 else {
                                     complete = false;
                                     break;
@@ -7806,17 +7766,12 @@ where
                             active.remove(layout);
                             return Ok(shape);
                         };
-                        self.semantic_flat_shape_visit(
-                            owner,
-                            element_ty,
-                            &array_layout.elem,
-                            active,
-                        )?
-                        .and_then(|element| {
-                            usize::try_from(array_layout.len)
-                                .ok()
-                                .map(|len| FlatShape::Product(vec![element; len]))
-                        })
+                        self.semantic_flat_shape_visit(owner, element_ty, &array_layout.elem, active)?
+                            .and_then(|element| {
+                                usize::try_from(array_layout.len)
+                                    .ok()
+                                    .map(|len| FlatShape::Product(vec![element; len]))
+                            })
                     }
                     Layout::Enum(enum_layout)
                         if enum_layout
@@ -8336,13 +8291,12 @@ impl<'db> BodyLocalStoragePlan<'db> {
             }
         }
 
+
         // Shader-private products are SSA values, not necessarily scalar lanes.
         // Parameters retain their independently selected physical call ABI.
         for (index, representation) in values.iter_mut().enumerate() {
             let local = RLocalId::from_u32(index as u32);
-            if let Some(ty) = module
-                .native_value_params
-                .get(&body.owner)
+            if let Some(ty) = module.native_value_params.get(&body.owner)
                 .and_then(|params| params.get(&local))
             {
                 *representation = Some(LocalValueRepresentation::NativeAggregate(*ty));
@@ -8350,11 +8304,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
             }
             if matches!(representation, Some(LocalValueRepresentation::Flattened(lanes))
                 if lanes.iter().all(|ty| matches!(ty, Type::I1 | Type::I32 | Type::F32)))
-                && !body
-                    .signature
-                    .params
-                    .iter()
-                    .any(|param| param.local == local)
+                && !body.signature.params.iter().any(|param| param.local == local)
                 && let Some(class) = body.value_class(local)
                 && let Some(ty) = module.typed_private_type_for_class(class)?
             {
@@ -8380,15 +8330,8 @@ impl<'db> BodyLocalStoragePlan<'db> {
                 continue;
             }
             for stmt in &block.stmts {
-                if let RStmt::Assign {
-                    dst,
-                    expr: RExpr::Use(src),
-                    ..
-                } = stmt
-                    && matches!(
-                        plan.values[dst.as_u32() as usize],
-                        Some(LocalValueRepresentation::Single(_))
-                    )
+                if let RStmt::Assign { dst, expr: RExpr::Use(src), .. } = stmt
+                    && matches!(plan.values[dst.as_u32() as usize], Some(LocalValueRepresentation::Single(_)))
                 {
                     // Flattened assignments have no object-copy adaptation.
                     // Scalar/address-carried assignments consume this plan.
@@ -8398,11 +8341,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                         plan.copies.insert(key, copy);
                     }
                 }
-                let RStmt::Assign {
-                    expr: RExpr::Call { callee, args },
-                    ..
-                } = stmt
-                else {
+                let RStmt::Assign { expr: RExpr::Call { callee, args }, .. } = stmt else {
                     continue;
                 };
                 // Declaration already excludes compiler-consumed intrinsics
@@ -8432,16 +8371,11 @@ impl<'db> BodyLocalStoragePlan<'db> {
         let mut arena = BodyArenaPlan {
             prologue: ArenaEmissionCount {
                 allocations: self.materialized_scalar_slots.len()
-                    + body
-                        .signature
-                        .params
-                        .iter()
-                        .filter(|param| {
-                            !indirect_params.is_some_and(|params| params.contains(&param.local))
-                                && !self.materialized_scalar_slots.contains(&param.local)
-                                && self.materialized_param_slots.contains(&param.local)
-                        })
-                        .count(),
+                    + body.signature.params.iter().filter(|param| {
+                        !indirect_params.is_some_and(|params| params.contains(&param.local))
+                            && !self.materialized_scalar_slots.contains(&param.local)
+                            && self.materialized_param_slots.contains(&param.local)
+                    }).count(),
                 retained_results: 0,
             },
             blocks: vec![ArenaEmissionCount::default(); body.blocks.len()],
@@ -8452,39 +8386,26 @@ impl<'db> BodyLocalStoragePlan<'db> {
             }
             let demand = &mut arena.blocks[index];
             for stmt in &block.stmts {
-                let RStmt::Assign { dst, expr } = stmt else {
-                    continue;
-                };
+                let RStmt::Assign { dst, expr } = stmt else { continue };
                 if let RExpr::Call { callee, args } = expr {
                     if let Some(call) = self.calls.get(&(*callee, args.to_vec())) {
-                        demand.allocations += call
-                            .arguments
-                            .iter()
-                            .filter(|argument| argument.materializes())
-                            .count();
-                        demand.retained_results +=
-                            usize::from(call.result == CallResultStorage::EnclosingArena);
+                        demand.allocations += call.arguments.iter()
+                            .filter(|argument| argument.materializes()).count();
+                        demand.retained_results += usize::from(call.result == CallResultStorage::EnclosingArena);
                     }
                     continue;
                 }
                 // Erased and flattened assignments never synthesize arena
                 // storage. Their emitters have no single-value materialization.
-                if !matches!(
-                    self.values[dst.as_u32() as usize],
-                    Some(LocalValueRepresentation::Single(_))
-                ) {
+                if !matches!(self.values[dst.as_u32() as usize], Some(LocalValueRepresentation::Single(_))) {
                     continue;
                 }
                 let allocates = match expr {
                     RExpr::Use(src) => matches!(
-                        self.copies.get(&(*dst, *src)),
-                        Some(ValueCopyStorage::DeepCopy(_))
+                        self.copies.get(&(*dst, *src)), Some(ValueCopyStorage::DeepCopy(_))
                     ),
-                    RExpr::AggregateMake { .. }
-                    | RExpr::Load { .. }
-                    | RExpr::AggregateExtract { .. } => {
-                        self.address_carried_aggregate_values.contains(dst)
-                    }
+                    RExpr::AggregateMake { .. } | RExpr::Load { .. }
+                    | RExpr::AggregateExtract { .. } => self.address_carried_aggregate_values.contains(dst),
                     RExpr::AllocObject { .. } | RExpr::MaterializeToObject { .. } => {
                         !self.typed_private_locals.contains_key(dst)
                     }
@@ -8542,9 +8463,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
             let layout = match class {
                 RuntimeClass::AggregateValue { layout } if indirect => *layout,
                 _ => module.memory_lowerable_ref_layout(class).ok_or_else(|| {
-                    LowerError::Internal(format!(
-                        "aggregate copy source {src:?} lost its memory layout"
-                    ))
+                    LowerError::Internal(format!("aggregate copy source {src:?} lost its memory layout"))
                 })?,
             };
             Ok(ValueCopyStorage::DeepCopy(layout))
@@ -8561,17 +8480,13 @@ impl<'db> BodyLocalStoragePlan<'db> {
         callee: RuntimeInstance<'db>,
         args: &[RLocalId],
     ) -> Result<CallStoragePlan<'db>, LowerError> {
-        let params = &module
-            .prepared_interfaces
-            .get(&callee)
+        let params = &module.prepared_interfaces.get(&callee)
             .ok_or_else(|| LowerError::Internal("prepared Wasm callee is missing".to_owned()))?
             .params;
         if args.len() != params.len() {
             return Err(LowerError::Internal(format!(
                 "call to `{}` has {} Fe arguments but {} prepared parameters",
-                module.function_symbol(callee),
-                args.len(),
-                params.len(),
+                module.function_symbol(callee), args.len(), params.len(),
             )));
         }
         let mut arguments = Vec::with_capacity(args.len());
@@ -8580,24 +8495,19 @@ impl<'db> BodyLocalStoragePlan<'db> {
             let source = body.value_class(*arg).ok_or_else(|| {
                 LowerError::Internal(format!("call argument {arg:?} has no runtime class"))
             })?;
-            let storage = if let Some(ty) = module
-                .native_value_params
-                .get(&callee)
+            let storage = if let Some(ty) = module.native_value_params.get(&callee)
                 .and_then(|params| params.get(&prepared_param.local))
             {
                 if !source.shares_runtime_rep_with(module.db, param) {
-                    return Err(LowerError::Internal(
-                        "native call argument changed runtime class".to_owned(),
-                    ));
+                    return Err(LowerError::Internal("native call argument changed runtime class".to_owned()));
                 }
                 CallArgumentStorage::NativeValue(*ty)
-            } else if let Some(pointee) =
-                module.typed_private_borrow_pointee(callee, prepared_param.local)
+            } else if let Some(pointee) = module
+                .typed_private_borrow_pointee(callee, prepared_param.local)
             {
                 let source_pointee = match source {
                     RuntimeClass::Ref {
-                        pointee,
-                        kind: RefKind::Const | RefKind::Object,
+                        pointee, kind: RefKind::Const | RefKind::Object,
                         view: RefView::Whole,
                     } => Some(pointee.as_ref()),
                     _ => None,
@@ -8616,9 +8526,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                 }
                 CallArgumentStorage::TypedBorrow
             } else {
-                let indirect = module
-                    .indirect_aggregate_params
-                    .get(&callee)
+                let indirect = module.indirect_aggregate_params.get(&callee)
                     .is_some_and(|params| params.contains(&prepared_param.local));
                 let read_borrow = matches!(param,
                     RuntimeClass::Ref { pointee, kind: RefKind::Const, view: RefView::Whole }
@@ -8627,12 +8535,11 @@ impl<'db> BodyLocalStoragePlan<'db> {
                         && module.aggregate_is_memory_lowerable(source)
                 );
                 if indirect || read_borrow {
-                    if !scoped_arena && !module.indirect_aggregate_safe_bodies.contains(&callee) {
-                        let role = if indirect {
-                            "an indirect aggregate value copy"
-                        } else {
-                            "a scoped aggregate borrow"
-                        };
+                    if !scoped_arena
+                        && !module.indirect_aggregate_safe_bodies.contains(&callee)
+                    {
+                        let role = if indirect { "an indirect aggregate value copy" }
+                            else { "a scoped aggregate borrow" };
                         return Err(LowerError::Internal(format!(
                             "call to `{}` requires {role}, but the callee failed the arena escape proof",
                             module.function_symbol(callee),
@@ -8733,10 +8640,7 @@ enum ValueCopyStorage<'db> {
 
 impl CallArgumentStorage<'_> {
     fn materializes(&self) -> bool {
-        matches!(
-            self,
-            Self::OwnedDeepCopy(_) | Self::OwnedMaterialization | Self::BorrowMaterialization
-        )
+        matches!(self, Self::OwnedDeepCopy(_) | Self::OwnedMaterialization | Self::BorrowMaterialization)
     }
 }
 
@@ -8779,11 +8683,7 @@ impl<'db> CallStoragePlan<'db> {
         } else {
             CallTemporaryLifetime::CallScope
         };
-        Self {
-            arguments,
-            result,
-            lifetime,
-        }
+        Self { arguments, result, lifetime }
     }
 }
 
@@ -8901,13 +8801,9 @@ where
                 }
                 Some(LocalValueRepresentation::NativeAggregate(ty)) => {
                     native_aggregate_values.insert(local);
-                    vars.insert(
-                        local,
-                        LocalSsaBinding {
-                            variable: fb.declare_var(ty),
-                            carrier: ty,
-                        },
-                    );
+                    vars.insert(local, LocalSsaBinding {
+                        variable: fb.declare_var(ty), carrier: ty,
+                    });
                 }
                 None => {}
             }
@@ -9314,11 +9210,9 @@ where
             return match intrinsic {
                 GpuIntrinsic::StorageStore => self.lower_gpu_storage_store(args),
                 GpuIntrinsic::StorageAtomicStore => self.lower_gpu_storage_atomic_store(args),
-                GpuIntrinsic::StorageAtomicAdd
-                | GpuIntrinsic::StorageAtomicMin
-                | GpuIntrinsic::StorageAtomicLoad => self
-                    .lower_gpu_storage_atomic_value(intrinsic, args)
-                    .map(|_| ()),
+                GpuIntrinsic::StorageAtomicAdd | GpuIntrinsic::StorageAtomicMin | GpuIntrinsic::StorageAtomicLoad => {
+                    self.lower_gpu_storage_atomic_value(intrinsic, args).map(|_| ())
+                }
                 GpuIntrinsic::StorageLoad => Err(LowerError::Internal(
                     "GPU storage load appeared as a unit-returning call".to_owned(),
                 )),
@@ -9383,67 +9277,40 @@ where
     fn gpu_atomic_word_object(&mut self, args: &[RLocalId]) -> Result<ValueId, LowerError> {
         let (object, element) = self.gpu_resource_element_object(args)?;
         if !matches!(element, GpuResourceElementType::Scalar(Type::I32)) {
-            return Err(LowerError::Unsupported(
-                "GPU atomic access requires u32 storage".into(),
-            ));
+            return Err(LowerError::Unsupported("GPU atomic access requires u32 storage".into()));
         }
         Ok(object)
     }
 
     fn lower_gpu_storage_atomic_store(&mut self, args: &[RLocalId]) -> Result<(), LowerError> {
         let [_, _, value] = args else {
-            return Err(LowerError::Internal(
-                "GPU atomic store requires resource, index, and value".into(),
-            ));
+            return Err(LowerError::Internal("GPU atomic store requires resource, index, and value".into()));
         };
         let object = self.gpu_atomic_word_object(args)?;
         let value = self.local_value(*value)?;
-        self.fb
-            .insert_inst_no_result(sonatina_ir::inst::data::ObjAtomicStore::new(
-                self.inst_set(),
-                object,
-                value,
-            ));
+        self.fb.insert_inst_no_result(sonatina_ir::inst::data::ObjAtomicStore::new(self.inst_set(), object, value));
         Ok(())
     }
 
-    fn lower_gpu_storage_atomic_value(
-        &mut self,
-        intrinsic: GpuIntrinsic,
-        args: &[RLocalId],
-    ) -> Result<ValueId, LowerError> {
+    fn lower_gpu_storage_atomic_value(&mut self, intrinsic: GpuIntrinsic, args: &[RLocalId]) -> Result<ValueId, LowerError> {
         use sonatina_ir::inst::data::{ObjAtomicAdd, ObjAtomicLoad, ObjAtomicUMin};
         if intrinsic == GpuIntrinsic::StorageAtomicLoad {
             if args.len() != 2 {
-                return Err(LowerError::Internal(
-                    "GPU atomic load requires resource and index".into(),
-                ));
+                return Err(LowerError::Internal("GPU atomic load requires resource and index".into()));
             }
             let object = self.gpu_atomic_word_object(args)?;
-            return Ok(self
-                .fb
-                .insert_inst(ObjAtomicLoad::new(self.inst_set(), object), Type::I32));
+            return Ok(self.fb.insert_inst(ObjAtomicLoad::new(self.inst_set(), object), Type::I32));
         }
         let [_, _, value] = args else {
-            return Err(LowerError::Internal(
-                "GPU atomic RMW requires resource, index, and value".into(),
-            ));
+            return Err(LowerError::Internal("GPU atomic RMW requires resource, index, and value".into()));
         };
         let object = self.gpu_atomic_word_object(args)?;
         let value = self.local_value(*value)?;
         let is = self.inst_set();
         Ok(match intrinsic {
-            GpuIntrinsic::StorageAtomicAdd => self
-                .fb
-                .insert_inst(ObjAtomicAdd::new(is, object, value), Type::I32),
-            GpuIntrinsic::StorageAtomicMin => self
-                .fb
-                .insert_inst(ObjAtomicUMin::new(is, object, value), Type::I32),
-            _ => {
-                return Err(LowerError::Internal(
-                    "non-atomic intrinsic in atomic lowering".into(),
-                ));
-            }
+            GpuIntrinsic::StorageAtomicAdd => self.fb.insert_inst(ObjAtomicAdd::new(is, object, value), Type::I32),
+            GpuIntrinsic::StorageAtomicMin => self.fb.insert_inst(ObjAtomicUMin::new(is, object, value), Type::I32),
+            _ => return Err(LowerError::Internal("non-atomic intrinsic in atomic lowering".into())),
         })
     }
 
@@ -9542,21 +9409,16 @@ where
         args: &[RLocalId],
     ) -> Result<(Vec<ValueId>, Option<ValueId>), LowerError> {
         // Validate every adaptation before emitting any temporary allocations.
-        let plan = self
-            .call_storage
-            .get(&(callee, args.to_vec()))
-            .cloned()
-            .ok_or_else(|| {
-                LowerError::Internal(format!(
-                    "call to `{}` has no body storage plan",
-                    self.module.function_symbol(callee),
-                ))
-            })?;
+        let plan = self.call_storage.get(&(callee, args.to_vec())).cloned().ok_or_else(|| {
+            LowerError::Internal(format!(
+                "call to `{}` has no body storage plan",
+                self.module.function_symbol(callee),
+            ))
+        })?;
         // Callee-allocated results belong to our enclosing frame even when
         // argument preparation emits no allocation. Consume the body plan,
         // rather than reclassifying return ownership in each call emitter.
-        self.emitted_arena.retained_results +=
-            usize::from(plan.result == CallResultStorage::EnclosingArena);
+        self.emitted_arena.retained_results += usize::from(plan.result == CallResultStorage::EnclosingArena);
         let mut values = Vec::new();
         let mut call_checkpoint = None;
         for (arg, storage) in args.iter().zip(plan.arguments) {
@@ -9568,8 +9430,7 @@ where
                 // preceding flat-argument loads retain their original order.
                 let checkpoint_ty = self.fb.ptr_type(Type::I8);
                 call_checkpoint = Some(
-                    self.fb
-                        .insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
+                    self.fb.insert_inst(MemCheckpoint::new(self.inst_set()), checkpoint_ty),
                 );
             }
             match storage {
@@ -9582,16 +9443,12 @@ where
                         let mut cursor = 0;
                         let value = self.assemble_native_value(ty, &leaves, &mut cursor)?;
                         if cursor != leaves.len() {
-                            return Err(LowerError::Internal(
-                                "native argument leaf arity changed".to_owned(),
-                            ));
+                            return Err(LowerError::Internal("native argument leaf arity changed".to_owned()));
                         }
                         value
                     };
                     if self.fb.type_of(value) != ty {
-                        return Err(LowerError::Internal(
-                            "native argument physical type changed".to_owned(),
-                        ));
+                        return Err(LowerError::Internal("native argument physical type changed".to_owned()));
                     }
                     values.push(value);
                 }
@@ -10037,27 +9894,20 @@ where
             Some(CompoundType::Struct(data)) => Ok(Some(data.fields.clone())),
             Some(CompoundType::Array { elem, len }) => Ok(Some(vec![elem; len])),
             None if matches!(ty, Type::I1 | Type::I32 | Type::F32) => Ok(None),
-            _ => Err(LowerError::Internal(
-                "unsupported native aggregate value type".to_owned(),
-            )),
+            _ => Err(LowerError::Internal("unsupported native aggregate value type".to_owned())),
         }
     }
 
     fn assemble_native_value(
-        &mut self,
-        ty: Type,
-        leaves: &[ValueId],
-        cursor: &mut usize,
+        &mut self, ty: Type, leaves: &[ValueId], cursor: &mut usize,
     ) -> Result<ValueId, LowerError> {
         let Some(fields) = self.native_value_fields(ty)? else {
-            let value = *leaves
-                .get(*cursor)
-                .ok_or_else(|| LowerError::Internal("missing native aggregate leaf".to_owned()))?;
+            let value = *leaves.get(*cursor).ok_or_else(||
+                LowerError::Internal("missing native aggregate leaf".to_owned()))?;
             if self.fb.type_of(value) != ty {
                 return Err(LowerError::Internal(format!(
                     "native aggregate leaf {} has type {:?}, expected {ty:?}",
-                    *cursor,
-                    self.fb.type_of(value),
+                    *cursor, self.fb.type_of(value),
                 )));
             }
             *cursor += 1;
@@ -10067,17 +9917,13 @@ where
         for (index, field) in fields.into_iter().enumerate() {
             let child = self.assemble_native_value(field, leaves, cursor)?;
             let index = self.fb.make_imm_value(index as i32);
-            value = self
-                .fb
-                .insert_inst(InsertValue::new(self.inst_set(), value, index, child), ty);
+            value = self.fb.insert_inst(InsertValue::new(self.inst_set(), value, index, child), ty);
         }
         Ok(value)
     }
 
     fn project_native_leaves(
-        &mut self,
-        value: ValueId,
-        leaves: &mut Vec<ValueId>,
+        &mut self, value: ValueId, leaves: &mut Vec<ValueId>,
     ) -> Result<(), LowerError> {
         let Some(fields) = self.native_value_fields(self.fb.type_of(value))? else {
             leaves.push(value);
@@ -10085,9 +9931,7 @@ where
         };
         for (index, field) in fields.into_iter().enumerate() {
             let index = self.fb.make_imm_value(index as i32);
-            let child = self
-                .fb
-                .insert_inst(ExtractValue::new(self.inst_set(), value, index), field);
+            let child = self.fb.insert_inst(ExtractValue::new(self.inst_set(), value, index), field);
             self.project_native_leaves(child, leaves)?;
         }
         Ok(())
@@ -10102,42 +9946,31 @@ where
         let mut cursor = 0;
         let value = self.assemble_native_value(ty, leaves, &mut cursor)?;
         if cursor != leaves.len() {
-            return Err(LowerError::Internal(
-                "native aggregate leaf arity changed".to_owned(),
-            ));
+            return Err(LowerError::Internal("native aggregate leaf arity changed".to_owned()));
         }
         Ok(value)
     }
 
     fn lower_native_aggregate_assign(
-        &mut self,
-        dst: RLocalId,
-        expr: &RExpr<'db>,
+        &mut self, dst: RLocalId, expr: &RExpr<'db>,
     ) -> Result<ValueId, LowerError> {
         let ty = self.vars[&dst].carrier;
-        let class = self.body.value_class(dst).cloned().ok_or_else(|| {
-            LowerError::Internal("native aggregate destination has no class".to_owned())
-        })?;
+        let class = self.body.value_class(dst).cloned().ok_or_else(||
+            LowerError::Internal("native aggregate destination has no class".to_owned()))?;
         match expr {
             RExpr::Use(source) if self.native_aggregate_values.contains(source) => {
                 let value = self.local_value(*source)?;
                 if self.fb.type_of(value) != ty {
-                    return Err(LowerError::Internal(
-                        "native value copy changed type".to_owned(),
-                    ));
+                    return Err(LowerError::Internal("native value copy changed type".to_owned()));
                 }
                 Ok(value)
             }
             RExpr::Load { place } => {
                 if let Some((pointer, source_class)) = self.typed_private_place(place)? {
                     if !source_class.shares_runtime_rep_with(self.module.db, &class) {
-                        return Err(LowerError::Internal(
-                            "native aggregate load changed class".to_owned(),
-                        ));
+                        return Err(LowerError::Internal("native aggregate load changed class".to_owned()));
                     }
-                    return Ok(self
-                        .fb
-                        .insert_inst(Mload::new(self.inst_set(), pointer, ty), ty));
+                    return Ok(self.fb.insert_inst(Mload::new(self.inst_set(), pointer, ty), ty));
                 }
                 self.lower_flat_to_native_assign(dst, expr, &class, ty)
             }
@@ -10146,27 +9979,20 @@ where
             {
                 let source = self.local_value(*value)?;
                 let index = self.fb.make_imm_value(*index as i32);
-                Ok(self
-                    .fb
-                    .insert_inst(ExtractValue::new(self.inst_set(), source, index), ty))
+                Ok(self.fb.insert_inst(ExtractValue::new(self.inst_set(), source, index), ty))
             }
             RExpr::AggregateMake { fields, .. } => {
-                let field_types = self.native_value_fields(ty)?.ok_or_else(|| {
-                    LowerError::Internal("native constructor has no aggregate fields".to_owned())
-                })?;
+                let field_types = self.native_value_fields(ty)?.ok_or_else(||
+                    LowerError::Internal("native constructor has no aggregate fields".to_owned()))?;
                 if field_types.len() != fields.len() {
-                    return Err(LowerError::Internal(
-                        "native constructor field arity changed".to_owned(),
-                    ));
+                    return Err(LowerError::Internal("native constructor field arity changed".to_owned()));
                 }
                 let mut value = self.fb.make_undef_value(ty);
                 for (index, (field, field_ty)) in fields.iter().zip(field_types).enumerate() {
                     let child = if self.native_aggregate_values.contains(field) {
                         let child = self.local_value(*field)?;
                         if self.fb.type_of(child) != field_ty {
-                            return Err(LowerError::Internal(
-                                "native constructor field type changed".to_owned(),
-                            ));
+                            return Err(LowerError::Internal("native constructor field type changed".to_owned()));
                         }
                         child
                     } else {
@@ -10174,37 +10000,27 @@ where
                         let mut cursor = 0;
                         let child = self.assemble_native_value(field_ty, &leaves, &mut cursor)?;
                         if cursor != leaves.len() {
-                            return Err(LowerError::Internal(
-                                "native constructor field leaf arity changed".to_owned(),
-                            ));
+                            return Err(LowerError::Internal("native constructor field leaf arity changed".to_owned()));
                         }
                         child
                     };
                     let index = self.fb.make_imm_value(index as i32);
-                    value = self
-                        .fb
-                        .insert_inst(InsertValue::new(self.inst_set(), value, index, child), ty);
+                    value = self.fb.insert_inst(InsertValue::new(self.inst_set(), value, index, child), ty);
                 }
                 Ok(value)
             }
-            RExpr::Call { callee, args }
-                if self
-                    .module
-                    .func_map
-                    .get(callee)
-                    .and_then(|callee| self.module.builder.ctx.get_sig(*callee))
-                    .is_some_and(|signature| signature.ret_tys() == [ty]) =>
+            RExpr::Call { callee, args } if self.module.func_map.get(callee)
+                .and_then(|callee| self.module.builder.ctx.get_sig(*callee))
+                .is_some_and(|signature| signature.ret_tys() == [ty]) =>
             {
                 self.lower_call(*callee, args)
             }
             // Existing external/flat interfaces and enum payload extraction
             // still supply scalar lanes. Adapt at that boundary, not at every
             // subsequent use of the resulting native value.
-            RExpr::Use(_)
-            | RExpr::Call { .. }
-            | RExpr::EnumExtract { .. }
-            | RExpr::AggregateExtract { .. }
-            | RExpr::Placeholder { .. } => self.lower_flat_to_native_assign(dst, expr, &class, ty),
+            RExpr::Use(_) | RExpr::Call { .. } | RExpr::EnumExtract { .. }
+            | RExpr::AggregateExtract { .. } | RExpr::Placeholder { .. } =>
+                self.lower_flat_to_native_assign(dst, expr, &class, ty),
             _ => Err(LowerError::Unsupported(format!(
                 "native aggregate assignment does not support {expr:?}"
             ))),
@@ -10212,26 +10028,16 @@ where
     }
 
     fn lower_flat_to_native_assign(
-        &mut self,
-        dst: RLocalId,
-        expr: &RExpr<'db>,
-        class: &RuntimeClass<'db>,
-        ty: Type,
+        &mut self, dst: RLocalId, expr: &RExpr<'db>, class: &RuntimeClass<'db>, ty: Type,
     ) -> Result<ValueId, LowerError> {
         let mut types = Vec::new();
         self.local_flat_shape(dst)?.leaf_types(&mut types);
-        let variables = types
-            .into_iter()
-            .map(|ty| self.fb.declare_var(ty))
-            .collect::<Vec<_>>();
+        let variables = types.into_iter().map(|ty| self.fb.declare_var(ty)).collect::<Vec<_>>();
         self.tuple_vars.insert(dst, variables.clone());
         let result = self.lower_tuple_assign(dst, expr);
         self.tuple_vars.remove(&dst);
         result?;
-        let leaves = variables
-            .into_iter()
-            .map(|variable| self.fb.use_var(variable))
-            .collect::<Vec<_>>();
+        let leaves = variables.into_iter().map(|variable| self.fb.use_var(variable)).collect::<Vec<_>>();
         self.native_value_from_leaves(class, ty, &leaves)
     }
 
@@ -10694,11 +10500,8 @@ where
                 if let Some(intrinsic) = gpu_intrinsic(self.module.db, *callee) {
                     return match intrinsic {
                         GpuIntrinsic::StorageLoad => self.lower_gpu_storage_load_tuple(dst, args),
-                        GpuIntrinsic::StorageStore
-                        | GpuIntrinsic::StorageAtomicAdd
-                        | GpuIntrinsic::StorageAtomicMin
-                        | GpuIntrinsic::StorageAtomicLoad
-                        | GpuIntrinsic::StorageAtomicStore => Err(LowerError::Internal(
+                        GpuIntrinsic::StorageStore | GpuIntrinsic::StorageAtomicAdd | GpuIntrinsic::StorageAtomicMin
+                        | GpuIntrinsic::StorageAtomicLoad | GpuIntrinsic::StorageAtomicStore => Err(LowerError::Internal(
                             "GPU storage store appeared as a tuple-returning call".to_owned(),
                         )),
                     };
@@ -10786,15 +10589,11 @@ where
     fn lower_expr(&mut self, expr: &RExpr<'db>, dst: RLocalId) -> Result<ValueId, LowerError> {
         match expr {
             RExpr::Use(src) => {
-                let storage = self
-                    .copy_storage
-                    .get(&(dst, *src))
-                    .copied()
-                    .ok_or_else(|| {
-                        LowerError::Internal(format!(
-                            "value copy {src:?} -> {dst:?} has no body storage plan"
-                        ))
-                    })?;
+                let storage = self.copy_storage.get(&(dst, *src)).copied().ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "value copy {src:?} -> {dst:?} has no body storage plan"
+                    ))
+                })?;
                 match storage {
                     ValueCopyStorage::ReadScalar => self.local_read_value(*src),
                     ValueCopyStorage::Forward => self.local_value(*src),
@@ -11880,8 +11679,7 @@ where
             if self.native_aggregate_values.contains(&source) {
                 let value = self.local_value(source)?;
                 let ty = self.fb.type_of(value);
-                self.fb
-                    .insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
+                self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
                 return Ok(());
             }
             let leaves = if self.is_address_carried_aggregate_value(source) {
@@ -12198,19 +11996,11 @@ where
         if self.native_aggregate_values.contains(&src) {
             let value = self.local_value(src)?;
             let pointer = if local.storage_root == dst {
-                self.fb.insert_inst(
-                    Alloca::new(self.inst_set(), local.pointee_ty),
-                    local.pointer_ty,
-                )
+                self.fb.insert_inst(Alloca::new(self.inst_set(), local.pointee_ty), local.pointer_ty)
             } else {
                 self.local_value(local.storage_root)?
             };
-            self.fb.insert_inst_no_result(Mstore::new(
-                self.inst_set(),
-                pointer,
-                value,
-                local.pointee_ty,
-            ));
+            self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, local.pointee_ty));
             return Ok(pointer);
         }
         let leaves = if self.is_address_carried_aggregate_value(src) {
@@ -12740,14 +12530,10 @@ where
                 "typed private place resolution changed its result class".to_owned(),
             ));
         }
-        let pointee_ty = self
-            .module
-            .typed_private_type_for_class(&current_class)?
-            .ok_or_else(|| {
-                LowerError::Internal(
-                    "planned typed-private projection has no target pointee type".to_owned(),
-                )
-            })?;
+        let pointee_ty = self.module.typed_private_type_for_class(&current_class)?
+            .ok_or_else(|| LowerError::Internal(
+                "planned typed-private projection has no target pointee type".to_owned(),
+            ))?;
         let pointer_ty = self.module.builder.ptr_type(pointee_ty);
         let pointer = self.fb.insert_inst(Gep::new(is, indices), pointer_ty);
         Ok(Some((pointer, resolved.result_class)))
@@ -12804,15 +12590,11 @@ where
         if let PlaceRoot::Ref(root) = place.root
             && self.typed_private_locals.contains_key(&root)
         {
-            return self
-                .typed_private_scalar_place(place)?
-                .map(Some)
-                .ok_or_else(|| {
-                    LowerError::Unsupported(
-                        "planned typed-private place is not a supported scalar projection"
-                            .to_owned(),
-                    )
-                });
+            return self.typed_private_scalar_place(place)?.map(Some).ok_or_else(|| {
+                LowerError::Unsupported(
+                    "planned typed-private place is not a supported scalar projection".to_owned(),
+                )
+            });
         }
         let program = self.module.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
@@ -13355,10 +13137,7 @@ where
         // backend. Sonatina owns the width-specific overflow implementation;
         // Fe consumes its result and overflow flag without reconstructing it.
         if checked
-            && matches!(
-                op,
-                IntrinsicArithBinOp::Add | IntrinsicArithBinOp::Sub | IntrinsicArithBinOp::Mul
-            )
+            && matches!(op, IntrinsicArithBinOp::Add | IntrinsicArithBinOp::Sub | IntrinsicArithBinOp::Mul)
         {
             let lhs = self.local_read_value(lhs)?;
             let rhs = self.local_read_value(rhs)?;
@@ -13689,16 +13468,10 @@ where
         if let Some(intrinsic) = gpu_intrinsic(self.module.db, callee) {
             return match intrinsic {
                 GpuIntrinsic::StorageLoad => self.lower_gpu_storage_load_scalar(args),
-                GpuIntrinsic::StorageAtomicAdd
-                | GpuIntrinsic::StorageAtomicMin
-                | GpuIntrinsic::StorageAtomicLoad => {
-                    self.lower_gpu_storage_atomic_value(intrinsic, args)
-                }
-                GpuIntrinsic::StorageStore | GpuIntrinsic::StorageAtomicStore => {
-                    Err(LowerError::Internal(
-                        "GPU storage store appeared as a value-returning call".to_owned(),
-                    ))
-                }
+                GpuIntrinsic::StorageAtomicAdd | GpuIntrinsic::StorageAtomicMin | GpuIntrinsic::StorageAtomicLoad => self.lower_gpu_storage_atomic_value(intrinsic, args),
+                GpuIntrinsic::StorageStore | GpuIntrinsic::StorageAtomicStore => Err(LowerError::Internal(
+                    "GPU storage store appeared as a value-returning call".to_owned(),
+                )),
             };
         }
         let is = self.inst_set();
@@ -13775,35 +13548,26 @@ where
                 // canonical-arena pointer, so load their leaves before rewinding
                 // the scoped arena. Every other return is the single-value form.
                 let function = self.module.func_map[&self.body.owner];
-                let signature = self.module.builder.ctx.get_sig(function).ok_or_else(|| {
-                    LowerError::Internal("return has no declared physical signature".to_owned())
-                })?;
+                let signature = self.module.builder.ctx.get_sig(function).ok_or_else(||
+                    LowerError::Internal("return has no declared physical signature".to_owned()))?;
                 if let [ty] = signature.ret_tys()
-                    && matches!(
-                        ty.resolve_compound(&self.module.builder.ctx),
-                        Some(
-                            sonatina_ir::types::CompoundType::Struct(_)
-                                | sonatina_ir::types::CompoundType::Array { .. }
-                        )
-                    )
+                    && matches!(ty.resolve_compound(&self.module.builder.ctx),
+                        Some(sonatina_ir::types::CompoundType::Struct(_)
+                            | sonatina_ir::types::CompoundType::Array { .. }))
                 {
                     let result = if self.native_aggregate_values.contains(value) {
                         self.local_value(*value)?
                     } else {
                         let leaves = self.local_flat_values(*value)?;
-                        let class = self.body.signature.ret.clone().ok_or_else(|| {
-                            LowerError::Internal("aggregate return lost its class".to_owned())
-                        })?;
+                        let class = self.body.signature.ret.clone().ok_or_else(||
+                            LowerError::Internal("aggregate return lost its class".to_owned()))?;
                         self.native_value_from_leaves(&class, *ty, &leaves)?
                     };
                     if self.fb.type_of(result) != *ty {
-                        return Err(LowerError::Internal(
-                            "aggregate return changed physical type".to_owned(),
-                        ));
+                        return Err(LowerError::Internal("aggregate return changed physical type".to_owned()));
                     }
                     self.rewind_scoped_arena();
-                    self.fb
-                        .insert_inst_no_result(Return::new_single(is, result));
+                    self.fb.insert_inst_no_result(Return::new_single(is, result));
                     return Ok(());
                 }
                 let return_class = self.body.signature.ret.clone();
@@ -13813,11 +13577,7 @@ where
                             instantiated_runtime_return_ty(self.module.db, self.body.owner)
                         {
                             self.module
-                                .semantic_scalar_tuple_element_tys(
-                                    self.body.owner,
-                                    semantic_ty,
-                                    &class,
-                                )?
+                                .semantic_scalar_tuple_element_tys(self.body.owner, semantic_ty, &class)?
                                 .is_some()
                         } else {
                             self.module.scalar_tuple_element_tys(&class).is_some()
@@ -14090,53 +13850,40 @@ mod tests {
         for phase in ["signature", "body", "Wasm ABI", "typed-borrow"] {
             let mut db = DriverDataBase::default();
             let url = Url::parse("file:///missing_prepared_body.fe").unwrap();
-            db.workspace().touch(
-                &mut db,
-                url.clone(),
-                Some("pub fn probe(_ value: u32) -> u32 { value }".to_owned()),
-            );
+            db.workspace().touch(&mut db, url.clone(), Some(
+                "pub fn probe(_ value: u32) -> u32 { value }".to_owned(),
+            ));
             let file = db.workspace().get(&db, &url).unwrap();
-            let package =
-                mir::build_wasm_runtime_package_for_entry(&db, db.top_mod(file), "probe").unwrap();
+            let package = mir::build_wasm_runtime_package_for_entry(
+                &db, db.top_mod(file), "probe",
+            ).unwrap();
             let isa = create_wasm32_isa();
             let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-            let mut module =
-                PortableModuleLowerer::new(&db, builder, &isa, &package, HashSet::new(), &[])
-                    .unwrap();
+            let mut module = PortableModuleLowerer::new(
+                &db, builder, &isa, &package, HashSet::new(), &[],
+            ).unwrap();
             if phase == "body" {
                 module.declare_functions().unwrap();
             }
-            let instance = *module
-                .prepared_bodies
-                .keys()
-                .find(|&&instance| module.function_symbol(instance) == "probe")
-                .expect("prepared probe");
+            let instance = *module.prepared_bodies.keys().find(|&&instance| {
+                module.function_symbol(instance) == "probe"
+            }).expect("prepared probe");
             module.prepared_bodies.remove(&instance).unwrap();
             let result = match phase {
                 "signature" => module.declare_functions(),
                 "body" => module.lower_bodies(),
                 "Wasm ABI" => module.derive_wasm_indirect_aggregate_abi().map(|_| ()),
                 "typed-borrow" => {
-                    module.private_place_materialization =
-                        PrivatePlaceMaterialization::ShaderTypedWhenLegal;
+                    module.private_place_materialization = PrivatePlaceMaterialization::ShaderTypedWhenLegal;
                     module.derive_typed_private_borrow_params().map(|_| ())
                 }
                 _ => unreachable!(),
             };
-            let error = result
-                .expect_err("missing normalized body must fail closed")
-                .to_string();
-            let operation = if matches!(phase, "signature" | "body") {
-                "lowering"
-            } else {
-                "analysis"
-            };
-            assert!(
-                error.contains(&format!(
-                    "missing prepared runtime body for `probe` during {phase} {operation}"
-                )),
-                "{error}"
-            );
+            let error = result.expect_err("missing normalized body must fail closed").to_string();
+            let operation = if matches!(phase, "signature" | "body") { "lowering" } else { "analysis" };
+            assert!(error.contains(&format!(
+                "missing prepared runtime body for `probe` during {phase} {operation}"
+            )), "{error}");
         }
     }
 
@@ -14147,42 +13894,30 @@ mod tests {
         for mutation in 0..5 {
             let mut db = DriverDataBase::default();
             let url = Url::parse("file:///arena_plan_mutation.fe").unwrap();
-            db.workspace().touch(
-                &mut db,
-                url.clone(),
-                Some("pub fn probe(_ value: u32) -> u32 { value }".to_owned()),
-            );
+            db.workspace().touch(&mut db, url.clone(), Some(
+                "pub fn probe(_ value: u32) -> u32 { value }".to_owned(),
+            ));
             let file = db.workspace().get(&db, &url).unwrap();
-            let package =
-                mir::build_wasm_runtime_package_for_entry(&db, db.top_mod(file), "probe").unwrap();
+            let package = mir::build_wasm_runtime_package_for_entry(
+                &db, db.top_mod(file), "probe",
+            ).unwrap();
             let isa = create_wasm32_isa();
             let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-            let mut module =
-                PortableModuleLowerer::new(&db, builder, &isa, &package, HashSet::new(), &[])
-                    .unwrap();
+            let mut module = PortableModuleLowerer::new(
+                &db, builder, &isa, &package, HashSet::new(), &[],
+            ).unwrap();
             module.declare_functions().unwrap();
-            let instance = *module
-                .func_map
-                .keys()
-                .find(|&&instance| module.function_symbol(instance) == "probe")
-                .expect("probe declaration");
+            let instance = *module.func_map.keys().find(|&&instance| {
+                module.function_symbol(instance) == "probe"
+            }).expect("probe declaration");
             let function = module.func_map[&instance];
-            let body = module
-                .prepared_bodies
-                .remove(&instance)
+            let body = module.prepared_bodies.remove(&instance)
                 .expect("prepared probe body");
             let mut lowerer = PortableFunctionLowerer::new(
-                &mut module,
-                body,
-                function,
-                false,
-                false,
-                HashSet::new(),
-                false,
-            )
-            .unwrap();
+                &mut module, body, function, false, false, HashSet::new(), false,
+            ).unwrap();
             match mutation {
-                0 => {}
+                0 => {},
                 1 => lowerer.arena_plan.prologue.allocations += 1,
                 2 => lowerer.arena_plan.prologue.retained_results += 1,
                 3 => lowerer.arena_plan.blocks[0].allocations += 1,
@@ -14193,18 +13928,10 @@ mod tests {
             if mutation == 0 {
                 result.expect("unaltered plan must lower");
             } else {
-                let error = result
-                    .expect_err("corrupted plan must fail closed")
-                    .to_string();
+                let error = result.expect_err("corrupted plan must fail closed").to_string();
                 let site = if mutation <= 2 { "prologue" } else { "block 0" };
-                assert!(
-                    error.contains(&format!("arena storage plan mismatch in `probe` {site}")),
-                    "{error}"
-                );
-                assert!(
-                    error.contains("planned") && error.contains("emitted"),
-                    "{error}"
-                );
+                assert!(error.contains(&format!("arena storage plan mismatch in `probe` {site}")), "{error}");
+                assert!(error.contains("planned") && error.contains("emitted"), "{error}");
             }
         }
     }
@@ -14212,32 +13939,17 @@ mod tests {
     #[test]
     fn planned_arena_need_includes_callee_owned_results_without_allocations() {
         let none = ArenaEmissionCount::default();
-        let allocation = ArenaEmissionCount {
-            allocations: 1,
-            retained_results: 0,
-        };
-        let result = ArenaEmissionCount {
-            allocations: 0,
-            retained_results: 1,
-        };
+        let allocation = ArenaEmissionCount { allocations: 1, retained_results: 0 };
+        let result = ArenaEmissionCount { allocations: 0, retained_results: 1 };
         for prologue in [none, allocation] {
             for block in [none, allocation, result] {
-                let plan = BodyArenaPlan {
-                    prologue,
-                    blocks: vec![none, block],
-                };
+                let plan = BodyArenaPlan { prologue, blocks: vec![none, block] };
                 assert_eq!(plan.uses_arena(), prologue != none || block != none);
             }
         }
-        let before = ArenaEmissionCount {
-            allocations: 3,
-            retained_results: 2,
-        };
+        let before = ArenaEmissionCount { allocations: 3, retained_results: 2 };
         assert_eq!(before.since(before), none);
-        let after = ArenaEmissionCount {
-            allocations: 3,
-            retained_results: 3,
-        };
+        let after = ArenaEmissionCount { allocations: 3, retained_results: 3 };
         assert_eq!(after.since(before), result);
     }
 
@@ -14245,34 +13957,19 @@ mod tests {
     fn call_storage_plan_keeps_result_ownership_independent_of_arguments() {
         for scoped_arena in [false, true] {
             for result in [CallResultStorage::Direct, CallResultStorage::EnclosingArena] {
-                for arguments in [
-                    vec![],
-                    vec![CallArgumentStorage::Flat],
-                    vec![CallArgumentStorage::TypedBorrow],
-                ] {
+                for arguments in [vec![], vec![CallArgumentStorage::Flat], vec![CallArgumentStorage::TypedBorrow]] {
                     let plan = CallStoragePlan::new(arguments, result, scoped_arena);
                     assert_eq!(plan.result, result);
                     assert_eq!(plan.lifetime, CallTemporaryLifetime::None);
                 }
-                for argument in [
-                    CallArgumentStorage::OwnedMaterialization,
-                    CallArgumentStorage::BorrowMaterialization,
-                ] {
-                    let plan = CallStoragePlan::new(
-                        vec![CallArgumentStorage::Flat, argument],
-                        result,
-                        scoped_arena,
-                    );
+                for argument in [CallArgumentStorage::OwnedMaterialization, CallArgumentStorage::BorrowMaterialization] {
+                    let plan = CallStoragePlan::new(vec![CallArgumentStorage::Flat, argument], result, scoped_arena);
                     assert_eq!(plan.result, result);
-                    assert_eq!(
-                        plan.lifetime,
-                        match (scoped_arena, result) {
-                            (true, _) => CallTemporaryLifetime::CallerFrame,
-                            (false, CallResultStorage::EnclosingArena) =>
-                                CallTemporaryLifetime::EnclosingResult,
-                            (false, CallResultStorage::Direct) => CallTemporaryLifetime::CallScope,
-                        }
-                    );
+                    assert_eq!(plan.lifetime, match (scoped_arena, result) {
+                        (true, _) => CallTemporaryLifetime::CallerFrame,
+                        (false, CallResultStorage::EnclosingArena) => CallTemporaryLifetime::EnclosingResult,
+                        (false, CallResultStorage::Direct) => CallTemporaryLifetime::CallScope,
+                    });
                 }
             }
         }
@@ -14281,67 +13978,34 @@ mod tests {
     #[test]
     fn residual_intrinsic_gate_runs_on_rmir_without_sonatina() {
         let cases = [
-            (
-                "extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __rsqrt_f32(value) }",
-                true,
-            ),
-            (
-                "extern { fn __sqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __sqrt_f32(value) }",
-                false,
-            ),
-            (
-                "extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { value }",
-                false,
-            ),
-            (
-                "fn __rsqrt_f32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __rsqrt_f32(value) }",
-                false,
-            ),
-            (
-                "extern { fn __add_u32(_: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value) }",
-                true,
-            ),
-            (
-                "extern { fn __checked_add(_: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __checked_add(value) }",
-                true,
-            ),
-            (
-                "fn __add_u32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value) }",
-                false,
-            ),
-            (
-                "extern { fn __add_u32(_: u32, _: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value, value) }",
-                false,
-            ),
+            ("extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __rsqrt_f32(value) }", true),
+            ("extern { fn __sqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { __sqrt_f32(value) }", false),
+            ("extern { fn __rsqrt_f32(_: f32) -> f32 }\npub fn kernel(_ value: f32) -> f32 { value }", false),
+            ("fn __rsqrt_f32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __rsqrt_f32(value) }", false),
+            ("extern { fn __add_u32(_: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value) }", true),
+            ("extern { fn __checked_add(_: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __checked_add(value) }", true),
+            ("fn __add_u32(_ value: u32) -> u32 { value ^ 7 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value) }", false),
+            ("extern { fn __add_u32(_: u32, _: u32) -> u32 }\npub fn kernel(_ value: u32) -> u32 { __add_u32(value, value) }", false),
         ];
         for (source, rejects) in cases {
             let mut db = DriverDataBase::default();
             let url = Url::parse("file:///residual_intrinsic_gate.fe").unwrap();
-            db.workspace()
-                .touch(&mut db, url.clone(), Some(source.to_owned()));
+            db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
             let file = db.workspace().get(&db, &url).unwrap();
             let top_mod = db.top_mod(file);
             let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
             assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
-            let package =
-                mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+            let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
             // This gate needs only RMIR and target identity, not a Sonatina ISA,
             // module, signature, instruction builder, or physical storage plan.
-            for target in [
-                Architecture::Wasm32,
-                Architecture::Shader,
-                Architecture::X86_64,
-            ] {
+            for target in [Architecture::Wasm32, Architecture::Shader, Architecture::X86_64] {
                 let result = validate_portable_intrinsic_calls(&db, &package, target);
                 assert_eq!(result.is_err(), rejects, "{target:?}: {source}");
                 if let Err(error) = result {
                     let message = error.to_string();
                     assert!(message.contains("intrinsic `__"), "{message}");
                     assert!(message.contains(&format!("{target:?} target")), "{message}");
-                    assert!(
-                        message.contains("before Sonatina construction"),
-                        "{message}"
-                    );
+                    assert!(message.contains("before Sonatina construction"), "{message}");
                 }
             }
         }
@@ -14351,32 +14015,17 @@ mod tests {
     fn portable_target_policy_is_derived_from_the_selected_isa() {
         let wasm = PortableLoweringPolicy::for_architecture(Architecture::Wasm32).unwrap();
         assert!(wasm.validate_host_enum_params && wasm.enable_scoped_arena);
-        assert_eq!(
-            wasm.private_place_materialization,
-            PrivatePlaceMaterialization::CanonicalArena
-        );
+        assert_eq!(wasm.private_place_materialization, PrivatePlaceMaterialization::CanonicalArena);
         assert_eq!(wasm.aggregate_copy_lowering, AggregateCopyLowering::Memcopy);
         let shader = PortableLoweringPolicy::for_architecture(Architecture::Shader).unwrap();
         assert!(!shader.validate_host_enum_params && shader.enable_scoped_arena);
-        assert_eq!(
-            shader.private_place_materialization,
-            PrivatePlaceMaterialization::ShaderTypedWhenLegal
-        );
-        assert_eq!(
-            shader.aggregate_copy_lowering,
-            AggregateCopyLowering::Memcopy
-        );
+        assert_eq!(shader.private_place_materialization, PrivatePlaceMaterialization::ShaderTypedWhenLegal);
+        assert_eq!(shader.aggregate_copy_lowering, AggregateCopyLowering::Memcopy);
         for architecture in [Architecture::X86_64, Architecture::Aarch64] {
             let native = PortableLoweringPolicy::for_architecture(architecture).unwrap();
             assert!(native.validate_host_enum_params && !native.enable_scoped_arena);
-            assert_eq!(
-                native.private_place_materialization,
-                PrivatePlaceMaterialization::CanonicalArena
-            );
-            assert_eq!(
-                native.aggregate_copy_lowering,
-                AggregateCopyLowering::InlineLoop
-            );
+            assert_eq!(native.private_place_materialization, PrivatePlaceMaterialization::CanonicalArena);
+            assert_eq!(native.aggregate_copy_lowering, AggregateCopyLowering::InlineLoop);
         }
         assert!(PortableLoweringPolicy::for_architecture(Architecture::Evm).is_err());
     }
@@ -14385,24 +14034,22 @@ mod tests {
     fn portable_ir_uses_the_callers_isa() {
         let mut db = DriverDataBase::default();
         let url = url::Url::parse("file:///portable_explicit_isa.fe").unwrap();
-        db.workspace().touch(
-            &mut db,
-            url.clone(),
-            Some("pub fn kernel(_ value: u32) -> u32 { value }".to_owned()),
-        );
+        db.workspace().touch(&mut db, url.clone(), Some(
+            "pub fn kernel(_ value: u32) -> u32 { value }".to_owned(),
+        ));
         let file = db.workspace().get(&db, &url).unwrap();
         let top_mod = db.top_mod(file);
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
         let isa = sonatina_ir::isa::native::Native::new(TargetTriple::new(
-            Architecture::X86_64,
-            Vendor::Unknown,
-            OperatingSystem::Native,
+            Architecture::X86_64, Vendor::Unknown, OperatingSystem::Native,
         ));
         // Scalar-only: this tests target propagation, not native aggregate
         // allocation support or a change to the package's serialized layout.
-        let lowerer = lower_portable_bodies(&isa, &db, &package, HashSet::new(), &[]).unwrap();
+        let lowerer = lower_portable_bodies(
+            &isa, &db, &package, HashSet::new(), &[],
+        ).unwrap();
         let module = lowerer.finish();
         assert_eq!(module.ctx.triple, isa.triple());
         assert_eq!(module.ctx.type_layout.pointer_repl(), Type::I64);
@@ -14417,41 +14064,29 @@ pub fn probe(_ input: Wide) -> u32 { input.values[0] }
 "#;
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///target_specific_arity.fe").unwrap();
-        db.workspace()
-            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
         let file = db.workspace().get(&db, &url).unwrap();
         let top_mod = db.top_mod(file);
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "probe").unwrap();
-        let error = compile_runtime_package_wasm(&db, &package)
-            .err()
+        let error = compile_runtime_package_wasm(&db, &package).err()
             .expect("the public Wasm signature must retain its validator limit");
-        assert!(
-            error.to_string().contains("validated limit of 1000"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("validated limit of 1000"), "{error}");
 
         let (shader, entries) = compile_runtime_package_shader_ir(&db, &package)
             .expect("shader IR must not enforce Wasm validator limits");
-        assert_eq!(
-            shader.ctx.func_sig(entries[0], |sig| sig.args().len()),
-            1001
-        );
+        assert_eq!(shader.ctx.func_sig(entries[0], |sig| sig.args().len()), 1001);
 
         let isa = sonatina_ir::isa::native::Native::new(TargetTriple::new(
-            Architecture::X86_64,
-            Vendor::Unknown,
-            OperatingSystem::Native,
+            Architecture::X86_64, Vendor::Unknown, OperatingSystem::Native,
         ));
-        let native = lower_portable_bodies(&isa, &db, &package, HashSet::new(), &[])
-            .expect("native IR must not enforce Wasm validator limits");
+        let native = lower_portable_bodies(
+            &isa, &db, &package, HashSet::new(), &[],
+        ).expect("native IR must not enforce Wasm validator limits");
         let entries = shader_runtime_entries(&native).unwrap();
         let native = native.finish();
-        assert_eq!(
-            native.ctx.func_sig(entries[0], |sig| sig.args().len()),
-            1001
-        );
+        assert_eq!(native.ctx.func_sig(entries[0], |sig| sig.args().len()), 1001);
         // These assertions cover IR construction, not acceptance of a shader
         // entry interface or a native machine calling convention.
     }
@@ -14477,76 +14112,45 @@ pub fn kernel(_ value: u32) -> u32 {
 "#;
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///retained_borrow_interface.fe").unwrap();
-        db.workspace()
-            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
         let file = db.workspace().get(&db, &url).unwrap();
         let top_mod = db.top_mod(file);
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
         assert!(diagnostics.is_empty(), "{diagnostics}");
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
         let isa = sonatina_ir::isa::shader::Shader::new(TargetTriple::new(
-            Architecture::Shader,
-            Vendor::Unknown,
-            OperatingSystem::Unknown,
+            Architecture::Shader, Vendor::Unknown, OperatingSystem::Unknown,
         ));
         let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-        let mut module =
-            PortableModuleLowerer::new(&db, builder, &isa, &package, HashSet::new(), &[]).unwrap();
-        let caller = *module
-            .prepared_bodies
-            .keys()
-            .find(|&&instance| module.function_symbol(instance) == "middle")
-            .expect("prepared middle helper");
+        let mut module = PortableModuleLowerer::new(
+            &db, builder, &isa, &package, HashSet::new(), &[],
+        ).unwrap();
+        let caller = *module.prepared_bodies.keys().find(|&&instance| {
+            module.function_symbol(instance) == "middle"
+        }).expect("prepared middle helper");
         let body = module.prepared_bodies[&caller].clone();
-        let (&root, pointee) = module.typed_private_borrow_params[&caller]
-            .iter()
-            .next()
+        let (&root, pointee) = module.typed_private_borrow_params[&caller].iter().next()
             .expect("certified borrow parameter");
         let pointee = pointee.clone();
-        let callee = body
-            .blocks
-            .iter()
-            .flat_map(|block| &block.stmts)
-            .find_map(|stmt| match stmt {
-                RStmt::Assign {
-                    expr: RExpr::Call { callee, .. },
-                    ..
-                } => Some(*callee),
+        let callee = body.blocks.iter().flat_map(|block| &block.stmts).find_map(|stmt| {
+            match stmt {
+                RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } => Some(*callee),
                 _ => None,
-            })
-            .expect("retained call to leaf");
+            }
+        }).expect("retained call to leaf");
         module.prepared_bodies.clear();
         let analyze = |module: &PortableModuleLowerer<'_, '_, _>| {
-            module
-                .typed_private_component(
-                    &body,
-                    root,
-                    pointee.clone(),
-                    TypedPrivateRootKind::Parameter,
-                    &module.typed_private_borrow_params,
-                )
-                .map(|_| ())
+            module.typed_private_component(
+                &body, root, pointee.clone(), TypedPrivateRootKind::Parameter,
+                &module.typed_private_borrow_params,
+            ).map(|_| ())
         };
-        assert!(
-            analyze(&module).is_ok(),
-            "consumed bodies must not invalidate prepared interfaces"
-        );
+        assert!(analyze(&module).is_ok(), "consumed bodies must not invalidate prepared interfaces");
         let interface = module.prepared_interfaces.remove(&callee).unwrap();
-        assert_eq!(
-            analyze(&module).unwrap_err(),
-            "missing-prepared-callee-interface"
-        );
+        assert_eq!(analyze(&module).unwrap_err(), "missing-prepared-callee-interface");
         module.prepared_interfaces.insert(callee, interface);
-        module
-            .prepared_interfaces
-            .get_mut(&callee)
-            .unwrap()
-            .params
-            .clear();
-        assert_eq!(
-            analyze(&module).unwrap_err(),
-            "prepared-callee-arity-mismatch"
-        );
+        module.prepared_interfaces.get_mut(&callee).unwrap().params.clear();
+        assert_eq!(analyze(&module).unwrap_err(), "prepared-callee-arity-mismatch");
     }
 
     #[test]
@@ -14599,15 +14203,9 @@ pub fn kernel(_ value: u32) -> u32 {
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
         let (module, entries) = compile_runtime_package_shader_ir(&db, &package).unwrap();
         assert_eq!(module.ctx.triple.architecture, Architecture::Shader);
+        assert_eq!(entries.len(), 1, "the selected package has one section entry");
         assert_eq!(
-            entries.len(),
-            1,
-            "the selected package has one section entry"
-        );
-        assert_eq!(
-            module
-                .ctx
-                .func_sig(entries[0], |signature| signature.name().to_owned()),
+            module.ctx.func_sig(entries[0], |signature| signature.name().to_owned()),
             "kernel",
             "shader entry identity must come from the runtime section declaration",
         );
@@ -14841,48 +14439,28 @@ pub fn kernel(_ seed: u32) -> u32 {
         for function in module.funcs() {
             module.ctx.func_sig(function, |signature| {
                 if signature.name() == "advance" {
-                    assert!(
-                        matches!(signature.ret_tys(), [ty]
+                    assert!(matches!(signature.ret_tys(), [ty]
                         if matches!(ty.resolve_compound(&module.ctx),
                             Some(sonatina_ir::types::CompoundType::Struct(_)))),
-                        "private shader state must return one structured value, not scalar lanes"
-                    );
+                        "private shader state must return one structured value, not scalar lanes");
                 }
             });
         }
-        let artifact =
-            crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
-                &db,
-                &package,
-                [1, 1, 1],
-            )
-            .expect("snapshot-observing state chain should reach validated SPIR-V");
+        let artifact = crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
+            &db, &package, [1, 1, 1],
+        )
+        .expect("snapshot-observing state chain should reach validated SPIR-V");
         let wgsl = artifact.wgsl.as_deref().expect("WGSL artifact");
         let parsed = naga::front::wgsl::parse_str(wgsl).expect("snapshot WGSL reparses");
-        let (_, helper) = parsed
-            .functions
-            .iter()
-            .find(|(_, function)| {
-                function
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name.contains("advance"))
-            })
+        let (_, helper) = parsed.functions.iter().find(|(_, function)|
+            function.name.as_deref().is_some_and(|name| name.contains("advance")))
             .expect("state-return helper must remain outlined");
-        assert!(
-            matches!(
-                parsed.types[helper.result.as_ref().unwrap().ty].inner,
-                naga::TypeInner::Struct { .. }
-            ),
-            "outlined state result must remain structured"
-        );
+        assert!(matches!(parsed.types[helper.result.as_ref().unwrap().ty].inner,
+            naga::TypeInner::Struct { .. }), "outlined state result must remain structured");
         let bytes = crate::BackendKind::Wasm
             .create()
             .compile(
-                &db,
-                top_mod,
-                crate::layout_for(crate::BackendKind::Wasm),
-                crate::OptLevel::O0,
+                &db, top_mod, crate::layout_for(crate::BackendKind::Wasm), crate::OptLevel::O0,
             )
             .expect("snapshot chain should retain the Wasm ABI")
             .into_bytecode()
@@ -14891,15 +14469,10 @@ pub fn kernel(_ seed: u32) -> u32 {
         let wasm = wasmtime::Module::new(&engine, bytes).unwrap();
         let mut store = wasmtime::Store::new(&engine, ());
         let instance = wasmtime::Instance::new(&mut store, &wasm, &[]).unwrap();
-        let kernel = instance
-            .get_typed_func::<i32, i32>(&mut store, "kernel")
-            .unwrap();
+        let kernel = instance.get_typed_func::<i32, i32>(&mut store, "kernel").unwrap();
         for seed in [0, 1, 42, 1000] {
-            assert_eq!(
-                kernel.call(&mut store, seed).unwrap(),
-                4 * seed + 4,
-                "old snapshots must not observe mutations to returned copies"
-            );
+            assert_eq!(kernel.call(&mut store, seed).unwrap(), 4 * seed + 4,
+                "old snapshots must not observe mutations to returned copies");
         }
     }
 
