@@ -63,6 +63,71 @@ fn raster_constant_divisor_guards_normalize_but_real_traps_remain() {
 }
 
 #[test]
+fn raster_enum_match_admission_documents_root_helper_gap() {
+    // Known limitation, not the desired contract: a closed enum returned by a
+    // helper loses its tag domain. The impossible invalid-tag trap survives.
+    // Root admission rejects it, whereas helper admission accepts it. Keep both
+    // cases visible until domain propagation and admission are reconciled;
+    // accepting the helper is not execution evidence or a supported workaround.
+    for at_root in [false, true] {
+        let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
+        let source = if at_root {
+            source.replace("        RasterVertex {", "        let slot = match checked_slot(Edge {low:vertex_index,high:vertex_index.wrapping_add(1)}) { Some(v) => v, None => 0 }\n        RasterVertex {")
+            .replace("if vertex_index == 1", "if slot == 1")
+        } else {
+            source.replace("if vertex_index == 1", "if resolved(vertex_index) == 1")
+        };
+        let source = source
+            .replace(
+                "if vertex_index == 2",
+                "if resolved(vertex_index.wrapping_add(1)) == 2",
+            )
+            .replace(
+                "if vertex_index == 0",
+                "if resolved(vertex_index.wrapping_add(2)) == 0",
+            );
+        let source = format!(
+            r#"{source}
+struct Edge {{low:u32,high:u32}}
+impl Copy for Edge {{}}
+fn checked_slot(_ edge:Edge)->Option<u32> {{
+    if edge.high==4 && edge.low<4 {{return Some(edge.low.wrapping_add(6))}}
+    if edge.low==0 && edge.high==1 {{Some(0)}}
+    else if edge.low==1 && edge.high==2 {{Some(1)}}
+    else if edge.low==2 && edge.high==3 {{Some(2)}}
+    else if edge.low==0 && edge.high==3 {{Some(3)}}
+    else if edge.low==0 && edge.high==2 {{Some(4)}}
+    else if edge.low==1 && edge.high==3 {{Some(5)}} else {{None}}
+}}
+fn resolved(_ n:u32)->u32 {{match checked_slot(Edge {{low:n,high:n.wrapping_add(1)}}) {{Some(v)=>v,None=>0}}}}
+"#
+        );
+        let mut db = DriverDataBase::default();
+        let url = Url::parse(&format!("file:///raster_retained_enum_{at_root}.fe")).unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let result = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None));
+        if at_root {
+            let error=result.err().expect("known root admission gap changed; update this baseline to require success after verifying enum-domain preservation").to_string();
+            assert!(
+                error.contains("vertex body") && error.contains("trap operations"),
+                "{error}"
+            );
+        } else {
+            assert!(
+                !result
+                    .expect("helper baseline must compile")
+                    .wgsl
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
 fn raster_bundles_execute_const_indexed_scoped_task_families() {
     let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
     let source = format!(
