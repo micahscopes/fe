@@ -40,6 +40,29 @@ fn compile_bundle() -> WebBundle {
 }
 
 #[test]
+fn raster_constant_divisor_guards_normalize_but_real_traps_remain() {
+    let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
+    for (name, divisor, succeeds) in [("constant", "3", true), ("dynamic", "vertex_index", false)] {
+        let source = source.replace("if vertex_index ==", &format!("if vertex_index % {divisor} =="));
+        let mut db = DriverDataBase::default();
+        let url = Url::parse(&format!("file:///raster_divisor_{name}.fe")).unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let result = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None));
+        if succeeds {
+            let bundle = result.expect("statically nonzero divisor must not retain a dead trap");
+            assert!(!bundle.wgsl.is_empty());
+        } else {
+            let error = result.err().expect("possible zero divisor must still fail closed").to_string();
+            assert!(error.contains("trap") || error.contains("nonzero"), "{error}");
+        }
+    }
+}
+
+#[test]
 fn raster_bundles_execute_const_indexed_scoped_task_families() {
     let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
     let source = format!(

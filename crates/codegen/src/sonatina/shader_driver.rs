@@ -1353,7 +1353,10 @@ fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
     // Full inlining and instruction splicing stay disabled here: this pass
     // exposes the callable graph without duplicating any substantive work.
     let functions = module.funcs();
-    run_function_passes_on(module, &functions, &[Pass::CfgCleanup]);
+    // Eligibility runs before rooted inlining. Fold constant safety guards
+    // first, so an impossible divide-by-zero edge is not mistaken for a real
+    // raster trap. SCCP preserves guards whose condition is not provably false.
+    run_function_passes_on(module, &functions, &[Pass::Sccp, Pass::CfgCleanup]);
     Inliner::new(InlinerConfig {
         enable_single_block_splice: false,
         enable_full_inliner: false,
