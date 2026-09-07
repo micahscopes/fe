@@ -167,7 +167,7 @@ pub(crate) fn behavior_is_scoped_task(
         .any(|attrs| attrs.is_actor_scoped_task(db))
 }
 
-fn scoped_task_family_count(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>)
+pub(crate) fn scoped_task_family_count(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>)
     -> Result<Option<u32>, ResidentActorError>
 {
     for role in behavior.actor_roles(db).data(db) {
@@ -201,7 +201,7 @@ fn scoped_task_family_count(db: &DriverDataBase, behavior: hir::hir_def::Func<'_
     Ok(None)
 }
 
-fn family_instances<'db>(db: &'db DriverDataBase, top_mod: TopLevelMod<'db>,
+pub(crate) fn family_instances<'db>(db: &'db DriverDataBase, top_mod: TopLevelMod<'db>,
     families: &[ScopedTaskFamily]) -> Result<Vec<SemanticInstance<'db>>, ResidentActorError>
 {
     let mut instances = Vec::new();

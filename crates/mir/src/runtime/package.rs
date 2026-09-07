@@ -617,6 +617,18 @@ pub fn build_wasm_runtime_package_for_entries_with_internal_instances<'db>(
     entry_names: &[String],
     instances: &[SemanticInstance<'db>],
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    build_wasm_runtime_package_for_entries_with_internal_roots(db, top_mod, entry_names, &[], instances)
+}
+
+/// Compose ordinary policy roots with exact const-specialized task roots.
+/// Neither internal root kind changes the named-entry export policy.
+pub fn build_wasm_runtime_package_for_entries_with_internal_roots<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    entry_names: &[String],
+    funcs: &[Func<'db>],
+    instances: &[SemanticInstance<'db>],
+) -> Result<RuntimePackage<'db>, LowerError> {
     let mut names = FxHashSet::default();
     if entry_names.iter().any(|name| !names.insert(name)) {
         return Err(LowerError::Unsupported("duplicate named Wasm entry".to_owned()));
@@ -627,10 +639,17 @@ pub fn build_wasm_runtime_package_for_entries_with_internal_instances<'db>(
             return Err(LowerError::Unsupported("duplicate specialized Wasm root".to_owned()));
         }
     }
-    if entry_names.is_empty() && instances.is_empty() {
+    let mut functions = FxHashSet::default();
+    for func in funcs {
+        if !functions.insert(*func) || instances.iter().any(|instance|
+            instance.key(db).owner(db) == BodyOwner::Func(*func)) {
+            return Err(LowerError::Unsupported("duplicate internal Wasm root".to_owned()));
+        }
+    }
+    if entry_names.is_empty() && funcs.is_empty() && instances.is_empty() {
         return Err(LowerError::Unsupported("requested Wasm root set must not be empty".to_owned()));
     }
-    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names), &[], instances)
+    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names), funcs, instances)
 }
 
 fn build_wasm_runtime_package_impl<'db>(

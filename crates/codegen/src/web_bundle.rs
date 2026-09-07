@@ -19,7 +19,7 @@ use common::InputDb;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     semantic::{
-        SemConstId, SemConstScalar, SemConstValue, ViewParam,
+        SemConstId, SemConstScalar, SemConstValue, SemanticInstance, ViewParam,
         ctfe::{CtfeError, eval_body_owner_const},
         project_view_surface,
     },
@@ -51,7 +51,8 @@ use crate::browser_actor_runtime::{
     BROWSER_ACTOR_RUNTIME_FILES, BROWSER_ACTOR_RUNTIME_PROTOCOL, BROWSER_ACTOR_RUNTIME_VERSION,
 };
 use crate::resident_actor::{
-    StructuredChildActorArtifact, behavior_is_scoped_task, compile_scoped_task_support,
+    ScopedTaskFamily, StructuredChildActorArtifact, behavior_is_scoped_task,
+    compile_scoped_task_support, family_instances, scoped_task_family_count,
 };
 use crate::sonatina::{
     WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_interface,
@@ -2624,14 +2625,14 @@ fn gpu_actor_name_for_entry(
 /// non-resource state snapshot as the render transition. Resource-bearing
 /// self tasks stay fail-closed until the Wasm host can preserve opaque GPU
 /// authorities across the task boundary.
-fn render_actor_scoped_task_entries(
-    db: &DriverDataBase,
-    top_mod: TopLevelMod<'_>,
+fn render_actor_scoped_task_entries<'db>(
+    db: &'db DriverDataBase,
+    top_mod: TopLevelMod<'db>,
     source_entry: &str,
     resource_field_indices: &[u32],
-) -> Result<Vec<String>, WebBundleError> {
+) -> Result<(Vec<String>, Vec<SemanticInstance<'db>>), WebBundleError> {
     let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let actors = semantic_actors(db, top_mod);
     let actor = actors
@@ -2651,6 +2652,7 @@ fn render_actor_scoped_task_entries(
     let state_fields = actor.state.hir_fields(db).data(db);
     let assumptions = PredicateListId::empty_list(db);
     let mut entries = Vec::new();
+    let mut families = Vec::new();
     for task in actor
         .behaviors
         .iter()
@@ -2667,8 +2669,12 @@ fn render_actor_scoped_task_entries(
                 ))
             })?;
         let task_args = task.arg_tys(db);
+        let family = scoped_task_family_count(db, task)
+            .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
         if task_args.is_empty() {
-            entries.push(name);
+            if let Some(count) = family {
+                families.push(ScopedTaskFamily { source_entry: name, count });
+            } else { entries.push(name); }
             continue;
         }
         if !resource_field_indices.is_empty() {
@@ -2705,9 +2711,13 @@ fn render_actor_scoped_task_entries(
                 )));
             }
         }
-        entries.push(name);
+        if let Some(count) = family {
+            families.push(ScopedTaskFamily { source_entry: name, count });
+        } else { entries.push(name); }
     }
-    Ok(entries)
+    let instances = family_instances(db, top_mod, &families)
+        .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
+    Ok((entries, instances))
 }
 
 /// The terminal entry and mode derived from a module's unique GPU-program actor,
@@ -7476,6 +7486,12 @@ impl WebBundle {
             &options.source_entry,
             &resource_field_indices,
         )?;
+        let (scoped_task_entries, scoped_task_instances) = render_actor_scoped_task_entries(
+            db, top_mod, &options.source_entry, &resource_field_indices,
+        )?;
+        let scoped_task_count = scoped_task_entries.len() + scoped_task_instances.len();
+        let mut scoped_tasks = Vec::new();
+        let mut structured_children = Vec::new();
         let (wasm, control, has_fe_schedule) = if control_export.is_some()
             || initializer.is_some()
             || quality_policy.is_some()
@@ -7483,6 +7499,7 @@ impl WebBundle {
             || readback.is_some()
             || !pass_activation_policies.is_empty()
             || !pass_preparation_policies.is_empty()
+            || scoped_task_count != 0
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -7529,6 +7546,7 @@ impl WebBundle {
                 )));
             }
             let mut control_entries = Vec::new();
+            control_entries.extend(scoped_task_entries);
             if let Some(control_export) = control_export.as_deref() {
                 control_entries.push(control_export.to_owned());
             }
@@ -7563,11 +7581,12 @@ impl WebBundle {
                     started.elapsed().as_millis(),
                 );
             }
-            let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
+            let control_package = mir::build_wasm_runtime_package_for_entries_with_internal_roots(
                 db,
                 top_mod,
                 &control_entries,
                 &internal_funcs,
+                &scoped_task_instances,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
             if trace {
@@ -7577,6 +7596,14 @@ impl WebBundle {
                 );
             }
             let mut wasm_options = WasmCompileOptions::default().with_optimization();
+            if scoped_task_count != 0 {
+                (scoped_tasks, structured_children) = compile_scoped_task_support(
+                    db, top_mod, control_package, scoped_task_count, true,
+                ).map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?;
+                wasm_options = wasm_options
+                    .with_canonical_stack_memory(["fe_cabi_post_return"])
+                    .with_canonical_scoped_host_borrows();
+            }
             if let Some(contract) = typed_transition.as_ref() {
                 wasm_options = with_typed_surface_export(
                     wasm_options,
@@ -7759,8 +7786,8 @@ impl WebBundle {
             manifest,
             interface_js: None,
             interface_d_ts: None,
-            scoped_tasks: Vec::new(),
-            structured_children: Vec::new(),
+            scoped_tasks,
+            structured_children,
             resource_assets,
         })
     }
@@ -7823,7 +7850,7 @@ impl WebBundle {
             &options.source_entry,
         )?;
         let initializer = surface_initializer_contract(db, top_mod, &options.source_entry, &[])?;
-        let scoped_task_entries =
+        let (scoped_task_entries, scoped_task_instances) =
             render_actor_scoped_task_entries(db, top_mod, &options.source_entry, &[])?;
         // Canonical actor messages and the surface-control transition are two
         // different roles. Explicitly placed/capability-bearing Fe functions
@@ -7949,18 +7976,20 @@ impl WebBundle {
             .chain(quality_policy.as_ref().map(|policy| policy.func))
             .chain(recovery_policy.as_ref().map(|policy| policy.func))
             .collect::<Vec<_>>();
-        let wasm_package = mir::build_wasm_runtime_package_for_entries_with_internal_funcs(
+        let wasm_package = mir::build_wasm_runtime_package_for_entries_with_internal_roots(
             db,
             top_mod,
             &wasm_entries,
             &internal_funcs,
+            &scoped_task_instances,
         )
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
-        let (scoped_tasks, structured_children) = if scoped_task_entries.is_empty() {
+        let scoped_task_count = scoped_task_entries.len() + scoped_task_instances.len();
+        let (scoped_tasks, structured_children) = if scoped_task_count == 0 {
             (Vec::new(), Vec::new())
         } else {
-            compile_scoped_task_support(db, top_mod, wasm_package, scoped_task_entries.len(), true)
+            compile_scoped_task_support(db, top_mod, wasm_package, scoped_task_count, true)
                 .map_err(|error| WebBundleError::EntryDerivation(error.to_string()))?
         };
 

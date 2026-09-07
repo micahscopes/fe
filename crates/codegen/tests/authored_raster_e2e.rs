@@ -39,6 +39,94 @@ fn compile_bundle() -> WebBundle {
     bundle
 }
 
+#[test]
+fn raster_bundles_execute_const_indexed_scoped_task_families() {
+    let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
+    let source = format!(
+        "{}\n{}",
+        r#"
+use core::actor::{ScopedTask, ScopedTaskFamily}
+use core::pending::{Suspend, TaskOutcome, Timer}
+use std::host::{HostTimer, Resumable, sleep}
+use std::wasm::WasmBackend
+"#,
+        source.replace(
+            "actor TypedMesh uses (GpuProgram<WebGpuBackend>) {",
+            r#"
+actor TypedMesh uses (GpuProgram<WebGpuBackend>) {
+    fn observe(self) -> u32 uses (ScopedTask) {
+        with (Timer<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
+            match sleep(0) {
+                TaskOutcome::Success(_) => if self.tint > 0.0 { 13 } else { 99 },
+                _ => 99,
+            }
+        }
+    }
+    fn heartbeat<const I: u32>() -> u32 uses (ScopedTaskFamily<2>) {
+        with (Timer<WasmBackend> = HostTimer {}, Suspend<WasmBackend, u32> = Resumable {}) {
+            match sleep(0) {
+                TaskOutcome::Success(_) => I + 11,
+                _ => 99,
+            }
+        }
+    }
+"#
+        )
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///raster_scoped_families.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let bundle = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None)).unwrap();
+    assert_eq!(
+        bundle.scoped_tasks.len(),
+        3,
+        "raster compilation must not discard Fe tasks"
+    );
+    assert_eq!(bundle.manifest.passes.len(), 1);
+    assert_ne!(
+        bundle.scoped_tasks[0].start_export,
+        bundle.scoped_tasks[1].start_export
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let site = directory.path().join("site");
+    bundle.write_atomic(&site).unwrap();
+    let wasm = bundle
+        .manifest
+        .artifacts
+        .wasm
+        .as_ref()
+        .expect("task Wasm artifact");
+    let script = format!(
+        r#"
+import {{createMaterializedTaskRegistry}} from './tasks/tasks.js';
+import {{createHostCompletionBroker}} from './tasks/host-completion.js';
+const broker=createHostCompletionBroker();
+const {{instance}}=await WebAssembly.instantiate(await Bun.file({wasm:?}).arrayBuffer(),broker.imports);
+const tasks=Object.values(createMaterializedTaskRegistry(instance.exports));
+if(tasks.filter(task=>task.inputWidth===1).length!==1)throw Error('missing state-taking task');
+const results=await Promise.all(tasks.map(task=>broker.run(task,task.inputWidth ? task.liftInput([0.4]) : [])));
+if(JSON.stringify(results.map(r=>r[0]).sort())!==JSON.stringify([11,12,13]))throw Error(JSON.stringify(results));
+if(broker.activeCount()!==0)throw Error('leaked task operations');
+"#
+    );
+    std::fs::write(site.join("run.mjs"), script).unwrap();
+    let result = std::process::Command::new("bun")
+        .arg("run.mjs")
+        .current_dir(&site)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
     let instance = wgpu::Instance::default();
