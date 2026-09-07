@@ -561,6 +561,47 @@ fn generic_copy_array_element_is_a_value_snapshot() {
     assert_eq!(wide_butterfly.call(&mut store, ()).unwrap(), (23, 17));
 }
 
+#[test]
+fn associated_record_array_materializes_in_its_generic_owner() {
+    let source = r#"
+use core::option::Option
+trait Model { type Point: Copy }
+struct Point { x:f32, y:f32 }
+impl Copy for Point {}
+struct Plane {}
+impl Model for Plane {type Point=Point}
+struct Control<M:Model> { point:M::Point, weight:f32 }
+impl<M:Model> Copy for Control<M> {}
+fn controls<M:Model,const N:usize>(_ point:M::Point,_ valid:bool)->Option<[Control<M>;N]> {
+    if !valid {return Option::None}
+    let mut result=[Control<M> {point:point,weight:0.0};N]
+    let mut i:usize=0
+    while i<N {
+        result[i]=Control<M> {point:point,weight:2.0}
+        i=i+1
+    }
+    Option::Some(result)
+}
+pub fn sample(_ x:f32,_ index:usize,_ valid:bool)->f32 {
+    match controls<Plane,4>(Point {x:x,y:7.0},valid) {
+        Option::None=>-1.0,
+        Option::Some(values)=>values[index].point.x+values[index].point.y+values[index].weight,
+    }
+}
+"#;
+    let bytes=compile(source,"wasm_associated_record_array");
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,bytes).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let sample=instance.get_typed_func::<(f32,i32,i32),f32>(&mut store,"sample").unwrap();
+    for index in 0..4 {
+        assert_eq!(sample.call(&mut store,(3.0,index,1)).unwrap(),12.0);
+        assert_eq!(sample.call(&mut store,(99.0,index,0)).unwrap(),-1.0);
+    }
+    assert!(sample.call(&mut store,(3.0,4,1)).is_err());
+}
+
 fn assert_pick_executes_and_traps(bytes: Vec<u8>) {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).unwrap();

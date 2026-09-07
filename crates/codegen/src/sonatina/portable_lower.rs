@@ -11734,7 +11734,7 @@ where
                 "wasm target: aggregate copy source and destination layouts differ: {source_class:?} / {destination_class:?}"
             )));
         }
-        if !self.module.aggregate_is_memory_lowerable(&source_class) {
+        if !self.local_is_memory_lowerable(source, &source_class) {
             return Err(LowerError::Unsupported(format!(
                 "wasm target: aggregate copy source {source:?} has non-memory-lowerable leaves"
             )));
@@ -12056,6 +12056,16 @@ where
         Ok(pointer)
     }
 
+    /// Associated fields need the owning monomorphization, not merely their
+    /// retained source spelling, for the existing memory-admission rules.
+    fn local_is_memory_lowerable(&self, local: RLocalId, class: &RuntimeClass<'db>) -> bool {
+        self.body.local(local).is_some_and(|source| {
+            self.module.aggregate_is_semantically_memory_lowerable_in(
+                Some(self.body.owner), source.semantic_ty, class,
+            )
+        })
+    }
+
     fn lower_materialize_to_object(&mut self, src: RLocalId) -> Result<ValueId, LowerError> {
         let class = self.body.value_class(src).cloned().ok_or_else(|| {
             LowerError::Internal(format!(
@@ -12067,7 +12077,7 @@ where
                 "wasm target: materialization source {src:?} is not an aggregate value"
             )));
         };
-        if !self.module.aggregate_is_memory_lowerable(&class) {
+        if !self.local_is_memory_lowerable(src, &class) {
             return Err(LowerError::Unsupported(format!(
                 "wasm target: materialization source {src:?} has non-scalar memory leaves"
             )));
