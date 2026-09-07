@@ -1093,14 +1093,20 @@ export function surfaceParamPlan(param, protocolVersion) {
   const source = param.source;
   const presentation = param.presentation;
   if (!presentation ||
-      !["initial", "surface_width", "surface_height"].includes(source) ||
-      !["hidden", "range", "checkbox", "select"].includes(presentation.widget) ||
+      !["initial", "surface_width", "surface_height", "state"].includes(source) ||
+      !["hidden", "range", "checkbox", "select", "output"].includes(presentation.widget) ||
       !["linear", "logarithmic"].includes(presentation.scale) ||
       !["scalar", "integer", "toggle"].includes(presentation.readout)) {
     throw new Error("fe render runtime: protocol v9 param is missing a supported Fe presentation plan");
   }
   if ((presentation.widget === "hidden") !== (param.visible === false)) {
     throw new Error("fe render runtime: Fe param visibility disagrees with its presentation widget");
+  }
+  if (source === "state" || presentation.widget === "output") {
+    if (source !== "state" || presentation.widget !== "output" ||
+        presentation.scale !== "linear" || param.init != null) {
+      throw new Error("fe render runtime: readouts must observe actor state without initializing it");
+    }
   }
   if (presentation.widget === "checkbox" &&
       (presentation.scale !== "linear" || presentation.readout !== "toggle")) {
@@ -1585,7 +1591,7 @@ const SHADOW_CSS = `
 .panel { display: grid; gap: 12px; }
 .control { display: grid; gap: 4px; }
 .control label { display: flex; justify-content: space-between; color: #96a0b5; }
-.control b { color: #cfd6e4; font-weight: 600; }
+.control b, .control output { color: #cfd6e4; font-weight: 600; }
 .control input[type=range] { width: 100%; accent-color: #5b8cff; }
 .control select { width: 100%; color: #cfd6e4; background: #151923; border: 1px solid #333a4b;
   border-radius: 5px; padding: 5px 7px; font: inherit; }
@@ -4061,6 +4067,10 @@ export class FeSurfaceElement extends HTMLElement {
    * declaration-order index and untouched proposed value. Older, untyped
    * bundles retain their compatibility replacement path. */
   _applyParamEdit(index, value, paramIndex = index) {
+    const declaration = this._surface?.params?.[paramIndex];
+    if (declaration && surfaceParamPlan(declaration, this._manifest?.protocol_version ?? 8).source === "state") {
+      throw new TypeError(`fe-surface: \`${declaration.name}\` is an actor-owned read-only value`);
+    }
     if (this._surfaceTransitionKernel) {
       if (
         this._surfaceTransitionSchedule === "resident" &&
@@ -4558,7 +4568,7 @@ export class FeSurfaceElement extends HTMLElement {
       const doc = member.doc || param.doc;
       if (doc) row.title = doc;
       const label = document.createElement("label");
-      const value = document.createElement("b");
+      const value = document.createElement(presentation.widget === "output" ? "output" : "b");
       const isInt = presentation.readout === "integer";
       const isToggle = presentation.readout === "toggle";
       const optionLabels = presentation.options ?? [];
@@ -4588,6 +4598,13 @@ export class FeSurfaceElement extends HTMLElement {
       const name = document.createElement("span");
       name.textContent = param.name;
       label.append(name, value);
+      if (presentation.widget === "output") {
+        value.setAttribute("aria-label", param.name);
+        row.append(label);
+        this._panel.append(row);
+        this._controlRows.push({ index, input: null, value, format, encode, isToggle });
+        return;
+      }
       const input = document.createElement(
         presentation.widget === "select" ? "select" : "input",
       );
@@ -4631,6 +4648,7 @@ export class FeSurfaceElement extends HTMLElement {
   _refreshControlValues() {
     for (const row of this._controlRows) {
       row.value.textContent = row.format(this._uniforms[row.index]);
+      if (!row.input) continue;
       if (row.isToggle) {
         row.input.checked = this._uniforms[row.index] >= 0.5;
       } else {

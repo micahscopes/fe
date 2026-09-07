@@ -53,6 +53,43 @@ test("continuous controls preserve authored values without an invented step latt
 const { GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
+test("actor readouts render, refresh, and reject both direct and scripted edits", () => {
+  const previousDocument = globalThis.document;
+  const element = tag => ({ tag, children: [], append(...children) { this.children.push(...children); }, setAttribute() {} });
+  globalThis.document = { createElement: element };
+  try {
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._updateBadge = () => {};
+    surface.getAttribute = () => null;
+    surface._panel = element("div");
+    surface._manifest = { protocol_version: 10 };
+    const param = { name: "resolved", source: "state", visible: true,
+      presentation: { widget: "output", scale: "linear", readout: "integer", options: [] } };
+    surface._surface = { params: [param] };
+    surface._members = [{ name: "resolved" }];
+    surface._memberIndexByName = new Map([["resolved", 0]]);
+    surface._surfaceParamIndexByName = new Map([["resolved", 0]]);
+    surface._uniforms = [32];
+    surface._fsm = "ready";
+    surface._renderControls();
+    const row = surface._controlRows[0];
+    assert.equal(row.input, null);
+    assert.equal(row.value.tag, "output");
+    assert.equal(row.value.textContent, "32");
+    surface._uniforms = [64];
+    surface._refreshControlValues();
+    assert.equal(row.value.textContent, "64");
+    assert.throws(() => surface._applyParamEdit(0, 999, 0), /read-only/);
+    assert.throws(() => { surface.params.resolved = 999; }, /read-only/);
+    assert.deepEqual(surface._uniforms, [64]);
+    assert.throws(() => surfaceParamPlan({ ...param, init: 0 }, 10), /without initializing/);
+    assert.throws(() => surfaceParamPlan({ ...param, source: "initial" }, 10), /actor state/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("declarative upgrade boots once after all initial attribute reactions", async () => {
   for (const manual of [false, true]) {
     const surface = Object.create(FeSurfaceElement.prototype);

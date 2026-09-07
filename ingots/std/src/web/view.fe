@@ -243,7 +243,7 @@ pub enum ParamKind {
     Log,
     /// An integer slider over `[min, max]`, whole steps.
     Int,
-    /// A projected-but-not-user-visible constant.
+    /// A value untouched by input events; presentation may hide or display it.
     Fixed,
     /// Bound to the live canvas width in pixels (replaces `const RESOLUTION`).
     ExtentX,
@@ -262,6 +262,8 @@ pub enum ParamValueSource {
     Initial,
     SurfaceWidth,
     SurfaceHeight,
+    /// Owned by the initialized Fe actor, never a proposed host edit.
+    State,
 }
 
 /// Browser-neutral control shape requested by the Fe surface declaration.
@@ -271,6 +273,8 @@ pub enum ParamWidget {
     Checkbox,
     /// A finite integral choice, realized by browser hosts as a native select.
     Select,
+    /// An actor-owned observation, realized as a native output element.
+    Output,
 }
 
 /// Mapping between a range widget's normalized visual axis and its semantic
@@ -551,6 +555,18 @@ impl Param {
     /// control.
     pub const fn fixed(_ value: f32) -> Param {
         Param::binding(ParamKind::Fixed, value, true, ParamValueSource::Initial)
+    }
+
+    /// Display an existing actor state leaf without inventing an initial value
+    /// or an input binding. The actor must supply InitialState. Append readouts
+    /// after input declarations when using a field-prefix input derive.
+    pub const fn readout(_ format: ParamReadout) -> Param {
+        let mut result=Param::binding(ParamKind::Fixed,0.0,false,ParamValueSource::State)
+        result.presentation=ParamPresentation {
+            widget:ParamWidget::Output,scale:ParamScale::Linear,readout:format,
+            visible:true,options:ChoiceOptions::empty(),
+        }
+        result
     }
 
     /// Bound to the live canvas width in pixels. The runtime writes the actual

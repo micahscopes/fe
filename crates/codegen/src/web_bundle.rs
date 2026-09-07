@@ -5782,6 +5782,11 @@ fn project_surface(
     };
     let has_initializer =
         surface_initializer_contract(db, top_mod, source_entry, resource_field_indices)?.is_some();
+    if !has_initializer && view.params.iter().any(|param| param.source == "state") {
+        return Err(WebBundleError::SurfaceProjection(
+            "actor-owned readouts require an InitialState behavior".into(),
+        ));
+    }
     if (!has_initializer
         && (view.params.len() != members.len() || view.params.len() != field_names.len()))
         || view.params.len() > members.len()
@@ -5856,6 +5861,17 @@ fn web_surface_param(
         }
     }
     let options = &view_param.presentation.options;
+    if view_param.source == "state" || view_param.presentation.widget == "output" {
+        if view_param.source != "state" || view_param.presentation.widget != "output"
+            || view_param.kind != "fixed" || view_param.initialized || view_param.bounded
+            || view_param.presentation.scale != "linear"
+        {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}`: readouts require actor-owned, non-initializing fixed values with linear output presentation",
+                view_param.name,
+            )));
+        }
+    }
     if view_param.presentation.widget == "select" {
         let expected_max = options.len().checked_sub(1).ok_or_else(|| {
             WebBundleError::SurfaceProjection(format!(

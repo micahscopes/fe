@@ -1,0 +1,10 @@
+use std::web::view::{Param,ParamReadout,Surface,Extent}
+use std::webgpu::{GpuProgram,WebGpuBackend,FragmentSurface}
+struct Params {resolved:Param}
+actor UnownedSurface uses (GpuProgram<WebGpuBackend>) {
+    resolved:u32,
+    const fn view()->Surface<Params> {
+        Surface {extent:Extent::square(32),params:Params {resolved:Param::readout(ParamReadout::Integer)}}
+    }
+    fn shade(self,x:i32,y:i32)->i32 uses (FragmentSurface) {-1}
+}
