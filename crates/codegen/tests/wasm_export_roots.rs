@@ -103,6 +103,30 @@ pub fn read(_ input: Record<Wide>) -> u32 { input.tag }
     assert!(error.contains("unsupported"), "genuine u256 must fail closed: {error}");
 }
 
+#[test]
+fn wasm_local_counter_borrow_coexists_with_local_array() {
+    let source = r#"
+pub fn sumdown(_ limit: u32) -> u32 {
+    let mut values: [u32; 8] = [0; 8]
+    let mut remaining = limit
+    while remaining > 0 {
+        remaining -= 1
+        values[0] = values[0] + remaining
+    }
+    values[0]
+}
+"#;
+    let wasm = compile_to_wasm("local_counter_and_array.fe", source);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let sumdown = instance.get_typed_func::<i32, i32>(&mut store, "sumdown").unwrap();
+    for limit in 0..32 {
+        assert_eq!(sumdown.call(&mut store, limit).unwrap(), limit * (limit - 1) / 2);
+    }
+}
+
 /// THE R3.4c ENABLER: a module whose only functions are parameter-carrying
 /// exports still yields a nonempty, executable runtime package.
 #[test]

@@ -6320,6 +6320,7 @@ where
         }
 
         for (instance, body) in &self.prepared_bodies {
+            let materialized_scalars = address_taken_scalar_slots(body);
             for block in &body.blocks {
                 for stmt in &block.stmts {
                     if let RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } = stmt
@@ -6349,7 +6350,15 @@ where
                                 .push(destination);
                         }
                         RExpr::AddrOf { place } => {
-                            if let Some(source) = Self::arena_owned_place_source(body, place) {
+                            if matches!(place.root, PlaceRoot::Slot(local)
+                                if place.path.is_empty() && materialized_scalars.contains(&local))
+                            {
+                                // The prologue allocates address-taken scalar slots
+                                // in the canonical arena. Seed the ADDRESS only:
+                                // the scalar's contents may still be an arbitrary
+                                // integer and must not acquire pointer provenance.
+                                seeds.push(destination);
+                            } else if let Some(source) = Self::arena_owned_place_source(body, place) {
                                 local_dependents
                                     .entry((*instance, source))
                                     .or_default()
@@ -13062,8 +13071,8 @@ where
     ) -> Result<ValueId, LowerError> {
         if matches!(class.repr, ScalarRepr::Float { .. }) {
             let is = self.inst_set();
-            let lhs = self.local_value(lhs)?;
-            let rhs = self.local_value(rhs)?;
+            let lhs = self.local_read_value(lhs)?;
+            let rhs = self.local_read_value(rhs)?;
             return Ok(match op {
                 IntrinsicArithBinOp::Add => self.fb.insert_inst(Fadd::new(is, lhs, rhs), Type::F32),
                 IntrinsicArithBinOp::Sub => self.fb.insert_inst(Fsub::new(is, lhs, rhs), Type::F32),
@@ -13088,8 +13097,8 @@ where
         if checked
             && matches!(op, IntrinsicArithBinOp::Add | IntrinsicArithBinOp::Sub | IntrinsicArithBinOp::Mul)
         {
-            let lhs = self.local_value(lhs)?;
-            let rhs = self.local_value(rhs)?;
+            let lhs = self.local_read_value(lhs)?;
+            let rhs = self.local_read_value(rhs)?;
             let [value, overflow] = match (op, class.is_signed_int()) {
                 (IntrinsicArithBinOp::Add, false) => self.fb.insert_uaddo(lhs, rhs),
                 (IntrinsicArithBinOp::Sub, false) => self.fb.insert_usubo(lhs, rhs),
@@ -13103,8 +13112,8 @@ where
             return Ok(value);
         }
         let is = self.inst_set();
-        let lhs = self.local_value(lhs)?;
-        let rhs = self.local_value(rhs)?;
+        let lhs = self.local_read_value(lhs)?;
+        let rhs = self.local_read_value(rhs)?;
         if !class.is_signed_int()
             && matches!(op, IntrinsicArithBinOp::Div | IntrinsicArithBinOp::Rem)
         {
