@@ -637,6 +637,61 @@ function writeGpuBuffer(queue, buffer, offset, bytes) {
   generatedWebGpuOperations.bufferWrite(queue, buffer, offset, bytes);
 }
 
+/** Realize one Fe-selected publication into its already resolved logical
+ * resource. This is transport, not selection or packing policy. No source
+ * view survives this synchronous call. Each instance belongs to one resource
+ * owner; replacing the physical buffer (including device recovery) invalidates
+ * its submission receipt. GPU validation/device loss remains the owner's
+ * responsibility: a queued write is not evidence of GPU execution. */
+export class BufferPublicationWriter {
+  #receipts = new WeakMap();
+
+  write(queue, buffer, memory, publication) {
+    if (!(memory instanceof WebAssembly.Memory)) {
+      throw new TypeError("buffer publication requires its owning Wasm memory");
+    }
+    const { epoch, revision, sourceByteOffset, targetByteOffset, byteLength } = publication;
+    for (const [name, value] of Object.entries({ epoch, revision, sourceByteOffset, targetByteOffset, byteLength })) {
+      if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+        throw new RangeError(`buffer publication ${name} is not a u32`);
+      }
+    }
+    if (targetByteOffset % 4 || byteLength % 4) {
+      throw new RangeError("buffer publication destination and length must be four-byte aligned");
+    }
+    if (sourceByteOffset + byteLength > memory.buffer.byteLength ||
+        !Number.isSafeInteger(buffer.size) || targetByteOffset + byteLength > buffer.size) {
+      throw new RangeError("buffer publication exceeds source or destination bounds");
+    }
+    const previous = this.#receipts.get(buffer);
+    if (previous) {
+      if (previous.memory !== memory || previous.queue !== queue) {
+        throw new Error("buffer publication changed resource ownership");
+      }
+      if (epoch < previous.epoch || (epoch === previous.epoch && revision < previous.revision)) {
+        throw new Error("stale buffer publication");
+      }
+      if (epoch === previous.epoch && revision === previous.revision) {
+        if (sourceByteOffset !== previous.sourceByteOffset || targetByteOffset !== previous.targetByteOffset ||
+            byteLength !== previous.byteLength) {
+          throw new Error("buffer publication changed range without a new revision");
+        }
+        return false;
+      }
+    }
+    // Construct the view only now: memory.grow may have detached an earlier
+    // buffer. GPUQueue.writeBuffer copies its source during this call.
+    if (byteLength !== 0) {
+      writeGpuBuffer(queue, buffer, targetByteOffset,
+        new Uint8Array(memory.buffer, sourceByteOffset, byteLength));
+    }
+    this.#receipts.set(buffer, {
+      queue, memory, epoch, revision, sourceByteOffset, targetByteOffset, byteLength,
+    });
+    return true;
+  }
+}
+
 function drawGpu(renderPass, vertexCount, instanceCount) {
   if (generatedWebGpuOperations === undefined) {
     throw new Error("fe render runtime: generated WebGPU operations are unavailable");

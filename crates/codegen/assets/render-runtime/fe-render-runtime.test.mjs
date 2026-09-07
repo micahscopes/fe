@@ -8,6 +8,7 @@ import test from "node:test";
 globalThis.HTMLElement = class HTMLElement {};
 globalThis.customElements = { define() {} };
 const { rasterPlan, rasterColorTarget, rasterPrimitive, rasterMultisample } = await import("./fe-render-runtime.js");
+const { BufferPublicationWriter } = await import("./fe-render-runtime.js");
 
 const { FeSurfaceElement, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
@@ -180,6 +181,46 @@ installGeneratedWebGpuOperations({
     pass.drawIndirect(buffer, offset),
   computeDispatchIndirect: (pass, buffer, offset) =>
     pass.dispatchWorkgroupsIndirect(buffer, offset),
+});
+
+test("buffer publications use fresh Wasm views and suppress only identical submitted revisions", () => {
+  const writer = new BufferPublicationWriter();
+  const memory = new WebAssembly.Memory({initial:1});
+  const buffer = {size:32}, calls = [];
+  const queue = {writeBuffer:(target,offset,bytes)=>calls.push({target,offset,bytes:[...bytes]})};
+  const p = {epoch:1,revision:1,sourceByteOffset:4,targetByteOffset:8,byteLength:4};
+  new Uint8Array(memory.buffer,4,4).set([1,2,3,4]);
+  assert.equal(writer.write(queue,buffer,memory,p),true);
+  assert.equal(writer.write(queue,buffer,memory,p),false);
+  memory.grow(1);
+  new Uint8Array(memory.buffer,4,4).set([5,6,7,8]);
+  assert.equal(writer.write(queue,buffer,memory,{...p,revision:2}),true);
+  assert.deepEqual(calls.map(c=>c.bytes),[[1,2,3,4],[5,6,7,8]]);
+  assert.ok(calls.every(c=>c.target===buffer&&c.offset===8));
+  assert.throws(()=>writer.write(queue,buffer,memory,p),/stale/);
+  assert.throws(()=>writer.write(queue,buffer,memory,{...p,revision:2,byteLength:8}),/without a new revision/);
+  // A replacement device allocation must receive the same logical revision.
+  assert.equal(writer.write(queue,{size:32},memory,{...p,revision:2}),true);
+  assert.equal(writer.write(queue,buffer,memory,{...p,epoch:2,revision:0}),true);
+});
+
+test("buffer publication validation and synchronous write failures publish no receipt", () => {
+  const writer = new BufferPublicationWriter();
+  const memory = new WebAssembly.Memory({initial:1}), buffer = {size:16};
+  let failed=true,count=0;
+  const queue={writeBuffer:()=>{count++;if(failed)throw Error('write failed');}};
+  const p={epoch:0,revision:0,sourceByteOffset:0,targetByteOffset:0,byteLength:4};
+  for(const patch of [{epoch:-1},{revision:NaN},{sourceByteOffset:65536},{byteLength:3},
+    {targetByteOffset:2},{targetByteOffset:16},{byteLength:0x100000000}]) {
+    assert.throws(()=>writer.write(queue,buffer,memory,{...p,...patch}),RangeError);
+  }
+  assert.equal(count,0);
+  assert.throws(()=>writer.write(queue,buffer,memory,p),/write failed/);
+  failed=false;
+  assert.equal(writer.write(queue,buffer,memory,p),true);
+  assert.equal(count,2);
+  assert.throws(()=>writer.write(queue,buffer,new WebAssembly.Memory({initial:1}),p),/ownership/);
+  assert.throws(()=>writer.write({},buffer,memory,p),/ownership/);
 });
 
 test("Fe primitive plans preserve all native topologies and winding per pass", () => {
