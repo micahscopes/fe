@@ -3,6 +3,30 @@
 September 7, 2026. Reproduced on mb2 `8b9a43050` with Sonatina `8cdf4e9`.
 This is a diagnosis and regression baseline, not a fix or a supported workaround.
 
+## Correction candidate
+
+Sonatina `9ff018641e5a9385010bd9a5684a9762663d07c9` adds conservative integer
+return summaries to the existing range analysis. Fe invokes this before raster
+helper admission. Unknown/external results remain unrestricted; calls and their
+effects are retained. Four bounded summary rounds limit optional precision work.
+
+The updated test is
+`raster_enum_match_preserves_closed_return_domain_in_root_and_helper` and requires
+both placements to compile. It passed in 7.48 seconds. Both post-lowering
+captures under `/laboratory/quilting/scratch/composite-enum-fixed-ir-20260907/`
+have zero `unreachable` instructions while retaining calls to `checked_slot`.
+Sonatina's selected range suite passed 28 tests, including unknown/external and
+out-of-domain results retaining their traps. These are compiler gates; the actual
+composition renderer and browser seam behavior still require verification.
+
+The full six-test authored-raster suite yielded five passes. Its native GPU
+execution gate failed to acquire an adapter (`Backends(0x0)`), not during shader
+validation or execution. No GPU-skip flag was used. Evidence:
+`/laboratory/quilting/scratch/composite-raster-suite-20260907.log`. Chrome WebGPU
+execution remains a required, separate gate.
+
+The historical baseline and reproduction below describe the pre-fix state.
+
 The Quilting composition renderer's density-map API uses a checked shared-edge
 slot (`Option<u32>`). Its vertex lowering fails with "vertex body uses
 allocation/private-memory/trap operations that have no raster-stage channel".

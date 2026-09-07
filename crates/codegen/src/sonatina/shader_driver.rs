@@ -30,6 +30,7 @@ use sonatina_codegen::optim::{
     dead_ret::{DeadRetElimConfig, run_dead_ret_elim},
     exact_func_merge::run_exact_private_func_merge,
     forwarded_ret::{ForwardedRetElimConfig, run_forwarded_ret_elim},
+    return_range::run_return_range_branch_simplify,
     inliner::{FullInlineCloneRecord, Inliner, InlinerConfig},
     run_function_passes_on,
 };
@@ -1365,6 +1366,14 @@ fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
     .run(module);
     let functions = module.funcs();
     run_function_passes_on(module, &functions, &[Pass::CfgCleanup]);
+    // Closed result domains must survive retained calls. Prove impossible
+    // branches before contextual raster admission, without cloning helpers or
+    // weakening guards on unknown/host-provided values. Four summary rounds
+    // bound optional precision work; exhausting them remains conservative.
+    let ranges = run_return_range_branch_simplify(module, 4);
+    if std::env::var_os("FE_SPIRV_INLINE_TRACE").is_some() {
+        eprintln!("fe shader return ranges: {ranges:?}");
+    }
 }
 
 fn spirv_root_expansion_counts(

@@ -63,12 +63,9 @@ fn raster_constant_divisor_guards_normalize_but_real_traps_remain() {
 }
 
 #[test]
-fn raster_enum_match_admission_documents_root_helper_gap() {
-    // Known limitation, not the desired contract: a closed enum returned by a
-    // helper loses its tag domain. The impossible invalid-tag trap survives.
-    // Root admission rejects it, whereas helper admission accepts it. Keep both
-    // cases visible until domain propagation and admission are reconciled;
-    // accepting the helper is not execution evidence or a supported workaround.
+fn raster_enum_match_preserves_closed_return_domain_in_root_and_helper() {
+    // Both placements must compile. Proved callee return bounds eliminate the
+    // invalid-tag path without requiring the author to relocate the match.
     for at_root in [false, true] {
         let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
         let source = if at_root {
@@ -110,20 +107,7 @@ fn resolved(_ n:u32)->u32 {{match checked_slot(Edge {{low:n,high:n.wrapping_add(
         let diagnostics = db.run_on_top_mod(top).format_diags(&db);
         assert!(diagnostics.is_empty(), "{diagnostics}");
         let result = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None));
-        if at_root {
-            let error=result.err().expect("known root admission gap changed; update this baseline to require success after verifying enum-domain preservation").to_string();
-            assert!(
-                error.contains("vertex body") && error.contains("trap operations"),
-                "{error}"
-            );
-        } else {
-            assert!(
-                !result
-                    .expect("helper baseline must compile")
-                    .wgsl
-                    .is_empty()
-            );
-        }
+        assert!(!result.expect("both exhaustive-match placements must compile").wgsl.is_empty());
     }
 }
 
