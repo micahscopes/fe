@@ -189,6 +189,132 @@ fn two_structured_children_fixture() -> (DriverDataBase, common::file::File) {
     (db, file)
 }
 
+#[test]
+fn tagged_instances_share_behavior_but_not_worker_identity() {
+    let source = r#"
+use core::Worker
+use core::actor::{ActorInstance, ActorMailbox, Handles, InitialState, ProjectState, ResidentTransition, ScopedTask}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+pub struct Request { pub value: u32 }
+pub struct Response { pub value: u32 }
+pub struct State { pub value: u32 }
+struct Slot<const I: u32> {}
+actor Child {
+    fn double(request: Request) -> Response uses (Worker) {
+        Response { value: request.value * 2 }
+    }
+}
+fn supervise<C>(_ child: C) -> u32 {
+    match supervise_browser_child(child: child, max_restarts: 1, window_ms: 1000,
+        backoff_ms: 1, startup_timeout_ms: 1000) {
+        ChildScopeExit::Cancelled(epoch) => epoch
+        ChildScopeExit::Exhausted(epoch, _) => epoch
+        ChildScopeExit::TransportFailure(epoch, _) => epoch
+        ChildScopeExit::InvariantViolation(epoch, _) => epoch
+    }
+}
+fn request<C>() -> u32
+uses (mailbox: mut ActorMailbox<WasmBackend, C>, suspend: Suspend<WasmBackend, u32>)
+where C: Handles<Request, Response> {
+    let pending: Pending<WasmBackend, Response> = mailbox.ask(Request { value: 21 })
+    match suspend.suspend(pending) {
+        TaskOutcome::Success(response,) => response.value
+        TaskOutcome::Failure(error,) => error
+        TaskOutcome::Cancelled => 0
+    }
+}
+fn ask<C>() -> u32 where C: Handles<Request, Response> {
+    with (ActorMailbox<WasmBackend, C> = BrowserActorMailbox<C> {},
+          Suspend<WasmBackend, u32> = Resumable {}) {
+        request<C>()
+    }
+}
+actor Parent {
+    value: u32,
+    fn initial() -> State uses (InitialState) { State { value: 0 } }
+    fn receive(self, event: State) -> State uses (ResidentTransition) { event }
+    fn project(self) -> State uses (ProjectState) { State { value: self.value } }
+    fn supervise0() -> u32 uses (ScopedTask) { supervise(ActorInstance<Child, Slot<0>> {}) }
+    fn supervise1() -> u32 uses (ScopedTask) { supervise(ActorInstance<Child, Slot<1>> {}) }
+    fn request0() -> u32 uses (ScopedTask) { ask<ActorInstance<Child, Slot<0>>>() }
+    fn request1() -> u32 uses (ScopedTask) { ask<ActorInstance<Child, Slot<1>>>() }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///tagged_worker_instances.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let artifact = compile_resident_actor(&db, top_mod).unwrap().unwrap();
+    let [first, second] = artifact.structured_children.as_slice() else {
+        panic!("expected two instances, got {}", artifact.structured_children.len());
+    };
+    assert_eq!(first.actor, second.actor);
+    assert_ne!(first.scope.key, second.scope.key);
+    assert_ne!(first.scope.spawn, second.scope.spawn);
+    assert_ne!(first.interface.lanes[0].name, second.interface.lanes[0].name);
+    let package = materialize_scoped_task_package(&artifact.scoped_tasks, &artifact.structured_children)
+        .unwrap().unwrap();
+    let paths = package.files.iter().map(|file| file.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(paths.len(), package.files.len(), "instances must not overwrite package files");
+    assert_eq!(paths.iter().filter(|path| path.ends_with("/child.wasm")).count(), 2);
+    let engine = wasmtime::Engine::default();
+    for (index, child) in artifact.structured_children.iter().enumerate() {
+        let module = wasmtime::Module::new(&engine, &child.wasm).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        let alloc = instance.get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc").unwrap();
+        let request = alloc.call(&mut store, (4, 4)).unwrap();
+        let value = 21 + index as u32;
+        memory.write(&mut store, request as usize, &value.to_le_bytes()).unwrap();
+        let call = instance.get_typed_func::<i32, i32>(
+            &mut store, child.interface.lanes[0].export.as_deref().unwrap(),
+        ).unwrap();
+        let response = call.call(&mut store, request).unwrap();
+        let mut output = [0; 4];
+        memory.read(&store, response as usize, &mut output).unwrap();
+        assert_eq!(u32::from_le_bytes(output), value * 2);
+    }
+    // Reusing a tag means reusing a scope, not an implicit fresh allocation.
+    let alias_source = source.replace("Slot<1>", "Slot<0>");
+    let mut alias_db = DriverDataBase::default();
+    alias_db.workspace().touch(&mut alias_db, url.clone(), Some(alias_source));
+    let alias_file = alias_db.workspace().get(&alias_db, &url).unwrap();
+    let alias = compile_resident_actor(&alias_db, alias_db.top_mod(alias_file)).unwrap().unwrap();
+    assert_eq!(alias.structured_children.len(), 1);
+
+    // A same-named user struct and a forged Handles impl are not authority to
+    // select another actor's compiled endpoint.
+    let spoof_source = source.replace("{ActorInstance, ActorMailbox", "{ActorMailbox")
+        .replace("struct Slot<const I: u32> {}", r#"
+struct Slot<const I: u32> {}
+struct ActorInstance<C, Tag> {}
+impl<C, Tag, M, R> Handles<M, R> for ActorInstance<C, Tag> where C: Handles<M, R> {}
+"#);
+    let forged_source = source.replace("actor Child {", r#"
+pub struct ActualResponse { pub value: u32 }
+impl Handles<Request, Response> for Child {}
+actor Child {
+"#).replace("fn double(request: Request) -> Response", "fn double(request: Request) -> ActualResponse")
+        .replace("Response { value: request.value * 2 }", "ActualResponse { value: request.value * 2 }");
+    for invalid_source in [spoof_source, forged_source] {
+        let mut invalid_db = DriverDataBase::default();
+        invalid_db.workspace().touch(&mut invalid_db, url.clone(), Some(invalid_source));
+        let invalid_file = invalid_db.workspace().get(&invalid_db, &url).unwrap();
+        let invalid_top_mod = invalid_db.top_mod(invalid_file);
+        let diagnostics = invalid_db.run_on_top_mod(invalid_top_mod).format_diags(&invalid_db);
+        assert!(diagnostics.is_empty(), "negative fixture must type-check: {diagnostics}");
+        assert!(compile_resident_actor(&invalid_db, invalid_top_mod).is_err());
+    }
+}
+
 fn rich_structured_child_fixture() -> (DriverDataBase, common::file::File) {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///web_component_rich_structured_child.fe").unwrap();

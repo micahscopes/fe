@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use common::ingot::IngotKind;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
     semantic::instantiate_with_generic_args,
@@ -314,7 +315,19 @@ fn actor_for_nominal_ty<'a, 'db>(
     while let Some(inner) = ty.as_view(db) {
         ty = inner;
     }
-    let AdtRef::Struct(state) = ty.adt_def(db)?.adt_ref(db) else {
+    let mut adt = ty.adt_def(db)?.adt_ref(db);
+    // Only the trusted core instance constructor delegates behavior lookup.
+    // Keep the full tagged type everywhere else: scope and mailbox identities
+    // must remain distinct even when their authored behavior is shared.
+    if ty.ingot(db).is_some_and(|ingot| ingot.kind(db) == IngotKind::Core)
+        && adt.name(db).is_some_and(|name| name.data(db) == "ActorInstance")
+    {
+        let [child, _tag] = ty.generic_args(db) else {
+            return None;
+        };
+        adt = child.adt_def(db)?.adt_ref(db);
+    }
+    let AdtRef::Struct(state) = adt else {
         return None;
     };
     actors.iter().find(|actor| actor.state == state)
