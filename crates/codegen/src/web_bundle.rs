@@ -55,7 +55,7 @@ use crate::resident_actor::{
     compile_scoped_task_support, family_instances, scoped_task_family_count,
 };
 use crate::sonatina::{
-    WasmCompileOptions, compile_runtime_package_spirv_authored_raster_with_interface,
+    WasmCompileOptions,
     compile_runtime_package_spirv_compute_with_interface, compile_runtime_package_spirv_grid,
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_render_with_resources,
     compile_runtime_package_wasm_with_options,
@@ -6948,6 +6948,7 @@ enum ActorShaderCompileKind {
     Raster {
         vertex_entry: String,
         instance_index: bool,
+        direct_counts: Option<[u32; 2]>,
     },
 }
 
@@ -6969,7 +6970,7 @@ fn plan_actor_shader_compile_units(
     while index < program.stages.len() {
         let stage = &program.stages[index];
         match &stage.kind {
-            WebActorStageKind::Vertex { instance_index, .. } => {
+            WebActorStageKind::Vertex { instance_index, draw, .. } => {
                 let Some(WebActorStage {
                     source_entry: fragment_entry,
                     kind: WebActorStageKind::RasterFragment { .. },
@@ -6986,6 +6987,10 @@ fn plan_actor_shader_compile_units(
                     kind: ActorShaderCompileKind::Raster {
                         vertex_entry: stage.source_entry.clone(),
                         instance_index: *instance_index,
+                        direct_counts: match draw {
+                            WebActorDraw::Direct {vertex_count,instance_count} => Some([*vertex_count,*instance_count]),
+                            WebActorDraw::Indirect {..} => None,
+                        },
                     },
                 });
                 index += 2;
@@ -7084,6 +7089,7 @@ fn compile_actor_shader_unit(
         ActorShaderCompileKind::Raster {
             vertex_entry,
             instance_index,
+            direct_counts,
         } => {
             let package = mir::build_wasm_runtime_package_for_entries(
                 db,
@@ -7113,13 +7119,14 @@ fn compile_actor_shader_unit(
             } else {
                 Vec::new()
             };
-            compile_runtime_package_spirv_authored_raster_with_interface(
+            crate::sonatina::compile_runtime_package_spirv_authored_raster_for_draw(
                 db,
                 &package,
                 vertex_entry,
                 &unit.source_entry,
                 &external,
                 &builtin_arguments,
+                *direct_counts,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))
         }

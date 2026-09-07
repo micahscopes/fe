@@ -553,6 +553,23 @@ pub fn compile_runtime_package_spirv_authored_raster_with_interface(
     resources: &[SpirvExternalResource],
     builtin_arguments: &[SpirvBuiltinArgument],
 ) -> Result<SpirvArtifact, LowerError> {
+    compile_runtime_package_spirv_authored_raster_for_draw(
+        db, package, vertex_entry, fragment_entry, resources, builtin_arguments, None,
+    )
+}
+
+/// Internal actor path: counts come from the SAME direct draw declaration used
+/// by the emitted manifest, with zero firstVertex/firstInstance. Public shader
+/// callers and indirect draws have no implicit invocation-bound contract.
+pub(crate) fn compile_runtime_package_spirv_authored_raster_for_draw(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    resources: &[SpirvExternalResource],
+    builtin_arguments: &[SpirvBuiltinArgument],
+    direct_counts: Option<[u32; 2]>,
+) -> Result<SpirvArtifact, LowerError> {
     let (mut module, entry_functions) = compile_runtime_package_shader_ir(db, package)?;
     // Resolve the public API's names only among declared runtime entries, once.
     // Optimization, legality checking and emission all retain these identities.
@@ -573,6 +590,38 @@ pub fn compile_runtime_package_spirv_authored_raster_with_interface(
     };
     let vertex = resolve(vertex_entry)?;
     let fragment = resolve(fragment_entry)?;
+    if let Some(counts) = direct_counts {
+        // Do not specialize an entry which also has source-language callers:
+        // their arguments are not constrained by the draw declaration.
+        let called = module.funcs().iter().any(|&reference| {
+            module.func_store.view(reference, |function| {
+                function.layout.iter_block().any(|block| {
+                    function.layout.iter_inst(block).any(|inst| {
+                        function.dfg.call_info(inst).is_some_and(|call| call.callee() == vertex)
+                    })
+                })
+            })
+        });
+        if !called {
+            use sonatina_codegen::{domtree::DomTree, loop_analysis::LoopTree,
+                optim::range_branch_simplify::RangeBranchSimplify};
+            use sonatina_ir::ControlFlowGraph;
+            let mut bounds = Vec::new();
+            if counts[0] != 0 { bounds.push((0, 0, counts[0] - 1)); }
+            if builtin_arguments.len() == 2 && counts[1] != 0 {
+                bounds.push((1, 0, counts[1] - 1));
+            }
+            module.func_store.modify(vertex, |function| {
+                let mut cfg = ControlFlowGraph::default();
+                cfg.compute(function);
+                let mut dom = DomTree::default();
+                dom.compute(&cfg);
+                let mut loops = LoopTree::default();
+                loops.compute(&cfg, &dom);
+                RangeBranchSimplify::new().run_with_u32_argument_bounds(function, &cfg, &loops, &bounds)
+            }).map_err(LowerError::Spirv)?;
+        }
+    }
     compile_webgpu_request(
         &mut module,
         ShaderPipeline::Raster { vertex, fragment },

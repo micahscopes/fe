@@ -16,11 +16,16 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-fn compile_bundle() -> WebBundle {
+fn compile_bundle(bounded_increment: bool) -> WebBundle {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/actor_raster_typed");
     let mut db = DriverDataBase::default();
     let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
     assert!(!driver::init_ingot(&mut db, &url));
+    if bounded_increment {
+        let source = include_str!("fixtures/actor_raster_typed/src/lib.fe")
+            .replace("if vertex_index == 1", "if vertex_index + 1 == 2");
+        db.workspace().touch(&mut db, url.join("src/lib.fe").unwrap(), Some(source));
+    }
     let top_mod = db
         .workspace()
         .containing_ingot(&db, url)
@@ -348,7 +353,15 @@ fn readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
 
 #[test]
 fn fe_vertex_varying_and_fragment_execute_as_one_gpu_pipeline() {
-    let bundle = compile_bundle();
+    execute_raster(compile_bundle(false));
+}
+
+#[test]
+fn proved_vertex_increment_preserves_executed_pixels() {
+    execute_raster(compile_bundle(true));
+}
+
+fn execute_raster(bundle: WebBundle) {
     let pass = &bundle.manifest.passes[0];
     assert_eq!(pass.draw_vertices, Some(3));
     let Some((adapter, device, queue)) = device() else {

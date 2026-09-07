@@ -52,6 +52,7 @@ pub use native::{
     compile_runtime_package_native_surface_transition4_f32,
 };
 #[cfg(feature = "spirv-backend")]
+pub(crate) use shader_driver::compile_runtime_package_spirv_authored_raster_for_draw;
 pub use shader_driver::{
     ComputeShaderInterface,
     compile_render_wgsl, compile_runtime_package_spirv,
