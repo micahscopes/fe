@@ -1653,6 +1653,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
+    this._wasmArenaCheckpoint = null;
+    this._wasmArenaRewind = null;
     this._gpuReadbackKernel = null;
     this._gpuReadbackBinding = null;
     this._gpuReadbackResource = null;
@@ -1937,6 +1939,14 @@ export class FeSurfaceElement extends HTMLElement {
         throw new Error("fe render runtime: canonical arena reset export is not callable");
       }
       this._wasmArenaReset = arenaReset ?? null;
+      const checkpoint = instance?.exports.fe_cabi_checkpoint;
+      const rewind = instance?.exports.fe_cabi_rewind;
+      if ((checkpoint !== undefined || rewind !== undefined) &&
+          (typeof checkpoint !== "function" || typeof rewind !== "function")) {
+        throw new Error("fe render runtime: canonical arena requires both checkpoint and rewind exports");
+      }
+      this._wasmArenaCheckpoint = checkpoint ?? null;
+      this._wasmArenaRewind = rewind ?? null;
       const residentScheduled =
         instance?.exports.fe_surface_transition_scheduled_v1 ??
         instance?.exports.fe_surface_transition_latest_per_frame_v4 ?? null;
@@ -2078,7 +2088,7 @@ export class FeSurfaceElement extends HTMLElement {
       }
 
       const authoredInitial = this._surfaceInitializerKernel
-        ? this._runWasmArenaEpoch(() => this._surfaceInitializerKernel())
+        ? this._runWasmInitialization(() => this._surfaceInitializerKernel())
         : undefined;
       this._uniforms = this._initialOverride ??
         (authoredInitial === undefined
@@ -2715,7 +2725,7 @@ export class FeSurfaceElement extends HTMLElement {
         uniforms,
       );
       for (const record of activePassRecords) await realizePassPipeline(device, record);
-      this._bufferPublications?.write(gpu, uniforms);
+      this._runWasmArenaEpoch(() => this._bufferPublications?.write(gpu, uniforms));
       if (activePassRecords.some(record => record.pass.layout.mode !== "compute")) {
         ensureRasterAttachments(gpu, this._backingWidth, this._backingHeight);
       }
@@ -2949,11 +2959,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._members.forEach((member, index) => {
       args[member.arg_index] = uniforms[index];
     });
-    // This legacy fallback invokes one scalar pixel entry repeatedly. Reset
-    // before (rather than before and after) each pixel; `_renderWasmInto`
-    // closes the final epoch in `finally`.
-    this._wasmArenaReset?.();
-    return this._kernel(...args) >>> 0; // 0xAARRGGBB
+    return this._runWasmArenaEpoch(() => this._kernel(...args) >>> 0); // 0xAARRGGBB
   }
 
   _renderWasmInto(canvas, width, height, uniforms) {
@@ -2962,19 +2968,15 @@ export class FeSurfaceElement extends HTMLElement {
     const ctx = canvas.getContext("2d");
     const image = ctx.createImageData(width, height);
     const data = image.data;
-    try {
-      for (let py = 0; py < height; py++) {
-        for (let px = 0; px < width; px++) {
-          const rgba = this._callKernel(px, py, uniforms);
-          const i = (py * width + px) * 4;
-          data[i] = (rgba >>> 16) & 255;
-          data[i + 1] = (rgba >>> 8) & 255;
-          data[i + 2] = rgba & 255;
-          data[i + 3] = (rgba >>> 24) & 255;
-        }
+    for (let py = 0; py < height; py++) {
+      for (let px = 0; px < width; px++) {
+        const rgba = this._callKernel(px, py, uniforms);
+        const i = (py * width + px) * 4;
+        data[i] = (rgba >>> 16) & 255;
+        data[i + 1] = (rgba >>> 8) & 255;
+        data[i + 2] = rgba & 255;
+        data[i + 3] = (rgba >>> 24) & 255;
       }
-    } finally {
-      this._wasmArenaReset?.();
     }
     ctx.putImageData(image, 0, 0);
   }
@@ -3582,6 +3584,8 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceTransitionMemory = null;
     this._surfaceTransitionAlloc = null;
     this._wasmArenaReset = null;
+    this._wasmArenaCheckpoint = null;
+    this._wasmArenaRewind = null;
     this._gpuReadbackKernel = null;
     this._gpuReadbackBinding = null;
     this._gpuReadbackResource = null;
@@ -4085,11 +4089,32 @@ export class FeSurfaceElement extends HTMLElement {
     }
   }
 
-  /** Run one externally initiated Fe call in a fresh canonical arena epoch.
-   * Aggregate storage is call-local: scalar resident actor globals survive a
-   * reset, while matrices, records, and event transport from a completed (or
-   * trapped) call do not accumulate across browser frames. */
+  /** Initialization establishes actor-owned storage. Only failed initialization
+   * discards its allocations; successful storage lives with the Wasm instance.
+   * Older scalar-only bundles without checkpoint exports keep their old ABI. */
+  _runWasmInitialization(call) {
+    if (!this._wasmArenaCheckpoint) return this._runWasmArenaEpoch(call);
+    const cursor = this._wasmArenaCheckpoint();
+    try {
+      return call();
+    } catch (error) {
+      this._wasmArenaRewind(cursor);
+      throw error;
+    }
+  }
+
+  /** Synchronous scratch scope above all current owner/task allocations.
+   * Results must be scalar values or consumed/copied inside the scope. Calls
+   * cannot publish newly allocated persistent storage through this boundary. */
   _runWasmArenaEpoch(call) {
+    if (this._wasmArenaCheckpoint) {
+      const cursor = this._wasmArenaCheckpoint();
+      try {
+        return call();
+      } finally {
+        this._wasmArenaRewind(cursor);
+      }
+    }
     if (!this._wasmArenaReset) return call();
     this._wasmArenaReset();
     try {

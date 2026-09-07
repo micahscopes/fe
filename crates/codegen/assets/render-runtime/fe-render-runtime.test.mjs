@@ -2045,7 +2045,47 @@ test("legacy per-pixel Wasm fallback also bounds aggregate epochs", () => {
   };
 
   assert.throws(() => surface._renderWasmInto(canvas, 2, 1, []), /pixel trap/);
-  assert.deepEqual(trace, ["reset", "pixel:0:0", "reset", "pixel:1:0", "reset"]);
+  assert.deepEqual(trace, ["reset", "pixel:0:0", "reset", "reset", "pixel:1:0", "reset"]);
+});
+
+test("surface scratch preserves initialized storage and live task allocations", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  let cursor = 64;
+  const memory = new Uint8Array(1024);
+  const allocate = count => { const start = cursor; cursor += count; return start; };
+  surface._wasmArenaReset = () => { throw new Error("must not reset owner storage"); };
+  surface._wasmArenaCheckpoint = () => cursor;
+  surface._wasmArenaRewind = saved => { cursor = saved; };
+  const retained = surface._runWasmInitialization(() => {
+    const pointer = allocate(128);
+    memory.fill(42, pointer, cursor);
+    return pointer;
+  });
+  assert.equal(cursor, 192);
+  // A suspended task has acquired storage since initialization. Restoring a
+  // cached initialization watermark would corrupt it; capture each call anew.
+  const task = allocate(64);
+  memory.fill(77, task, cursor);
+  for (let frame = 0; frame < 100; frame++) {
+    surface._runWasmArenaEpoch(() => {
+      assert.equal(allocate(32), 256);
+      surface._runWasmArenaEpoch(() => { assert.equal(allocate(16), 288); });
+      assert.equal(cursor, 288);
+    });
+    assert.equal(cursor, 256);
+  }
+  assert.throws(() => surface._runWasmArenaEpoch(() => {
+    allocate(32);
+    throw new Error("scratch trap");
+  }), /scratch trap/);
+  assert.equal(cursor, 256);
+  assert.deepEqual([...memory.slice(retained, task)], Array(128).fill(42));
+  assert.deepEqual([...memory.slice(task, 256)], Array(64).fill(77));
+  assert.throws(() => surface._runWasmInitialization(() => {
+    allocate(80);
+    throw new Error("initializer trap");
+  }), /initializer trap/);
+  assert.equal(cursor, 256);
 });
 
 test("a burst crosses into the Fe transition once at the presentation boundary", async () => {
