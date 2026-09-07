@@ -5668,7 +5668,7 @@ where
             } else if indirect_params.contains(&param.local) {
                 args.push(Type::I32);
             } else if let Some(elem_tys) =
-                self.semantic_scalar_tuple_element_tys(semantic_ty, &param.class)?
+                self.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, &param.class)?
             {
                 if matches!(linkage, Linkage::Private)
                     && elem_tys.len() > 1
@@ -5723,7 +5723,7 @@ where
                         vec![ty]
                     } else if matches!(linkage, Linkage::Private)
                         && semantic_ty.map(|semantic_ty|
-                            self.semantic_scalar_tuple_element_tys(semantic_ty, class))
+                            self.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, class))
                             .transpose()?.flatten().is_some_and(|lanes|
                                 lanes.len() > 1 && lanes.iter().all(|ty|
                                     matches!(ty, Type::I1 | Type::I32 | Type::F32)))
@@ -5732,7 +5732,7 @@ where
                         vec![ty]
                     } else if let Some(elem_tys) = semantic_ty
                         .map(|semantic_ty| {
-                            self.semantic_scalar_tuple_element_tys(semantic_ty, class)
+                            self.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, class)
                         })
                         .transpose()?
                         .flatten()
@@ -7646,18 +7646,23 @@ where
     /// until their variant-specific semantic field mapping is available.
     fn semantic_flat_shape(
         &mut self,
+        owner: RuntimeInstance<'db>,
         semantic_ty: TyId<'db>,
         class: &RuntimeClass<'db>,
     ) -> Result<Option<FlatShape>, LowerError> {
-        self.semantic_flat_shape_visit(semantic_ty, class, &mut HashSet::new())
+        self.semantic_flat_shape_visit(owner, semantic_ty, class, &mut HashSet::new())
     }
 
     fn semantic_flat_shape_visit(
         &mut self,
+        owner: RuntimeInstance<'db>,
         semantic_ty: TyId<'db>,
         class: &RuntimeClass<'db>,
         active: &mut HashSet<LayoutId<'db>>,
     ) -> Result<Option<FlatShape>, LowerError> {
+        let semantic_ty = owner.key(self.db).semantic(self.db)
+            .map(|instance| instance.normalized_ty(self.db, semantic_ty))
+            .unwrap_or(semantic_ty);
         let semantic_ty = semantic_ty.as_view(self.db).unwrap_or(semantic_ty);
         if semantic_gpu_resource(self.db, semantic_ty) {
             return Ok(Some(FlatShape::Leaf(self.gpu_resource_type(semantic_ty)?)));
@@ -7687,7 +7692,7 @@ where
                                 semantic_fields.into_iter().zip(&struct_layout.fields)
                             {
                                 let Some(field) =
-                                    self.semantic_flat_shape_visit(field_ty, field_class, active)?
+                                    self.semantic_flat_shape_visit(owner, field_ty, field_class, active)?
                                 else {
                                     complete = false;
                                     break;
@@ -7710,7 +7715,7 @@ where
                             active.remove(layout);
                             return Ok(shape);
                         };
-                        self.semantic_flat_shape_visit(element_ty, &array_layout.elem, active)?
+                        self.semantic_flat_shape_visit(owner, element_ty, &array_layout.elem, active)?
                             .and_then(|element| {
                                 usize::try_from(array_layout.len)
                                     .ok()
@@ -7941,10 +7946,11 @@ where
 
     fn semantic_scalar_tuple_element_tys(
         &mut self,
+        owner: RuntimeInstance<'db>,
         semantic_ty: TyId<'db>,
         class: &RuntimeClass<'db>,
     ) -> Result<Option<Vec<Type>>, LowerError> {
-        let Some(shape) = self.semantic_flat_shape(semantic_ty, class)? else {
+        let Some(shape) = self.semantic_flat_shape(owner, semantic_ty, class)? else {
             return Ok(None);
         };
         let mut leaves = Vec::new();
@@ -8180,7 +8186,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                         let ty = module.ty_for_class(class)?;
                         values[idx] = Some(LocalValueRepresentation::Single(ty));
                     } else if let Some(elem_tys) =
-                        module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                        module.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, class)?
                     {
                         if body
                             .signature
@@ -8204,7 +8210,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                     continue;
                 }
                 if let Some(elem_tys) =
-                    module.semantic_scalar_tuple_element_tys(semantic_ty, class)?
+                    module.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, class)?
                 {
                     values[idx] = Some(LocalValueRepresentation::Flattened(elem_tys));
                 } else if module.is_memory_lowerable_object_ref(class)
@@ -9457,7 +9463,7 @@ where
             })
             .ok_or_else(|| LowerError::Internal(format!("flattened local {local:?} is missing")))?;
         self.module
-            .semantic_flat_shape(semantic_ty, &class)?
+            .semantic_flat_shape(self.body.owner, semantic_ty, &class)?
             .ok_or_else(|| {
             LowerError::Unsupported(format!(
                 "wasm target (R2.2): `{class:?}` is not a recursive product tree of wasm scalars"
@@ -10477,7 +10483,7 @@ where
                     instantiated_runtime_return_ty(self.module.db, *callee)
                 {
                     self.module
-                        .semantic_flat_shape(semantic_ty, &callee_class)?
+                        .semantic_flat_shape(*callee, semantic_ty, &callee_class)?
                 } else {
                     self.module.flat_shape(&callee_class)
                 }
@@ -13520,7 +13526,7 @@ where
                             instantiated_runtime_return_ty(self.module.db, self.body.owner)
                         {
                             self.module
-                                .semantic_scalar_tuple_element_tys(semantic_ty, &class)?
+                                .semantic_scalar_tuple_element_tys(self.body.owner, semantic_ty, &class)?
                                 .is_some()
                         } else {
                             self.module.scalar_tuple_element_tys(&class).is_some()

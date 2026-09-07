@@ -60,10 +60,51 @@ fn compile_to_wasm_err(name: &str, source: &str) -> String {
         .to_string()
 }
 
-/// THE R3.4c ENABLER: a module whose only entries are param-carrying `pub` fns
-/// produces a NON-empty wasm module, and each function is exported and callable
-/// with its value parameters. This exact shape yields an EMPTY package under
-/// the EVM-style zero-param root rule.
+/// Rejection-style loops must not retry the same sequence element forever.
+#[test]
+fn wasm_for_continue_advances_before_condition() {
+    let source = r#"
+pub fn continued(_ limit: u32) -> u32 {
+    let mut visits: u32 = 0
+    let mut sum: u32 = 0
+    for i in 0..(limit as usize) {
+        visits += 1
+        if visits > limit { return 0xffffffff }
+        if i % 2 == 0 { continue }
+        sum += i.downcast_truncate()
+    }
+    sum
+}
+
+"#;
+    let wasm = compile_to_wasm("for_continue.fe", source);
+    wasmparser::validate(&wasm).expect("valid loop module");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let continued = instance.get_typed_func::<i32, i32>(&mut store, "continued").unwrap();
+    for limit in 0..32 {
+        let expected: i32 = (0..limit).filter(|i| i % 2 == 1).sum();
+        assert_eq!(continued.call(&mut store, limit).unwrap(), expected, "limit={limit}");
+    }
+}
+
+#[test]
+fn wasm_associated_wide_field_does_not_become_usize() {
+    let source = r#"
+trait Carrier { type Repr }
+struct Wide {}
+impl Carrier for Wide { type Repr = u256 }
+pub struct Record<T: Carrier> { pub value: <T as Carrier>::Repr, pub tag: u32 }
+pub fn read(_ input: Record<Wide>) -> u32 { input.tag }
+"#;
+    let error = compile_to_wasm_err("associated_wide_field.fe", source);
+    assert!(error.contains("unsupported"), "genuine u256 must fail closed: {error}");
+}
+
+/// THE R3.4c ENABLER: a module whose only functions are parameter-carrying
+/// exports still yields a nonempty, executable runtime package.
 #[test]
 fn wasm_param_carrying_pub_fns_are_export_roots() {
     // No zero-param `main`: the only entries are value-param `pub` fns.
