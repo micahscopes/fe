@@ -35,3 +35,30 @@ Regression: `tagged_instances_share_behavior_but_not_worker_identity` in
 `crates/codegen/tests/resident_actor.rs`. It checks scope/lane/package identity,
 executes each emitted Wasm child, checks same-tag aliasing and rejects forged
 types/endpoint claims.
+
+## Const-indexed task families
+
+Use `ScopedTaskFamily<N>` when one behavior must run for each member of a finite
+type-indexed family. The behavior declares exactly one `const I: u32` parameter:
+
+```fe
+fn supervision<const I: u32>() -> u32 uses (ScopedTaskFamily<WORKERS>) {
+    supervise(ActorInstance<AtlasWorker, Slot<I>> {})
+}
+fn work<const I: u32>(self) -> u32 uses (ScopedTaskFamily<WORKERS>) {
+    run<ActorInstance<AtlasWorker, Slot<I>>>(self.address, I)
+}
+```
+
+Here `supervise` and `run` are ordinary shared Fe functions; only their generic
+call sites are shown. `WORKERS` is a const u32. The compiler evaluates the count,
+specializes the authored behavior over `0..WORKERS`, and uses the existing
+continuation and structured-child machinery. It emits neither source wrappers
+nor an application-authored task table. Generic parameters are real semantic
+substitutions, so every slot's mailbox remains type-branded. Ordinary
+`ScopedTask` behavior is unchanged. Families on structured children retain the
+existing self-less-task requirement.
+
+The task registry exposes each generated machine's `inputWidth`; generic hosts
+can start self-less tasks with no input and state-capturing tasks with the actor
+state, without reconstructing a list of numbered source method names.

@@ -546,7 +546,7 @@ pub fn build_wasm_runtime_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
-    build_wasm_runtime_package_impl(db, top_mod, None, &[])
+    build_wasm_runtime_package_impl(db, top_mod, None, &[], &[])
 }
 
 /// Build the Wasm-shaped runtime package rooted at one caller-selected public
@@ -605,7 +605,32 @@ pub fn build_wasm_runtime_package_for_entries_with_internal_funcs<'db>(
             )));
         }
     }
-    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names), internal_funcs)
+    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names), internal_funcs, &[])
+}
+
+/// Root exact, already-specialized Fe functions without inventing source names
+/// or wrapper bodies. Used by typed compile-time task families. These remain
+/// internal implementations; ordinary named entries retain their export policy.
+pub fn build_wasm_runtime_package_for_entries_with_internal_instances<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    entry_names: &[String],
+    instances: &[SemanticInstance<'db>],
+) -> Result<RuntimePackage<'db>, LowerError> {
+    let mut names = FxHashSet::default();
+    if entry_names.iter().any(|name| !names.insert(name)) {
+        return Err(LowerError::Unsupported("duplicate named Wasm entry".to_owned()));
+    }
+    let mut keys = FxHashSet::default();
+    for instance in instances {
+        if !keys.insert(instance.key(db)) {
+            return Err(LowerError::Unsupported("duplicate specialized Wasm root".to_owned()));
+        }
+    }
+    if entry_names.is_empty() && instances.is_empty() {
+        return Err(LowerError::Unsupported("requested Wasm root set must not be empty".to_owned()));
+    }
+    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names), &[], instances)
 }
 
 fn build_wasm_runtime_package_impl<'db>(
@@ -613,6 +638,7 @@ fn build_wasm_runtime_package_impl<'db>(
     top_mod: TopLevelMod<'db>,
     requested_entries: Option<&[String]>,
     internal_funcs: &[Func<'db>],
+    internal_instances: &[SemanticInstance<'db>],
 ) -> Result<RuntimePackage<'db>, LowerError> {
     wasm_runtime_package_trace(|| {
         format!(
@@ -713,7 +739,7 @@ fn build_wasm_runtime_package_impl<'db>(
             )));
         }
     }
-    if entry_funcs.is_empty() && internal_funcs.is_empty() {
+    if entry_funcs.is_empty() && internal_funcs.is_empty() && internal_instances.is_empty() {
         if let Some(rejection) = rejections.first() {
             return Err(LowerError::Unsupported(format_runtime_root_rejection(
                 db, rejection,
@@ -821,6 +847,27 @@ fn build_wasm_runtime_package_impl<'db>(
             db,
             semantic,
             wasm_export_param_class,
+        ));
+    }
+    for semantic in internal_instances.iter().copied() {
+        let BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+            return Err(LowerError::Unsupported("specialized Wasm root must be a function".to_owned()));
+        };
+        if func.is_extern(db) || is_test_func(db, func) || func.body(db).is_none()
+            || entry_funcs.contains(&func)
+        {
+            return Err(LowerError::Unsupported(format!(
+                "specialized Wasm root `{}` must be a bodied internal function", func_display_name(db, func)
+            )));
+        }
+        let effects = entry_effect_arg_plans(db, EntryEffectContext::StandaloneFunc { func }, semantic)?;
+        if !effects.is_empty() || wasm_root_has_surviving_effect_param(db, semantic) {
+            return Err(LowerError::Unsupported(format!(
+                "specialized Wasm root `{}` has a host-visible effect binding", func_display_name(db, func)
+            )));
+        }
+        package_roots.push(runtime_instance_for_semantic_with_visible_param_overrides(
+            db, semantic, wasm_export_param_class,
         ));
     }
     let entry = main_root.unwrap_or(package_roots[0]);

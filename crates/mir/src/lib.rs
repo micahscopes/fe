@@ -30,6 +30,7 @@ pub use runtime::{
     build_runtime_package, build_test_runtime_package, build_wasm_runtime_package,
     build_wasm_runtime_package_for_entries,
     build_wasm_runtime_package_for_entries_with_internal_funcs,
+    build_wasm_runtime_package_for_entries_with_internal_instances,
     build_wasm_runtime_package_for_entry, derive_runtime_resumable_plans,
     derive_runtime_suspension_points, enum_tag_size_bytes, enum_variant_field_offset_bytes,
     format_runtime_body, format_runtime_body_excerpt, format_runtime_body_observation,

@@ -77,6 +77,13 @@ pub struct ProjectState {}
 #[actor_scoped_task]
 pub struct ScopedTask {}
 
+/// A finite family of scoped tasks, specialized at compile time over `0..N`.
+/// The behavior declares exactly one `const I: u32` parameter. Its body and
+/// captured actor state are authored once; each specialization has its own
+/// continuation and typed capabilities. No runtime task selector is needed.
+#[actor_scoped_task]
+pub struct ScopedTaskFamily<const N: u32> {}
+
 /// A self-less actor behavior whose const result describes page structure.
 /// Build tooling may project this typed value before runtime artifacts are
 /// discovered; the authored behavior name and concrete page vocabulary remain

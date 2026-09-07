@@ -9,10 +9,12 @@ use std::fmt;
 use common::ingot::IngotKind;
 use compiler_db::DriverDataBase;
 use hir::analysis::{
-    semantic::instantiate_with_generic_args,
-    ty::{adt_def::AdtRef, normalize::normalize_ty, ty_check::BodyOwner, ty_def::TyId},
+    semantic::{instantiate_with_generic_args, GenericSubst, SemanticInstance, SemanticInstanceKey,
+        get_or_build_semantic_instance, identity_semantic_instance_key},
+    ty::{adt_def::AdtRef, const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy},
+        normalize::normalize_ty, ty_check::BodyOwner, ty_def::{TyId, TyData, TyBase, PrimTy}},
 };
-use hir::hir_def::{ActorTransition, TopLevelMod};
+use hir::hir_def::{ActorTransition, TopLevelMod, CallableDef, IntegerId};
 
 use crate::actor_semantics::{SemanticActor, nominal_attrs, resolve_metadata_ty, semantic_actors};
 use crate::{
@@ -45,6 +47,13 @@ pub struct ResidentActorContract {
     /// Source identities of role-selected scoped tasks. These stay inside the
     /// compiler; the browser receives only generated fixed task adapters.
     pub scoped_task_source_entries: Vec<String>,
+    pub scoped_task_families: Vec<ScopedTaskFamily>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedTaskFamily {
+    pub source_entry: String,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +165,62 @@ pub(crate) fn behavior_is_scoped_task(
         .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
         .filter_map(|ty| nominal_attrs(db, ty))
         .any(|attrs| attrs.is_actor_scoped_task(db))
+}
+
+fn scoped_task_family_count(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>)
+    -> Result<Option<u32>, ResidentActorError>
+{
+    for role in behavior.actor_roles(db).data(db) {
+        let Some(ty) = role.key_path.to_opt()
+            .and_then(|path| resolve_metadata_ty(db, path, behavior.scope())) else { continue };
+        let Some(adt) = ty.adt_def(db) else { continue };
+        if !ty.ingot(db).is_some_and(|ingot| ingot.kind(db) == IngotKind::Core)
+            || !adt.adt_ref(db).name(db).is_some_and(|name| name.data(db) == "ScopedTaskFamily")
+        { continue; }
+        let [count] = ty.generic_args(db) else {
+            return Err(ResidentActorError::Contract("task family needs a concrete count".into()));
+        };
+        let TyData::ConstTy(count) = count.data(db) else {
+            return Err(ResidentActorError::Contract("task family count must be const".into()));
+        };
+        let evaluated = count.evaluate(db, None);
+        let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(count), _) = evaluated.data(db) else {
+            return Err(ResidentActorError::Contract("task family count must evaluate to u32".into()));
+        };
+        let count = u32::try_from(count.data(db)).map_err(|_|
+            ResidentActorError::Contract("task family count exceeds u32".into()))?;
+        let params = CallableDef::Func(behavior).params(db);
+        if params.len() != 1 || !params[0].const_ty_ty(db).is_some_and(|ty|
+            matches!(ty.data(db), TyData::TyBase(TyBase::Prim(PrimTy::U32))))
+        {
+            return Err(ResidentActorError::Contract(
+                "task family behavior must declare exactly one const index of type u32".into()));
+        }
+        return Ok(Some(count));
+    }
+    Ok(None)
+}
+
+fn family_instances<'db>(db: &'db DriverDataBase, top_mod: TopLevelMod<'db>,
+    families: &[ScopedTaskFamily]) -> Result<Vec<SemanticInstance<'db>>, ResidentActorError>
+{
+    let mut instances = Vec::new();
+    for family in families {
+        let func = top_mod.all_funcs(db).iter().copied().find(|func|
+            func.top_mod(db) == top_mod && func.name(db).to_opt()
+                .is_some_and(|name| name.data(db) == &family.source_entry))
+            .ok_or_else(|| ResidentActorError::Contract("task family source disappeared".into()))?;
+        let identity = identity_semantic_instance_key(db, BodyOwner::Func(func));
+        let index_ty = CallableDef::Func(func).params(db)[0].const_ty_ty(db).unwrap();
+        for index in 0..family.count {
+            let arg = TyId::new(db, TyData::ConstTy(ConstTyId::new(db,
+                ConstTyData::Evaluated(EvaluatedConstTy::LitInt(IntegerId::new(db,num_bigint::BigUint::from(index))),index_ty))));
+            let key = SemanticInstanceKey::new(db, identity.owner(db), GenericSubst::new(db,vec![arg]),
+                identity.effect_providers(db),identity.impl_env(db).clone());
+            instances.push(get_or_build_semantic_instance(db,key));
+        }
+    }
+    Ok(instances)
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +629,7 @@ fn compile_structured_children_with_ancestry<'db>(
         let interface = CanonicalInterfaceManifest::build(declarations)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
         let mut scoped_task_entries = Vec::new();
+        let mut task_families = Vec::new();
         for task in actor
             .behaviors
             .iter()
@@ -584,25 +650,30 @@ fn compile_structured_children_with_ancestry<'db>(
                     "structured child actor `{actor_name}` scoped task `{name}` must be self-less until Worker-owned actor state is available",
                 )));
             }
-            scoped_task_entries.push(name);
+            if let Some(count) = scoped_task_family_count(db, task)? {
+                task_families.push(ScopedTaskFamily { source_entry: name, count });
+            } else {
+                scoped_task_entries.push(name);
+            }
         }
         let actor_package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &lane_entries)
             .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
         let mut child_ancestry = ancestry.to_vec();
         child_ancestry.push(child_ty);
+        let task_instances = family_instances(db, top_mod, &task_families)?;
         let (scoped_tasks, scoped_task_wasm, structured_children) = if scoped_task_entries
-            .is_empty()
+            .is_empty() && task_instances.is_empty()
         {
             (Vec::new(), None, Vec::new())
         } else {
             let task_package =
-                mir::build_wasm_runtime_package_for_entries(db, top_mod, &scoped_task_entries)
+                mir::build_wasm_runtime_package_for_entries_with_internal_instances(db, top_mod, &scoped_task_entries, &task_instances)
                     .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
             let (scoped_tasks, structured_children) = compile_scoped_task_support_with_ancestry(
                 db,
                 top_mod,
                 task_package,
-                scoped_task_entries.len(),
+                scoped_task_entries.len() + task_instances.len(),
                 optimize,
                 &child_ancestry,
             )?;
@@ -1097,6 +1168,7 @@ pub fn resident_actor_contract(
     )?;
 
     let mut scoped_task_source_entries = Vec::new();
+    let mut scoped_task_families = Vec::new();
     for task in actor
         .behaviors
         .iter()
@@ -1137,7 +1209,11 @@ pub fn resident_actor_contract(
                 )));
             }
         }
-        scoped_task_source_entries.push(name);
+        if let Some(count) = scoped_task_family_count(db, task)? {
+            scoped_task_families.push(ScopedTaskFamily { source_entry: name, count });
+        } else {
+            scoped_task_source_entries.push(name);
+        }
     }
 
     Ok(Some(ResidentActorContract {
@@ -1154,6 +1230,7 @@ pub fn resident_actor_contract(
         event_tag_limits,
         state_tag_limits,
         scoped_task_source_entries,
+        scoped_task_families,
     }))
 }
 
@@ -1184,14 +1261,15 @@ pub fn compile_resident_actor_with_optimization(
         contract.source_entry.clone(),
     ];
     entries.extend(contract.scoped_task_source_entries.iter().cloned());
-    let package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &entries)
+    let instances = family_instances(db, top_mod, &contract.scoped_task_families)?;
+    let package = mir::build_wasm_runtime_package_for_entries_with_internal_instances(db, top_mod, &entries, &instances)
         .map_err(|error| ResidentActorError::Contract(error.to_string()))?;
     validate_actor_sink_events(db, &package, &contract)?;
     let (scoped_tasks, structured_children) = compile_scoped_task_support(
         db,
         top_mod,
         package,
-        contract.scoped_task_source_entries.len(),
+        contract.scoped_task_source_entries.len() + instances.len(),
         optimize,
     )?;
     // A scoped task can receive generated rich host values between Wasm

@@ -313,6 +313,45 @@ actor Child {
         assert!(diagnostics.is_empty(), "negative fixture must type-check: {diagnostics}");
         assert!(compile_resident_actor(&invalid_db, invalid_top_mod).is_err());
     }
+    // The same workers expressed as two const-indexed behaviors rather than
+    // one hand-written method per instance. The compiler specializes bodies,
+    // not source text; this test substitution only reuses the fixture prelude.
+    let family_source = source.replace("ResidentTransition, ScopedTask}",
+        "ResidentTransition, ScopedTask, ScopedTaskFamily}")
+        .replace("fn supervise0() -> u32 uses (ScopedTask) { supervise(ActorInstance<Child, Slot<0>> {}) }",
+            "fn supervision<const I: u32>() -> u32 uses (ScopedTaskFamily<3>) { supervise(ActorInstance<Child, Slot<I>> {}) }")
+        .replace("fn supervise1() -> u32 uses (ScopedTask) { supervise(ActorInstance<Child, Slot<1>> {}) }", "")
+        .replace("fn request0() -> u32 uses (ScopedTask) { ask<ActorInstance<Child, Slot<0>>>() }",
+            "fn requests<const I: u32>() -> u32 uses (ScopedTaskFamily<3>) { ask<ActorInstance<Child, Slot<I>>>() }")
+        .replace("fn request1() -> u32 uses (ScopedTask) { ask<ActorInstance<Child, Slot<1>>>() }", "");
+    let mut family_db = DriverDataBase::default();
+    family_db.workspace().touch(&mut family_db,url.clone(),Some(family_source.clone()));
+    let family_file = family_db.workspace().get(&family_db,&url).unwrap();
+    let family_top = family_db.top_mod(family_file);
+    let diagnostics = family_db.run_on_top_mod(family_top).format_diags(&family_db);
+    assert!(diagnostics.is_empty(),"task family diagnostics: {diagnostics}");
+    let family = compile_resident_actor(&family_db,family_top).unwrap().unwrap();
+    assert_eq!(family.structured_children.len(),3);
+    assert_eq!(family.scoped_tasks.len(),6);
+    let names = family.scoped_tasks.iter().map(|task| &task.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names.len(),6,"each family specialization needs a unique continuation");
+    for count in [0,1] {
+        let mut db = DriverDataBase::default();
+        let source = family_source.replace("ScopedTaskFamily<3>",&format!("ScopedTaskFamily<{count}>"));
+        db.workspace().touch(&mut db,url.clone(),Some(source));
+        let file = db.workspace().get(&db,&url).unwrap();
+        let artifact = compile_resident_actor(&db,db.top_mod(file)).unwrap().unwrap();
+        assert_eq!(artifact.structured_children.len(),count);
+        assert_eq!(artifact.scoped_tasks.len(),count*2);
+    }
+    let mut db = DriverDataBase::default();
+    let invalid = family_source.replace("<const I: u32>()", "()")
+        .replace("Slot<I>","Slot<0>");
+    db.workspace().touch(&mut db,url.clone(),Some(invalid));
+    let file = db.workspace().get(&db,&url).unwrap();
+    let error = compile_resident_actor(&db,db.top_mod(file)).unwrap_err();
+    assert!(error.to_string().contains("exactly one const index"),"{error}");
 }
 
 fn rich_structured_child_fixture() -> (DriverDataBase, common::file::File) {
