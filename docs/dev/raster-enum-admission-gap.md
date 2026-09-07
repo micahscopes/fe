@@ -25,6 +25,14 @@ validation or execution. No GPU-skip flag was used. Evidence:
 `/laboratory/quilting/scratch/composite-raster-suite-20260907.log`. Chrome WebGPU
 execution remains a required, separate gate.
 
+Follow-up: the same native GPU test binary passed on AMD Radeon780M/RADV in
+4.05s with the existing Vulkan loader exposed through process-local
+`LD_LIBRARY_PATH` and the existing Radeon manifest through `VK_DRIVER_FILES`.
+No global environment or GPU-skip policy was changed. Evidence:
+`/laboratory/quilting/scratch/composite-native-gpu-loader-20260907.log`.
+The real composition renderer also compiled and rendered in Chrome; its partial
+browser receipt is `/laboratory/quilting-fe/docs/composite-spacing-browser-receipt-20260907.md`.
+
 The historical baseline and reproduction below describe the pre-fix state.
 
 The Quilting composition renderer's density-map API uses a checked shared-edge
