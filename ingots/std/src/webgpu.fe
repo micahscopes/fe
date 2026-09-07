@@ -32,6 +32,7 @@ pub use layout::{
     UniformLayout,
     VertexLayout,
 }
+pub use publication::{BufferPublication, PublicationVersion}
 pub use resource::{
     ActorResident,
     AtomicReadWrite,

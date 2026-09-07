@@ -1,0 +1,47 @@
+//! Borrowed runtime data for an already resolved logical GPU resource.
+//! This describes a transfer; constructing a value performs no GPU work.
+use core::{BrowserBytes, BrowserList}
+use core::marker::Copy
+use core::option::Option
+
+/// Monotone identity within one resource owner's lifetime. A new epoch may
+/// restart revision numbering. Neither value is a physical device generation.
+pub struct PublicationVersion { pub epoch: u32, pub revision: u32 }
+impl Copy for PublicationVersion {}
+
+/// `Resource` is the nominal destination type, not a binding number or handle.
+/// `source` borrows already packed bytes in the producer's Wasm memory. The
+/// owner must keep them alive and unchanged through synchronous host transfer;
+/// this value grants no permission to reset its arena or send it to a worker.
+///
+/// GPU struct packing is deliberately not inferred from a BrowserList<T>:
+/// Wasm object layout and GPU storage layout need not coincide. The word
+/// constructor is exact for an already packed u32 stream; other layouts must
+/// supply bytes produced using their own layout evidence.
+pub struct BufferPublication<Resource> {
+    pub version: PublicationVersion,
+    pub source: BrowserBytes,
+    pub target_byte_offset: u32,
+}
+impl<Resource> Copy for BufferPublication<Resource> {}
+
+impl<Resource> BufferPublication<Resource> {
+    /// Construct a byte range from packed words without allocation or copying.
+    /// Reject arithmetic overflow and a forged bounded-list length. Actual
+    /// memory and destination capacity are checked at the transfer boundary.
+    pub fn from_words<const MAX: usize>(
+        _ version: PublicationVersion,
+        _ source: BrowserList<u32, MAX>,
+        _ target_word_offset: u32,
+    ) -> Option<Self> {
+        if source.len as usize > MAX || source.len > 1073741823
+            || target_word_offset > 1073741823 {
+            return Option::None
+        }
+        Option::Some(Self {
+            version: version,
+            source: BrowserBytes { ptr: source.ptr.address(), len: source.len * 4 },
+            target_byte_offset: target_word_offset * 4,
+        })
+    }
+}
