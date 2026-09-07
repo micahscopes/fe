@@ -14,7 +14,7 @@ struct ChoiceParams { mode: Param }
 struct ChoiceState { mode: f32 }
 
 impl SurfaceState for ChoiceState { type Params = ChoiceParams }
-derive ApplyParamBindings for ChoiceState using ParamBindingsProvider
+derive ApplyParamBindings for ChoiceState using ParamBindingsProvider<ChoiceParams>
 
 const fn choice_params() -> ChoiceParams {
     ChoiceParams {

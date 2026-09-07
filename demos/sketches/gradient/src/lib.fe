@@ -42,7 +42,7 @@ impl SurfaceState for GradientViewState {
     type Params = GradientParams
 }
 
-derive ApplyParamBindings for GradientViewState using ParamBindingsProvider
+derive ApplyParamBindings for GradientViewState using ParamBindingsProvider<GradientParams>
 
 const fn gradient_params() -> GradientParams {
     GradientParams {

@@ -272,7 +272,7 @@ impl SurfaceState for RaymarchViewState {
     type Params = RaymarchParams
 }
 
-derive ApplyParamBindings for RaymarchViewState using ParamBindingsProvider
+derive ApplyParamBindings for RaymarchViewState using ParamBindingsProvider<RaymarchParams>
 
 const fn raymarch_params() -> RaymarchParams {
     RaymarchParams {

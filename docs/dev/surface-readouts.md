@@ -24,12 +24,15 @@ of ownership, initialization and presentation. The authored `Fixed` drive
 semantics preserve state even if used in an input record. No application
 calculation belongs in the host or manifest generator.
 
-Current derive convention: `ParamBindingsProvider` numbers the input record's
-fields in declaration order. Keep those fields as the view's matching prefix
-and append readouts. It does not yet derive arbitrary cross-record field
-ordinals; interleaving unrelated observations with inputs is unsupported by
-that derive. General field-ordinal reflection would remove this existing order
-restriction without host-side remapping.
+Use `derive ApplyParamBindings for Controls using ParamBindingsProvider<Params>`.
+The configured record is the same `Params` associated with `Controls` by
+`SurfaceState`. The provider reflects parameter declarations and matches input
+field names at compile time; their ordinals need not match the input record's
+order. Readouts can therefore precede or interleave inputs without shifting
+which state field an edit changes. Missing input labels leave an incomplete
+generated state construction and fail compilation, rather than silently
+binding to ordinal zero. Name matching emits no runtime string lookup and
+requires no host-side index remapping.
 
 Gates: `surface_readout` compiler integration test (initialized positive and
 missing-owner negative), plus runtime readout creation, refresh, malformed-plan

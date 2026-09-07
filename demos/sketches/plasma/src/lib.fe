@@ -42,7 +42,7 @@ impl SurfaceState for PlasmaViewState {
     type Params = PlasmaParams
 }
 
-derive ApplyParamBindings for PlasmaViewState using ParamBindingsProvider
+derive ApplyParamBindings for PlasmaViewState using ParamBindingsProvider<PlasmaParams>
 
 const fn plasma_params() -> PlasmaParams {
     PlasmaParams {

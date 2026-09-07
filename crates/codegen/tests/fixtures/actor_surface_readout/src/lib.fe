@@ -6,7 +6,7 @@ struct Controls {request:f32}
 impl Copy for Controls {}
 struct Params {request:Param,resolved:Param}
 impl SurfaceState for Controls {type Params=Params}
-derive ApplyParamBindings for Controls using ParamBindingsProvider
+derive ApplyParamBindings for Controls using ParamBindingsProvider<Params>
 const fn params()->Params {
     Params {request:Param::range(min:0.0,max:8.0,init:2.0),resolved:Param::readout(ParamReadout::Integer)}
 }

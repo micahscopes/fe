@@ -30,7 +30,7 @@ impl SurfaceState for ProbeState {
     type Params = ProbeParams
 }
 
-derive ApplyParamBindings for ProbeState using ParamBindingsProvider
+derive ApplyParamBindings for ProbeState using ParamBindingsProvider<ProbeParams>
 
 const fn probe_params() -> ProbeParams {
     ProbeParams {

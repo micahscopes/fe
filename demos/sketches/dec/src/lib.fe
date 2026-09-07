@@ -799,7 +799,7 @@ impl SurfaceState for DecViewState {
     type Params = DecParams
 }
 
-derive ApplyParamBindings for DecViewState using ParamBindingsProvider
+derive ApplyParamBindings for DecViewState using ParamBindingsProvider<DecParams>
 
 const fn dec_params() -> DecParams {
     DecParams {

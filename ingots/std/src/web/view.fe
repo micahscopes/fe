@@ -695,11 +695,12 @@ pub trait ApplyParamBindings: SurfaceState {
     ) -> Self
 }
 
-/// Generic derive provider for `ApplyParamBindings`. Reflection supplies only
-/// state field labels; `Param::drive` supplies all application semantics.
-pub struct ParamBindingsProvider {}
+/// Generic derive provider for `ApplyParamBindings`. Configure it with the
+/// state's associated Params record. Reflection matches field labels to that
+/// record's declaration ordinals; `Param::drive` owns application semantics.
+pub struct ParamBindingsProvider<Params> {}
 
-impl Derive<ApplyParamBindings> for ParamBindingsProvider {
+impl<Params> Derive<ApplyParamBindings> for ParamBindingsProvider<Params> {
     const fn derive<T>(ev: own Evidence<ApplyParamBindings<T>>) -> Evidence<ApplyParamBindings<T>>
         uses (
             reflect: Reflect<T>,
@@ -710,13 +711,27 @@ impl Derive<ApplyParamBindings> for ParamBindingsProvider {
         let params = builder.arg_ref("params")
         let event = builder.arg_ref("event")
         let mut next = builder.struct_init()
-        let mut index: u32 = 0
+        // Parameter ordinals belong to the declaration record, not the state
+        // record: readouts may be interleaved and inputs may be reordered.
+        let declarations = 0..0
+        for configured in builder.provider_ty().normalized_preorder_types() {
+            if builder.same_ty(configured.constructor(), builder.ty<ParamBindingsProvider>()) {
+                for arg in configured.generic_args() {
+                    if arg.is_type() { declarations = arg.ty().fields() }
+                }
+            }
+        }
         for field in reflect.fields() {
             let current = builder.field_get(state, field)
             let param = builder.field_get(params, field)
-            let driven = builder.call(param, "drive", current, event, builder.int(index))
-            next = builder.with_field(next, field, driven)
-            index = index + 1
+            let mut index: u32 = 0
+            for declaration in declarations {
+                if declaration.name() == field.name() {
+                    let driven = builder.call(param, "drive", current, event, builder.int(index))
+                    next = builder.with_field(next, field, driven)
+                }
+                index = index + 1
+            }
         }
         builder.emit_method("apply_param_bindings", next)
         builder.finish()

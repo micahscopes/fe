@@ -379,7 +379,7 @@ impl SurfaceState for PencilControls {
     type Params = PencilParams
 }
 
-derive ApplyParamBindings for PencilControls using ParamBindingsProvider
+derive ApplyParamBindings for PencilControls using ParamBindingsProvider<PencilParams>
 
 pub const fn pencil_params() -> PencilParams {
     PencilParams {

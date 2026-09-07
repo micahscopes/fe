@@ -154,7 +154,7 @@ impl SurfaceState for Cga3dViewState {
     type Params = Cga3dParams
 }
 
-derive ApplyParamBindings for Cga3dViewState using ParamBindingsProvider
+derive ApplyParamBindings for Cga3dViewState using ParamBindingsProvider<Cga3dParams>
 
 /// One Fe declaration feeds both the projected sliders and the generated
 /// pointer/wheel transition. Binding policy never enters the web manifest.

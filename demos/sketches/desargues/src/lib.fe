@@ -92,7 +92,7 @@ impl SurfaceState for DesarguesViewState {
     type Params = DesarguesParams
 }
 
-derive ApplyParamBindings for DesarguesViewState using ParamBindingsProvider
+derive ApplyParamBindings for DesarguesViewState using ParamBindingsProvider<DesarguesParams>
 
 const fn desargues_params() -> DesarguesParams {
     DesarguesParams {

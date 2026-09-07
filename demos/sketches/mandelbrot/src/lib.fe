@@ -233,7 +233,7 @@ impl SurfaceState for MandelbrotViewState {
     type Params = MandelbrotParams
 }
 
-derive ApplyParamBindings for MandelbrotViewState using ParamBindingsProvider
+derive ApplyParamBindings for MandelbrotViewState using ParamBindingsProvider<MandelbrotParams>
 
 const fn mandelbrot_params() -> MandelbrotParams {
     MandelbrotParams {

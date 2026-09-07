@@ -156,7 +156,7 @@ impl SurfaceState for QcgaViewState {
     type Params = QcgaParams
 }
 
-derive ApplyParamBindings for QcgaViewState using ParamBindingsProvider
+derive ApplyParamBindings for QcgaViewState using ParamBindingsProvider<QcgaParams>
 
 const fn qcga_params() -> QcgaParams {
     QcgaParams {
