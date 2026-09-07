@@ -5323,6 +5323,27 @@ where
         indirect_params: &HashSet<RLocalId>,
     ) -> HashSet<RLocalId> {
         let mut values = indirect_params.clone();
+        // Pattern-bound aggregate payloads can be Slots subsequently indexed
+        // or projected. They need a real value copy in the arena, not a bundle
+        // of SSA leaves with no address for the projection.
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let RStmt::Assign {
+                    expr: RExpr::Load { place }, ..
+                } = stmt else { continue; };
+                let PlaceRoot::Slot(local) = place.root else { continue; };
+                if self.isa.triple().architecture == Architecture::Wasm32
+                    && self.private_place_materialization == PrivatePlaceMaterialization::CanonicalArena
+                    && !place.path.is_empty()
+                    && body.value_class(local).is_some_and(|class|
+                        matches!(class, RuntimeClass::AggregateValue { .. })
+                            && self.aggregate_is_memory_lowerable_in(Some(body.owner), class)
+                            && self.flat_shape(class).is_some_and(|shape| shape.leaf_count() > 0))
+                {
+                    values.insert(local);
+                }
+            }
+        }
         for (index, local) in body.locals.iter().enumerate() {
             if !matches!(local.root, RuntimeLocalRoot::None) {
                 continue;
@@ -5694,7 +5715,7 @@ where
                     args.extend(elem_tys);
                 }
             } else if matches!(linkage, Linkage::Private)
-                && self.is_memory_lowerable_object_ref(&param.class)
+                && self.is_memory_lowerable_object_ref(body.owner, &param.class)
             {
                 // A mutable owned aggregate receiver is object-backed inside
                 // one generated Wasm module. Its caller has already
@@ -7198,7 +7219,7 @@ where
             RExpr::Use(src) => {
                 analysis.allocates |= body
                     .value_class(*src)
-                    .is_some_and(|class| self.is_memory_lowerable_object_ref(class));
+                    .is_some_and(|class| self.is_memory_lowerable_object_ref(body.owner, class));
             }
             RExpr::ConstScalar(_)
             | RExpr::Unary { .. }
@@ -7363,7 +7384,7 @@ where
                 pointee,
                 kind: RefKind::Const | RefKind::Object,
                 view: RefView::Whole,
-            } if self.aggregate_is_memory_lowerable(pointee)
+            } if self.aggregate_is_memory_lowerable_in(Some(body.owner), pointee)
         )
     }
 
@@ -7382,7 +7403,7 @@ where
                 pointee,
                 kind: RefKind::Const | RefKind::Object,
                 view: RefView::Whole,
-            }) if self.aggregate_is_memory_lowerable(pointee)
+            }) if self.aggregate_is_memory_lowerable_in(Some(body.owner), pointee)
         )
     }
 
@@ -7393,7 +7414,7 @@ where
                 pointee,
                 kind: RefKind::Object,
                 view: RefView::Whole,
-            }) if self.aggregate_is_memory_lowerable(pointee)
+            }) if self.aggregate_is_memory_lowerable_in(Some(body.owner), pointee)
         )
     }
 
@@ -7447,7 +7468,11 @@ where
     /// references retain their existing scalar-handle ABI unless their pointee
     /// is an aggregate already materialized in the arena. Public params and
     /// returns still go through the flattened value ABI or fail closed.
-    fn is_memory_lowerable_object_ref(&self, class: &RuntimeClass<'db>) -> bool {
+    fn is_memory_lowerable_object_ref(
+        &self,
+        owner: RuntimeInstance<'db>,
+        class: &RuntimeClass<'db>,
+    ) -> bool {
         let RuntimeClass::Ref {
             pointee,
             kind,
@@ -7457,24 +7482,18 @@ where
             return false;
         };
         match kind {
-            RefKind::Const | RefKind::Object => self.aggregate_is_memory_lowerable(pointee),
+            RefKind::Const | RefKind::Object => {
+                self.aggregate_is_memory_lowerable_in(Some(owner), pointee)
+            }
             RefKind::Provider {
                 space: AddressSpaceKind::Memory,
                 ..
             } => {
                 matches!(**pointee, RuntimeClass::AggregateValue { .. })
-                    && self.aggregate_is_memory_lowerable(pointee)
+                    && self.aggregate_is_memory_lowerable_in(Some(owner), pointee)
             }
             _ => false,
         }
-    }
-
-    fn aggregate_is_semantically_memory_lowerable(
-        &self,
-        semantic_ty: TyId<'db>,
-        class: &RuntimeClass<'db>,
-    ) -> bool {
-        self.aggregate_is_semantically_memory_lowerable_in(None, semantic_ty, class)
     }
 
     fn aggregate_is_semantically_memory_lowerable_in(
@@ -7488,6 +7507,12 @@ where
             .map(|instance| instance.normalized_ty(self.db, semantic_ty))
             .unwrap_or(semantic_ty);
         let semantic_ty = semantic_ty.as_view(self.db).unwrap_or(semantic_ty);
+        // MIR may copy a borrowed payload into an aggregate value while
+        // retaining its source `ref T` spelling. Only a value carrier permits
+        // using T here; reference carriers still obey transport admission.
+        let semantic_ty = if matches!(class, RuntimeClass::AggregateValue { .. }) {
+            semantic_ty.as_borrow(self.db).map_or(semantic_ty, |(_, inner)| inner)
+        } else { semantic_ty };
         match class {
             RuntimeClass::Scalar(scalar) => {
                 scalar_ty_r1(scalar).is_ok()
@@ -7524,7 +7549,7 @@ where
                             variant
                                 .fields
                                 .iter()
-                                .all(|field| self.aggregate_is_memory_lowerable(field))
+                                .all(|field| self.aggregate_is_memory_lowerable_in(owner, field))
                         })
                 }
             },
@@ -7579,7 +7604,11 @@ where
     /// borrows, object locals, and materialized memory-provider parameters
     /// share target-derived address arithmetic while retaining their distinct
     /// write permissions.
-    fn memory_lowerable_ref_layout(&self, class: &RuntimeClass<'db>) -> Option<LayoutId<'db>> {
+    fn memory_lowerable_ref_layout(
+        &self,
+        owner: RuntimeInstance<'db>,
+        class: &RuntimeClass<'db>,
+    ) -> Option<LayoutId<'db>> {
         let RuntimeClass::Ref {
             pointee,
             kind:
@@ -7597,7 +7626,7 @@ where
         let RuntimeClass::AggregateValue { layout } = pointee.as_ref() else {
             return None;
         };
-        self.aggregate_is_memory_lowerable(pointee)
+        self.aggregate_is_memory_lowerable_in(Some(owner), pointee)
             .then_some(*layout)
     }
 
@@ -7673,6 +7702,16 @@ where
     /// transports continue to fail closed. Nominal canonical browser descriptors
     /// retain their narrow owned-pointer exception.
     fn aggregate_is_memory_lowerable(&self, class: &RuntimeClass<'db>) -> bool {
+        self.aggregate_is_memory_lowerable_in(None, class)
+    }
+
+    // Keep the owning instantiation through enum payloads as well as products:
+    // their stored source types can still contain associated-type projections.
+    fn aggregate_is_memory_lowerable_in(
+        &self,
+        owner: Option<RuntimeInstance<'db>>,
+        class: &RuntimeClass<'db>,
+    ) -> bool {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar).is_ok(),
             RuntimeClass::AggregateValue { layout } => {
@@ -7685,7 +7724,7 @@ where
                     Layout::Array(layout) => layout.source_ty,
                     Layout::Enum(layout) => layout.source_ty,
                 };
-                self.aggregate_is_semantically_memory_lowerable(semantic_ty, class)
+                self.aggregate_is_semantically_memory_lowerable_in(owner, semantic_ty, class)
             }
             RuntimeClass::Ref {
                 kind:
@@ -8223,7 +8262,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                 }
                 if address_carried_aggregate_values.contains(&local_id) {
                     if !matches!(class, RuntimeClass::AggregateValue { .. })
-                        || !module.aggregate_is_memory_lowerable(class)
+                        || !module.aggregate_is_memory_lowerable_in(Some(body.owner), class)
                     {
                         return Err(LowerError::Internal(format!(
                             "indirect Wasm parameter {local_id:?} is not a memory-lowerable aggregate"
@@ -8286,7 +8325,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                     module.semantic_scalar_tuple_element_tys(body.owner, semantic_ty, class)?
                 {
                     values[idx] = Some(LocalValueRepresentation::Flattened(elem_tys));
-                } else if module.is_memory_lowerable_object_ref(class)
+                } else if module.is_memory_lowerable_object_ref(body.owner, class)
                     || module.object_value_layout(class).is_some()
                 {
                     // Change 1: a function-local aggregate behind an object /
@@ -8424,7 +8463,8 @@ impl<'db> BodyLocalStoragePlan<'db> {
                 }
                 let allocates = match expr {
                     RExpr::Use(src) => matches!(
-                        self.copies.get(&(*dst, *src)), Some(ValueCopyStorage::DeepCopy(_))
+                        self.copies.get(&(*dst, *src)),
+                        Some(ValueCopyStorage::DeepCopy(_) | ValueCopyStorage::Materialize)
                     ),
                     RExpr::AggregateMake { .. } | RExpr::Load { .. }
                     | RExpr::AggregateExtract { .. } => self.address_carried_aggregate_values.contains(dst),
@@ -8476,15 +8516,20 @@ impl<'db> BodyLocalStoragePlan<'db> {
         })?;
         let indirect = self.materialized_param_slots.contains(&src)
             || self.address_carried_aggregate_values.contains(&src);
+        if self.address_carried_aggregate_values.contains(&dst) && !indirect
+            && matches!(class, RuntimeClass::AggregateValue { .. })
+        {
+            return Ok(ValueCopyStorage::Materialize);
+        }
         // Fresh bindings and proven borrows preserve object identity. Copying
         // an existing Fe aggregate value must instead allocate independent storage.
-        let object_copy = module.is_memory_lowerable_object_ref(class)
+        let object_copy = module.is_memory_lowerable_object_ref(body.owner, class)
             && !self.binding_facts.is_fresh(src.as_u32() as usize)
             && !self.binding_facts.is_borrowed(src.as_u32() as usize);
         if indirect || object_copy {
             let layout = match class {
                 RuntimeClass::AggregateValue { layout } if indirect => *layout,
-                _ => module.memory_lowerable_ref_layout(class).ok_or_else(|| {
+                _ => module.memory_lowerable_ref_layout(body.owner, class).ok_or_else(|| {
                     LowerError::Internal(format!("aggregate copy source {src:?} lost its memory layout"))
                 })?,
             };
@@ -8655,6 +8700,7 @@ impl BodyArenaPlan {
 
 #[derive(Clone, Copy)]
 enum ValueCopyStorage<'db> {
+    Materialize,
     ReadScalar,
     Forward,
     DeepCopy(LayoutId<'db>),
@@ -10618,6 +10664,7 @@ where
                 })?;
                 match storage {
                     ValueCopyStorage::ReadScalar => self.local_read_value(*src),
+                    ValueCopyStorage::Materialize => self.lower_materialize_to_object(*src),
                     ValueCopyStorage::Forward => self.local_value(*src),
                     ValueCopyStorage::DeepCopy(layout) => {
                         let source = self.local_value(*src)?;
@@ -11047,7 +11094,7 @@ where
                 if let RuntimeClass::Ref { pointee, .. } = &dst_class
                     && self
                         .module
-                        .memory_lowerable_ref_layout(&dst_class)
+                        .memory_lowerable_ref_layout(self.body.owner, &dst_class)
                         .is_some()
                 {
                     if let Some((address, projected)) = self.typed_private_place(place)? {
@@ -12307,7 +12354,7 @@ where
             }
             mir::ResolvedPlaceRootKind::Ref { value, class }
                 if self.body.value_class(value).is_some_and(|class| {
-                    self.module.memory_lowerable_ref_layout(class).is_some()
+                    self.module.memory_lowerable_ref_layout(self.body.owner, class).is_some()
                 }) =>
             {
                 // Object and memory-provider refs matched above. The remaining
@@ -12342,6 +12389,24 @@ where
         let mut byte_offset = 0usize;
         for elem in resolved.path {
             match elem {
+                mir::ResolvedPlaceElem::VariantField { variant, field, class } => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "resolved aggregate variant base is not an enum".to_owned(),
+                        ));
+                    };
+                    if layout != variant.enum_layout {
+                        return Err(LowerError::Internal(
+                            "resolved aggregate variant belongs to a different enum".to_owned(),
+                        ));
+                    }
+                    addr = self.offset_addr(addr, byte_offset)?;
+                    byte_offset = 0;
+                    addr = self.payload_enum_field_address(
+                        addr, layout, usize::from(variant.index), usize::from(field.0),
+                    )?;
+                    current_class = class;
+                }
                 mir::ResolvedPlaceElem::Field { field, class } => {
                     let RuntimeClass::AggregateValue { layout } = current_class else {
                         return Err(LowerError::Internal(
@@ -12718,7 +12783,7 @@ where
                         ..
                     })
                 ) && self.body.value_class(value).is_some_and(|class| {
-                    self.module.memory_lowerable_ref_layout(class).is_some()
+                    self.module.memory_lowerable_ref_layout(self.body.owner, class).is_some()
                 }) =>
             {
                 (value, class, true)

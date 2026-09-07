@@ -583,7 +583,10 @@ fn controls<M:Model,const N:usize>(_ point:M::Point,_ valid:bool)->Option<[Contr
     Option::Some(result)
 }
 pub fn sample(_ x:f32,_ index:usize,_ valid:bool)->f32 {
-    match controls<Plane,4>(Point {x:x,y:7.0},valid) {
+    evaluate(controls<Plane,4>(Point {x:x,y:7.0},valid),index)
+}
+fn evaluate(_ controls:Option<[Control<Plane>;4]>,_ index:usize)->f32 {
+    match controls {
         Option::None=>-1.0,
         Option::Some(values)=>values[index].point.x+values[index].point.y+values[index].weight,
     }

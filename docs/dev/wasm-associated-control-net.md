@@ -36,3 +36,37 @@ September 7 receipts:
 Logs under `/laboratory/quilting/scratch/`:
 `pole-associated-record-final-20260907.log`, `pole-zero-length-isolated-20260907.log`,
 and `pole-patch-final-oracle-20260907.log`.
+
+## Optional control arrays passed to helpers
+
+Factoring the evaluator into a helper exposed additional missing paths. The
+regression now passes the optional array into `evaluate` before matching and
+indexing it. This is ordinary Fe composition, not a demo-specific ABI.
+
+- Private reference admission, enum payload recursion, copy planning and place
+  access retain the owning type instantiation.
+- An aggregate-value carrier can retain a source `ref T` label after copying a
+  pattern payload. Admission uses T for that value carrier only; this does not
+  legalize arbitrary reference carriers.
+- Canonical-arena aggregate projections use the existing enum tag/payload
+  offsets for variant fields.
+- Nonempty Wasm aggregate slots read through projected places receive arena
+  storage. Empty aggregates keep their erased representation. Copying from
+  flattened values into those slots is an explicit `Materialize` storage-plan
+  operation, counted by the existing allocation/emission consistency check.
+
+This does not change the public pointer ABI or disable bounds, escape, copy,
+or allocation checks. Shader typed-private storage is not selected by the new
+Wasm slot rule.
+
+Final release receipts for this extension:
+
+- Aggregate arrays: **10 passed, 1 failed** (the same earlier zero-length MIR
+  mutation failure); the helper-argument regression now passes.
+- Canonical arena: **5 passed**; nested record view retag: **1 passed**.
+- Quilting's `patch_` selection: **12 passed**, including the edge-authored
+  triangle/quad boundary oracle and existing dense-Clifford/QB comparisons.
+
+Logs: `associated-helper-planned-20260907.log`,
+`associated-helper-boundaries-final-20260907.log`, and
+`edge-patch-planned-20260907.log` in `/laboratory/quilting/scratch/`.
