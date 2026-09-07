@@ -120,7 +120,7 @@ impl fmt::Display for ResidentActorError {
 
 impl std::error::Error for ResidentActorError {}
 
-fn behavior_is_resident(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
+pub(crate) fn behavior_is_resident(db: &DriverDataBase, behavior: hir::hir_def::Func<'_>) -> bool {
     behavior
         .actor_roles(db)
         .data(db)
@@ -843,19 +843,30 @@ fn validate_actor_sink_events(
     package: &mir::RuntimePackage<'_>,
     contract: &ResidentActorContract,
 ) -> Result<(), ResidentActorError> {
+    validate_actor_sink_target(db, package, &contract.actor, &contract.source_entry)
+}
+
+/// Shared by standalone resident actors and render actors. Equal transport
+/// widths do not establish nominal message compatibility.
+pub(crate) fn validate_actor_sink_target(
+    db: &DriverDataBase,
+    package: &mir::RuntimePackage<'_>,
+    actor: &str,
+    source_entry: &str,
+) -> Result<(), ResidentActorError> {
     let resident_functions = package
         .functions(db)
         .into_iter()
         .filter(|function| {
             function.linkage(db) == mir::RuntimeLinkage::Internal
-                && function.symbol(db).as_str() == contract.source_entry.as_str()
+                && function.symbol(db).as_str() == source_entry
         })
         .collect::<Vec<_>>();
     let [resident] = resident_functions.as_slice() else {
         return Err(ResidentActorError::Contract(format!(
             "actor `{}` resident transition `{}` resolved to {} runtime roots",
-            contract.actor,
-            contract.source_entry,
+            actor,
+            source_entry,
             resident_functions.len(),
         )));
     };
@@ -863,7 +874,7 @@ fn validate_actor_sink_events(
     let Some(event) = resident_body.signature.params.first() else {
         return Err(ResidentActorError::Contract(format!(
             "actor `{}` resident transition has no runtime event parameter",
-            contract.actor,
+            actor,
         )));
     };
     let mir::instance::RuntimeInstanceSource::Semantic(resident_semantic) =
@@ -871,13 +882,13 @@ fn validate_actor_sink_events(
     else {
         return Err(ResidentActorError::Contract(format!(
             "actor `{}` resident transition is not a semantic Fe function",
-            contract.actor,
+            actor,
         )));
     };
     let BodyOwner::Func(resident_func) = resident_semantic.key(db).owner(db) else {
         return Err(ResidentActorError::Contract(format!(
             "actor `{}` resident transition is not a Fe function",
-            contract.actor,
+            actor,
         )));
     };
     // Read the authored semantic argument rather than the runtime local's
@@ -891,7 +902,7 @@ fn validate_actor_sink_events(
         .ok_or_else(|| {
             ResidentActorError::Contract(format!(
                 "actor `{}` resident transition has no semantic event type",
-                contract.actor,
+                actor,
             ))
         })?;
     let resident_event_ty = instantiate_with_generic_args(
@@ -920,7 +931,7 @@ fn validate_actor_sink_events(
         let [sent] = body.signature.params.as_slice() else {
             return Err(ResidentActorError::Contract(format!(
                 "actor `{}` typed sink must take exactly one event value; found {} parameters",
-                contract.actor,
+                actor,
                 body.signature.params.len(),
             )));
         };
@@ -929,13 +940,13 @@ fn validate_actor_sink_events(
         else {
             return Err(ResidentActorError::Contract(format!(
                 "actor `{}` typed sink is not a semantic Fe function",
-                contract.actor,
+                actor,
             )));
         };
         let BodyOwner::Func(sink_func) = sink_semantic.key(db).owner(db) else {
             return Err(ResidentActorError::Contract(format!(
                 "actor `{}` typed sink is not a Fe function",
-                contract.actor,
+                actor,
             )));
         };
         let sink_event_ty = sink_func
@@ -945,7 +956,7 @@ fn validate_actor_sink_events(
             .ok_or_else(|| {
                 ResidentActorError::Contract(format!(
                     "actor `{}` typed sink declaration has no event type",
-                    contract.actor,
+                    actor,
                 ))
             })?;
         let sink_event_ty = instantiate_with_generic_args(
@@ -965,7 +976,7 @@ fn validate_actor_sink_events(
         if sink_event_ty != resident_event_ty {
             return Err(ResidentActorError::Contract(format!(
                 "actor `{}` typed sink event differs from its resident transition: sent `{}`, resident `{}`",
-                contract.actor,
+                actor,
                 sink_event_ty.pretty_print(db),
                 resident_event_ty.pretty_print(db),
             )));
@@ -973,7 +984,7 @@ fn validate_actor_sink_events(
         if sent.class != event.class {
             return Err(ResidentActorError::Contract(format!(
                 "actor `{}` typed sink event differs from its resident transition: sent {:?}, resident {:?}",
-                contract.actor, sent.class, event.class,
+                actor, sent.class, event.class,
             )));
         }
     }

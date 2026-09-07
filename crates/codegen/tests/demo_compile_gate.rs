@@ -1009,7 +1009,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
         .expect("seed event-kind state");
 
     let identities = [
-        1.0f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 2.0, 3.0, 4.0,
+        1.0f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 2.0, 3.0, 4.0, 5.0,
     ];
     let mut receipt = 0.0f32;
     for (tag, identity) in identities.into_iter().enumerate() {
@@ -1090,7 +1090,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             timestamp: 9.0,
             width: 64.0,
             height: 64.0,
-            event_kind: 11,
+            event_kind: 12,
             param_index: 0,
             param_value: 0.0,
         }],
@@ -1111,7 +1111,7 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
                 &mut invalid_results,
             )
             .is_err(),
-        "the generated Wasm boundary must trap before Fe observes tag 11",
+        "the generated Wasm boundary must trap before Fe observes tag 12",
     );
 
     replace_state
@@ -1252,11 +1252,14 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
     let schedule_tape = [
         // Visibility alone is not work; raw input then asks for a frame.
         (4, 0, (0, 0, 0)),
+        // Worker state changes invalidate without pretending to be input.
+        (11, 1, (0, 1, 0)),
         (0, 1, (0, 1, 0)),
         // the frame starts one presentation.
         (2, 1, (1, 0, 0)),
         // a second frame cannot overtake the in-flight submission.
         (2, 3, (0, 0, 0)),
+        (11, 3, (0, 0, 0)),
         // completion releases backpressure and observes newer queued input.
         (3, 3, (0, 1, 0)),
         (2, 3, (1, 0, 0)),
@@ -1312,14 +1315,14 @@ fn surface_event_kinds_are_fe_typed_and_invalid_host_tags_trap() {
             .call(
                 &mut store,
                 &[
-                    wasmtime::Val::I32(11),
+                    wasmtime::Val::I32(12),
                     wasmtime::Val::F32(0),
                     wasmtime::Val::I32(0),
                 ],
                 &mut invalid_policy_results,
             )
             .is_err(),
-        "the resident policy wrapper must trap before Fe observes event tag 11",
+        "the resident policy wrapper must trap before Fe observes event tag 12",
     );
 }
 

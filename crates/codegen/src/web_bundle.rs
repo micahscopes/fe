@@ -100,6 +100,7 @@ const TYPED_SURFACE_STATE_REPLACE_EXPORT: &str = "fe_surface_state_replace_v1";
 /// complete-state initializer. The selected behavior is identified by the
 /// nominal `InitialState` role; its source name remains application vocabulary.
 const SURFACE_INITIALIZER_EXPORT: &str = "fe_surface_initialize_v1";
+const ACTOR_NOTIFICATION_EXPORT: &str = "fe_surface_actor_message_v1";
 /// Fixed binary discovery point for a resident Fe presentation policy. The
 /// policy's authored behavior name and private state never enter the manifest.
 const TYPED_SURFACE_SCHEDULE_EXPORT: &str = "fe_surface_schedule_v2";
@@ -2677,6 +2678,31 @@ fn render_actor_scoped_task_entries<'db>(
             } else { entries.push(name); }
             continue;
         }
+        // A task may explicitly request the complete non-resource state as
+        // one Fe record instead of taking `self`. Its canonical input adapter
+        // derives the record shape; no opaque GPU handle crosses this boundary.
+        if task_args.len() == 1 {
+            let mut value_fields = Vec::new();
+            for (index, field) in state_fields.iter().enumerate() {
+                if resource_field_indices.contains(&(index as u32)) { continue; }
+                let ty = lower_hir_ty(db, field.type_ref().to_opt().ok_or_else(||
+                    WebBundleError::EntryDerivation("unresolved task state field".into()))?,
+                    actor.state.scope(), assumptions);
+                let canonical = canonical_type_from_semantic(db, ty, "render_task_input")
+                    .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+                let field_name = field.name.to_opt().ok_or_else(||
+                    WebBundleError::EntryDerivation("unnamed task state field".into()))?;
+                value_fields.push(CanonicalField::new(field_name.data(db).to_owned(), canonical));
+            }
+            let expected = CanonicalType::Record(value_fields);
+            if canonical_type_from_semantic(db, *task_args[0].skip_binder(), "render_task_input")
+                .is_ok_and(|actual| actual == expected) {
+                if let Some(count) = family {
+                    families.push(ScopedTaskFamily { source_entry: name, count });
+                } else { entries.push(name); }
+                continue;
+            }
+        }
         if !resource_field_indices.is_empty() {
             return Err(WebBundleError::EntryDerivation(format!(
                 "GPU actor `{actor_name}` scoped task `{name}` receives self while the actor owns GPU resources; opaque resource custody is not yet available to Wasm tasks"
@@ -3141,11 +3167,8 @@ fn surface_initializer_contract(
             "GPU state initializer `{initializer_name}` must be self-less and take no arguments"
         )));
     }
-    if !resource_field_indices.is_empty() {
-        return Err(WebBundleError::SurfaceProjection(format!(
-            "GPU state initializer `{initializer_name}` cannot initialize external resource handles"
-        )));
-    }
+    // Initialization returns only ordinary actor values. Resource allocation
+    // remains with the typed GPU resource owner, not this Wasm function.
     let (state, _) = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
         .expect("initializer containing actor must have state shape");
     let initialized =
@@ -3153,7 +3176,7 @@ fn surface_initializer_contract(
             .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
     if initialized != state {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "GPU state initializer `{initializer_name}` must return complete actor state: expected {state:?}, got {initialized:?}"
+            "GPU state initializer `{initializer_name}` must return complete non-resource actor state: expected {state:?}, got {initialized:?}"
         )));
     }
     let mut results = Vec::new();
@@ -3335,6 +3358,87 @@ struct TypedGpuReadbackContract {
     actor_param_is_resource: Vec<bool>,
 }
 
+/// Task notifications share the render actor's resident non-resource state.
+/// Message identity and layout are derived from Fe, never an authored route.
+struct ActorNotificationContract {
+    source_entry: String,
+    event_fields: usize,
+    event_tag_limits: Vec<(usize, u32)>,
+    state_tag_limits: Vec<(usize, u32)>,
+    actor_param_is_resource: Vec<bool>,
+}
+
+fn actor_notification_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    program: &WebActorProgram,
+) -> Result<Option<ActorNotificationContract>, WebBundleError> {
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors.iter().find(|a| a.state.name(db).to_opt()
+        .is_some_and(|name| name.data(db) == &program.actor))
+        .ok_or_else(|| WebBundleError::EntryDerivation("missing render actor".into()))?;
+    let behaviors = actor.behaviors.iter().copied()
+        .filter(|b| crate::resident_actor::behavior_is_resident(db, *b)).collect::<Vec<_>>();
+    let behavior = match behaviors.as_slice() {
+        [] => return Ok(None),
+        [behavior] => *behavior,
+        _ => return Err(WebBundleError::EntryDerivation(
+            "render actor must have exactly one ResidentTransition notification target".into())),
+    };
+    let source_entry = behavior.name(db).to_opt().unwrap().data(db).to_owned();
+    let args = behavior.arg_tys(db);
+    let fields = actor.state.hir_fields(db).data(db);
+    if args.len() != fields.len() + 1 {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "notification `{source_entry}` must take one message followed by complete actor state")));
+    }
+    let event = canonical_type_from_semantic(db, *args[0].skip_binder(), "actor_notification")
+        .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+    if !matches!(event, CanonicalType::Record(_)) {
+        return Err(WebBundleError::EntryDerivation("actor notification must be a named record".into()));
+    }
+    let mut event_tag_limits = Vec::new();
+    let event_fields = surface_scalar_tag_limits(&event, "actor_notification", 0, &mut event_tag_limits)?;
+    let mut event_lanes = Vec::new();
+    append_canonical_wasm_types(&event, &mut event_lanes, "actor_notification")?;
+    if event_fields != event_lanes.len() {
+        return Err(WebBundleError::EntryDerivation("inconsistent notification layout".into()));
+    }
+    let mut state = Vec::new();
+    let mut actor_param_is_resource = Vec::new();
+    for (index, (field, arg)) in fields.iter().zip(&args[1..]).enumerate() {
+        let declared = lower_hir_ty(db, field.type_ref().to_opt().ok_or_else(||
+            WebBundleError::EntryDerivation("unresolved notification state field".into()))?,
+            actor.state.scope(), PredicateListId::empty_list(db));
+        if normalized_semantic_ty(db, declared) != normalized_semantic_ty(db, *arg.skip_binder()) {
+            return Err(WebBundleError::EntryDerivation("notification state argument differs from actor field".into()));
+        }
+        if program.resources.iter().any(|r| r.field_index == index as u32) {
+            actor_param_is_resource.push(true);
+            continue;
+        }
+        let canonical = canonical_type_from_semantic(db, declared, "notification_state")
+            .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+        let mut lanes = Vec::new();
+        append_canonical_wasm_types(&canonical, &mut lanes, "notification_state")?;
+        actor_param_is_resource.extend(std::iter::repeat_n(false, lanes.len()));
+        let name = field.name.to_opt().ok_or_else(||
+            WebBundleError::EntryDerivation("unnamed notification state field".into()))?;
+        state.push(CanonicalField::new(name.data(db).to_owned(), canonical));
+    }
+    let state = CanonicalType::Record(state);
+    let returned = canonical_type_from_semantic(db, behavior.return_ty(db), "notification_result")
+        .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+    if returned != state {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "notification `{source_entry}` must return complete non-resource actor state: expected {state:?}, got {returned:?}")));
+    }
+    let mut state_tag_limits = Vec::new();
+    surface_scalar_tag_limits(&state, "notification_state", 0, &mut state_tag_limits)?;
+    Ok(Some(ActorNotificationContract { source_entry, event_fields, event_tag_limits,
+        state_tag_limits, actor_param_is_resource }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypedSurfaceScheduleContract {
     event_fields: usize,
@@ -3478,6 +3582,7 @@ fn canonical_surface_event_kind_type() -> CanonicalType {
             "pointer_down",
             "pointer_move",
             "pointer_up",
+            "state_changed",
         ]
         .into_iter()
         .map(|name| CanonicalVariant {
@@ -7566,6 +7671,7 @@ impl WebBundle {
             db, top_mod, &options.source_entry, &resource_field_indices,
         )?;
         let scoped_task_count = scoped_task_entries.len() + scoped_task_instances.len();
+        let notification = actor_notification_contract(db, top_mod, &program)?;
         let mut scoped_tasks = Vec::new();
         let mut structured_children = Vec::new();
         let (wasm, control, has_fe_schedule) = if control_export.is_some()
@@ -7577,6 +7683,7 @@ impl WebBundle {
             || !pass_preparation_policies.is_empty()
             || !publications.is_empty()
             || scoped_task_count != 0
+            || notification.is_some()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -7622,7 +7729,17 @@ impl WebBundle {
                     program.actor
                 )));
             }
+            let notification_is_auxiliary = readback.is_some()
+                || typed_transition.as_ref().is_some_and(|c| c.scheduled);
+            if notification.is_some() && control_export.is_some()
+                && !typed_transition.as_ref().is_some_and(|c| c.scheduled) {
+                return Err(WebBundleError::SurfaceProjection(
+                    "task notifications require resident SurfaceScheduling when combined with surface controls".into()));
+            }
             let mut control_entries = Vec::new();
+            if let Some(notification) = &notification {
+                control_entries.push(notification.source_entry.clone());
+            }
             control_entries.extend(scoped_task_entries);
             if let Some(control_export) = control_export.as_deref() {
                 control_entries.push(control_export.to_owned());
@@ -7671,6 +7788,16 @@ impl WebBundle {
                 &scoped_task_instances,
             )
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+            if let Some(notification) = &notification {
+                crate::resident_actor::validate_actor_sink_target(
+                    db, &control_package, &program.actor, &notification.source_entry,
+                ).map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+            } else if control_package.functions(db).into_iter().any(|function|
+                mir::runtime_actor_effect_kind(db, function.instance(db))
+                    == Some(mir::RuntimeActorEffectFuncKind::SendBegin)) {
+                return Err(WebBundleError::EntryDerivation(
+                    "render tasks send actor messages but no ResidentTransition target is declared".into()));
+            }
             if trace {
                 eprintln!(
                     "[fe web actor graph] control package complete, elapsed_ms={}",
@@ -7705,6 +7832,20 @@ impl WebBundle {
             if let Some(readback) = readback.as_ref() {
                 wasm_options =
                     with_typed_gpu_readback(wasm_options, readback, readback_is_auxiliary);
+            }
+            if let Some(notification) = &notification {
+                wasm_options = if notification_is_auxiliary {
+                    wasm_options.with_resident_actor_aux_transition_checked(
+                        &notification.source_entry, ACTOR_NOTIFICATION_EXPORT,
+                        notification.event_fields, notification.actor_param_is_resource.clone(),
+                        notification.event_tag_limits.clone(), notification.state_tag_limits.clone())
+                } else {
+                    wasm_options.with_resident_actor_transition_checked(
+                        &notification.source_entry, ACTOR_NOTIFICATION_EXPORT,
+                        TYPED_SURFACE_STATE_REPLACE_EXPORT, notification.event_fields,
+                        notification.actor_param_is_resource.clone(), notification.event_tag_limits.clone(),
+                        notification.state_tag_limits.clone())
+                }.with_canonical_arena();
             }
             if let Some(initializer) = initializer.as_ref() {
                 wasm_options = with_surface_initializer(wasm_options, initializer);

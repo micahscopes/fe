@@ -1966,6 +1966,45 @@ test("fixed host writes untouched SurfaceEvent records in the versioned memory l
   assert.deepEqual(events, before);
 });
 
+test("typed task notifications preserve every transition and coalesce only presentation facts", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._resources = [];
+  surface._members = [{ name: "value" }];
+  surface._uniforms = [0];
+  surface._pendingSurfaceEvents = [];
+  surface._backingWidth = 2;
+  surface._backingHeight = 2;
+  surface._refreshControlValues = () => {};
+  let resident = 0;
+  const delivered = [];
+  surface._actorNotificationKernel = amount => {
+    delivered.push(amount);
+    resident += amount;
+    return resident;
+  };
+  const scheduled = [];
+  surface._surfaceScheduleKernel = () => {};
+  surface._runSurfaceSchedule = kind => {
+    scheduled.push([kind, surface._pendingSurfaceEvents.length]);
+    return { requestFrame: true };
+  };
+  surface._realizeSurfaceSchedule = decision => assert.equal(decision.requestFrame, true);
+  surface._deliverActorNotification([2]);
+  surface._deliverActorNotification([3]);
+  assert.deepEqual(delivered, [2, 3]);
+  assert.deepEqual(surface._uniforms, [5]);
+  assert.deepEqual(scheduled, [[SurfaceEventKind.StateChanged, 1], [SurfaceEventKind.StateChanged, 1]]);
+  const aborted = new AbortController();
+  aborted.abort();
+  assert.throws(() => surface._deliverActorNotification([9], aborted.signal), { name: "AbortError" });
+  assert.deepEqual(surface._uniforms, [5]);
+  assert.equal(surface._pendingSurfaceEvents.length, 1);
+  surface._actorNotificationKernel = () => { throw new Error("Fe transition failed"); };
+  assert.throws(() => surface._deliverActorNotification([9]), /Fe transition failed/);
+  assert.deepEqual(surface._uniforms, [5]);
+  assert.equal(scheduled.length, 2);
+});
+
 test("each Fe surface call gets a bounded arena epoch, including traps", () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._surfaceTransitionMemory = new WebAssembly.Memory({ initial: 1 });

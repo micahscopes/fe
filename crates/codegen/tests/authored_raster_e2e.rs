@@ -127,6 +127,114 @@ if(broker.activeCount()!==0)throw Error('leaked task operations');
     );
 }
 
+#[test]
+fn raster_tasks_deliver_nominal_messages_into_resident_render_state() {
+    let source = include_str!("fixtures/actor_raster_typed/src/lib.fe");
+    let source = format!("{}\n{}", r#"
+use core::actor::{ActorSink, InitialState, ResidentTransition, ScopedTaskFamily}
+use core::pending::{Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::Resumable
+use std::wasm::WasmBackend
+struct Message { amount: f32 }
+struct WrongMessage { amount: f32 }
+struct State { tint: f32 }
+use std::webgpu::StorageBuffer
+use std::webgpu::{SurfaceTransition, SurfaceScheduling, LatestPerFrame}
+use std::web::SurfaceEvent
+"#, source.replace("    tint: f32,", r#"
+    payload: StorageBuffer<u32, 4>,
+    tint: f32,
+    fn initial() -> State uses (InitialState) { State { tint: 10.0 } }
+    fn receive(self, event: Message) -> State uses (ResidentTransition) {
+        State { tint: self.tint + event.amount }
+    }
+    fn control(self, event: own SurfaceEvent) -> State
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>) {
+        State { tint: self.tint + event.delta_x }
+    }
+    fn notify<const I: u32>(state: State) -> u32 uses (ScopedTaskFamily<2>) {
+        with (ActorSink<WasmBackend, Message> = BrowserActorSink {},
+            Suspend<WasmBackend, u32> = Resumable {}) {
+            match ActorMessage::new(Message { amount: if I == 0 { 1.0 } else { 2.0 } }).send() {
+                TaskOutcome::Success(_) => if state.tint > 0.0 { I + 1 } else { 99 },
+                _ => 99,
+            }
+        }
+    }
+"#));
+    let compile = |source: String| {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///raster_task_notifications.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let top = db.top_mod(db.workspace().get(&db, &url).unwrap());
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
+    };
+    let bundle = compile(source.clone()).unwrap();
+    assert_eq!(bundle.scoped_tasks.len(), 2);
+    let directory = tempfile::tempdir().unwrap();
+    let site = directory.path().join("site");
+    bundle.write_atomic(&site).unwrap();
+    let wasm = bundle.manifest.artifacts.wasm.as_ref().unwrap();
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/render-runtime/fe-render-runtime.js");
+    let script = format!(r#"
+import {{createMaterializedTaskRegistry}} from './tasks/tasks.js';
+import {{createHostCompletionBroker}} from './tasks/host-completion.js';
+globalThis.HTMLElement=class {{}};
+globalThis.customElements={{define(){{}}}};
+const {{FeSurfaceElement}}=await import({runtime:?});
+const surface=Object.create(FeSurfaceElement.prototype);
+surface._resources={resources};
+surface._members=[{{name:'tint'}}];
+surface._fsm='hidden';
+surface._refreshControlValues=()=>{{}};
+const broker=createHostCompletionBroker({{actorEvents:{{send:(event,signal)=>surface._deliverActorNotification(event,signal)}}}});
+const {{instance}}=await WebAssembly.instantiate(await Bun.file({wasm:?}).arrayBuffer(),broker.imports);
+const e=instance.exports;
+surface._wasmArenaCheckpoint=e.fe_cabi_checkpoint;
+surface._wasmArenaRewind=e.fe_cabi_rewind;
+surface._actorNotificationKernel=e.fe_surface_actor_message_v1;
+surface._surfaceStateReplaceKernel=e.fe_surface_state_replace_v1;
+const initial=surface._runWasmInitialization(()=>e.fe_surface_initialize_v1());
+surface._replaceSurfaceState(Array.isArray(initial)?initial:[initial]);
+const tasks=Object.values(createMaterializedTaskRegistry(e));
+const results=await Promise.all(tasks.map(task=>broker.run(task,task.liftInput([10]))));
+if(JSON.stringify(results.map(r=>r[0]).sort())!=='[1,2]')throw Error(JSON.stringify(results));
+if(surface._uniforms[0]!==13)throw Error('messages failed to share resident state: '+surface._uniforms);
+// A real scheduled surface transition must see those same globals.
+surface._attachSurfaceByteTransport(e);
+surface._surfaceTransitionKernel=e.fe_surface_transition_scheduled_v1;
+surface._surfaceTransitionStateResident=true;
+const afterControl=surface._runSurfaceFrame([{{mx:0,my:0,dx:4,dy:0,wheelDelta:0,wheelMode:0,
+    buttons:0,timestamp:0,width:2,height:2,eventKind:0,paramIndex:0,paramValue:0}}]);
+if(afterControl[0]!==17)throw Error('surface and task states diverged');
+surface._deliverActorNotification([2]);
+if(surface._uniforms[0]!==19)throw Error('notification missed surface state');
+surface._replaceSurfaceState([20]);
+surface._deliverActorNotification([2]);
+if(surface._uniforms[0]!==22)throw Error('replacement and message state diverged');
+const cancelled=new AbortController();cancelled.abort();
+let rejected=false;
+try{{surface._deliverActorNotification([100],cancelled.signal)}}catch(error){{rejected=error.name==='AbortError'}}
+if(!rejected||surface._uniforms[0]!==22)throw Error('cancelled notification mutated state');
+if(broker.activeCount()!==0)throw Error('leaked task operations');
+"#, runtime=runtime.to_string_lossy(), resources=serde_json::to_string(&bundle.manifest.resources).unwrap());
+    std::fs::write(site.join("run.mjs"), script).unwrap();
+    let result = std::process::Command::new("bun").arg("run.mjs").current_dir(&site).output().unwrap();
+    assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    let wrong = source.replace("ActorSink<WasmBackend, Message>", "ActorSink<WasmBackend, WrongMessage>")
+        .replace("ActorMessage::new(Message", "ActorMessage::new(WrongMessage");
+    assert!(compile(wrong).unwrap_err().to_string().contains("typed sink event differs"));
+    let missing = source.replace(" uses (ResidentTransition)", "");
+    assert!(compile(missing).unwrap_err().to_string().contains("no ResidentTransition target"));
+    let opaque_self = source.replace("fn notify<const I: u32>(state: State)", "fn notify<const I: u32>(self)")
+        .replace("if state.tint", "if self.tint");
+    assert!(compile(opaque_self).unwrap_err().to_string().contains("opaque resource custody"));
+}
+
 fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
     let instance = wgpu::Instance::default();

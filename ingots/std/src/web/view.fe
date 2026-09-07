@@ -44,6 +44,9 @@ pub enum SurfaceEventKind {
     PointerMove,
     /// Primary pointer contact ended or was cancelled.
     PointerUp,
+    /// A typed actor message has already updated resident state. This fact
+    /// requests presentation; it does not carry or reapply that message.
+    StateChanged,
 }
 
 impl Copy for SurfaceEventKind {}

@@ -683,6 +683,9 @@ fn frame_schedule(
     }
 
     match event.kind {
+        SurfaceEventKind::StateChanged => {
+            request_frame = visible && device_lost == false && presenting == false && demand
+        }
         SurfaceEventKind::AnimationFrame => {
             if visible && device_lost == false && presenting == false && demand {
                 presenting = true

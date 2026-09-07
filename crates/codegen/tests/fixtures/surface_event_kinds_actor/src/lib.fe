@@ -61,6 +61,7 @@ actor SurfaceEventKindProbe uses (
             SurfaceEventKind::PointerDown => 2.0,
             SurfaceEventKind::PointerMove => 3.0,
             SurfaceEventKind::PointerUp => 4.0,
+            SurfaceEventKind::StateChanged => 5.0,
         }
         let dx: f32 = event.delta_x
         let dy: f32 = event.delta_y

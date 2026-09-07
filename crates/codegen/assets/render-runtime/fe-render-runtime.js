@@ -349,6 +349,7 @@ export const SurfaceEventKind = Object.freeze({
   PointerDown: 8,
   PointerMove: 9,
   PointerUp: 10,
+  StateChanged: 11,
 });
 
 /** Fixed tags of Fe's bounded raw-queue effect. The selected resident policy
@@ -1635,6 +1636,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._scopedTaskMachines = null;
     this._scopedTaskLifetime = null;
     this._bufferPublications = null;
+    this._actorNotificationKernel = null;
     this._scopedTasksNeedReboot = false;
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
@@ -1998,6 +2000,13 @@ export class FeSurfaceElement extends HTMLElement {
       }
       this._surfaceTransitionStateResident =
         typeof residentScheduled === "function" || this._gpuReadbackKernel !== null;
+      this._actorNotificationKernel = instance?.exports.fe_surface_actor_message_v1 ?? null;
+      if (this._actorNotificationKernel !== null) {
+        if (typeof this._actorNotificationKernel !== "function") {
+          throw new Error("fe render runtime: actor notification export is not callable");
+        }
+        this._surfaceTransitionStateResident = true;
+      }
       if (this._surfaceTransitionStateResident) {
         const replaceState = instance?.exports.fe_surface_state_replace_v1;
         if (typeof replaceState !== "function") {
@@ -2008,19 +2017,7 @@ export class FeSurfaceElement extends HTMLElement {
         this._surfaceStateReplaceKernel = replaceState;
       }
       if (this._surfaceTransitionSchedule === "resident" || this._gpuReadbackKernel) {
-        const memory = instance?.exports.memory;
-        const alloc = instance?.exports.fe_cabi_alloc;
-        if (
-          !(memory instanceof WebAssembly.Memory) ||
-          typeof alloc !== "function" ||
-          typeof this._wasmArenaReset !== "function"
-        ) {
-          throw new Error(
-            "fe render runtime: resident byte transport is missing fixed memory/allocator/reset exports",
-          );
-        }
-        this._surfaceTransitionMemory = memory;
-        this._surfaceTransitionAlloc = alloc;
+        this._attachSurfaceByteTransport(instance.exports);
       }
       const surfaceScheduleV2 = instance?.exports.fe_surface_schedule_v2;
       const surfaceSchedule = surfaceScheduleV2 ?? instance?.exports.fe_surface_schedule_v1;
@@ -2102,6 +2099,7 @@ export class FeSurfaceElement extends HTMLElement {
             )
             : undeclaredViewInitialUniforms(this._members))
           : this._surfaceReplyValues(authoredInitial, "surface initializer"));
+      this._replaceSurfaceState(this._uniforms);
       this._startScopedTasks();
 
       if (!this._adoptedCanvas) this._ensureStage();
@@ -3571,6 +3569,7 @@ export class FeSurfaceElement extends HTMLElement {
   _teardown() {
     this._stopScopedTasks();
     this._bufferPublications = null;
+    this._actorNotificationKernel = null;
     this._scopedTaskBroker = null;
     this._scopedTaskMachines = null;
     this._scopedTasksNeedReboot = false;
@@ -3636,6 +3635,13 @@ export class FeSurfaceElement extends HTMLElement {
     const needsWorkerScope = required.some(value => value.module === "fe:worker-scope");
     const needsWorkerMailbox = required.some(value => value.module === "fe:worker-mailbox");
     const brokerOptions = {};
+    if (required.some(value => value.module === "fe:actor")) {
+      if (!WebAssembly.Module.exports(wasmModule).some(value =>
+          value.name === "fe_surface_actor_message_v1" && value.kind === "function")) {
+        throw new Error("render task messages require a compiler-selected resident transition");
+      }
+      brokerOptions.actorEvents = { send: (event, signal) => this._deliverActorNotification(event, signal) };
+    }
     let structuredWorkerScopes = [];
     if (needsWorkerScope || needsWorkerMailbox) {
       if (typeof taskModule.createStructuredWorkerScopes !== "function") {
@@ -3729,6 +3735,29 @@ export class FeSurfaceElement extends HTMLElement {
     this._scopedTaskLifetime?.abort();
     this._scopedTaskLifetime = null;
     this._scopedTaskBroker?.cancelAll();
+  }
+
+  _deliverActorNotification(event, signal) {
+    if (signal?.aborted) throw new DOMException("Actor scope cancelled", "AbortError");
+    if (!this._actorNotificationKernel) {
+      throw new Error("actor notification target is unavailable");
+    }
+    const next = this._runWasmArenaEpoch(() => this._surfaceReplyValues(
+      this._actorNotificationKernel(...event, ...this._surfaceResourceArgs()),
+      "typed actor notification",
+    ));
+    this._uniforms = next;
+    this._refreshControlValues();
+    if (this._surfaceScheduleKernel) {
+      // Coalesce only the presentation fact, never the already-delivered Fe
+      // messages. The scheduler retains ownership of frame/backpressure policy.
+      if (!this._pendingSurfaceEvents.some(e => e.eventKind === SurfaceEventKind.StateChanged)) {
+        this._pendingSurfaceEvents.push(this._surfaceBoundaryEvent(SurfaceEventKind.StateChanged));
+      }
+      this._realizeSurfaceSchedule(this._runSurfaceSchedule(SurfaceEventKind.StateChanged));
+    } else {
+      this._queueGestureRender(next);
+    }
   }
 
   async _bootCanonicalActor(wasm) {
@@ -4101,6 +4130,21 @@ export class FeSurfaceElement extends HTMLElement {
       this._wasmArenaRewind(cursor);
       throw error;
     }
+  }
+
+  _attachSurfaceByteTransport(exports) {
+    const memory = exports.memory;
+    const alloc = exports.fe_cabi_alloc;
+    const realloc = exports.cabi_realloc;
+    const allocate = typeof alloc === "function" ? alloc
+      : typeof realloc === "function" ? (size, align) => realloc(0, 0, align, size)
+      : null;
+    if (!(memory instanceof WebAssembly.Memory) || !allocate ||
+        !(this._wasmArenaCheckpoint && this._wasmArenaRewind || this._wasmArenaReset)) {
+      throw new Error("fe render runtime: resident byte transport requires canonical memory, allocation and scratch reclamation");
+    }
+    this._surfaceTransitionMemory = memory;
+    this._surfaceTransitionAlloc = allocate;
   }
 
   /** Synchronous scratch scope above all current owner/task allocations.
