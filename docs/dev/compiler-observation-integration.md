@@ -963,3 +963,40 @@ Evidence root: `/laboratory/quilting/scratch/wgsl-codegen-review-20260905/`.
 Capture: guarded-subtraction-actor-retire/capture.json,
 e71412d908fd9f5257f28ab1933c9ea55172b3bb22774e1c47591954f1503a0d.
 Compiler example SHA256 178889d8464c99cac1fea2cc71fb09d56a474b04f056c283e51587e975edec64.
+
+## Wasm atlas scratch reclamation (2026-09-06)
+
+The CPU atlas probe separated sampling, triangulation and audit using the same
+Fe implementation. Uniform LoD-8 sampling retained 13.6 MB; adding triangulation
+raised the arena endpoint to 324 MB (triangle) / 287 MB (quad), before audits.
+These measurements are Wasmtime probes, not browser-worker or full-atlas totals.
+
+`FE_WASM_LOWER_TRACE_DETAIL` now reports scoped-arena rejection for ordinary
+bodies as well as indirect-ABI bodies. The trace exposed two inconsistent
+legality checks around runtime-sized ranges:
+
+- A `Known<0>` bound has a closed, zero-leaf unit placeholder. The emitter
+  accepts it, but reclamation analysis rejected every placeholder.
+- Associated `Unknown::Repr` fields resolve to `usize`. Parameter analysis used
+  a class-only shape rather than the instance-normalized target-aware field
+  interpretation already used by emission.
+
+The fix admits only the emitter's zero-leaf product and normalizes aggregate
+parameter fields in their semantic instance. Non-unit placeholders, escaping
+references, and genuinely unsupported wide integers retain their checks.
+The runtime-loop regression returned correct data before the fix but retained
+264,079 arena bytes after 128 tiny calls; it now stays below 4,096. Fixed-bound
+loops did not reproduce the defect and were not sufficient acceptance evidence.
+
+The actual full-density atlas probes retain identical mesh receipts and pass
+all audits. Their post-call arena returns to 1,024 bytes; importantly, measured
+linear-memory high-water is 37,224,448 bytes, not merely an end-of-call reset
+masking the old 353 MB retention. A 64 MiB per-worker probe guard records the
+bounded result. This does not establish optimal memory use, parallel worker
+behavior, full-atlas speed, or production browser performance.
+
+Evidence: `wasm-unit-loop-arena-before-20260906.log`,
+`wasm-unit-loop-arena-after-20260906.log`, `wasm-arena-export-safety-20260906.log`,
+and `wasm-cpu-atlas-bounded-memory-20260906.log` under
+`/laboratory/quilting/scratch/`. This diagnosis used phase probes and compiler
+lowering traces, not Riff-cat captures.

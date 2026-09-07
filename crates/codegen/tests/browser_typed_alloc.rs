@@ -1,10 +1,18 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
+use salsa::Setter;
 use url::Url;
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {
+    compile_to_wasm_with_profile(source, OptLevel::O0, "debug")
+}
+
+fn compile_to_wasm_with_profile(source: &str, opt: OptLevel, profile: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
+    db.compilation_settings()
+        .set_profile(&mut db)
+        .to(profile.into());
     let url = Url::parse("file:///browser_typed_alloc.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(source.to_owned()));
@@ -14,7 +22,7 @@ fn compile_to_wasm(source: &str) -> Vec<u8> {
     assert!(diagnostics.is_empty(), "{diagnostics}");
     BackendKind::Wasm
         .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), opt)
         .expect("typed browser object allocation should lower")
         .into_bytecode()
         .expect("Wasm bytecode")
@@ -253,6 +261,64 @@ pub fn run(_ count: u32) -> BrowserBytes {
     assert!(
         next < 2048,
         "callee-local scratch escaped its memory-provider scope: arena top {next}",
+    );
+}
+
+#[test]
+fn unit_loop_placeholders_do_not_disable_scoped_scratch_reclamation() {
+    let wasm = compile_to_wasm_with_profile(
+        r#"
+use core::{BrowserBytes, BrowserPtr, alloc_browser_object}
+struct State { total: u32 }
+fn initialize() uses (state: mut State) { state.total = 0 }
+fn accumulate(_ seed: u32, _ length: usize) uses (state: mut State) {
+    if length > 256 { return }
+    let mut scratch: [u32; 256] = [0; 256]
+    for i in 0 .. length { scratch[i] = seed + i.downcast_truncate() }
+    state.total += scratch[(seed % 256) as usize]
+}
+fn batch(_ count: u32) uses (state: mut State) {
+    for i in 0 .. (count as usize) { accumulate(i.downcast_truncate(), count as usize) }
+}
+pub fn run(_ count: u32) -> BrowserBytes {
+    let state: BrowserPtr<State> = alloc_browser_object<State>()
+    with (state) { initialize() }
+    with (state) { batch(count) }
+    BrowserBytes { ptr: state.address(), len: 4 }
+}
+"#,
+        OptLevel::O2,
+        "release",
+    );
+    wasmparser::validate(&wasm).unwrap();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    assert_eq!(module.imports().count(), 0);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let reset = instance
+        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+        .unwrap();
+    let run = instance
+        .get_typed_func::<i32, (i32, i32)>(&mut store, "run")
+        .unwrap();
+    let alloc = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+        .unwrap();
+    reset.call(&mut store, ()).unwrap();
+    let (pointer, length) = run.call(&mut store, 128).unwrap();
+    assert_eq!(length, 4);
+    let mut total = [0_u8; 4];
+    instance
+        .get_memory(&mut store, "memory")
+        .unwrap()
+        .read(&store, pointer as usize, &mut total)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(total), 16_256);
+    let next = alloc.call(&mut store, (1, 1)).unwrap();
+    assert!(
+        next < 4096,
+        "unit loop disabled scratch reclamation: arena end {next}"
     );
 }
 
