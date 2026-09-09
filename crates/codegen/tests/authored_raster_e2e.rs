@@ -76,8 +76,10 @@ fn raster_fixed_actor_arrays_support_bounded_indexing() {
         ("record", "Normal", "self.values[(vertex_index % 4) as usize].x", true),
         ("enum_record", "EnumRecord", "selected_normal(self.values[(vertex_index % 4) as usize])", true),
         ("record_loop", "Normal", "select_record(self.values, vertex_index, 4).x", true),
+        ("record_loop_break", "Normal", "select_record(self.values, vertex_index, 2).x", true),
         ("unbounded", "f32", "self.values[(vertex_index + 4) as usize]", false),
     ] {
+        eprintln!("raster array case: {name}");
         let source = original
             .replace("    tint: f32,", &format!("    tint: f32,\n    values: [{element}; 4],"))
             .replace("heat: if vertex_index == 0 { 1.0 } else { 0.0 },",
@@ -92,7 +94,7 @@ fn selected_normal(_ value: EnumRecord) -> f32 {{
     match value.policy {{ Policy::First => value.normal.x, Policy::Second => value.normal.y, Policy::Third => value.normal.z }}
 }}
 "#)
-        } else if name == "record_loop" {
+        } else if name == "record_loop" || name == "record_loop_break" {
             format!(r#"{source}
 #[arithmetic(unchecked)]
 fn select_record(_ values: [Normal; 4], _ vertex: u32, _ count: u32) -> Normal {{
@@ -119,6 +121,11 @@ fn select_record(_ values: [Normal; 4], _ vertex: u32, _ count: u32) -> Normal {
                 let mut state = vec![0.0f32; if element == "EnumRecord" {17} else if element == "Normal" {13} else {5}];
                 state[0] = 0.4;
                 state[1] = 1.0;
+                if name == "record_loop_break" {
+                    // A hot third element must remain invisible: the active
+                    // count ends the search before it, despite spare capacity.
+                    state[7] = 1.0;
+                }
                 execute_raster_with_state(bundle, &state);
             }
         } else {
