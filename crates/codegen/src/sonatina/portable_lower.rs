@@ -4240,6 +4240,7 @@ where
                 }
                 self.typed_private_class_size(&data.elem)?.checked_mul(len)
             }
+            Layout::Enum(data) if data.variants.iter().all(|variant| variant.fields.is_empty()) => Some(4),
             Layout::Enum(_) => None,
         }
     }
@@ -4303,6 +4304,9 @@ where
                 }
                 self.builder.declare_array_type(elem, len)
             }
+            // Match the existing flattened value ABI: payload-free enums are
+            // one full-width tag, even when their Wasm memory tag is compact.
+            Layout::Enum(data) if data.variants.iter().all(|variant| variant.fields.is_empty()) => Type::I32,
             Layout::Enum(_) => return Ok(None),
         };
         self.typed_private_type_cache.insert(layout, ty);
@@ -11694,6 +11698,16 @@ where
                     }
                     Ok(())
                 }
+                Layout::Enum(data) if data.variants.iter().all(|variant| variant.fields.is_empty()) => {
+                    let value = *leaves.get(*cursor).ok_or_else(|| LowerError::Internal(
+                        "shader typed-private enum is missing its tag".to_owned()))?;
+                    if self.fb.type_of(value) != Type::I32 {
+                        return Err(LowerError::Internal("shader enum tag is not i32".to_owned()));
+                    }
+                    self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, Type::I32));
+                    *cursor += 1;
+                    Ok(())
+                }
                 Layout::Enum(_) => Err(LowerError::Unsupported(
                     "shader typed-private payload enums are not implemented".to_owned(),
                 )),
@@ -11741,6 +11755,10 @@ where
                         let child = self.typed_private_child_pointer(pointer, &data.elem, index)?;
                         self.load_typed_private_leaves(child, &data.elem, values)?;
                     }
+                    Ok(())
+                }
+                Layout::Enum(data) if data.variants.iter().all(|variant| variant.fields.is_empty()) => {
+                    values.push(self.load_memory_scalar(pointer, Type::I32));
                     Ok(())
                 }
                 Layout::Enum(_) => Err(LowerError::Unsupported(

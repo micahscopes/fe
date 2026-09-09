@@ -74,12 +74,37 @@ fn raster_fixed_actor_arrays_support_bounded_indexing() {
         ("constant", "f32", "self.values[0]", true),
         ("bounded", "f32", "self.values[(vertex_index % 4) as usize]", true),
         ("record", "Normal", "self.values[(vertex_index % 4) as usize].x", true),
+        ("enum_record", "EnumRecord", "selected_normal(self.values[(vertex_index % 4) as usize])", true),
+        ("record_loop", "Normal", "select_record(self.values, vertex_index, 4).x", true),
         ("unbounded", "f32", "self.values[(vertex_index + 4) as usize]", false),
     ] {
         let source = original
             .replace("    tint: f32,", &format!("    tint: f32,\n    values: [{element}; 4],"))
             .replace("heat: if vertex_index == 0 { 1.0 } else { 0.0 },",
                 &format!("heat: {access},"));
+        let source = if name == "enum_record" {
+            format!(r#"{source}
+enum Policy {{ First, Second, Third }}
+impl Copy for Policy {{}}
+struct EnumRecord {{ normal: Normal, policy: Policy }}
+impl Copy for EnumRecord {{}}
+fn selected_normal(_ value: EnumRecord) -> f32 {{
+    match value.policy {{ Policy::First => value.normal.x, Policy::Second => value.normal.y, Policy::Third => value.normal.z }}
+}}
+"#)
+        } else if name == "record_loop" {
+            format!(r#"{source}
+#[arithmetic(unchecked)]
+fn select_record(_ values: [Normal; 4], _ vertex: u32, _ count: u32) -> Normal {{
+    for i in 0 .. 4 {{
+        if i >= (count as usize) {{ break }}
+        let value = values[i]
+        if i == (vertex as usize) {{ return value }}
+    }}
+    Normal {{ x: 0.0, y: 0.0, z: 0.0 }}
+}}
+"#)
+        } else { source };
         let mut db = DriverDataBase::default();
         let url = Url::parse(&format!("file:///raster_array_{name}.fe")).unwrap();
         db.workspace().touch(&mut db, url.clone(), Some(source));
@@ -91,7 +116,7 @@ fn raster_fixed_actor_arrays_support_bounded_indexing() {
         if succeeds {
             let bundle = result.unwrap_or_else(|error| panic!("{name}: {error}"));
             if name != "constant" {
-                let mut state = vec![0.0f32; if element == "Normal" {13} else {5}];
+                let mut state = vec![0.0f32; if element == "EnumRecord" {17} else if element == "Normal" {13} else {5}];
                 state[0] = 0.4;
                 state[1] = 1.0;
                 execute_raster_with_state(bundle, &state);
