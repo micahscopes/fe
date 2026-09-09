@@ -715,7 +715,7 @@ fn remap_terminator<'db>(
             *beneficiary = offset_local(*beneficiary, local_base)
         }
         RTerminator::Return(Some(value)) => *value = offset_local(*value, local_base),
-        RTerminator::Trap | RTerminator::Return(None) | RTerminator::Stop => {}
+        RTerminator::AssertFailure { .. } | RTerminator::Trap | RTerminator::Return(None) | RTerminator::Stop => {}
     }
     terminator
 }
@@ -1243,7 +1243,7 @@ fn block_successors(terminator: &RTerminator<'_>) -> Vec<RBlockId> {
         | RTerminator::ReturnData { .. }
         | RTerminator::Revert { .. }
         | RTerminator::SelfDestruct { .. }
-        | RTerminator::Trap
+        | RTerminator::AssertFailure { .. } | RTerminator::Trap
         | RTerminator::Return(_)
         | RTerminator::Stop => Vec::new(),
     }
@@ -1438,7 +1438,7 @@ fn terminator_uses(terminator: &RTerminator<'_>, used: &mut BTreeSet<RLocalId>) 
             used.insert(*value);
         }
         RTerminator::Goto(_)
-        | RTerminator::Trap
+        | RTerminator::AssertFailure { .. } | RTerminator::Trap
         | RTerminator::Return(None)
         | RTerminator::Stop => {}
     }

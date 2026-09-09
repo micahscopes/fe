@@ -747,6 +747,9 @@ fn format_terminator_with_style<'db>(
         RTerminator::SelfDestruct { beneficiary } => {
             format!("selfdestruct {}", format_local_id(*beneficiary))
         }
+        RTerminator::AssertFailure { message } => {
+            format!("assert_failure {:?}", message.map(|id| id.data(db)))
+        }
         RTerminator::Trap => "trap".to_string(),
         RTerminator::Return(value) => value
             .map(|value| format!("return {}", format_local_id(value)))

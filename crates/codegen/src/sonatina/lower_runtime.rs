@@ -2332,6 +2332,31 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                 self.fb
                     .insert_inst_no_result(EvmInvalid::new(self.module.inst_set()));
             }
+            RTerminator::AssertFailure { message } => {
+                let payload =
+                    assertion_revert_payload(message.map(|id| id.data(self.module.db).as_bytes()));
+                let size = self.index_value(payload.len().next_multiple_of(32) as u64);
+                let ptr_ty = self.fb.ptr_type(Type::I8);
+                let ptr = self
+                    .fb
+                    .insert_inst(EvmMalloc::new(self.module.inst_set(), size), ptr_ty);
+                let ptr = self.coerce_value_to_ty(ptr, Type::I256)?;
+                for (index, chunk) in payload.chunks(32).enumerate() {
+                    let addr = self.offset_address(ptr, index as u64, AddressSpaceKind::Memory)?;
+                    let mut word = [0u8; 32];
+                    word[..chunk.len()].copy_from_slice(chunk);
+                    let value = self.fb.make_imm_value(bytes_to_i256(&word, false));
+                    self.fb.insert_inst_no_result(Mstore::new(
+                        self.module.inst_set(),
+                        addr,
+                        value,
+                        Type::I256,
+                    ));
+                }
+                let len = self.index_value(payload.len() as u64);
+                self.fb
+                    .insert_inst_no_result(EvmRevert::new(self.module.inst_set(), ptr, len));
+            }
             RTerminator::Return(value) => match value {
                 Some(value) => {
                     let value = self.local_value(*value)?;
@@ -4667,6 +4692,7 @@ fn block_successors<'db>(terminator: &RTerminator<'db>) -> SmallVec<[RBlockId; 2
         | RTerminator::Revert { .. }
         | RTerminator::SelfDestruct { .. }
         | RTerminator::Trap
+        | RTerminator::AssertFailure { .. }
         | RTerminator::Return(_)
         | RTerminator::Stop => SmallVec::new(),
     }
@@ -4882,6 +4908,57 @@ fn panic_selector_immediate() -> Immediate {
     let mut bytes = [0; 32];
     bytes[..4].copy_from_slice(&[0x4e, 0x48, 0x7b, 0x71]);
     Immediate::from_i256(bytes_to_i256(&bytes, false), Type::I256)
+}
+
+fn assertion_revert_payload(message: Option<&[u8]>) -> Vec<u8> {
+    fn push_word(out: &mut Vec<u8>, value: usize) {
+        let mut word = [0; 32];
+        word[32 - size_of::<usize>()..].copy_from_slice(&value.to_be_bytes());
+        out.extend(word);
+    }
+    match message {
+        Some(bytes) => {
+            let padded_len = bytes.len().next_multiple_of(32);
+            let mut payload = Vec::with_capacity(4 + 64 + padded_len);
+            payload.extend([0x08, 0xc3, 0x79, 0xa0]);
+            push_word(&mut payload, 32);
+            push_word(&mut payload, bytes.len());
+            payload.extend(bytes);
+            payload.resize(4 + 64 + padded_len, 0);
+            payload
+        }
+        None => {
+            let mut payload = vec![0x4e, 0x48, 0x7b, 0x71];
+            push_word(&mut payload, 1);
+            payload
+        }
+    }
+}
+
+#[cfg(test)]
+mod assertion_payload_tests {
+    use super::assertion_revert_payload;
+
+    #[test]
+    fn assertion_payloads_preserve_solidity_encoding() {
+        let panic = assertion_revert_payload(None);
+        assert_eq!(panic.len(), 36);
+        assert_eq!(&panic[..4], &[0x4e, 0x48, 0x7b, 0x71]);
+        assert!(panic[4..35].iter().all(|byte| *byte == 0));
+        assert_eq!(panic[35], 1);
+
+        for message in [&b""[..], &b"boom"[..], &[0x61; 33][..]] {
+            let error = assertion_revert_payload(Some(message));
+            assert_eq!(error.len(), 68 + message.len().next_multiple_of(32));
+            assert_eq!(&error[..4], &[0x08, 0xc3, 0x79, 0xa0]);
+            assert!(error[4..35].iter().all(|byte| *byte == 0));
+            assert_eq!(error[35], 32);
+            assert!(error[36..67].iter().all(|byte| *byte == 0));
+            assert_eq!(error[67], message.len() as u8);
+            assert_eq!(&error[68..68 + message.len()], message);
+            assert!(error[68 + message.len()..].iter().all(|byte| *byte == 0));
+        }
+    }
 }
 
 fn zero_for_type(fb: &mut FunctionBuilder<InstInserter>, ty: Type) -> ValueId {

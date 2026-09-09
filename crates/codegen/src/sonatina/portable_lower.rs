@@ -2098,7 +2098,10 @@ fn slot_param_has_only_static_field_reads<'db>(
             }
         }
         let terminator_is_safe = match &block.terminator {
-            RTerminator::Goto(_) | RTerminator::Trap | RTerminator::Stop => true,
+            RTerminator::Goto(_)
+            | RTerminator::AssertFailure { .. }
+            | RTerminator::Trap
+            | RTerminator::Stop => true,
             RTerminator::Branch { cond, .. } => *cond != candidate,
             RTerminator::SwitchScalar { discr, .. }
             | RTerminator::MatchEnumTag { tag: discr, .. } => *discr != candidate,
@@ -2873,7 +2876,7 @@ fn collect_terminator_uses(terminator: &RTerminator<'_>, used: &mut FxHashMap<RL
         RTerminator::SelfDestruct { beneficiary } => {
             used.insert(*beneficiary, ());
         }
-        RTerminator::Trap => {}
+        RTerminator::AssertFailure { .. } | RTerminator::Trap => {}
         RTerminator::Return(value) => {
             if let Some(value) = value {
                 used.insert(*value, ());
@@ -6910,6 +6913,7 @@ where
                 | RTerminator::Branch { .. }
                 | RTerminator::SwitchScalar { .. }
                 | RTerminator::MatchEnumTag { .. }
+                | RTerminator::AssertFailure { .. }
                 | RTerminator::Trap => {}
             }
         }
@@ -7195,6 +7199,7 @@ where
                 | RTerminator::Branch { .. }
                 | RTerminator::SwitchScalar { .. }
                 | RTerminator::MatchEnumTag { .. }
+                | RTerminator::AssertFailure { .. }
                 | RTerminator::Trap
                 | RTerminator::Return(_)
                 | RTerminator::Stop => {}
@@ -13769,7 +13774,7 @@ where
                     self.module.function_symbol(*callee),
                 )));
             }
-            RTerminator::Trap => {
+            RTerminator::AssertFailure { .. } | RTerminator::Trap => {
                 self.fb.insert_inst_no_result(Unreachable::new(is));
             }
             other => {
@@ -13902,6 +13907,7 @@ fn compute_reachable_blocks(body: &RuntimeBody<'_>) -> Vec<bool> {
             | RTerminator::ReturnData { .. }
             | RTerminator::Revert { .. }
             | RTerminator::SelfDestruct { .. }
+            | RTerminator::AssertFailure { .. }
             | RTerminator::Trap
             | RTerminator::Return(_)
             | RTerminator::Stop => {}

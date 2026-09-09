@@ -91,6 +91,16 @@ pub fn main() {
 }
 
 #[test]
+fn assert_macro_without_message_retains_evm_panic_payload() {
+    let ir = with_top_mod_for_source(
+        "assert_macro_without_message_retains_evm_panic_payload.fe",
+        "pub fn main() { assert!(false) }",
+        |db, top_mod| emit_module_sonatina_ir(db, top_mod).expect("Sonatina IR should emit"),
+    );
+    assert!(ir.contains("evm_revert") && ir.contains("36.i256"), "{ir}");
+}
+
+#[test]
 fn sonatina_function_names_disambiguate_module_conflicts() {
     let ir = with_top_mod_for_source(
         "sonatina_function_names_disambiguate_module_conflicts.fe",

@@ -1784,6 +1784,11 @@ pub enum RTerminator<'db> {
     SelfDestruct {
         beneficiary: RValueId,
     },
+    /// An assertion failure has no runtime payload until backend lowering.
+    /// EVM encodes a revert payload; portable targets trap without EVM memory.
+    AssertFailure {
+        message: Option<hir::hir_def::StringId<'db>>,
+    },
     Trap,
     Return(Option<RValueId>),
     Stop,

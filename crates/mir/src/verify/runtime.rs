@@ -1050,7 +1050,7 @@ fn verify_terminator<'db>(
             Ok(())
         }
         RTerminator::SelfDestruct { beneficiary } => verify_word_value(body, *beneficiary),
-        RTerminator::Trap => Ok(()),
+        RTerminator::AssertFailure { .. } | RTerminator::Trap => Ok(()),
         RTerminator::Return(value) => {
             let class = value
                 .map(|value| runtime_value_class(body, value).cloned())
