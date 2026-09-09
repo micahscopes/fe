@@ -489,6 +489,7 @@ impl CanonicalScalarValuePlan {
 
 fn canonical_layout_contains_variant(layout: &crate::CanonicalLayout) -> bool {
     match &layout.shape {
+        crate::CanonicalShape::Array { element, .. } => canonical_layout_contains_variant(element),
         crate::CanonicalShape::Record { fields } => fields
             .iter()
             .any(|field| canonical_layout_contains_variant(&field.layout)),
@@ -514,6 +515,15 @@ fn canonical_scalar_value_plan(
     use crate::CanonicalShape;
     let scalar = |ty| CanonicalScalarValuePlan::Scalar { offset: base, ty };
     Ok(match &layout.shape {
+        CanonicalShape::Array { element, len, stride } => {
+            let mut plans = Vec::with_capacity(*len as usize);
+            for index in 0..*len {
+                let offset = index.checked_mul(*stride).and_then(|v| base.checked_add(v))
+                    .ok_or_else(|| LowerError::Unsupported(format!("canonical array offset overflow at `{path}`")))?;
+                plans.push(canonical_scalar_value_plan(element, offset, &format!("{path}[{index}]"))?);
+            }
+            CanonicalScalarValuePlan::Record(plans)
+        }
         CanonicalShape::Bool => scalar(Type::I1),
         CanonicalShape::U8 => scalar(Type::I8),
         CanonicalShape::I32 | CanonicalShape::U32 => scalar(Type::I32),
@@ -8243,7 +8253,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
             .get(&body.owner)
             .cloned()
             .unwrap_or_default();
-        let typed_private_locals = module.derive_typed_private_locals(body)?;
+        let mut typed_private_locals = module.derive_typed_private_locals(body)?;
 
         // Declare one SSA variable per value-carried local. A primitive scalar
         // Slot used only through whole-slot loads/stores is promoted to the same
@@ -8311,7 +8321,19 @@ impl<'db> BodyLocalStoragePlan<'db> {
                             .iter()
                             .any(|param| param.local == local_id)
                         {
-                            values[idx] = Some(LocalValueRepresentation::Single(Type::I32));
+                            // Addressable value parameters are local copies, not
+                            // arena pointers received from the caller. Preserve
+                            // their fixed shader type just as for authored local
+                            // storage; Wasm/native retain their existing arena ABI.
+                            let ty = if let Some(pointee_ty) = module.typed_private_type_for_class(class)? {
+                                let pointer_ty = module.builder.ptr_type(pointee_ty);
+                                typed_private_locals.insert(local_id, TypedPrivateLocal {
+                                    component_root: local_id, storage_root: local_id,
+                                    pointee: class.clone(), pointee_ty, pointer_ty,
+                                });
+                                pointer_ty
+                            } else { Type::I32 };
+                            values[idx] = Some(LocalValueRepresentation::Single(ty));
                             materialized_param_slots.insert(local_id);
                         } else {
                             // Conditional and continuation joins are represented
@@ -8441,6 +8463,7 @@ impl<'db> BodyLocalStoragePlan<'db> {
                         !indirect_params.is_some_and(|params| params.contains(&param.local))
                             && !self.materialized_scalar_slots.contains(&param.local)
                             && self.materialized_param_slots.contains(&param.local)
+                            && !self.typed_private_locals.contains_key(&param.local)
                     }).count(),
                 retained_results: 0,
             },
@@ -9006,9 +9029,16 @@ where
                         param.local
                     ))
                 })?;
-                let pointer = self.lower_alloc_object(*layout)?;
                 let mut cursor = 0usize;
-                self.store_materialized_leaves(pointer, &param.class, &shape, leaves, &mut cursor)?;
+                let pointer = if let Some(local) = self.typed_private_locals.get(&param.local).cloned() {
+                    let pointer = self.fb.insert_inst(Alloca::new(self.inst_set(), local.pointee_ty), local.pointer_ty);
+                    self.store_typed_private_leaves(pointer, &param.class, leaves, &mut cursor)?;
+                    pointer
+                } else {
+                    let pointer = self.lower_alloc_object(*layout)?;
+                    self.store_materialized_leaves(pointer, &param.class, &shape, leaves, &mut cursor)?;
+                    pointer
+                };
                 if cursor != leaves.len() {
                     return Err(LowerError::Internal(format!(
                         "materialized parameter {:?} consumed {cursor} of {} leaves",
@@ -12526,6 +12556,8 @@ where
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
             .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
         let (root, mut current_class) = match resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Slot { local, class }
+                if self.typed_private_locals.contains_key(&local) => (local, class),
             mir::ResolvedPlaceRootKind::Ref { value, class }
                 if self.typed_private_locals.contains_key(&value) =>
             {
@@ -12689,9 +12721,11 @@ where
         // The body plan owns the root representation. Failure to project a
         // selected typed root must not reinterpret its pointer as an arena
         // byte offset, including after bounds-check instructions were emitted.
-        if let PlaceRoot::Ref(root) = place.root
-            && self.typed_private_locals.contains_key(&root)
-        {
+        let typed_root = match place.root {
+            PlaceRoot::Ref(root) | PlaceRoot::Slot(root) => self.typed_private_locals.contains_key(&root),
+            _ => false,
+        };
+        if typed_root {
             return self.typed_private_scalar_place(place)?.map(Some).ok_or_else(|| {
                 LowerError::Unsupported(
                     "planned typed-private place is not a supported scalar projection".to_owned(),

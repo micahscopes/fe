@@ -21,6 +21,18 @@ function uint(value, path, maximum = 0xffffffff) {
   return value;
 }
 
+function fixedArrayValue(value, len, path) {
+  if (!Array.isArray(value) || value.length !== len
+      || Object.keys(value).length !== len) {
+    throw new TypeError(`${path} must be a dense fixed array of length ${len}`);
+  }
+  for (let i = 0; i < len; i += 1) {
+    if (!Object.hasOwn(value, i)) {
+      throw new TypeError(`${path}[${i}] is missing`);
+    }
+  }
+}
+
 function checkedEnd(offset, length, memory, path) {
   memory = memoryBytes(memory);
   uint(offset, `${path} offset`);
@@ -101,6 +113,20 @@ function validateLayout(layout, path, depth = 0, state = { nodes: 0 }) {
         || layout.stride !== 4 || !Number.isSafeInteger(layout.max)
         || layout.max < 0 || layout.max > Math.floor(0xffffffff / layout.stride)) {
       throw new TypeError(`${path} has non-canonical bounded list descriptor`);
+    }
+    return layout;
+  }
+  if (layout.kind === "array") {
+    exactKeys(layout, [...baseKeys, "element", "len", "stride"], path);
+    uint(layout.len, `${path}.len`, 4096);
+    const before = state.nodes;
+    validateLayout(layout.element, `${path}.element`, depth + 1, state);
+    state.nodes += (state.nodes - before) * Math.max(0, layout.len - 1);
+    if (state.nodes > 4096) throw new TypeError(`${path} exceeds maximum type node count`);
+    const stride = alignUp(layout.element.size, layout.element.align, path);
+    const size = uint(stride * layout.len, `${path}.size`);
+    if (layout.stride !== stride || layout.size !== size || layout.align !== layout.element.align) {
+      throw new TypeError(`${path} has non-canonical fixed array layout`);
     }
     return layout;
   }
@@ -283,6 +309,13 @@ function writeLayout(layout, value, memory, offset, allocate, path) {
     case "bytes":
     case "string": writeDescriptor(layout, value, memory, offset, allocate, path); return;
     case "list": writeList(layout, value, memory, offset, allocate, path); return;
+    case "array": {
+      fixedArrayValue(value, layout.len, path);
+      for (let i = 0; i < layout.len; i += 1) {
+        writeLayout(layout.element, value[i], memory, offset + i * layout.stride, allocate, `${path}[${i}]`);
+      }
+      return;
+    }
     case "record": {
       exactKeys(value, layout.fields.map((field) => field.name), path);
       for (const field of layout.fields) {
@@ -354,6 +387,9 @@ function readLayout(layout, memory, offset, path) {
       }
       return result;
     }
+    case "array":
+      return Array.from({ length: layout.len }, (_, i) =>
+        readLayout(layout.element, memory, offset + i * layout.stride, `${path}[${i}]`));
     case "record":
       return Object.fromEntries(layout.fields.map((field) => [
         field.name,
@@ -592,6 +628,7 @@ function mailboxValueWidth(layout, path) {
     case "bytes":
     case "string":
     case "list": return 2;
+    case "array": return layout.len * mailboxValueWidth(layout.element, `${path}[]`);
     case "record": return layout.fields.reduce(
       (width, field) => width + mailboxValueWidth(field.layout, `${path}.${field.name}`),
       0,
@@ -610,6 +647,7 @@ function mailboxValueWidth(layout, path) {
 }
 
 function mailboxHasDescriptors(layout) {
+  if (layout.kind === "array") return layout.len > 0 && mailboxHasDescriptors(layout.element);
   if (layout.kind === "bytes" || layout.kind === "string" || layout.kind === "list") {
     return true;
   }
@@ -671,6 +709,10 @@ function liftMailboxDescriptor(layout, carriers, state, binding, path) {
 }
 
 function liftMailboxValue(layout, carriers, state, binding, path) {
+  if (layout.kind === "array") {
+    return Array.from({ length: layout.len }, (_, i) =>
+      liftMailboxValue(layout.element, carriers, state, binding, `${path}[${i}]`));
+  }
   if (layout.kind === "record") {
     return Object.fromEntries(layout.fields.map((field) => [
       field.name,
@@ -734,6 +776,12 @@ function liftMailboxValue(layout, carriers, state, binding, path) {
 }
 
 function consumeMailboxZeros(layout, carriers, state, binding, path) {
+  if (layout.kind === "array") {
+    for (let i = 0; i < layout.len; i += 1) {
+      consumeMailboxZeros(layout.element, carriers, state, binding, `${path}[${i}]`);
+    }
+    return;
+  }
   if (layout.kind === "record") {
     for (const field of layout.fields) {
       consumeMailboxZeros(field.layout, carriers, state, binding, `${path}.${field.name}`);
@@ -775,6 +823,10 @@ function consumeMailboxZeros(layout, carriers, state, binding, path) {
 }
 
 function appendMailboxZeros(layout, output) {
+  if (layout.kind === "array") {
+    for (let i = 0; i < layout.len; i += 1) appendMailboxZeros(layout.element, output);
+    return;
+  }
   if (layout.kind === "record") {
     for (const field of layout.fields) appendMailboxZeros(field.layout, output);
     return;
@@ -851,6 +903,13 @@ function lowerMailboxDescriptor(layout, value, output, binding, allocations, pat
 }
 
 function lowerMailboxValue(layout, value, output, binding, allocations, path) {
+  if (layout.kind === "array") {
+    fixedArrayValue(value, layout.len, path);
+    for (let i = 0; i < layout.len; i += 1) {
+      lowerMailboxValue(layout.element, value[i], output, binding, allocations, `${path}[${i}]`);
+    }
+    return;
+  }
   if (layout.kind === "record") {
     exactKeys(value, layout.fields.map((field) => field.name), path);
     for (const field of layout.fields) {
@@ -1029,6 +1088,12 @@ export function compileCanonicalActorMailbox(manifest) {
 
 function canonicalTransferList(layout, value, name, output, seen) {
   switch (layout.kind) {
+    case "array":
+      fixedArrayValue(value, layout.len, name);
+      for (let i = 0; i < layout.len; i += 1) {
+        canonicalTransferList(layout.element, value[i], `${name}[${i}]`, output, seen);
+      }
+      return;
     case "bytes": {
       if (!(value instanceof Uint8Array)
           || !(value.buffer instanceof ArrayBuffer)

@@ -776,6 +776,15 @@ fn scalar_layout(
     tag_limits: &mut Vec<(usize, u32)>,
 ) -> Result<usize, ResidentActorError> {
     match ty {
+        CanonicalType::Array { element, len } => {
+            let mut count = 0usize;
+            for index in 0..*len {
+                let at = offset.checked_add(count).ok_or_else(|| ResidentActorError::Contract(format!("scalar offset overflow at `{path}`")))?;
+                count = count.checked_add(scalar_layout(element, &format!("{path}[{index}]"), at, tag_limits)?)
+                    .ok_or_else(|| ResidentActorError::Contract(format!("scalar count overflow at `{path}`")))?;
+            }
+            Ok(count)
+        }
         CanonicalType::Bool
         | CanonicalType::U8
         | CanonicalType::I32

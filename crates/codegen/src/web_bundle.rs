@@ -2944,6 +2944,13 @@ fn append_actor_state_leaves(
         .last()
         .expect("actor state leaves always have a field path");
     match ty {
+        CanonicalType::Array { element, len } => {
+            for index in 0..*len {
+                let mut nested_path = field_path.to_vec();
+                nested_path.push(index.to_string());
+                append_actor_state_leaves(element, &nested_path, doc, leaves)?;
+            }
+        }
         CanonicalType::Record(fields) => {
             for field in fields {
                 let mut nested_path = field_path.to_vec();
@@ -3742,6 +3749,11 @@ fn append_canonical_wasm_types(
     path: &str,
 ) -> Result<(), WebBundleError> {
     match ty {
+        CanonicalType::Array { element, len } => {
+            for index in 0..*len {
+                append_canonical_wasm_types(element, output, &format!("{path}[{index}]"))?;
+            }
+        }
         CanonicalType::Bool | CanonicalType::U8 | CanonicalType::I32 | CanonicalType::U32 => {
             output.push(WebControlWasmType::I32)
         }
@@ -3779,6 +3791,13 @@ fn surface_scalar_tag_limits(
     output: &mut Vec<(usize, u32)>,
 ) -> Result<usize, WebBundleError> {
     match ty {
+        CanonicalType::Array { element, len } => {
+            let mut count = 0;
+            for index in 0..*len {
+                count += surface_scalar_tag_limits(element, &format!("{path}[{index}]"), offset + count, output)?;
+            }
+            Ok(count)
+        }
         CanonicalType::Bool
         | CanonicalType::U8
         | CanonicalType::I32
@@ -8850,6 +8869,8 @@ fn canonical_interface_declarations(
 ) -> Result<String, WebBundleError> {
     fn ty(layout: &crate::CanonicalLayout, indent: usize) -> String {
         match &layout.shape {
+            crate::CanonicalShape::Array { element, len, .. } => format!("[{}]",
+                (0..*len).map(|_| ty(element, indent)).collect::<Vec<_>>().join(", ")),
             crate::CanonicalShape::Bool => "boolean".to_owned(),
             crate::CanonicalShape::U8
             | crate::CanonicalShape::I32

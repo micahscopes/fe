@@ -68,6 +68,42 @@ fn raster_constant_divisor_guards_normalize_but_real_traps_remain() {
 }
 
 #[test]
+fn raster_fixed_actor_arrays_support_bounded_indexing() {
+    let original = include_str!("fixtures/actor_raster_typed/src/lib.fe");
+    for (name, element, access, succeeds) in [
+        ("constant", "f32", "self.values[0]", true),
+        ("bounded", "f32", "self.values[(vertex_index % 4) as usize]", true),
+        ("record", "Normal", "self.values[(vertex_index % 4) as usize].x", true),
+        ("unbounded", "f32", "self.values[(vertex_index + 4) as usize]", false),
+    ] {
+        let source = original
+            .replace("    tint: f32,", &format!("    tint: f32,\n    values: [{element}; 4],"))
+            .replace("heat: if vertex_index == 0 { 1.0 } else { 0.0 },",
+                &format!("heat: {access},"));
+        let mut db = DriverDataBase::default();
+        let url = Url::parse(&format!("file:///raster_array_{name}.fe")).unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics}");
+        let result = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None));
+        if succeeds {
+            let bundle = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            if name != "constant" {
+                let mut state = vec![0.0f32; if element == "Normal" {13} else {5}];
+                state[0] = 0.4;
+                state[1] = 1.0;
+                execute_raster_with_state(bundle, &state);
+            }
+        } else {
+            let error = result.err().expect("out-of-bounds indexing must still fail closed").to_string();
+            assert!(error.contains("trap") || error.contains("bounds"), "{error}");
+        }
+    }
+}
+
+#[test]
 fn raster_enum_match_preserves_closed_return_domain_in_root_and_helper() {
     // Both placements must compile. Proved callee return bounds eliminate the
     // invalid-tag path without requiring the author to relocate the match.
@@ -362,6 +398,10 @@ fn proved_vertex_increment_preserves_executed_pixels() {
 }
 
 fn execute_raster(bundle: WebBundle) {
+    execute_raster_with_state(bundle, &[0.4]);
+}
+
+fn execute_raster_with_state(bundle: WebBundle, values: &[f32]) {
     let pass = &bundle.manifest.passes[0];
     assert_eq!(pass.draw_vertices, Some(3));
     let Some((adapter, device, queue)) = device() else {
@@ -374,11 +414,12 @@ fn execute_raster(bundle: WebBundle) {
     assert_eq!(binding.access, WebBindingAccess::Read);
     let state = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Fe authored raster state"),
-        size: 4,
+        size: std::mem::size_of_val(values) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(&state, 0, &0.4f32.to_le_bytes());
+    let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+    queue.write_buffer(&state, 0, &bytes);
     let group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Fe authored raster group layout"),
         entries: &[wgpu::BindGroupLayoutEntry {

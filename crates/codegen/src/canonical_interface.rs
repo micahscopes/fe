@@ -54,6 +54,8 @@ pub enum CanonicalType {
         element: CanonicalListElement,
         max: u32,
     },
+    /// Inline, fixed-length values. Unlike BrowserList this owns no descriptor.
+    Array { element: Box<CanonicalType>, len: u32 },
     Record(Vec<CanonicalField>),
     Variant(Vec<CanonicalVariant>),
 }
@@ -218,6 +220,7 @@ pub enum CanonicalShape {
     Record {
         fields: Vec<CanonicalFieldLayout>,
     },
+    Array { element: Box<CanonicalLayout>, len: u32, stride: u32 },
     Variant {
         tag_offset: u32,
         variants: Vec<CanonicalVariantLayout>,
@@ -708,6 +711,17 @@ pub fn canonical_type_from_semantic<'db>(
     // read-only views. The canonical declaration describes the underlying
     // message record, not Fe's local access capability.
     let ty = ty.as_view(db).unwrap_or(ty);
+    if ty.is_array(db) {
+        let len = ty.array_len(db).ok_or_else(|| error(format!("{path}: fixed array length must be concrete")))?;
+        if len > MAX_NODES {
+            return Err(error(format!("{path}: fixed array exceeds maximum type node count {MAX_NODES}")));
+        }
+        let element = *ty.generic_args(db).first().ok_or_else(|| error(format!("{path}: missing array element type")))?;
+        return Ok(CanonicalType::Array {
+            element: Box::new(canonical_type_from_semantic(db, element, &format!("{path}[]"))?),
+            len: len as u32,
+        });
+    }
     if let TyData::TyBase(TyBase::Prim(primitive)) = ty.base_ty(db).data(db) {
         return match primitive {
             PrimTy::Bool => Ok(CanonicalType::Bool),
@@ -1146,6 +1160,21 @@ fn layout_type(
                 },
             )
         }
+        CanonicalType::Array { element, len } => {
+            let before = *nodes;
+            let element = layout_type(element, depth + 1, nodes, &format!("{path}[]"))?;
+            // Bound expanded values, not just the compact metadata tree. Keep
+            // one element's validation even for a zero-length array.
+            let extra = (*nodes - before).checked_mul(len.saturating_sub(1) as usize)
+                .ok_or_else(|| error(format!("{path}: fixed array node count overflow")))?;
+            *nodes = nodes.checked_add(extra).ok_or_else(|| error("canonical node count overflow"))?;
+            if *nodes > MAX_NODES { return Err(error(format!("{path}: fixed array exceeds maximum type node count {MAX_NODES}"))); }
+            let stride = align_up(element.size, element.align, path)?;
+            let size = stride.checked_mul(*len).ok_or_else(|| error(format!("{path}: fixed array size overflow")))?;
+            CanonicalLayout { size, align: element.align, shape: CanonicalShape::Array {
+                element: Box::new(element), len: *len, stride,
+            }}
+        }
         CanonicalType::Record(fields) => {
             if fields.is_empty() {
                 return Err(error(format!(
@@ -1280,6 +1309,7 @@ fn canonical_variant_name(name: &str) -> String {
 
 fn contains_variant(ty: &CanonicalType) -> bool {
     match ty {
+        CanonicalType::Array { element, .. } => contains_variant(element),
         CanonicalType::Variant(_) => true,
         CanonicalType::Record(fields) => fields.iter().any(|field| contains_variant(&field.ty)),
         CanonicalType::Bool
@@ -1297,6 +1327,7 @@ fn contains_variant(ty: &CanonicalType) -> bool {
 
 fn canonical_wasm_scalar_value(ty: &CanonicalType) -> bool {
     match ty {
+        CanonicalType::Array { element, .. } => canonical_wasm_scalar_value(element),
         CanonicalType::Bool
         | CanonicalType::U8
         | CanonicalType::I32
@@ -1929,6 +1960,23 @@ pub fn update(request:Request)->Response<Plane> {
         let lane = &manifest.lanes[0];
         assert_eq!((lane.request.size, lane.request.align), (16, 4));
         assert_eq!((lane.response.size, lane.response.align), (16, 4));
+    }
+
+    #[test]
+    fn fixed_record_arrays_have_canonical_value_layouts() {
+        let declaration = semantic_lane(
+            r#"
+struct Draw { begin:u32, end:u32 }
+struct State { draws:[Draw;16], count:u32 }
+pub fn update(state:State)->State {state}
+"#,
+            "update",
+        )
+        .expect("fixed arrays of closed records must be canonical values");
+        let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+        let lane = &manifest.lanes[0];
+        assert_eq!((lane.request.size, lane.request.align), (132, 4));
+        assert_eq!((lane.response.size, lane.response.align), (132, 4));
     }
 
     #[test]

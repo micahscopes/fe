@@ -365,6 +365,20 @@ fn trace_contextual_helper_analysis(
     if std::env::var_os("FE_SPIRV_INLINE_TRACE").is_none() {
         return;
     }
+    if let ShaderPipeline::Raster { vertex, fragment } = request.pipeline {
+        for (stage, root) in [("vertex", vertex), ("fragment", fragment)] {
+            module.func_store.view(root, |function| {
+                let mut operations = std::collections::BTreeMap::<String, usize>::new();
+                for block in function.layout.iter_block() {
+                    for inst in function.layout.iter_inst(block) {
+                        let text = function.dfg.inst(inst).as_text().to_string();
+                        *operations.entry(text).or_default() += 1;
+                    }
+                }
+                eprintln!("fe raster root operations: phase={phase}, stage={stage}, counts={operations:?}");
+            });
+        }
+    }
     match NagaBackend::analyze_request_helpers(module, request) {
         Ok(analysis) => {
             eprintln!(
@@ -1403,10 +1417,15 @@ fn normalize_spirv_helper_graph(module: &mut sonatina_ir::Module) {
     // Full inlining and instruction splicing stay disabled here: this pass
     // exposes the callable graph without duplicating any substantive work.
     let functions = module.funcs();
-    // Eligibility runs before rooted inlining. Fold constant safety guards
-    // first, so an impossible divide-by-zero edge is not mistaken for a real
-    // raster trap. SCCP preserves guards whose condition is not provably false.
-    run_function_passes_on(module, &functions, &[Pass::Sccp, Pass::CfgCleanup]);
+    // Eligibility runs before rooted inlining. Prove constant and range-bound
+    // safety guards first (including remainder-bounded array indices), so an
+    // impossible failure edge is not mistaken for a real raster trap. Neither
+    // pass removes guards whose condition remains unknown.
+    run_function_passes_on(
+        module,
+        &functions,
+        &[Pass::Sccp, Pass::RangeBranchSimplify, Pass::CfgCleanup],
+    );
     Inliner::new(InlinerConfig {
         enable_single_block_splice: false,
         enable_full_inliner: false,

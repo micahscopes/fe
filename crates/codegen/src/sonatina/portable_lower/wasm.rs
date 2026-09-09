@@ -1774,6 +1774,14 @@ impl<'db, 'a> PortableModuleLowerer<'db, 'a, Wasm32> {
         ) -> Result<(), LowerError> {
             use crate::CanonicalShape;
             let ty = match &layout.shape {
+                CanonicalShape::Array { element, len, stride } => {
+                    for index in 0..*len {
+                        let offset = index.checked_mul(*stride).and_then(|v| base.checked_add(v))
+                            .ok_or_else(|| LowerError::Unsupported("canonical array offset overflow".to_owned()))?;
+                        flatten(element, offset, leaves, descriptors)?;
+                    }
+                    None
+                }
                 CanonicalShape::Bool => Some(Type::I1),
                 CanonicalShape::U8 => Some(Type::I8),
                 CanonicalShape::I32 | CanonicalShape::U32 => Some(Type::I32),

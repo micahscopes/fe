@@ -554,3 +554,49 @@ pub fn frame(request: own Request) -> AllocatedBrowserBytes {
         "an oversized Fe descriptor must trap instead of exposing memory"
     );
 }
+
+#[test]
+fn canonical_fixed_record_array_updates_preserve_other_elements_and_input() {
+    let source = r#"
+struct Draw { begin: u32, end: u32 }
+struct State { draws: [Draw; 16], count: u32 }
+pub fn update(state: own State) -> State {
+    let mut result = state
+    result.draws[7].end = 999
+    result.count = 8
+    result
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///wasm_fixed_record_array.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let declaration = canonical_lane_decl_from_entry(&db, top_mod, "update", "update").unwrap();
+    let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+    let lane = manifest.lanes[0].clone();
+    assert_eq!(lane.request.size, 132);
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "update").unwrap();
+    let artifact = compile_runtime_package_wasm_with_options(
+        &db, &package, WasmCompileOptions::default().with_canonical_lane(lane),
+    ).unwrap();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let update = instance.get_typed_func::<i32, i32>(&mut store, "fe_cabi_update").unwrap();
+    let input: Vec<u8> = (0u32..33).flat_map(u32::to_le_bytes).collect();
+    memory.write(&mut store, 0, &input).unwrap();
+    let response = update.call(&mut store, 0).unwrap() as usize;
+    let mut output = vec![0; 132];
+    memory.read(&store, response, &mut output).unwrap();
+    let mut expected = input.clone();
+    expected[60..64].copy_from_slice(&999u32.to_le_bytes());
+    expected[128..132].copy_from_slice(&8u32.to_le_bytes());
+    assert_eq!(output, expected);
+    memory.read(&store, 0, &mut output).unwrap();
+    assert_eq!(output, input, "updating a returned value must not alias its input");
+}
