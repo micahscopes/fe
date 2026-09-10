@@ -59,7 +59,11 @@ use sonatina_ir::{
     types::{CompoundType, EnumReprHint, EnumVariantRef, VariantData},
 };
 
-use super::{LowerError, create_module_ctx};
+use super::{
+    LowerError,
+    checked_arith::{CheckedArithOp, insert_checked_arith},
+    create_module_ctx,
+};
 use crate::{
     TargetDataLayout,
     function_symbols::{FunctionSymbolInput, FunctionSymbolStyle, assign_function_symbols},
@@ -4136,29 +4140,20 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         let signed = operand.is_signed_scalar();
         Ok(match op {
             ArithBinOp::Add => {
-                let [raw, overflow] = if signed {
-                    self.fb.insert_saddo(lhs, rhs)
-                } else {
-                    self.fb.insert_uaddo(lhs, rhs)
-                };
+                let [raw, overflow] =
+                    insert_checked_arith(&mut self.fb, CheckedArithOp::Add, signed, lhs, rhs);
                 self.emit_panic_revert(overflow, PANIC_OVERFLOW)?;
                 raw
             }
             ArithBinOp::Sub => {
-                let [raw, overflow] = if signed {
-                    self.fb.insert_ssubo(lhs, rhs)
-                } else {
-                    self.fb.insert_usubo(lhs, rhs)
-                };
+                let [raw, overflow] =
+                    insert_checked_arith(&mut self.fb, CheckedArithOp::Sub, signed, lhs, rhs);
                 self.emit_panic_revert(overflow, PANIC_OVERFLOW)?;
                 raw
             }
             ArithBinOp::Mul => {
-                let [raw, overflow] = if signed {
-                    self.fb.insert_smulo(lhs, rhs)
-                } else {
-                    self.fb.insert_umulo(lhs, rhs)
-                };
+                let [raw, overflow] =
+                    insert_checked_arith(&mut self.fb, CheckedArithOp::Mul, signed, lhs, rhs);
                 self.emit_panic_revert(overflow, PANIC_OVERFLOW)?;
                 raw
             }
@@ -4260,29 +4255,20 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                 .fb
                 .insert_inst(EvmExp::new(self.module.inst_set(), lhs, rhs), ty),
             (IntrinsicArithBinOp::Add, true) => {
-                let [raw, overflow] = if signed {
-                    self.fb.insert_saddo(lhs, rhs)
-                } else {
-                    self.fb.insert_uaddo(lhs, rhs)
-                };
+                let [raw, overflow] =
+                    insert_checked_arith(&mut self.fb, CheckedArithOp::Add, signed, lhs, rhs);
                 self.emit_panic_revert(overflow, PANIC_OVERFLOW)?;
                 raw
             }
             (IntrinsicArithBinOp::Sub, true) => {
-                let [raw, overflow] = if signed {
-                    self.fb.insert_ssubo(lhs, rhs)
-                } else {
-                    self.fb.insert_usubo(lhs, rhs)
-                };
+                let [raw, overflow] =
+                    insert_checked_arith(&mut self.fb, CheckedArithOp::Sub, signed, lhs, rhs);
                 self.emit_panic_revert(overflow, PANIC_OVERFLOW)?;
                 raw
             }
             (IntrinsicArithBinOp::Mul, true) => {
-                let [raw, overflow] = if signed {
-                    self.fb.insert_smulo(lhs, rhs)
-                } else {
-                    self.fb.insert_umulo(lhs, rhs)
-                };
+                let [raw, overflow] =
+                    insert_checked_arith(&mut self.fb, CheckedArithOp::Mul, signed, lhs, rhs);
                 self.emit_panic_revert(overflow, PANIC_OVERFLOW)?;
                 raw
             }

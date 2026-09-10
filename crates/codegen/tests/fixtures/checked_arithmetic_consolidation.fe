@@ -1,0 +1,11 @@
+pub fn policy_checked_u32_add(_ a: u32, _ b: u32) -> u32 { a + b }
+pub fn policy_checked_u32_sub(_ a: u32, _ b: u32) -> u32 { a - b }
+pub fn policy_checked_u32_mul(_ a: u32, _ b: u32) -> u32 { a * b }
+
+pub fn policy_checked_i32_add(_ a: i32, _ b: i32) -> i32 { a + b }
+pub fn policy_checked_i32_sub(_ a: i32, _ b: i32) -> i32 { a - b }
+pub fn policy_checked_i32_mul(_ a: i32, _ b: i32) -> i32 { a * b }
+
+pub fn policy_gpu_add(_ x: u32) -> u32 { x + 1 }
+pub fn policy_gpu_sub(_ x: u32) -> u32 { x - 1 }
+pub fn policy_gpu_mul(_ x: u32) -> u32 { x * 2 }

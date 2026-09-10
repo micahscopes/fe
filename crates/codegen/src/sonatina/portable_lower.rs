@@ -100,7 +100,10 @@ use crate::{
     canonical_interface::semantic_type_retains_borrowed_host_storage, canonical_type_from_semantic,
 };
 
-use super::LowerError;
+use super::{
+    LowerError,
+    checked_arith::{CheckedArithOp, insert_checked_arith},
+};
 use super::lower_runtime::{
     assign_sonatina_function_symbols, bytes_to_i256, linkage_for_runtime, scalar_ty,
 };
@@ -13288,15 +13291,19 @@ where
         {
             let lhs = self.local_read_value(lhs)?;
             let rhs = self.local_read_value(rhs)?;
-            let [value, overflow] = match (op, class.is_signed_int()) {
-                (IntrinsicArithBinOp::Add, false) => self.fb.insert_uaddo(lhs, rhs),
-                (IntrinsicArithBinOp::Sub, false) => self.fb.insert_usubo(lhs, rhs),
-                (IntrinsicArithBinOp::Mul, false) => self.fb.insert_umulo(lhs, rhs),
-                (IntrinsicArithBinOp::Add, true) => self.fb.insert_saddo(lhs, rhs),
-                (IntrinsicArithBinOp::Sub, true) => self.fb.insert_ssubo(lhs, rhs),
-                (IntrinsicArithBinOp::Mul, true) => self.fb.insert_smulo(lhs, rhs),
+            let op = match op {
+                IntrinsicArithBinOp::Add => CheckedArithOp::Add,
+                IntrinsicArithBinOp::Sub => CheckedArithOp::Sub,
+                IntrinsicArithBinOp::Mul => CheckedArithOp::Mul,
                 _ => unreachable!(),
             };
+            let [value, overflow] = insert_checked_arith(
+                &mut self.fb,
+                op,
+                class.is_signed_int(),
+                lhs,
+                rhs,
+            );
             self.trap_if(overflow);
             return Ok(value);
         }
