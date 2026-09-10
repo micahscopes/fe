@@ -5483,31 +5483,27 @@ where
         if let Some(element) = self.resource_element_cache.get(&element_ty).cloned() {
             return Ok(element);
         }
-        let scalar_type = |ty: TyId<'db>| match ty.base_ty(self.db).data(self.db) {
-            TyData::TyBase(TyBase::Prim(PrimTy::U32 | PrimTy::I32)) => Some(Type::I32),
-            TyData::TyBase(TyBase::Prim(PrimTy::F32)) => Some(Type::F32),
-            _ => None,
+        use crate::actor_semantics::{ResourceScalar, SemanticResourceElement,
+            ResourceElementError, resource_scalar, semantic_resource_element};
+        let scalar_type = |scalar| match scalar {
+            ResourceScalar::U32 | ResourceScalar::I32 => Type::I32,
+            ResourceScalar::F32 => Type::F32,
         };
-        let element = if let Some(ty) = scalar_type(element_ty) {
-            GpuResourceElementType::Scalar(ty)
-        } else {
-            let adt = element_ty.adt_def(self.db).ok_or_else(|| {
-                LowerError::Unsupported(
+        let shape = semantic_resource_element(self.db, element_ty).map_err(|error| {
+            LowerError::Unsupported(match error {
+                ResourceElementError::NotRecord =>
                     "GPU storage elements must be u32/i32/f32 or POD records of those fields"
                         .to_owned(),
-                )
-            })?;
-            let AdtRef::Struct(struct_) = adt.adt_ref(self.db) else {
-                return Err(LowerError::Unsupported(
-                    "GPU storage elements must be u32/i32/f32 or POD records of those fields"
-                        .to_owned(),
-                ));
-            };
-            let fields = element_ty.field_types(self.db);
+                ResourceElementError::EmptyOrInconsistent =>
+                    "GPU storage POD records must contain one or more u32/i32/f32 fields".to_owned(),
+            })
+        })?;
+        let element = match shape {
+          SemanticResourceElement::Scalar(scalar) => GpuResourceElementType::Scalar(scalar_type(scalar)),
+          SemanticResourceElement::Record { name, fields } => {
             let field_tys = fields
                 .iter()
-                .copied()
-                .map(scalar_type)
+                .map(|(_, ty)| resource_scalar(self.db, *ty).map(scalar_type))
                 .collect::<Option<Vec<_>>>();
             let Some(field_tys) = field_tys.filter(|fields| !fields.is_empty()) else {
                 return Err(LowerError::Unsupported(
@@ -5515,11 +5511,7 @@ where
                         .to_owned(),
                 ));
             };
-            let name = struct_
-                .name(self.db)
-                .to_opt()
-                .map(|name| name.data(self.db).to_string())
-                .unwrap_or_else(|| {
+            let name = name.unwrap_or_else(|| {
                     format!("gpu_resource_record_{}", self.resource_element_cache.len())
                 });
             let ty = self.builder.declare_struct_type(&name, &field_tys, false);
@@ -5527,6 +5519,7 @@ where
                 ty,
                 fields: field_tys.into_boxed_slice(),
             }
+          }
         };
         self.resource_element_cache
             .insert(element_ty, element.clone());

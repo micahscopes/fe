@@ -39,6 +39,99 @@ pub(crate) struct SemanticGpuResource<'db> {
     pub(crate) has_typed_policy: bool,
 }
 
+/// Semantic element discovery shared by resource consumers. This deliberately
+/// does not choose a physical layout or decide whether signed storage is legal
+/// in a browser interface.
+pub(crate) enum SemanticResourceElement<'db> {
+    Scalar(ResourceScalar),
+    Record {
+        name: Option<String>,
+        fields: Vec<(Option<String>, TyId<'db>)>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ResourceScalar { U32, I32, F32 }
+
+pub(crate) fn resource_scalar(
+    db: &dyn hir::analysis::HirAnalysisDb,
+    ty: TyId<'_>,
+) -> Option<ResourceScalar> {
+    use hir::analysis::ty::ty_def::{PrimTy, TyBase, TyData};
+    let ty = ty.as_view(db).unwrap_or(ty);
+    match ty.base_ty(db).data(db) {
+        TyData::TyBase(TyBase::Prim(PrimTy::U32)) => Some(ResourceScalar::U32),
+        TyData::TyBase(TyBase::Prim(PrimTy::I32)) => Some(ResourceScalar::I32),
+        TyData::TyBase(TyBase::Prim(PrimTy::F32)) => Some(ResourceScalar::F32),
+        _ => None,
+    }
+}
+
+pub(crate) enum ResourceElementError { NotRecord, EmptyOrInconsistent }
+
+#[cfg(test)]
+mod resource_element_tests {
+    use super::*;
+    use common::InputDb;
+    use hir::hir_def::HirIngot;
+
+    #[test]
+    fn aliases_and_generic_fields_retain_semantic_signedness() {
+        let mut db = DriverDataBase::default();
+        let url = url::Url::parse("file:///resource_element_view.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(r#"
+struct Pair<T> { first: T, second: f32 }
+type SignedPair = Pair<i32>
+pub fn identity(value: SignedPair) -> SignedPair { value }
+"#.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let function = top.ingot(&db).all_funcs(&db).iter().copied()
+            .find(|f| f.name(&db).to_opt().is_some_and(|n| n.data(&db) == "identity"))
+            .unwrap();
+        let shape = semantic_resource_element(&db, function.return_ty(&db));
+        let Ok(SemanticResourceElement::Record { fields, .. }) = shape else {
+            panic!("alias to instantiated record must retain its shape");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0.as_deref(), Some("first"));
+        assert_eq!(fields[1].0.as_deref(), Some("second"));
+        assert!(matches!(resource_scalar(&db, fields[0].1), Some(ResourceScalar::I32)));
+        assert!(matches!(resource_scalar(&db, fields[1].1), Some(ResourceScalar::F32)));
+    }
+}
+
+pub(crate) fn semantic_resource_element<'db>(
+    db: &'db dyn hir::analysis::HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Result<SemanticResourceElement<'db>, ResourceElementError> {
+    use hir::analysis::ty::adt_def::AdtRef;
+    use hir::hir_def::FieldParent;
+    let ty = ty.as_view(db).unwrap_or(ty);
+    if let Some(scalar) = resource_scalar(db, ty) {
+        return Ok(SemanticResourceElement::Scalar(scalar));
+    }
+    let Some(adt) = ty.adt_def(db) else {
+        return Err(ResourceElementError::NotRecord);
+    };
+    let AdtRef::Struct(record) = adt.adt_ref(db) else {
+        return Err(ResourceElementError::NotRecord);
+    };
+    let declared = FieldParent::Struct(record).fields(db).collect::<Vec<_>>();
+    let instantiated = ty.field_types(db);
+    if declared.is_empty() || declared.len() != instantiated.len() {
+        return Err(ResourceElementError::EmptyOrInconsistent);
+    }
+    Ok(SemanticResourceElement::Record {
+        name: record.name(db).to_opt().map(|name| name.data(db).to_string()),
+        fields: declared.into_iter().zip(instantiated).map(|(field, ty)| {
+            (field.name(db).map(|name| name.data(db).to_string()), ty)
+        }).collect(),
+    })
+}
+
 /// Recover one GPU resource's semantic shape after aliases and views have been
 /// normalized. `Ok(None)` means the type is not a GPU resource; malformed
 /// attributed resources fail closed with a stable compiler-owned explanation.

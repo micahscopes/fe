@@ -33,7 +33,7 @@ use hir::analysis::{
     },
 };
 use hir::hir_def::{
-    EnumVariant, FieldParent, Func, GenericArg, GenericParam, GpuControl, GpuDispatch, GpuDraw,
+    EnumVariant, Func, GenericArg, GenericParam, GpuControl, GpuDispatch, GpuDraw,
     GpuResource, GpuStage, HirIngot, Partial, PathId, TopLevelMod, TypeKind, Visibility,
 };
 use serde::{Deserialize, Serialize};
@@ -1700,54 +1700,36 @@ fn resource_element(
     ty: TyId<'_>,
     path: &str,
 ) -> Result<WebActorResourceElement, WebBundleError> {
-    let ty = ty.as_view(db).unwrap_or(ty);
-    let scalar_kind = |ty: TyId<'_>| match ty.base_ty(db).data(db) {
-        TyData::TyBase(TyBase::Prim(PrimTy::U32)) => Some(WebScalarKind::U32),
-        TyData::TyBase(TyBase::Prim(PrimTy::F32)) => Some(WebScalarKind::F32),
-        _ => None,
-    };
-    if let Some(scalar) = scalar_kind(ty) {
-        return Ok(match scalar {
-            WebScalarKind::U32 => WebActorResourceElement::U32,
-            WebScalarKind::F32 => WebActorResourceElement::F32,
-            WebScalarKind::I1 | WebScalarKind::I32 | WebScalarKind::I64 => {
-                unreachable!("filtered resource scalar")
-            }
-        });
-    }
-    let adt = ty.adt_def(db).ok_or_else(|| {
-        WebBundleError::EntryDerivation(format!(
-            "resource `{path}` element must be `u32`, `f32`, or a POD record"
-        ))
-    })?;
-    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
-        return Err(WebBundleError::EntryDerivation(format!(
-            "resource `{path}` element must be `u32`, `f32`, or a POD record"
-        )));
-    };
-    let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
-    let field_tys = ty.field_types(db);
-    if field_views.is_empty() || field_views.len() != field_tys.len() {
-        return Err(WebBundleError::EntryDerivation(format!(
+    use crate::actor_semantics::{ResourceElementError, ResourceScalar,
+        SemanticResourceElement, resource_scalar, semantic_resource_element};
+    let invalid = || WebBundleError::EntryDerivation(format!(
+        "resource `{path}` element must be `u32`, `f32`, or a POD record"
+    ));
+    let shape = semantic_resource_element(db, ty).map_err(|error| match error {
+        ResourceElementError::NotRecord => invalid(),
+        ResourceElementError::EmptyOrInconsistent => WebBundleError::EntryDerivation(format!(
             "resource `{path}` POD record has no fields or inconsistent semantic metadata"
-        )));
-    }
-    let mut fields = Vec::with_capacity(field_views.len());
-    for (index, (field, field_ty)) in field_views.into_iter().zip(field_tys).enumerate() {
-        let Some(scalar) = scalar_kind(field_ty) else {
-            return Err(WebBundleError::EntryDerivation(format!(
+        )),
+    })?;
+    let declared = match shape {
+        SemanticResourceElement::Scalar(ResourceScalar::U32) => return Ok(WebActorResourceElement::U32),
+        SemanticResourceElement::Scalar(ResourceScalar::F32) => return Ok(WebActorResourceElement::F32),
+        SemanticResourceElement::Scalar(ResourceScalar::I32) => return Err(invalid()),
+        SemanticResourceElement::Record { fields, .. } => fields,
+    };
+    let mut fields = Vec::with_capacity(declared.len());
+    for (index, (name, field_ty)) in declared.into_iter().enumerate() {
+        let scalar = match resource_scalar(db, field_ty) {
+            Some(ResourceScalar::U32) => WebScalarKind::U32,
+            Some(ResourceScalar::F32) => WebScalarKind::F32,
+            _ => return Err(WebBundleError::EntryDerivation(format!(
                 "resource `{path}` POD field {} must be `u32` or `f32`; signed `i32` storage requires explicit carrier bitcasts",
                 index
-            )));
+            ))),
         };
-        let name = field
-            .name(db)
-            .map(|name| name.data(db).to_string())
-            .ok_or_else(|| {
-                WebBundleError::EntryDerivation(format!(
-                    "resource `{path}` POD fields must be named"
-                ))
-            })?;
+        let name = name.ok_or_else(|| WebBundleError::EntryDerivation(format!(
+            "resource `{path}` POD fields must be named"
+        )))?;
         fields.push(WebActorResourceField {
             name,
             offset: u32::try_from(index).unwrap() * 4,
