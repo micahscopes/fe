@@ -1,0 +1,37 @@
+use std::webgpu::{StorageBuffer, GpuProgram, WebGpuBackend, ComputeSurface,
+    ComputeInvocation, Workgroup, FixedDispatch, FragmentSurface}
+
+fn read<T, const N: usize>(words: StorageBuffer<T, N>, index: u32) -> T {
+    words.load(index: index)
+}
+
+// Both the element-generic read and length-generic loop cross the boundary.
+fn total<const N: usize>(words: StorageBuffer<u32, N>, count: u32) -> u32 {
+    let mut value = 0
+    let mut i = 0
+    while i < count {
+        value = value + read(words: words, index: i)
+        i = i + 1
+    }
+    value
+}
+
+actor GenericResources uses (GpuProgram<WebGpuBackend>) {
+    left: StorageBuffer<u32, 64>,
+    right: StorageBuffer<u32, 64>,
+    output: StorageBuffer<u32, 64>,
+
+    fn sample(self, lane: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<64, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        let a = total(words: self.left, count: 3)
+        let b = total(words: self.left, count: 5)
+        let c = total(words: self.right, count: 3)
+        let d = total(words: self.right, count: 5)
+        self.output.store(index: lane.global.x, value: a + b + c + d)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        self.output.load(index: 0).downcast_truncate()
+    }
+}
