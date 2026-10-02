@@ -1,6 +1,5 @@
-// Events are encoded through the `EventAbiEncode` tuple impls, which stop at
-// arity 16. An event with 17 non-indexed fields must produce a trait-bound
-// diagnostic pointing at the event definition instead of an ICE.
+// An event with seventeen non-indexed fields uses the shared ABI record
+// encoder and must type-check without the old tuple-arity diagnostic.
 use std::evm::Log
 
 #[event]

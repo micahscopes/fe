@@ -13,11 +13,11 @@ use super::{
 use crate::{
     HirDb,
     hir_def::{
-        AssocConstDef, AttrListId, Body, BodyKind, Expr, ExprId, FieldDefListId, FuncModifiers,
-        FuncParam, FuncParamMode, FuncParamName, GenericArgListId, GenericParamListId, IdentId,
-        ImplTrait, LitKind, Partial, Pat, PathId, PathKind, Stmt, StringId, Struct,
-        TrackedItemVariant, TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind, Visibility,
-        WhereClauseId, WhereClausePredicate, WherePredicate, expr::CallArg,
+        AbiRecordKind, AssocConstDef, AttrListId, Body, BodyKind, Expr, ExprId, FieldDefListId,
+        FuncModifiers, FuncParam, FuncParamMode, FuncParamName, GenericArgListId,
+        GenericParamListId, IdentId, ImplTrait, LitKind, Partial, Pat, PathId, PathKind, Stmt,
+        StringId, Struct, TrackedItemVariant, TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind,
+        Visibility, WhereClauseId, WhereClausePredicate, WherePredicate, expr::CallArg,
     },
     span::{AbiStructDesugared, HirOrigin},
 };
@@ -125,6 +125,12 @@ pub(super) fn lower_abi_struct<'db>(
         db,
         TypeKind::Path(Partial::Present(PathId::from_ident(db, name))),
     );
+    super::msg::lower_abi_record_impl(
+        &mut builder,
+        self_ty,
+        &field_specs,
+        AbiRecordKind::AbiStruct,
+    );
     lower_abi_size_impl(&mut builder, self_ty, &field_specs);
     lower_abi_span_impl(&mut builder, self_ty, &field_specs);
     lower_encode_impl(&mut builder, self_ty, &field_specs);
@@ -166,8 +172,8 @@ fn lower_abi_size_impl<'db>(
         TrackedItemVariant::ImplTrait(impl_trait_idx),
         |builder, id| {
             let consts = vec![
-                create_head_size_assoc_const(builder, field_specs),
-                create_is_dynamic_assoc_const(builder, field_specs),
+                create_head_size_assoc_const(builder, field_specs.len(), AbiRecordKind::AbiStruct),
+                create_is_dynamic_assoc_const(builder, field_specs, AbiRecordKind::AbiStruct),
             ];
             let impl_trait = builder.new_impl_trait(
                 id,
@@ -191,6 +197,7 @@ fn lower_abi_span_impl<'db>(
     self_ty: TypeId<'db>,
     field_specs: &FieldSpecs<'db>,
 ) {
+    let abi_record_trait = builder.abi_record_trait_ref(field_specs.len());
     let trait_ref = builder.core_abi_trait_ref_sol("AbiSpan");
     let field_specs = field_specs.to_vec();
     builder.impl_trait(trait_ref, self_ty, |builder| {
@@ -311,7 +318,7 @@ fn lower_abi_span_impl<'db>(
                     let args = vec![
                         body.ident_expr(input_ident),
                         body.ident_expr(pos_ident),
-                        build_decode_head_pos_expr(body, pos_ident, &field_specs[..idx]),
+                        build_decode_head_pos_expr(body, pos_ident, abi_record_trait, idx),
                         body.ident_expr(input_len_ident),
                         body.ident_expr(end_ident),
                     ];
@@ -364,6 +371,7 @@ fn lower_encode_impl<'db>(
     self_ty: TypeId<'db>,
     field_specs: &FieldSpecs<'db>,
 ) {
+    let abi_record_trait = builder.abi_record_trait_ref(field_specs.len());
     let trait_ref = builder.core_abi_trait_ref_sol("Encode");
     let field_specs = field_specs.to_vec();
     builder.impl_trait(trait_ref, self_ty, |builder| {
@@ -380,7 +388,7 @@ fn lower_encode_impl<'db>(
             params,
             None,
             FuncModifiers::new(Visibility::Private, false, false, false),
-            |body| body.encode_fields(&field_specs, ptr_ident),
+            |body| body.encode_fields(&field_specs, ptr_ident, abi_record_trait),
         );
     });
 }
@@ -390,6 +398,7 @@ fn lower_decode_impl<'db>(
     self_ty: TypeId<'db>,
     field_specs: &FieldSpecs<'db>,
 ) {
+    let abi_record_trait = builder.abi_record_trait_ref(field_specs.len());
     let trait_ref = builder.core_abi_trait_ref_sol("Decode");
     let field_specs = field_specs.to_vec();
     let field_names = field_specs
@@ -449,7 +458,8 @@ fn lower_decode_impl<'db>(
                     input_len_ident,
                 };
                 for (idx, (name, ty)) in field_specs.iter().copied().enumerate() {
-                    let head_pos = build_decode_head_pos_expr(body, pos_ident, &field_specs[..idx]);
+                    let head_pos =
+                        build_decode_head_pos_expr(body, pos_ident, abi_record_trait, idx);
                     body.decode_field_into(
                         "decode_field_from_prechecked_head",
                         name,
@@ -635,6 +645,8 @@ fn lower_sol_compat_impl<'db>(
             )),
         );
         let sol_type = AssocConstDef {
+            body_check_policy:
+                crate::hir_def::AssocConstBodyCheckPolicy::ExpansionSourceCompatibility,
             attributes: AttrListId::new(db, vec![]),
             name: Partial::Present(IdentId::new(db, "SOL_TYPE".to_string())),
             ty: Partial::Present(self_s),

@@ -2,6 +2,7 @@ use crate::analysis::{
     HirAnalysisDb,
     diagnostics::DiagnosticVoucher,
     ty::{
+        abi_record_fields::abi_record_field_ty_range,
         abi_struct_field_checks,
         abi_ty::{is_composite_event_ty, is_dynamic_event_ty},
         adt_def::AdtRef,
@@ -13,8 +14,8 @@ use crate::analysis::{
     },
 };
 use crate::{
-    AbiFieldContext, AbiFieldDiagnostic, AbiFieldDiagnosticKind, AbiStructDiagnostic,
-    AbiStructDiagnosticKind, AttrMisuseError, ErrorDiagnostic, EventError, EventErrorKind,
+    AbiFieldContext, AbiFieldDiagnostic, AbiFieldDiagnosticKind, AbiRecordDiagnostic,
+    AbiRecordDiagnosticKind, AbiStructDiagnostic, AbiStructDiagnosticKind, AttrMisuseError,
     FieldModifierError, MsgDiagnostic, ParserError,
     hir_def::{ModuleTree, Partial, TopLevelMod, TypeKind},
     lower::{parse_file_impl, scope_graph_impl, top_mod_ast},
@@ -129,9 +130,8 @@ impl ModuleAnalysisPass for EventLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        let mut diags = scope_graph_impl::accumulated::<EventError>(db, top_mod)
-            .into_iter()
-            .map(|d| Box::new(d.clone()) as _)
+        let mut diags = accumulated_abi_record_diagnostics(db, top_mod, AbiFieldContext::Event)
+            .map(|d| Box::new(d) as _)
             .collect::<Vec<_>>();
         diags.extend(
             accumulated_abi_field_diagnostics(db, top_mod, AbiFieldContext::Event)
@@ -158,7 +158,7 @@ impl ModuleAnalysisPass for EventLowerPass {
 fn semantic_indexed_dynamic_field_errors<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
-) -> impl Iterator<Item = EventError> {
+) -> impl Iterator<Item = AbiRecordDiagnostic> {
     let mut diags = Vec::new();
     let mut seen_structs = Vec::new();
 
@@ -184,12 +184,6 @@ fn semantic_indexed_dynamic_field_errors<'db>(
         }
         seen_structs.push(event_struct);
 
-        let root = top_mod_ast(db, top_mod).syntax().clone();
-        let ast_struct = event_origin
-            .event_struct
-            .syntax_node_ptr()
-            .try_to_node(&root)
-            .and_then(ast::Struct::cast);
         let assumptions = constraints_for(db, event_struct.into());
 
         for (field_idx, field) in event_struct.hir_fields(db).data(db).iter().enumerate() {
@@ -202,40 +196,38 @@ fn semantic_indexed_dynamic_field_errors<'db>(
             let resolved_ty = lower_hir_ty(db, field_ty, event_struct.scope(), assumptions);
             let ty = resolved_ty.pretty_print(db).to_string();
             let kind = if is_dynamic_event_ty(db, resolved_ty) {
-                EventErrorKind::IndexedDynamicField { ty }
+                AbiRecordDiagnosticKind::IndexedDynamicField { ty }
             } else if is_composite_event_ty(db, resolved_ty) && !resolved_ty.is_tuple(db) {
                 // Tuples are already rejected as event fields.
-                EventErrorKind::IndexedCompositeField { ty }
+                AbiRecordDiagnosticKind::IndexedCompositeField { ty }
             } else {
                 continue;
             };
 
-            let ast_field = ast_struct
-                .as_ref()
-                .and_then(|ast_struct| ast_struct.fields())
-                .and_then(|fields| fields.into_iter().nth(field_idx));
-            let primary_range = ast_field.as_ref().map_or_else(
-                || parser::TextRange::empty(0.into()),
-                |field| {
-                    field
-                        .ty()
-                        .map_or(field.syntax().text_range(), |ty| ty.syntax().text_range())
-                },
-            );
-            diags.push(EventError {
+            let primary_range =
+                abi_record_field_ty_range(db, top_mod, &event_origin.event_struct, field_idx);
+            diags.push(AbiRecordDiagnostic {
                 kind,
                 file: top_mod.file(db),
                 primary_range,
-                struct_name: event_struct
-                    .name(db)
-                    .to_opt()
-                    .map(|name| name.data(db).to_string()),
-                field_name: field.name.to_opt().map(|name| name.data(db).to_string()),
             });
         }
     }
 
     diags.into_iter()
+}
+
+/// The diagnostics that lowering accumulated for `#[event]` or `#[error]`
+/// struct declarations, as `context` selects.
+fn accumulated_abi_record_diagnostics<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+    context: AbiFieldContext,
+) -> impl Iterator<Item = AbiRecordDiagnostic> {
+    scope_graph_impl::accumulated::<AbiRecordDiagnostic>(db, top_mod)
+        .into_iter()
+        .filter(move |diag| diag.kind.context() == context)
+        .cloned()
 }
 
 // Syntactic non-path field types are rejected during event/error lowering so we
@@ -262,7 +254,6 @@ fn semantic_field_type_errors<'db>(
 ) -> impl Iterator<Item = AbiFieldDiagnostic> {
     let mut diags = Vec::new();
     let mut seen_structs = Vec::new();
-    let root = top_mod_ast(db, top_mod).syntax().clone();
 
     for &impl_trait in top_mod.all_impl_traits(db) {
         let HirOrigin::Desugared(origin) = impl_trait.origin(db) else {
@@ -328,17 +319,13 @@ fn semantic_field_type_errors<'db>(
                 continue;
             };
 
+            let primary_range = abi_record_field_ty_range(db, top_mod, &struct_ptr, field_idx);
             diags.push(AbiFieldDiagnostic {
                 kind,
                 context,
                 ty: resolved_ty.pretty_print(db).to_string(),
                 file: top_mod.file(db),
-                primary_range: field_ty_range(&root, &struct_ptr, field_idx),
-                struct_name: abi_struct
-                    .name(db)
-                    .to_opt()
-                    .map(|name| name.data(db).to_string()),
-                field_name: field.name.to_opt().map(|name| name.data(db).to_string()),
+                primary_range,
             });
         }
     }
@@ -370,9 +357,8 @@ impl ModuleAnalysisPass for ErrorLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        let mut diags = scope_graph_impl::accumulated::<ErrorDiagnostic>(db, top_mod)
-            .into_iter()
-            .map(|d| Box::new(d.clone()) as _)
+        let mut diags = accumulated_abi_record_diagnostics(db, top_mod, AbiFieldContext::Error)
+            .map(|d| Box::new(d) as _)
             .collect::<Vec<_>>();
         diags.extend(
             accumulated_abi_field_diagnostics(db, top_mod, AbiFieldContext::Error)

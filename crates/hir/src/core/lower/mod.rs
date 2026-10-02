@@ -20,11 +20,12 @@ use crate::{
     },
     span::HirOrigin,
 };
-pub use abi_field::{AbiFieldContext, AbiFieldDiagnostic, AbiFieldDiagnosticKind};
+pub use abi_field::{
+    AbiFieldContext, AbiFieldDiagnostic, AbiFieldDiagnosticKind, AbiRecordDiagnostic,
+    AbiRecordDiagnosticKind,
+};
 pub use abi_struct::{AbiStructDiagnostic, AbiStructDiagnosticKind};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
-pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
-pub use event::{EventError, EventErrorKind};
 pub use item::{FieldModifierError, FieldModifierErrorKind, MsgDiagnostic, MsgDiagnosticKind};
 pub use parse::parse_file_impl;
 
@@ -63,6 +64,15 @@ fn signature_name_chunks(name: &str) -> Vec<&str> {
     }
     chunks.push(&name[start..]);
     chunks
+}
+
+/// Names of the associated constants that generated ABI impls define and
+/// read. Analysis does not recognize generated constants by name: each one
+/// declares how its body is checked (`AssocConstBodyCheckPolicy`).
+mod generated_abi_const {
+    pub(crate) const LAYOUT: &str = "LAYOUT";
+    pub(crate) const HEAD_SIZE: &str = "HEAD_SIZE";
+    pub(crate) const IS_DYNAMIC: &str = "IS_DYNAMIC";
 }
 
 pub(super) fn lower_visibility(owner: &impl ItemModifierOwner) -> Visibility {

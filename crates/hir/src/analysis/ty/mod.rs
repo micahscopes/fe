@@ -6,7 +6,7 @@ use crate::analysis::ty::trait_resolution::{
 use crate::analysis::ty::ty_check::EffectParamOwner;
 use crate::core::adt_lower::lower_adt;
 use crate::core::hir_def::{
-    GenericParamOwner, IdentId, ItemKind, PathId, TopLevelMod, Trait, TypeAlias,
+    Func, GenericParamOwner, IdentId, ItemKind, PathId, TopLevelMod, Trait, TypeAlias,
     scope_graph::{ScopeGraph, ScopeId},
 };
 use adt_def::{AdtDef, AdtRef};
@@ -27,6 +27,7 @@ use crate::analysis::{
 use crate::semantic::diagnostics::Diagnosable;
 use crate::span::{DesugaredOrigin, EventDesugared, HirOrigin};
 
+pub(crate) mod abi_record_fields;
 pub mod abi_ty;
 pub mod adt_def;
 pub mod assoc_const;
@@ -580,6 +581,17 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
         let indexed_dynamic_events = events_with_indexed_dynamic_fields(db, top_mod);
         let reported_at_source = generated_abi_reported_at_source(db, top_mod);
         let keep = |origin: &DesugaredOrigin| !reported_at_source.contains(origin);
+        // Record field analysis owns an `#[error]` or `#[event]` field type
+        // that cannot be used in the record's ABI; the record's generated
+        // bodies would only repeat it.
+        let (record_field_diags, failing_records) =
+            abi_record_fields::encoded_record_field_diags(db, top_mod);
+        diags.extend(record_field_diags);
+        let record_fails = |func: &Func<'db>| {
+            func.containing_impl_trait(db)
+                .and_then(|impl_trait| abi_record_fields::generated_abi_record(db, impl_trait))
+                .is_some_and(|(record, _)| failing_records.contains(&record))
+        };
         for func in top_mod
             .all_funcs(db)
             .iter()
@@ -587,7 +599,10 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
             .filter(|func| match func.origin(db) {
                 HirOrigin::Desugared(DesugaredOrigin::Msg(_)) => false,
                 HirOrigin::Desugared(origin @ DesugaredOrigin::Event(event)) => {
-                    !indexed_dynamic_events.contains(event) && keep(origin)
+                    !indexed_dynamic_events.contains(event) && keep(origin) && !record_fails(func)
+                }
+                HirOrigin::Desugared(origin @ DesugaredOrigin::Error(_)) => {
+                    keep(origin) && !record_fails(func)
                 }
                 HirOrigin::Desugared(origin) => keep(origin),
                 _ => true,
@@ -671,8 +686,8 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
         // Associated const bodies in inherent impl blocks live inside the impl
         // rather than as standalone items, so check them here. A value/declared-type
         // mismatch surfaces as a plain `TypeMismatch`, same as a top-level `const`.
-        // (Trait impl consts are not included: desugared `#[event]`/`#[error]`
-        // impls rely on cascaded body errors being suppressed.)
+        // Trait impl consts are checked separately above according to each
+        // constant's body-checking policy.
         for &impl_ in top_mod.all_impls(db) {
             // Consts on generic impls have legitimately parametric values
             // (e.g. `256 / BITS`), validated per instantiation; only flag a
