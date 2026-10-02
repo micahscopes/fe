@@ -104,7 +104,6 @@ pub(crate) fn const_scalar_from_value<'db>(
     let ty = sem_const_ty(db, value);
     match value.value(db) {
         SemConstValue::Structural { .. }
-        | SemConstValue::TypeLevel { .. }
         | SemConstValue::Unit
         | SemConstValue::Tuple { .. }
         | SemConstValue::Struct { .. }
@@ -261,7 +260,6 @@ fn lower_const_node<'db>(
     }
     match value.value(db) {
         SemConstValue::Structural { .. }
-        | SemConstValue::TypeLevel { .. }
         | SemConstValue::Unit
         | SemConstValue::Scalar { .. }
         | SemConstValue::Description(..) => None,

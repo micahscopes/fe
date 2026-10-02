@@ -2,6 +2,7 @@
 //!
 //! A matching user-defined spelling does not establish protocol identity.
 
+use crate::span::LazySpan;
 use crate::{
     analysis::{
         HirAnalysisDb,
@@ -80,6 +81,30 @@ pub struct FrozenOwner {
     pub path: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrozenOwnerError {
+    MissingFile,
+    MissingPath,
+}
+
+impl FrozenOwner {
+    pub fn of_item<'db>(
+        db: &'db dyn crate::SpannedHirDb,
+        item: crate::hir_def::ItemKind<'db>,
+    ) -> Result<Self, FrozenOwnerError> {
+        let file = item
+            .span()
+            .resolve(db)
+            .and_then(|span| span.file.url(db))
+            .ok_or(FrozenOwnerError::MissingFile)?;
+        let path = item
+            .scope()
+            .pretty_path(db)
+            .ok_or(FrozenOwnerError::MissingPath)?;
+        Ok(Self { file, path })
+    }
+}
+
 /// Stable authored item address shared by provider identity and quote lookup.
 /// Impl members use the declaration header instead of an unnamed impl scope
 /// or its source-order index.
@@ -106,6 +131,22 @@ impl FrozenItemLocator {
         match self {
             Self::Named(owner) => &owner.file,
             Self::ImplMember { file, .. } | Self::TraitMember { file, .. } => file,
+        }
+    }
+
+    pub fn path_nodes(&self) -> usize {
+        match self {
+            Self::Named(owner) => authored_path_nodes(&owner.path),
+            Self::ImplMember {
+                module_path,
+                member_name,
+                ..
+            } => authored_path_nodes(module_path) + authored_path_nodes(member_name),
+            Self::TraitMember {
+                trait_path,
+                member_name,
+                ..
+            } => authored_path_nodes(trait_path) + authored_path_nodes(member_name),
         }
     }
 
@@ -191,11 +232,28 @@ pub struct FrozenCodeNode {
     pub assoc_type_values: Vec<Option<FrozenQuoteSignatureType>>,
 }
 
-pub fn frozen_path_nodes(path: &str) -> usize {
-    1usize.saturating_add(path.split("::").count())
+/// The defining ingot replaces the display root; it is not an extra path node.
+pub fn authored_path_nodes(path: &str) -> usize {
+    path.split("::").count()
 }
 
 impl FrozenCodeNode {
+    /// Ownership for every classified site, without allocating another table.
+    pub fn members(&self) -> impl Iterator<Item = QuoteMember> + '_ {
+        self.rooted_funcs
+            .iter()
+            .map(|site| site.member)
+            .chain(self.rooted_constructors.iter().map(|site| site.member))
+            .chain(self.qualified_consts.iter().map(|site| site.member))
+            .chain(self.locals.iter().map(|site| site.member))
+            .chain(self.local_types.iter().map(|site| site.member))
+            .chain(self.param_uses.iter().map(|site| site.member))
+            .chain(self.effect_uses.iter().map(|site| site.member))
+            .chain(self.generic_uses.iter().map(|site| site.member))
+            .chain(self.self_uses.iter().map(|site| site.member))
+            .chain(self.self_record_inits.iter().map(|site| site.member))
+    }
+
     /// Paths prepared from captured roots, separate from indexing metadata.
     pub fn rooted_path_nodes(&self, function: Option<u32>) -> usize {
         let arguments = |args: &Option<Vec<FrozenQuoteSignatureType>>| {
@@ -203,13 +261,13 @@ impl FrozenCodeNode {
         };
         self.rooted_funcs
             .iter()
-            .filter(|root| function.is_none() || root.func == function)
-            .map(|root| frozen_path_nodes(&root.path) + arguments(&root.type_arguments))
+            .filter(|root| function.is_none() || root.member.function() == function)
+            .map(|root| root.owner.path_nodes() + arguments(&root.type_arguments))
             .sum::<usize>()
             + if function.is_none() {
                 self.rooted_traits
                     .iter()
-                    .map(|root| frozen_path_nodes(&root.path))
+                    .map(|root| authored_path_nodes(&root.owner.path))
                     .sum::<usize>()
             } else {
                 0
@@ -217,9 +275,9 @@ impl FrozenCodeNode {
             + self
                 .rooted_constructors
                 .iter()
-                .filter(|root| function.is_none() || root.func == function)
+                .filter(|root| function.is_none() || root.member.function() == function)
                 .map(|root| {
-                    frozen_path_nodes(&root.owner.path)
+                    authored_path_nodes(&root.owner.owner.path)
                         + usize::from(root.variant_index.is_some())
                             * (1 + usize::from(root.self_target))
                         + usize::from(root.self_target)
@@ -360,10 +418,42 @@ pub struct FrozenVariantBinding {
     pub field: Option<usize>,
 }
 
+/// The expression body or quoted item owning a classified quotation site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum QuoteMember {
+    Fragment,
+    Function(u32),
+    FunctionWhere(u32, u32),
+    AssocConst(u32),
+    CheckedBody,
+}
+
+impl QuoteMember {
+    pub fn function(self) -> Option<u32> {
+        match self {
+            Self::Function(index) | Self::FunctionWhere(index, _) => Some(index),
+            Self::Fragment | Self::AssocConst(_) | Self::CheckedBody => None,
+        }
+    }
+
+    pub fn where_predicate(self) -> Option<u32> {
+        match self {
+            Self::FunctionWhere(_, predicate) => Some(predicate),
+            _ => None,
+        }
+    }
+
+    pub fn assoc_const(self) -> Option<u32> {
+        match self {
+            Self::AssocConst(index) => Some(index),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteLocal {
-    /// None for a standalone expression or arm fragment.
-    pub func: Option<u32>,
+    pub member: QuoteMember,
     pub binder: PatId,
     pub uses: Vec<ExprId>,
 }
@@ -376,7 +466,7 @@ pub enum FrozenQuoteConstructorSite {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteConstructor {
-    pub func: Option<u32>,
+    pub member: QuoteMember,
     pub site: FrozenQuoteConstructorSite,
     pub owner: FrozenQuoteNominal,
     /// `None` denotes the struct itself; `Some` indexes the authored enum.
@@ -387,17 +477,40 @@ pub struct FrozenQuoteConstructor {
     pub self_target: bool,
 }
 
+impl FrozenQuoteConstructor {
+    pub fn new(
+        member: QuoteMember,
+        site: FrozenQuoteConstructorSite,
+        owner: FrozenQuoteNominal,
+        variant_index: Option<u16>,
+        type_arguments: Option<Vec<FrozenQuoteSignatureType>>,
+    ) -> Self {
+        Self {
+            member,
+            site,
+            owner,
+            variant_index,
+            type_arguments,
+            self_target: false,
+        }
+    }
+
+    pub fn for_self(mut self) -> Self {
+        self.self_target = true;
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteLocalType {
-    /// None for a standalone expression or arm fragment.
-    pub func: Option<u32>,
+    pub member: QuoteMember,
     pub stmt: StmtId,
     pub ty: FrozenQuoteSignatureType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteSelfUse {
-    pub func: u32,
+    pub member: QuoteMember,
     pub site: ExprId,
 }
 
@@ -409,7 +522,7 @@ pub struct FrozenQuoteOpenUse {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteQualifiedConst {
-    pub func: u32,
+    pub member: QuoteMember,
     pub site: ExprId,
     pub trait_site: u32,
     pub receiver: PrimTy,
@@ -418,24 +531,22 @@ pub struct FrozenQuoteQualifiedConst {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteParamUse {
     pub site: ExprId,
-    pub func: u32,
+    pub member: QuoteMember,
     pub index: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteEffectUse {
     pub site: ExprId,
-    pub func: u32,
+    pub member: QuoteMember,
     pub index: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteGenericUse {
     pub site: ExprId,
-    pub func: u32,
+    pub member: QuoteMember,
     pub index: u32,
-    /// A const predicate owns a separate expression body from the method.
-    pub where_predicate: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -497,7 +608,7 @@ impl FrozenQuoteSignatureType {
                 arguments,
                 arguments_given,
             } => {
-                2 + frozen_path_nodes(&root.path)
+                2 + authored_path_nodes(&root.owner.path)
                     + arguments.len()
                     + 2 * usize::from(*arguments_given || !arguments.is_empty())
             }
@@ -506,7 +617,7 @@ impl FrozenQuoteSignatureType {
                 arguments,
                 arguments_given,
             } => {
-                2 + frozen_path_nodes(&root.path)
+                2 + authored_path_nodes(&root.owner.path)
                     + arguments.len()
                     + 2 * usize::from(*arguments_given || !arguments.is_empty())
             }
@@ -529,27 +640,18 @@ impl FrozenQuoteSignatureType {
 }
 
 /// A nominal signature type selected while checking the quote's provider.
-/// The output resolves its ingot path and confirms the authored item identity.
+/// Replay locates this declaration before constructing a resolved HIR path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteNominal {
-    pub ingot: Url,
-    pub path: String,
     pub owner: FrozenOwner,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteFunction {
-    /// A function index for item quotes, or `None` for an expression fragment.
-    pub func: Option<u32>,
-    /// An associated-constant index for item quotes, or `None` otherwise.
-    pub assoc_const: Option<u32>,
+    pub member: QuoteMember,
     /// Explicit call type arguments checked at the provider site.
     pub type_arguments: Option<Vec<FrozenQuoteSignatureType>>,
     pub site: ExprId,
-    pub where_predicate: Option<u32>,
-    pub ingot: Url,
-    /// Item path relative to the defining ingot's top-level module.
-    pub path: String,
     /// The authored declaration selected while checking the quote.
     pub owner: FrozenItemLocator,
 }
@@ -557,31 +659,21 @@ pub struct FrozenQuoteFunction {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteTrait {
     pub site: u32,
-    pub ingot: Url,
-    pub path: String,
     pub owner: FrozenOwner,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenCodeHole {
     Code(usize, Option<FrozenQuoteSpan>),
-    Value(Box<FrozenMetaValue>, Option<FrozenQuoteFieldType>),
+    /// Reflected field hints share checked quotation types and owner binders.
+    Value(Box<FrozenMetaValue>, Option<FrozenQuoteSignatureType>),
 }
 
-/// Checked meaning of a field type used by a quote over a generic record.
-/// The output view rebinds target parameters by index, never by authored name.
+/// An authored source location carried through quotation transport.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteSpan {
     pub file: url::Url,
     pub range: std::ops::Range<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum FrozenQuoteFieldType {
-    TargetParam(usize),
-    Primitive(PrimTy),
-    Tuple(Vec<FrozenQuoteFieldType>),
-    Ptr(Box<FrozenQuoteFieldType>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -606,7 +698,6 @@ pub enum FrozenHandleKind {
 /// ID crosses this boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenMetaValue {
-    Unit,
     Code(FrozenCode),
     Scalar {
         value: SemConstScalar,
@@ -617,15 +708,7 @@ pub enum FrozenMetaValue {
         owner: FrozenOwner,
         kind: FrozenHandleKind,
     },
-    Tuple(Vec<Self>),
-    Array(Vec<Self>),
-    Record {
-        item: MetaItem,
-        fields: BTreeMap<String, Self>,
-    },
-    Variant {
-        item: MetaItem,
-        name: String,
+    DeclarationName {
         case: FrozenMetaVariantCase,
         fields: Vec<Self>,
     },
@@ -633,7 +716,6 @@ pub enum FrozenMetaValue {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenMetaVariantCase {
-    Other,
     DeclarationNameLiteral,
     DeclarationNameFieldPrefix,
 }
@@ -644,9 +726,6 @@ pub struct FrozenGeneration {
     /// Checked scalar types for target const parameters, aligned with all
     /// target parameters. Type parameters have no entry.
     pub target_const_param_types: Vec<Option<crate::analysis::ty::ty_def::PrimTy>>,
-    /// Source position anchors diagnostics. Item identity uses the resolved
-    /// nominal path, so inserting an earlier sibling does not change it.
-    pub target_span_start: usize,
     /// The authored generation attribute, for output-stage construction errors.
     pub site_span: Option<std::ops::Range<usize>>,
     pub provider: FrozenItemLocator,

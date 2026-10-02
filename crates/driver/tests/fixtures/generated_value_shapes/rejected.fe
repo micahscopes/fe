@@ -1,0 +1,14 @@
+use core::meta::{Code, Item, Record}
+
+struct Payload { value: u8 }
+const fn unit() { () }
+const fn tuple() -> (u8, bool) { (3, true) }
+const fn array() -> [u8; 2] { [3, 4] }
+const fn record() -> Payload { Payload { value: 3 } }
+const fn emit(_ target: Record) -> Code<Item> {
+    quote { fn generated() -> u8 { 3 } }
+}
+#[generate(emit)]
+struct Target {}
+
+const fn inspection_kind() -> core::meta::CodeNodeKind { core::meta::CodeNodeKind::Block }

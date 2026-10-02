@@ -43,22 +43,6 @@ pub struct RuntimeInstanceKey<'db> {
 }
 
 impl<'db> RuntimeInstanceKey<'db> {
-    /// Resolve physical policy in the source owner's dependency context.
-    pub fn scope(self, db: &'db dyn MirDb) -> hir::hir_def::scope_graph::ScopeId<'db> {
-        match self.source(db) {
-            RuntimeInstanceSource::Semantic(semantic) => semantic.key(db).owner(db).scope(),
-            RuntimeInstanceSource::Synthetic(synthetic) => match synthetic.spec(db) {
-                RuntimeSyntheticSpec::MainRoot { callee, .. }
-                | RuntimeSyntheticSpec::TestRoot { callee, .. } => callee.key(db).scope(db),
-                RuntimeSyntheticSpec::ManualContractRoot { func, .. } => func.scope(),
-                RuntimeSyntheticSpec::ContractInitAbi { plan } => plan.contract.scope(),
-                RuntimeSyntheticSpec::ContractRecvAbi { plan } => plan.contract.scope(),
-                RuntimeSyntheticSpec::ContractInitRoot { contract, .. }
-                | RuntimeSyntheticSpec::ContractRuntimeRoot { contract, .. } => contract.scope(),
-            },
-        }
-    }
-
     pub fn semantic(self, db: &'db dyn MirDb) -> Option<SemanticInstance<'db>> {
         match self.source(db) {
             RuntimeInstanceSource::Semantic(semantic) => Some(semantic),

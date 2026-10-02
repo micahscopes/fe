@@ -17,6 +17,9 @@ macro_rules! quotation_faults {
 quotation_faults! {
     /// Failures while locating, reifying and copying checked quotation data.
     QuoteConstructionFault {
+        AuthoredItemLocatorIsAmbiguous => "authored item locator is ambiguous",
+        ConstPredicateNeedsCheckedNameTransplantation => "quoted const predicate needs checked name transplantation",
+        NameBelongsToAnotherTemplateMember => "quoted name belongs to another template member",
         BinderGroupAlreadyBoundInAnEnclosingPattern => "binder group already bound in an enclosing pattern",
         BinderGroupHasNoHygieneRecord => "binder group has no hygiene record",
         BinderGroupIsNotBoundInThisScope => "binder group is not bound in this scope",
@@ -86,11 +89,9 @@ quotation_faults! {
         ExpressionFragmentNeedsCheckedNameTransplantation => "quoted expression fragment needs checked name transplantation",
         ExpressionSpliceNeedsExpressionCode => "quoted expression splice needs expression code",
         FieldLabelHasNoCheckedField => "quoted field label has no checked field",
-        FieldPrimitiveIsUnsupported => "quoted field primitive is unsupported",
         FieldTypeIsMissing => "quoted field type is missing",
         FragmentGenericUseNeedsACheckedBody => "quoted fragment generic use needs a checked body",
         FragmentVariantIsClassifiedTwice => "quoted fragment variant is classified twice",
-        FragmentVariantWasNotCopied => "quoted fragment variant was not copied",
         FunctionBodyIsMissing => "quoted function body is missing",
         FunctionBodyRequiresASpliceOrNameRewrite => "quoted function body requires a splice or name rewrite",
         FunctionContainsAnInvalidCondition => "quoted function contains an invalid condition",
@@ -126,7 +127,6 @@ quotation_faults! {
         ImplTraitPathSegmentIsMissing => "quoted impl trait path segment is missing",
         ImplTraitRootIsAmbiguous => "quoted impl trait root is ambiguous",
         ItemCountExceedsUsize => "quoted item count exceeds usize",
-        ItemIngotIsMissing => "quoted item ingot is missing",
         ItemListNeedsCheckedTransplantation => "quoted item list needs checked transplantation",
         ItemPathHasNoItem => "quoted item path has no item",
         ItemPathIsNotASimpleItemPath => "quoted item path is not a simple item path",
@@ -200,7 +200,6 @@ quotation_faults! {
         TargetParameterCountChanged => "quoted target parameter count changed",
         TargetParameterCountChangedAfterFreezing => "quoted target parameter count changed after freezing",
         TargetParameterHasNoName => "quoted target parameter has no name",
-        TargetParameterIndexIsMissing => "quoted target parameter index is missing",
         TargetQualifiedBoundTraitIsMissing => "quoted target qualified bound trait is missing",
         TargetTypeParameterHasAConstType => "quoted target type parameter has a const type",
         TargetWhereBinderIsMissing => "quoted target where binder is missing",
@@ -260,9 +259,7 @@ quotation_faults! {
 quotation_faults! {
     /// Checked identities that changed after quotation transport.
     QuoteHygieneFault {
-        AssociatedConstantFunctionChangedMeaningInOutput => "quoted associated constant function changed meaning in output",
         ConstWhereBodyChangedInOutput => "quoted const where body changed in output",
-        ConstWhereFunctionChangedMeaningInOutput => "quoted const where function changed meaning in output",
         ConstWhereGenericChangedMeaningInOutput => "quoted const where generic changed meaning in output",
         ConstructorChangedOwnerOrVariantIndex => "quoted constructor changed owner or variant index",
         EffectBindingChangedMeaningInOutput => "quoted effect binding changed meaning in output",
@@ -271,11 +268,6 @@ quotation_faults! {
         LocalBinderChangedMeaningInOutput => "quoted local binder changed meaning in output",
         MethodCallChangedSelectionInOutput => "quoted method call changed selection in output",
         MethodCallDisappearedBeforeHygieneChecking => "quoted method call disappeared before hygiene checking",
-        NominalTypeChangedMeaningInOutput => "quoted nominal type changed meaning in output",
         ParameterChangedMeaningInOutput => "quoted parameter changed meaning in output",
-        QualifiedConstantChangedTraitInOutput => "quoted qualified constant changed trait in output",
-        RootedFunctionChangedMeaningInOutput => "quoted rooted function changed meaning in output",
-        RootedTraitChangedMeaningInOutput => "quoted rooted trait changed meaning in output",
-        TraitTypeChangedMeaningInOutput => "quoted trait type changed meaning in output",
     }
 }

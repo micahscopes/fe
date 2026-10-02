@@ -13,7 +13,7 @@ use crate::analysis::{
         LayoutBundleUnrepresentable, LayoutPortKey,
         const_ty::{CallableInputLayoutHoleOrigin, ConstTyData},
         ty_check::BodyOwner,
-        ty_def::{TyData, TyId},
+        ty_def::TyId,
     },
 };
 
@@ -23,14 +23,6 @@ pub(super) fn layout_const_param_uses<'db>(
 ) -> Vec<TyId<'db>> {
     fn collect<'db>(db: &'db dyn HirAnalysisDb, value: SemConstId<'db>, uses: &mut Vec<TyId<'db>>) {
         match value.value(db) {
-            SemConstValue::TypeLevel { const_ty, .. } => {
-                if let TyData::ConstTy(term) = const_ty.data(db)
-                    && matches!(term.data(db), ConstTyData::TyParam(_, _))
-                    && !uses.contains(&const_ty)
-                {
-                    uses.push(*const_ty);
-                }
-            }
             SemConstValue::Description(term) => {
                 let const_ty = TyId::const_ty(db, *term);
                 if matches!(term.data(db), ConstTyData::TyParam(_, _)) && !uses.contains(&const_ty)

@@ -288,7 +288,9 @@ impl<'db> GenericParam<'db> {
 impl<'db> TypeGenericParam<'db> {
     /// Pretty-prints a type generic parameter like `T: Trait`.
     pub fn pretty_print(&self, db: &dyn HirDb) -> String {
-        let name = unwrap_partial(self.name, "TypeGenericParam::name").display_name(db);
+        let name = unwrap_partial(self.name, "TypeGenericParam::name")
+            .data(db)
+            .clone();
 
         let mut result = name;
 
@@ -309,7 +311,9 @@ impl<'db> TypeGenericParam<'db> {
 impl<'db> ConstGenericParam<'db> {
     /// Pretty-prints a const generic parameter like `const N: usize`.
     pub fn pretty_print(&self, db: &'db dyn HirDb) -> String {
-        let name = unwrap_partial(self.name, "ConstGenericParam::name").display_name(db);
+        let name = unwrap_partial(self.name, "ConstGenericParam::name")
+            .data(db)
+            .clone();
         let ty = unwrap_partial(self.ty, "ConstGenericParam::ty").pretty_print(db);
         let mut out = format!("const {name}: {ty}");
         if let Some(default) = self.default {

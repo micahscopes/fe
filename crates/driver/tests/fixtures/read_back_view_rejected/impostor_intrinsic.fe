@@ -1,0 +1,9 @@
+// expect-error: NotConstEvaluable
+use core::meta::{Code, Expr, CodeNode, CodeNodeKind, code_root}
+extern {
+    pub const fn node_kind(_ node: CodeNode) -> CodeNodeKind
+}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> CodeNodeKind {
+    node_kind(code_root(code))
+}

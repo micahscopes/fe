@@ -692,13 +692,6 @@ fn check_sem_const_wf<'db>(
 ) -> WellFormedness<'db> {
     match value.value(db) {
         SemConstValue::Structural { ty, .. } => check_ty_wf(db, solve_cx, *ty),
-        SemConstValue::TypeLevel { ty, const_ty } => {
-            let wf = check_ty_wf(db, solve_cx, *ty);
-            if !wf.is_wf() {
-                return wf;
-            }
-            check_ty_wf(db, solve_cx, *const_ty)
-        }
         SemConstValue::Description(term) => check_ty_wf(db, solve_cx, TyId::const_ty(db, *term)),
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => {
             for child in elems.iter().copied() {

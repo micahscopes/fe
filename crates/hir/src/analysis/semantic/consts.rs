@@ -118,7 +118,6 @@ impl<'db> SemConstId<'db> {
                 }
             },
             SemConstValue::Description(term) => term.pretty_print_concrete(db),
-            SemConstValue::TypeLevel { const_ty, .. } => const_ty.pretty_print(db).to_string(),
             SemConstValue::Tuple { elems, .. } => {
                 let elems = elems
                     .iter()
@@ -183,10 +182,6 @@ pub enum SemConstValue<'db> {
         value: SemConstScalar,
     },
     Description(ConstTyId<'db>),
-    TypeLevel {
-        ty: TyId<'db>,
-        const_ty: TyId<'db>,
-    },
     Tuple {
         ty: TyId<'db>,
         elems: Box<[SemConstId<'db>]>,
@@ -219,7 +214,6 @@ pub fn sem_const_ty<'db>(db: &'db dyn HirAnalysisDb, value: SemConstId<'db>) -> 
         SemConstValue::Description(term) => term.ty(db),
         SemConstValue::Structural { ty, .. }
         | SemConstValue::Scalar { ty, .. }
-        | SemConstValue::TypeLevel { ty, .. }
         | SemConstValue::Tuple { ty, .. }
         | SemConstValue::Struct { ty, .. }
         | SemConstValue::Array { ty, .. }
@@ -233,7 +227,7 @@ pub(crate) fn retype_sem_const_description<'db>(
     ty: TyId<'db>,
 ) -> Option<SemConstId<'db>> {
     let value = match value.value(db).clone() {
-        SemConstValue::Structural { .. } | SemConstValue::TypeLevel { .. } => return None,
+        SemConstValue::Structural { .. } => return None,
         SemConstValue::Unit if ty == TyId::unit(db) => SemConstValue::Unit,
         SemConstValue::Unit => return None,
         SemConstValue::Scalar { value, .. } => SemConstValue::Scalar { ty, value },
@@ -360,7 +354,6 @@ fn verify_sem_const_shape_impl<'db>(
     match value.value(db) {
         SemConstValue::Structural { ty, .. } if !ty.has_invalid(db) => Ok(()),
         SemConstValue::Structural { .. } => Err("structural handle has an invalid type"),
-        SemConstValue::TypeLevel { .. } => Err("verified constant contains a dependent value"),
         SemConstValue::Unit => Ok(()),
         SemConstValue::Description(term) if allow_dependent && !term.ty(db).has_invalid(db) => {
             match term.data(db) {
@@ -788,26 +781,6 @@ fn reify_runtime_const_impl<'db>(
                 return None;
             }
             reify_runtime_const_impl(db, Some(instance), value, expected_ty)?
-        }
-        SemConstValue::TypeLevel { ty, const_ty } => {
-            let instance = instance?;
-            let ty = if ty.pretty_print(db) == "{integer}" || ty.is_integral_var(db) {
-                expected_ty
-            } else {
-                *ty
-            };
-            let TyData::ConstTy(term) = const_ty.data(db) else {
-                return None;
-            };
-            let evaluated = evaluate_type_level_const_ty(db, *term, Some(ty));
-            let value = sem_const_from_ty(db, TyId::const_ty(db, evaluated))?;
-            if matches!(
-                value.value(db),
-                SemConstValue::Description(..) | SemConstValue::TypeLevel { .. }
-            ) {
-                return None;
-            }
-            reify_runtime_const_impl(db, Some(instance), value, ty)?
         }
         SemConstValue::Tuple { ty: _, elems } => {
             let ty = expected_ty.as_view(db).unwrap_or(expected_ty);

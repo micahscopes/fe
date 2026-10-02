@@ -319,6 +319,12 @@ fn semantic_ctfe_provider_edits_match_fresh_databases() {
         "/../fe/tests/fixtures/fe_test/const_trait_providers.fe"
     ));
     let original = std::fs::read_to_string(&path).expect("fixture should be readable");
+    // This HIR-only test does not run driver generation. Keep its provider
+    // selection input separate from the fixture's generated reflection checks.
+    let original = original
+        .split("#[test]")
+        .next()
+        .expect("fixture should contain provider declarations");
     fn evaluate<'db>(
         db: &'db HirAnalysisTestDb,
         top_mod: fe_hir::hir_def::TopLevelMod<'db>,
@@ -1294,7 +1300,7 @@ fn sem_const_has_type_level_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) 
         SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Scalar { .. } => {
             false
         }
-        SemConstValue::Description(..) | SemConstValue::TypeLevel { .. } => true,
+        SemConstValue::Description(..) => true,
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems
             .iter()
             .copied()
@@ -1308,10 +1314,9 @@ fn sem_const_has_type_level_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) 
 
 fn sem_const_has_abstract_scalar_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) -> bool {
     match value.value(db) {
-        SemConstValue::Structural { .. }
-        | SemConstValue::Unit
-        | SemConstValue::Description(..)
-        | SemConstValue::TypeLevel { .. } => false,
+        SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Description(..) => {
+            false
+        }
         SemConstValue::Scalar { ty, .. } => ty.pretty_print(db) == "{integer}",
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems
             .iter()

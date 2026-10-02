@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 use common::InputDb;
 use fe_driver::{
     DriverDataBase,
-    elaboration::read_back::{ReadBackError, read_back, read_back_type},
+    elaboration::{
+        construction::ConstructionError,
+        read_back::{read_back, read_back_type},
+    },
 };
 use hir::{
     HirDb,
@@ -15,8 +18,7 @@ use hir::{
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenGeneration, FrozenHandleKind,
         FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase, FrozenQuoteConstructorSite,
-        FrozenQuoteFieldType, FrozenQuoteSignatureType, FrozenTemplateSource, FrozenVariantBinding,
-        MetaItem,
+        FrozenQuoteSignatureType, FrozenTemplateSource, FrozenVariantBinding, MetaItem,
     },
     hir_def::{
         Body, Cond, CondId, Expr, ExprId, FieldIndex, FieldParent, Func, GenericParamOwner,
@@ -114,8 +116,7 @@ struct Frame<'db> {
     node: usize,
     body: Body<'db>,
     owner: Func<'db>,
-    function: u32,
-    local_function: Option<u32>,
+    member: hir::core::meta::QuoteMember,
     open: Vec<IdentId<'db>>,
     locals: HashMap<PatId, PatId>,
     visible: Vec<(IdentId<'db>, PatId)>,
@@ -140,23 +141,30 @@ impl<'a, 'db> Comparison<'a, 'db> {
         let key = frozen.template.as_ref().expect("nonempty body fragment");
         let owner = owner(self.authored, &key.owner);
         let source = owner.body(self.authored).expect("source owner body");
-        let (body, open, local_function) = match key.source {
+        let (body, open, member) = match key.source {
             FrozenTemplateSource::Quote => {
                 let quote = quote(self.authored, frozen).expect("quote");
                 (
                     quote.template,
                     quote.open.clone(),
-                    matches!(quote.fragment, QuoteFragment::Items(_)).then_some(function),
+                    if matches!(quote.fragment, QuoteFragment::Items(_)) {
+                        hir::core::meta::QuoteMember::Function(function)
+                    } else {
+                        hir::core::meta::QuoteMember::Fragment
+                    },
                 )
             }
-            FrozenTemplateSource::CheckedBody => (source, Vec::new(), Some(function)),
+            FrozenTemplateSource::CheckedBody => (
+                source,
+                Vec::new(),
+                hir::core::meta::QuoteMember::CheckedBody,
+            ),
         };
         Frame {
             node,
             body,
             owner,
-            function,
-            local_function,
+            member,
             open,
             locals: HashMap::new(),
             visible: Vec::new(),
@@ -487,16 +495,16 @@ impl<'a, 'db> Comparison<'a, 'db> {
         self.type_argument(frame, expected, &actual);
     }
 
-    fn field_type(&self, expected: &FrozenQuoteFieldType, actual: &FrozenQuoteSignatureType) {
-        use FrozenQuoteFieldType as F;
+    fn field_type(&self, expected: &FrozenQuoteSignatureType, actual: &FrozenQuoteSignatureType) {
+        use FrozenQuoteSignatureType as F;
         use FrozenQuoteSignatureType as T;
         match expected {
-            F::TargetParam(index) => assert_eq!(
+            F::OwnerGeneric(index) => assert_eq!(
                 actual,
                 &if self.is_method {
-                    T::OwnerGeneric(*index as u32)
+                    T::OwnerGeneric(*index)
                 } else {
-                    T::FunctionGeneric(*index as u32)
+                    T::FunctionGeneric(*index)
                 }
             ),
             F::Primitive(primitive) => assert_eq!(actual, &T::Primitive(*primitive)),
@@ -515,6 +523,32 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 };
                 self.field_type(inner, actual);
             }
+            F::Nominal {
+                root, arguments, ..
+            } => {
+                let T::Nominal {
+                    root: selected,
+                    arguments: actual,
+                    ..
+                } = actual
+                else {
+                    panic!("expected nominal field type")
+                };
+                assert_eq!(root.owner, selected.owner, "nominal field owner");
+                assert_eq!(arguments.len(), actual.len(), "nominal field arguments");
+                for (expected, actual) in arguments.iter().zip(actual) {
+                    self.field_type(expected, actual);
+                }
+            }
+            F::Mode(mode, inner) => {
+                let T::Mode(actual_mode, actual) = actual else {
+                    panic!("expected field type mode")
+                };
+                assert_eq!(mode, actual_mode);
+                self.field_type(inner, actual);
+            }
+            F::Never => assert_eq!(actual, &T::Never),
+            other => panic!("unsupported reflected field type: {other:?}"),
         }
     }
 
@@ -542,7 +576,10 @@ impl<'a, 'db> Comparison<'a, 'db> {
         .count();
         assert_eq!(count, arguments.len());
         for (index, actual) in arguments.iter().enumerate() {
-            self.field_type(&FrozenQuoteFieldType::TargetParam(index), actual);
+            self.field_type(
+                &FrozenQuoteSignatureType::OwnerGeneric(index as u32),
+                actual,
+            );
         }
     }
 
@@ -555,9 +592,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         let expected = self.code.nodes[frame.node]
             .rooted_constructors
             .iter()
-            .find(|root| {
-                root.site == expected && (root.func.is_none() || root.func == Some(frame.function))
-            })
+            .find(|root| root.site == expected && root.member == frame.member)
             .expect("captured enum variant");
         let actual = self
             .actual
@@ -588,8 +623,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
     fn path(&self, frame: &Frame<'db>, expected: ExprId, actual: ExprId) {
         let node = &self.code.nodes[frame.node];
         if node.rooted_constructors.iter().any(|root| {
-            root.site == FrozenQuoteConstructorSite::Expr(expected)
-                && (root.func.is_none() || root.func == Some(frame.function))
+            root.site == FrozenQuoteConstructorSite::Expr(expected) && root.member == frame.member
         }) {
             self.variant(
                 frame,
@@ -601,13 +635,13 @@ impl<'a, 'db> Comparison<'a, 'db> {
         if let Some(use_) = node
             .param_uses
             .iter()
-            .find(|use_| use_.site == expected && use_.func == frame.function)
+            .find(|use_| use_.site == expected && use_.member == frame.member)
         {
             self.parameter(actual, use_.index as usize);
         } else if node
             .self_uses
             .iter()
-            .any(|use_| use_.site == expected && use_.func == frame.function)
+            .any(|use_| use_.site == expected && use_.member == frame.member)
             || node.free_self_uses.contains(&expected)
         {
             self.parameter(actual, 0);
@@ -639,9 +673,11 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     self.parameter(actual, index);
                 }
             }
-        } else if let Some(use_) = node.generic_uses.iter().find(|use_| {
-            use_.site == expected && use_.func == frame.function && use_.where_predicate.is_none()
-        }) {
+        } else if let Some(use_) = node
+            .generic_uses
+            .iter()
+            .find(|use_| use_.site == expected && use_.member == frame.member)
+        {
             let actual = self
                 .actual
                 .generic_uses
@@ -652,7 +688,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         } else if let Some(local) = node
             .locals
             .iter()
-            .find(|local| local.func == frame.local_function && local.uses.contains(&expected))
+            .find(|local| local.member == frame.member && local.uses.contains(&expected))
         {
             let binder = frame
                 .locals
@@ -668,7 +704,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         } else if let Some(root) = node
             .rooted_funcs
             .iter()
-            .find(|root| root.site == expected && root.where_predicate.is_none())
+            .find(|root| root.site == expected && root.member == frame.member)
         {
             let actual = self
                 .actual
@@ -690,7 +726,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         } else if let Some(constant) = node
             .qualified_consts
             .iter()
-            .find(|use_| use_.site == expected && use_.func == frame.function)
+            .find(|use_| use_.site == expected && use_.member == frame.member)
         {
             let actual_constant = self
                 .actual
@@ -1008,7 +1044,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     .iter()
                     .any(|root| {
                         root.site == FrozenQuoteConstructorSite::Expr(expected)
-                            && (root.func.is_none() || root.func == Some(frame.function))
+                            && root.member == frame.member
                     })
                 {
                     self.variant(
@@ -1027,7 +1063,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     if node
                         .self_record_inits
                         .iter()
-                        .any(|use_| use_.site == expected && use_.func == frame.function)
+                        .any(|use_| use_.site == expected && use_.member == frame.member)
                     {
                         self.self_type(actual_type);
                     } else {
@@ -1116,7 +1152,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     let expected_type = &self.code.nodes[frame.node]
                         .local_types
                         .iter()
-                        .find(|local| local.stmt == expected && local.func == frame.local_function)
+                        .find(|local| local.stmt == expected && local.member == frame.member)
                         .expect("frozen annotation")
                         .ty;
                     let actual_type = &self
@@ -1245,7 +1281,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     .iter()
                     .any(|root| {
                         root.site == FrozenQuoteConstructorSite::Pat(expected)
-                            && (root.func.is_none() || root.func == Some(frame.function))
+                            && root.member == frame.member
                     }) =>
             {
                 assert_eq!(mutable, actual_mutable);
@@ -1291,7 +1327,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     self.code.nodes[frame.node]
                         .locals
                         .iter()
-                        .any(|local| local.func == frame.local_function && local.binder == expected)
+                        .any(|local| local.member == frame.member && local.binder == expected)
                 );
                 assert!(
                     self.actual
@@ -1390,14 +1426,12 @@ fn name<'db>(
                     item: MetaItem::Field,
                     ..
                 } => field(value),
-                FrozenMetaValue::Variant {
-                    item: MetaItem::DeclarationName,
+                FrozenMetaValue::DeclarationName {
                     case: FrozenMetaVariantCase::DeclarationNameLiteral,
                     fields,
                     ..
                 } => text(&fields[0]),
-                FrozenMetaValue::Variant {
-                    item: MetaItem::DeclarationName,
+                FrozenMetaValue::DeclarationName {
                     case: FrozenMetaVariantCase::DeclarationNameFieldPrefix,
                     fields,
                     ..
@@ -1433,24 +1467,27 @@ fn compare_impl_predicates<'db>(
     use hir::hir_def::{QuoteWherePredicate, TypeBound};
     fn field_type<'db>(
         db: &'db DriverDataBase,
-        expected: &FrozenQuoteFieldType,
+        expected: &FrozenQuoteSignatureType,
         actual: hir::analysis::ty::ty_def::TyId<'db>,
     ) {
         use hir::analysis::ty::ty_def::{PrimTy, TyBase};
         match expected {
-            FrozenQuoteFieldType::TargetParam(index) => {
+            FrozenQuoteSignatureType::OwnerGeneric(index) => {
                 let TyData::TyParam(param) = actual.data(db) else {
                     panic!("where payload parameter");
                 };
-                assert_eq!(param.idx, *index, "impl where payload parameter index");
+                assert_eq!(
+                    param.idx, *index as usize,
+                    "impl where payload parameter index"
+                );
             }
-            FrozenQuoteFieldType::Primitive(primitive) => {
+            FrozenQuoteSignatureType::Primitive(primitive) => {
                 let TyData::TyBase(TyBase::Prim(actual)) = actual.data(db) else {
                     panic!("where primitive type");
                 };
                 assert_eq!(primitive, actual, "impl where primitive identity");
             }
-            FrozenQuoteFieldType::Tuple(parts) => {
+            FrozenQuoteSignatureType::Tuple(parts) => {
                 let (base, args) = actual.decompose_ty_app(db);
                 assert!(
                     matches!(base.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Tuple(count))) if *count == parts.len()),
@@ -1461,7 +1498,7 @@ fn compare_impl_predicates<'db>(
                     field_type(db, part, *argument);
                 }
             }
-            FrozenQuoteFieldType::Ptr(inner) => {
+            FrozenQuoteSignatureType::Ptr(inner) => {
                 let (base, args) = actual.decompose_ty_app(db);
                 assert!(
                     matches!(base.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Ptr))),
@@ -1470,6 +1507,36 @@ fn compare_impl_predicates<'db>(
                 assert_eq!(args.len(), 1);
                 field_type(db, inner, args[0]);
             }
+            FrozenQuoteSignatureType::Nominal {
+                root, arguments, ..
+            } => {
+                let (base, args) = actual.decompose_ty_app(db);
+                let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
+                    panic!("impl where nominal field identity")
+                };
+                let selected =
+                    hir::core::meta::FrozenOwner::of_item(db, adt.adt_ref(db).as_item()).unwrap();
+                assert_eq!(root.owner, selected, "impl where nominal field owner");
+                assert_eq!(arguments.len(), args.len());
+                for (expected, actual) in arguments.iter().zip(args) {
+                    field_type(db, expected, *actual);
+                }
+            }
+            FrozenQuoteSignatureType::Mode(mode, inner) => {
+                let (base, args) = actual.decompose_ty_app(db);
+                let primitive = if *mode == hir::hir_def::TypeMode::Mut {
+                    PrimTy::BorrowMut
+                } else {
+                    PrimTy::BorrowRef
+                };
+                assert!(
+                    matches!(base.data(db), TyData::TyBase(TyBase::Prim(actual)) if *actual == primitive)
+                );
+                assert_eq!(args.len(), 1);
+                field_type(db, inner, args[0]);
+            }
+            FrozenQuoteSignatureType::Never => assert!(matches!(actual.data(db), TyData::Never)),
+            other => panic!("unsupported impl where field type: {other:?}"),
         }
     }
     fn collect(
@@ -1792,7 +1859,10 @@ pub fn assert_round_trip_against<'db>(
                 "effect header"
             );
             if function.has_effects(output) {
-                assert_eq!(read_back(output, function), Err(ReadBackError::Effectful));
+                assert_eq!(
+                    read_back(output, function),
+                    Err(ConstructionError::ReadBackEffectful)
+                );
                 continue;
             }
             let reflected = read_back(output, function).expect("generated body reads back");

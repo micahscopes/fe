@@ -4,9 +4,9 @@ expression: rendered
 input_file: tests/fixtures/quote_request_budget/repeated_items_20.fe
 ---
 error[18-0004]: invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
-   ┌─ repeated_items_20.fe:10:19
+   ┌─ repeated_items_20.fe:9:19
    │
-10 │                 ${items}
+ 9 │                 ${items}
    │                   ^^^^^ invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
    ·
 18 │ #[generate(ingot::author::emit)]

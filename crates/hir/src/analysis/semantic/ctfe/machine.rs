@@ -28,8 +28,9 @@ use crate::{
             const_check::const_effects_supported,
             const_ty::{ConstTyData, ConstTyId},
             corelib::{
-                CtfeExternIntrinsic, NumericExternIntrinsic, PrimitiveWrapperCallKind,
-                SaturatingArithmetic, core_primitive_wrapper_call_kind, ctfe_extern_intrinsic_kind,
+                CodeOp, CodeValueOp, CtfeExternIntrinsic, MetaIntrinsic, NumericExternIntrinsic,
+                PrimitiveWrapperCallKind, SaturatingArithmetic, StructuralOp,
+                core_primitive_wrapper_call_kind, ctfe_extern_intrinsic_kind, meta_intrinsic_kind,
             },
             normalize::normalize_ty,
             provider::ProviderAddressSpace,
@@ -66,67 +67,61 @@ impl Default for CtfeConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
-pub enum CtfeError<'db> {
-    NotConstEvaluable {
-        origin: SemOrigin<'db>,
-    },
-    AssertionFailed {
-        origin: SemOrigin<'db>,
-        message: Option<String>,
-    },
-    InvalidOperation {
-        origin: SemOrigin<'db>,
-        message: String,
-    },
-    InvalidBorrow {
-        origin: SemOrigin<'db>,
-    },
-    InvalidProviderUse {
-        origin: SemOrigin<'db>,
-    },
-    NonConstCall {
-        origin: SemOrigin<'db>,
-    },
-    InvalidBody {
-        origin: SemOrigin<'db>,
-    },
-    DivisionByZero {
-        origin: SemOrigin<'db>,
-    },
-    ArithmeticOverflow {
-        origin: SemOrigin<'db>,
-    },
-    NegativeExponent {
-        origin: SemOrigin<'db>,
-    },
-    OutOfBounds {
-        origin: SemOrigin<'db>,
-    },
-    VariantMismatch {
-        origin: SemOrigin<'db>,
-    },
-    UninitializedLocal {
-        origin: SemOrigin<'db>,
-    },
-    StepLimitExceeded {
-        origin: SemOrigin<'db>,
-    },
-    RecursionLimitExceeded {
-        origin: SemOrigin<'db>,
-    },
-    /// Evaluating the const required its own value (directly or through a
-    /// cycle of const items). Produced as the fixpoint-initial value of the
-    /// eval queries below, so a recursive definition converges to this error
-    /// instead of panicking on the salsa dependency cycle.
-    RecursiveConst {
-        origin: SemOrigin<'db>,
-    },
-    CalleeError {
-        origin: SemOrigin<'db>,
-        callee: SemanticInstance<'db>,
-        source: Box<CtfeError<'db>>,
-    },
+macro_rules! ctfe_errors {
+    ($($name:ident => $message:literal),* $(,)?) => {
+        #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+        pub enum CtfeError<'db> {
+            $($name { origin: SemOrigin<'db> },)*
+            AssertionFailed { origin: SemOrigin<'db>, message: Option<String> },
+            InvalidOperation { origin: SemOrigin<'db>, message: String },
+            CalleeError { origin: SemOrigin<'db>, callee: SemanticInstance<'db>, source: Box<CtfeError<'db>> },
+        }
+        /// Lifetime-free failure cause, without database identities or call frames.
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub enum CtfeErrorKind {
+            $($name,)*
+            AssertionFailed(Option<String>),
+            InvalidOperation(String),
+            Invariant(String),
+        }
+        impl CtfeError<'_> {
+            pub fn kind(&self) -> CtfeErrorKind {
+                match self {
+                    $(Self::$name { .. } => CtfeErrorKind::$name,)*
+                    Self::AssertionFailed { message, .. } => CtfeErrorKind::AssertionFailed(message.clone()),
+                    Self::InvalidOperation { message, .. } => CtfeErrorKind::InvalidOperation(message.clone()),
+                    Self::CalleeError { source, .. } => source.kind(),
+                }
+            }
+        }
+        impl std::fmt::Display for CtfeErrorKind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $(Self::$name => f.write_str($message),)*
+                    Self::AssertionFailed(Some(message)) => write!(f, "assertion failed: {message}"),
+                    Self::AssertionFailed(None) => f.write_str("assertion failed"),
+                    Self::InvalidOperation(message) => f.write_str(message),
+                    Self::Invariant(message) => write!(f, "constant evaluation invariant failed: {message}"),
+                }
+            }
+        }
+    };
+}
+ctfe_errors! {
+    NotConstEvaluable => "expression cannot be evaluated as a constant",
+    InvalidBorrow => "invalid borrow during constant evaluation",
+    InvalidProviderUse => "invalid provider use during constant evaluation",
+    NonConstCall => "constant evaluation called a non-const function",
+    InvalidBody => "constant evaluation encountered an invalid body",
+    DivisionByZero => "division by zero",
+    ArithmeticOverflow => "arithmetic overflow",
+    NegativeExponent => "negative exponent",
+    OutOfBounds => "index out of bounds",
+    VariantMismatch => "enum variant mismatch",
+    UninitializedLocal => "read of an uninitialized local",
+    StepLimitExceeded => "evaluation step limit exceeded",
+    RecursionLimitExceeded => "evaluation recursion limit exceeded",
+    RecursiveConst => "recursive constant dependency",
 }
 
 impl<'db> CtfeError<'db> {
@@ -538,7 +533,6 @@ impl<'db> CtfeConstValue<'db> {
                 bytes: Rc::from(bytes.as_slice()),
             },
             SemConstValue::Structural { .. }
-            | SemConstValue::TypeLevel { .. }
             | SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }
             | SemConstValue::Array { .. }
@@ -573,9 +567,7 @@ impl<'db> CtfeConstValue<'db> {
                 bytes: Rc::from(bytes.as_slice()),
             },
             SemConstValue::Description(..) => unreachable!("verified CTFE value is dependent"),
-            SemConstValue::Structural { .. } | SemConstValue::TypeLevel { .. } => {
-                CtfeConstKind::Interned(value)
-            }
+            SemConstValue::Structural { .. } => CtfeConstKind::Interned(value),
             SemConstValue::Tuple { ty, .. } => CtfeConstKind::Tuple {
                 ty: *ty,
                 elems: value
@@ -870,7 +862,6 @@ pub(super) fn sem_const_dependency<'db>(
             .iter()
             .copied()
             .find_map(|field| sem_const_dependency(db, field)),
-        SemConstValue::TypeLevel { const_ty, .. } => Some(ConstDependency::Value(*const_ty)),
         SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Scalar { .. } => {
             None
         }
@@ -1938,78 +1929,62 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         args: &[CtfeConstValue<'db>],
         origin: SemOrigin<'db>,
     ) -> EvalResult<'db, CtfeConstValue<'db>> {
-        if func.top_mod(self.db).ingot(self.db).kind(self.db) == common::ingot::IngotKind::Core
-            && let Some(name) = func.name(self.db).to_opt()
-            && matches!(
-                name.data(self.db).as_str(),
-                "field_count"
-                    | "variant_count"
-                    | "variant"
-                    | "binders"
-                    | "binder_at"
-                    | "field"
-                    | "field_type"
-                    | "type_is"
-                    | "query_field"
-                    | "empty"
-                    | "code_root"
-                    | "node_kind"
-                    | "node_child_count"
-                    | "node_child"
-                    | "node_parameter_index"
-                    | "node_same_binding"
-                    | "node_same_checked_call"
-                    | "node_type_is"
-                    | "node_field_index"
-                    | "node_record_field_index"
-                    | "node_literal"
-                    | "node_assignment_operator"
-                    | "node_array_length"
-            )
-        {
-            let operation = name.data(self.db).as_str();
-            if operation == "empty"
-                && crate::analysis::ty::corelib::lib_func_matches(
-                    self.db,
-                    func,
-                    "core::meta::empty",
-                )
-            {
-                return Ok(self.code_value(
+        if let Some(operation) = meta_intrinsic_kind(self.db, func) {
+            return Ok(match operation {
+                MetaIntrinsic::CodeOp(operation) => {
+                    self.eval_code_intrinsic(instance, operation, result_ty, args, origin)?
+                }
+                MetaIntrinsic::StructuralOp(operation) => {
+                    self.eval_structural_intrinsic(instance, operation, result_ty, args, origin)?
+                }
+                MetaIntrinsic::CodeValueOp(CodeValueOp::Empty) => self.code_value(
                     result_ty,
                     crate::analysis::semantic::CodeSource::Empty,
                     Vec::new(),
                     origin,
-                )?);
-            }
-            if crate::analysis::ty::corelib::lib_func_matches(
-                self.db,
-                func,
-                &format!("core::meta::{operation}"),
-            ) {
-                if matches!(
-                    operation,
-                    "code_root"
-                        | "node_kind"
-                        | "node_child_count"
-                        | "node_child"
-                        | "node_parameter_index"
-                        | "node_same_binding"
-                        | "node_same_checked_call"
-                        | "node_type_is"
-                        | "node_field_index"
-                        | "node_record_field_index"
-                        | "node_literal"
-                        | "node_assignment_operator"
-                        | "node_array_length"
-                ) {
-                    return Ok(
-                        self.eval_code_intrinsic(instance, operation, result_ty, args, origin)?
-                    );
+                )?,
+                MetaIntrinsic::CodeValueOp(CodeValueOp::Root) => {
+                    let Some(arg) = args.first() else {
+                        return Err(CtfeError::InvalidOperation {
+                            origin,
+                            message: "wrong number of code inspection arguments".into(),
+                        }
+                        .into());
+                    };
+                    let SemConstValue::Structural { handle, .. } =
+                        arg.materialize(self.db).value(self.db)
+                    else {
+                        return Err(CtfeError::InvalidOperation {
+                            origin,
+                            message: "code inspection requires a compiler-issued handle".into(),
+                        }
+                        .into());
+                    };
+                    let StructuralHandle::Code(code) = handle else {
+                        return Err(CtfeError::InvalidOperation {
+                            origin,
+                            message: "code_root requires a code value".into(),
+                        }
+                        .into());
+                    };
+                    let (body, _) =
+                        super::code_view::checked_body(self.db, *code).map_err(|message| {
+                            CtfeError::InvalidOperation {
+                                origin,
+                                message: message.into(),
+                            }
+                        })?;
+                    self.structural_value(
+                        result_ty,
+                        StructuralHandle::CodeNode {
+                            code: *code,
+                            site: crate::analysis::semantic::CodeNodeSite::Expr(body.expr(self.db)),
+                        },
+                        origin,
+                        "",
+                    )?
                 }
-                return self
-                    .eval_structural_intrinsic(instance, operation, result_ty, args, origin);
-            }
+            });
         }
         if func.top_mod(self.db).ingot(self.db).kind(self.db) == common::ingot::IngotKind::Core
             && crate::analysis::ty::corelib::lib_func_matches(
@@ -2052,6 +2027,17 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         .map_err(Into::into)
     }
 
+    fn reflected_field_shape(
+        &self,
+        owner: crate::analysis::ty::adt_def::AdtRef<'db>,
+        variant_index: Option<u16>,
+    ) -> Option<&'db crate::analysis::ty::adt_def::AdtField<'db>> {
+        owner
+            .as_adt(self.db)
+            .fields(self.db)
+            .get(usize::from(variant_index.unwrap_or(0)))
+    }
+
     fn eval_field_query(
         &mut self,
         invocation: SemanticInstance<'db>,
@@ -2073,9 +2059,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             message: format!("reflected field query: {message}"),
         };
         let adt = owner.as_adt(db);
-        let shape = adt
-            .fields(db)
-            .get(usize::from(variant_index.unwrap_or(0)))
+        let shape = self
+            .reflected_field_shape(owner, variant_index)
             .ok_or_else(|| invalid("invalid variant coordinate"))?;
         if !adt.params(db).is_empty() || index >= shape.num_types() {
             return Err(invalid("invalid record field").into());
@@ -2275,17 +2260,14 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let scope = self.frames[frame_idx].body.template_owner.scope();
         let context = TraitSolveCx::new(db, scope);
         let evidence = introduce_obligation(db, context, *term).map_err(invalid)?;
-        let value = SemConstId::new(
-            db,
-            SemConstValue::Structural {
-                ty: result_ty,
-                handle: StructuralHandle::Evidence(
-                    crate::analysis::semantic::SelectedApplication::from_evidence(&evidence),
-                ),
-            },
-        );
-        let verified = VerifiedConstValueId::from_complete_execution(db, value).map_err(invalid)?;
-        Ok(CtfeConstValue::concrete(db, verified))
+        self.structural_value(
+            result_ty,
+            StructuralHandle::Evidence(
+                crate::analysis::semantic::SelectedApplication::from_evidence(&evidence),
+            ),
+            origin,
+            "evidence introduction: ",
+        )
     }
 
     /// A code value of type `ty` (`Code<K>`): a quote with its splices'
@@ -2298,48 +2280,70 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         origin: SemOrigin<'db>,
     ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
         let code = crate::analysis::semantic::QuotedCode::new(self.db, source, holes);
-        let value = SemConstId::new(
-            self.db,
-            SemConstValue::Structural {
-                ty,
-                handle: StructuralHandle::Code(code),
-            },
-        );
+        self.structural_value(ty, StructuralHandle::Code(code), origin, "")
+    }
+
+    fn structural_value(
+        &self,
+        ty: TyId<'db>,
+        handle: StructuralHandle<'db>,
+        origin: SemOrigin<'db>,
+        error_prefix: &str,
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        let value = SemConstId::new(self.db, SemConstValue::Structural { ty, handle });
         let verified =
             VerifiedConstValueId::from_complete_execution(self.db, value).map_err(|message| {
                 CtfeError::InvalidOperation {
                     origin,
-                    message: message.to_owned(),
+                    message: format!("{error_prefix}{message}"),
                 }
             })?;
         Ok(CtfeConstValue::concrete(self.db, verified))
     }
 
+    fn reflected_type_is(
+        &self,
+        actual: TyId<'db>,
+        candidate: TyId<'db>,
+        origin: SemOrigin<'db>,
+        messages: (&str, &str),
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        let invalid = |message: &str| CtfeError::InvalidOperation {
+            origin,
+            message: message.into(),
+        };
+        if !matches!(
+            candidate.data(self.db),
+            TyData::TyBase(TyBase::Prim(PrimTy::Bool | PrimTy::U64 | PrimTy::U256))
+        ) {
+            return Err(invalid(messages.0));
+        }
+        if [actual, candidate].iter().any(|ty| {
+            ty.has_invalid(self.db)
+                || ty.has_param(self.db)
+                || ty.has_var(self.db)
+                || ty.has_projection(self.db)
+        }) {
+            return Err(invalid(messages.1));
+        }
+        Ok(CtfeConstValue::bool(actual == candidate))
+    }
+
     fn eval_code_intrinsic(
         &self,
         instance: SemanticInstance<'db>,
-        operation: &str,
+        operation: CodeOp,
         result_ty: TyId<'db>,
         args: &[CtfeConstValue<'db>],
         origin: SemOrigin<'db>,
     ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
         use super::code_view::{checked_body, describe};
-        use crate::analysis::{semantic::CodeNodeSite, ty::ty_check::check_func_body};
+        use crate::analysis::semantic::CodeNodeSite;
         let db = self.db;
         let invalid = |message: &str| CtfeError::InvalidOperation {
             origin,
             message: message.into(),
         };
-        let count = match operation {
-            "node_child"
-            | "node_same_binding"
-            | "node_same_checked_call"
-            | "node_record_field_index" => 2,
-            _ => 1,
-        };
-        if args.len() != count {
-            return Err(invalid("wrong number of code inspection arguments"));
-        }
         let handle = |arg: &CtfeConstValue<'db>| match arg.materialize(db).value(db) {
             SemConstValue::Structural { handle, .. } => Ok(*handle),
             _ => Err(invalid("code inspection requires a compiler-issued handle")),
@@ -2347,26 +2351,16 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let node = |arg| match handle(arg)? {
             StructuralHandle::CodeNode { code, site } => {
                 let (body, typed) = checked_body(db, code).map_err(invalid)?;
-                describe(db, body, typed, site).map_err(invalid)?;
-                Ok((code, site, body, typed))
+                let description = describe(db, body, typed, site).map_err(invalid)?;
+                Ok((code, site, body, typed, description))
             }
             _ => Err(invalid("code inspection requires a node cursor")),
         };
-        let output = if operation == "code_root" {
-            let StructuralHandle::Code(code) = handle(&args[0])? else {
-                return Err(invalid("code_root requires a code value"));
-            };
-            let (body, _) = checked_body(db, code).map_err(invalid)?;
-            StructuralHandle::CodeNode {
-                code,
-                site: CodeNodeSite::Expr(body.expr(db)),
-            }
-        } else {
-            let (code, site, body, typed) = node(&args[0])?;
-            let description = describe(db, body, typed, site).map_err(invalid)?;
-            match operation {
-                "node_kind" | "node_assignment_operator" => {
-                    let kind = if operation == "node_assignment_operator" {
+        let (code, site, body, typed, description) = node(&args[0])?;
+        let output = match operation {
+            CodeOp::NodeKind | CodeOp::NodeAssignmentOperator => {
+                let kind =
+                    if operation == CodeOp::NodeAssignmentOperator {
                         let CodeNodeSite::Expr(expr) = site else {
                             return Err(invalid("node is not a compound assignment"));
                         };
@@ -2380,234 +2374,204 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     } else {
                         description.kind
                     };
-                    let TyData::TyBase(TyBase::Adt(adt)) = result_ty.base_ty(db).data(db) else {
-                        return Err(invalid("node kind result is not an enum"));
+                let TyData::TyBase(TyBase::Adt(adt)) = result_ty.base_ty(db).data(db) else {
+                    return Err(invalid("node kind result is not an enum"));
+                };
+                let crate::analysis::ty::adt_def::AdtRef::Enum(definition) = adt.adt_ref(db) else {
+                    return Err(invalid("node kind result is not an enum"));
+                };
+                let index = definition
+                    .variants(db)
+                    .position(|variant| variant.name(db).is_some_and(|name| name.data(db) == kind))
+                    .ok_or_else(|| invalid("checked node kind has no declared enum case"))?;
+                let index =
+                    u16::try_from(index).map_err(|_| invalid("node kind enum is too large"))?;
+                return Ok(CtfeConstValue::enum_(
+                    result_ty,
+                    VariantIndex(index),
+                    Vec::new(),
+                ));
+            }
+            CodeOp::NodeChildCount => {
+                return Ok(CtfeConstValue::int(
+                    db,
+                    result_ty,
+                    description.children.len().into(),
+                ));
+            }
+            CodeOp::NodeChild => {
+                let value = self
+                    .expect_int(args[1].clone(), origin)
+                    .map_err(|_| invalid("code child index must be an integer"))?;
+                let index = value
+                    .to_usize()
+                    .ok_or_else(|| invalid("invalid code child index"))?;
+                let site = description.children.get(index).ok_or_else(|| {
+                    invalid(&format!(
+                        "code child index {index} is out of bounds for {} children",
+                        description.children.len()
+                    ))
+                })?;
+                StructuralHandle::CodeNode { code, site }
+            }
+            CodeOp::NodeParameterIndex => {
+                let CodeNodeSite::Expr(expr) = site else {
+                    return Err(invalid("node is not a parameter use"));
+                };
+                let Some(LocalBinding::Param { idx, .. }) = typed.expr_binding(expr) else {
+                    return Err(invalid("node is not a parameter use"));
+                };
+                return Ok(CtfeConstValue::int(db, result_ty, idx.into()));
+            }
+            CodeOp::NodeSameBinding => {
+                let (_, rhs, rhs_body, rhs_typed, _) = node(&args[1])?;
+                let binding =
+                    |typed: &crate::analysis::ty::ty_check::TypedBody<'db>, site| match site {
+                        CodeNodeSite::Expr(expr) => typed.expr_binding(expr),
+                        CodeNodeSite::Pat(pat) => typed.pat_binding(pat),
+                        _ => None,
                     };
-                    let crate::analysis::ty::adt_def::AdtRef::Enum(definition) = adt.adt_ref(db)
-                    else {
-                        return Err(invalid("node kind result is not an enum"));
-                    };
-                    let index = definition
-                        .variants(db)
-                        .position(|variant| {
-                            variant.name(db).is_some_and(|name| name.data(db) == kind)
-                        })
-                        .ok_or_else(|| invalid("checked node kind has no declared enum case"))?;
-                    let index =
-                        u16::try_from(index).map_err(|_| invalid("node kind enum is too large"))?;
-                    return Ok(CtfeConstValue::enum_(
-                        result_ty,
-                        VariantIndex(index),
-                        Vec::new(),
-                    ));
+                let lhs =
+                    binding(typed, site).ok_or_else(|| invalid("node has no checked binding"))?;
+                let rhs = binding(rhs_typed, rhs)
+                    .ok_or_else(|| invalid("node has no checked binding"))?;
+                return Ok(CtfeConstValue::bool(body == rhs_body && lhs == rhs));
+            }
+            CodeOp::NodeSameCheckedCall => {
+                let (_, rhs, _, rhs_typed, _) = node(&args[1])?;
+                let (CodeNodeSite::Expr(lhs), CodeNodeSite::Expr(rhs)) = (site, rhs) else {
+                    return Err(invalid("node has no checked call record"));
+                };
+                let lhs = typed
+                    .callable_expr(lhs)
+                    .ok_or_else(|| invalid("node has no checked call record"))?;
+                let rhs = rhs_typed
+                    .callable_expr(rhs)
+                    .ok_or_else(|| invalid("node has no checked call record"))?;
+                return Ok(CtfeConstValue::bool(lhs == rhs));
+            }
+            CodeOp::NodeTypeIs => {
+                let ty = match site {
+                    CodeNodeSite::Expr(expr) => typed.expr_ty(db, expr),
+                    CodeNodeSite::Pat(pat) => typed.pat_ty(db, pat),
+                    _ => return Err(invalid("node has no checked value type")),
+                };
+                let candidate = *instance
+                    .key(db)
+                    .subst(db)
+                    .generic_args(db)
+                    .first()
+                    .ok_or_else(|| invalid("node_type_is requires a candidate type"))?;
+                let func = body
+                    .containing_func(db)
+                    .ok_or_else(|| invalid("checked body has no function"))?;
+                let normalize = |ty| normalize_ty(db, ty, func.scope(), typed.assumptions());
+                let ty = normalize(ty.as_view(db).unwrap_or(ty));
+                let candidate = normalize(candidate);
+                return self.reflected_type_is(
+                    ty,
+                    candidate,
+                    origin,
+                    (
+                        "node_type_is currently requires bool, u64 or u256",
+                        "code type comparison requires complete closed types",
+                    ),
+                );
+            }
+            CodeOp::NodeFieldIndex => {
+                let CodeNodeSite::Expr(expr) = site else {
+                    return Err(invalid("node is not a field projection"));
+                };
+                let index = typed
+                    .resolved_field_index(expr)
+                    .ok_or_else(|| invalid("node is not a checked field projection"))?;
+                return Ok(CtfeConstValue::int(db, result_ty, index.into()));
+            }
+            CodeOp::NodeArrayLength => {
+                let CodeNodeSite::Expr(expr) = site else {
+                    return Err(invalid("node is not an array construction"));
+                };
+                if !matches!(
+                    body.exprs(db).get(expr),
+                    Some(crate::hir_def::Partial::Present(
+                        crate::hir_def::Expr::Array(_) | crate::hir_def::Expr::ArrayRep(_, _)
+                    ))
+                ) {
+                    return Err(invalid("node is not an array construction"));
                 }
-                "node_child_count" => {
-                    return Ok(CtfeConstValue::int(
-                        db,
-                        result_ty,
-                        description.children.len().into(),
-                    ));
+                let ty = typed.expr_ty(db, expr);
+                let length = ty
+                    .as_view(db)
+                    .unwrap_or(ty)
+                    .array_len(db)
+                    .ok_or_else(|| invalid("array length is not a checked concrete value"))?;
+                return Ok(CtfeConstValue::int(db, result_ty, length.into()));
+            }
+            CodeOp::NodeRecordFieldIndex => {
+                let CodeNodeSite::Expr(expr) = site else {
+                    return Err(invalid("node is not a record constructor"));
+                };
+                let Some(crate::hir_def::Partial::Present(crate::hir_def::Expr::RecordInit(
+                    _,
+                    fields,
+                ))) = body.exprs(db).get(expr)
+                else {
+                    return Err(invalid("node is not a record constructor"));
+                };
+                let value = self
+                    .expect_int(args[1].clone(), origin)
+                    .map_err(|_| invalid("record child index must be an integer"))?;
+                let index = value
+                    .to_usize()
+                    .ok_or_else(|| invalid("invalid record child index"))?;
+                let field = fields
+                    .get(index)
+                    .ok_or_else(|| invalid("record child index is out of bounds"))?;
+                let label = field
+                    .label_eagerly(db, body)
+                    .ok_or_else(|| invalid("record child has no checked field name"))?;
+                let index =
+                    crate::analysis::ty::ty_check::RecordLike::Type(typed.expr_ty(db, expr))
+                        .record_field_idx(db, label)
+                        .ok_or_else(|| invalid("record child has no declared field"))?;
+                return Ok(CtfeConstValue::int(db, result_ty, index.into()));
+            }
+            CodeOp::NodeLiteral => {
+                let CodeNodeSite::Expr(expr) = site else {
+                    return Err(invalid("node is not a scalar literal"));
+                };
+                if typed.expr_ty(db, expr) != result_ty {
+                    return Err(invalid("literal query requires its checked type"));
                 }
-                "node_child" => {
-                    let SemConstValue::Scalar {
-                        value: SemConstScalar::Int { value },
-                        ..
-                    } = args[1].materialize(db).value(db)
-                    else {
-                        return Err(invalid("code child index must be an integer"));
-                    };
-                    let index = value
-                        .to_usize()
-                        .ok_or_else(|| invalid("invalid code child index"))?;
-                    let site = description.children.get(index).ok_or_else(|| {
-                        invalid(&format!(
-                            "code child index {index} is out of bounds for {} children",
-                            description.children.len()
-                        ))
-                    })?;
-                    StructuralHandle::CodeNode { code, site }
-                }
-                "node_parameter_index" => {
-                    let CodeNodeSite::Expr(expr) = site else {
-                        return Err(invalid("node is not a parameter use"));
-                    };
-                    let Some(LocalBinding::Param { idx, .. }) = typed.expr_binding(expr) else {
-                        return Err(invalid("node is not a parameter use"));
-                    };
-                    return Ok(CtfeConstValue::int(db, result_ty, idx.into()));
-                }
-                "node_same_binding" => {
-                    let (_, rhs, rhs_body, rhs_typed) = node(&args[1])?;
-                    let binding =
-                        |typed: &crate::analysis::ty::ty_check::TypedBody<'db>, site| match site {
-                            CodeNodeSite::Expr(expr) => typed.expr_binding(expr),
-                            CodeNodeSite::Pat(pat) => typed.pat_binding(pat),
-                            _ => None,
-                        };
-                    let lhs = binding(typed, site)
-                        .ok_or_else(|| invalid("node has no checked binding"))?;
-                    let rhs = binding(rhs_typed, rhs)
-                        .ok_or_else(|| invalid("node has no checked binding"))?;
-                    return Ok(CtfeConstValue::bool(body == rhs_body && lhs == rhs));
-                }
-                "node_same_checked_call" => {
-                    let (_, rhs, _, rhs_typed) = node(&args[1])?;
-                    let (CodeNodeSite::Expr(lhs), CodeNodeSite::Expr(rhs)) = (site, rhs) else {
-                        return Err(invalid("node has no checked call record"));
-                    };
-                    let lhs = typed
-                        .callable_expr(lhs)
-                        .ok_or_else(|| invalid("node has no checked call record"))?;
-                    let rhs = rhs_typed
-                        .callable_expr(rhs)
-                        .ok_or_else(|| invalid("node has no checked call record"))?;
-                    return Ok(CtfeConstValue::bool(lhs == rhs));
-                }
-                "node_type_is" => {
-                    let ty = match site {
-                        CodeNodeSite::Expr(expr) => typed.expr_ty(db, expr),
-                        CodeNodeSite::Pat(pat) => typed.pat_ty(db, pat),
-                        _ => return Err(invalid("node has no checked value type")),
-                    };
-                    let candidate = *instance
-                        .key(db)
-                        .subst(db)
-                        .generic_args(db)
-                        .first()
-                        .ok_or_else(|| invalid("node_type_is requires a candidate type"))?;
-                    let func = body
-                        .containing_func(db)
-                        .ok_or_else(|| invalid("checked body has no function"))?;
-                    let (_, typed) = check_func_body(db, func);
-                    let normalize = |ty| normalize_ty(db, ty, func.scope(), typed.assumptions());
-                    let ty = normalize(ty.as_view(db).unwrap_or(ty));
-                    let candidate = normalize(candidate);
-                    if !matches!(
-                        candidate.data(db),
-                        TyData::TyBase(TyBase::Prim(PrimTy::Bool | PrimTy::U64 | PrimTy::U256))
-                    ) {
-                        return Err(invalid("node_type_is currently requires bool, u64 or u256"));
-                    }
-                    for ty in [ty, candidate] {
-                        if ty.has_invalid(db)
-                            || ty.has_param(db)
-                            || ty.has_var(db)
-                            || ty.has_projection(db)
-                        {
+                let Some(crate::hir_def::Partial::Present(crate::hir_def::Expr::Lit(literal))) =
+                    body.exprs(db).get(expr)
+                else {
+                    return Err(invalid("node is not a scalar literal"));
+                };
+                return Ok(match literal {
+                    crate::hir_def::LitKind::Int(integer) => {
+                        let value = BigInt::from(integer.data(db).clone());
+                        if !int_in_range(db, result_ty, &value) {
                             return Err(invalid(
-                                "code type comparison requires complete closed types",
+                                "literal magnitude does not fit its checked type; inspect the enclosing unary form",
                             ));
                         }
+                        CtfeConstValue::int(db, result_ty, value)
                     }
-                    return Ok(CtfeConstValue::bool(ty == candidate));
-                }
-                "node_field_index" => {
-                    let CodeNodeSite::Expr(expr) = site else {
-                        return Err(invalid("node is not a field projection"));
-                    };
-                    let index = typed
-                        .resolved_field_index(expr)
-                        .ok_or_else(|| invalid("node is not a checked field projection"))?;
-                    return Ok(CtfeConstValue::int(db, result_ty, index.into()));
-                }
-                "node_array_length" => {
-                    let CodeNodeSite::Expr(expr) = site else {
-                        return Err(invalid("node is not an array construction"));
-                    };
-                    if !matches!(
-                        body.exprs(db).get(expr),
-                        Some(crate::hir_def::Partial::Present(
-                            crate::hir_def::Expr::Array(_) | crate::hir_def::Expr::ArrayRep(_, _)
-                        ))
-                    ) {
-                        return Err(invalid("node is not an array construction"));
+                    crate::hir_def::LitKind::Bool(value) => CtfeConstValue::bool(*value),
+                    crate::hir_def::LitKind::String(value) => {
+                        CtfeConstValue::bytes(result_ty, value.data(db).as_bytes().to_vec())
                     }
-                    let ty = typed.expr_ty(db, expr);
-                    let length =
-                        ty.as_view(db).unwrap_or(ty).array_len(db).ok_or_else(|| {
-                            invalid("array length is not a checked concrete value")
-                        })?;
-                    return Ok(CtfeConstValue::int(db, result_ty, length.into()));
-                }
-                "node_record_field_index" => {
-                    let CodeNodeSite::Expr(expr) = site else {
-                        return Err(invalid("node is not a record constructor"));
-                    };
-                    let Some(crate::hir_def::Partial::Present(crate::hir_def::Expr::RecordInit(
-                        _,
-                        fields,
-                    ))) = body.exprs(db).get(expr)
-                    else {
-                        return Err(invalid("node is not a record constructor"));
-                    };
-                    let SemConstValue::Scalar {
-                        value: SemConstScalar::Int { value },
-                        ..
-                    } = args[1].materialize(db).value(db)
-                    else {
-                        return Err(invalid("record child index must be an integer"));
-                    };
-                    let index = value
-                        .to_usize()
-                        .ok_or_else(|| invalid("invalid record child index"))?;
-                    let field = fields
-                        .get(index)
-                        .ok_or_else(|| invalid("record child index is out of bounds"))?;
-                    let label = field
-                        .label_eagerly(db, body)
-                        .ok_or_else(|| invalid("record child has no checked field name"))?;
-                    let index =
-                        crate::analysis::ty::ty_check::RecordLike::Type(typed.expr_ty(db, expr))
-                            .record_field_idx(db, label)
-                            .ok_or_else(|| invalid("record child has no declared field"))?;
-                    return Ok(CtfeConstValue::int(db, result_ty, index.into()));
-                }
-                "node_literal" => {
-                    let CodeNodeSite::Expr(expr) = site else {
-                        return Err(invalid("node is not a scalar literal"));
-                    };
-                    if typed.expr_ty(db, expr) != result_ty {
-                        return Err(invalid("literal query requires its checked type"));
-                    }
-                    let Some(crate::hir_def::Partial::Present(crate::hir_def::Expr::Lit(literal))) =
-                        body.exprs(db).get(expr)
-                    else {
-                        return Err(invalid("node is not a scalar literal"));
-                    };
-                    return Ok(match literal {
-                        crate::hir_def::LitKind::Int(integer) => {
-                            let value = BigInt::from(integer.data(db).clone());
-                            if !int_in_range(db, result_ty, &value) {
-                                return Err(invalid(
-                                    "literal magnitude does not fit its checked type; inspect the enclosing unary form",
-                                ));
-                            }
-                            CtfeConstValue::int(db, result_ty, value)
-                        }
-                        crate::hir_def::LitKind::Bool(value) => CtfeConstValue::bool(*value),
-                        crate::hir_def::LitKind::String(value) => {
-                            CtfeConstValue::bytes(result_ty, value.data(db).as_bytes().to_vec())
-                        }
-                    });
-                }
-                _ => return Err(invalid("unknown code inspection operation")),
+                });
             }
         };
-        let value = SemConstId::new(
-            db,
-            SemConstValue::Structural {
-                ty: result_ty,
-                handle: output,
-            },
-        );
-        let verified = VerifiedConstValueId::from_complete_execution(db, value).map_err(invalid)?;
-        Ok(CtfeConstValue::concrete(db, verified))
+        Ok(self.structural_value(result_ty, output, origin, "")?)
     }
 
     fn eval_structural_intrinsic(
         &mut self,
         instance: SemanticInstance<'db>,
-        operation: &str,
+        operation: StructuralOp,
         result_ty: TyId<'db>,
         args: &[CtfeConstValue<'db>],
         origin: SemOrigin<'db>,
@@ -2630,8 +2594,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             )),
             _ => None,
         };
-        let output = match (operation, handle, args.len()) {
-            ("binders", StructuralHandle::Variant(variant), 2) => {
+        let name = MetaIntrinsic::StructuralOp(operation).name();
+        let output = match (operation, handle) {
+            (StructuralOp::Binders, StructuralHandle::Variant(variant)) => {
                 if usize::from(variant.idx) >= variant.enum_.len_variants(self.db) {
                     return Err(CtfeError::InvalidOperation {
                         origin,
@@ -2639,14 +2604,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     }
                     .into());
                 }
-                let SemConstValue::Scalar {
-                    value: SemConstScalar::Int { value },
-                    ..
-                } = args[1].materialize(self.db).value(self.db)
-                else {
-                    return Err(invalid().into());
-                };
-                let group = value.to_usize().ok_or_else(invalid)?;
+                let group = self
+                    .index_from_value(args[1].clone(), origin)
+                    .map_err(|_| invalid())?;
                 return Ok(self.code_value(
                     result_ty,
                     crate::analysis::semantic::CodeSource::VariantBinding {
@@ -2658,14 +2618,14 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     origin,
                 )?);
             }
-            ("binders", _, _) => {
+            (StructuralOp::Binders, _) => {
                 return Err(CtfeError::InvalidOperation {
                     origin,
                     message: "`binders` needs a selected variant payload".into(),
                 }
                 .into());
             }
-            ("binder_at", StructuralHandle::Code(code), 2) => {
+            (StructuralOp::BinderAt, StructuralHandle::Code(code)) => {
                 let crate::analysis::semantic::CodeSource::VariantBinding {
                     variant,
                     group,
@@ -2699,9 +2659,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     }
                     .into());
                 }
-                let fields = owner.as_adt(self.db).fields(self.db);
-                if fields
-                    .get(usize::from(variant.idx))
+                if self
+                    .reflected_field_shape(owner, variant_index)
                     .is_none_or(|shape| index >= shape.num_types())
                 {
                     return Err(CtfeError::InvalidOperation {
@@ -2722,9 +2681,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 )?);
             }
             (
-                "variant_count",
+                StructuralOp::VariantCount,
                 StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),
-                1,
             ) => {
                 return Ok(CtfeConstValue::int(
                     self.db,
@@ -2733,18 +2691,12 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 ));
             }
             (
-                "variant",
+                StructuralOp::Variant,
                 StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),
-                2,
             ) => {
-                let SemConstValue::Scalar {
-                    value: SemConstScalar::Int { value },
-                    ..
-                } = args[1].materialize(self.db).value(self.db)
-                else {
-                    return Err(invalid().into());
-                };
-                let index = value.to_usize().ok_or_else(invalid)?;
+                let index = self
+                    .index_from_value(args[1].clone(), origin)
+                    .map_err(|_| invalid())?;
                 if index >= owner.len_variants(self.db) {
                     return Err(CtfeError::InvalidOperation {
                         origin,
@@ -2754,20 +2706,19 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 }
                 StructuralHandle::Variant(crate::hir_def::EnumVariant::new(owner, index))
             }
-            ("variant" | "variant_count", _, _) => {
+            (StructuralOp::Variant | StructuralOp::VariantCount, _) => {
                 return Err(CtfeError::InvalidOperation {
                     origin,
                     message: format!(
-                        "`{operation}` needs a whole enum input; a struct or selected payload has no variants"
+                        "`{name}` needs a whole enum input; a struct or selected payload has no variants"
                     ),
                 }.into());
             }
             (
-                "field_count" | "field",
+                StructuralOp::FieldCount | StructuralOp::Field,
                 StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),
-                _,
             ) => {
-                let name = owner
+                let owner_name = owner
                     .name(self.db)
                     .to_opt()
                     .map(|name| name.data(self.db).as_str())
@@ -2775,18 +2726,17 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 return Err(CtfeError::InvalidOperation {
                     origin,
                     message: format!(
-                        "`{operation}` needs a struct or a selected variant; `{name}` is an enum, so select a payload with `variant(record, i)`"
+                        "`{name}` needs a struct or a selected variant; `{owner_name}` is an enum, so select a payload with `variant(record, i)`"
                     ),
                 }.into());
             }
             (
-                "query_field",
+                StructuralOp::QueryField,
                 StructuralHandle::FieldType {
                     owner,
                     variant_index,
                     index,
                 },
-                1,
             ) => {
                 return self.eval_field_query(
                     instance,
@@ -2797,28 +2747,23 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     origin,
                 );
             }
-            ("field_count", _, 1) if field_list.is_some() => {
+            (StructuralOp::FieldCount, _) if field_list.is_some() => {
                 let (owner, variant_index) = field_list.unwrap();
-                let count = owner.as_adt(self.db).fields(self.db)
-                    [usize::from(variant_index.unwrap_or(0))]
-                .num_types();
+                let count = self
+                    .reflected_field_shape(owner, variant_index)
+                    .ok_or_else(invalid)?
+                    .num_types();
                 return Ok(CtfeConstValue::int(self.db, result_ty, count.into()));
             }
-            ("field", _, 2) if field_list.is_some() => {
+            (StructuralOp::Field, _) if field_list.is_some() => {
                 let (owner, variant_index) = field_list.unwrap();
-                let SemConstValue::Scalar {
-                    value: SemConstScalar::Int { value },
-                    ..
-                } = args[1].materialize(self.db).value(self.db)
-                else {
-                    return Err(invalid().into());
-                };
-                let index = value.to_usize().ok_or_else(invalid)?;
-                if index
-                    >= owner.as_adt(self.db).fields(self.db)
-                        [usize::from(variant_index.unwrap_or(0))]
-                    .num_types()
-                {
+                let index = self
+                    .index_from_value(args[1].clone(), origin)
+                    .map_err(|_| invalid())?;
+                let shape = self
+                    .reflected_field_shape(owner, variant_index)
+                    .ok_or_else(invalid)?;
+                if index >= shape.num_types() {
                     return Err(CtfeError::InvalidOperation {
                         origin,
                         message: "record field index is out of bounds".into(),
@@ -2832,31 +2777,28 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 }
             }
             (
-                "field_type",
+                StructuralOp::FieldType,
                 StructuralHandle::Field {
                     owner,
                     variant_index,
                     index,
                 },
-                1,
             ) => StructuralHandle::FieldType {
                 owner,
                 variant_index,
                 index,
             },
             (
-                "type_is",
+                StructuralOp::TypeIs,
                 StructuralHandle::FieldType {
                     owner,
                     variant_index,
                     index,
                 },
-                1,
             ) => {
                 let adt = owner.as_adt(self.db);
-                let shape = adt
-                    .fields(self.db)
-                    .get(usize::from(variant_index.unwrap_or(0)))
+                let shape = self
+                    .reflected_field_shape(owner, variant_index)
                     .ok_or_else(invalid)?;
                 if !adt.params(self.db).is_empty() || index >= shape.num_types() {
                     return Err(invalid().into());
@@ -2878,47 +2820,19 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 };
                 let field_ty = normalize(field_ty);
                 let candidate = normalize(candidate);
-                // The first structural workload queries the existing static
-                // scalar codecs. Do not turn TyId equality into an accidental
-                // general reflected definitional-equality operation.
-                if !matches!(
-                    candidate.data(self.db),
-                    TyData::TyBase(TyBase::Prim(PrimTy::Bool | PrimTy::U64 | PrimTy::U256))
-                ) {
-                    return Err(CtfeError::InvalidOperation {
-                        origin,
-                        message: "type_is currently requires bool, u64 or u256".to_owned(),
-                    }
-                    .into());
-                }
-                for ty in [field_ty, candidate] {
-                    if ty.has_invalid(self.db)
-                        || ty.has_param(self.db)
-                        || ty.has_var(self.db)
-                        || ty.has_projection(self.db)
-                    {
-                        return Err(invalid().into());
-                    }
-                }
-                return Ok(CtfeConstValue::bool(field_ty == candidate));
+                return Ok(self.reflected_type_is(
+                    field_ty,
+                    candidate,
+                    origin,
+                    (
+                        "type_is currently requires bool, u64 or u256",
+                        "invalid structural reflection handle or operation",
+                    ),
+                )?);
             }
             _ => return Err(invalid().into()),
         };
-        let value = SemConstId::new(
-            self.db,
-            SemConstValue::Structural {
-                ty: result_ty,
-                handle: output,
-            },
-        );
-        let verified =
-            VerifiedConstValueId::from_complete_execution(self.db, value).map_err(|message| {
-                CtfeError::InvalidOperation {
-                    origin,
-                    message: message.to_owned(),
-                }
-            })?;
-        Ok(CtfeConstValue::concrete(self.db, verified))
+        Ok(self.structural_value(result_ty, output, origin, "")?)
     }
 
     fn eval_numeric_extern_intrinsic(

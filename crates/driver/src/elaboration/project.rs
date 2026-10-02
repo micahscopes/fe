@@ -22,8 +22,8 @@ use hir::{
         },
     },
     core::meta::{
-        FrozenGeneration, FrozenItemLocator, FrozenMetaValue, FrozenOwner, FrozenQuoteSpan,
-        MetaItem,
+        FrozenGeneration, FrozenItemLocator, FrozenMetaValue, FrozenOwner, FrozenOwnerError,
+        FrozenQuoteSpan, MetaItem,
     },
     hir_def::{CallableDef, Expr, HirIngot, ItemKind, Partial, WhereClauseOwner},
     span::{DesugaredOrigin, HirOrigin, LazySpan},
@@ -72,37 +72,13 @@ fn evaluation_error(
     };
     let mut root = error;
     let mut calls = Vec::new();
-    let fault = loop {
-        break match root {
-            CtfeError::NotConstEvaluable { .. } => EvaluationFault::NotConstEvaluable,
-            CtfeError::AssertionFailed { message, .. } => {
-                EvaluationFault::AssertionFailed(message.clone())
-            }
-            CtfeError::InvalidOperation { message, .. } => {
-                EvaluationFault::InvalidOperation(message.clone())
-            }
-            CtfeError::InvalidBorrow { .. } => EvaluationFault::InvalidBorrow,
-            CtfeError::InvalidProviderUse { .. } => EvaluationFault::InvalidProviderUse,
-            CtfeError::NonConstCall { .. } => EvaluationFault::NonConstCall,
-            CtfeError::InvalidBody { .. } => EvaluationFault::InvalidBody,
-            CtfeError::DivisionByZero { .. } => EvaluationFault::DivisionByZero,
-            CtfeError::ArithmeticOverflow { .. } => EvaluationFault::ArithmeticOverflow,
-            CtfeError::NegativeExponent { .. } => EvaluationFault::NegativeExponent,
-            CtfeError::OutOfBounds { .. } => EvaluationFault::OutOfBounds,
-            CtfeError::VariantMismatch { .. } => EvaluationFault::VariantMismatch,
-            CtfeError::UninitializedLocal { .. } => EvaluationFault::UninitializedLocal,
-            CtfeError::StepLimitExceeded { .. } => EvaluationFault::StepLimitExceeded,
-            CtfeError::RecursionLimitExceeded { .. } => EvaluationFault::RecursionLimitExceeded,
-            CtfeError::RecursiveConst { .. } => EvaluationFault::RecursiveConst,
-            CtfeError::CalleeError { callee, source, .. } => {
-                if let Some(name) = callee.key(db).owner(db).scope().pretty_path(db) {
-                    calls.push(name);
-                }
-                root = source;
-                continue;
-            }
-        };
-    };
+    while let CtfeError::CalleeError { callee, source, .. } = root {
+        if let Some(name) = callee.key(db).owner(db).scope().pretty_path(db) {
+            calls.push(name);
+        }
+        root = source;
+    }
+    let fault = root.kind();
     ElaborationErrorKind::EvaluationFailed { fault, calls }
 }
 
@@ -277,17 +253,7 @@ fn unique_quote_location(value: &FrozenMetaValue) -> Option<FrozenQuoteSpan> {
                     }
                 }
             }
-            FrozenMetaValue::Tuple(values) | FrozenMetaValue::Array(values) => {
-                for value in values {
-                    collect(value, locations);
-                }
-            }
-            FrozenMetaValue::Record { fields, .. } => {
-                for value in fields.values() {
-                    collect(value, locations);
-                }
-            }
-            FrozenMetaValue::Variant { fields, .. } => {
+            FrozenMetaValue::DeclarationName { fields, .. } => {
                 for value in fields {
                     collect(value, locations);
                 }
@@ -460,41 +426,6 @@ fn check_output_shape<'db>(
     Err(ElaborationErrorKind::UnsupportedOutputShape)
 }
 
-/// One structural budget for the frozen provider result. Schema names and
-/// pretty-printer formatting do not affect whether a declaration is admitted.
-/// Each value node costs eight units, plus its scalar payload bytes.
-fn description_units(value: &FrozenMetaValue) -> usize {
-    let payload = match value {
-        FrozenMetaValue::Unit | FrozenMetaValue::Structural { .. } => 0,
-        FrozenMetaValue::Code(code) => code.nodes.iter().fold(0usize, |sum, node| {
-            let holes = node.holes.iter().fold(0usize, |sum, hole| {
-                sum.saturating_add(match hole {
-                    hir::core::meta::FrozenCodeHole::Code(..) => 8,
-                    hir::core::meta::FrozenCodeHole::Value(value, _) => description_units(value),
-                })
-            });
-            sum.saturating_add(16).saturating_add(holes)
-        }),
-        FrozenMetaValue::Scalar { value, .. } => match value {
-            SemConstScalar::Bool(_) => 1,
-            SemConstScalar::Int { value } => value.to_signed_bytes_le().len(),
-            SemConstScalar::Bytes(bytes) => bytes.len(),
-        },
-        FrozenMetaValue::Tuple(values) | FrozenMetaValue::Array(values) => {
-            values.iter().fold(0usize, |sum, value| {
-                sum.saturating_add(description_units(value))
-            })
-        }
-        FrozenMetaValue::Record { fields, .. } => fields.values().fold(0usize, |sum, value| {
-            sum.saturating_add(description_units(value))
-        }),
-        FrozenMetaValue::Variant { fields, .. } => fields.iter().fold(0usize, |sum, value| {
-            sum.saturating_add(description_units(value))
-        }),
-    };
-    8usize.saturating_add(payload)
-}
-
 /// Prepare all explicit invocations in the resolved input set. The authored
 /// database remains unchanged, including on failure. None avoids copying when
 /// there are no invocations. Resolve semantic identities again in the result.
@@ -631,18 +562,11 @@ fn prepare_selected<'db>(
                 }
             };
             // Freeze the checked value before the output HIR query reads it.
-            let frozen = input.freeze_value(value).map_err(|e| {
+            let (frozen, units) = input.freeze_value_counted(value).map_err(|e| {
                 let mut diagnostic = error(ElaborationErrorKind::Freezing(e));
                 diagnostic.quote = provider_quote_location(db, *provider).map(Box::new);
                 diagnostic
             })?;
-            let units = description_units(&frozen);
-            if units > 65536 {
-                return Err(error(ElaborationErrorKind::DescriptionLimit {
-                    actual: units,
-                    maximum: 65536,
-                }));
-            }
             total_units = total_units.saturating_add(units);
             if total_units > 1048576 {
                 return Err(error(ElaborationErrorKind::ProjectDescriptionLimit {
@@ -650,24 +574,20 @@ fn prepare_selected<'db>(
                     maximum: 1048576,
                 }));
             }
-            let provider_identity = FrozenItemLocator::Named(FrozenOwner {
-                file: provider
-                    .span()
-                    .resolve(db)
-                    .and_then(|span| span.file.url(db))
-                    .ok_or_else(|| error(ElaborationErrorKind::ProviderFileMissing))?,
-                path: provider
-                    .scope()
-                    .pretty_path(db)
-                    .ok_or_else(|| error(ElaborationErrorKind::ProviderPathMissing))?,
-            });
-            let span = request
+            let provider_identity = FrozenItemLocator::Named(
+                FrozenOwner::of_item(db, (*provider).into()).map_err(|kind| {
+                    error(match kind {
+                        FrozenOwnerError::MissingFile => ElaborationErrorKind::ProviderFileMissing,
+                        FrozenOwnerError::MissingPath => ElaborationErrorKind::ProviderPathMissing,
+                    })
+                })?,
+            );
+            request
                 .owner
                 .as_item()
                 .span()
                 .resolve(db)
                 .ok_or_else(|| error(ElaborationErrorKind::OwnerSpanMissing))?;
-            let range: std::ops::Range<usize> = span.range.into();
             frozen_requests.push(FrozenGeneration {
                 target: input
                     .frozen_owner()
@@ -675,7 +595,6 @@ fn prepare_selected<'db>(
                 target_const_param_types: input
                     .frozen_const_param_types()
                     .map_err(|e| error(ElaborationErrorKind::Owner(e)))?,
-                target_span_start: range.start,
                 site_span: site,
                 provider: provider_identity,
                 attribute_index: request.attribute_index,

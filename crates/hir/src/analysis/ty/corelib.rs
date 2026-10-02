@@ -625,6 +625,67 @@ define_runtime_intrinsics! {
     IntrinsicKeccak256 => (Core, ["intrinsic", "__keccak256"], READ_VALUE_0, None),
 }
 
+// One declaration table owns reflection names, typed dispatch and memory contracts.
+macro_rules! define_meta_intrinsics {
+    ($($group:ident { $($operation:ident => $name:literal),+ $(,)? }),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+        pub(crate) enum MetaIntrinsic { $($group($group)),+ }
+        $(
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+            pub(crate) enum $group { $($operation),+ }
+        )+
+        #[salsa::tracked]
+        pub(crate) fn meta_intrinsic_kind<'db>(
+            db: &'db dyn HirAnalysisDb,
+            func: Func<'db>,
+        ) -> Option<MetaIntrinsic> {
+            if func.top_mod(db).ingot(db).kind(db) != IngotKind::Core {
+                return None;
+            }
+            let name = func.name(db).to_opt()?.data(db).as_str();
+            match name {
+                $($($name => lib_func_matches(db, func, concat!("core::meta::", $name))
+                    .then_some(MetaIntrinsic::$group($group::$operation)),)+)+
+                _ => None,
+            }
+        }
+        impl MetaIntrinsic {
+            pub(crate) fn name(self) -> &'static str {
+                match self { $($(Self::$group($group::$operation) => $name,)+)+ }
+            }
+        }
+    };
+}
+
+define_meta_intrinsics! {
+    CodeOp {
+        NodeKind => "node_kind",
+        NodeChildCount => "node_child_count",
+        NodeChild => "node_child",
+        NodeParameterIndex => "node_parameter_index",
+        NodeSameBinding => "node_same_binding",
+        NodeSameCheckedCall => "node_same_checked_call",
+        NodeTypeIs => "node_type_is",
+        NodeFieldIndex => "node_field_index",
+        NodeRecordFieldIndex => "node_record_field_index",
+        NodeLiteral => "node_literal",
+        NodeAssignmentOperator => "node_assignment_operator",
+        NodeArrayLength => "node_array_length",
+    },
+    StructuralOp {
+        FieldCount => "field_count",
+        VariantCount => "variant_count",
+        Variant => "variant",
+        Binders => "binders",
+        BinderAt => "binder_at",
+        Field => "field",
+        FieldType => "field_type",
+        TypeIs => "type_is",
+        QueryField => "query_field",
+    },
+    CodeValueOp { Empty => "empty", Root => "code_root" },
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum NumericExternIntrinsic {
     CheckedBinary(ArithBinOp),
@@ -821,34 +882,11 @@ pub fn intrinsic_contract<'db>(
             .any(|path| lib_func_matches(db, func, path));
     if numeric
         || host_import
+        || meta_intrinsic_kind(db, func).is_some()
         || [
             "core::intrinsic::size_of",
             "core::intrinsic::contract_field_slot",
             "core::obligations::prove",
-            "core::meta::variant_count",
-            "core::meta::variant",
-            "core::meta::binders",
-            "core::meta::binder_at",
-            "core::meta::field_count",
-            "core::meta::field",
-            "core::meta::field_type",
-            "core::meta::type_is",
-            "core::meta::query_field",
-            "core::meta::empty",
-            "core::meta::code_root",
-            "core::meta::node_kind",
-            "core::meta::node_child_count",
-            "core::meta::node_child",
-            "core::meta::node_parameter_index",
-            "core::meta::node_same_binding",
-            "core::meta::node_same_checked_call",
-            "core::meta::node_type_is",
-            "core::meta::node_field_index",
-            "core::meta::node_record_field_index",
-            "core::meta::node_literal",
-            "core::meta::node_assignment_operator",
-            "core::meta::node_array_length",
-            "core::meta::record_field_count",
         ]
         .iter()
         .any(|path| lib_func_matches(db, func, path))

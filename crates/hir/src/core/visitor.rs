@@ -2008,7 +2008,7 @@ where
                 );
             }
         }
-        PathKind::BoundIngot { .. } => {}
+        PathKind::BoundIngot { .. } | PathKind::BoundItem { .. } => {}
         PathKind::QualifiedType { type_, trait_ } => {
             ctxt.with_new_ctxt(
                 |span| span.segment(idx).qualified_type().ty(),

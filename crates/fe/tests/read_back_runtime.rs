@@ -333,3 +333,16 @@ fn quoted_signature_aliases_execute_at_o0_and_o2(fixture: Fixture<&str>) {
 fn ordinary_fragment_locals_execute_at_o0_and_o2(fixture: Fixture<&str>) {
     execute_quoted_fixture(fixture);
 }
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_member_owners", glob: "*.fe")]
+fn mixed_quote_members_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_impl_method_generic.fe",
+)]
+fn method_generic_shadowing_owner_executes_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture_with_count(fixture, 1);
+}

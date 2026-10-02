@@ -80,6 +80,22 @@ pub fn lower_hir_ty<'db>(
     lower_hir_ty_impl(db, ty, scope, assumptions, &minter)
 }
 
+/// Lower a checked primitive using the caller's scope and assumptions.
+pub fn lower_hir_primitive<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: HirTyId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> Option<PrimTy> {
+    match lower_hir_ty(db, ty, scope, assumptions)
+        .base_ty(db)
+        .data(db)
+    {
+        TyData::TyBase(TyBase::Prim(primitive)) => Some(*primitive),
+        _ => None,
+    }
+}
+
 fn lower_hir_ty_impl<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,

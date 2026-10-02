@@ -1366,6 +1366,7 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                         .to_opt()
                         .map_or_else(|| segment.pretty_print(db), |id| id.data(db).to_owned()),
                     PathKind::BoundIngot { display, .. } => display.data(db).clone(),
+                    PathKind::BoundItem { display, .. } => display.pretty_print(db),
                     PathKind::QualifiedType { type_, trait_ } => {
                         let ty = type_.pretty_print(db);
                         let trait_name = trait_.pretty_print(db);
@@ -3802,14 +3803,6 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                     error_code,
                 )
             }
-
-            Self::RecordShapeAcquisition { primary, reason } => primary_diag(
-                severity,
-                "record shape acquisition is not permitted",
-                *reason,
-                primary.resolve(db),
-                error_code,
-            ),
 
             Self::TypeSizeOverflow { primary, ty } => primary_diag(
                 severity,

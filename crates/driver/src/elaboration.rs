@@ -20,7 +20,7 @@ use hir::{
         ty::{adt_def::AdtRef, trait_resolution::PredicateListId, ty_def::TyId},
     },
     core::meta::MetaItem,
-    hir_def::{IdentId, ItemKind, attr::Attr},
+    hir_def::{ItemKind, attr::Attr},
 };
 
 use crate::DriverDataBase;
@@ -39,28 +39,12 @@ pub struct Invocation<'db> {
 pub struct RecordInput<'db> {
     db: &'db DriverDataBase,
     owner: AdtRef<'db>,
-    fields: Vec<FieldInput<'db>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct FieldInput<'db> {
-    pub name: IdentId<'db>,
-    pub ty: TyId<'db>,
-}
-
-/// A descriptor stays in its input view and cannot be constructed from a name
-/// or an index alone. No Salsa identity here may be moved to an output database.
-pub struct FieldDescriptor<'db> {
-    db: &'db DriverDataBase,
-    owner: AdtRef<'db>,
-    index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordInputError {
     InvalidField(usize),
     InvalidVariantField(usize, usize),
-    WrongOwner,
 }
 
 impl std::fmt::Display for RecordInputError {
@@ -70,7 +54,6 @@ impl std::fmt::Display for RecordInputError {
             Self::InvalidVariantField(variant, field) => {
                 write!(f, "invalid field at index {field} of variant {variant}")
             }
-            Self::WrongOwner => f.write_str("field descriptor belongs to another owner"),
         }
     }
 }
@@ -81,7 +64,6 @@ impl<'db> Invocation<'db> {
         db: &'db DriverDataBase,
     ) -> Result<RecordInput<'db>, RecordInputError> {
         let adt = self.owner.as_adt(db);
-        let mut fields = Vec::new();
         let struct_fields = match self.owner {
             AdtRef::Struct(owner) => Some(owner.hir_fields(db)),
             AdtRef::Enum(_) => None,
@@ -91,7 +73,7 @@ impl<'db> Invocation<'db> {
             .flat_map(|fields| fields.data(db))
             .enumerate()
         {
-            let name = field
+            field
                 .name
                 .to_opt()
                 .ok_or(RecordInputError::InvalidField(index))?;
@@ -99,7 +81,6 @@ impl<'db> Invocation<'db> {
             if ty.has_invalid(db) || ty.has_var(db) {
                 return Err(RecordInputError::InvalidField(index));
             }
-            fields.push(FieldInput { name, ty });
         }
         if matches!(self.owner, AdtRef::Enum(_)) {
             for (variant_index, shape) in adt.fields(db).iter().enumerate() {
@@ -114,7 +95,6 @@ impl<'db> Invocation<'db> {
         Ok(RecordInput {
             db,
             owner: self.owner,
-            fields,
         })
     }
 }
@@ -136,27 +116,6 @@ impl<'db> RecordInput<'db> {
                 handle: StructuralHandle::Record(self.owner),
             },
         ))
-    }
-
-    pub fn descriptors(&self) -> impl Iterator<Item = FieldDescriptor<'db>> + '_ {
-        (0..self.fields.len()).map(|index| FieldDescriptor {
-            db: self.db,
-            owner: self.owner,
-            index,
-        })
-    }
-
-    pub fn field(
-        &self,
-        descriptor: &FieldDescriptor<'db>,
-    ) -> Result<FieldInput<'db>, RecordInputError> {
-        if !std::ptr::eq(self.db, descriptor.db) || self.owner != descriptor.owner {
-            return Err(RecordInputError::WrongOwner);
-        }
-        self.fields
-            .get(descriptor.index)
-            .copied()
-            .ok_or(RecordInputError::InvalidField(descriptor.index))
     }
 }
 

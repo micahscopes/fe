@@ -1,0 +1,30 @@
+pub trait Empty {
+    fn empty(self) -> bool
+    fn make_empty() -> Self
+}
+pub enum Inner<T> { None, Some(T) }
+mod author {
+    use core::meta::{Code, Item, Record, field, field_type}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let ty = field_type(field(record, 0))
+        quote {
+            impl ingot::Empty for ${ty} {
+                fn empty(self) -> bool {
+                    match self { Self::None => true, Self::Some(_) => false }
+                }
+                fn make_empty() -> Self { Self::None }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+pub struct Outer<T> { pub inner: Inner<T> }
+#[test]
+fn values() {
+    let wide: Inner<u256> = Inner::make_empty()
+    let flag: Inner<bool> = Inner::make_empty()
+    assert!(wide.empty())
+    assert!(flag.empty())
+    assert!(!Inner::Some(23 as u256).empty())
+    assert!(!Inner::Some(true).empty())
+}

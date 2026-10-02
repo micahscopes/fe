@@ -15,11 +15,11 @@ use crate::{
         ty::{
             const_ty::{BodyHoleSite, HoleAnchor, LoweringContext},
             diagnostics::BodyDiag,
-            ty_def::{PrimTy, TyBase, TyData, TyId, TyVarSort},
-            ty_lower::lower_hir_ty,
+            ty_def::{PrimTy, TyData, TyId, TyVarSort},
+            ty_lower::lower_hir_primitive,
         },
     },
-    core::meta::MetaItem,
+    core::meta::{MetaItem, QuoteMember},
     hir_def::{
         Body, CallableDef, Cond, CondId, Expr, ExprId, FuncParamName, GenericArg, GenericArgListId,
         GenericParam, GenericParamListId, IdentId, Partial, Pat, PatId, PathId, PathKind, Quote,
@@ -49,7 +49,7 @@ pub struct CheckedQuote<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuoteLocalType<'db> {
-    pub func: Option<u32>,
+    pub member: QuoteMember,
     pub stmt: StmtId,
     pub ty: HirTyId<'db>,
 }
@@ -58,10 +58,7 @@ pub struct QuoteLocalType<'db> {
 pub struct QuoteNameUse<'db> {
     pub site: QuoteNameSite,
     pub class: QuoteNameClass<'db>,
-    /// Quoted function currently being visited, if any.
-    pub func: Option<u32>,
-    /// Quoted associated constant currently being visited, if any.
-    pub assoc_const: Option<u32>,
+    pub member: QuoteMember,
     /// Signature slot being checked, when this name occurs in a function type.
     pub signature: Option<QuoteSignatureSite>,
 }
@@ -253,12 +250,7 @@ impl<'db> TyChecker<'db> {
                             return None;
                         };
                         Some(constant.ty.to_opt().and_then(|ty| {
-                            let resolved =
-                                lower_hir_ty(db, ty, self.env.scope(), self.env.assumptions());
-                            match resolved.base_ty(db).data(db) {
-                                TyData::TyBase(TyBase::Prim(primitive)) => Some(*primitive),
-                                _ => None,
-                            }
+                            lower_hir_primitive(db, ty, self.env.scope(), self.env.assumptions())
                         }))
                     })
                     .collect()
@@ -402,8 +394,7 @@ struct TemplateWalk<'a, 'db> {
     funcs: u32,
     assoc_consts: u32,
     assoc_types: u32,
-    active_func: Option<u32>,
-    active_assoc_const: Option<u32>,
+    active_member: QuoteMember,
     signature_site: Option<QuoteSignatureSite>,
     function_generic_items: Vec<u32>,
     local_types: Vec<QuoteLocalType<'db>>,
@@ -427,8 +418,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             funcs: 0,
             assoc_consts: 0,
             assoc_types: 0,
-            active_func: None,
-            active_assoc_const: None,
+            active_member: QuoteMember::Fragment,
             signature_site: None,
             function_generic_items: Vec::new(),
             local_types: Vec::new(),
@@ -477,7 +467,8 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             QuoteItem::Func(func) => {
                 let func_index = self.funcs;
                 self.funcs += 1;
-                let previous_func = self.active_func.replace(func_index);
+                let previous_member =
+                    std::mem::replace(&mut self.active_member, QuoteMember::Function(func_index));
                 self.function_generic_items.push(self.items);
                 self.enter_generics(func.generic_params);
                 if let Partial::Present(params) = func.params {
@@ -539,17 +530,18 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                 }
                 self.values.pop();
                 self.types.pop();
-                self.active_func = previous_func;
+                self.active_member = previous_member;
             }
             QuoteItem::Const(const_) => {
                 let index = self.assoc_consts;
                 self.assoc_consts += 1;
                 self.walk_ty_opt(const_.ty);
-                let previous = self.active_assoc_const.replace(index);
+                let previous =
+                    std::mem::replace(&mut self.active_member, QuoteMember::AssocConst(index));
                 if let Some(value) = const_.value {
                     self.walk_expr(value);
                 }
-                self.active_assoc_const = previous;
+                self.active_member = previous;
             }
             QuoteItem::Type(ty) => {
                 let index = self.assoc_types;
@@ -603,24 +595,24 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                 GenericParam::Type(param) => {
                     for (bound_index, bound) in param.bounds.iter().enumerate() {
                         let previous = self.signature_site;
-                        self.signature_site =
-                            self.active_func
-                                .map(|func| QuoteSignatureSite::GenericBound {
-                                    func,
-                                    param: param_index as u32,
-                                    bound: bound_index as u32,
-                                });
+                        self.signature_site = self.active_member.function().map(|func| {
+                            QuoteSignatureSite::GenericBound {
+                                func,
+                                param: param_index as u32,
+                                bound: bound_index as u32,
+                            }
+                        });
                         self.walk_bound(bound);
                         self.signature_site = previous;
                     }
                     if let Some(ty) = param.default_ty {
                         let previous = self.signature_site;
-                        self.signature_site =
-                            self.active_func
-                                .map(|func| QuoteSignatureSite::GenericDefault {
-                                    func,
-                                    param: param_index as u32,
-                                });
+                        self.signature_site = self.active_member.function().map(|func| {
+                            QuoteSignatureSite::GenericDefault {
+                                func,
+                                param: param_index as u32,
+                            }
+                        });
                         self.walk_ty(ty);
                         self.signature_site = previous;
                     }
@@ -636,7 +628,8 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                 QuoteWherePredicate::Bound(predicate) => {
                     let previous = self.signature_site;
                     self.signature_site = self
-                        .active_func
+                        .active_member
+                        .function()
                         .map(|func| QuoteSignatureSite::WhereType {
                             func,
                             predicate: predicate_index as u32,
@@ -649,7 +642,8 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                     for (bound_index, bound) in predicate.bounds.iter().enumerate() {
                         let previous = self.signature_site;
                         self.signature_site = self
-                            .active_func
+                            .active_member
+                            .function()
                             .map(|func| QuoteSignatureSite::WhereBound {
                                 func,
                                 predicate: predicate_index as u32,
@@ -666,11 +660,19 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                 QuoteWherePredicate::Const(expr) => {
                     let previous = self.signature_site;
                     self.signature_site =
-                        self.active_func.map(|func| QuoteSignatureSite::WhereConst {
-                            func,
-                            predicate: predicate_index as u32,
-                        });
+                        self.active_member
+                            .function()
+                            .map(|func| QuoteSignatureSite::WhereConst {
+                                func,
+                                predicate: predicate_index as u32,
+                            });
+                    let previous_member = self.active_member;
+                    if let Some(func) = previous_member.function() {
+                        self.active_member =
+                            QuoteMember::FunctionWhere(func, predicate_index as u32);
+                    }
                     self.walk_expr(*expr);
+                    self.active_member = previous_member;
                     self.signature_site = previous;
                 }
                 QuoteWherePredicate::Hole(_) => {}
@@ -813,9 +815,9 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         match data {
             Stmt::Let(pat, ty, init) => {
                 if let Some(ty) = ty {
-                    let func = self.active_func;
+                    let func = self.active_member.function();
                     self.local_types.push(QuoteLocalType {
-                        func,
+                        member: self.active_member,
                         stmt,
                         ty: *ty,
                     });
@@ -947,8 +949,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         self.names.push(QuoteNameUse {
             site,
             class,
-            func: self.active_func,
-            assoc_const: self.active_assoc_const,
+            member: self.active_member,
             signature: self.signature_site,
         });
     }
@@ -1094,7 +1095,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                 }
                 return self.push(site, QuoteNameClass::Qualified);
             }
-            PathKind::BoundIngot { .. } => None,
+            PathKind::BoundIngot { .. } | PathKind::BoundItem { .. } => None,
         };
         if let Some(name) = root_name {
             if name.is_self(db) || name.is_self_ty(db) {

@@ -87,21 +87,36 @@ fn quoted_root_identity_matches_checked_output(fixture: Fixture<&str>) {
     let sibling_path = authored_path
         .strip_suffix("::author::bump")
         .expect("fixture names author::bump");
+    let expected_path = format!("{sibling_path}::bump");
     root.owner = hir::core::meta::FrozenItemLocator::Named(hir::core::meta::FrozenOwner {
         file: url.clone(),
-        path: format!("{sibling_path}::bump"),
+        path: expected_path.clone(),
     });
     input.set_requests(&mut output).to(requests);
 
     let file = output.workspace().get(&output, &url).expect("fixture file");
     let module = output.top_mod(file);
     assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
-    let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
-    assert_eq!(errors.len(), 1);
-    assert_eq!(
-        errors[0].failure.to_string(),
-        "quoted rooted function changed meaning in output"
-    );
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .copied()
+        .find(|function| {
+            function
+                .name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "answer")
+        })
+        .expect("generated answer");
+    let (diagnostics, _) = hir::analysis::ty::ty_check::check_func_body(&output, function);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let frozen = fe_driver::elaboration::read_back::read_back(&output, function)
+        .expect("checked answer reads back");
+    let [selected] = frozen.nodes[frozen.root].rooted_funcs.as_slice() else {
+        panic!("one selected function");
+    };
+    assert_eq!(selected.owner.named_path(), Some(expected_path.as_str()));
 }
 
 #[dir_test(
@@ -139,11 +154,36 @@ fn quoted_trait_identity_matches_checked_output(fixture: Fixture<&str>) {
     let file = output.workspace().get(&output, &url).expect("fixture file");
     let module = output.top_mod(file);
     assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
-    let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
-    assert_eq!(errors.len(), 1);
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    let [implementation] = module.all_impl_traits(&output).as_slice() else {
+        panic!("one generated implementation");
+    };
+    let path = implementation
+        .hir_trait_ref(&output)
+        .to_opt()
+        .unwrap()
+        .path(&output)
+        .to_opt()
+        .unwrap();
+    let resolved = hir::analysis::name_resolution::resolve_path(
+        &output,
+        path,
+        implementation.scope(),
+        hir::analysis::ty::trait_resolution::PredicateListId::empty_list(&output),
+        true,
+    )
+    .expect("captured trait resolves");
+    let hir::analysis::name_resolution::PathRes::Trait(actual) = resolved else {
+        panic!("expected trait");
+    };
     assert_eq!(
-        errors[0].failure.to_string(),
-        "quoted rooted trait changed meaning in output"
+        actual
+            .key(&output)
+            .name(&output)
+            .to_opt()
+            .unwrap()
+            .data(&output),
+        "Other"
     );
 }
 
@@ -178,7 +218,7 @@ fn core_meta_reordering_preserves_generated_meaning(fixture: Fixture<&str>) {
     };
     assert_eq!(request.target.file, source_url);
     assert_eq!(
-        request.target_span_start,
+        request.site_span.as_ref().unwrap().start,
         fixture.content().find("#[generate(").unwrap()
     );
     assert!(
@@ -199,8 +239,7 @@ fn core_meta_reordering_preserves_generated_meaning(fixture: Fixture<&str>) {
     };
     assert!(matches!(
         name.as_ref(),
-        hir::core::meta::FrozenMetaValue::Variant {
-            item: hir::core::meta::MetaItem::DeclarationName,
+        hir::core::meta::FrozenMetaValue::DeclarationName {
             case: hir::core::meta::FrozenMetaVariantCase::DeclarationNameLiteral,
             ..
         }
@@ -653,8 +692,8 @@ fn generation_invocation_errors_explain_the_authored_request() {
 }
 
 #[test]
-fn record_inputs_preserve_field_types_and_reject_foreign_descriptors() {
-    use fe_driver::elaboration::{RecordInputError, invocations};
+fn record_inputs_preserve_checked_field_types() {
+    use fe_driver::elaboration::invocations;
     use hir::analysis::ty::ty_def::TyId;
     let mut db = DriverDataBase::default();
     let url: Url = "file:///records.fe".parse().unwrap();
@@ -676,49 +715,35 @@ struct Empty {}
     );
     let file = db.workspace().get(&db, &url).unwrap();
     let requests = invocations(&db, file).unwrap();
-    let records: Vec<_> = requests
-        .iter()
-        .map(|request| request.record_input(&db).unwrap())
-        .collect();
-    let packet = records
-        .iter()
-        .find(|r| r.descriptors().count() == 3)
-        .unwrap();
-    let fields: Vec<_> = packet
-        .descriptors()
-        .map(|descriptor| packet.field(&descriptor).unwrap())
-        .collect();
-    assert_eq!(fields[0].name.data(&db), "nonce");
-    assert_eq!(fields[0].ty, TyId::u256(&db));
-    assert_eq!(fields[1].name.data(&db), "ready");
-    assert_eq!(fields[1].ty, TyId::bool(&db));
-    assert_eq!(fields[2].name.data(&db), "code");
-    assert_eq!(fields[2].ty.pretty_print(&db), "u64");
-    let foreign = records
-        .iter()
-        .find(|r| r.descriptors().count() == 1)
-        .unwrap()
-        .descriptors()
-        .next()
-        .unwrap();
-    assert_eq!(
-        packet.field(&foreign).unwrap_err(),
-        RecordInputError::WrongOwner
-    );
-    assert!(records.iter().any(|r| r.descriptors().count() == 0));
-
-    // Even identical source in a different database is a different input view.
-    let stage = db.fork_inputs();
-    let stage_file = stage.workspace().get(&stage, &url).unwrap();
-    for request in invocations(&stage, stage_file).unwrap() {
-        let record = request.record_input(&stage).unwrap();
-        for descriptor in record.descriptors() {
-            assert_eq!(
-                packet.field(&descriptor).unwrap_err(),
-                RecordInputError::WrongOwner
-            );
-        }
+    for request in &requests {
+        request.record_input(&db).unwrap();
     }
+    let packet = requests
+        .iter()
+        .find(|r| r.owner.as_adt(&db).fields(&db)[0].num_types() == 3)
+        .unwrap();
+    let hir::analysis::ty::adt_def::AdtRef::Struct(owner) = packet.owner else {
+        panic!("struct");
+    };
+    let fields = owner.hir_fields(&db);
+    let names: Vec<_> = fields
+        .data(&db)
+        .iter()
+        .map(|f| f.name.to_opt().unwrap().data(&db).as_str())
+        .collect();
+    assert_eq!(names, ["nonce", "ready", "code"]);
+    let shape = &packet.owner.as_adt(&db).fields(&db)[0];
+    assert_eq!(shape.ty(&db, 0).instantiate_identity(), TyId::u256(&db));
+    assert_eq!(shape.ty(&db, 1).instantiate_identity(), TyId::bool(&db));
+    assert_eq!(
+        shape.ty(&db, 2).instantiate_identity().pretty_print(&db),
+        "u64"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.owner.as_adt(&db).fields(&db)[0].num_types() == 0)
+    );
 }
 
 #[test]
@@ -734,9 +759,14 @@ fn field_type_edits_match_fresh_resolution_and_invalid_types_are_rejected() {
         let inspect = |view: &DriverDataBase| {
             let file = view.workspace().get(view, &url).unwrap();
             let requests = invocations(view, file).unwrap();
-            let record = requests[0].record_input(view)?;
-            let descriptor = record.descriptors().next().unwrap();
-            Ok::<_, RecordInputError>(record.field(&descriptor)?.ty.pretty_print(view).clone())
+            requests[0].record_input(view)?;
+            Ok::<_, RecordInputError>(
+                requests[0].owner.as_adt(view).fields(view)[0]
+                    .ty(view, 0)
+                    .instantiate_identity()
+                    .pretty_print(view)
+                    .clone(),
+            )
         };
         let mut fresh = DriverDataBase::default();
         put(&mut fresh, url.as_str(), &source);
@@ -754,9 +784,14 @@ fn field_type_edits_match_fresh_resolution_and_invalid_types_are_rejected() {
     );
     let file = db.workspace().get(&db, &url).unwrap();
     let requests = invocations(&db, file).unwrap();
-    let record = requests[0].record_input(&db).unwrap();
-    let descriptor = record.descriptors().next().unwrap();
-    assert_eq!(record.field(&descriptor).unwrap().ty.pretty_print(&db), "T");
+    requests[0].record_input(&db).unwrap();
+    assert_eq!(
+        requests[0].owner.as_adt(&db).fields(&db)[0]
+            .ty(&db, 0)
+            .instantiate_identity()
+            .pretty_print(&db),
+        "T"
+    );
 }
 
 #[test]
@@ -1799,8 +1834,8 @@ fn generated_generic_implementation_preserves_owner_binders_and_conditions() {
         .collect::<Vec<_>>();
     assert_eq!(parameters.len(), 2);
     assert_ne!(parameters[0], parameters[1]);
-    assert_eq!(parameters[0], "<quote-record-type-0:T>");
-    assert_eq!(parameters[1], "<quote-record-const-1:N>");
+    assert_eq!(parameters[0], "T");
+    assert_eq!(parameters[1], "N");
     let trait_ref = implementation.hir_trait_ref(&output).to_opt().unwrap();
     let trait_ref = trait_ref.pretty_print(&output);
     assert_eq!(trait_ref, "ingot::Value<T>");

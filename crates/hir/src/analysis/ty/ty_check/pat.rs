@@ -270,7 +270,6 @@ impl<'db> TyChecker<'db> {
             SemConstValue::Structural { .. }
             | SemConstValue::Unit
             | SemConstValue::Description(..)
-            | SemConstValue::TypeLevel { .. }
             | SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }
             | SemConstValue::Array { .. }

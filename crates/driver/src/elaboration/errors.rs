@@ -4,237 +4,96 @@ use hir::{analysis::semantic::ctfe::ConstDemandKind, lower::GeneratedQuoteFailur
 
 use super::{InvocationErrorKind, RecordInputError, construction::ConstructionError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FreezingProtocolFault {
-    BinderFieldIndexIsOutOfBounds,
-    BinderVariantIndexIsOutOfBounds,
-    DuplicateCoreMetaField,
-    ExpectedCoreMetaEnumDefinition,
-    ExpectedCoreMetaRecordDefinition,
-    GenerationOwnerFileIsMissing,
-    GenerationOwnerPathIsMissing,
-    InvalidCheckedBodyCodeOrigin,
-    InvalidCoreMetaArray,
-    InvalidCoreMetaEnumVariant,
-    InvalidCoreMetaRecordFields,
-    InvalidCoreMetaRecordType,
-    InvalidCoreMetaTuple,
-    InvalidCoreMetaVariantType,
-    QuoteBinderIsClassifiedTwice,
-    QuoteFunctionScopeIsMissing,
-    QuoteHasNoCheckedNameClassification,
-    QuoteLocalUseHasNoBinder,
-    QuoteOwnerBodyIsMissing,
-    QuoteOwnerDoesNotTypeCheck,
-    QuoteOwnerIsNotAFunction,
-    QuoteOwnerLocatorIsMissing,
-    QuoteSiteNoLongerNamesAQuote,
-    SelfConstructionOutsideAMethodNeedsTransplantation,
-    SelfPathNeedsCheckedTransplantation,
-    AssociatedTypeHasExtraCheckedNames,
-    CastNeedsACheckedPrimitiveTypeBeforeTransplantation,
-    ConstWhereLocalOrValueUseNeedsCheckedReification,
-    EffectUseNeedsASimpleBoundPath,
-    FragmentConstPredicateNeedsCheckedReification,
-    FunctionArgumentNeedsAType,
-    FunctionGenericIdentityIsMissing,
-    FunctionGenericOwnerIsMissing,
-    FunctionHasNoCheckedGenericOwner,
-    FunctionIntermediateTypeArgumentsNeedReification,
-    FunctionPathSegmentIsMissing,
-    FunctionRootChangedShape,
-    FunctionRootHasNoAuthoredFunction,
-    FunctionTypeArgumentHasExtraCheckedNames,
-    FunctionTypeArgumentIsMissing,
-    FunctionTypeArgumentNeedsCheckedReification,
-    GenericBodyUseNeedsASimplePath,
-    GenericBodyUseNeedsCheckedReification,
-    GenericBodyUseOutsideAFunctionNeedsTransplantation,
-    GenericSignatureBindingChanged,
-    ImplTraitArgumentHasExtraCheckedNames,
-    ImplTraitArgumentNeedsACheckedType,
-    ImplTraitArgumentNeedsCheckedReification,
-    ImplTraitTypeArgumentIsMissing,
-    LocalTypeHasExtraCheckedNames,
-    LocalTypeNeedsCheckedReification,
-    LocalUseChangedFunctionOwner,
-    MethodWhereBoundTypeIsMissing,
-    MethodWhereBoundTypeNeedsCheckedReification,
-    MethodWhereFragmentNeedsCheckedReification,
-    NominalTypeFileIsMissing,
-    ParameterUseChangedFunctionOwner,
-    QualifiedConstantHasNoCheckedTrait,
-    QualifiedConstantHasNoPath,
-    QualifiedConstantHasNoReceiverType,
-    QualifiedConstantHasNoRoot,
-    QualifiedConstantNeedsAPrimitiveReceiver,
-    QualifiedConstantNeedsARootedTrait,
-    QualifiedConstantNeedsASimpleMember,
-    QualifiedConstantOutsideAFunctionNeedsTransplantation,
-    RootedFunctionOutsideAFunctionNeedsTransplantation,
-    SelfOutsideAMethodNeedsTransplantation,
-    SignatureHasExtraCheckedNames,
-    SignatureNameChangedSite,
-    SignaturePathSegmentIsMissing,
-    SignatureTypeHasNoCheckedName,
-    TraitFileIsMissing,
-    TraitSignatureNameChangedSite,
-    WhereTypeHasExtraCheckedNames,
-    WhereTypeIsMissing,
-    WhereTypeNeedsCheckedReification,
-    TargetConstParameterHasNoType,
-    TargetConstParameterTypeIsNotScalar,
-    TypeLevelValuesAreNotGeneratedDeclarations,
-    UnexpectedCoreMetaRecord,
-    UnexpectedCoreMetaVariant,
-    UnexpectedDeclarationNameVariant,
-    UnnamedCoreMetaField,
+// Every protocol fault owns its typed variant and diagnostic text in one table.
+macro_rules! freezing_protocol_faults {
+    ($($kind:ident => $message:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum FreezingProtocolFault { $($kind),+ }
+        impl std::fmt::Display for FreezingProtocolFault {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(match self { $(Self::$kind => $message),+ })
+            }
+        }
+    };
 }
 
-impl std::fmt::Display for FreezingProtocolFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::BinderFieldIndexIsOutOfBounds => "binder field index is out of bounds",
-            Self::BinderVariantIndexIsOutOfBounds => "binder variant index is out of bounds",
-            Self::DuplicateCoreMetaField => "duplicate core meta field",
-            Self::ExpectedCoreMetaEnumDefinition => "expected core meta enum definition",
-            Self::ExpectedCoreMetaRecordDefinition => "expected core meta record definition",
-            Self::GenerationOwnerFileIsMissing => "generation owner file is missing",
-            Self::GenerationOwnerPathIsMissing => "generation owner path is missing",
-            Self::InvalidCheckedBodyCodeOrigin => "invalid checked-body code origin",
-            Self::InvalidCoreMetaArray => "invalid core meta array",
-            Self::InvalidCoreMetaEnumVariant => "invalid core meta enum variant",
-            Self::InvalidCoreMetaRecordFields => "invalid core meta record fields",
-            Self::InvalidCoreMetaRecordType => "invalid core meta record type",
-            Self::InvalidCoreMetaTuple => "invalid core meta tuple",
-            Self::InvalidCoreMetaVariantType => "invalid core meta variant type",
-            Self::QuoteBinderIsClassifiedTwice => "quote binder is classified twice",
-            Self::QuoteFunctionScopeIsMissing => "quote function scope is missing",
-            Self::QuoteHasNoCheckedNameClassification => "quote has no checked name classification",
-            Self::QuoteLocalUseHasNoBinder => "quote local use has no binder",
-            Self::QuoteOwnerBodyIsMissing => "quote owner body is missing",
-            Self::QuoteOwnerDoesNotTypeCheck => "quote owner does not type check",
-            Self::QuoteOwnerIsNotAFunction => "quote owner is not a function",
-            Self::QuoteOwnerLocatorIsMissing => "quote owner locator is missing",
-            Self::QuoteSiteNoLongerNamesAQuote => "quote site no longer names a quote",
-            Self::SelfConstructionOutsideAMethodNeedsTransplantation => {
-                "quoted Self construction outside a method needs transplantation"
-            }
-            Self::SelfPathNeedsCheckedTransplantation => {
-                "quoted Self path needs checked transplantation"
-            }
-            Self::AssociatedTypeHasExtraCheckedNames => {
-                "quoted associated type has extra checked names"
-            }
-            Self::CastNeedsACheckedPrimitiveTypeBeforeTransplantation => {
-                "quoted cast needs a checked primitive type before transplantation"
-            }
-            Self::ConstWhereLocalOrValueUseNeedsCheckedReification => {
-                "quoted const where local or value use needs checked reification"
-            }
-            Self::EffectUseNeedsASimpleBoundPath => "quoted effect use needs a simple bound path",
-            Self::FragmentConstPredicateNeedsCheckedReification => {
-                "quoted fragment const predicate needs checked reification"
-            }
-            Self::FunctionArgumentNeedsAType => "quoted function argument needs a type",
-            Self::FunctionGenericIdentityIsMissing => "quoted function generic identity is missing",
-            Self::FunctionGenericOwnerIsMissing => "quoted function generic owner is missing",
-            Self::FunctionHasNoCheckedGenericOwner => {
-                "quoted function has no checked generic owner"
-            }
-            Self::FunctionIntermediateTypeArgumentsNeedReification => {
-                "quoted function intermediate type arguments need reification"
-            }
-            Self::FunctionPathSegmentIsMissing => "quoted function path segment is missing",
-            Self::FunctionRootChangedShape => "quoted function root changed shape",
-            Self::FunctionRootHasNoAuthoredFunction => {
-                "quoted function root has no authored function"
-            }
-            Self::FunctionTypeArgumentHasExtraCheckedNames => {
-                "quoted function type argument has extra checked names"
-            }
-            Self::FunctionTypeArgumentIsMissing => "quoted function type argument is missing",
-            Self::FunctionTypeArgumentNeedsCheckedReification => {
-                "quoted function type argument needs checked reification"
-            }
-            Self::GenericBodyUseNeedsASimplePath => "quoted generic body use needs a simple path",
-            Self::GenericBodyUseNeedsCheckedReification => {
-                "quoted generic body use needs checked reification"
-            }
-            Self::GenericBodyUseOutsideAFunctionNeedsTransplantation => {
-                "quoted generic body use outside a function needs transplantation"
-            }
-            Self::GenericSignatureBindingChanged => "quoted generic signature binding changed",
-            Self::ImplTraitArgumentHasExtraCheckedNames => {
-                "quoted impl trait argument has extra checked names"
-            }
-            Self::ImplTraitArgumentNeedsACheckedType => {
-                "quoted impl trait argument needs a checked type"
-            }
-            Self::ImplTraitArgumentNeedsCheckedReification => {
-                "quoted impl trait argument needs checked reification"
-            }
-            Self::ImplTraitTypeArgumentIsMissing => "quoted impl trait type argument is missing",
-            Self::LocalTypeHasExtraCheckedNames => "quoted local type has extra checked names",
-            Self::LocalTypeNeedsCheckedReification => "quoted local type needs checked reification",
-            Self::LocalUseChangedFunctionOwner => "quoted local use changed function owner",
-            Self::MethodWhereBoundTypeIsMissing => "quoted method where bound type is missing",
-            Self::MethodWhereBoundTypeNeedsCheckedReification => {
-                "quoted method where bound type needs checked reification"
-            }
-            Self::MethodWhereFragmentNeedsCheckedReification => {
-                "quoted method where fragment needs checked reification"
-            }
-            Self::NominalTypeFileIsMissing => "quoted nominal type file is missing",
-            Self::ParameterUseChangedFunctionOwner => "quoted parameter use changed function owner",
-            Self::QualifiedConstantHasNoCheckedTrait => {
-                "quoted qualified constant has no checked trait"
-            }
-            Self::QualifiedConstantHasNoPath => "quoted qualified constant has no path",
-            Self::QualifiedConstantHasNoReceiverType => {
-                "quoted qualified constant has no receiver type"
-            }
-            Self::QualifiedConstantHasNoRoot => "quoted qualified constant has no root",
-            Self::QualifiedConstantNeedsAPrimitiveReceiver => {
-                "quoted qualified constant needs a primitive receiver"
-            }
-            Self::QualifiedConstantNeedsARootedTrait => {
-                "quoted qualified constant needs a rooted trait"
-            }
-            Self::QualifiedConstantNeedsASimpleMember => {
-                "quoted qualified constant needs a simple member"
-            }
-            Self::QualifiedConstantOutsideAFunctionNeedsTransplantation => {
-                "quoted qualified constant outside a function needs transplantation"
-            }
-            Self::RootedFunctionOutsideAFunctionNeedsTransplantation => {
-                "quoted rooted function outside a function needs transplantation"
-            }
-            Self::SelfOutsideAMethodNeedsTransplantation => {
-                "quoted self outside a method needs transplantation"
-            }
-            Self::SignatureHasExtraCheckedNames => "quoted signature has extra checked names",
-            Self::SignatureNameChangedSite => "quoted signature name changed site",
-            Self::SignaturePathSegmentIsMissing => "quoted signature path segment is missing",
-            Self::SignatureTypeHasNoCheckedName => "quoted signature type has no checked name",
-            Self::TraitFileIsMissing => "quoted trait file is missing",
-            Self::TraitSignatureNameChangedSite => "quoted trait signature name changed site",
-            Self::WhereTypeHasExtraCheckedNames => "quoted where type has extra checked names",
-            Self::WhereTypeIsMissing => "quoted where type is missing",
-            Self::WhereTypeNeedsCheckedReification => "quoted where type needs checked reification",
-            Self::TargetConstParameterHasNoType => "target const parameter has no type",
-            Self::TargetConstParameterTypeIsNotScalar => {
-                "target const parameter type is not scalar"
-            }
-            Self::TypeLevelValuesAreNotGeneratedDeclarations => {
-                "type-level values are not generated declarations"
-            }
-            Self::UnexpectedCoreMetaRecord => "unexpected core meta record",
-            Self::UnexpectedCoreMetaVariant => "unexpected core meta variant",
-            Self::UnexpectedDeclarationNameVariant => "unexpected declaration name variant",
-            Self::UnnamedCoreMetaField => "unnamed core meta field",
-        })
-    }
+freezing_protocol_faults! {
+    BinderFieldIndexIsOutOfBounds => "binder field index is out of bounds",
+    BinderVariantIndexIsOutOfBounds => "binder variant index is out of bounds",
+    ExpectedCoreMetaEnumDefinition => "expected core meta enum definition",
+    GenerationOwnerFileIsMissing => "generation owner file is missing",
+    GenerationOwnerPathIsMissing => "generation owner path is missing",
+    InvalidCheckedBodyCodeOrigin => "invalid checked-body code origin",
+    InvalidCoreMetaEnumVariant => "invalid core meta enum variant",
+    InvalidCoreMetaVariantType => "invalid core meta variant type",
+    QuoteBinderIsClassifiedTwice => "quote binder is classified twice",
+    QuoteHasNoCheckedNameClassification => "quote has no checked name classification",
+    QuoteLocalUseHasNoBinder => "quote local use has no binder",
+    QuoteOwnerBodyIsMissing => "quote owner body is missing",
+    QuoteOwnerDoesNotTypeCheck => "quote owner does not type check",
+    QuoteOwnerIsNotAFunction => "quote owner is not a function",
+    QuoteHoleSlotIsOutOfBounds => "quote hole slot is out of bounds",
+    QuoteOwnerLocatorIsMissing => "quote owner locator is missing",
+    QuoteSiteNoLongerNamesAQuote => "quote site no longer names a quote",
+    SelfConstructionOutsideAMethodNeedsTransplantation => "quoted Self construction outside a method needs transplantation",
+    SelfPathNeedsCheckedTransplantation => "quoted Self path needs checked transplantation",
+    AssociatedTypeHasExtraCheckedNames => "quoted associated type has extra checked names",
+    CastNeedsACheckedPrimitiveTypeBeforeTransplantation => "quoted cast needs a checked primitive type before transplantation",
+    ConstWhereLocalOrValueUseNeedsCheckedReification => "quoted const where local or value use needs checked reification",
+    EffectUseNeedsASimpleBoundPath => "quoted effect use needs a simple bound path",
+    FragmentConstPredicateNeedsCheckedReification => "quoted fragment const predicate needs checked reification",
+    FunctionArgumentNeedsAType => "quoted function argument needs a type",
+    FunctionGenericIdentityIsMissing => "quoted function generic identity is missing",
+    FunctionGenericOwnerIsMissing => "quoted function generic owner is missing",
+    FunctionHasNoCheckedGenericOwner => "quoted function has no checked generic owner",
+    FunctionIntermediateTypeArgumentsNeedReification => "quoted function intermediate type arguments need reification",
+    FunctionPathSegmentIsMissing => "quoted function path segment is missing",
+    FunctionRootChangedShape => "quoted function root changed shape",
+    FunctionRootHasNoAuthoredFunction => "quoted function root has no authored function",
+    FunctionTypeArgumentHasExtraCheckedNames => "quoted function type argument has extra checked names",
+    FunctionTypeArgumentIsMissing => "quoted function type argument is missing",
+    FunctionTypeArgumentNeedsCheckedReification => "quoted function type argument needs checked reification",
+    GenericBodyUseNeedsASimplePath => "quoted generic body use needs a simple path",
+    GenericBodyUseNeedsCheckedReification => "quoted generic body use needs checked reification",
+    GenericBodyUseOutsideAFunctionNeedsTransplantation => "quoted generic body use outside a function needs transplantation",
+    GenericSignatureBindingChanged => "quoted generic signature binding changed",
+    ImplTraitArgumentHasExtraCheckedNames => "quoted impl trait argument has extra checked names",
+    ImplTraitArgumentNeedsACheckedType => "quoted impl trait argument needs a checked type",
+    ImplTraitArgumentNeedsCheckedReification => "quoted impl trait argument needs checked reification",
+    ImplTraitTypeArgumentIsMissing => "quoted impl trait type argument is missing",
+    LocalTypeHasExtraCheckedNames => "quoted local type has extra checked names",
+    LocalTypeNeedsCheckedReification => "quoted local type needs checked reification",
+    LocalUseChangedFunctionOwner => "quoted local use changed function owner",
+    MethodWhereBoundTypeIsMissing => "quoted method where bound type is missing",
+    MethodWhereBoundTypeNeedsCheckedReification => "quoted method where bound type needs checked reification",
+    MethodWhereFragmentNeedsCheckedReification => "quoted method where fragment needs checked reification",
+    NominalTypeFileIsMissing => "quoted nominal type file is missing",
+    ParameterUseChangedFunctionOwner => "quoted parameter use changed function owner",
+    QualifiedConstantHasNoCheckedTrait => "quoted qualified constant has no checked trait",
+    QualifiedConstantHasNoPath => "quoted qualified constant has no path",
+    QualifiedConstantHasNoReceiverType => "quoted qualified constant has no receiver type",
+    QualifiedConstantHasNoRoot => "quoted qualified constant has no root",
+    QualifiedConstantNeedsAPrimitiveReceiver => "quoted qualified constant needs a primitive receiver",
+    QualifiedConstantNeedsARootedTrait => "quoted qualified constant needs a rooted trait",
+    QualifiedConstantNeedsASimpleMember => "quoted qualified constant needs a simple member",
+    QualifiedConstantOutsideAFunctionNeedsTransplantation => "quoted qualified constant outside a function needs transplantation",
+    RootedFunctionOutsideAFunctionNeedsTransplantation => "quoted rooted function outside a function needs transplantation",
+    SelfOutsideAMethodNeedsTransplantation => "quoted self outside a method needs transplantation",
+    SignatureHasExtraCheckedNames => "quoted signature has extra checked names",
+    SignatureNameChangedSite => "quoted signature name changed site",
+    SignaturePathSegmentIsMissing => "quoted signature path segment is missing",
+    SignatureTypeHasNoCheckedName => "quoted signature type has no checked name",
+    TraitFileIsMissing => "quoted trait file is missing",
+    TraitSignatureNameChangedSite => "quoted trait signature name changed site",
+    WhereTypeHasExtraCheckedNames => "quoted where type has extra checked names",
+    WhereTypeIsMissing => "quoted where type is missing",
+    WhereTypeNeedsCheckedReification => "quoted where type needs checked reification",
+    TargetConstParameterHasNoType => "target const parameter has no type",
+    TargetConstParameterTypeIsNotScalar => "target const parameter type is not scalar",
+    TypeLevelValuesAreNotGeneratedDeclarations => "type-level values are not generated declarations",
+    UnsupportedGeneratedValueShape => "generation transport accepts quoted code, scalars, structural handles and declaration names",
+    UnexpectedCoreMetaVariant => "unexpected core meta variant",
+    UnexpectedDeclarationNameVariant => "unexpected declaration name variant",
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,56 +114,7 @@ impl std::fmt::Display for FreezingLimitKind {
     }
 }
 
-/// Evaluation faults retain authored messages but never render Salsa IDs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvaluationFault {
-    NotConstEvaluable,
-    AssertionFailed(Option<String>),
-    InvalidOperation(String),
-    InvalidBorrow,
-    InvalidProviderUse,
-    NonConstCall,
-    InvalidBody,
-    DivisionByZero,
-    ArithmeticOverflow,
-    NegativeExponent,
-    OutOfBounds,
-    VariantMismatch,
-    UninitializedLocal,
-    StepLimitExceeded,
-    RecursionLimitExceeded,
-    RecursiveConst,
-    Invariant(String),
-}
-impl std::fmt::Display for EvaluationFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::AssertionFailed(Some(message)) => {
-                return write!(f, "assertion failed: {message}");
-            }
-            Self::InvalidOperation(message) => return f.write_str(message),
-            Self::Invariant(message) => {
-                return write!(f, "constant evaluation invariant failed: {message}");
-            }
-            Self::NotConstEvaluable => "expression cannot be evaluated as a constant",
-            Self::AssertionFailed(None) => "assertion failed",
-            Self::InvalidBorrow => "invalid borrow during constant evaluation",
-            Self::InvalidProviderUse => "invalid provider use during constant evaluation",
-            Self::NonConstCall => "constant evaluation called a non-const function",
-            Self::InvalidBody => "constant evaluation encountered an invalid body",
-            Self::DivisionByZero => "division by zero",
-            Self::ArithmeticOverflow => "arithmetic overflow",
-            Self::NegativeExponent => "negative exponent",
-            Self::OutOfBounds => "index out of bounds",
-            Self::VariantMismatch => "enum variant mismatch",
-            Self::UninitializedLocal => "read of an uninitialized local",
-            Self::StepLimitExceeded => "evaluation step limit exceeded",
-            Self::RecursionLimitExceeded => "evaluation recursion limit exceeded",
-            Self::RecursiveConst => "recursive constant dependency",
-        };
-        f.write_str(message)
-    }
-}
+pub use hir::analysis::semantic::ctfe::CtfeErrorKind as EvaluationFault;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElaborationErrorKind {
@@ -324,10 +134,6 @@ pub enum ElaborationErrorKind {
     },
     Operation(String),
     Freezing(ConstructionError),
-    DescriptionLimit {
-        actual: usize,
-        maximum: usize,
-    },
     ProjectDescriptionLimit {
         actual: usize,
         maximum: usize,
@@ -361,7 +167,6 @@ impl ElaborationErrorKind {
             | Self::EvaluationBlocked(_)
             | Self::EvaluationFailed { .. }
             | Self::Operation(_)
-            | Self::DescriptionLimit { .. }
             | Self::ProjectDescriptionLimit { .. }
             | Self::ProviderFileMissing
             | Self::ProviderPathMissing
@@ -399,8 +204,7 @@ impl std::fmt::Display for ElaborationErrorKind {
             }
             Self::Operation(message) => f.write_str(message),
             Self::Freezing(error) => write!(f, "invalid generated declaration: {error}"),
-            Self::DescriptionLimit { actual, maximum } => write!(f, "invalid generated declaration: generated description units limit exceeded: {actual} > {maximum}"),
-            Self::ProjectDescriptionLimit { actual, maximum } => write!(f, "project generated description units limit exceeded: {actual} > {maximum}"),
+            Self::ProjectDescriptionLimit { actual, maximum } => write!(f, "project generated nodes limit exceeded: {actual} > {maximum}"),
             Self::ProviderFileMissing => f.write_str("generation provider file is missing"),
             Self::ProviderPathMissing => f.write_str("generation provider path is missing"),
             Self::OwnerSpanMissing => f.write_str("generation owner has no source span"),

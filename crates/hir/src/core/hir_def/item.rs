@@ -722,6 +722,34 @@ pub struct Func<'db> {
     pub origin: HirOrigin<ast::Func>,
 }
 
+/// Authored impl header spelling shared by freezing and base-graph lookup.
+pub(crate) struct ImplHeaderKey {
+    pub(crate) trait_path: Option<String>,
+    pub(crate) self_type_path: String,
+    pub(crate) selection_name: Option<String>,
+}
+
+pub(crate) fn impl_header_key<'db>(
+    db: &'db dyn HirDb,
+    item: ItemKind<'db>,
+) -> Option<ImplHeaderKey> {
+    match item {
+        ItemKind::ImplTrait(implementation) => Some(ImplHeaderKey {
+            trait_path: Some(implementation.hir_trait_ref(db).to_opt()?.pretty_print(db)),
+            self_type_path: implementation.hir_type_ref(db).to_opt()?.pretty_print(db),
+            selection_name: implementation
+                .selection_name(db)
+                .map(|name| name.data(db).clone()),
+        }),
+        ItemKind::Impl(implementation) => Some(ImplHeaderKey {
+            trait_path: None,
+            self_type_path: implementation.hir_type_ref(db).to_opt()?.pretty_print(db),
+            selection_name: None,
+        }),
+        _ => None,
+    }
+}
+
 impl<'db> Func<'db> {
     pub fn span(self) -> LazyFuncSpan<'db> {
         LazyFuncSpan::new(self)
@@ -730,36 +758,44 @@ impl<'db> Func<'db> {
     /// A source-stable locator for checked code that may outlive this database
     /// view. Method identities use their containing declaration's header.
     pub fn frozen_locator(self, db: &'db dyn SpannedHirDb) -> Option<FrozenItemLocator> {
-        let file = self.span().resolve(db)?.file.url(db)?;
-        let parent = self.scope().parent(db).and_then(|scope| scope.to_item());
+        self.frozen_locator_with_scope(
+            db,
+            self.span().resolve(db)?.file.url(db)?,
+            |scope| scope.parent(db),
+            |scope| scope.pretty_path(db),
+        )
+    }
+
+    /// Build the same identity using an explicit graph during generated lowering.
+    pub(crate) fn frozen_locator_with_scope(
+        self,
+        db: &'db dyn HirDb,
+        file: url::Url,
+        parent_scope: impl Fn(ScopeId<'db>) -> Option<ScopeId<'db>>,
+        path: impl Fn(ScopeId<'db>) -> Option<String>,
+    ) -> Option<FrozenItemLocator> {
+        let parent = parent_scope(self.scope()).and_then(|scope| scope.to_item());
         let member_name = || self.name(db).to_opt().map(|name| name.data(db).clone());
         match parent {
-            Some(ItemKind::ImplTrait(implementation)) => Some(FrozenItemLocator::ImplMember {
-                file,
-                module_path: implementation.scope().parent(db)?.pretty_path(db)?,
-                trait_path: Some(implementation.hir_trait_ref(db).to_opt()?.pretty_print(db)),
-                self_type_path: implementation.hir_type_ref(db).to_opt()?.pretty_print(db),
-                selection_name: implementation
-                    .selection_name(db)
-                    .map(|name| name.data(db).clone()),
-                member_name: member_name()?,
-            }),
-            Some(ItemKind::Impl(implementation)) => Some(FrozenItemLocator::ImplMember {
-                file,
-                module_path: implementation.scope().parent(db)?.pretty_path(db)?,
-                trait_path: None,
-                self_type_path: implementation.hir_type_ref(db).to_opt()?.pretty_print(db),
-                selection_name: None,
-                member_name: member_name()?,
-            }),
+            Some(parent @ (ItemKind::ImplTrait(_) | ItemKind::Impl(_))) => {
+                let header = impl_header_key(db, parent)?;
+                Some(FrozenItemLocator::ImplMember {
+                    file,
+                    module_path: path(parent_scope(parent.scope())?)?,
+                    trait_path: header.trait_path,
+                    self_type_path: header.self_type_path,
+                    selection_name: header.selection_name,
+                    member_name: member_name()?,
+                })
+            }
             Some(ItemKind::Trait(trait_)) => Some(FrozenItemLocator::TraitMember {
                 file,
-                trait_path: trait_.scope().pretty_path(db)?,
+                trait_path: path(trait_.scope())?,
                 member_name: member_name()?,
             }),
             _ => Some(FrozenItemLocator::Named(FrozenOwner {
                 file,
-                path: self.scope().pretty_path(db)?,
+                path: path(self.scope())?,
             })),
         }
     }

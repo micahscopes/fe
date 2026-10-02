@@ -350,12 +350,6 @@ fn invalid_size_of<'db>(
 ) -> Option<String> {
     let term = match value.value(db) {
         SemConstValue::Description(term) => *term,
-        SemConstValue::TypeLevel { const_ty, .. } => {
-            let TyData::ConstTy(term) = const_ty.data(db) else {
-                return None;
-            };
-            *term
-        }
         _ => return None,
     };
     let ConstTyData::Abstract(expr, _) = term.data(db) else {
@@ -1861,8 +1855,7 @@ impl<'db> RmirEmitter<'db> {
             SemConstValue::Structural { .. }
             | SemConstValue::Unit
             | SemConstValue::Scalar { .. }
-            | SemConstValue::Description(..)
-            | SemConstValue::TypeLevel { .. } => {
+            | SemConstValue::Description(..) => {
                 panic!("semantic const should lower as a natural runtime value: {value:?}")
             }
         }
@@ -2275,8 +2268,7 @@ impl<'db> RmirEmitter<'db> {
             SemConstValue::Structural { .. }
             | SemConstValue::Unit
             | SemConstValue::Scalar { .. }
-            | SemConstValue::Description(..)
-            | SemConstValue::TypeLevel { .. } => {
+            | SemConstValue::Description(..) => {
                 panic!("expected non-scalar semantic const, found {value:?}")
             }
         }

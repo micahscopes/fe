@@ -5,10 +5,7 @@ use common::InputDb;
 use dir_test::{Fixture, dir_test};
 use fe_driver::{
     DriverDataBase,
-    elaboration::{
-        prepare,
-        read_back::{ReadBackError, read_back},
-    },
+    elaboration::{construction::ConstructionError, prepare, read_back::read_back},
 };
 use hir::{
     HirDb,
@@ -356,7 +353,7 @@ fn read_back_preserves_checked_binding_classes(fixture: Fixture<&str>) {
     let call = read_back(&db, named_function(&db, &url, "call")).expect("call body");
     let roots = &call.nodes[call.root].rooted_funcs;
     assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0].path, "helper");
+    assert!(roots[0].owner.named_path().unwrap().ends_with("::helper"));
 
     let method =
         read_back(&db, named_function(&db, &url, "method_and_field")).expect("method body");
@@ -380,7 +377,13 @@ fn read_back_keeps_local_and_root_identity(fixture: Fixture<&str>) {
     let rooted = read_back(&db, named_function(&db, &url, "rooted")).expect("rooted call");
     let roots = &rooted.nodes[rooted.root].rooted_funcs;
     assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0].path, "lib::helper");
+    assert!(
+        roots[0]
+            .owner
+            .named_path()
+            .unwrap()
+            .ends_with("::lib::helper")
+    );
 }
 
 fn inject_read_back_body(output: &mut DriverDataBase, url: &Url, original: &FrozenCode) {
@@ -942,7 +945,13 @@ fn checked_root_survives_conflicting_destination_name(fixture: Fixture<&str>) {
     .expect("copied rooted call reads back");
     let roots = &reflected.nodes[reflected.root].rooted_funcs;
     assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0].path, "lib::helper");
+    assert!(
+        roots[0]
+            .owner
+            .named_path()
+            .unwrap()
+            .ends_with("::lib::helper")
+    );
     assert_eq!(
         roots[0].owner,
         original.nodes[original.root].rooted_funcs[0].owner,
@@ -999,7 +1008,7 @@ fn checked_records_and_annotations_survive_destination_shadowing(fixture: Fixtur
             else {
                 panic!("record must retain nominal identity");
             };
-            assert!(root.path.starts_with("source::"));
+            assert!(root.owner.path.contains("::source::"));
             if name == "record_generic" {
                 assert_eq!(
                     arguments,
@@ -1117,28 +1126,91 @@ fn explicit_call_types_survive_destination_shadowing(fixture: Fixture<&str>) {
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_generic_calls", glob: "*.fe")]
 fn call_type_argument_cannot_keep_another_nominal_owners_authority(fixture: Fixture<&str>) {
     let (authored, url) = shadowing_destination(&fixture);
-    let mut original = read_back(&authored, named_function(&authored, &url, "call_nominal"))
-        .expect("authored call reads back");
+    let original = read_back(&authored, named_function(&authored, &url, "call_nominal")).unwrap();
     let arguments = original.nodes[original.root].rooted_funcs[0]
         .type_arguments
-        .as_mut()
-        .expect("explicit call arguments");
-    let FrozenQuoteSignatureType::Nominal { root, .. } = &mut arguments[0] else {
-        panic!("expected nominal argument");
+        .as_ref()
+        .unwrap();
+    let FrozenQuoteSignatureType::Nominal { root, .. } = &arguments[0] else {
+        panic!("nominal");
     };
-    root.path = "dest::Wrapped".into();
-    let mut output = prepare(&authored)
-        .expect("generation succeeds")
-        .expect("generation request exists");
-    inject_read_back_body(&mut output, &url, &original);
-    let file = output.workspace().get(&output, &url).expect("fixture file");
-    let errors = hir::lower::generated_quote_hygiene_errors(&output, output.top_mod(file));
-    assert!(
-        errors.iter().any(|error| error.failure
-            == hir::lower::GeneratedQuoteFailure::Hygiene(
-                hir::lower::QuoteHygieneFault::NominalTypeChangedMeaningInOutput,
-            )),
-        "conflicting nominal argument must fail owner validation: {errors:?}"
+    assert_captured_display_invariant(&authored, &url, &root.owner, true);
+}
+
+fn assert_captured_display_invariant(
+    db: &DriverDataBase,
+    url: &Url,
+    owner: &hir::core::meta::FrozenOwner,
+    generic: bool,
+) {
+    use hir::analysis::{name_resolution::resolve_path, ty::trait_resolution::PredicateListId};
+    use hir::hir_def::{
+        GenericArg, GenericArgListId, IdentId, PathId, PathKind, TypeGenericArg, TypeId, TypeKind,
+    };
+    let file = db.workspace().get(db, &owner.file).unwrap();
+    let module = db.top_mod(file);
+    let item = module
+        .scope_graph(db)
+        .items_dfs(db)
+        .find(|item| item.scope().pretty_path(db).as_ref() == Some(&owner.path))
+        .unwrap();
+    let args = if generic {
+        GenericArgListId::given(
+            db,
+            vec![GenericArg::Type(TypeGenericArg {
+                ty: hir::hir_def::Partial::Present(TypeId::new(
+                    db,
+                    TypeKind::Primitive(hir::hir_def::prim_ty::PrimTy::Uint(
+                        hir::hir_def::prim_ty::UintTy::U256,
+                    )),
+                )),
+            })],
+        )
+    } else {
+        GenericArgListId::none(db)
+    };
+    let captured = |name: &str| {
+        let display = PathId::from_ident(db, IdentId::new(db, name))
+            .with_generic_args(db, args)
+            .unwrap();
+        PathId::new(
+            db,
+            PathKind::BoundItem {
+                item: item.scope(),
+                display,
+            },
+            None,
+        )
+    };
+    let destination = db.top_mod(db.workspace().get(db, url).unwrap()).scope();
+    let resolve = |path| {
+        resolve_path(
+            db,
+            path,
+            destination,
+            PredicateListId::empty_list(db),
+            false,
+        )
+        .expect("captured declaration resolves")
+    };
+    let actual = resolve(captured("WrongDestination"));
+    assert_eq!(actual, resolve(captured("AnotherWrongDestination")));
+    use hir::analysis::{
+        name_resolution::PathRes,
+        ty::ty_def::{TyBase, TyData},
+    };
+    let resolved_scope = match actual {
+        PathRes::Ty(ty) => match ty.base_ty(db).data(db) {
+            TyData::TyBase(TyBase::Adt(adt)) => adt.adt_ref(db).scope(),
+            _ => panic!("captured nominal must resolve to an ADT"),
+        },
+        PathRes::Trait(inst) => inst.key(db).scope(),
+        _ => panic!("expected captured nominal or trait"),
+    };
+    assert_eq!(
+        resolved_scope,
+        item.scope(),
+        "display cannot change the selected declaration"
     );
 }
 
@@ -1174,7 +1246,7 @@ fn unsupported_local_annotation_is_explicit(fixture: Fixture<&str>) {
     let (db, url) = fixture_db(fixture);
     assert_eq!(
         read_back(&db, named_function(&db, &url, "unsupported_const_array")),
-        Err(ReadBackError::UnsupportedType),
+        Err(ConstructionError::ReadBackUnsupportedType),
     );
 }
 
@@ -1230,35 +1302,20 @@ fn shadowing_destination(fixture: &Fixture<&str>) -> (DriverDataBase, Url) {
 )]
 fn conflicting_record_path_cannot_keep_another_owners_authority(fixture: Fixture<&str>) {
     let (authored, url) = shadowing_destination(&fixture);
-    let mut original = read_back(&authored, named_function(&authored, &url, "record_scalar"))
-        .expect("authored record reads back");
+    let original = read_back(&authored, named_function(&authored, &url, "record_scalar")).unwrap();
     let (_, FrozenQuoteSignatureType::Nominal { root, .. }) =
-        &mut original.nodes[original.root].record_types[0]
+        &original.nodes[original.root].record_types[0]
     else {
-        panic!("expected nominal record");
+        panic!("nominal");
     };
-    root.path = "dest::Point".into();
-    let mut output = fe_driver::elaboration::prepare(&authored)
-        .expect("generation succeeds")
-        .expect("generation request exists");
-    inject_read_back_body(&mut output, &url, &original);
-    let file = output.workspace().get(&output, &url).expect("fixture file");
-    let module = output.top_mod(file);
-    let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
-    assert!(
-        errors.iter().any(|error| error.failure
-            == hir::lower::GeneratedQuoteFailure::Hygiene(
-                hir::lower::QuoteHygieneFault::NominalTypeChangedMeaningInOutput,
-            )),
-        "conflicting nominal root must fail owner validation: {errors:?}"
-    );
+    assert_captured_display_invariant(&authored, &url, &root.owner, false);
 }
 
 fn assert_read_back_unsupported(fixture: Fixture<&str>) {
     let (db, url) = fixture_db(fixture);
     assert_eq!(
         read_back(&db, named_function(&db, &url, "bump")),
-        Err(ReadBackError::Effectful),
+        Err(ConstructionError::ReadBackEffectful),
     );
     read_back(&db, named_function(&db, &url, "pure_twin")).expect("pure twin");
 }
@@ -1450,7 +1507,7 @@ fn quoted_enum_payload_where_bounds_are_checked(fixture: Fixture<&str>) {
     glob: "quote_enum_generic.fe",
 )]
 fn enum_payload_where_comparison_rejects_changed_predicate(fixture: Fixture<&str>) {
-    use hir::core::meta::{FrozenQuoteFieldType, FrozenQuoteWherePredicate};
+    use hir::core::meta::{FrozenQuoteSignatureType, FrozenQuoteWherePredicate};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let (authored, url) = fixture_db(fixture);
     let output = prepare(&authored)
@@ -1486,8 +1543,10 @@ fn enum_payload_where_comparison_rejects_changed_predicate(fixture: Fixture<&str
                         _ => None,
                     })
                     .expect("payload type hole");
-                let FrozenCodeHole::Value(_, Some(FrozenQuoteFieldType::TargetParam(parameter))) =
-                    &mut node.holes[slot as usize]
+                let FrozenCodeHole::Value(
+                    _,
+                    Some(FrozenQuoteSignatureType::OwnerGeneric(parameter)),
+                ) = &mut node.holes[slot as usize]
                 else {
                     panic!("target parameter hole");
                 };
@@ -1973,11 +2032,11 @@ fn missing_const_generic_destination_binding_rejects(fixture: Fixture<&str>) {
 
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_bound_constants", glob: "*.fe")]
 fn qualified_const_cannot_borrow_another_traits_authority(fixture: Fixture<&str>) {
-    let mut copied = bound_constant_output(&fixture);
-    let input = HirDb::generated_module(&copied.output, &copied.url).expect("frozen generation");
-    let mut requests = input.requests(&copied.output).clone();
-    let request = requests
-        .iter_mut()
+    let copied = bound_constant_output(&fixture);
+    let input = HirDb::generated_module(&copied.output, &copied.url).unwrap();
+    let request = input
+        .requests(&copied.output)
+        .iter()
         .find(|request| {
             request
                 .provider
@@ -1986,27 +2045,17 @@ fn qualified_const_cannot_borrow_another_traits_authority(fixture: Fixture<&str>
                 .ends_with("read_back_qualified")
         })
         .unwrap();
-    let FrozenMetaValue::Code(code) = &mut request.value else {
-        panic!("item quote");
+    let FrozenMetaValue::Code(code) = &request.value else {
+        panic!("code");
     };
     let FrozenCodeHole::Code(child, ..) = code.nodes[code.root].holes[0] else {
-        panic!("body fragment");
+        panic!("fragment");
     };
-    code.nodes[child].rooted_traits[0].path = "HasValue".into();
-    input.set_requests(&mut copied.output).to(requests);
-    let file = copied
-        .output
-        .workspace()
-        .get(&copied.output, &copied.url)
-        .unwrap();
-    let errors =
-        hir::lower::generated_quote_hygiene_errors(&copied.output, copied.output.top_mod(file));
-    assert!(
-        errors.iter().any(|error| error
-            .failure
-            .to_string()
-            .contains("qualified constant changed trait")),
-        "{errors:?}"
+    assert_captured_display_invariant(
+        &copied.output,
+        &copied.url,
+        &code.nodes[child].rooted_traits[0].owner,
+        false,
     );
 }
 
@@ -2094,7 +2143,7 @@ fn quoted_output_bodies_read_back(fixture: Fixture<&str>) {
         if function.has_effects(&output) {
             assert_eq!(
                 read_back(&output, *function),
-                Err(ReadBackError::Effectful),
+                Err(ConstructionError::ReadBackEffectful),
                 "{name}"
             );
             continue;
@@ -2305,19 +2354,6 @@ fn assert_quote_comparison_detects_changed_body(fixture: Fixture<&str>) {
                         .then_some(locator)
                 })
                 .expect("different helper with the same signature");
-            root.path = other
-                .named_path()
-                .expect("named helper")
-                .strip_prefix(&format!(
-                    "{}::",
-                    authored
-                        .top_mod(file)
-                        .scope()
-                        .pretty_path(&authored)
-                        .unwrap()
-                ))
-                .expect("fixture helper belongs to its source module")
-                .to_owned();
             root.owner = other;
             "selected function identity"
         }
@@ -2502,7 +2538,8 @@ fn quoted_multifile_helper_keeps_nested_modules() {
         semantic::{EvalOutcome, eval_body_owner_const_with_args},
         ty::ty_check::BodyOwner,
     };
-    for external in [false, true] {
+    for external_alias in [None, Some("policy"), Some("renamed_policy")] {
+        let external = external_alias.is_some();
         let mut authored = DriverDataBase::default();
         for (path, source) in [
             (
@@ -2540,7 +2577,10 @@ pub const fn emit(_ record: Record) -> Code<Item> {
                 path.to_owned()
             };
             let source = if external && path.ends_with("/project/src/lib.fe") {
-                source.replace("ingot::outer::author::emit", "policy::outer::author::emit")
+                source.replace(
+                    "ingot::outer::author::emit",
+                    &format!("{}::outer::author::emit", external_alias.unwrap()),
+                )
             } else {
                 source.to_owned()
             };
@@ -2566,7 +2606,7 @@ pub const fn emit(_ record: Record) -> Code<Item> {
                 &mut authored,
                 &Url::parse("file:///project/").unwrap(),
                 &Url::parse("file:///policy/").unwrap(),
-                "policy".into(),
+                external_alias.unwrap().into(),
                 common::dependencies::DependencyArguments::default(),
             );
         }
@@ -2585,6 +2625,16 @@ pub const fn emit(_ record: Record) -> Code<Item> {
             panic!("generated helper evaluates: {value:?}")
         };
         assert_eq!(value.pretty_print(&output), "7");
+        let printed = function.pretty_print(&output);
+        let root = external_alias.unwrap_or("ingot");
+        assert!(
+            printed.contains(&format!("{root}::outer::author::Token")),
+            "nominal must print its destination root: {printed}"
+        );
+        assert!(
+            printed.contains(&format!("{root}::outer::author::helper")),
+            "helper must print its destination root: {printed}"
+        );
     }
 }
 
@@ -3105,6 +3155,51 @@ fn quoted_self_constructors_keep_impl_owner(fixture: Fixture<&str>) {
     quote_round_trip::assert_round_trip(&authored, &output, &url);
 }
 
+#[test]
+fn quoted_self_constructor_rejects_a_different_captured_owner() {
+    let source = format!(
+        "{}\npub enum Other {{ A, B(u256) }}\n",
+        include_str!("fixtures/quote_self_constructors/field_type_owner.fe")
+    );
+    let mut authored = DriverDataBase::default();
+    let url = Url::parse("file:///self_constructor_owner.fe").unwrap();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), source);
+    let mut output = prepare(&authored).unwrap().unwrap();
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let mut requests = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("quoted impl")
+    };
+    let root = code
+        .nodes
+        .iter_mut()
+        .flat_map(|node| &mut node.rooted_constructors)
+        .find(|root| {
+            root.self_target
+                && matches!(
+                    root.site,
+                    hir::core::meta::FrozenQuoteConstructorSite::Expr(_)
+                )
+        })
+        .expect("Self::B constructor");
+    let (module, _) = root.owner.owner.path.rsplit_once("::").unwrap();
+    root.owner.owner.path = format!("{module}::Other");
+    input.set_requests(&mut output).to(requests);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
+    assert!(
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Hygiene(
+                hir::lower::QuoteHygieneFault::ConstructorChangedOwnerOrVariantIndex,
+            )),
+        "Self must retain its captured owner: {errors:?}"
+    );
+}
+
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_self_constructors/rejected", glob: "*.fe")]
 fn quoted_self_preserves_field_visibility(fixture: Fixture<&str>) {
     let authored = field_authority_fixture_db(fixture);
@@ -3314,9 +3409,9 @@ fn copied_constructor_types_share_the_request_budget(fixture: Fixture<&str>) {
     let child = *child;
     let root = &mut code.nodes[child].rooted_constructors[0];
     assert_eq!(
-        root.func,
-        Some(0),
-        "read-back keeps the source function index"
+        root.member,
+        hir::core::meta::QuoteMember::CheckedBody,
+        "read-back keeps explicit checked-body ownership"
     );
     root.type_arguments = Some(vec![T::Tuple(vec![T::Primitive(PrimTy::Bool); 65_536])]);
     input.set_requests(&mut copied.output).to(requests);
@@ -3351,7 +3446,7 @@ fn associated_constant_call_types_share_the_request_budget(fixture: Fixture<&str
     let root = code.nodes[code.root]
         .rooted_funcs
         .iter_mut()
-        .find(|root| root.assoc_const == Some(0))
+        .find(|root| root.member == hir::core::meta::QuoteMember::AssocConst(0))
         .expect("constant call");
     root.type_arguments = Some(vec![FrozenQuoteSignatureType::Tuple(vec![
         FrozenQuoteSignatureType::Primitive(PrimTy::Bool); 65_536
@@ -3406,7 +3501,7 @@ fn reflected_field_types_share_the_freezing_budget() {
 
 #[test]
 fn reflected_type_holes_charge_each_emitted_expansion() {
-    use hir::core::meta::FrozenQuoteFieldType as F;
+    use hir::core::meta::FrozenQuoteSignatureType as F;
     let template = include_str!("fixtures/quote_signature_alias/limits/reflected_type.fe.in");
     let source = template
         .replace("__ALIASES__", "type D0<T> = T")
@@ -3427,7 +3522,7 @@ fn reflected_type_holes_charge_each_emitted_expansion() {
         .iter()
         .enumerate()
         .filter_map(|(slot, hole)| {
-            matches!(hole, FrozenCodeHole::Value(_, Some(F::TargetParam(0)))).then_some(slot)
+            matches!(hole, FrozenCodeHole::Value(_, Some(F::OwnerGeneric(0)))).then_some(slot)
         })
         .collect::<Vec<_>>();
     assert_eq!(slots.len(), 3, "impl argument, parameter and result");
@@ -3439,7 +3534,7 @@ fn reflected_type_holes_charge_each_emitted_expansion() {
         let FrozenCodeHole::Value(_, hint) = &mut code.nodes[code.root].holes[slot] else {
             panic!("hint")
         };
-        *hint = Some(F::Tuple(vec![F::TargetParam(0); 65_536]));
+        *hint = Some(F::Tuple(vec![F::OwnerGeneric(0); 65_536]));
         input.set_requests(&mut output).to(changed);
         let file = output.workspace().get(&output, &url).unwrap();
         let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
@@ -3517,13 +3612,13 @@ fn checked_body_metadata_has_one_aggregate_freezing_budget() {
     let result = read_back(&db, subject);
     assert_eq!(
         result,
-        Err(ReadBackError::Construction(Box::new(
+        Err(
             fe_driver::elaboration::construction::ConstructionError::Limit {
                 name: fe_driver::elaboration::FreezingLimitKind::MetaNodes,
                 actual: 65537,
                 maximum: 65536,
-            },
-        ))),
+            }
+        ),
         "individually bounded types need one aggregate read-back limit"
     );
 }
@@ -3632,7 +3727,7 @@ fn copied_kind_bounds_have_a_pre_recursion_limit() {
 
 #[test]
 fn reflected_hints_share_the_enclosing_type_depth_limit() {
-    use hir::core::meta::{FrozenQuoteFieldType as F, FrozenQuoteSignatureType as T};
+    use hir::core::meta::{FrozenQuoteSignatureType as F, FrozenQuoteSignatureType as T};
     let source = include_str!("fixtures/quote_signature_alias/limits/reflected_type.fe.in")
         .replace("__ALIASES__", "type D0<T> = T")
         .replace("__LEVEL__", "0");
@@ -3661,7 +3756,7 @@ fn reflected_hints_share_the_enclosing_type_depth_limit() {
     let FrozenCodeHole::Value(_, Some(hint)) = &mut node.holes[slot as usize] else {
         panic!("hint")
     };
-    let mut nested = F::TargetParam(0);
+    let mut nested = F::OwnerGeneric(0);
     for _ in 0..100 {
         nested = F::Ptr(Box::new(nested));
     }
@@ -3706,7 +3801,11 @@ fn fragment_local_comparison_rejects_changed_binder_identity(fixture: Fixture<&s
             let node = code
                 .nodes
                 .iter_mut()
-                .find(|node| node.locals.iter().any(|local| local.func.is_none()))
+                .find(|node| {
+                    node.locals
+                        .iter()
+                        .any(|local| local.member == hir::core::meta::QuoteMember::Fragment)
+                })
                 .expect("arm fragment locals");
             let key = node.template.as_ref().unwrap();
             let file = authored
@@ -4025,13 +4124,11 @@ fn checked_type_read_back_preserves_the_underlying_depth_failure() {
             .expect_err("expanded type needs a normal depth diagnostic");
     assert_eq!(
         error,
-        ReadBackError::Construction(Box::new(
-            fe_driver::elaboration::construction::ConstructionError::Limit {
-                name: fe_driver::elaboration::FreezingLimitKind::TypeDepth,
-                actual: 257,
-                maximum: 256,
-            },
-        ))
+        fe_driver::elaboration::construction::ConstructionError::Limit {
+            name: fe_driver::elaboration::FreezingLimitKind::TypeDepth,
+            actual: 257,
+            maximum: 256,
+        }
     );
 }
 
@@ -4046,7 +4143,10 @@ fn checked_body_issuance_defers_admission_and_preserves_unsupported_type_rejecti
     let url = Url::parse("file:///checked_body_issuance.fe").unwrap();
     db.workspace().update(&mut db, url.clone(), source);
     let subject = named_function(&db, &url, "unsupported_const_array");
-    assert_eq!(read_back(&db, subject), Err(ReadBackError::UnsupportedType));
+    assert_eq!(
+        read_back(&db, subject),
+        Err(ConstructionError::ReadBackUnsupportedType)
+    );
     let value = fe_driver::elaboration::read_back::read_back_value(&db, subject)
         .expect("issuance retains checked source without freezing transport metadata");
     let file = db.workspace().get(&db, &url).unwrap();
@@ -4054,7 +4154,236 @@ fn checked_body_issuance_defers_admission_and_preserves_unsupported_type_rejecti
     let input = requests[0].record_input(&db).unwrap();
     assert_eq!(
         input.freeze_value(value),
-        Err(ConstructionError::ReadBack(ReadBackError::UnsupportedType)),
+        Err(ConstructionError::ReadBackUnsupportedType),
         "transport must retain the native read-back rejection",
     );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_records", glob: "*.fe")]
+fn checked_body_metadata_cannot_claim_another_member(fixture: Fixture<&str>) {
+    use hir::core::meta::QuoteMember;
+    let (authored, url) = shadowing_destination(&fixture);
+    let original = read_back(&authored, named_function(&authored, &url, "record_scalar"))
+        .expect("authored body reads back");
+    for forged in [
+        QuoteMember::Fragment,
+        QuoteMember::Function(0),
+        QuoteMember::FunctionWhere(0, 0),
+        QuoteMember::AssocConst(0),
+    ] {
+        for field in 0..3 {
+            let mut code = original.clone();
+            let node = &mut code.nodes[code.root];
+            match field {
+                0 => node.locals[0].member = forged,
+                1 => node.local_types[0].member = forged,
+                2 => node.rooted_constructors[0].member = forged,
+                _ => unreachable!(),
+            }
+            let mut output = fe_driver::elaboration::prepare(&authored)
+                .expect("generation succeeds")
+                .expect("generation request exists");
+            inject_read_back_body(&mut output, &url, &code);
+            let file = output.workspace().get(&output, &url).expect("fixture file");
+            let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+            assert!(
+                errors.iter().any(|error| error.failure
+                    == hir::lower::GeneratedQuoteFailure::Construction(
+                        hir::lower::QuoteConstructionFault::NameBelongsToAnotherTemplateMember
+                    )),
+                "forged {forged:?} ownership in field {field} must be rejected: {errors:?}"
+            );
+        }
+    }
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_member_owners", glob: "*.fe")]
+fn mixed_quote_members_keep_independent_identities(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("mixed members generate")
+        .expect("request");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_member_owners", glob: "*.fe")]
+fn item_metadata_cannot_claim_a_missing_member(fixture: Fixture<&str>) {
+    use hir::core::meta::QuoteMember;
+    let (authored, url) = fixture_db(fixture);
+    for forged in [
+        QuoteMember::Fragment,
+        QuoteMember::CheckedBody,
+        QuoteMember::Function(99),
+        QuoteMember::FunctionWhere(0, 99),
+        QuoteMember::AssocConst(99),
+    ] {
+        let mut output = prepare(&authored)
+            .expect("mixed members generate")
+            .expect("request");
+        let input = HirDb::generated_module(&output, &url).expect("frozen generation");
+        let mut requests = input.requests(&output).clone();
+        let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+            panic!("code")
+        };
+        code.nodes[code.root].rooted_funcs[0].member = forged;
+        input.set_requests(&mut output).to(requests);
+        let file = output.workspace().get(&output, &url).expect("file");
+        let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+        assert!(
+            errors.iter().any(|error| error.failure
+                == hir::lower::GeneratedQuoteFailure::Construction(
+                    hir::lower::QuoteConstructionFault::NameBelongsToAnotherTemplateMember
+                )),
+            "forged {forged:?}: {errors:?}"
+        );
+    }
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_member_owners", glob: "*.fe")]
+fn predicate_members_cannot_silently_drop_body_bindings(fixture: Fixture<&str>) {
+    use hir::core::meta::QuoteMember;
+    let (authored, url) = fixture_db(fixture);
+    let mut output = prepare(&authored)
+        .expect("mixed members generate")
+        .expect("request");
+    let input = HirDb::generated_module(&output, &url).expect("frozen generation");
+    let mut requests = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("code")
+    };
+    code.nodes[code.root].locals[0].member = QuoteMember::FunctionWhere(0, 0);
+    input.set_requests(&mut output).to(requests);
+    let file = output.workspace().get(&output, &url).expect("file");
+    let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+    assert!(
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Construction(
+                hir::lower::QuoteConstructionFault::ConstPredicateNeedsCheckedNameTransplantation
+            )),
+        "{errors:?}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_records", glob: "*.fe")]
+fn duplicate_authored_nominals_report_an_ambiguous_locator(fixture: Fixture<&str>) {
+    let (authored, url) = shadowing_destination(&fixture);
+    let original = read_back(&authored, named_function(&authored, &url, "record_scalar"))
+        .expect("authored record reads back");
+    let mut output = prepare(&authored)
+        .expect("generation succeeds")
+        .expect("request");
+    inject_read_back_body(&mut output, &url, &original);
+    let file = output.workspace().get(&output, &url).expect("file");
+    let declaration = "pub struct Point { pub x: u256, pub y: u256 }";
+    let source =
+        file.text(&output)
+            .replacen(declaration, &format!("{declaration}\n    {declaration}"), 1);
+    assert_ne!(
+        &source,
+        file.text(&output),
+        "source declaration must be duplicated"
+    );
+    output.workspace().update(&mut output, url.clone(), source);
+    let file = output.workspace().get(&output, &url).expect("edited file");
+    let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+    assert!(
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Construction(
+                hir::lower::QuoteConstructionFault::AuthoredItemLocatorIsAmbiguous
+            )),
+        "duplicate locator must be ambiguous, not absent: {errors:?}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_records", glob: "*.fe")]
+fn duplicate_generation_targets_report_an_ambiguous_locator(fixture: Fixture<&str>) {
+    let (authored, url) = shadowing_destination(&fixture);
+    let mut output = prepare(&authored)
+        .expect("generation succeeds")
+        .expect("request");
+    let file = output.workspace().get(&output, &url).expect("file");
+    let declaration = "struct GeneratedTarget {}";
+    let source =
+        file.text(&output)
+            .replacen(declaration, &format!("{declaration}\n{declaration}"), 1);
+    assert_ne!(&source, file.text(&output), "target must be duplicated");
+    output.workspace().update(&mut output, url.clone(), source);
+    let file = output.workspace().get(&output, &url).expect("edited file");
+    let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+    assert!(
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Construction(
+                hir::lower::QuoteConstructionFault::AuthoredItemLocatorIsAmbiguous
+            )),
+        "duplicate target must be ambiguous: {errors:?}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_value_shapes", glob: "*.fe")]
+fn generation_rejects_unconsumed_value_shapes(fixture: Fixture<&str>) {
+    use fe_driver::elaboration::{
+        FreezingProtocolFault, construction::ConstructionError, invocations,
+    };
+    use hir::analysis::{
+        semantic::{EvalOutcome, eval_body_owner_const_with_args},
+        ty::ty_check::BodyOwner,
+    };
+    let (db, url) = fixture_db(fixture);
+    let file = db.workspace().get(&db, &url).unwrap();
+    let diagnostics = db.run_on_ingot(db.top_mod(file).ingot(&db));
+    assert!(
+        !diagnostics.has_errors(&db),
+        "{}",
+        diagnostics.format_diags(&db)
+    );
+    let invocation = invocations(&db, file).unwrap().pop().unwrap();
+    let input = invocation.record_input(&db).unwrap();
+    for name in ["unit", "tuple", "array", "record", "inspection_kind"] {
+        let function = named_function(&db, &url, name);
+        let EvalOutcome::Ready(value) = eval_body_owner_const_with_args(
+            &db,
+            BodyOwner::Func(function),
+            GenericSubst::for_body_owner(&db, BodyOwner::Func(function), vec![]),
+            vec![],
+        ) else {
+            panic!("{name} must evaluate");
+        };
+        assert_eq!(
+            input.freeze_value(value),
+            Err(ConstructionError::Protocol(if name == "inspection_kind" {
+                FreezingProtocolFault::UnexpectedCoreMetaVariant
+            } else {
+                FreezingProtocolFault::UnsupportedGeneratedValueShape
+            })),
+            "{name} must be rejected before publication",
+        );
+    }
+}
+
+#[test]
+fn merged_read_back_failures_preserve_generation_diagnostics() {
+    use ConstructionError::*;
+    for (error, message) in [
+        (ReadBackMissingBody, "checked function body is missing"),
+        (ReadBackInvalidBody, "checked function body is invalid"),
+        (ReadBackEffectful, "checked function has effects"),
+        (ReadBackMissingOwner, "checked item owner is missing"),
+        (
+            ReadBackUnsupportedCall,
+            "checked body contains an unsupported call",
+        ),
+        (
+            ReadBackUnsupportedName,
+            "checked body contains an unsupported name",
+        ),
+        (
+            ReadBackUnsupportedType,
+            "checked body contains an unsupported type",
+        ),
+    ] {
+        assert_eq!(
+            error.to_string(),
+            format!("checked-body code no longer reads back: {message}")
+        );
+    }
 }

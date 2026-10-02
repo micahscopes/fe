@@ -23,7 +23,10 @@ fn construction_error_uses_generation_site(fixture: Fixture<&str>) {
         .site_span
         .clone()
         .expect("generation attribute span");
-    requests[0].value = FrozenMetaValue::Array(vec![]);
+    requests[0].value = FrozenMetaValue::Scalar {
+        value: hir::analysis::semantic::SemConstScalar::Bool(false),
+        primitive: None,
+    };
     module_input.set_requests(&mut output).to(requests);
 
     let file = output.workspace().get(&output, &url).expect("fixture file");

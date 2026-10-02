@@ -71,14 +71,6 @@ extern {
     pub const fn empty<K>() -> Code<K>
 }
 
-extern {
-    /// Count the fields of a nongeneric record from its defining module.
-    ///
-    /// This owner-scoped operation includes private fields. Aliases retain the
-    /// record's identity. The returned number carries no reflection authority.
-    pub const fn record_field_count<T>() -> u256
-}
-
 pub enum DeclarationName {
     Literal(String<31>),
     FieldPrefix(String<31>, Field),

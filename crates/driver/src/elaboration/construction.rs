@@ -1,40 +1,36 @@
 //! Freeze checked Fe provider values before generated HIR is published.
 //! Descriptor identity and owner authority are checked in the authored view.
 
-use std::{
-    borrow::Cow,
-    cell::Cell,
-    collections::{BTreeMap, HashMap},
-};
+use std::{borrow::Cow, cell::Cell, collections::HashMap};
 
 use hir::{
     analysis::name_resolution::{PathRes, resolve_path},
     analysis::{
-        semantic::{QuotedCode, SemConstId, SemConstValue, StructuralHandle},
+        semantic::{QuotedCode, SemConstId, SemConstScalar, SemConstValue, StructuralHandle},
         ty::{
-            adt_def::{AdtDef, AdtRef},
+            adt_def::AdtRef,
             trait_resolution::PredicateListId,
             ty_check::{
                 QuoteBinder, QuoteNameClass, QuoteNameSite, QuoteNameUse, QuoteSignatureSite,
                 check_func_body,
             },
             ty_def::{PrimTy as SemPrimTy, TyBase, TyData, TyId},
-            ty_lower::lower_hir_ty,
+            ty_lower::{lower_hir_primitive, lower_hir_ty},
         },
     },
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenHandleKind, FrozenItemLocator,
-        FrozenMetaValue, FrozenMetaVariantCase, FrozenOwner, FrozenQuoteConstructor,
-        FrozenQuoteConstructorSite, FrozenQuoteEffectUse, FrozenQuoteFieldType,
+        FrozenMetaValue, FrozenMetaVariantCase, FrozenOwner, FrozenOwnerError,
+        FrozenQuoteConstructor, FrozenQuoteConstructorSite, FrozenQuoteEffectUse,
         FrozenQuoteFunction, FrozenQuoteFunctionTypes, FrozenQuoteGenericUse, FrozenQuoteLocal,
         FrozenQuoteLocalType, FrozenQuoteNominal, FrozenQuoteOpenUse, FrozenQuoteParamUse,
         FrozenQuoteQualifiedConst, FrozenQuoteSelfUse, FrozenQuoteSignatureType, FrozenQuoteTrait,
         FrozenQuoteWherePredicate, FrozenTemplateKey, FrozenTemplateSource, MetaItem,
     },
     hir_def::{
-        CallableDef, Expr, Func, GenericArg, GenericParam, HirIngot, Partial, PathKind,
-        QuoteFragment, QuoteFunc, QuoteItem, QuoteWherePredicate, Trait, TypeBound, TypeId,
-        TypeKind, scope_graph::ScopeId,
+        CallableDef, Expr, Func, GenericArg, GenericParam, Partial, PathKind, QuoteFragment,
+        QuoteFunc, QuoteItem, QuoteWherePredicate, Trait, TypeBound, TypeId, TypeKind,
+        scope_graph::ScopeId,
     },
     span::LazySpan,
 };
@@ -48,7 +44,13 @@ use crate::DriverDataBase;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstructionError {
     Protocol(FreezingProtocolFault),
-    ReadBack(super::read_back::ReadBackError),
+    ReadBackMissingBody,
+    ReadBackInvalidBody,
+    ReadBackEffectful,
+    ReadBackMissingOwner,
+    ReadBackUnsupportedCall,
+    ReadBackUnsupportedName,
+    ReadBackUnsupportedType,
     Authority,
     MissingItemPath,
     UnsupportedConstructorInstantiation,
@@ -62,44 +64,35 @@ pub enum ConstructionError {
     },
 }
 
-impl From<super::read_back::ReadBackError> for ConstructionError {
-    fn from(error: super::read_back::ReadBackError) -> Self {
-        match error {
-            super::read_back::ReadBackError::Construction(error) => *error,
-            error => Self::ReadBack(error),
-        }
+impl From<FreezingProtocolFault> for ConstructionError {
+    fn from(error: FreezingProtocolFault) -> Self {
+        Self::Protocol(error)
     }
 }
 
 const MAX_FROZEN_NODES: usize = 65_536;
 
 pub(super) fn charge_frozen_node(nodes: &Cell<usize>) -> Result<(), ConstructionError> {
-    let used = nodes.get().saturating_add(1);
+    charge_frozen_nodes(nodes, 1)
+}
+
+fn charge_frozen_nodes(nodes: &Cell<usize>, amount: usize) -> Result<(), ConstructionError> {
+    let used = nodes.get().saturating_add(amount);
     if used > MAX_FROZEN_NODES {
-        return Err(limit(FreezingLimitKind::MetaNodes, used, MAX_FROZEN_NODES));
+        return Err(limit(
+            FreezingLimitKind::MetaNodes,
+            MAX_FROZEN_NODES + 1,
+            MAX_FROZEN_NODES,
+        ));
     }
     nodes.set(used);
     Ok(())
 }
 
-/// Preserve file modules when rooting a checked item in its defining ingot.
-/// The file's top module is not the ingot root.
-pub(super) fn frozen_quote_item_path<'db>(
-    db: &'db DriverDataBase,
-    scope: ScopeId<'db>,
-) -> Result<String, ConstructionError> {
-    let full = scope
-        .pretty_path(db)
-        .ok_or(ConstructionError::MissingItemPath)?;
-    let root = scope
-        .ingot(db)
-        .root_mod(db)
-        .scope()
-        .pretty_path(db)
-        .ok_or(ConstructionError::MissingItemPath)?;
-    full.strip_prefix(&format!("{root}::"))
-        .map(str::to_owned)
-        .ok_or(ConstructionError::MissingItemPath)
+/// Charge the stored code-node shell where it is allocated, rather than
+/// traversing the completed graph to estimate its description size.
+pub(super) fn charge_frozen_code_node(nodes: &Cell<usize>) -> Result<(), ConstructionError> {
+    charge_frozen_nodes(nodes, 16)
 }
 
 pub(super) fn frozen_quote_trait<'db>(
@@ -107,64 +100,22 @@ pub(super) fn frozen_quote_trait<'db>(
     trait_: Trait<'db>,
     site: u32,
 ) -> Result<FrozenQuoteTrait, ConstructionError> {
-    let scope = trait_.scope();
-    let file = trait_
-        .span()
-        .resolve(db)
-        .and_then(|span| span.file.url(db))
-        .ok_or(ConstructionError::Protocol(
-            FreezingProtocolFault::TraitFileIsMissing,
-        ))?;
-    let full_path = scope
-        .pretty_path(db)
-        .ok_or(ConstructionError::MissingItemPath)?;
-    let path = frozen_quote_item_path(db, scope)?;
-    Ok(FrozenQuoteTrait {
-        site,
-        ingot: scope.ingot(db).base(db).clone(),
-        path,
-        owner: FrozenOwner {
-            file,
-            path: full_path,
-        },
-    })
-}
-
-fn frozen_quote_nominal<'db>(
-    db: &'db DriverDataBase,
-    adt: AdtDef<'db>,
-) -> Result<FrozenQuoteNominal, ConstructionError> {
-    frozen_quote_nominal_ref(db, adt.adt_ref(db))
+    let owner = FrozenOwner::of_item(db, trait_.into()).map_err(|error| match error {
+        FrozenOwnerError::MissingFile => FreezingProtocolFault::TraitFileIsMissing.into(),
+        FrozenOwnerError::MissingPath => ConstructionError::MissingItemPath,
+    })?;
+    Ok(FrozenQuoteTrait { site, owner })
 }
 
 pub(super) fn frozen_quote_nominal_ref<'db>(
     db: &'db DriverDataBase,
     adt: AdtRef<'db>,
 ) -> Result<FrozenQuoteNominal, ConstructionError> {
-    let scope = match adt {
-        AdtRef::Struct(item) => item.scope(),
-        AdtRef::Enum(item) => item.scope(),
-    };
-    let full_path = scope
-        .pretty_path(db)
-        .ok_or(ConstructionError::MissingItemPath)?;
-    let path = frozen_quote_item_path(db, scope)?;
-    let file = match adt {
-        AdtRef::Struct(item) => item.span().resolve(db),
-        AdtRef::Enum(item) => item.span().resolve(db),
-    }
-    .and_then(|span| span.file.url(db))
-    .ok_or(ConstructionError::Protocol(
-        FreezingProtocolFault::NominalTypeFileIsMissing,
-    ))?;
-    Ok(FrozenQuoteNominal {
-        ingot: scope.ingot(db).base(db).clone(),
-        path,
-        owner: FrozenOwner {
-            file,
-            path: full_path,
-        },
-    })
+    let owner = FrozenOwner::of_item(db, adt.as_item()).map_err(|error| match error {
+        FrozenOwnerError::MissingFile => FreezingProtocolFault::NominalTypeFileIsMissing.into(),
+        FrozenOwnerError::MissingPath => ConstructionError::MissingItemPath,
+    })?;
+    Ok(FrozenQuoteNominal { owner })
 }
 
 /// Freeze a checked type without resolving its spelling again. Normal generic
@@ -263,7 +214,7 @@ fn freeze_checked_quote_type_bounded<'db, 'a>(
             FrozenQuoteSignatureType::Mode(mode, Box::new(arguments.remove(0)))
         }
         TyData::TyBase(TyBase::Adt(adt)) => FrozenQuoteSignatureType::Nominal {
-            root: frozen_quote_nominal(db, *adt)?,
+            root: frozen_quote_nominal_ref(db, adt.adt_ref(db))?,
             arguments_given: !arguments.is_empty(),
             arguments,
         },
@@ -331,6 +282,22 @@ pub(super) fn charge_frozen_type(
         pending.extend(ty.children());
     }
     Ok(())
+}
+
+fn quoted_functions<'a, 'db>(
+    fragment: &'a QuoteFragment<'db>,
+) -> impl Iterator<Item = &'a QuoteFunc<'db>> {
+    let items = match fragment {
+        QuoteFragment::Items(items) => match items.as_slice() {
+            [QuoteItem::Impl(implementation)] => implementation.items.as_slice(),
+            _ => items.as_slice(),
+        },
+        _ => &[],
+    };
+    items.iter().filter_map(|item| match item {
+        QuoteItem::Func(function) => Some(function),
+        _ => None,
+    })
 }
 
 fn freeze_quote_signature_type<'a, 'db>(
@@ -433,9 +400,9 @@ where
             let arguments_given = path.generic_args(db).is_given(db);
             let mut arguments = Vec::new();
             for index in 0..path.len(db) {
-                let segment = path.segment(db, index).ok_or(ConstructionError::Protocol(
-                    FreezingProtocolFault::SignaturePathSegmentIsMissing,
-                ))?;
+                let segment = path
+                    .segment(db, index)
+                    .ok_or(FreezingProtocolFault::SignaturePathSegmentIsMissing)?;
                 let args = segment.generic_args(db);
                 if index + 1 != path.len(db) && args.is_given(db) {
                     return Ok(None);
@@ -462,13 +429,11 @@ where
                     arguments.push(frozen);
                 }
             }
-            let name_use = names.next().ok_or(ConstructionError::Protocol(
-                FreezingProtocolFault::SignatureTypeHasNoCheckedName,
-            ))?;
+            let name_use = names
+                .next()
+                .ok_or(FreezingProtocolFault::SignatureTypeHasNoCheckedName)?;
             if !matches!(name_use.site, QuoteNameSite::Type(_)) {
-                return Err(ConstructionError::Protocol(
-                    FreezingProtocolFault::SignatureNameChangedSite,
-                ));
+                return Err(FreezingProtocolFault::SignatureNameChangedSite.into());
             }
             if matches!(name_use.class, QuoteNameClass::SelfName)
                 && path.as_ident(db).is_some_and(|name| name.is_self_ty(db))
@@ -488,9 +453,7 @@ where
                     QuoteNameClass::Bound(QuoteBinder::Generic { item, index: bound })
                         if *item == generic_item && *bound as usize == index
                 ) {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::GenericSignatureBindingChanged,
-                    ));
+                    return Err(FreezingProtocolFault::GenericSignatureBindingChanged.into());
                 }
                 return Ok(Some(FrozenQuoteSignatureType::FunctionGeneric(
                     index as u32,
@@ -552,16 +515,14 @@ where
                 && let TyData::TyBase(TyBase::Adt(adt)) = selected.base_ty(db).data(db)
             {
                 return Ok(Some(FrozenQuoteSignatureType::Nominal {
-                    root: frozen_quote_nominal(db, *adt)?,
+                    root: frozen_quote_nominal_ref(db, adt.adt_ref(db))?,
                     arguments,
                     arguments_given,
                 }));
             }
             if let QuoteNameClass::Rooted(PathRes::Trait(selected)) = &name_use.class {
                 let QuoteNameSite::Type(site) = name_use.site else {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::TraitSignatureNameChangedSite,
-                    ));
+                    return Err(FreezingProtocolFault::TraitSignatureNameChangedSite.into());
                 };
                 return Ok(Some(FrozenQuoteSignatureType::Trait {
                     root: frozen_quote_trait(db, selected.key(db), site)?,
@@ -598,7 +559,27 @@ impl std::fmt::Display for ConstructionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Protocol(fault) => fault.fmt(f),
-            Self::ReadBack(error) => write!(f, "checked-body code no longer reads back: {error}"),
+            Self::ReadBackMissingBody => f.write_str(
+                "checked-body code no longer reads back: checked function body is missing",
+            ),
+            Self::ReadBackInvalidBody => f.write_str(
+                "checked-body code no longer reads back: checked function body is invalid",
+            ),
+            Self::ReadBackEffectful => {
+                f.write_str("checked-body code no longer reads back: checked function has effects")
+            }
+            Self::ReadBackMissingOwner => {
+                f.write_str("checked-body code no longer reads back: checked item owner is missing")
+            }
+            Self::ReadBackUnsupportedCall => f.write_str(
+                "checked-body code no longer reads back: checked body contains an unsupported call",
+            ),
+            Self::ReadBackUnsupportedName => f.write_str(
+                "checked-body code no longer reads back: checked body contains an unsupported name",
+            ),
+            Self::ReadBackUnsupportedType => f.write_str(
+                "checked-body code no longer reads back: checked body contains an unsupported type",
+            ),
             Self::SelfConstructor { name } => write!(
                 f,
                 "quoted Self constructor `{name}` does not match the impl self type"
@@ -624,29 +605,20 @@ impl<'db> RecordInput<'db> {
     ) -> Result<FrozenItemLocator, ConstructionError> {
         function
             .frozen_locator(self.db)
-            .ok_or(ConstructionError::Protocol(
-                FreezingProtocolFault::QuoteOwnerLocatorIsMissing,
-            ))
+            .ok_or(FreezingProtocolFault::QuoteOwnerLocatorIsMissing.into())
     }
 
     pub(crate) fn frozen_owner(&self) -> Result<FrozenOwner, ConstructionError> {
-        let file = self
-            .owner
-            .as_item()
-            .span()
-            .resolve(self.db)
-            .and_then(|span| span.file.url(self.db))
-            .ok_or(ConstructionError::Protocol(
-                FreezingProtocolFault::GenerationOwnerFileIsMissing,
-            ))?;
-        let path = self
-            .owner
-            .scope()
-            .pretty_path(self.db)
-            .ok_or(ConstructionError::Protocol(
-                FreezingProtocolFault::GenerationOwnerPathIsMissing,
-            ))?;
-        Ok(FrozenOwner { file, path })
+        FrozenOwner::of_item(self.db, self.owner.as_item()).map_err(|error| {
+            ConstructionError::Protocol(match error {
+                FrozenOwnerError::MissingFile => {
+                    FreezingProtocolFault::GenerationOwnerFileIsMissing
+                }
+                FrozenOwnerError::MissingPath => {
+                    FreezingProtocolFault::GenerationOwnerPathIsMissing
+                }
+            })
+        })
     }
 
     pub(crate) fn frozen_const_param_types(
@@ -659,26 +631,26 @@ impl<'db> RecordInput<'db> {
         params
             .data(self.db)
             .iter()
-            .map(|param| match param {
+            .enumerate()
+            .map(|(index, param)| match param {
                 GenericParam::Type(_) => Ok(None),
                 GenericParam::Const(param) => {
-                    let ty = param.ty.to_opt().ok_or(ConstructionError::Protocol(
-                        FreezingProtocolFault::TargetConstParameterHasNoType,
-                    ))?;
-                    let checked = lower_hir_ty(
-                        self.db,
-                        ty,
-                        self.owner.scope(),
-                        hir::analysis::ty::trait_resolution::PredicateListId::empty_list(self.db),
-                    );
-                    let TyData::TyBase(TyBase::Prim(primitive)) =
-                        checked.base_ty(self.db).data(self.db)
-                    else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::TargetConstParameterTypeIsNotScalar,
-                        ));
-                    };
-                    Ok(Some(*primitive))
+                    param
+                        .ty
+                        .to_opt()
+                        .ok_or(FreezingProtocolFault::TargetConstParameterHasNoType)?;
+                    let primitive = self
+                        .owner
+                        .as_adt(self.db)
+                        .params(self.db)
+                        .get(index)
+                        .and_then(|parameter| parameter.const_ty_ty(self.db))
+                        .and_then(|ty| match ty.base_ty(self.db).data(self.db) {
+                            TyData::TyBase(TyBase::Prim(primitive)) => Some(*primitive),
+                            _ => None,
+                        })
+                        .ok_or(FreezingProtocolFault::TargetConstParameterTypeIsNotScalar)?;
+                    Ok(Some(primitive))
                 }
             })
             .collect()
@@ -696,12 +668,6 @@ impl<'db> RecordInput<'db> {
         (index < shape.num_types()).then(|| shape.ty(self.db, index).instantiate_identity())
     }
 
-    fn meta_item(&self, ty: TyId<'db>) -> Option<MetaItem> {
-        MetaItem::ALL
-            .into_iter()
-            .find(|item| self.designated(ty, *item))
-    }
-
     /// Freeze a checked provider value before publishing any generated items.
     /// Only the designated generation protocol and this record's structural
     /// handles may cross into the output phase.
@@ -709,9 +675,17 @@ impl<'db> RecordInput<'db> {
         &self,
         value: SemConstId<'db>,
     ) -> Result<FrozenMetaValue, ConstructionError> {
+        self.freeze_value_counted(value).map(|(value, _)| value)
+    }
+
+    pub(super) fn freeze_value_counted(
+        &self,
+        value: SemConstId<'db>,
+    ) -> Result<(FrozenMetaValue, usize), ConstructionError> {
         let owner = self.frozen_owner()?;
         let nodes = Cell::new(0);
-        self.freeze_node(value, &owner, &nodes, 0)
+        let value = self.freeze_node(value, &owner, &nodes, 0)?;
+        Ok((value, nodes.get()))
     }
 
     fn freeze_node(
@@ -727,8 +701,15 @@ impl<'db> RecordInput<'db> {
         }
         let freeze = |value, nodes: &Cell<usize>| self.freeze_node(value, owner, nodes, depth + 1);
         match value.value(self.db) {
-            SemConstValue::Unit => Ok(FrozenMetaValue::Unit),
             SemConstValue::Scalar { ty, value } => {
+                charge_frozen_nodes(
+                    nodes,
+                    match &value {
+                        SemConstScalar::Bool(_) => 1,
+                        SemConstScalar::Int { value } => value.bits().div_ceil(8) as usize,
+                        SemConstScalar::Bytes(bytes) => bytes.len(),
+                    },
+                )?;
                 let primitive = match ty.base_ty(self.db).data(self.db) {
                     TyData::TyBase(TyBase::Prim(primitive)) => Some(*primitive),
                     _ => None,
@@ -813,129 +794,47 @@ impl<'db> RecordInput<'db> {
                     kind,
                 })
             }
-            SemConstValue::Tuple { ty, elems } => {
-                if !ty.is_tuple(self.db) {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCoreMetaTuple,
-                    ));
-                }
-                elems
-                    .iter()
-                    .map(|value| freeze(*value, nodes))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(FrozenMetaValue::Tuple)
-            }
-            SemConstValue::Array { ty, elems } => {
-                if !ty.is_array(self.db) {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCoreMetaArray,
-                    ));
-                }
-                elems
-                    .iter()
-                    .map(|value| freeze(*value, nodes))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(FrozenMetaValue::Array)
-            }
-            SemConstValue::Struct { ty, fields } => {
-                let item = self.meta_item(*ty).ok_or(ConstructionError::Protocol(
-                    FreezingProtocolFault::UnexpectedCoreMetaRecord,
-                ))?;
-                let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(self.db).data(self.db) else {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCoreMetaRecordType,
-                    ));
-                };
-                let AdtRef::Struct(definition) = adt.adt_ref(self.db) else {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::ExpectedCoreMetaRecordDefinition,
-                    ));
-                };
-                let definitions = definition.hir_fields(self.db);
-                let definitions = definitions.data(self.db);
-                if definitions.len() != fields.len() {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCoreMetaRecordFields,
-                    ));
-                }
-                let mut named = BTreeMap::new();
-                for (definition, value) in definitions.iter().zip(fields) {
-                    let name = definition
-                        .name
-                        .to_opt()
-                        .ok_or(ConstructionError::Protocol(
-                            FreezingProtocolFault::UnnamedCoreMetaField,
-                        ))?
-                        .data(self.db)
-                        .clone();
-                    if named.insert(name, freeze(*value, nodes)?).is_some() {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::DuplicateCoreMetaField,
-                        ));
-                    }
-                }
-                Ok(FrozenMetaValue::Record {
-                    item,
-                    fields: named,
-                })
+            SemConstValue::Unit
+            | SemConstValue::Tuple { .. }
+            | SemConstValue::Array { .. }
+            | SemConstValue::Struct { .. } => {
+                Err(FreezingProtocolFault::UnsupportedGeneratedValueShape.into())
             }
             SemConstValue::Enum {
                 ty,
                 variant,
                 fields,
             } => {
-                let item = self.meta_item(*ty).ok_or(ConstructionError::Protocol(
-                    FreezingProtocolFault::UnexpectedCoreMetaVariant,
-                ))?;
+                if !self.designated(*ty, MetaItem::DeclarationName) {
+                    return Err(FreezingProtocolFault::UnexpectedCoreMetaVariant.into());
+                }
                 let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(self.db).data(self.db) else {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCoreMetaVariantType,
-                    ));
+                    return Err(FreezingProtocolFault::InvalidCoreMetaVariantType.into());
                 };
                 let AdtRef::Enum(definition) = adt.adt_ref(self.db) else {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::ExpectedCoreMetaEnumDefinition,
-                    ));
+                    return Err(FreezingProtocolFault::ExpectedCoreMetaEnumDefinition.into());
                 };
                 let name = definition
                     .variants(self.db)
                     .nth(usize::from(variant.0))
                     .and_then(|variant| variant.name(self.db))
-                    .ok_or(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCoreMetaEnumVariant,
-                    ))?
-                    .data(self.db)
-                    .clone();
+                    .ok_or(FreezingProtocolFault::InvalidCoreMetaEnumVariant)?
+                    .data(self.db);
                 let fields = fields
                     .iter()
                     .map(|value| freeze(*value, nodes))
                     .collect::<Result<Vec<_>, _>>()?;
                 // The evaluated discriminant already selected a variant of the
                 // designated core enum. Freeze that case before source order is lost.
-                let case = if item == MetaItem::DeclarationName {
-                    match name.as_str() {
-                        "Literal" => FrozenMetaVariantCase::DeclarationNameLiteral,
-                        "FieldPrefix" => FrozenMetaVariantCase::DeclarationNameFieldPrefix,
-                        _ => {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::UnexpectedDeclarationNameVariant,
-                            ));
-                        }
-                    }
-                } else {
-                    FrozenMetaVariantCase::Other
+                let case = match name.as_str() {
+                    "Literal" => FrozenMetaVariantCase::DeclarationNameLiteral,
+                    "FieldPrefix" => FrozenMetaVariantCase::DeclarationNameFieldPrefix,
+                    _ => return Err(FreezingProtocolFault::UnexpectedDeclarationNameVariant.into()),
                 };
-                Ok(FrozenMetaValue::Variant {
-                    item,
-                    name,
-                    case,
-                    fields,
-                })
+                Ok(FrozenMetaValue::DeclarationName { case, fields })
             }
-            SemConstValue::Description(_) | SemConstValue::TypeLevel { .. } => {
-                Err(ConstructionError::Protocol(
-                    FreezingProtocolFault::TypeLevelValuesAreNotGeneratedDeclarations,
-                ))
+            SemConstValue::Description(_) => {
+                Err(FreezingProtocolFault::TypeLevelValuesAreNotGeneratedDeclarations.into())
             }
         }
     }
@@ -948,37 +847,37 @@ impl<'db> RecordInput<'db> {
     fn freeze_field_type(
         &self,
         ty: TyId<'db>,
-        depth: usize,
         budget: &Cell<usize>,
-    ) -> Result<Option<FrozenQuoteFieldType>, ConstructionError> {
-        if depth > 128 {
-            return Ok(None);
-        }
-        charge_frozen_node(budget)?;
-        if let TyData::TyParam(param) = ty.data(self.db) {
-            return Ok((param.owner == self.owner.scope())
-                .then(|| FrozenQuoteFieldType::TargetParam(param.original_idx(self.db))));
-        }
-        let (base, args) = ty.decompose_ty_app(self.db);
-        match base.data(self.db) {
-            TyData::TyBase(TyBase::Prim(SemPrimTy::Tuple(arity))) if args.len() == *arity => {
-                let mut elements = Vec::new();
-                for arg in args {
-                    let Some(element) = self.freeze_field_type(*arg, depth + 1, budget)? else {
-                        return Ok(None);
-                    };
-                    elements.push(element);
-                }
-                Ok(Some(FrozenQuoteFieldType::Tuple(elements)))
-            }
-            TyData::TyBase(TyBase::Prim(SemPrimTy::Ptr)) if args.len() == 1 => Ok(self
-                .freeze_field_type(args[0], depth + 1, budget)?
-                .map(|inner| FrozenQuoteFieldType::Ptr(Box::new(inner)))),
-            TyData::TyBase(TyBase::Prim(primitive)) if args.is_empty() => {
-                Ok(Some(FrozenQuoteFieldType::Primitive(*primitive)))
-            }
-            _ => Ok(None),
-        }
+    ) -> Result<Option<FrozenQuoteSignatureType>, ConstructionError> {
+        let mut nodes = budget.get();
+        let result = freeze_checked_quote_type_bounded(
+            self.db,
+            ty,
+            &|ty| {
+                let TyData::TyParam(param) = ty.data(self.db) else {
+                    return None;
+                };
+                (param.owner == self.owner.scope())
+                    .then(|| {
+                        u32::try_from(param.original_idx(self.db))
+                            .ok()
+                            .map(|index| Cow::Owned(FrozenQuoteSignatureType::OwnerGeneric(index)))
+                    })
+                    .flatten()
+            },
+            &mut nodes,
+            0,
+        )
+        .map_err(|error| match error {
+            ConstructionError::Limit {
+                name: FreezingLimitKind::TypeNodes,
+                actual,
+                maximum,
+            } => limit(FreezingLimitKind::MetaNodes, actual, maximum),
+            error => error,
+        })?;
+        budget.set(nodes);
+        Ok(result)
     }
 
     fn freeze_code(
@@ -989,7 +888,7 @@ impl<'db> RecordInput<'db> {
     ) -> Result<FrozenCode, ConstructionError> {
         // Discover the interned graph without following the Rust call stack.
         // Shared fragments get one frozen node, while every edge is retained.
-        charge_frozen_node(budget)?;
+        charge_frozen_code_node(budget)?;
         let mut nodes = vec![FrozenCodeNode::empty(None)];
         let mut seen = HashMap::from([(root, 0)]);
         let mut pending = vec![root];
@@ -1005,7 +904,7 @@ impl<'db> RecordInput<'db> {
                         return Err(ConstructionError::Authority);
                     }
                     if let std::collections::hash_map::Entry::Vacant(entry) = seen.entry(child) {
-                        charge_frozen_node(budget)?;
+                        charge_frozen_code_node(budget)?;
                         entry.insert(pending.len());
                         pending.push(child);
                         nodes.push(FrozenCodeNode::empty(None));
@@ -1068,14 +967,10 @@ impl<'db> RecordInput<'db> {
                 }
                 let shape = adt.as_adt(self.db).fields(self.db);
                 let Some(shape) = shape.get(usize::from(variant.idx)) else {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::BinderVariantIndexIsOutOfBounds,
-                    ));
+                    return Err(FreezingProtocolFault::BinderVariantIndexIsOutOfBounds.into());
                 };
                 if field.is_some_and(|index| index >= shape.num_types()) {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::BinderFieldIndexIsOutOfBounds,
-                    ));
+                    return Err(FreezingProtocolFault::BinderFieldIndexIsOutOfBounds.into());
                 }
                 nodes[index].variant_binding = Some(hir::core::meta::FrozenVariantBinding {
                     owner: frozen_quote_nominal_ref(self.db, adt)?,
@@ -1090,30 +985,23 @@ impl<'db> RecordInput<'db> {
             let func = site
                 .owner
                 .containing_func(self.db)
-                .ok_or(ConstructionError::Protocol(
-                    FreezingProtocolFault::QuoteOwnerIsNotAFunction,
-                ))?;
-            let body = func.body(self.db).ok_or(ConstructionError::Protocol(
-                FreezingProtocolFault::QuoteOwnerBodyIsMissing,
-            ))?;
+                .ok_or(FreezingProtocolFault::QuoteOwnerIsNotAFunction)?;
+            let body = func
+                .body(self.db)
+                .ok_or(FreezingProtocolFault::QuoteOwnerBodyIsMissing)?;
             if site.source == FrozenTemplateSource::CheckedBody {
                 if site.owner != body
                     || site.expr != body.expr(self.db)
                     || !code.holes(self.db).is_empty()
                 {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::InvalidCheckedBodyCodeOrigin,
-                    ));
+                    return Err(FreezingProtocolFault::InvalidCheckedBodyCodeOrigin.into());
                 }
-                let mut frozen = super::read_back::read_back_with_budget(self.db, func, budget)
-                    .map_err(ConstructionError::from)?;
+                let mut frozen = super::read_back::read_back_with_budget(self.db, func, budget)?;
                 nodes[index] = frozen.nodes.swap_remove(frozen.root);
                 return Ok(());
             }
             let Partial::Present(Expr::Quote(quote)) = &body.exprs(self.db)[site.expr] else {
-                return Err(ConstructionError::Protocol(
-                    FreezingProtocolFault::QuoteSiteNoLongerNamesAQuote,
-                ));
+                return Err(FreezingProtocolFault::QuoteSiteNoLongerNamesAQuote.into());
             };
             // Bound the authored arenas before later copying nested pattern/arm
             // vectors. This is independent of how many names the body contains.
@@ -1126,36 +1014,29 @@ impl<'db> RecordInput<'db> {
             }
             // Non-body holes (including where/type positions) retain the
             // authored operand span; body-hole maps below refine their edges.
-            for (slot, hole) in quote.holes.iter().enumerate() {
-                hole_spans[slot] = hole.expr.span(body).resolve(self.db).and_then(|span| {
+            let mut record_hole_span = |slot: usize, span: Option<common::diagnostics::Span>| {
+                let destination = hole_spans
+                    .get_mut(slot)
+                    .ok_or(FreezingProtocolFault::QuoteHoleSlotIsOutOfBounds)?;
+                *destination = span.and_then(|span| {
                     Some(hir::core::meta::FrozenQuoteSpan {
                         file: span.file.url(self.db)?,
                         range: span.range.into(),
                     })
                 });
+                Ok::<_, ConstructionError>(())
+            };
+            for (slot, hole) in quote.holes.iter().enumerate() {
+                record_hole_span(slot, hole.expr.span(body).resolve(self.db))?;
             }
             for (expr, value) in quote.template.exprs(self.db).iter() {
-                if let Partial::Present(Expr::Hole(slot)) = value
-                    && let Some(destination) = hole_spans.get_mut(*slot as usize)
-                {
-                    *destination = expr.span(quote.template).resolve(self.db).and_then(|span| {
-                        Some(hir::core::meta::FrozenQuoteSpan {
-                            file: span.file.url(self.db)?,
-                            range: span.range.into(),
-                        })
-                    });
+                if let Partial::Present(Expr::Hole(slot)) = value {
+                    record_hole_span(*slot as usize, expr.span(quote.template).resolve(self.db))?;
                 }
             }
             for (pat, value) in quote.template.pats(self.db).iter() {
-                if let Partial::Present(hir::hir_def::Pat::Hole(slot)) = value
-                    && let Some(destination) = hole_spans.get_mut(*slot as usize)
-                {
-                    *destination = pat.span(quote.template).resolve(self.db).and_then(|span| {
-                        Some(hir::core::meta::FrozenQuoteSpan {
-                            file: span.file.url(self.db)?,
-                            range: span.range.into(),
-                        })
-                    });
+                if let Partial::Present(hir::hir_def::Pat::Hole(slot)) = value {
+                    record_hole_span(*slot as usize, pat.span(quote.template).resolve(self.db))?;
                 }
             }
             if let QuoteFragment::Arms(arms) = &quote.fragment {
@@ -1168,12 +1049,7 @@ impl<'db> RecordInput<'db> {
                             .arms()
                             .arm(index)
                             .resolve(self.db);
-                        hole_spans[*slot as usize] = span.and_then(|span| {
-                            Some(hir::core::meta::FrozenQuoteSpan {
-                                file: span.file.url(self.db)?,
-                                range: span.range.into(),
-                            })
-                        });
+                        record_hole_span(*slot as usize, span)?;
                     }
                 }
             }
@@ -1187,39 +1063,26 @@ impl<'db> RecordInput<'db> {
                                 .arms()
                                 .arm(index)
                                 .resolve(self.db);
-                            hole_spans[*slot as usize] = span.and_then(|span| {
-                                Some(hir::core::meta::FrozenQuoteSpan {
-                                    file: span.file.url(self.db)?,
-                                    range: span.range.into(),
-                                })
-                            });
+                            record_hole_span(*slot as usize, span)?;
                         }
                     }
                 }
             }
             let checked_primitive = |ty| {
-                let resolved = lower_hir_ty(
+                lower_hir_primitive(
                     self.db,
                     ty,
                     func.scope(),
                     PredicateListId::empty_list(self.db),
-                );
-                match resolved.base_ty(self.db).data(self.db) {
-                    TyData::TyBase(TyBase::Prim(primitive)) => Some(*primitive),
-                    _ => None,
-                }
+                )
             };
             let (diagnostics, typed) = check_func_body(self.db, func);
             if !diagnostics.is_empty() {
-                return Err(ConstructionError::Protocol(
-                    FreezingProtocolFault::QuoteOwnerDoesNotTypeCheck,
-                ));
+                return Err(FreezingProtocolFault::QuoteOwnerDoesNotTypeCheck.into());
             }
             let checked = typed
                 .checked_quote(site.expr)
-                .ok_or(ConstructionError::Protocol(
-                    FreezingProtocolFault::QuoteHasNoCheckedNameClassification,
-                ))?;
+                .ok_or(FreezingProtocolFault::QuoteHasNoCheckedNameClassification)?;
             // Bound classification work before building its parallel carrier vectors.
             for _ in 0..checked.names.len()
                 + checked.local_types.len()
@@ -1231,8 +1094,9 @@ impl<'db> RecordInput<'db> {
             let checked_signature_type =
                 |ty: TypeId<'db>,
                  signature: QuoteSignatureSite,
-                 item: &QuoteFunc<'db>,
-                 generic_item: u32| {
+                 generics: &[GenericParam<'db>],
+                 generic_item: u32,
+                 extra_names: FreezingProtocolFault| {
                     let mut names = checked.names.iter().filter(|use_| {
                         use_.signature == Some(signature)
                             && matches!(use_.site, QuoteNameSite::Type(_))
@@ -1241,15 +1105,13 @@ impl<'db> RecordInput<'db> {
                         self.db,
                         ty,
                         &mut names,
-                        item.generic_params.data(self.db),
+                        generics,
                         generic_item,
                         &checked_primitive,
                         budget,
                     )?;
                     if frozen.is_some() && names.next().is_some() {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::SignatureHasExtraCheckedNames,
-                        ));
+                        return Err(extra_names.into());
                     }
                     Ok::<_, ConstructionError>(frozen)
                 };
@@ -1291,37 +1153,26 @@ impl<'db> RecordInput<'db> {
                     .enumerate()
                     .map(|(index, predicate)| match predicate {
                         QuoteWherePredicate::Hole(_) => Ok(None),
-                        QuoteWherePredicate::Const(_) => Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::FragmentConstPredicateNeedsCheckedReification,
-                        )),
+                        QuoteWherePredicate::Const(_) => Err(
+                            FreezingProtocolFault::FragmentConstPredicateNeedsCheckedReification
+                                .into(),
+                        ),
                         QuoteWherePredicate::Bound(predicate) => {
-                            let ty = predicate.ty.to_opt().ok_or(ConstructionError::Protocol(
-                                FreezingProtocolFault::WhereTypeIsMissing,
-                            ))?;
+                            let ty = predicate
+                                .ty
+                                .to_opt()
+                                .ok_or(FreezingProtocolFault::WhereTypeIsMissing)?;
                             let signature = QuoteSignatureSite::FragmentWhereType {
                                 predicate: index as u32,
                             };
-                            let mut names = checked.names.iter().filter(|name| {
-                                name.signature == Some(signature)
-                                    && matches!(name.site, QuoteNameSite::Type(_))
-                            });
-                            let ty = freeze_quote_signature_type(
-                                self.db,
+                            let ty = checked_signature_type(
                                 ty,
-                                &mut names,
+                                signature,
                                 &[],
                                 u32::MAX,
-                                &checked_primitive,
-                                budget,
+                                FreezingProtocolFault::WhereTypeHasExtraCheckedNames,
                             )?
-                            .ok_or(ConstructionError::Protocol(
-                                FreezingProtocolFault::WhereTypeNeedsCheckedReification,
-                            ))?;
-                            if names.next().is_some() {
-                                return Err(ConstructionError::Protocol(
-                                    FreezingProtocolFault::WhereTypeHasExtraCheckedNames,
-                                ));
-                            }
+                            .ok_or(FreezingProtocolFault::WhereTypeNeedsCheckedReification)?;
                             let trait_sites = predicate
                                 .bounds
                                 .iter()
@@ -1367,11 +1218,23 @@ impl<'db> RecordInput<'db> {
                     charge_frozen_node(budget)?;
                 }
 
-                let generic_item = *checked.function_generic_items.get(index as usize).ok_or(
-                    ConstructionError::Protocol(
-                        FreezingProtocolFault::FunctionHasNoCheckedGenericOwner,
-                    ),
-                )?;
+                let generic_item = *checked
+                    .function_generic_items
+                    .get(index as usize)
+                    .ok_or(FreezingProtocolFault::FunctionHasNoCheckedGenericOwner)?;
+                let signature_type = |ty: Option<TypeId<'db>>, signature| {
+                    ty.map(|ty| {
+                        checked_signature_type(
+                            ty,
+                            signature,
+                            item.generic_params.data(self.db),
+                            generic_item,
+                            FreezingProtocolFault::SignatureHasExtraCheckedNames,
+                        )
+                    })
+                    .transpose()
+                    .map(Option::flatten)
+                };
                 let params = item
                     .params
                     .to_opt()
@@ -1381,22 +1244,13 @@ impl<'db> RecordInput<'db> {
                             .iter()
                             .enumerate()
                             .map(|(param_index, param)| {
-                                param
-                                    .ty
-                                    .to_opt()
-                                    .map(|ty| {
-                                        checked_signature_type(
-                                            ty,
-                                            QuoteSignatureSite::Param {
-                                                func: index,
-                                                index: param_index as u32,
-                                            },
-                                            item,
-                                            generic_item,
-                                        )
-                                    })
-                                    .transpose()
-                                    .map(Option::flatten)
+                                signature_type(
+                                    param.ty.to_opt(),
+                                    QuoteSignatureSite::Param {
+                                        func: index,
+                                        index: param_index as u32,
+                                    },
+                                )
                             })
                             .collect::<Result<Vec<_>, ConstructionError>>()
                     })
@@ -1408,36 +1262,17 @@ impl<'db> RecordInput<'db> {
                     .iter()
                     .enumerate()
                     .map(|(effect_index, effect)| {
-                        effect
-                            .key_ty
-                            .to_opt()
-                            .map(|ty| {
-                                checked_signature_type(
-                                    ty,
-                                    QuoteSignatureSite::Effect {
-                                        func: index,
-                                        index: effect_index as u32,
-                                    },
-                                    item,
-                                    generic_item,
-                                )
-                            })
-                            .transpose()
-                            .map(Option::flatten)
-                    })
-                    .collect::<Result<Vec<_>, ConstructionError>>()?;
-                let result = item
-                    .ret_ty
-                    .map(|ty| {
-                        checked_signature_type(
-                            ty,
-                            QuoteSignatureSite::Result { func: index },
-                            item,
-                            generic_item,
+                        signature_type(
+                            effect.key_ty.to_opt(),
+                            QuoteSignatureSite::Effect {
+                                func: index,
+                                index: effect_index as u32,
+                            },
                         )
                     })
-                    .transpose()?
-                    .flatten();
+                    .collect::<Result<Vec<_>, ConstructionError>>()?;
+                let result =
+                    signature_type(item.ret_ty, QuoteSignatureSite::Result { func: index })?;
                 let generic_bound_sites = item
                     .generic_params
                     .data(self.db)
@@ -1469,21 +1304,13 @@ impl<'db> RecordInput<'db> {
                     .iter()
                     .enumerate()
                     .map(|(param_index, param)| match param {
-                        GenericParam::Type(param) => param
-                            .default_ty
-                            .map(|ty| {
-                                checked_signature_type(
-                                    ty,
-                                    QuoteSignatureSite::GenericDefault {
-                                        func: index,
-                                        param: param_index as u32,
-                                    },
-                                    item,
-                                    generic_item,
-                                )
-                            })
-                            .transpose()
-                            .map(Option::flatten),
+                        GenericParam::Type(param) => signature_type(
+                            param.default_ty,
+                            QuoteSignatureSite::GenericDefault {
+                                func: index,
+                                param: param_index as u32,
+                            },
+                        ),
                         GenericParam::Const(_) => Ok(None),
                     })
                     .collect::<Result<Vec<_>, ConstructionError>>()?;
@@ -1507,24 +1334,25 @@ impl<'db> RecordInput<'db> {
                                 QuoteWherePredicate::Const(_) => {
                                     Ok(FrozenQuoteWherePredicate::Const)
                                 }
-                                QuoteWherePredicate::Hole(_) => Err(ConstructionError::Protocol(FreezingProtocolFault::MethodWhereFragmentNeedsCheckedReification)),
+                                QuoteWherePredicate::Hole(_) => Err(FreezingProtocolFault::MethodWhereFragmentNeedsCheckedReification.into()),
                                 QuoteWherePredicate::Bound(_) => unreachable!(),
                             };
                         };
                         let ty = predicate
                             .ty
                             .to_opt()
-                            .ok_or(ConstructionError::Protocol(FreezingProtocolFault::MethodWhereBoundTypeIsMissing))?;
+                            .ok_or(FreezingProtocolFault::MethodWhereBoundTypeIsMissing)?;
                         let ty = checked_signature_type(
                             ty,
                             QuoteSignatureSite::WhereType {
                                 func: index,
                                 predicate: predicate_index as u32,
                             },
-                            item,
+                            item.generic_params.data(self.db),
                             generic_item,
+                            FreezingProtocolFault::SignatureHasExtraCheckedNames,
                         )?
-                        .ok_or(ConstructionError::Protocol(FreezingProtocolFault::MethodWhereBoundTypeNeedsCheckedReification))?;
+                        .ok_or(FreezingProtocolFault::MethodWhereBoundTypeNeedsCheckedReification)?;
                         let trait_sites = predicate
                             .bounds
                             .iter()
@@ -1546,7 +1374,7 @@ impl<'db> RecordInput<'db> {
                 for local in checked
                     .local_types
                     .iter()
-                    .filter(|local| local.func == Some(index))
+                    .filter(|local| local.member.function() == Some(index))
                 {
                     let ty = checked_signature_type(
                         local.ty,
@@ -1554,14 +1382,13 @@ impl<'db> RecordInput<'db> {
                             func: Some(index),
                             stmt: local.stmt,
                         },
-                        item,
+                        item.generic_params.data(self.db),
                         generic_item,
+                        FreezingProtocolFault::SignatureHasExtraCheckedNames,
                     )?
-                    .ok_or(ConstructionError::Protocol(
-                        FreezingProtocolFault::LocalTypeNeedsCheckedReification,
-                    ))?;
+                    .ok_or(FreezingProtocolFault::LocalTypeNeedsCheckedReification)?;
                     local_types.push(FrozenQuoteLocalType {
-                        func: Some(index),
+                        member: local.member,
                         stmt: local.stmt,
                         ty,
                     });
@@ -1591,95 +1418,65 @@ impl<'db> RecordInput<'db> {
                             let Some(ty) = associated.ty else {
                                 return Ok(None);
                             };
-                            let mut names = checked.names.iter().filter(|name| {
-                                name.signature
-                                    == Some(QuoteSignatureSite::AssocType {
-                                        index: index as u32,
-                                    })
-                                    && matches!(name.site, QuoteNameSite::Type(_))
-                            });
-                            let frozen = freeze_quote_signature_type(
-                                self.db,
+                            checked_signature_type(
                                 ty,
-                                &mut names,
+                                QuoteSignatureSite::AssocType {
+                                    index: index as u32,
+                                },
                                 &[],
                                 0,
-                                &checked_primitive,
-                                budget,
-                            )?;
-                            if frozen.is_some() && names.next().is_some() {
-                                return Err(ConstructionError::Protocol(
-                                    FreezingProtocolFault::AssociatedTypeHasExtraCheckedNames,
-                                ));
-                            }
-                            Ok(frozen)
+                                FreezingProtocolFault::AssociatedTypeHasExtraCheckedNames,
+                            )
                         })
                         .collect::<Result<Vec<_>, ConstructionError>>()?;
                 }
-                for (index, item) in items
-                    .iter()
-                    .filter_map(|item| match item {
-                        QuoteItem::Func(function) => Some(function),
-                        _ => None,
-                    })
-                    .enumerate()
+                if let [QuoteItem::Impl(item)] = items.as_slice()
+                    && let Some(Partial::Present(trait_ref)) = item.trait_ref
+                    && let Partial::Present(path) = trait_ref.path(self.db)
                 {
-                    freeze_function(item, index as u32)?;
-                }
-                if let [QuoteItem::Impl(item)] = items.as_slice() {
-                    if let Some(Partial::Present(trait_ref)) = item.trait_ref
-                        && let Partial::Present(path) = trait_ref.path(self.db)
-                    {
-                        let args = path.generic_args(self.db);
-                        if args.is_given(self.db) {
-                            let arguments = args
-                                .data(self.db)
+                    let args = path.generic_args(self.db);
+                    if args.is_given(self.db) {
+                        let arguments =
+                            args.data(self.db)
                                 .iter()
                                 .enumerate()
                                 .map(|(arg_index, arg)| {
                                     let GenericArg::Type(arg) = arg else {
-                                        return Err(ConstructionError::Protocol(FreezingProtocolFault::ImplTraitArgumentNeedsACheckedType));
+                                        return Err(
+                                        FreezingProtocolFault::ImplTraitArgumentNeedsACheckedType
+                                            .into(),
+                                    );
                                     };
-                                    let ty = arg.ty.to_opt().ok_or(ConstructionError::Protocol(FreezingProtocolFault::ImplTraitTypeArgumentIsMissing))?;
+                                    let ty = arg.ty.to_opt().ok_or(
+                                        FreezingProtocolFault::ImplTraitTypeArgumentIsMissing,
+                                    )?;
                                     let signature = QuoteSignatureSite::ImplTraitArgument {
                                         index: arg_index as u32,
                                     };
-                                    let mut names = checked.names.iter().filter(|name| {
-                                        name.signature == Some(signature)
-                                            && matches!(name.site, QuoteNameSite::Type(_))
-                                    });
-                                    let frozen = freeze_quote_signature_type(
-                                        self.db,
-                                        ty,
-                                        &mut names,
-                                        &[],
-                                        u32::MAX,
-                                        &checked_primitive,
-                                        budget,
-                                    )?
-                                    .ok_or(ConstructionError::Protocol(FreezingProtocolFault::ImplTraitArgumentNeedsCheckedReification))?;
-                                    if names.next().is_some() {
-                                        return Err(ConstructionError::Protocol(FreezingProtocolFault::ImplTraitArgumentHasExtraCheckedNames));
-                                    }
+                                    let frozen = checked_signature_type(
+                                    ty,
+                                    signature,
+                                    &[],
+                                    u32::MAX,
+                                    FreezingProtocolFault::ImplTraitArgumentHasExtraCheckedNames,
+                                )?
+                                .ok_or(
+                                    FreezingProtocolFault::ImplTraitArgumentNeedsCheckedReification,
+                                )?;
                                     Ok(frozen)
                                 })
                                 .collect::<Result<Vec<_>, ConstructionError>>()?;
-                            impl_trait_type_arguments = Some(arguments);
-                        }
-                    }
-                    let mut function_index = 0;
-                    for child in &item.items {
-                        if let QuoteItem::Func(method) = child {
-                            freeze_function(method, function_index)?;
-                            function_index += 1;
-                        }
+                        impl_trait_type_arguments = Some(arguments);
                     }
                 }
+            }
+            for (index, item) in quoted_functions(&quote.fragment).enumerate() {
+                freeze_function(item, index as u32)?;
             }
             if matches!(quote.fragment, QuoteFragment::Expr | QuoteFragment::Arms(_)) {
                 for (expr, data) in quote.template.exprs(self.db).iter() {
                     if let Partial::Present(Expr::Cast(_, Partial::Present(ty))) = data {
-                        let primitive = checked_primitive(*ty).ok_or(ConstructionError::Protocol(FreezingProtocolFault::CastNeedsACheckedPrimitiveTypeBeforeTransplantation))?;
+                        let primitive = checked_primitive(*ty).ok_or(FreezingProtocolFault::CastNeedsACheckedPrimitiveTypeBeforeTransplantation)?;
                         charge_frozen_node(budget)?;
                         cast_primitives.push((expr, primitive));
                     }
@@ -1691,34 +1488,22 @@ impl<'db> RecordInput<'db> {
             for local in checked
                 .local_types
                 .iter()
-                .filter(|local| local.func.is_none())
+                .filter(|local| local.member.function().is_none())
             {
                 let signature = QuoteSignatureSite::LocalType {
                     func: None,
                     stmt: local.stmt,
                 };
-                let mut names = checked.names.iter().filter(|name| {
-                    name.signature == Some(signature) && matches!(name.site, QuoteNameSite::Type(_))
-                });
-                let ty = freeze_quote_signature_type(
-                    self.db,
+                let ty = checked_signature_type(
                     local.ty,
-                    &mut names,
+                    signature,
                     &[],
                     u32::MAX,
-                    &checked_primitive,
-                    budget,
+                    FreezingProtocolFault::LocalTypeHasExtraCheckedNames,
                 )?
-                .ok_or(ConstructionError::Protocol(
-                    FreezingProtocolFault::LocalTypeNeedsCheckedReification,
-                ))?;
-                if names.next().is_some() {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::LocalTypeHasExtraCheckedNames,
-                    ));
-                }
+                .ok_or(FreezingProtocolFault::LocalTypeNeedsCheckedReification)?;
                 local_types.push(FrozenQuoteLocalType {
-                    func: None,
+                    member: local.member,
                     stmt: local.stmt,
                     ty,
                 });
@@ -1813,95 +1598,77 @@ impl<'db> RecordInput<'db> {
                             }
                             _ => return Err(failure()),
                         };
-                        rooted_constructors.push(FrozenQuoteConstructor {
-                            func: name.func,
-                            site,
-                            owner: frozen_quote_nominal_ref(self.db, owner)?,
-                            variant_index,
-                            type_arguments: None,
-                            self_target: true,
-                        });
+                        rooted_constructors.push(
+                            FrozenQuoteConstructor::new(
+                                name.member,
+                                site,
+                                frozen_quote_nominal_ref(self.db, owner)?,
+                                variant_index,
+                                None,
+                            )
+                            .for_self(),
+                        );
                         continue;
                     }
                 }
 
-                if let QuoteNameClass::Rooted(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) =
-                    &name.class
-                    && let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(self.db).data(self.db)
-                    && matches!(adt.adt_ref(self.db), AdtRef::Struct(_))
-                {
-                    let site = match name.site {
-                        QuoteNameSite::Pat(pat) => Some(FrozenQuoteConstructorSite::Pat(pat)),
-                        QuoteNameSite::Expr(expr) => Some(FrozenQuoteConstructorSite::Expr(expr)),
-                        QuoteNameSite::Type(_) => None,
-                    };
-                    if let Some(site) = site {
-                        rooted_constructors.push(FrozenQuoteConstructor {
-                            func: name.func,
-                            site,
-                            owner: frozen_quote_nominal(self.db, *adt)?,
-                            variant_index: None,
-                            self_target: false,
-                            type_arguments: if matches!(
-                                name.class,
-                                QuoteNameClass::Rooted(PathRes::TyAlias(..))
-                            ) {
-                                Some(
-                                    freeze_quote_constructor_arguments_budgeted(
-                                        self.db, *ty, func, budget,
-                                    )?
-                                    .ok_or(
-                                        ConstructionError::UnsupportedConstructorInstantiation,
-                                    )?,
-                                )
-                            } else {
-                                None
-                            },
-                        });
+                let constructor = match &name.class {
+                    QuoteNameClass::Rooted(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+                        match ty.base_ty(self.db).data(self.db) {
+                            TyData::TyBase(TyBase::Adt(adt))
+                                if matches!(adt.adt_ref(self.db), AdtRef::Struct(_)) =>
+                            {
+                                Some((adt.adt_ref(self.db), None, *ty))
+                            }
+                            _ => None,
+                        }
                     }
-                }
-
-                if let QuoteNameClass::Rooted(PathRes::EnumVariant(variant)) = &name.class {
-                    let site = match name.site {
-                        QuoteNameSite::Expr(site) => Some(FrozenQuoteConstructorSite::Expr(site)),
-                        QuoteNameSite::Pat(site) => Some(FrozenQuoteConstructorSite::Pat(site)),
-                        QuoteNameSite::Type(_) => None,
-                    };
-                    if let Some(site) = site {
-                        rooted_constructors.push(FrozenQuoteConstructor {
-                            func: name.func,
-                            site,
-                            owner: frozen_quote_nominal_ref(
-                                self.db,
-                                AdtRef::Enum(variant.variant.enum_),
-                            )?,
-                            variant_index: Some(variant.variant.idx),
-                            self_target: false,
-                            type_arguments: if variant.path.parent(self.db).is_some_and(|parent| {
-                                matches!(
-                                    resolve_path(
-                                        self.db,
-                                        parent,
-                                        func.scope(),
-                                        PredicateListId::empty_list(self.db),
-                                        true
-                                    ),
-                                    Ok(PathRes::TyAlias(..))
-                                )
-                            }) {
-                                Some(
-                                    freeze_quote_constructor_arguments_budgeted(
-                                        self.db, variant.ty, func, budget,
-                                    )?
-                                    .ok_or(
-                                        ConstructionError::UnsupportedConstructorInstantiation,
-                                    )?,
-                                )
-                            } else {
-                                None
-                            },
-                        });
-                    }
+                    QuoteNameClass::Rooted(PathRes::EnumVariant(variant)) => Some((
+                        AdtRef::Enum(variant.variant.enum_),
+                        Some(variant.variant.idx),
+                        variant.ty,
+                    )),
+                    _ => None,
+                };
+                let site = match name.site {
+                    QuoteNameSite::Expr(site) => Some(FrozenQuoteConstructorSite::Expr(site)),
+                    QuoteNameSite::Pat(site) => Some(FrozenQuoteConstructorSite::Pat(site)),
+                    QuoteNameSite::Type(_) => None,
+                };
+                if let (Some((owner, variant_index, ty)), Some(site)) = (constructor, site) {
+                    rooted_constructors.push(FrozenQuoteConstructor::new(
+                        name.member,
+                        site,
+                        frozen_quote_nominal_ref(self.db, owner)?,
+                        variant_index,
+                        if match &name.class {
+                            QuoteNameClass::Rooted(PathRes::TyAlias(..)) => true,
+                            QuoteNameClass::Rooted(PathRes::EnumVariant(variant)) => {
+                                variant.path.parent(self.db).is_some_and(|parent| {
+                                    matches!(
+                                        resolve_path(
+                                            self.db,
+                                            parent,
+                                            func.scope(),
+                                            PredicateListId::empty_list(self.db),
+                                            true
+                                        ),
+                                        Ok(PathRes::TyAlias(..))
+                                    )
+                                })
+                            }
+                            _ => false,
+                        } {
+                            Some(
+                                freeze_quote_constructor_arguments_budgeted(
+                                    self.db, ty, func, budget,
+                                )?
+                                .ok_or(ConstructionError::UnsupportedConstructorInstantiation)?,
+                            )
+                        } else {
+                            None
+                        },
+                    ));
                 }
                 if matches!(name.signature, Some(QuoteSignatureSite::WhereConst { .. }))
                     && matches!(
@@ -1915,20 +1682,18 @@ impl<'db> RecordInput<'db> {
                             | QuoteNameClass::SelfName
                     )
                 {
-                    return Err(ConstructionError::Protocol(
-                        FreezingProtocolFault::ConstWhereLocalOrValueUseNeedsCheckedReification,
-                    ));
+                    return Err(
+                        FreezingProtocolFault::ConstWhereLocalOrValueUseNeedsCheckedReification
+                            .into(),
+                    );
                 }
                 match (name.site, &name.class) {
                     (QuoteNameSite::Pat(binder), QuoteNameClass::Binds) => {
                         if locals.iter().any(|local| local.binder == binder) {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::QuoteBinderIsClassifiedTwice,
-                            ));
+                            return Err(FreezingProtocolFault::QuoteBinderIsClassifiedTwice.into());
                         }
-                        let func = name.func;
                         locals.push(FrozenQuoteLocal {
-                            func,
+                            member: name.member,
                             binder,
                             uses: Vec::new(),
                         });
@@ -1940,13 +1705,9 @@ impl<'db> RecordInput<'db> {
                         let local = locals
                             .iter_mut()
                             .find(|local| local.binder == *binder)
-                            .ok_or(ConstructionError::Protocol(
-                                FreezingProtocolFault::QuoteLocalUseHasNoBinder,
-                            ))?;
-                        if name.func != local.func {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::LocalUseChangedFunctionOwner,
-                            ));
+                            .ok_or(FreezingProtocolFault::QuoteLocalUseHasNoBinder)?;
+                        if name.member != local.member {
+                            return Err(FreezingProtocolFault::LocalUseChangedFunctionOwner.into());
                         }
                         local.uses.push(expr);
                     }
@@ -1954,14 +1715,14 @@ impl<'db> RecordInput<'db> {
                         QuoteNameSite::Expr(expr),
                         QuoteNameClass::Bound(QuoteBinder::Param { func, index }),
                     ) => {
-                        if name.func != Some(*func) {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::ParameterUseChangedFunctionOwner,
-                            ));
+                        if name.member.function() != Some(*func) {
+                            return Err(
+                                FreezingProtocolFault::ParameterUseChangedFunctionOwner.into()
+                            );
                         }
                         param_uses.push(FrozenQuoteParamUse {
                             site: expr,
-                            func: *func,
+                            member: name.member,
                             index: *index,
                         });
                     }
@@ -1969,20 +1730,20 @@ impl<'db> RecordInput<'db> {
                         QuoteNameSite::Expr(expr),
                         QuoteNameClass::Bound(QuoteBinder::EffectParam { func, index }),
                     ) => {
-                        if name.func != Some(*func)
+                        if name.member.function() != Some(*func)
                             || !matches!(
                                 &quote.template.exprs(self.db)[expr],
                                 Partial::Present(Expr::Path(Partial::Present(path)))
                                     if path.as_ident(self.db).is_some()
                             )
                         {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::EffectUseNeedsASimpleBoundPath,
-                            ));
+                            return Err(
+                                FreezingProtocolFault::EffectUseNeedsASimpleBoundPath.into()
+                            );
                         }
                         effect_uses.push(FrozenQuoteEffectUse {
                             site: expr,
-                            func: *func,
+                            member: name.member,
                             index: *index,
                         });
                     }
@@ -1990,7 +1751,7 @@ impl<'db> RecordInput<'db> {
                         QuoteNameSite::Expr(expr),
                         QuoteNameClass::Bound(QuoteBinder::Generic { item, index }),
                     ) => {
-                        let func = name.func.ok_or(ConstructionError::Protocol(FreezingProtocolFault::GenericBodyUseOutsideAFunctionNeedsTransplantation))?;
+                        let func = name.member.function().ok_or(FreezingProtocolFault::GenericBodyUseOutsideAFunctionNeedsTransplantation)?;
                         if checked.function_generic_items.get(func as usize) != Some(item)
                             || function_types
                                 .get(func as usize)
@@ -1999,9 +1760,9 @@ impl<'db> RecordInput<'db> {
                                 .flatten()
                                 .is_none()
                         {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::GenericBodyUseNeedsCheckedReification,
-                            ));
+                            return Err(
+                                FreezingProtocolFault::GenericBodyUseNeedsCheckedReification.into(),
+                            );
                         }
                         let simple_path = matches!(
                             &quote.template.exprs(self.db)[expr],
@@ -2009,21 +1770,14 @@ impl<'db> RecordInput<'db> {
                                 if path.as_ident(self.db).is_some()
                         );
                         if !simple_path {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::GenericBodyUseNeedsASimplePath,
-                            ));
+                            return Err(
+                                FreezingProtocolFault::GenericBodyUseNeedsASimplePath.into()
+                            );
                         }
                         generic_uses.push(FrozenQuoteGenericUse {
                             site: expr,
-                            func,
+                            member: name.member,
                             index: *index,
-                            where_predicate: match name.signature {
-                                Some(QuoteSignatureSite::WhereConst {
-                                    func: owner,
-                                    predicate,
-                                }) if owner == func => Some(predicate),
-                                _ => None,
-                            },
                         });
                     }
                     (QuoteNameSite::Expr(expr), QuoteNameClass::SelfName) => {
@@ -2032,8 +1786,9 @@ impl<'db> RecordInput<'db> {
                             Partial::Present(Expr::RecordInit(Partial::Present(path), _))
                                 if path.is_self_ty(self.db)
                         ) {
+                            name.member.function().ok_or(FreezingProtocolFault::SelfConstructionOutsideAMethodNeedsTransplantation)?;
                             self_record_inits.push(FrozenQuoteSelfUse {
-                                func: name.func.ok_or(ConstructionError::Protocol(FreezingProtocolFault::SelfConstructionOutsideAMethodNeedsTransplantation))?,
+                                member: name.member,
                                 site: expr,
                             });
                             continue;
@@ -2045,25 +1800,29 @@ impl<'db> RecordInput<'db> {
                             _ => false,
                         };
                         if !simple_self {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::SelfPathNeedsCheckedTransplantation,
-                            ));
+                            return Err(
+                                FreezingProtocolFault::SelfPathNeedsCheckedTransplantation.into()
+                            );
                         }
-                        if let Some(func) = name.func {
-                            self_uses.push(FrozenQuoteSelfUse { func, site: expr });
+                        if name.member.function().is_some() {
+                            self_uses.push(FrozenQuoteSelfUse {
+                                member: name.member,
+                                site: expr,
+                            });
                         } else if matches!(
                             &quote.fragment,
                             QuoteFragment::Expr | QuoteFragment::Arms(_)
                         ) {
                             free_self_uses.push(expr);
                         } else {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::SelfOutsideAMethodNeedsTransplantation,
-                            ));
+                            return Err(
+                                FreezingProtocolFault::SelfOutsideAMethodNeedsTransplantation
+                                    .into(),
+                            );
                         }
                     }
                     (QuoteNameSite::Expr(expr), QuoteNameClass::Open(index))
-                        if name.func.is_none()
+                        if name.member.function().is_none()
                             && matches!(
                                 &quote.fragment,
                                 QuoteFragment::Expr | QuoteFragment::Arms(_)
@@ -2088,72 +1847,38 @@ impl<'db> RecordInput<'db> {
                     let TyData::TyBase(TyBase::Func(CallableDef::Func(selected))) =
                         ty.base_ty(self.db).data(self.db)
                     else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::FunctionRootHasNoAuthoredFunction,
-                        ));
+                        return Err(FreezingProtocolFault::FunctionRootHasNoAuthoredFunction.into());
                     };
-                    let scope = res.as_scope(self.db).ok_or(ConstructionError::Protocol(
-                        FreezingProtocolFault::QuoteFunctionScopeIsMissing,
-                    ))?;
-                    let path = frozen_quote_item_path(self.db, scope)?;
-                    if name.func.is_none()
-                        && name.assoc_const.is_none()
+                    if name.member.function().is_none()
+                        && name.member.assoc_const().is_none()
                         && !matches!(quote.fragment, QuoteFragment::Expr | QuoteFragment::Arms(_))
                     {
-                        return Err(ConstructionError::Protocol(FreezingProtocolFault::RootedFunctionOutsideAFunctionNeedsTransplantation));
+                        return Err(FreezingProtocolFault::RootedFunctionOutsideAFunctionNeedsTransplantation.into());
                     }
-                    let (generics, generic_item) = if let Some(func_index) = name.func {
-                        let function = match &quote.fragment {
-                            QuoteFragment::Items(items) => {
-                                if let [QuoteItem::Impl(implementation)] = items.as_slice() {
-                                    implementation
-                                        .items
-                                        .iter()
-                                        .filter_map(|item| match item {
-                                            QuoteItem::Func(function) => Some(function),
-                                            _ => None,
-                                        })
-                                        .nth(func_index as usize)
-                                } else {
-                                    items
-                                        .iter()
-                                        .filter_map(|item| match item {
-                                            QuoteItem::Func(function) => Some(function),
-                                            _ => None,
-                                        })
-                                        .nth(func_index as usize)
-                                }
-                            }
-                            QuoteFragment::Expr
-                            | QuoteFragment::Arms(_)
-                            | QuoteFragment::Where(_) => None,
-                        }
-                        .ok_or(ConstructionError::Protocol(
-                            FreezingProtocolFault::FunctionGenericOwnerIsMissing,
-                        ))?;
-                        let generic_item = *checked
-                            .function_generic_items
-                            .get(func_index as usize)
-                            .ok_or(ConstructionError::Protocol(
-                                FreezingProtocolFault::FunctionGenericIdentityIsMissing,
-                            ))?;
-                        (
-                            function.generic_params.data(self.db).as_slice(),
-                            generic_item,
-                        )
-                    } else {
-                        (&[][..], u32::MAX)
-                    };
+                    let (generics, generic_item) =
+                        if let Some(func_index) = name.member.function() {
+                            let function = quoted_functions(&quote.fragment)
+                                .nth(func_index as usize)
+                                .ok_or(FreezingProtocolFault::FunctionGenericOwnerIsMissing)?;
+                            let generic_item = *checked
+                                .function_generic_items
+                                .get(func_index as usize)
+                                .ok_or(FreezingProtocolFault::FunctionGenericIdentityIsMissing)?;
+                            (
+                                function.generic_params.data(self.db).as_slice(),
+                                generic_item,
+                            )
+                        } else {
+                            (&[][..], u32::MAX)
+                        };
                     let type_arguments = match &quote.template.exprs(self.db)[expr] {
                         Partial::Present(Expr::Path(Partial::Present(path))) => {
                             for index in 0..path.len(self.db).saturating_sub(1) {
-                                let segment = path.segment(self.db, index).ok_or(
-                                    ConstructionError::Protocol(
-                                        FreezingProtocolFault::FunctionPathSegmentIsMissing,
-                                    ),
-                                )?;
+                                let segment = path
+                                    .segment(self.db, index)
+                                    .ok_or(FreezingProtocolFault::FunctionPathSegmentIsMissing)?;
                                 if segment.generic_args(self.db).is_given(self.db) {
-                                    return Err(ConstructionError::Protocol(FreezingProtocolFault::FunctionIntermediateTypeArgumentsNeedReification));
+                                    return Err(FreezingProtocolFault::FunctionIntermediateTypeArgumentsNeedReification.into());
                                 }
                             }
                             let args = path.generic_args(self.db);
@@ -2164,10 +1889,10 @@ impl<'db> RecordInput<'db> {
                                     .enumerate()
                                     .map(|(index, arg)| {
                                         let GenericArg::Type(arg) = arg else {
-                                            return Err(ConstructionError::Protocol(FreezingProtocolFault::FunctionArgumentNeedsAType));
+                                            return Err(FreezingProtocolFault::FunctionArgumentNeedsAType.into());
                                         };
                                         let Some(ty) = arg.ty.to_opt() else {
-                                            return Err(ConstructionError::Protocol(FreezingProtocolFault::FunctionTypeArgumentIsMissing));
+                                            return Err(FreezingProtocolFault::FunctionTypeArgumentIsMissing.into());
                                         };
                                         let signature = QuoteSignatureSite::CallTypeArgument {
                                             expr,
@@ -2185,9 +1910,9 @@ impl<'db> RecordInput<'db> {
                                             generic_item,
                                             &checked_primitive, budget,
 )?
-                                        .ok_or(ConstructionError::Protocol(FreezingProtocolFault::FunctionTypeArgumentNeedsCheckedReification))?;
+                                        .ok_or(FreezingProtocolFault::FunctionTypeArgumentNeedsCheckedReification)?;
                                         if names.next().is_some() {
-                                            return Err(ConstructionError::Protocol(FreezingProtocolFault::FunctionTypeArgumentHasExtraCheckedNames));
+                                            return Err(FreezingProtocolFault::FunctionTypeArgumentHasExtraCheckedNames.into());
                                         }
                                         Ok(frozen)
                                     })
@@ -2198,26 +1923,13 @@ impl<'db> RecordInput<'db> {
                             }
                         }
                         _ => {
-                            return Err(ConstructionError::Protocol(
-                                FreezingProtocolFault::FunctionRootChangedShape,
-                            ));
+                            return Err(FreezingProtocolFault::FunctionRootChangedShape.into());
                         }
                     };
                     rooted_funcs.push(FrozenQuoteFunction {
-                        func: name.func,
-                        assoc_const: name.assoc_const,
+                        member: name.member,
                         type_arguments,
                         site: expr,
-                        where_predicate: match name.signature {
-                            Some(QuoteSignatureSite::WhereConst { func, predicate })
-                                if name.func == Some(func) =>
-                            {
-                                Some(predicate)
-                            }
-                            _ => None,
-                        },
-                        ingot: scope.ingot(self.db).base(self.db).clone(),
-                        path,
                         owner: self.frozen_quote_owner(*selected)?,
                     });
                 }
@@ -2232,25 +1944,23 @@ impl<'db> RecordInput<'db> {
                     let Some(previous) =
                         name_index.checked_sub(1).and_then(|i| checked.names.get(i))
                     else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantHasNoCheckedTrait,
-                        ));
+                        return Err(
+                            FreezingProtocolFault::QualifiedConstantHasNoCheckedTrait.into()
+                        );
                     };
                     let (
                         QuoteNameSite::Type(trait_site),
                         QuoteNameClass::Rooted(PathRes::Trait(_)),
                     ) = (previous.site, &previous.class)
                     else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantNeedsARootedTrait,
-                        ));
+                        return Err(
+                            FreezingProtocolFault::QualifiedConstantNeedsARootedTrait.into()
+                        );
                     };
                     let Partial::Present(Expr::Path(Partial::Present(path))) =
                         &quote.template.exprs(self.db)[expr]
                     else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantHasNoPath,
-                        ));
+                        return Err(FreezingProtocolFault::QualifiedConstantHasNoPath.into());
                     };
                     if path.len(self.db) != 2
                         || !matches!(
@@ -2259,27 +1969,26 @@ impl<'db> RecordInput<'db> {
                                 if generic_args.is_empty(self.db)
                         )
                     {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantNeedsASimpleMember,
-                        ));
+                        return Err(
+                            FreezingProtocolFault::QualifiedConstantNeedsASimpleMember.into()
+                        );
                     }
                     let Some(root) = path.segment(self.db, 0) else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantHasNoRoot,
-                        ));
+                        return Err(FreezingProtocolFault::QualifiedConstantHasNoRoot.into());
                     };
                     let PathKind::QualifiedType { type_, .. } = root.kind(self.db) else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantHasNoReceiverType,
-                        ));
+                        return Err(
+                            FreezingProtocolFault::QualifiedConstantHasNoReceiverType.into()
+                        );
                     };
                     let Some(receiver) = checked_primitive(type_) else {
-                        return Err(ConstructionError::Protocol(
-                            FreezingProtocolFault::QualifiedConstantNeedsAPrimitiveReceiver,
-                        ));
+                        return Err(
+                            FreezingProtocolFault::QualifiedConstantNeedsAPrimitiveReceiver.into(),
+                        );
                     };
+                    name.member.function().ok_or(FreezingProtocolFault::QualifiedConstantOutsideAFunctionNeedsTransplantation)?;
                     qualified_consts.push(FrozenQuoteQualifiedConst {
-                        func: name.func.ok_or(ConstructionError::Protocol(FreezingProtocolFault::QualifiedConstantOutsideAFunctionNeedsTransplantation))?,
+                        member: name.member,
                         site: expr,
                         trait_site,
                         receiver,
@@ -2323,7 +2032,7 @@ impl<'db> RecordInput<'db> {
                             ..
                         } if *field_owner == self.owner => {
                             match self.reflected_field_type(*variant_index, *index) {
-                                Some(ty) => self.freeze_field_type(ty, 0, budget)?,
+                                Some(ty) => self.freeze_field_type(ty, budget)?,
                                 None => None,
                             }
                         }

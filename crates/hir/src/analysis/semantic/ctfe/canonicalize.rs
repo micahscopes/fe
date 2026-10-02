@@ -529,7 +529,6 @@ fn canonicalize_const_value<'db>(
                 evaluated
             }
         }
-        SemConstValue::TypeLevel { .. } => value,
         SemConstValue::Tuple { ty, elems } => tuple_const(
             db,
             *ty,

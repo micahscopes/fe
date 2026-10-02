@@ -1608,7 +1608,7 @@ impl<'db> TyParam<'db> {
             }
             return name_str;
         }
-        self.name.display_name(db)
+        self.name.data(db).clone()
     }
 
     pub fn is_trait_self(&self) -> bool {

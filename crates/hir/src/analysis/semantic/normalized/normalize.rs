@@ -1139,8 +1139,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
             SemConstValue::Structural { .. }
             | SemConstValue::Scalar { .. }
             | SemConstValue::Unit
-            | SemConstValue::Description(..)
-            | SemConstValue::TypeLevel { .. } => {
+            | SemConstValue::Description(..) => {
                 return Err(NormalizeError::UnresolvedHandleOrigin(ty));
             }
         };

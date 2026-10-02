@@ -1,4 +1,7 @@
-pub trait Score { fn score(self) -> u256 }
+pub trait Score {
+    fn score(self) -> u256
+    fn make(_ value: u256) -> Self
+}
 pub enum Inner { A, B(u256) }
 mod author {
     use core::meta::{Code, Item, Record, field, field_type}
@@ -6,6 +9,7 @@ mod author {
         let ty = field_type(field(record, 0))
         quote {
             impl ingot::Score for ${ty} {
+                fn make(_ value: u256) -> Self { Self::B(value) }
                 fn score(self) -> u256 {
                     match self { Self::A => 1, Self::B(x) => x }
                 }
@@ -17,6 +21,8 @@ mod author {
 pub struct Outer { pub inner: Inner }
 #[test]
 fn values() {
+    let made: Inner = Inner::make(23)
+    assert!(made.score() == 23)
     assert!(Inner::A.score() == 1)
     assert!(Inner::B(8).score() == 8)
 }

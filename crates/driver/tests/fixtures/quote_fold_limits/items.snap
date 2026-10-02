@@ -3,8 +3,15 @@ source: crates/driver/tests/read_back.rs
 expression: rendered
 input_file: tests/fixtures/quote_fold_limits/items.fe
 ---
-error[18-0001]: invalid generated declaration: generated description units limit exceeded: 120024 > 65536
-   ┌─ items.fe:17:1
+error[18-0003]: invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+   ┌─ items.fe:8:21
    │
-17 │ #[generate(ingot::author::emit)]
-   │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ invalid generated declaration: generated description units limit exceeded: 120024 > 65536
+ 8 │               items = quote {
+   │ ╭─────────────────────^
+ 9 │ │                 ${items}
+10 │ │                 fn helper() -> u256 { 1 }
+11 │ │             }
+   │ ╰─────────────^ invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+   · │
+17 │   #[generate(ingot::author::emit)]
+   │   -------------------------------- generated here

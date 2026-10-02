@@ -99,3 +99,60 @@ impl<'db> Visitor<'db> for PathVisitor<'db, '_> {
         walk_path(self, ctxt, path);
     }
 }
+
+#[test]
+fn resolved_declaration_keeps_alias_arguments_under_destination_shadowing() {
+    use fe_hir::analysis::name_resolution::{PathRes, resolve_ident_to_bucket, resolve_name_res};
+
+    let mut db = HirAnalysisTestDb::default();
+    let source = db.new_stand_alone(
+        "resolved_reference_source.fe".into(),
+        "struct Opt<T> { value: T }\ntype O8 = Opt<u8>\n",
+    );
+    let destination = db.new_stand_alone(
+        "resolved_reference_destination.fe".into(),
+        "struct Opt<T> { value: T }\ntype O8 = Opt<u16>\n",
+    );
+    let (source_mod, _) = db.top_mod(source);
+    let (destination_mod, _) = db.top_mod(destination);
+    db.assert_no_diags(source_mod);
+    db.assert_no_diags(destination_mod);
+    let path = PathId::from_str(&db, "O8");
+    let assumptions = PredicateListId::empty_list(&db);
+    let declaration = resolve_ident_to_bucket(&db, path, source_mod.scope())
+        .pick(NameDomain::TYPE)
+        .as_ref()
+        .expect("source alias should resolve");
+    let direct = resolve_name_res(
+        &db,
+        declaration,
+        None,
+        path,
+        destination_mod.scope(),
+        assumptions,
+    )
+    .expect("resolved declaration should instantiate in the destination");
+    let captured = PathId::new(
+        &db,
+        fe_hir::hir_def::PathKind::BoundItem {
+            item: declaration.scope().expect("alias has a declaration scope"),
+            display: path,
+        },
+        None,
+    );
+    let carried = resolve_path(&db, captured, destination_mod.scope(), assumptions, false)
+        .expect("carried declaration should resolve without destination name lookup");
+    let authored = resolve_path(&db, path, source_mod.scope(), assumptions, false).unwrap();
+    let shadow = resolve_path(&db, path, destination_mod.scope(), assumptions, false).unwrap();
+    fn alias_type<'db>(resolution: &PathRes<'db>) -> fe_hir::analysis::ty::ty_def::TyId<'db> {
+        match resolution {
+            PathRes::TyAlias(_, ty) => *ty,
+            other => panic!("expected alias, got {other:?}"),
+        }
+    }
+    assert_eq!(alias_type(&direct), alias_type(&authored));
+    assert_eq!(alias_type(&carried), alias_type(&authored));
+    assert_ne!(alias_type(&authored), alias_type(&shadow));
+    assert!(alias_type(&direct).pretty_print(&db).contains("u8"));
+    assert!(alias_type(&shadow).pretty_print(&db).contains("u16"));
+}

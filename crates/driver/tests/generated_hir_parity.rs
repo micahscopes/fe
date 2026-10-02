@@ -192,7 +192,10 @@ fn assert_parity(fixture: Fixture<&str>, expected_private_calls: Option<usize>) 
                 .filter_map(ast::Struct::cast)
                 .find(|target| {
                     let span: Range<usize> = target.syntax().text_range().into();
-                    span.start == request.target_span_start
+                    request
+                        .site_span
+                        .as_ref()
+                        .is_some_and(|site| span.start <= site.start && site.end <= span.end)
                 })
                 .expect("authored generation target");
             let span: Range<usize> = target.syntax().text_range().into();

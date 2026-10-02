@@ -1,0 +1,50 @@
+trait Mixed {
+    const FIRST: u256
+    const SECOND: u256
+    fn first<const N: usize>(self) -> usize where author::positive(value: N)
+    fn second<const N: usize>(self) -> usize where author::positive(value: N)
+}
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn positive(value: usize) -> bool { value > 0 }
+    pub const fn offset(value: usize) -> usize { value + 10 }
+    pub const fn number(value: u256) -> u256 { value * 3 }
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Mixed for ${record} {
+                const FIRST: u256 = number(value: 4)
+                const SECOND: u256 = number(value: 7)
+                fn first<const N: usize>(self) -> usize where positive(value: N) { let answer: usize = offset(value: N)
+                    answer }
+                fn second<const N: usize>(self) -> usize where positive(value: N) { offset(value: N) + 1 }
+            }
+        }
+    }
+}
+const fn positive(value: usize) -> bool { false }
+const fn offset(value: usize) -> usize { value + 100 }
+const fn number(value: u256) -> u256 { value * 100 }
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+struct Twin { value: u256 }
+impl Mixed for Twin {
+    const FIRST: u256 = author::number(value: 4)
+    const SECOND: u256 = author::number(value: 7)
+    fn first<const N: usize>(self) -> usize where author::positive(value: N) { author::offset(value: N) }
+    fn second<const N: usize>(self) -> usize where author::positive(value: N) { author::offset(value: N) + 1 }
+}
+#[test]
+fn all_members_keep_their_provider_names() {
+    assert!(Target::FIRST == 12)
+    assert!(Target::FIRST == Twin::FIRST)
+    assert!(Target::SECOND == 21)
+    assert!(Target::SECOND == Twin::SECOND)
+    assert!(Target { value: 0 }.first<3>() == 13)
+    let first = Target { value: 0 }.first<3>()
+    let twin_first = Twin { value: 0 }.first<3>()
+    assert!(first == twin_first)
+    assert!(Target { value: 0 }.second<5>() == 16)
+    let second = Target { value: 0 }.second<5>()
+    let twin_second = Twin { value: 0 }.second<5>()
+    assert!(second == twin_second)
+}

@@ -16,7 +16,7 @@ use hir::{
         FrozenCode, FrozenCodeNode, FrozenQuoteConstructor, FrozenQuoteConstructorSite,
         FrozenQuoteFunction, FrozenQuoteGenericUse, FrozenQuoteLocal, FrozenQuoteLocalType,
         FrozenQuoteOpenUse, FrozenQuoteQualifiedConst, FrozenQuoteSignatureType, FrozenTemplateKey,
-        FrozenTemplateSource, MetaItem,
+        FrozenTemplateSource, MetaItem, QuoteMember,
     },
     hir_def::{
         CallableDef, Expr, Func, GenericArg, GenericParamOwner, Partial, Stmt, scope_graph::ScopeId,
@@ -25,8 +25,8 @@ use hir::{
 };
 
 use super::construction::{
-    ConstructionError, charge_frozen_node, charge_frozen_type, freeze_checked_quote_type,
-    freeze_quote_constructor_arguments, frozen_quote_item_path, frozen_quote_nominal_ref,
+    ConstructionError, charge_frozen_code_node, charge_frozen_node, charge_frozen_type,
+    freeze_checked_quote_type, freeze_quote_constructor_arguments, frozen_quote_nominal_ref,
     frozen_quote_trait,
 };
 use crate::DriverDataBase;
@@ -36,43 +36,8 @@ pub fn read_back_type<'db>(
     db: &'db DriverDataBase,
     func: Func<'db>,
     ty: TyId<'db>,
-) -> Result<FrozenQuoteSignatureType, ReadBackError> {
-    freeze_checked_quote_type(db, ty, func)
-        .map_err(ReadBackError::from)?
-        .ok_or(ReadBackError::UnsupportedType)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReadBackError {
-    MissingBody,
-    InvalidBody,
-    Effectful,
-    MissingOwner,
-    UnsupportedCall,
-    UnsupportedName,
-    UnsupportedType,
-    Construction(Box<ConstructionError>),
-}
-
-impl From<ConstructionError> for ReadBackError {
-    fn from(error: ConstructionError) -> Self {
-        Self::Construction(Box::new(error))
-    }
-}
-impl std::fmt::Display for ReadBackError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::Construction(error) => return error.fmt(f),
-            Self::MissingBody => "checked function body is missing",
-            Self::InvalidBody => "checked function body is invalid",
-            Self::Effectful => "checked function has effects",
-            Self::MissingOwner => "checked item owner is missing",
-            Self::UnsupportedCall => "checked body contains an unsupported call",
-            Self::UnsupportedName => "checked body contains an unsupported name",
-            Self::UnsupportedType => "checked body contains an unsupported type",
-        };
-        f.write_str(message)
-    }
+) -> Result<FrozenQuoteSignatureType, ConstructionError> {
+    freeze_checked_quote_type(db, ty, func)?.ok_or(ConstructionError::ReadBackUnsupportedType)
 }
 
 /// Supplies a checked body to an ordinary Fe const consumer as Code<Expr>.
@@ -80,22 +45,24 @@ impl std::fmt::Display for ReadBackError {
 pub fn read_back_value<'db>(
     db: &'db DriverDataBase,
     func: Func<'db>,
-) -> Result<SemConstId<'db>, ReadBackError> {
-    let body = func.body(db).ok_or(ReadBackError::MissingBody)?;
+) -> Result<SemConstId<'db>, ConstructionError> {
+    let body = func
+        .body(db)
+        .ok_or(ConstructionError::ReadBackMissingBody)?;
     if func.has_effects(db) {
-        return Err(ReadBackError::Effectful);
+        return Err(ConstructionError::ReadBackEffectful);
     }
     if !check_func_body(db, func).0.is_empty() {
-        return Err(ReadBackError::InvalidBody);
+        return Err(ConstructionError::ReadBackInvalidBody);
     }
     // Issuance keeps the checked source. Transport admission and metadata
     // freezing happen once, under the consumer's shared description budget.
     let code_ty = MetaItem::Code
         .resolve(db, func.scope())
-        .ok_or(ReadBackError::MissingOwner)?;
+        .ok_or(ConstructionError::ReadBackMissingOwner)?;
     let expr_ty = MetaItem::Expr
         .resolve(db, func.scope())
-        .ok_or(ReadBackError::MissingOwner)?;
+        .ok_or(ConstructionError::ReadBackMissingOwner)?;
     let code = QuotedCode::new(
         db,
         hir::analysis::semantic::CodeSource::Template(QuoteSite {
@@ -120,7 +87,7 @@ pub fn read_back_value<'db>(
 pub fn read_back<'db>(
     db: &'db DriverDataBase,
     func: Func<'db>,
-) -> Result<FrozenCode, ReadBackError> {
+) -> Result<FrozenCode, ConstructionError> {
     read_back_with_budget(db, func, &Cell::new(0))
 }
 
@@ -128,42 +95,45 @@ pub(super) fn read_back_with_budget<'db>(
     db: &'db DriverDataBase,
     func: Func<'db>,
     budget: &Cell<usize>,
-) -> Result<FrozenCode, ReadBackError> {
+) -> Result<FrozenCode, ConstructionError> {
     let freeze_type = |ty| {
-        let frozen = freeze_checked_quote_type(db, ty, func).map_err(ReadBackError::from)?;
+        let frozen = freeze_checked_quote_type(db, ty, func)?;
         if let Some(ty) = &frozen {
-            charge_frozen_type(ty, budget).map_err(ReadBackError::from)?;
+            charge_frozen_type(ty, budget)?;
         }
-        Ok::<_, ReadBackError>(frozen)
+        Ok::<_, ConstructionError>(frozen)
     };
     let freeze_arguments = |ty| {
-        let arguments =
-            freeze_quote_constructor_arguments(db, ty, func).map_err(ReadBackError::from)?;
+        let arguments = freeze_quote_constructor_arguments(db, ty, func)?;
         if let Some(arguments) = &arguments {
             for ty in arguments {
-                charge_frozen_type(ty, budget).map_err(ReadBackError::from)?;
+                charge_frozen_type(ty, budget)?;
             }
         }
-        Ok::<_, ReadBackError>(arguments)
+        Ok::<_, ConstructionError>(arguments)
     };
-    let body = func.body(db).ok_or(ReadBackError::MissingBody)?;
+    let body = func
+        .body(db)
+        .ok_or(ConstructionError::ReadBackMissingBody)?;
     if func.has_effects(db) {
-        return Err(ReadBackError::Effectful);
+        return Err(ConstructionError::ReadBackEffectful);
     }
     let (diagnostics, typed) = check_func_body(db, func);
     if !diagnostics.is_empty() {
-        return Err(ReadBackError::InvalidBody);
+        return Err(ConstructionError::ReadBackInvalidBody);
     }
     for _ in body.exprs(db).iter() {
-        charge_frozen_node(budget).map_err(ReadBackError::from)?;
+        charge_frozen_node(budget)?;
     }
     for _ in body.pats(db).iter() {
-        charge_frozen_node(budget).map_err(ReadBackError::from)?;
+        charge_frozen_node(budget)?;
     }
     for _ in body.stmts(db).iter() {
-        charge_frozen_node(budget).map_err(ReadBackError::from)?;
+        charge_frozen_node(budget)?;
     }
-    let owner = func.frozen_locator(db).ok_or(ReadBackError::MissingOwner)?;
+    let owner = func
+        .frozen_locator(db)
+        .ok_or(ConstructionError::ReadBackMissingOwner)?;
     let root = body.expr(db);
     let template = FrozenTemplateKey {
         owner,
@@ -171,21 +141,25 @@ pub(super) fn read_back_with_budget<'db>(
         source: FrozenTemplateSource::CheckedBody,
         span: root.span(body).resolve(db).map(|span| span.range.into()),
     };
+    charge_frozen_code_node(budget)?;
     let mut node = FrozenCodeNode::empty(Some(template));
     let mut local_uses = HashMap::new();
-    let freeze_variant = |site, ty, variant: hir::hir_def::EnumVariant<'db>| {
-        Ok::<_, ReadBackError>(FrozenQuoteConstructor {
-            func: Some(0),
+    let freeze_constructor = |site, ty, owner, variant_index| {
+        Ok::<_, ConstructionError>(FrozenQuoteConstructor::new(
+            QuoteMember::CheckedBody,
             site,
-            owner: frozen_quote_nominal_ref(
-                db,
-                hir::analysis::ty::adt_def::AdtRef::Enum(variant.enum_),
-            )
-            .map_err(ReadBackError::from)?,
-            variant_index: Some(variant.idx),
-            self_target: false,
-            type_arguments: Some(freeze_arguments(ty)?.ok_or(ReadBackError::UnsupportedType)?),
-        })
+            frozen_quote_nominal_ref(db, owner)?,
+            variant_index,
+            Some(freeze_arguments(ty)?.ok_or(ConstructionError::ReadBackUnsupportedType)?),
+        ))
+    };
+    let freeze_variant = |site, ty, variant: hir::hir_def::EnumVariant<'db>| {
+        freeze_constructor(
+            site,
+            ty,
+            hir::analysis::ty::adt_def::AdtRef::Enum(variant.enum_),
+            Some(variant.idx),
+        )
     };
     for (pat, _) in body.pats(db).iter() {
         if let Some(root) = typed.pattern_root(pat)
@@ -213,15 +187,12 @@ pub(super) fn read_back_with_budget<'db>(
                 hir::analysis::ty::adt_def::AdtRef::Struct(_)
             )
         {
-            node.rooted_constructors.push(FrozenQuoteConstructor {
-                func: Some(0),
-                site: FrozenQuoteConstructorSite::Pat(pat),
-                owner: frozen_quote_nominal_ref(db, adt.adt_ref(db))
-                    .map_err(ReadBackError::from)?,
-                variant_index: None,
-                self_target: false,
-                type_arguments: Some(freeze_arguments(*ty)?.ok_or(ReadBackError::UnsupportedType)?),
-            });
+            node.rooted_constructors.push(freeze_constructor(
+                FrozenQuoteConstructorSite::Pat(pat),
+                *ty,
+                adt.adt_ref(db),
+                None,
+            )?);
         }
     }
     let mut classified_paths = HashSet::new();
@@ -239,17 +210,20 @@ pub(super) fn read_back_with_budget<'db>(
                 classified_paths.insert(expr);
                 node.open_uses.push(FrozenQuoteOpenUse {
                     site: expr,
-                    index: u32::try_from(idx).map_err(|_| ReadBackError::UnsupportedName)?,
+                    index: u32::try_from(idx)
+                        .map_err(|_| ConstructionError::ReadBackUnsupportedName)?,
                 });
             }
             Some(LocalBinding::Local { pat, .. }) => {
                 classified_paths.insert(expr);
                 local_uses
                     .get_mut(&pat)
-                    .ok_or(ReadBackError::UnsupportedName)?
+                    .ok_or(ConstructionError::ReadBackUnsupportedName)?
                     .push(expr);
             }
-            Some(LocalBinding::EffectParam { .. }) => return Err(ReadBackError::Effectful),
+            Some(LocalBinding::EffectParam { .. }) => {
+                return Err(ConstructionError::ReadBackEffectful);
+            }
             None => {
                 if let Some(ValuePathRef::UnitVariant(variant)) = typed.value_path_ref(expr) {
                     node.rooted_constructors.push(freeze_variant(
@@ -266,27 +240,24 @@ pub(super) fn read_back_with_budget<'db>(
                 {
                     node.generic_uses.push(FrozenQuoteGenericUse {
                         site: expr,
-                        func: 0,
+                        member: QuoteMember::CheckedBody,
                         index: u32::from(index),
-                        where_predicate: None,
                     });
                     classified_paths.insert(expr);
                 } else if let Some(ConstRef::TraitConst(assoc)) = typed.expr_const_ref(expr) {
                     let inst = assoc.inst();
                     let TyData::TyBase(TyBase::Prim(receiver)) = inst.self_ty(db).data(db) else {
-                        return Err(ReadBackError::UnsupportedType);
+                        return Err(ConstructionError::ReadBackUnsupportedType);
                     };
                     if inst.args(db).len() != 1 {
-                        return Err(ReadBackError::UnsupportedType);
+                        return Err(ConstructionError::ReadBackUnsupportedType);
                     }
                     let trait_site = u32::try_from(node.rooted_traits.len())
-                        .map_err(|_| ReadBackError::UnsupportedName)?;
-                    node.rooted_traits.push(
-                        frozen_quote_trait(db, inst.key(db), trait_site)
-                            .map_err(ReadBackError::from)?,
-                    );
+                        .map_err(|_| ConstructionError::ReadBackUnsupportedName)?;
+                    node.rooted_traits
+                        .push(frozen_quote_trait(db, inst.key(db), trait_site)?);
                     node.qualified_consts.push(FrozenQuoteQualifiedConst {
-                        func: 0,
+                        member: QuoteMember::CheckedBody,
                         site: expr,
                         trait_site,
                         receiver: *receiver,
@@ -301,7 +272,7 @@ pub(super) fn read_back_with_budget<'db>(
         .iter()
         .filter_map(|(binder, _)| {
             local_uses.remove(&binder).map(|uses| FrozenQuoteLocal {
-                func: Some(0),
+                member: QuoteMember::CheckedBody,
                 binder,
                 uses,
             })
@@ -313,9 +284,9 @@ pub(super) fn read_back_with_budget<'db>(
             continue;
         };
         let ty = typed.pat_ty(db, *pat);
-        let ty = freeze_type(ty)?.ok_or(ReadBackError::UnsupportedType)?;
+        let ty = freeze_type(ty)?.ok_or(ConstructionError::ReadBackUnsupportedType)?;
         node.local_types.push(FrozenQuoteLocalType {
-            func: Some(0),
+            member: QuoteMember::CheckedBody,
             stmt,
             ty,
         });
@@ -330,7 +301,7 @@ pub(super) fn read_back_with_budget<'db>(
         };
         let callable = typed
             .callable_expr(expr)
-            .ok_or(ReadBackError::UnsupportedCall)?;
+            .ok_or(ConstructionError::ReadBackUnsupportedCall)?;
         if let CallableDef::VariantCtor(variant) = callable.callable_def {
             node.rooted_constructors.push(freeze_variant(
                 FrozenQuoteConstructorSite::Expr(*callee),
@@ -341,7 +312,7 @@ pub(super) fn read_back_with_budget<'db>(
             continue;
         }
         let CallableDef::Func(selected) = callable.callable_def else {
-            return Err(ReadBackError::UnsupportedCall);
+            return Err(ConstructionError::ReadBackUnsupportedCall);
         };
         let arguments = path.generic_args(db);
         let type_arguments = if arguments.is_given(db) {
@@ -353,32 +324,26 @@ pub(super) fn read_back_with_budget<'db>(
                     != GenericParamOwner::Func(selected).params(db).count()
                 || arguments.data(db).len() > callable.generic_args().len()
             {
-                return Err(ReadBackError::UnsupportedCall);
+                return Err(ConstructionError::ReadBackUnsupportedCall);
             }
             Some(
                 callable
                     .generic_args()
                     .iter()
                     .take(arguments.data(db).len())
-                    .map(|ty| freeze_type(*ty)?.ok_or(ReadBackError::UnsupportedType))
+                    .map(|ty| freeze_type(*ty)?.ok_or(ConstructionError::ReadBackUnsupportedType))
                     .collect::<Result<Vec<_>, _>>()?,
             )
         } else {
             None
         };
-        let scope = selected.scope();
-        let path = frozen_quote_item_path(db, scope).map_err(ReadBackError::from)?;
         node.rooted_funcs.push(FrozenQuoteFunction {
-            func: None,
-            assoc_const: None,
+            member: QuoteMember::CheckedBody,
             type_arguments,
             site: *callee,
-            where_predicate: None,
-            ingot: scope.ingot(db).base(db).clone(),
-            path,
             owner: selected
                 .frozen_locator(db)
-                .ok_or(ReadBackError::MissingOwner)?,
+                .ok_or(ConstructionError::ReadBackMissingOwner)?,
         });
         classified_paths.insert(*callee);
     }
@@ -387,28 +352,28 @@ pub(super) fn read_back_with_budget<'db>(
             Partial::Present(Expr::Cast(_, Partial::Present(_))) => {
                 let ty = typed.expr_ty(db, expr).base_ty(db);
                 let TyData::TyBase(TyBase::Prim(primitive)) = ty.data(db) else {
-                    return Err(ReadBackError::UnsupportedType);
+                    return Err(ConstructionError::ReadBackUnsupportedType);
                 };
                 node.cast_primitives.push((expr, *primitive));
             }
             Partial::Present(Expr::Path(_)) if !classified_paths.contains(&expr) => {
-                return Err(ReadBackError::UnsupportedName);
+                return Err(ConstructionError::ReadBackUnsupportedName);
             }
             Partial::Present(Expr::MethodCall(_, _, generic_args, _)) => {
                 if generic_args.is_given(db) {
-                    return Err(ReadBackError::UnsupportedCall);
+                    return Err(ConstructionError::ReadBackUnsupportedCall);
                 }
                 let callable = typed
                     .callable_expr(expr)
-                    .ok_or(ReadBackError::UnsupportedCall)?;
+                    .ok_or(ConstructionError::ReadBackUnsupportedCall)?;
                 let CallableDef::Func(selected) = callable.callable_def else {
-                    return Err(ReadBackError::UnsupportedCall);
+                    return Err(ConstructionError::ReadBackUnsupportedCall);
                 };
                 node.selected_methods.push((
                     expr,
                     selected
                         .frozen_locator(db)
-                        .ok_or(ReadBackError::MissingOwner)?,
+                        .ok_or(ConstructionError::ReadBackMissingOwner)?,
                 ));
             }
             Partial::Present(Expr::RecordInit(..)) => {
@@ -423,33 +388,27 @@ pub(super) fn read_back_with_budget<'db>(
                     continue;
                 }
                 if typed.record_init_lowering(expr) != Some(RecordInitLowering::Struct) {
-                    return Err(ReadBackError::UnsupportedName);
+                    return Err(ConstructionError::ReadBackUnsupportedName);
                 }
                 if let TyData::TyBase(TyBase::Adt(adt)) =
                     typed.expr_ty(db, expr).base_ty(db).data(db)
                 {
-                    node.rooted_constructors.push(FrozenQuoteConstructor {
-                        func: Some(0),
-                        site: FrozenQuoteConstructorSite::Expr(expr),
-                        owner: frozen_quote_nominal_ref(db, adt.adt_ref(db))
-                            .map_err(ReadBackError::from)?,
-                        variant_index: None,
-                        self_target: false,
-                        type_arguments: Some(
-                            freeze_arguments(typed.expr_ty(db, expr))?
-                                .ok_or(ReadBackError::UnsupportedType)?,
-                        ),
-                    });
+                    node.rooted_constructors.push(freeze_constructor(
+                        FrozenQuoteConstructorSite::Expr(expr),
+                        typed.expr_ty(db, expr),
+                        adt.adt_ref(db),
+                        None,
+                    )?);
                 }
-                let ty =
-                    freeze_type(typed.expr_ty(db, expr))?.ok_or(ReadBackError::UnsupportedType)?;
+                let ty = freeze_type(typed.expr_ty(db, expr))?
+                    .ok_or(ConstructionError::ReadBackUnsupportedType)?;
                 node.record_types.push((expr, ty));
             }
             _ => {}
         }
     }
     for _ in 0..node.metadata_nodes() {
-        charge_frozen_node(budget).map_err(ReadBackError::from)?;
+        charge_frozen_node(budget)?;
     }
     Ok(FrozenCode {
         root: 0,

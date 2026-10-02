@@ -504,6 +504,13 @@ pub(crate) fn resolve_type_path_definition<'db>(
     let mut parent_scope = None;
     for segment_idx in 0..path.len(db) {
         let segment = path.segment(db, segment_idx)?;
+        if let PathKind::BoundItem { item, .. } = segment.kind(db) {
+            if segment_idx + 1 == path.len(db) {
+                return Some(NameResKind::Scope(item));
+            }
+            parent_scope = Some(item);
+            continue;
+        }
         if segment_idx == 0
             && let PathKind::BoundIngot { ingot, .. } = segment.kind(db)
         {
@@ -1010,6 +1017,35 @@ fn resolve_segment<'db, F>(
 where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
+    if let PathKind::BoundItem { item, .. } = path.kind(db) {
+        let declaration = NameRes {
+            kind: NameResKind::Scope(item),
+            domain: NameDomain::TYPE | NameDomain::VALUE,
+            derivation: super::NameDerivation::Def,
+        };
+        let parent_ty = parent_res.as_ref().and_then(|parent| match parent {
+            PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => Some(*ty),
+            _ => None,
+        });
+        let result = resolve_name_res_unexpanded(
+            db,
+            &declaration,
+            parent_ty,
+            path,
+            scope,
+            assumptions,
+            minter,
+        )?;
+        observer(path, &result);
+        return Ok(normalize_computed_path(
+            db,
+            result,
+            scope,
+            assumptions,
+            minter,
+        ));
+    }
+
     if let PathKind::BoundIngot { ingot, .. } = path.kind(db) {
         if path.parent(db).is_some() {
             return Err(PathResError::parse_err(path));
