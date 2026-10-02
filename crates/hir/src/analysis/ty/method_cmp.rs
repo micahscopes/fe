@@ -25,13 +25,15 @@ use super::{
         GoalSatisfiability, PredicateListId, TraitSolveCx,
         constraint::collect_func_def_constraints, is_goal_satisfiable,
     },
-    ty_check::{ConstRef, check_anon_const_body},
+    ty_check::{ConstRef, PredicateKey, check_anon_const_body, comparable_const_predicate_key},
     ty_def::{InvalidCause, TyData, TyId},
     ty_lower::{CompleteSubst, ParamDomainId, ParamSchemaId, PartialSubst},
     unify::UnificationTable,
 };
 use crate::analysis::HirAnalysisDb;
-use crate::hir_def::{CallableDef, Expr, Partial, PathKind, scope_graph::ScopeId};
+use crate::hir_def::{
+    CallableDef, Expr, Func, Partial, PathKind, WhereClauseOwner, scope_graph::ScopeId,
+};
 use common::indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
@@ -96,6 +98,52 @@ pub(super) fn compare_impl_method<'db>(
     }
 
     compare_constraints(db, impl_m, trait_m, trait_inst, &param_subst, sink);
+    compare_const_predicates(db, impl_m, trait_m, &param_subst, sink);
+}
+
+fn method_const_predicate_keys<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> Option<Vec<PredicateKey<'db>>> {
+    let args = CallableDef::Func(func).params(db);
+    WhereClauseOwner::Func(func)
+        .where_clause(db)
+        .const_predicates(db)
+        .iter()
+        .map(|&body| comparable_const_predicate_key(db, body, func.scope(), args))
+        .collect()
+}
+
+fn compare_const_predicates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    impl_m: CallableDef<'db>,
+    trait_m: CallableDef<'db>,
+    param_subst: &CompleteSubst<'db>,
+    sink: &mut Vec<TyDiagCollection<'db>>,
+) -> bool {
+    let (CallableDef::Func(impl_func), CallableDef::Func(trait_func)) = (impl_m, trait_m) else {
+        return true;
+    };
+    let impl_keys = method_const_predicate_keys(db, impl_func);
+    let trait_keys = method_const_predicate_keys(db, trait_func)
+        .map(|keys| {
+            keys.into_iter()
+                .map(|key| super::subst::substitute_complete(db, key, param_subst))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .flatten();
+    let equal = match (impl_keys, trait_keys) {
+        (Some(impl_keys), Some(trait_keys)) => {
+            impl_keys.iter().all(|key| trait_keys.contains(key))
+                && trait_keys.iter().all(|key| impl_keys.contains(key))
+        }
+        _ => false,
+    };
+    if !equal {
+        sink.push(ImplDiag::MethodConstPredicateMismatch { impl_m, trait_m }.into());
+    }
+    equal
 }
 
 /// Checks if the number of generic parameters of the implemented method is the
@@ -1008,7 +1056,9 @@ fn classify_constraint_entailment(result: GoalSatisfiability<'_>) -> ConstraintE
         GoalSatisfiability::NeedsConfirmation { solutions, .. } if !solutions.is_empty() => {
             ConstraintEntailment::Proven
         }
-        GoalSatisfiability::NeedsConfirmation { .. } => ConstraintEntailment::Incomplete,
+        GoalSatisfiability::NeedsConfirmation { .. } | GoalSatisfiability::NormalizationFault => {
+            ConstraintEntailment::Incomplete
+        }
         GoalSatisfiability::UnSat(_) => ConstraintEntailment::Disproven,
     }
 }

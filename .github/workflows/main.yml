@@ -57,6 +57,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Validate release notes entry
         run: ./newsfragments/validate_files.py
+      - name: Guard trait proof search from const requirement discharge
+        run: python3 .github/check_trait_proof_boundary.py
+      - name: Guard designated core type recognition
+        run: python3 .github/check_core_item_identity.py
+      - name: Guard duplicate rendered diagnostics
+        run: python3 .github/check_rendered_diagnostics.py
+      - name: Guard direct trait solver setup budget
+        run: python3 .github/check_trait_solver_setup_budget.py
       - name: Lint with rustfmt
         run: cargo fmt --all -- --check
       - name: Lint with clippy

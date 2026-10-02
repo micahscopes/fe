@@ -1,0 +1,4 @@
+trait Value { const fn value() -> u256 { 41 } }
+struct Wrapped<const N: usize> {}
+impl<const N: usize> Value for Wrapped<N> where N > 0 {}
+const fn answer() -> u256 { <Wrapped<7> as Value>::value() }

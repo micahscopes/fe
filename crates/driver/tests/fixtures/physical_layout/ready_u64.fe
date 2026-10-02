@@ -1,0 +1,5 @@
+// expected-size: 18
+type Sample = u16
+struct Inner { code: u16, ready: u64 }
+struct Packet { tag: u8, inner: Inner, samples: [Sample; 3], tail: u8 }
+const fn observe() -> u256 { core::size_of<Packet>() }

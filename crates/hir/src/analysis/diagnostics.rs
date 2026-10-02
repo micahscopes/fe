@@ -16,7 +16,7 @@ use crate::analysis::{
             FuncBodyDiag, ImplDiag, MustUseSubject, TraitConstraintDiag, TraitLowerDiag,
             TyDiagCollection, TyLowerDiag,
         },
-        trait_def::TraitInstId,
+        trait_def::{TraitInstId, impl_display_name},
         ty_check::{EffectParamOwner, RecordLike},
         ty_def::{TyData, TyId, TyVarSort},
     },
@@ -28,7 +28,7 @@ use crate::{
 };
 use common::diagnostics::{
     CompleteDiagnostic, DiagnosticPass, GlobalErrorCode, LabelStyle, Severity, Span, SpanKind,
-    SubDiagnostic, cmp_complete_diagnostics,
+    SubDiagnostic,
 };
 use either::Either;
 use itertools::Itertools;
@@ -39,7 +39,9 @@ use common::file::File;
 
 fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId<'db>) -> String {
     match ty.data(db) {
-        TyData::TyVar(_) | TyData::TyParam(_) => ty.pretty_print(db).to_string(),
+        TyData::TyVar(_) | TyData::TyParam(_) | TyData::TypeFamily { .. } => {
+            ty.pretty_print(db).to_string()
+        }
         TyData::AssocTy(assoc_ty) => {
             let self_ty = pretty_print_ty_for_mismatch(db, assoc_ty.trait_.self_ty(db));
             format!(
@@ -66,10 +68,14 @@ fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId
                     .scope()
                     .pretty_path(db)
                     .unwrap_or_else(|| ty.pretty_print(db).to_string()),
+                TyBase::TypeFn(def) => def
+                    .scope()
+                    .pretty_path(db)
+                    .unwrap_or_else(|| ty.pretty_print(db).to_string()),
                 TyBase::Prim(_) | TyBase::Func(_) => ty.pretty_print(db).to_string(),
             }
         }
-        TyData::ConstTy(_) => ty.pretty_print(db).to_string(),
+        TyData::ConstTy(_) | TyData::ConstraintTerm(_) => ty.pretty_print(db).to_string(),
         TyData::Never => "!".to_string(),
         TyData::Invalid(cause) => format!("invalid({})", cause.pretty_print(db)),
     }
@@ -391,7 +397,7 @@ where
     let config = term::Config::default();
 
     let mut completes: Vec<_> = diags.into_iter().map(|diag| diag.to_complete(db)).collect();
-    completes.sort_by(cmp_complete_diagnostics);
+    common::diagnostics::sort_and_coalesce_complete_diagnostics(&mut completes);
 
     for diag in completes {
         term::emit(
@@ -543,6 +549,11 @@ impl DiagnosticVoucher for crate::AttrMisuseError {
                 1,
                 format!("unsupported `{attr}` attribute on {target}"),
                 format!("`{attr}` is only supported on {supported_targets}"),
+            ),
+            crate::AttrMisuseErrorKind::Unavailable => (
+                5,
+                format!("`{attr}` is not supported yet"),
+                "deriving implementations is not supported yet".to_string(),
             ),
             crate::AttrMisuseErrorKind::InvalidForm { expected_form } => (
                 2,
@@ -1130,6 +1141,69 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 )
             }
 
+            Self::NamedImplementationRequired {
+                primary,
+                member,
+                selection,
+                defined_at,
+            } => {
+                let member = member.data(db);
+                let selection = selection.data(db);
+                CompleteDiagnostic {
+                    severity,
+                    message: format!("`{member}` requires named implementation `{selection}`"),
+                    sub_diagnostics: vec![
+                        SubDiagnostic::new(
+                            LabelStyle::Primary,
+                            format!("`{member}` is not available through ordinary lookup"),
+                            primary.resolve(db),
+                        ),
+                        SubDiagnostic::new(
+                            LabelStyle::Secondary,
+                            format!("`{selection}` is defined here"),
+                            defined_at.resolve(db),
+                        ),
+                    ],
+                    notes: vec![format!(
+                        "hint: select it with `with ({selection}) {{ ... }}`; its prerequisites are checked when selected"
+                    )],
+                    error_code,
+                }
+            }
+
+            Self::NamedImplementationChoiceRequired {
+                primary,
+                member,
+                choices,
+            } => {
+                let member = member.data(db);
+                let mut sub_diagnostics = vec![SubDiagnostic::new(
+                    LabelStyle::Primary,
+                    format!("`{member}` is not available through ordinary lookup"),
+                    primary.resolve(db),
+                )];
+                let mut suggestions = Vec::new();
+                for (selection, defined_at) in choices {
+                    let selection = selection.data(db);
+                    sub_diagnostics.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("`{selection}` is defined here"),
+                        defined_at.resolve(db),
+                    ));
+                    suggestions.push(format!("`with ({selection}) {{ ... }}`"));
+                }
+                CompleteDiagnostic {
+                    severity,
+                    message: format!("`{member}` requires a named implementation choice"),
+                    sub_diagnostics,
+                    notes: vec![format!(
+                        "hint: select one with {}; its prerequisites are checked when selected",
+                        suggestions.join(" or ")
+                    )],
+                    error_code,
+                }
+            }
+
             Self::Invisible(prim_span, ident, span) => {
                 let ident = ident.data(db);
 
@@ -1264,6 +1338,7 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                     PathKind::Ident { ident, .. } => ident
                         .to_opt()
                         .map_or_else(|| segment.pretty_print(db), |id| id.data(db).to_owned()),
+                    PathKind::BoundIngot { display, .. } => display.data(db).clone(),
                     PathKind::QualifiedType { type_, trait_ } => {
                         let ty = type_.pretty_print(db);
                         let trait_name = trait_.pretty_print(db);
@@ -1400,6 +1475,16 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 )
             }
 
+            Self::AssociatedFamilyBinding { span, name } => primary_diag(
+                Severity::Error,
+                format!(
+                    "associated family binding `{}` requires a parameter-preserving form",
+                    name.data(db)
+                ),
+                "this binding syntax supports associated types without parameters",
+                span.resolve(db),
+                error_code,
+            ),
             Self::TraitConstHoleArg { span, ident } => primary_diag(
                 Severity::Error,
                 format!(
@@ -1692,6 +1777,27 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
     fn to_complete(&self, db: &dyn SpannedHirAnalysisDb) -> CompleteDiagnostic {
         let error_code = GlobalErrorCode::new(DiagnosticPass::TypeDefinition, self.local_code());
         match self {
+            Self::ConstEvalAtUse { use_span, fault } => {
+                let mut diagnostic = fault.to_complete(db);
+                if let Some(use_span) = use_span.resolve(db)
+                    && diagnostic.primary_span() != Some(use_span.clone())
+                {
+                    for label in &mut diagnostic.sub_diagnostics {
+                        if label.style == LabelStyle::Primary {
+                            label.style = LabelStyle::Secondary;
+                        }
+                    }
+                    diagnostic.sub_diagnostics.insert(
+                        0,
+                        SubDiagnostic::new(
+                            LabelStyle::Primary,
+                            "constant is evaluated here".to_string(),
+                            Some(use_span),
+                        ),
+                    );
+                }
+                diagnostic
+            }
             Self::ExpectedStarKind(span) => {
                 // find expected ty name, num of generic args, etc
                 primary_diag(
@@ -1866,6 +1972,14 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 Severity::Error,
                 "kind bound is not allowed",
                 "kind bound is not allowed here",
+                span.resolve(db),
+                error_code,
+            ),
+
+            Self::UnknownKindBound { span, name } => primary_diag(
+                Severity::Error,
+                "unknown kind marker",
+                &format!("`{name}` does not resolve to a kind marker"),
                 span.resolve(db),
                 error_code,
             ),
@@ -2651,6 +2765,55 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             ),
 
+            Self::AssociatedFamilyDeclaration { span, error } => {
+                use crate::analysis::ty::diagnostics::AssociatedFamilyError;
+                let message = match error {
+                    AssociatedFamilyError::ParameterCount { expected, given } => format!(
+                        "associated type parameter count mismatch: expected {expected}, given {given}"
+                    ),
+                    AssociatedFamilyError::ParameterKind { expected, given } => format!(
+                        "associated type parameter kind mismatch: expected {expected}, given {given}"
+                    ),
+                    AssociatedFamilyError::ParameterSort =>
+                        "associated type parameter sort does not match the declaration".into(),
+                    AssociatedFamilyError::ConstParameter =>
+                        "const associated type parameters are not supported".into(),
+                    AssociatedFamilyError::ImplementationBound =>
+                        "associated type implementation parameter bounds must be declared on the trait".into(),
+                    AssociatedFamilyError::UnknownMember =>
+                        "associated type is not declared by the trait".into(),
+                    AssociatedFamilyError::DuplicateParameter =>
+                        "duplicate associated type parameter".into(),
+                    AssociatedFamilyError::InvalidGuard =>
+                        "invalid associated type parameter guard".into(),
+                    AssociatedFamilyError::InvalidOutputBound =>
+                        "invalid associated type output bound".into(),
+                    AssociatedFamilyError::GuardedPartialApplication =>
+                        "guarded associated family must be fully applied".into(),
+                };
+                primary_diag(Severity::Error, &message, &message, span.resolve(db), error_code)
+            }
+            Self::ComputedTypeImplHeader(span) => primary_diag(
+                Severity::Error,
+                "computed types are not allowed in implementation headers",
+                "implement the trait on its structural type instead of a computed application",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::ComputedTypeDeclaration { span, reason } => primary_diag(
+                Severity::Error,
+                "invalid recursive type function declaration",
+                reason,
+                span.resolve(db),
+                error_code,
+            ),
+            Self::TypeNormalizationLimit(span) => primary_diag(
+                Severity::Error,
+                "type normalization limit exceeded",
+                "this type requires more nested reductions than supported",
+                span.resolve(db),
+                error_code,
+            ),
             Self::TypeLoweringCycle(span) => primary_diag(
                 Severity::Error,
                 "cycle detected while resolving this type",
@@ -3455,6 +3618,160 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 error_code,
             ),
 
+            Self::ObligationIntroduction { primary, reason } => primary_diag(
+                severity,
+                "trait evidence introduction failed",
+                *reason,
+                primary.resolve(db),
+                error_code,
+            ),
+            Self::ObligationOpening { primary, reason } => primary_diag(
+                severity,
+                "trait evidence opening failed",
+                *reason,
+                primary.resolve(db),
+                error_code,
+            ),
+            Self::UnknownNamedSelection {
+                primary,
+                name,
+                available,
+            } => {
+                let name = name.data(db);
+                let mut labels = vec![SubDiagnostic::new(
+                    LabelStyle::Primary,
+                    format!("`with ({name})` names no implementation here"),
+                    primary.resolve(db),
+                )];
+                for (alias, item) in available {
+                    labels.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("`{}` is defined here", alias.data(db)),
+                        item.span().selection_name().resolve(db),
+                    ));
+                }
+                let notes = closest_named_selection(name, available, db)
+                    .map(|suggestion| vec![format!("did you mean `{suggestion}`?")])
+                    .unwrap_or_default();
+                CompleteDiagnostic::new(
+                    severity,
+                    format!("no implementation named `{name}` in scope"),
+                    labels,
+                    notes,
+                    error_code,
+                )
+            }
+            Self::AmbiguousNamedSelection {
+                primary,
+                name,
+                candidates,
+            } => {
+                let name = name.data(db);
+                let mut candidates: Vec<_> = candidates
+                    .iter()
+                    .map(|&item| {
+                        let goal = item
+                            .trait_inst(db)
+                            .map(|goal| goal.pretty_print(db, true))
+                            .unwrap_or_else(|| "invalid implementation".to_string());
+                        (goal, item)
+                    })
+                    .collect();
+                candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+                let goals = candidates
+                    .iter()
+                    .map(|(goal, _)| format!("`{goal}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                let mut labels = vec![SubDiagnostic::new(
+                    LabelStyle::Primary,
+                    format!("`{name}` names more than one implementation: {goals}"),
+                    primary.resolve(db),
+                )];
+                for (goal, item) in candidates {
+                    labels.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("also names this implementation: `{goal}`"),
+                        item.span().selection_name().resolve(db),
+                    ));
+                }
+                CompleteDiagnostic::new(
+                    severity,
+                    format!("`{name}` is an ambiguous implementation name"),
+                    labels,
+                    vec!["give these implementations distinct `as Name` names".to_string()],
+                    error_code,
+                )
+            }
+            Self::NamedSelectionFailed {
+                primary,
+                name,
+                candidate,
+                reason,
+                unproved,
+            } => {
+                let name = name.data(db);
+                let reason = unproved.map_or_else(
+                    || reason.to_string(),
+                    |requirement| {
+                        format!("required `{}` is not proved", requirement.pretty_print(db, true))
+                    },
+                );
+                CompleteDiagnostic::new(
+                    severity,
+                    format!("cannot select implementation `{name}`"),
+                    vec![
+                        SubDiagnostic::new(LabelStyle::Primary, reason, primary.resolve(db)),
+                        SubDiagnostic::new(
+                            LabelStyle::Secondary,
+                            format!("implementation `{name}` is defined here"),
+                            candidate.span().selection_name().resolve(db),
+                        ),
+                    ],
+                    vec![],
+                    error_code,
+                )
+            }
+            Self::GoalSelectionFailed {
+                primary,
+                goal,
+                candidates,
+                reason,
+                unproved,
+            } => {
+                let reason = unproved.map_or_else(
+                    || reason.to_string(),
+                    |requirement| {
+                        format!("required `{}` is not proved", requirement.pretty_print(db, true))
+                    },
+                );
+                let mut labels = vec![SubDiagnostic::new(
+                    LabelStyle::Primary,
+                    reason,
+                    primary.resolve(db),
+                )];
+                for &candidate in candidates {
+                    labels.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!(
+                            "candidate `{}` is defined here",
+                            impl_display_name(db, candidate)
+                        ),
+                        candidate.span().trait_ref().resolve(db),
+                    ));
+                }
+                CompleteDiagnostic::new(
+                    severity,
+                    format!(
+                        "cannot select an unnamed implementation for `{}`",
+                        goal.pretty_print(db, true)
+                    ),
+                    labels,
+                    vec![],
+                    error_code,
+                )
+            }
+
             Self::RecordShapeAcquisition { primary, reason } => primary_diag(
                 severity,
                 "record shape acquisition is not permitted",
@@ -3514,8 +3831,7 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 let mut diag = primary_diag(
                     severity,
                     "const where predicates are not supported here yet",
-                    "not yet supported in traits, trait impls with generic parameters, \
-                     generic `impl` blocks, or items nested in generic items",
+                    "symbolic conditions on items nested in generic items are not supported yet",
                     span.resolve(db),
                     error_code,
                 );
@@ -4878,6 +5194,40 @@ impl DiagnosticVoucher for BodyDiag<'_> {
     }
 }
 
+fn closest_named_selection<'db>(
+    target: &str,
+    available: &[(crate::hir_def::IdentId<'db>, crate::hir_def::ImplTrait<'db>)],
+    db: &dyn SpannedHirAnalysisDb,
+) -> Option<String> {
+    let threshold = (target.chars().count() / 3).clamp(1, 3);
+    available
+        .iter()
+        .map(|(name, _)| name.data(db).to_string())
+        .filter(|name| name != target)
+        .map(|name| (edit_distance(target, &name), name))
+        .filter(|(distance, _)| *distance <= threshold)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, name)| name)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<_> = left.chars().collect();
+    let right: Vec<_> = right.chars().collect();
+    let mut previous: Vec<_> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_char) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.iter().enumerate() {
+            let substitution = usize::from(left_char != right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 impl DiagnosticVoucher for TraitLowerDiag<'_> {
     fn to_complete(&self, db: &dyn SpannedHirAnalysisDb) -> CompleteDiagnostic {
         let error_code =
@@ -5086,6 +5436,14 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
                     error_code,
                 }
             }
+
+            Self::NormalizationFault(span) => primary_diag(
+                severity,
+                "type or constant normalization failed during trait matching",
+                "a ground value needed to choose an implementation could not be normalized",
+                span.resolve(db),
+                error_code,
+            ),
 
             Self::InfiniteBoundRecursion(span, msg) => primary_diag(
                 severity,
@@ -5400,6 +5758,26 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                     error_code,
                 )
             }
+
+            Self::MethodConstPredicateMismatch { trait_m, impl_m } => CompleteDiagnostic {
+                severity,
+                message: "method has different const conditions than trait".to_string(),
+                sub_diagnostics: vec![
+                    SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: "implementation must use the trait method's const conditions"
+                            .to_string(),
+                        span: impl_m.name_span().resolve(db),
+                    },
+                    SubDiagnostic {
+                        style: LabelStyle::Secondary,
+                        message: "trait method declares these conditions".to_string(),
+                        span: trait_m.name_span().resolve(db),
+                    },
+                ],
+                notes: vec![],
+                error_code,
+            },
 
             Self::InvalidSelfType {
                 span,

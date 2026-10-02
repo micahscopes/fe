@@ -1,0 +1,21 @@
+pub trait T<A> {
+    type Out
+    fn f(_ a: A) -> Self::Out
+}
+pub struct X {}
+pub struct Wrap<P> {}
+impl T<u256> for X {
+    type Out = u256
+    fn f(_ a: u256) -> u256 { a + 1 }
+}
+// the trait parameter is a plain generic A (not fixed), as the C2C encoding needs
+impl<A: core::marker::Copy, P: T<A>> T<A> for Wrap<P> {
+    type Out = (<P as T<A>>::Out, A)
+    fn f(_ a: A) -> Self::Out { (P::f(a), a) }
+}
+pub fn use_it() -> (u256, u256) { <Wrap<X> as T<u256>>::f(4) }
+#[test]
+fn m3() {
+    let r = use_it()
+    assert!(r.0 == 5)
+}

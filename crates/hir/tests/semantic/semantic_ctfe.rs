@@ -33,6 +33,61 @@ fn semantic_ctfe_fixture(name: &str) -> (camino::Utf8PathBuf, String) {
     (path, text)
 }
 
+fn named_func<'db>(
+    db: &'db HirAnalysisTestDb,
+    top_mod: fe_hir::hir_def::TopLevelMod<'db>,
+    name: &str,
+) -> fe_hir::hir_def::Func<'db> {
+    top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .find(|func| func.name(db).to_opt().is_some_and(|id| id.data(db) == name))
+        .unwrap_or_else(|| panic!("missing function `{name}`"))
+}
+
+#[dir_test::dir_test(
+    dir: "$CARGO_MANIFEST_DIR/test_files/semantic_ctfe/impl_const_obligations",
+    glob: "*.fe"
+)]
+fn semantic_ctfe_checks_pending_impl_const_obligations(fixture: dir_test::Fixture<&str>) {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(fixture.path().into(), fixture.content());
+    let (top_mod, _) = db.top_mod(file);
+    let answer = named_func(&db, top_mod, "answer");
+    let (diags, _) = check_func_body(&db, answer);
+    let requirement_count = diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag,
+                FuncBodyDiag::Body(BodyDiag::ConstRequirementNotSatisfied { .. })
+            )
+        })
+        .count();
+    let result = eval_body_owner_const(
+        &db,
+        BodyOwner::Func(answer),
+        GenericSubst::for_body_owner(&db, BodyOwner::Func(answer), vec![]),
+    );
+    if fixture.path().ends_with("accepted.fe") {
+        assert_eq!(requirement_count, 0, "{diags:?}");
+        let EvalOutcome::Ready(value) = result else {
+            panic!("expected a ready const result: {result:?}");
+        };
+        assert_eq!(value.pretty_print(&db), "41");
+    } else {
+        assert_eq!(requirement_count, 1, "{diags:?}");
+        assert!(
+            matches!(
+                result,
+                EvalOutcome::Failed(EvalFailure::Ctfe(CtfeError::InvalidBody { .. }))
+            ),
+            "expected the unresolved impl condition to block CTFE: {result:?}"
+        );
+    }
+}
+
 /// Each fixture's `answer` borrows one of its own frame locals, possibly
 /// through a call, and evaluates to 42.
 #[dir_test::dir_test(
@@ -1033,6 +1088,7 @@ fn contract_init_fixed_array_arg_fixture_has_no_type_level_semantic_consts() {
             | ItemKind::Impl(_)
             | ItemKind::ImplTrait(_)
             | ItemKind::TypeAlias(_)
+            | ItemKind::TypeFn(_)
             | ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::TopMod(_)

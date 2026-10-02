@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/fixed_attr_invalid.fe
+---
+error[12-0001]: unsupported `#[fixed]` attribute on struct `WrongTarget`
+  ┌─ fixed_attr_invalid.fe:8:1
+  │
+8 │ #[fixed]
+  │ ^^^^^^^^ `#[fixed]` is only supported on traits
+
+error[12-0002]: invalid `#[fixed]` attribute form on trait `WrongForm`
+  ┌─ fixed_attr_invalid.fe:1:1
+  │
+1 │ #[fixed()]
+  │ ^^^^^^^^^^ expected `#[fixed]`
+
+error[12-0003]: duplicate `#[fixed]` attribute on trait `Duplicate`
+  ┌─ fixed_attr_invalid.fe:5:1
+  │
+5 │ #[fixed]
+  │ ^^^^^^^^ remove the extra `#[fixed]` attribute

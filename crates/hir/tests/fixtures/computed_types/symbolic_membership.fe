@@ -1,0 +1,28 @@
+
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+trait Reduce {}
+impl Reduce for Par {}
+impl Reduce for Pair {}
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}
+
+struct Reducer<S> where S: Reduce {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn LPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<F, LPow<F, {N - 1}>>
+    }
+}
+fn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {}
+
+fn reduce_lpow<F: Reduce, const N: usize>(x: Reducer<LPow<F, N>>) {}

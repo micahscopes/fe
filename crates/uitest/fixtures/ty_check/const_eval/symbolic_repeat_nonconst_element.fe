@@ -1,0 +1,8 @@
+fn runtime() -> u8 { 7 }
+
+struct Marker<const N: usize> {}
+impl<const N: usize> Marker<N> {
+    const VALUE: [u8; N] = [runtime(); N]
+}
+
+const EMPTY: [u8; 0] = [runtime(); 0]

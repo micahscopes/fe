@@ -1,0 +1,9 @@
+trait Family<M> { type Output }
+
+const fn left<T>() -> <T as Family<bool>>::Output
+    where T: Family<u256, Output=bool>, T: Family<bool, Output=u256>
+{ true }
+
+const fn right<T>() -> <T as Family<bool>>::Output
+    where T: Family<bool, Output=u256>, T: Family<u256, Output=bool>
+{ true }

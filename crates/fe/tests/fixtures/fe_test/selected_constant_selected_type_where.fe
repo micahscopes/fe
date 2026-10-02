@@ -1,0 +1,27 @@
+// expect selected=2
+trait Compute {
+    const OK: bool
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject {
+    const OK: bool = false
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Other {
+    const OK: bool = true
+    const fn compute() -> u256 { 2 }
+}
+struct Gate<T: Compute> where T::OK { value: T }
+const fn selected() -> u256 {
+    with (Other) {
+        let gate: Gate<Subject> = Gate<Subject> { value: Subject {} }
+        Subject::compute()
+    }
+}
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(selected() == 2)
+}

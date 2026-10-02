@@ -1,0 +1,19 @@
+---
+source: crates/parser/tests/syntax_node.rs
+expression: node
+input_file: test_files/syntax_node/exprs/no_space_shift.fe
+---
+Root@0..14
+  BinExpr@0..13
+    PathExpr@0..5
+      Path@0..5
+        PathSegment@0..5
+          Ident@0..5 "value"
+    LShift@5..7
+      Lt@5..6 "<"
+      Lt@6..7 "<"
+    PathExpr@7..13
+      Path@7..13
+        PathSegment@7..13
+          Ident@7..13 "amount"
+  Newline@13..14 "\n"

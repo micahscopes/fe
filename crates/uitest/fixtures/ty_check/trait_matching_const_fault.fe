@@ -1,0 +1,8 @@
+struct Slot<const N: usize> {}
+trait Assoc { type Out }
+struct Subject<const N: usize> {}
+impl<const N: usize> Assoc for Subject<N> {
+    type Out = Slot<{1 / (N - 1)}>
+}
+fn consume<T: Assoc<Out = Slot<0>>>(_value: T) {}
+fn trigger() { consume(_value: Subject<1> {}) }

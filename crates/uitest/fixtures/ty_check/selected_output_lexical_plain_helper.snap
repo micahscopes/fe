@@ -1,0 +1,11 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/selected_output_lexical_plain_helper.fe
+---
+error[8-0000]: type mismatch
+   ┌─ selected_output_lexical_plain_helper.fe:30:41
+   │
+30 │ const fn leak() -> bool { with (Flag) { plain() } }
+   │                                         ^^^^^^^ expected `bool`, but `u256` is given

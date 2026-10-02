@@ -1,0 +1,10 @@
+struct Node<T> {}
+
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Tree<{N - 1}>>
+    }
+}
+
+fn invalid_conversion(x: Tree<4096>) -> bool { x }

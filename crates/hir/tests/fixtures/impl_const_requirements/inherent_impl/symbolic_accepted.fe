@@ -1,0 +1,7 @@
+struct Window<const N: usize> { value: u256 }
+impl<const N: usize> Window<N> where N > 0 {
+    fn read(self) -> u256 { self.value }
+}
+fn forward<const M: usize>(value: Window<M>) -> u256 where M > 0 {
+    value.read()
+}

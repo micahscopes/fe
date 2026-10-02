@@ -1,0 +1,3 @@
+const fn observed() -> (u256, u256) {
+    (<packet::Packet as core::abi::AbiSize>::HEAD_SIZE, packet::offset_active())
+}

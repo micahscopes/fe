@@ -1,7 +1,9 @@
 mod callable;
 mod const_requirements;
 pub(crate) use const_requirements::check_declared_type_requirements;
+pub(crate) use const_requirements::selected_impl_requirements_hold;
 pub use const_requirements::{EvaluationStop, RequirementFailure};
+pub(crate) use const_requirements::{PredicateKey, comparable_const_predicate_key};
 mod contract;
 mod effect_env;
 pub(crate) mod env;
@@ -30,6 +32,7 @@ use crate::analysis::ty::trait_resolution::constraint::{
     PredicateSource, collect_func_decl_constraint_pairs, collect_func_decl_constraints,
 };
 use crate::analysis::ty::visitor::{TyVisitable, TyVisitor, walk_const_ty, walk_ty};
+use crate::hir_def::ItemKind;
 use crate::hir_def::{
     AssocConstBodyCheckPolicy, CallableDef, ConstGenericArgValue, ImplTrait, Trait,
 };
@@ -97,14 +100,14 @@ use super::{
     },
     unify::{InferenceKey, Snapshot, UnificationError, UnificationTable},
 };
-use crate::analysis::semantic::SemanticCodeRegionRef;
 use crate::analysis::semantic::{
-    BlockedInfo, ConstDependency, ConstUsePolicy, CtfeConfig, EffectProviderSubst, EvalOutcome,
-    GenericSubst, ImplEnv, RuntimeSizeError, SemConstId, SemConstScalar, SemConstValue, SemOrigin,
-    SemanticInstanceKey, const_computation_for_instance, describe_const_computation,
-    eval_body_owner_const, get_or_build_semantic_instance, reify_runtime_const_for_ty,
-    runtime_size_bytes_with_source,
+    BlockedInfo, ConstDependency, ConstUsePolicy, CtfeConfig, EffectProviderSubst, EvalFailure,
+    EvalOutcome, GenericSubst, ImplEnv, RuntimeSizeError, SemConstId, SemConstScalar,
+    SemConstValue, SemOrigin, SemanticInstanceKey, const_computation_for_instance,
+    describe_const_computation, eval_body_owner_const, get_or_build_semantic_instance,
+    reify_runtime_const_for_ty, runtime_size_bytes_with_source,
 };
+use crate::analysis::semantic::{CtfeError, SemanticCodeRegionRef};
 use crate::analysis::ty::ty_def::{TyBase, TyData};
 use crate::analysis::ty::{
     const_ty::{
@@ -828,16 +831,24 @@ pub(crate) fn check_where_const_predicates<'db>(
         }
         WhereClauseOwner::Struct(record) => Some(GenericParamOwner::Struct(record)),
         WhereClauseOwner::Enum(enum_) => Some(GenericParamOwner::Enum(enum_)),
+        WhereClauseOwner::Trait(trait_) => Some(GenericParamOwner::Trait(trait_)),
+        WhereClauseOwner::Impl(implementation) => Some(GenericParamOwner::Impl(implementation)),
+        WhereClauseOwner::ImplTrait(implementation) => {
+            Some(GenericParamOwner::ImplTrait(implementation))
+        }
         _ => None,
     };
-    // Inherent method parameter lists include their impl's generic parameters.
-    // Requirement substitution reconciles their owners. Other generic contexts remain
-    // unsupported, including trait methods and nested generic declarations.
-    let inherited_impl = match owner {
-        WhereClauseOwner::Func(func) => func
-            .scope()
-            .parent_item(db)
-            .filter(|item| matches!(item, crate::hir_def::ItemKind::Impl(_))),
+    // Associated method parameter lists include their parent's generic
+    // parameters. Requirement substitution reconciles the two owners.
+    let inherited_parent = match owner {
+        WhereClauseOwner::Func(func) => func.scope().parent_item(db).filter(|item| {
+            matches!(
+                item,
+                crate::hir_def::ItemKind::Impl(_)
+                    | crate::hir_def::ItemKind::ImplTrait(_)
+                    | crate::hir_def::ItemKind::Trait(_)
+            )
+        }),
         _ => None,
     };
     let mut item = Some(crate::hir_def::ItemKind::from(owner));
@@ -846,7 +857,10 @@ pub(crate) fn check_where_const_predicates<'db>(
             && !collect_generic_params(db, params).params(db).is_empty()
             && generic_declaration
                 .is_none_or(|declaration| current != crate::hir_def::ItemKind::from(declaration))
-            && Some(current) != inherited_impl
+            && Some(current) != inherited_parent
+            && predicates
+                .iter()
+                .any(|body| const_requirements::predicate_may_depend_on_params(db, *body))
         {
             diags.extend(
                 predicates.iter().map(|body| {
@@ -895,7 +909,15 @@ pub(super) fn condition_outcome<'db>(
     owner: BodyOwner<'db>,
     subst: GenericSubst<'db>,
 ) -> ConditionOutcome<'db> {
-    match eval_body_owner_const(db, owner, subst) {
+    condition_outcome_from_evaluation(db, owner, eval_body_owner_const(db, owner, subst))
+}
+
+fn condition_outcome_from_evaluation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+    outcome: EvalOutcome<'db, SemConstId<'db>>,
+) -> ConditionOutcome<'db> {
+    match outcome {
         EvalOutcome::Ready(value) => match static_assert_bool_value(db, value) {
             Some(true) => ConditionOutcome::True,
             Some(false) => ConditionOutcome::False,
@@ -1285,17 +1307,7 @@ pub fn check_const_value<'db>(
     const_body_ctfe_diags(db, body, const_.ty(db), ConstUsePolicy::RequireValue)
 }
 
-/// CTFE-validates an anonymous const body (a top-level `const` initializer or
-/// an inherent associated-const value). Mirrors the validation top-level
-/// consts get, so a body that type-checks but is not const-evaluable (e.g.
-/// `const C: u256 = ordinary_fn()`) is rejected here rather than only when
-/// referenced.
-///
-/// `AllowDependent` applies to consts on generic impls: their value
-/// (e.g. `256 / BITS`) is legitimately parametric and is fully evaluated per
-/// instantiation, so a dependent description is expected. A
-/// genuinely non-const body still yields `NotConstEvaluable` and is flagged
-/// regardless.
+/// Fully evaluates a top-level const initializer at declaration.
 pub(crate) fn const_body_ctfe_diags<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
@@ -1370,7 +1382,7 @@ fn const_body_ctfe_diags_with_context<'db>(
                 {
                     diags.push(diag.into());
                 }
-            } else if require_value {
+            } else {
                 let key = SemanticInstanceKey::new(
                     db,
                     owner,
@@ -1390,30 +1402,33 @@ fn const_body_ctfe_diags_with_context<'db>(
             }
         }
         EvalOutcome::Blocked(info) => {
-            if require_value {
-                let (primary, dependency) = blocked_const_detail(db, body, &info);
-                if let Some(context) = context {
-                    diags.push(
-                        BodyDiag::ConstEvaluationFailed {
-                            primary,
-                            const_name: context.const_name,
-                            origin: context.origin,
-                            reason: format!("requires unresolved {dependency}"),
-                        }
-                        .into(),
-                    );
-                } else {
-                    diags.push(
-                        BodyDiag::ConstDependencyMustBeKnown {
-                            primary,
-                            dependency,
-                        }
-                        .into(),
-                    );
-                }
+            let (primary, dependency) = blocked_const_detail(db, body, &info);
+            if let Some(context) = context {
+                diags.push(
+                    BodyDiag::ConstEvaluationFailed {
+                        primary,
+                        const_name: context.const_name,
+                        origin: context.origin,
+                        reason: format!("requires unresolved {dependency}"),
+                    }
+                    .into(),
+                );
+            } else {
+                diags.push(
+                    BodyDiag::ConstDependencyMustBeKnown {
+                        primary,
+                        dependency,
+                    }
+                    .into(),
+                );
             }
         }
         EvalOutcome::Failed(failure) => {
+            let associated_use = if context.is_none() {
+                demanded_associated_const_use_span(db, body, &failure)
+            } else {
+                None
+            };
             let cause = invalid_cause_from_eval_failure(db, owner, failure);
             if let Some(context) = context {
                 let reason = match &cause {
@@ -1468,12 +1483,78 @@ fn const_body_ctfe_diags_with_context<'db>(
                 );
             } else {
                 if let Some(diag) = TyId::invalid(db, cause).emit_diag(db, body.span().into()) {
+                    let diag = match (associated_use, diag) {
+                        (Some(use_span), TyDiagCollection::Ty(fault)) => {
+                            TyLowerDiag::ConstEvalAtUse {
+                                use_span,
+                                fault: Box::new(fault),
+                            }
+                            .into()
+                        }
+                        (_, diag) => diag,
+                    };
                     diags.push(diag.into());
                 }
             }
         }
     }
     diags
+}
+
+/// RD77: an execution fault belongs to the demand that reached an ordinary
+/// associated value. The callee trace identifies that use without changing
+/// diagnostics for unrelated top-level constants or const-where predicates.
+fn demanded_associated_const_use_span<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    failure: &EvalFailure<'db>,
+) -> Option<crate::span::DynLazySpan<'db>> {
+    let mut error: &CtfeError<'db> = match failure {
+        EvalFailure::Ctfe(error) => error,
+        _ => return None,
+    };
+    let mut caller = body;
+    while let CtfeError::CalleeError {
+        origin,
+        callee,
+        source,
+    } = error
+    {
+        let callee_body = callee.key(db).owner(db).body(db)?;
+        if ordinary_associated_const_body(db, callee_body) {
+            return Some(
+                origin_expr_for_const_eval_diag(db, caller, *origin)
+                    .span(caller)
+                    .into(),
+            );
+        }
+        caller = callee_body;
+        error = source.as_ref();
+    }
+    None
+}
+
+fn ordinary_associated_const_body<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -> bool {
+    let mut scope = body.scope();
+    let mut parent = scope.parent_item(db);
+    while let Some(ItemKind::Body(enclosing)) = parent {
+        scope = enclosing.scope();
+        parent = scope.parent_item(db);
+    }
+    match parent {
+        Some(ItemKind::Trait(owner)) => owner
+            .assoc_consts(db)
+            .any(|constant| constant.default_body(db) == Some(body)),
+        Some(ItemKind::ImplTrait(owner)) => owner.assoc_consts(db).any(|constant| {
+            constant.value_body(db) == Some(body)
+                && constant.body_check_policy(db)
+                    == crate::hir_def::AssocConstBodyCheckPolicy::BodyAnalysis
+        }),
+        Some(ItemKind::Impl(owner)) => owner
+            .assoc_consts(db)
+            .any(|constant| constant.value_body(db) == Some(body)),
+        _ => false,
+    }
 }
 
 fn blocked_const_detail<'db>(
@@ -1569,7 +1650,10 @@ fn typed_body_for_bodyless_func<'db>(
         assumptions,
         pat_ty: SecondaryMap::new(),
         expr_ty: SecondaryMap::new(),
+        pat_selections: SecondaryMap::new(),
+        expr_selections: SecondaryMap::new(),
         implicit_moves: FxHashSet::default(),
+        static_selection_exprs: FxHashSet::default(),
         const_refs: SecondaryMap::new(),
         value_path_refs: SecondaryMap::new(),
         semantic_expr_lowering: SecondaryMap::new(),
@@ -1583,6 +1667,7 @@ fn typed_body_for_bodyless_func<'db>(
         pattern_store: PatternStore::default(),
         pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
         for_loop_seq: SecondaryMap::new(),
+        pending_const_obligations: Vec::new(),
         expr_place: SecondaryMap::new(),
         expr_places: PrimaryMap::new(),
         path_applications: Vec::new(),
@@ -2183,6 +2268,15 @@ impl<'db> TyChecker<'db> {
                     .bound(bound_idx)
                     .trait_bound()
                     .into(),
+                GenericParamOwner::TypeFn(type_alias) => type_alias
+                    .span()
+                    .generic_params()
+                    .param(param_idx)
+                    .into_type_param()
+                    .bounds()
+                    .bound(bound_idx)
+                    .trait_bound()
+                    .into(),
                 GenericParamOwner::Impl(impl_) => impl_
                     .span()
                     .generic_params()
@@ -2217,6 +2311,14 @@ impl<'db> TyChecker<'db> {
                 bound_idx,
             } => match owner {
                 WhereClauseOwner::Func(func) => func
+                    .span()
+                    .where_clause()
+                    .predicate(pred_idx)
+                    .bounds()
+                    .bound(bound_idx)
+                    .trait_bound()
+                    .into(),
+                WhereClauseOwner::TypeFn(func) => func
                     .span()
                     .where_clause()
                     .predicate(pred_idx)
@@ -2270,6 +2372,18 @@ impl<'db> TyChecker<'db> {
 
     fn process_trait_obligation(
         &mut self,
+        obligation: env::TraitObligation<'db>,
+        final_pass: bool,
+    ) -> TraitObligationOutcome<'db> {
+        let previous = self.env.assumptions();
+        self.env.replace_assumptions(obligation.assumptions);
+        let outcome = self.process_trait_obligation_in_context(obligation, final_pass);
+        self.env.replace_assumptions(previous);
+        outcome
+    }
+
+    fn process_trait_obligation_in_context(
+        &mut self,
         mut obligation: env::TraitObligation<'db>,
         final_pass: bool,
     ) -> TraitObligationOutcome<'db> {
@@ -2301,6 +2415,52 @@ impl<'db> TyChecker<'db> {
         }
 
         let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+        if !obligation.selected_applications.is_empty() {
+            let requirements = PredicateListId::new(db, vec![goal]).extend_all_bounds(db);
+            let snapshot = self.table.snapshot();
+            let mut directly_selected = false;
+            for &required in requirements.list(db) {
+                let required = self.normalize_trait_goal(required);
+                let Some(selection) = obligation
+                    .selected_applications
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|selection| selection.matches(db, required))
+                else {
+                    continue;
+                };
+                // Selection must satisfy implied requirements too. Otherwise a
+                // child bound could hide an incompatible selected parent output.
+                // More specific evidence can satisfy a less specific request.
+                let compatible = self.table.unify(selection.goal(), required).is_ok();
+                let instantiated = required.fold_with(db, &mut self.table);
+                if compatible && selection.revalidate(db, solve_cx, instantiated).is_ok() {
+                    directly_selected |= required == goal;
+                    continue;
+                }
+                self.table.rollback_to(snapshot);
+                if !final_pass {
+                    return TraitObligationOutcome::Requeue(obligation);
+                }
+                self.push_diag(BodyDiag::ObligationOpening {
+                    primary: obligation.span,
+                    reason: "the selected application could not establish this complete trait goal",
+                });
+                return TraitObligationOutcome::Discharged;
+            }
+            if directly_selected {
+                return if goal.fold_with(db, &mut self.table) != goal {
+                    TraitObligationOutcome::Progressed
+                } else {
+                    TraitObligationOutcome::Discharged
+                };
+            }
+            // Selected parent equalities may have constrained the root goal,
+            // but proving those parents does not establish the root impl.
+            obligation.goal = self.normalize_trait_goal(goal);
+        }
+        let goal = obligation.goal;
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         match is_goal_query_satisfiable(db, solve_cx, &query) {
             GoalSatisfiability::Satisfied(solution) => {
@@ -2313,11 +2473,32 @@ impl<'db> TyChecker<'db> {
                     };
                     return outcome;
                 }
-                let solved = query.extract_solution(&mut self.table, solution).inst;
-                if self.has_dead_inference_keys(&solved) {
+                let solved = query.extract_solution(&mut self.table, solution);
+                if self.has_dead_inference_keys(&solved.inst) {
                     return TraitObligationOutcome::Discharged;
                 }
-                self.table.unify(goal, solved).unwrap();
+                self.table.unify(goal, solved.inst).unwrap();
+                let conditions = solved.impl_conditions.fold_with(db, &mut self.table);
+                if !final_pass
+                    && (conditions
+                        .instances(db)
+                        .iter()
+                        .any(|instance| instance.params(db).iter().any(|ty| ty.has_var(db)))
+                        || conditions
+                            .trait_goals(db)
+                            .iter()
+                            .any(|goal| goal.args(db).iter().any(|ty| ty.has_var(db))))
+                {
+                    return TraitObligationOutcome::Requeue(obligation);
+                }
+                for pending in const_requirements::selected_impl_condition_uses(
+                    db,
+                    conditions,
+                    scope,
+                    obligation.span.clone(),
+                ) {
+                    self.env.register_const_obligation(pending);
+                }
                 if self.normalize_trait_goal(goal) != goal {
                     TraitObligationOutcome::Progressed
                 } else {
@@ -2433,6 +2614,12 @@ impl<'db> TyChecker<'db> {
                 }
             }
             GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Discharged,
+            GoalSatisfiability::NormalizationFault => {
+                self.push_diag(TyDiagCollection::from(
+                    TraitConstraintDiag::NormalizationFault(obligation.span),
+                ));
+                TraitObligationOutcome::Discharged
+            }
         }
     }
 
@@ -2591,6 +2778,12 @@ impl<'db> TyChecker<'db> {
             let tasks = self.env.take_deferred_tasks();
             for task in tasks {
                 match task {
+                    task @ env::DeferredTask::TypeFormation { .. } => {
+                        self.env.requeue_task(task);
+                    }
+                    task @ env::DeferredTask::Const(_) => {
+                        self.env.requeue_task(task);
+                    }
                     env::DeferredTask::Obligation(obligation) => {
                         match self.process_trait_obligation(obligation, false) {
                             TraitObligationOutcome::Discharged => {}
@@ -2685,6 +2878,8 @@ impl<'db> TyChecker<'db> {
 
                                 if candidate.needs_confirmation {
                                     self.env.register_trait_obligation(env::TraitObligation {
+                                        selected_applications: self.env.selected_applications(),
+                                        assumptions: self.env.assumptions(),
                                         goal: inst,
                                         origin: env::TraitObligationOrigin::GenericConfirmation,
                                         span: call_span.clone().into(),
@@ -2721,7 +2916,10 @@ impl<'db> TyChecker<'db> {
                                 let ret_ty = self.normalize_ty(callable.ret_ty(db));
                                 match self.table.unify(expr_prop.ty, ret_ty) {
                                     Ok(()) => {}
-                                    Err(UnificationError::TypeMismatch) => {
+                                    Err(
+                                        UnificationError::TypeMismatch
+                                        | UnificationError::NormalizationFault,
+                                    ) => {
                                         self.push_diag(BodyDiag::TypeMismatch {
                                             span: pending.expr.span(body).into(),
                                             expected: expr_prop.ty,
@@ -2788,8 +2986,27 @@ impl<'db> TyChecker<'db> {
         // Emit diagnostics for remaining tasks.
         for task in self.env.take_deferred_tasks() {
             match task {
+                env::DeferredTask::TypeFormation {
+                    ty,
+                    assumptions,
+                    span,
+                } => {
+                    if self.has_dead_inference_keys(&ty) {
+                        continue;
+                    }
+                    let ty = ty.fold_with(db, &mut env::Prober::new(&mut self.table, scope));
+                    if !ty.has_invalid(db) && !ty.has_var(db) {
+                        let solve_cx = TraitSolveCx::new(db, scope);
+                        if let Some(diag) = ty.emit_wf_diag(db, solve_cx, assumptions, span) {
+                            self.push_diag(diag);
+                        }
+                    }
+                }
                 env::DeferredTask::Obligation(obligation) => {
                     let _ = self.process_trait_obligation(obligation, true);
+                }
+                task @ env::DeferredTask::Const(_) => {
+                    self.env.requeue_task(task);
                 }
                 env::DeferredTask::Method(pending) => {
                     let Some(expr_prop) = self.env.typed_expr(pending.expr) else {
@@ -3281,7 +3498,24 @@ impl<'db> TyChecker<'db> {
         span: LazyTySpan<'db>,
         star_kind_required: bool,
     ) -> TyId<'db> {
-        let ty = lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions());
+        let ty = if self.env.selections().next().is_none() {
+            lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions())
+        } else {
+            let lookup_assumptions = self.env.method_lookup_assumptions();
+            let minter = LoweringContext::new(HoleAnchor::TemplateTy {
+                ty: hir_ty,
+                scope: self.env.scope(),
+                assumptions: lookup_assumptions,
+            })
+            .with_selections(self.env.selected_applications(), self.env.assumptions());
+            super::ty_lower::lower_hir_ty_with_minter(
+                self.db,
+                hir_ty,
+                self.env.scope(),
+                lookup_assumptions,
+                &minter,
+            )
+        };
 
         // If lowering failed, try to produce precise diagnostics (e.g., path resolution errors)
         if ty.has_invalid(self.db) {
@@ -3527,7 +3761,7 @@ impl<'db> TyChecker<'db> {
                 }
             }
 
-            Err(UnificationError::TypeMismatch) => {
+            Err(UnificationError::TypeMismatch | UnificationError::NormalizationFault) => {
                 let actual = actual.fold_with(self.db, &mut self.table);
                 let expected = expected.fold_with(self.db, &mut self.table);
                 if !actual.has_invalid(self.db) && !expected.has_invalid(self.db) {
@@ -3573,7 +3807,7 @@ impl<'db> TyChecker<'db> {
             self.db,
             path,
             scope,
-            self.env.assumptions(),
+            self.env.method_lookup_assumptions(),
             resolve_tail_as_value,
             &mut observe_segment,
             minter,
@@ -3844,7 +4078,12 @@ mod typed_body_tables {
         pub(super) assumptions: PredicateListId<'db>,
         pub(super) pat_ty: SecondaryMap<PatId, Option<TyId<'db>>>,
         pub(super) expr_ty: SecondaryMap<ExprId, Option<ExprProp<'db>>>,
+        pub(super) pat_selections:
+            SecondaryMap<PatId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
+        pub(super) expr_selections:
+            SecondaryMap<ExprId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
         pub(super) implicit_moves: FxHashSet<ExprId>,
+        pub(super) static_selection_exprs: FxHashSet<ExprId>,
         pub(super) const_refs: SecondaryMap<ExprId, Option<ConstRef<'db>>>,
         pub(super) value_path_refs: SecondaryMap<ExprId, Option<ValuePathRef<'db>>>,
         pub(super) semantic_expr_lowering: SecondaryMap<ExprId, Option<SemanticExprLowering<'db>>>,
@@ -3862,6 +4101,7 @@ mod typed_body_tables {
         pub(super) pattern_status: SecondaryMap<PatId, PatternAnalysisStatus>,
         /// Resolved Seq trait methods for for-loops
         pub(super) for_loop_seq: SecondaryMap<StmtId, Option<ForLoopSeq<'db>>>,
+        pub(super) pending_const_obligations: Vec<const_requirements::PendingConstObligation<'db>>,
         pub(super) expr_place: SecondaryMap<ExprId, PackedOption<ExprPlaceId>>,
         pub(super) expr_places: PrimaryMap<ExprPlaceId, Place<'db>>,
         /// The constrained type applications that resolving the body's paths
@@ -4171,6 +4411,12 @@ impl<'db> TypedBody<'db> {
         for prop in self.tables.expr_ty.values().flatten() {
             prop.visit_with(visitor);
         }
+        for selections in self.tables.pat_selections.values().flatten() {
+            selections.visit_with(visitor);
+        }
+        for selections in self.tables.expr_selections.values().flatten() {
+            selections.visit_with(visitor);
+        }
         for cref in self.tables.const_refs.values().flatten() {
             cref.visit_with(visitor);
         }
@@ -4200,6 +4446,9 @@ impl<'db> TypedBody<'db> {
         for (_, ty) in &self.tables.path_applications {
             ty.visit_with(visitor);
         }
+        for obligation in &self.tables.pending_const_obligations {
+            obligation.visit_with(visitor);
+        }
     }
 }
 
@@ -4221,6 +4470,14 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
             .values_mut()
             .flatten()
             .for_each(|prop| *prop = prop.clone().fold_with(db, folder));
+        this.pat_selections
+            .values_mut()
+            .flatten()
+            .for_each(|selections| *selections = selections.clone().fold_with(db, folder));
+        this.expr_selections
+            .values_mut()
+            .flatten()
+            .for_each(|selections| *selections = selections.clone().fold_with(db, folder));
         this.const_refs
             .values_mut()
             .flatten()
@@ -4254,6 +4511,9 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
             .values_mut()
             .flatten()
             .for_each(|seq| *seq = seq.clone().fold_with(db, folder));
+        this.pending_const_obligations
+            .iter_mut()
+            .for_each(|obligation| *obligation = obligation.clone().fold_with(db, folder));
         this.expr_places
             .values_mut()
             .for_each(|place| *place = place.clone().fold_with(db, folder));
@@ -4556,6 +4816,10 @@ impl<'db> TypedBody<'db> {
 
     pub fn semantic_expr_lowering(&self, expr: ExprId) -> Option<&SemanticExprLowering<'db>> {
         self.tables.semantic_expr_lowering[expr].as_ref()
+    }
+
+    pub fn is_static_selection(&self, expr: ExprId) -> bool {
+        self.tables.static_selection_exprs.contains(&expr)
     }
 
     pub fn record_init_lowering(&self, expr: ExprId) -> Option<RecordInitLowering<'db>> {
@@ -5867,7 +6131,10 @@ impl<'db> TypedBody<'db> {
             assumptions: PredicateListId::empty_list(db),
             pat_ty: SecondaryMap::new(),
             expr_ty: SecondaryMap::new(),
+            pat_selections: SecondaryMap::new(),
+            expr_selections: SecondaryMap::new(),
             implicit_moves: FxHashSet::default(),
+            static_selection_exprs: FxHashSet::default(),
             const_refs: SecondaryMap::new(),
             value_path_refs: SecondaryMap::new(),
             semantic_expr_lowering: SecondaryMap::new(),
@@ -5881,6 +6148,7 @@ impl<'db> TypedBody<'db> {
             pattern_store: PatternStore::default(),
             pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
             for_loop_seq: SecondaryMap::new(),
+            pending_const_obligations: Vec::new(),
             expr_place: SecondaryMap::new(),
             expr_places: PrimaryMap::new(),
             path_applications: Vec::new(),

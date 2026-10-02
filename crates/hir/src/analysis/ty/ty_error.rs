@@ -121,6 +121,24 @@ fn collect_ty_lower_errors_in_mode<'db>(
     vis.diags
 }
 
+pub(crate) fn collect_generic_arg_errors<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    arg: &GenericArg<'db>,
+    span: LazyGenericArgSpan<'db>,
+    assumptions: PredicateListId<'db>,
+) -> Vec<TyDiagCollection<'db>> {
+    let mut visitor = HirTyErrVisitor {
+        db,
+        assumptions,
+        diags: Vec::new(),
+        const_bodies: super::const_ty::ConstBodyLowering::Eager,
+    };
+    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    visitor.visit_generic_arg(&mut ctxt, arg);
+    visitor.diags
+}
+
 struct HirTyErrVisitor<'db> {
     db: &'db dyn HirAnalysisDb,
     diags: Vec<TyDiagCollection<'db>>,
@@ -272,7 +290,41 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         // structure as a normal type. Const expressions inside types are validated via
         // const-ty lowering/evaluation, and walking their HIR representation as a type
         // produces spurious "expected type" diagnostics for paths like `SALT`.
-        if !ty.is_const_ty(self.db) {
+        if let TyData::ConstraintTerm(goal) = ty.data(self.db) {
+            // A goal's first argument is its subject, unlike a trait reference.
+            // Check the resolved declaration and visit the original arguments
+            // without resolving the goal spelling as an ordinary type path.
+            if let TypeKind::Path(path) = hir_ty.data(self.db)
+                && let Some(path) = path.to_opt()
+            {
+                let idx = path.segment_index(self.db);
+                if !crate::analysis::name_resolution::is_scope_visible_from(
+                    self.db,
+                    goal.def(self.db).scope(),
+                    ctxt.scope(),
+                ) {
+                    let span = ctxt
+                        .span()
+                        .unwrap()
+                        .into_path_type()
+                        .path()
+                        .segment(idx)
+                        .ident();
+                    self.diags.push(
+                        PathResDiag::Invisible(
+                            span.into(),
+                            path.ident(self.db).unwrap(),
+                            goal.def(self.db).scope().name_span(self.db),
+                        )
+                        .into(),
+                    );
+                }
+                ctxt.with_new_ctxt(
+                    |span| span.into_path_type().path().segment(idx).generic_args(),
+                    |ctxt| self.visit_generic_arg_list(ctxt, path.generic_args(self.db)),
+                );
+            }
+        } else if !ty.is_const_ty(self.db) {
             walk_type(self, ctxt, hir_ty);
         }
         let did_fild_child_err = self.diags.len() > before;
@@ -307,7 +359,11 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         let path_span = ctxt.span().unwrap();
 
         let mut invisible = None;
+        let mut type_uses = Vec::new();
         let mut check_visibility = |path: PathId<'db>, reso: &PathRes<'db>| {
+            if let PathRes::Ty(ty) | PathRes::TyAlias(_, ty) = reso {
+                type_uses.push((path, *ty));
+            }
             if invisible.is_some() {
                 return;
             }
@@ -337,6 +393,21 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                 return;
             }
         };
+
+        for (used_path, ty) in type_uses {
+            use super::trait_resolution::{TraitSolveCx, check_type_application_requirements};
+            let solve_cx = TraitSolveCx::new(self.db, scope).with_assumptions(self.assumptions);
+            if let Some(diag) = check_type_application_requirements(self.db, solve_cx, ty)
+                .into_diag(
+                    path_span
+                        .clone()
+                        .segment(used_path.segment_index(self.db))
+                        .into(),
+                )
+            {
+                self.diags.push(diag);
+            }
+        }
 
         if !matches!(res, PathRes::Ty(_) | PathRes::TyAlias(..)) {
             let ident = path.ident(self.db).unwrap();
@@ -668,6 +739,13 @@ pub(crate) fn diag_from_invalid_cause<'db>(
         }
 
         InvalidCause::TypeLoweringCycle => TyLowerDiag::TypeLoweringCycle(span).into(),
+        InvalidCause::TypeNormalizationLimit => TyLowerDiag::TypeNormalizationLimit(span).into(),
+        InvalidCause::ComputedTypeDefinitionInvalid => TyLowerDiag::ComputedTypeDeclaration {
+            span,
+            reason: "this application refers to an invalid recursive type function definition"
+                .into(),
+        }
+        .into(),
 
         InvalidCause::NotAType(_) => return None,
 

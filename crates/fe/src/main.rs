@@ -8,7 +8,6 @@ mod dependency_diagnostics;
 mod doc;
 #[cfg(feature = "doc-server")]
 mod doc_serve;
-mod generate;
 mod metadata_input;
 #[cfg(feature = "cranelift")]
 mod native;
@@ -155,8 +154,6 @@ impl OptimizeArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Generate a checked standalone scalar function from an explicit Fe provider.
-    Generate(generate::GenerateArgs),
     /// Compile Fe code.
     Build {
         /// Path to an ingot/workspace directory (containing fe.toml), a workspace member name, or a .fe file.
@@ -697,12 +694,6 @@ pub fn run(opts: &Options) {
                 *report_failed_only,
                 *recovery_mode,
             )
-        }
-        Command::Generate(args) => {
-            if let Err(error) = generate::generate(args) {
-                eprintln!("Error: {error}");
-                std::process::exit(1);
-            }
         }
         Command::Check {
             path,

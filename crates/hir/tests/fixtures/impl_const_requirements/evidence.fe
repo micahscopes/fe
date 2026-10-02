@@ -1,0 +1,10 @@
+trait Marker {}
+struct Wrapper<const N: usize> {}
+impl<const N: usize> Marker for Wrapper<N> where N > 0 {}
+struct Good { value: Wrapper<7> }
+struct Bad { value: Wrapper<0> }
+
+trait Lifted {}
+impl<T: Marker> Lifted for T {}
+trait Twice {}
+impl<T: Lifted> Twice for T {}

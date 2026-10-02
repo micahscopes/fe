@@ -1,0 +1,4 @@
+trait Output { type Item }
+struct Wrapped<const N: usize> {}
+impl<const N: usize> Output for Wrapped<N> where N > 0 { type Item = u256 }
+fn consume(_ value: <Wrapped<0> as Output>::Item) -> u256 { value }

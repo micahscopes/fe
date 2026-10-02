@@ -3,17 +3,23 @@ use crate::{
         HirAnalysisDb,
         ty::{
             const_ty::lexical_const_body_owner,
+            fold::{TyFoldable, TyFolder},
             subst::substitute_complete,
-            trait_def::TraitInstId,
-            trait_resolution::PredicateListId,
+            trait_def::{
+                ImplementorId, ResolvedMethodInstance, SelectedEvidenceError, SelectedImplEvidence,
+                TraitInstId, prove_selected_impl_evidence, resolve_trait_method_instance,
+                resolved_method_instance,
+            },
+            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
             ty_check::{BodyOwner, TypedBody, infer_body},
             ty_def::TyId,
             ty_lower::CompleteSubst,
         },
     },
-    hir_def::{CallableDef, GenericParamOwner, scope_graph::ScopeId},
+    hir_def::{CallableDef, GenericParamOwner, IdentId, scope_graph::ScopeId},
     semantic::ProviderBinding,
 };
+use salsa::plumbing::AsId;
 
 #[derive(Clone, Debug)]
 pub struct TypedBodyTemplate<'db> {
@@ -99,22 +105,210 @@ impl<'db> GenericSubst<'db> {
     }
 }
 
-#[salsa::interned]
+/// A selected application retains the context that established its premises.
+/// Every consumer rechecks both that context and its requested application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct SelectedApplication<'db> {
+    goal: TraitInstId<'db>,
+    candidate: ImplementorId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+}
+
+impl<'db> SelectedApplication<'db> {
+    pub fn from_evidence(evidence: &SelectedImplEvidence<'db>) -> Self {
+        Self {
+            goal: evidence.goal(),
+            candidate: evidence.selected(),
+            scope: evidence.context().scope(),
+            assumptions: evidence.context().assumptions(),
+        }
+    }
+
+    pub fn goal(self) -> TraitInstId<'db> {
+        self.goal
+    }
+    pub fn scope(self) -> ScopeId<'db> {
+        self.scope
+    }
+    pub fn assumptions(self) -> PredicateListId<'db> {
+        self.assumptions
+    }
+    pub fn origin(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> crate::analysis::ty::trait_def::ImplementorOrigin<'db> {
+        self.candidate.origin(db)
+    }
+
+    /// Matches the selection slot. Associated equalities still have to pass
+    /// `revalidate`; this comparison alone is not proof of a requested goal.
+    pub fn matches(self, db: &'db dyn HirAnalysisDb, goal: TraitInstId<'db>) -> bool {
+        self.goal.def(db) == goal.def(db) && self.goal.args(db) == goal.args(db)
+    }
+
+    pub fn revalidate(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        destination: TraitSolveCx<'db>,
+        goal: TraitInstId<'db>,
+    ) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
+        if !self.matches(db, goal) {
+            return Err(SelectedEvidenceError::NotProven);
+        }
+        prove_selected_impl_evidence(
+            db,
+            TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions),
+            self.candidate,
+            self.goal,
+        )?;
+        prove_selected_impl_evidence(db, destination, self.candidate, goal)
+    }
+}
+
+/// Resolve one trait method through the selected application in scope, or
+/// through ordinary lookup when no selection covers the goal. An invalid
+/// selection must never fall back to an unrelated ordinary implementation.
+pub fn resolve_trait_method_with_selections<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+    method: IdentId<'db>,
+    selections: &[SelectedApplication<'db>],
+) -> Result<Selection<ResolvedMethodInstance<'db>>, SelectedEvidenceError> {
+    if let Some(selection) = selections
+        .iter()
+        .rev()
+        .copied()
+        .find(|selection| selection.matches(db, goal))
+    {
+        let evidence = selection.revalidate(db, context, goal)?;
+        Ok(resolved_method_instance(
+            db,
+            context,
+            evidence.resolved_instance(),
+            method,
+        ))
+    } else {
+        Ok(resolve_trait_method_instance(db, context, goal, method))
+    }
+}
+
+impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for SelectedApplication<'db> {
+    fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
+        &self,
+        visitor: &mut V,
+    ) {
+        self.goal.visit_with(visitor);
+        self.assumptions.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for SelectedApplication<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        Self {
+            goal: self.goal.fold_with(db, folder),
+            assumptions: self.assumptions.fold_with(db, folder),
+            ..self
+        }
+    }
+}
+
+#[salsa::interned(constructor = new_with_selections)]
 #[derive(Debug)]
 pub struct ImplEnv<'db> {
     pub normalization_scope: ScopeId<'db>,
     pub assumptions: PredicateListId<'db>,
     #[return_ref]
     pub witnesses: Vec<TraitInstId<'db>>,
+    #[return_ref]
+    pub selections: Vec<SelectedApplication<'db>>,
 }
 
 impl<'db> ImplEnv<'db> {
+    pub fn new(
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+        witnesses: Vec<TraitInstId<'db>>,
+    ) -> Self {
+        Self::new_with_selections(db, scope, assumptions, witnesses, Vec::new())
+    }
+
+    pub fn with_selections(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        selections: Vec<SelectedApplication<'db>>,
+    ) -> Self {
+        if *self.selections(db) == selections {
+            return self;
+        }
+        let mut by_goal = common::indexmap::IndexMap::new();
+        for selection in selections {
+            let goal = selection.goal();
+            let key = TraitInstId::new(
+                db,
+                goal.def(db),
+                goal.args(db).clone(),
+                common::indexmap::IndexMap::new(),
+            );
+            by_goal.insert(key, selection);
+        }
+        let mut selections = by_goal.into_iter().collect::<Vec<_>>();
+        selections.sort_by_key(|(goal, _)| goal.as_id());
+        Self::new_with_selections(
+            db,
+            self.normalization_scope(db),
+            self.assumptions(db),
+            self.witnesses(db).clone(),
+            selections
+                .into_iter()
+                .map(|(_, selection)| selection)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn selection_for(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> Option<SelectedApplication<'db>> {
+        self.selections(db)
+            .iter()
+            .rev()
+            .copied()
+            .find(|selection| selection.matches(db, goal))
+    }
+
     pub fn empty(db: &'db dyn HirAnalysisDb, normalization_scope: ScopeId<'db>) -> Self {
         Self::new(
             db,
             normalization_scope,
             PredicateListId::empty_list(db),
             Vec::new(),
+        )
+    }
+}
+
+impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for ImplEnv<'db> {
+    fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
+        &self,
+        visitor: &mut V,
+    ) {
+        self.assumptions(visitor.db()).visit_with(visitor);
+        self.witnesses(visitor.db()).visit_with(visitor);
+        self.selections(visitor.db()).visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for ImplEnv<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        Self::new_with_selections(
+            db,
+            self.normalization_scope(db),
+            self.assumptions(db).fold_with(db, folder),
+            self.witnesses(db).clone().fold_with(db, folder),
+            self.selections(db).clone().fold_with(db, folder),
         )
     }
 }

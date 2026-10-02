@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use parser::TextRange;
@@ -65,6 +66,84 @@ pub fn cmp_complete_diagnostics(
         }
         ord => ord,
     }
+}
+
+/// Present one error per code and primary source span while retaining every
+/// distinct reason, secondary label, and note from contributing checks.
+pub fn sort_and_coalesce_complete_diagnostics(diags: &mut Vec<CompleteDiagnostic>) {
+    fn display_key_span(code: &GlobalErrorCode, span: Span) -> Span {
+        if code.pass == DiagnosticPass::Parse {
+            Span {
+                file: span.file,
+                range: TextRange::new(span.range.start(), span.range.start()),
+                kind: SpanKind::Original,
+            }
+        } else {
+            span
+        }
+    }
+
+    diags.sort_by(cmp_complete_diagnostics);
+    let mut positions: HashMap<(Severity, GlobalErrorCode, Span), usize> = HashMap::new();
+    let mut result: Vec<CompleteDiagnostic> = Vec::with_capacity(diags.len());
+
+    for diag in diags.drain(..) {
+        let key = diag.primary_span().map(|span| {
+            (
+                diag.severity,
+                diag.error_code.clone(),
+                display_key_span(&diag.error_code, span),
+            )
+        });
+        if let Some(&index) = key.as_ref().and_then(|key| positions.get(key)) {
+            let prior = &mut result[index];
+            if *prior == diag {
+                continue;
+            }
+            if prior.message != diag.message && !prior.notes.contains(&diag.message) {
+                prior.notes.push(diag.message);
+            }
+            for sub in diag.sub_diagnostics {
+                if sub.is_primary()
+                    && prior.sub_diagnostics.iter().any(|existing| {
+                        existing.is_primary()
+                            && existing
+                                .span
+                                .clone()
+                                .map(|span| display_key_span(&diag.error_code, span))
+                                == sub
+                                    .span
+                                    .clone()
+                                    .map(|span| display_key_span(&diag.error_code, span))
+                    })
+                {
+                    if !sub.message.is_empty()
+                        && !prior
+                            .sub_diagnostics
+                            .iter()
+                            .any(|existing| existing.message == sub.message)
+                        && !prior.notes.contains(&sub.message)
+                    {
+                        prior.notes.push(sub.message);
+                    }
+                } else if !prior.sub_diagnostics.contains(&sub) {
+                    prior.sub_diagnostics.push(sub);
+                }
+            }
+            for note in diag.notes {
+                if !prior.notes.contains(&note) {
+                    prior.notes.push(note);
+                }
+            }
+        } else {
+            if let Some(key) = key {
+                positions.insert(key, result.len());
+            }
+            result.push(diag);
+        }
+    }
+
+    *diags = result;
 }
 
 pub fn trim_trailing_line_whitespace(text: &str) -> String {

@@ -1,0 +1,5 @@
+<fixture>: error[8-0000]: type mismatch
+   ┌─ invalid_unused_expression.fe:19:1
+   │
+19 │ #[generate(make)]
+   │ ^^^^^^^^^^^^^^^^^ expected `u256`, but `bool` is given

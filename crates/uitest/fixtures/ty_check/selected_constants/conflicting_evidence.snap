@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/selected_constants/conflicting_evidence.fe
+---
+error[8-0097]: trait evidence opening failed
+   ┌─ conflicting_evidence.fe:10:16
+   │
+10 │     with (Alt, e) { <Subject as Compute>::compute() * 100 + helper<Subject>() }
+   │                ^ evidence and a named selection cannot choose the same trait goal

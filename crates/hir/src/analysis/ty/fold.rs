@@ -6,7 +6,7 @@ use common::indexmap::{IndexMap, IndexSet};
 
 use super::{
     trait_def::{ImplementorId, TraitInstId, TraitRefId},
-    trait_resolution::{PredicateListId, TraitGoalSolution, TraitSolverQuery},
+    trait_resolution::{ImplConditionsId, PredicateListId, TraitGoalSolution, TraitSolverQuery},
     ty_check::{EffectArg, ExprProp, LocalBinding, ResolvedEffectArg},
     ty_def::{TyData, TyId},
     visitor::TyVisitable,
@@ -126,6 +126,7 @@ impl<'db> TyFoldable<'db> for TyId<'db> {
                         const_def,
                         capture,
                         policy,
+                        impl_env,
                     } => {
                         let ty = ty.map(|t| folder.fold_ty(db, t));
                         let capture = folder.fold_const_capture(db, capture);
@@ -136,6 +137,7 @@ impl<'db> TyFoldable<'db> for TyId<'db> {
                             const_def: *const_def,
                             capture,
                             policy: *policy,
+                            impl_env: impl_env.map(|env| env.fold_with(db, folder)),
                         }
                     }
                 };
@@ -144,10 +146,20 @@ impl<'db> TyFoldable<'db> for TyId<'db> {
                 TyId::const_ty(db, const_ty)
             }
 
+            TypeFamily { owner, args, body } => {
+                let args = args.iter().map(|arg| arg.fold_with(db, folder)).collect();
+                let body = body.fold_with(db, folder);
+                TyId::type_family_with_args(db, *owner, args, body)
+            }
             AssocTy(assoc) => {
                 let folded_trait = assoc.trait_.fold_with(db, folder);
 
                 TyId::assoc_ty(db, folded_trait, assoc.name)
+            }
+
+            ConstraintTerm(trait_inst) => {
+                let goal = trait_inst.fold_with(db, folder);
+                TyId::new(db, ConstraintTerm(goal))
             }
 
             QualifiedTy(trait_inst) => {
@@ -276,7 +288,8 @@ impl<'db> TyFoldable<'db> for SemanticInstanceKey<'db> {
                 folder.fold_scope(env.normalization_scope(db)),
                 env.assumptions(db).fold_with(db, folder),
                 env.witnesses(db).clone().fold_with(db, folder),
-            ),
+            )
+            .with_selections(db, env.selections(db).clone().fold_with(db, folder)),
         )
     }
 }
@@ -484,7 +497,27 @@ impl<'db> TyFoldable<'db> for TraitGoalSolution<'db> {
         Self {
             inst: self.inst.fold_with(db, folder),
             implementor: self.implementor.fold_with(db, folder),
+            impl_conditions: self.impl_conditions.fold_with(db, folder),
         }
+    }
+}
+
+impl<'db> TyFoldable<'db> for ImplConditionsId<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self::new(
+            db,
+            self.instances(db)
+                .iter()
+                .map(|&instance| instance.fold_with(db, folder))
+                .collect::<Vec<_>>(),
+            self.trait_goals(db)
+                .iter()
+                .map(|&goal| goal.fold_with(db, folder))
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -610,4 +643,44 @@ impl<'db> TyFoldable<'db> for ResolvedEffectArg<'db> {
             provider: self.provider,
         }
     }
+}
+
+/// Returns true if `needle` occurs anywhere within `haystack`.
+pub(super) fn ty_contains<'db>(
+    db: &'db dyn HirAnalysisDb,
+    haystack: TyId<'db>,
+    needle: TyId<'db>,
+) -> bool {
+    use super::visitor::{TyVisitor, walk_ty};
+
+    struct ContainsVisitor<'db> {
+        db: &'db dyn HirAnalysisDb,
+        needle: TyId<'db>,
+        found: bool,
+    }
+
+    impl<'db> TyVisitor<'db> for ContainsVisitor<'db> {
+        fn db(&self) -> &'db dyn HirAnalysisDb {
+            self.db
+        }
+
+        fn visit_ty(&mut self, ty: TyId<'db>) {
+            if self.found {
+                return;
+            }
+            if ty == self.needle {
+                self.found = true;
+                return;
+            }
+            walk_ty(self, ty);
+        }
+    }
+
+    let mut visitor = ContainsVisitor {
+        db,
+        needle,
+        found: false,
+    };
+    haystack.visit_with(&mut visitor);
+    visitor.found
 }

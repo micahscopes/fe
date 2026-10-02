@@ -104,7 +104,7 @@ fn named<'db>(db: &'db DriverDataBase, file: File, name: &str) -> Func<'db> {
 }
 
 fn evaluate(db: &DriverDataBase, file: File) -> String {
-    (match eval_body_owner_const_with_args(
+    eval_body_owner_const_with_args(
         db,
         BodyOwner::Func(named(db, file, "run")),
         hir::analysis::semantic::GenericSubst::for_body_owner(
@@ -113,10 +113,8 @@ fn evaluate(db: &DriverDataBase, file: File) -> String {
             Vec::new(),
         ),
         Vec::new(),
-    ) {
-        hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-        outcome => Err(outcome),
-    })
+    )
+    .into_ready()
     .expect("checked consumer evaluates")
     .pretty_print(db)
 }

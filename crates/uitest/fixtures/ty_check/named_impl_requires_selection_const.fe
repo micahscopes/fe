@@ -1,0 +1,10 @@
+trait Compute {
+    const ID: u256
+    const fn compute() -> u256
+}
+struct Subject {}
+impl Compute for Subject as Only {
+    const ID: u256 = 2
+    const fn compute() -> u256 { 2 }
+}
+const fn ordinary() -> u256 { Subject::ID }

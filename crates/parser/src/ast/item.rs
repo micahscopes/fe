@@ -1,6 +1,6 @@
 use rowan::ast::{AstNode, support};
 
-use super::{TraitRef, TupleType, TypeBoundList, ast_node, use_tree::UsePath};
+use super::{KindBound, TraitRef, TupleType, TypeBoundList, ast_node, use_tree::UsePath};
 use crate::{FeLang, SyntaxKind as SK, SyntaxToken};
 
 ast_node! {
@@ -42,6 +42,7 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Msg))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Enum))
             .or_else(|| support::child(self.syntax()).map(ItemKind::TypeAlias))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::RecursiveTypeFn))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Impl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
@@ -311,6 +312,129 @@ impl TypeAlias {
 }
 
 ast_node! {
+    /// `recursive type fn Name<..>() -> (KIND) where .. { match N { .. } }`
+    pub struct RecursiveTypeFn,
+    SK::RecursiveTypeFn,
+}
+impl super::GenericParamsOwner for RecursiveTypeFn {}
+impl super::WhereClauseOwner for RecursiveTypeFn {}
+impl super::AttrListOwner for RecursiveTypeFn {}
+impl super::ItemModifierOwner for RecursiveTypeFn {}
+impl RecursiveTypeFn {
+    /// Returns the name of the recursive type fn.
+    /// `RPow` in `recursive type fn RPow<F, const N: usize>() -> ..`.
+    ///
+    /// The node carries two `Ident` tokens: the contextual `recursive` keyword
+    /// and the name. The name is the `Ident` that follows the `fn` keyword.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        let mut seen_fn = false;
+        for elem in self.syntax().children_with_tokens() {
+            if let Some(tok) = elem.as_token() {
+                match tok.kind() {
+                    SK::FnKw => seen_fn = true,
+                    SK::Ident if seen_fn => return Some(tok.clone()),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the declared return kind, `(* -> *)` in the sketch.
+    pub fn ret_kind(&self) -> Option<TypeFnRetKind> {
+        support::child(self.syntax())
+    }
+
+    /// Returns the body: `{ match N { .. } }`.
+    pub fn body(&self) -> Option<TypeFnBody> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `(* -> *)` return kind of a recursive type fn.
+    pub struct TypeFnRetKind,
+    SK::TypeFnRetKind,
+}
+impl TypeFnRetKind {
+    /// Returns the kind bound wrapped by the `(..)` return kind, e.g. the
+    /// `* -> *` in `-> (* -> *)`.
+    pub fn kind_bound(&self) -> Option<KindBound> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `{ match N { .. } }` body of a recursive type fn.
+    pub struct TypeFnBody,
+    SK::TypeFnBody,
+}
+impl TypeFnBody {
+    /// Returns the single `match` that forms the body.
+    pub fn match_(&self) -> Option<TypeFnMatch> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `match N { .. }` inside a recursive type fn body.
+    pub struct TypeFnMatch,
+    SK::TypeFnMatch,
+}
+impl TypeFnMatch {
+    /// Returns the subject identifier (`N`).
+    pub fn subject(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
+
+    /// Returns the arm list.
+    pub fn arms(&self) -> Option<TypeFnArmList> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `{ <arm>* }` arm list of a recursive type fn match.
+    pub struct TypeFnArmList,
+    SK::TypeFnArmList,
+    IntoIterator<Item=TypeFnArm>
+}
+
+ast_node! {
+    /// `<pat> => <type>` a single recursive type fn arm.
+    pub struct TypeFnArm,
+    SK::TypeFnArm,
+}
+impl TypeFnArm {
+    /// Returns the arm pattern (`Int` or `_`).
+    pub fn pat(&self) -> Option<TypeFnArmPat> {
+        support::child(self.syntax())
+    }
+
+    /// Returns the arm's right-hand side type.
+    pub fn ty(&self) -> Option<super::Type> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `Int` or `_` recursive type fn arm pattern.
+    pub struct TypeFnArmPat,
+    SK::TypeFnArmPat,
+}
+impl TypeFnArmPat {
+    /// Returns the integer literal token, when this arm pattern is `Int`.
+    pub fn int_token(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Int)
+    }
+
+    /// Returns the `_` token, when this arm pattern is the wildcard.
+    pub fn underscore_token(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Underscore)
+    }
+}
+
+ast_node! {
     /// `trait Foo<..> where .. { .. }`
     pub struct Trait,
     SK::Trait,
@@ -355,6 +479,7 @@ ast_node! {
     SK::TraitTypeItem,
 }
 impl super::AttrListOwner for TraitTypeItem {}
+impl super::GenericParamsOwner for TraitTypeItem {}
 impl TraitTypeItem {
     /// Returns the name of the associated type
     pub fn name(&self) -> Option<SyntaxToken> {
@@ -473,6 +598,11 @@ impl super::GenericParamsOwner for ImplTrait {}
 impl super::WhereClauseOwner for ImplTrait {}
 impl super::AttrListOwner for ImplTrait {}
 impl ImplTrait {
+    /// A named alternative, introduced by `as Name` after the subject type.
+    pub fn selection_name(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
+
     /// Returns the trait of the impl.
     /// `Foo` in `impl<T> Foo for Bar<T> { .. }`
     pub fn trait_ref(&self) -> Option<TraitRef> {
@@ -764,6 +894,7 @@ pub enum ItemKind {
     Msg(Msg),
     Enum(Enum),
     TypeAlias(TypeAlias),
+    RecursiveTypeFn(RecursiveTypeFn),
     Impl(Impl),
     Trait(Trait),
     ImplTrait(ImplTrait),

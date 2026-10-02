@@ -1,0 +1,9 @@
+#[fixed()]
+trait WrongForm {}
+
+#[fixed]
+#[fixed]
+trait Duplicate {}
+
+#[fixed]
+struct WrongTarget {}

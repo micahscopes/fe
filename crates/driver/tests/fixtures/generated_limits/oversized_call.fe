@@ -1,0 +1,29 @@
+use core::meta::{Record, field, field_type, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition, FunctionCall, CallArgument}
+mod support {
+    pub const fn quad<T: Copy>(first_argument_abcdefghij: T, second_argument_abcdefghij: T, third_argument_abcdefghij: T, fourth_argument_abcdefghij: T) -> T {
+        first_argument_abcdefghij
+    }
+}
+const fn generate(_ record: Record) -> FunctionDefinition<1, 512> {
+    let f = field(record, 0)
+    let call = BodyExpr::Call(FunctionCall {
+        path: "ingot::support::quad",
+        types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None],
+        arguments: [
+            Option::Some(CallArgument { label: Option::Some("first_argument_abcdefghij"), expression: 1 }),
+            Option::Some(CallArgument { label: Option::Some("second_argument_abcdefghij"), expression: 1 }),
+            Option::Some(CallArgument { label: Option::Some("third_argument_abcdefghij"), expression: 1 }),
+            Option::Some(CallArgument { label: Option::Some("fourth_argument_abcdefghij"), expression: 1 }),
+        ],
+    })
+    let mut expressions: [BodyExpr; 512] = [call; 512]
+    expressions[0] = BodyExpr::Parameter(0)
+    expressions[1] = BodyExpr::Field(0, f)
+    FunctionDefinition {
+        name: DeclarationName::Literal("oversized"), public: true, const_function: true,
+        parameters: [DeclarationType::Record(record)], return_type: DeclarationType::Field(field_type(f)),
+        expressions, result: 511,
+    }
+}
+#[generate(generate)]
+struct RecordValue { value: u64 }

@@ -1,0 +1,1 @@
+Associated type normalization checks every trait argument when using contextual equalities. An equality for one application can no longer supply the output type of another application with the same subject.

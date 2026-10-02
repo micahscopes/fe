@@ -1,0 +1,21 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/named_impl_requires_selection_const.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/named_impl_requires_selection_const.fe
+
+error[2-0022]: `ID` requires named implementation `Only`
+  ┌─ named_impl_requires_selection_const.fe:6:40
+  │
+3 │ impl Compute for Subject as Only {
+  │                             ---- `Only` is defined here
+  ·
+6 │ const fn ordinary() -> u256 { Subject::ID }
+  │                                        ^^ `ID` is not available through ordinary lookup
+  │
+  = hint: select it with `with (Only) { ... }`; its prerequisites are checked when selected
+
+
+=== EXIT CODE: 1 ===

@@ -52,6 +52,11 @@ module.exports = grammar({
     [$.where_clause],
     [$.qualified_path_type, $.qualified_path_expression],
     [$.tuple_type, $.tuple_expression],
+    [$.where_const_predicate, $.path_segment],
+    [$.kind_bound, $.path_segment],
+    [$.where_const_predicate, $._expression],
+    [$.where_const_predicate, $._expression, $._path],
+    [$.where_const_predicate, $._expression, $._path, $.path_segment],
     // Self type vs self path segment vs expression
     [$.self_type, $.path_segment],
     [$.self_type, $._expression, $.path_segment],
@@ -459,6 +464,7 @@ module.exports = grammar({
       field('trait', $.trait_ref),
       'for',
       field('type', $._type),
+      optional(seq('as', field('name', $.identifier))),
       optional($.where_clause),
       field('body', $.trait_item_list),
     ),
@@ -539,6 +545,7 @@ module.exports = grammar({
     kind_bound: $ => prec.right(choice(
       seq('*', optional(seq('->', $.kind_bound))),
       seq('(', $.kind_bound, ')', optional(seq('->', $.kind_bound))),
+      seq($.identifier, optional(seq('->', $.kind_bound))),
     )),
 
     // Uses external scanner token _generic_open instead of '<' to avoid

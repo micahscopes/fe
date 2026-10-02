@@ -1,0 +1,22 @@
+// expect selected_gated=2
+trait Compute {
+    const OK: bool
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject {
+    const OK: bool = false
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Other {
+    const OK: bool = true
+    const fn compute() -> u256 { 2 }
+}
+const fn gated<T: Compute>() -> u256 where T::OK { T::compute() }
+const fn selected_gated() -> u256 { with (Other) { gated<Subject>() } }
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(selected_gated() == 2)
+}

@@ -1,0 +1,15 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/named_impl_requires_selection_const.fe
+---
+error[2-0022]: `ID` requires named implementation `Only`
+   ┌─ named_impl_requires_selection_const.fe:10:40
+   │
+ 6 │ impl Compute for Subject as Only {
+   │                             ---- `Only` is defined here
+   ·
+10 │ const fn ordinary() -> u256 { Subject::ID }
+   │                                        ^^ `ID` is not available through ordinary lookup
+   │
+   = hint: select it with `with (Only) { ... }`; its prerequisites are checked when selected

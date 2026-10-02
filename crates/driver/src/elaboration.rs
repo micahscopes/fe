@@ -16,6 +16,7 @@ use hir::{
         name_resolution::{PathRes, resolve_path},
         ty::{adt_def::AdtRef, trait_resolution::PredicateListId, ty_def::TyId},
     },
+    core::meta::MetaItem,
     hir_def::{IdentId, ItemKind, Struct, attr::Attr},
 };
 
@@ -54,7 +55,6 @@ pub struct FieldDescriptor<'db> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RecordInputError {
-    GenericRecord,
     InvalidField(usize),
     WrongOwner,
 }
@@ -65,9 +65,6 @@ impl<'db> Invocation<'db> {
         db: &'db DriverDataBase,
     ) -> Result<RecordInput<'db>, RecordInputError> {
         let adt = AdtRef::Struct(self.owner).as_adt(db);
-        if !adt.params(db).is_empty() {
-            return Err(RecordInputError::GenericRecord);
-        }
         let mut fields = Vec::new();
         for (index, field) in self.owner.hir_fields(db).data(db).iter().enumerate() {
             let name = field
@@ -75,7 +72,7 @@ impl<'db> Invocation<'db> {
                 .to_opt()
                 .ok_or(RecordInputError::InvalidField(index))?;
             let ty = adt.fields(db)[0].ty(db, index).instantiate_identity();
-            if ty.has_invalid(db) || ty.has_param(db) || ty.has_var(db) || ty.has_projection(db) {
+            if ty.has_invalid(db) || ty.has_var(db) {
                 return Err(RecordInputError::InvalidField(index));
             }
             fields.push(FieldInput { name, ty });
@@ -89,14 +86,15 @@ impl<'db> Invocation<'db> {
 }
 
 impl<'db> RecordInput<'db> {
+    fn meta_type(&self, item: MetaItem) -> Option<TyId<'db>> {
+        item.resolve(self.db, self.owner.scope())
+    }
+
     /// Materialize the compiler-issued argument for an ordinary Fe const
     /// provider. This identity is valid only in this input database.
     pub fn const_argument(&self) -> Option<hir::analysis::semantic::SemConstId<'db>> {
-        use hir::analysis::{
-            semantic::{SemConstId, SemConstValue, StructuralHandle},
-            ty::corelib::resolve_lib_type_path,
-        };
-        let ty = resolve_lib_type_path(self.db, self.owner.scope(), "core::meta::Record")?;
+        use hir::analysis::semantic::{SemConstId, SemConstValue, StructuralHandle};
+        let ty = self.meta_type(MetaItem::Record)?;
         Some(SemConstId::new(
             self.db,
             SemConstValue::Structural {

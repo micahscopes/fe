@@ -1,0 +1,16 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/evidence_runtime_opening.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/evidence_runtime_opening.fe
+
+error[8-0097]: trait evidence opening failed
+  ┌─ evidence_runtime_opening.fe:8:11
+  │
+8 │     with (evidence) { T::produce() }
+  │           ^^^^^^^^ evidence opening is currently limited to const functions
+
+
+=== EXIT CODE: 1 ===

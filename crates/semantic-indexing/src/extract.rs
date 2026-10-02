@@ -393,7 +393,7 @@ impl<'db> DocExtractor<'db> {
             ItemKind::Enum(_) => Some(DocItemKind::Enum),
             ItemKind::Trait(_) => Some(DocItemKind::Trait),
             ItemKind::Contract(_) => Some(DocItemKind::Contract),
-            ItemKind::TypeAlias(_) => Some(DocItemKind::TypeAlias),
+            ItemKind::TypeAlias(_) | ItemKind::TypeFn(_) => Some(DocItemKind::TypeAlias),
             ItemKind::Const(_) => Some(DocItemKind::Const),
             ItemKind::Impl(_) => Some(DocItemKind::Impl),
             ItemKind::ImplTrait(_) => Some(DocItemKind::ImplTrait),

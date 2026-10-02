@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/repeating_computed_projection.fe
+---
+error[3-0038]: cycle detected while resolving this type
+   ┌─ repeating_computed_projection.fe:11:49
+   │
+11 │ impl<const K: usize> Grow for Z<K> { type Out = Spine<Z<K>, 1> }
+   │                                                 ^^^^^^^^^^^^^^ this type's definition depends on itself
+
+error[3-0038]: cycle detected while resolving this type
+   ┌─ repeating_computed_projection.fe:12:13
+   │
+12 │ fn probe(x: Spine<Z<0>, 1>) -> Spine<Z<0>, 1> { x }
+   │             ^^^^^^^^^^^^^^ this type's definition depends on itself
+
+error[3-0038]: cycle detected while resolving this type
+   ┌─ repeating_computed_projection.fe:12:32
+   │
+12 │ fn probe(x: Spine<Z<0>, 1>) -> Spine<Z<0>, 1> { x }
+   │                                ^^^^^^^^^^^^^^ this type's definition depends on itself

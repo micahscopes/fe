@@ -1,0 +1,6 @@
+trait Marker {}
+struct Wrapped<const N: usize> {}
+const fn allowed<T: Marker>() -> bool { true }
+impl<const N: usize> Marker for Wrapped<N> where allowed<Wrapped<N>>() {}
+fn require<T: Marker>() {}
+fn consume() { require<Wrapped<7>>() }

@@ -1,7 +1,32 @@
 use std::{fs, path::Path, process::Command};
 
+use dir_test::{Fixture, dir_test};
+
 const SOURCE: &str = include_str!("fixtures/structural_generation/accessors.fe");
 const ABI_SOURCE: &str = include_str!("fixtures/structural_generation/abi.fe");
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/generated_const_expression_invalid",
+    glob: "*.fe"
+)]
+fn invalid_generated_constant_reports_its_generation_site(fixture: Fixture<&str>) {
+    let output = Command::new(env!("CARGO_BIN_EXE_fe"))
+        .args(["check", fixture.path(), "--standalone"])
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = fs::read_to_string(Path::new(fixture.path()).with_extension("snap")).unwrap();
+    assert!(!output.status.success(), "{diagnostic}");
+    assert!(
+        diagnostic.trim_end().ends_with(expected.trim_end()),
+        "{diagnostic}"
+    );
+}
 
 fn succeeds(root: &Path, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_fe"))

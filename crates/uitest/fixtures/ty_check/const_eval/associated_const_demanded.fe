@@ -1,0 +1,15 @@
+trait Fact {
+    const VALUE: u256
+}
+
+struct Subject {}
+impl Fact for Subject {
+    const VALUE: u256 = spin()
+}
+
+const fn spin() -> u256 {
+    while true {}
+    0
+}
+
+const DEMAND: u256 = Subject::VALUE

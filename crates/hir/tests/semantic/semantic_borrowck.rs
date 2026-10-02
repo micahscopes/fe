@@ -3069,6 +3069,7 @@ fn for_each_fixture_instance(
             | ItemKind::Impl(_)
             | ItemKind::ImplTrait(_)
             | ItemKind::TypeAlias(_)
+            | ItemKind::TypeFn(_)
             | ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::TopMod(_)

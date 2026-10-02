@@ -1,0 +1,3 @@
+struct Other {}
+
+fn not_a_kind<T: (Other)>() {}

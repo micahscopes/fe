@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/nested_generic_capture_rejected.fe
+---
+error[8-0092]: const where predicates are not supported here yet
+  ┌─ nested_generic_capture_rejected.fe:2:24
+  │
+2 │     struct Inner where N > 0 {}
+  │                        ^^^^^ symbolic conditions on items nested in generic items are not supported yet
+  │
+  = const where predicates are supported on functions, structs, enums, traits, trait methods, trait-impl methods, and generic inherent impls

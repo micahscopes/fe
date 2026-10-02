@@ -1,0 +1,37 @@
+trait Compute {
+    const fn compute(self, _ x: u256) -> u256
+    const fn entry() -> u256
+}
+struct Subject {}
+const fn first<T: Compute>(_ value: T, _ x: u256) -> u256 { second(value, x) }
+const fn second<T: Compute>(_ value: T, _ x: u256) -> u256 { value.compute(x) }
+const fn unrelated() -> u256 { Subject {}.compute(3) }
+impl Compute for Subject {
+    const fn compute(self, _ x: u256) -> u256 { x + 1 }
+    const fn entry() -> u256 { first(Subject {}, 7) + unrelated() }
+}
+impl Compute for Subject as Alternative {
+    const fn compute(self, _ x: u256) -> u256 { x + 10 }
+    const fn entry() -> u256 { first(Subject {}, 7) + unrelated() }
+}
+fn target() -> Subject { Subject {} }
+
+impl Compute for Subject as Other {
+    const fn compute(self, _ x: u256) -> u256 { x + 100 }
+    const fn entry() -> u256 { 0 }
+}
+
+const fn selected(_ x: u256) -> u256 {
+    let scoped = with (Alternative) {
+        let before = first(Subject {}, x)
+        let inner = with (Other) { first(Subject {}, x) }
+        let after = first(Subject {}, x)
+        before + inner + after
+    }
+    scoped + first(Subject {}, x)
+}
+
+#[test]
+fn nested_helpers_restore_their_choices() {
+    assert!(selected(7) == 149)
+}

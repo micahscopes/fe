@@ -89,7 +89,7 @@ fn scoped_witness_does_not_make_effectful_ctfe_legal() {
     let source = SOURCE.replace("fn consume<T>", "const fn consume<T>");
     let file = input(&mut db, "const-effects", &source);
     let errors = diagnostics(&db, file);
-    assert!(errors.contains("effects are not allowed"), "{errors}");
+    assert!(errors.contains("non-const call in `const fn`"), "{errors}");
 }
 
 #[test]
@@ -111,12 +111,14 @@ fn provider_key_edits_match_fresh_databases() {
 }
 
 #[test]
-fn witness_transport_respects_provider_ownership() {
+fn scoped_trait_provider_calls_borrow_noncopy_root() {
     let mut db = database();
+    // A lexical provider is a stable root. Repeated implicit calls borrow it;
+    // explicit moves out of a provider binding are checked separately.
     let source = SOURCE
         .replace("trait Compute: Copy", "trait Compute")
         .replace("impl Copy for Number {}", "");
     let file = input(&mut db, "noncopy", &source);
     let errors = diagnostics(&db, file);
-    assert!(errors.contains("move conflict"), "{errors}");
+    assert!(errors.is_empty(), "{errors}");
 }

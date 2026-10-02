@@ -1,0 +1,6 @@
+trait Read<const N: usize> {
+    fn read(self) -> usize where N > 0 { N }
+}
+struct S {}
+impl<const N: usize> Read<N> for S {}
+fn consume() -> usize { <S as Read<7>>::read(S {}) }

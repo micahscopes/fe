@@ -14,24 +14,18 @@ error[1-0001]: expected pattern
     │
 114 │         42 {}
     │         ^ expected pattern
-
-error[1-0001]: unexpected syntax while parsing pattern
-    ┌─ recv_arm_patterns.fe:114:9
     │
-114 │         42 {}
-    │         ^^ unexpected
+    = unexpected syntax while parsing pattern
+    = unexpected
 
 error[1-0001]: expected pattern
     ┌─ recv_arm_patterns.fe:123:9
     │
 123 │         (a, b) {}
     │         ^ expected pattern
-
-error[1-0001]: unexpected syntax while parsing pattern
-    ┌─ recv_arm_patterns.fe:123:9
     │
-123 │         (a, b) {}
-    │         ^^^^^^ unexpected
+    = unexpected syntax while parsing pattern
+    = unexpected
 
 error[1-0001]: literal patterns are not allowed in recv arm patterns; use a binding pattern instead
     ┌─ recv_arm_patterns.fe:135:25

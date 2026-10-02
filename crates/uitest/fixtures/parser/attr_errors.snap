@@ -8,12 +8,9 @@ error[1-0001]: expected path segment
   │
 1 │ #[123]
   │   ^ expected path segment
-
-error[1-0001]: unexpected syntax while parsing attribute
-  ┌─ attr_errors.fe:1:3
   │
-1 │ #[123]
-  │   ^^^ unexpected
+  = unexpected syntax while parsing attribute
+  = unexpected
 
 error[1-0001]: expected path segment
   ┌─ attr_errors.fe:4:7

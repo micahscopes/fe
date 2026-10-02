@@ -1,0 +1,13 @@
+trait Compute { const OK: bool }
+struct Subject {}
+
+impl Compute for Subject { const OK: bool = false }
+impl Compute for Subject as Other { const OK: bool = true }
+
+struct Bounded<const N: usize> where N > 0 { value: u256 }
+
+fn selected() {
+    with (Other) {
+        let bad: Bounded<0> = Bounded<0> { value: 1 }
+    }
+}

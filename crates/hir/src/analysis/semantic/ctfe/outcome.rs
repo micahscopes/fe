@@ -81,7 +81,7 @@ impl<'db, T: Update + PartialEq> EvalOutcome<'db, T> {
     pub(crate) fn into_result(self) -> EvalResult<'db, T> {
         match self {
             Self::Ready(value) => Ok(value),
-            Self::Blocked(info) => Err(EvalStop::Blocked(info)),
+            Self::Blocked(info) => Err(EvalStop::Blocked(Box::new(info))),
             Self::Failed(failure) => Err(EvalStop::Failed(failure)),
         }
     }
@@ -96,7 +96,7 @@ impl<'db, T: Update + PartialEq> EvalOutcome<'db, T> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
 pub(crate) enum EvalStop<'db> {
-    Blocked(BlockedInfo<'db>),
+    Blocked(Box<BlockedInfo<'db>>),
     Failed(EvalFailure<'db>),
 }
 
@@ -126,7 +126,7 @@ impl<'db, T: Update + PartialEq> From<EvalResult<'db, T>> for EvalOutcome<'db, T
     fn from(result: EvalResult<'db, T>) -> Self {
         match result {
             Ok(value) => Self::Ready(value),
-            Err(EvalStop::Blocked(info)) => Self::Blocked(info),
+            Err(EvalStop::Blocked(info)) => Self::Blocked(*info),
             Err(EvalStop::Failed(failure)) => Self::Failed(failure),
         }
     }

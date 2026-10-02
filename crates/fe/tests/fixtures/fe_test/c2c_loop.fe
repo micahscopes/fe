@@ -1,0 +1,191 @@
+// Encoding 2: each morphism TYPE names its own domain and codomain.
+// Interpretation traits take no parameters, so every goal has a concrete head.
+use core::marker::Copy
+
+pub trait Arrow {
+    type Dom
+    type Cod
+}
+pub struct Exl<A, B> {}
+pub struct Mul {}
+pub struct Add {}
+pub struct Fork<F, G> {}
+pub struct Comp<G, F> {}
+
+impl<A, B> Arrow for Exl<A, B> { type Dom = (A, B)  type Cod = A }
+impl Arrow for Mul { type Dom = (u256, u256)  type Cod = u256 }
+impl Arrow for Add { type Dom = (u256, u256)  type Cod = u256 }
+impl<F: Arrow, G: Arrow> Arrow for Fork<F, G> {
+    type Dom = <F as Arrow>::Dom
+    type Cod = (<F as Arrow>::Cod, <G as Arrow>::Cod)
+}
+impl<F: Arrow, G: Arrow> Arrow for Comp<G, F> {
+    type Dom = <F as Arrow>::Dom
+    type Cod = <G as Arrow>::Cod
+}
+
+// Interpretation 1: evaluation.
+pub trait Eval: Arrow {
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod
+}
+impl<A: Copy, B: Copy> Eval for Exl<A, B> { fn eval(_ a: (A, B)) -> A { a.0 } }
+impl Eval for Mul { fn eval(_ a: (u256, u256)) -> u256 { a.0 * a.1 } }
+impl Eval for Add { fn eval(_ a: (u256, u256)) -> u256 { a.0 + a.1 } }
+impl<F: Eval, G: Arrow<Dom = <F as Arrow>::Dom> + Eval> Eval for Fork<F, G>
+    where <F as Arrow>::Dom: Copy
+{
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod { (F::eval(a), G::eval(a)) }
+}
+impl<F: Eval, G: Arrow<Dom = <F as Arrow>::Cod> + Eval> Eval for Comp<G, F> {
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod { G::eval(F::eval(a)) }
+}
+
+// Object constraint for the derivative categories: ordinary bounds on impls.
+pub trait Additive {
+    fn zero() -> Self
+    fn plus(self, _ other: Self) -> Self
+}
+impl Additive for u256 {
+    fn zero() -> Self { 0 }
+    fn plus(self, _ other: Self) -> Self { self + other }
+}
+impl<A: Additive, B: Additive> Additive for (A, B) {
+    fn zero() -> Self { (A::zero(), B::zero()) }
+    fn plus(self, _ other: Self) -> Self { (self.0.plus(other.0), self.1.plus(other.1)) }
+}
+
+// Interpretation 2: reverse mode (Conal's dual category). `Back` is the data
+// the transposed linear map needs: saved primal values, shaped by the program.
+pub trait Rev: Arrow {
+    type Back
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back)
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom
+}
+impl<A: Copy, B: Copy + Additive> Rev for Exl<A, B> {
+    type Back = ()
+    fn forward(_ a: (A, B)) -> (A, ()) { (a.0, ()) }
+    fn backward(_ back: (), _ ct: A) -> (A, B) { (ct, B::zero()) }
+}
+impl Rev for Mul {
+    type Back = (u256, u256)
+    fn forward(_ a: (u256, u256)) -> (u256, (u256, u256)) { (a.0 * a.1, a) }
+    fn backward(_ back: (u256, u256), _ ct: u256) -> (u256, u256) { (ct * back.1, ct * back.0) }
+}
+impl Rev for Add {
+    type Back = ()
+    fn forward(_ a: (u256, u256)) -> (u256, ()) { (a.0 + a.1, ()) }
+    fn backward(_ back: (), _ ct: u256) -> (u256, u256) { (ct, ct) }
+}
+impl<F: Rev, G: Arrow<Dom = <F as Arrow>::Dom> + Rev> Rev for Fork<F, G>
+    where <F as Arrow>::Dom: Copy + Additive
+{
+    type Back = (<F as Rev>::Back, <G as Rev>::Back)
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back) {
+        let f = F::forward(a)
+        let g = G::forward(a)
+        ((f.0, g.0), (f.1, g.1))
+    }
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom {
+        F::backward(back.0, ct.0).plus(G::backward(back.1, ct.1))
+    }
+}
+impl<F: Rev, G: Arrow<Dom = <F as Arrow>::Cod> + Rev> Rev for Comp<G, F> {
+    type Back = (<F as Rev>::Back, <G as Rev>::Back)
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back) {
+        let f = F::forward(a)
+        let g = G::forward(f.0)
+        (g.0, (f.1, g.1))
+    }
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom {
+        F::backward(back.0, G::backward(back.1, ct))
+    }
+}
+
+
+pub struct Id<A> {}
+impl<A> Arrow for Id<A> { type Dom = A  type Cod = A }
+impl<A: Copy> Eval for Id<A> { fn eval(_ a: A) -> A { a } }
+impl<A: Copy + Additive> Rev for Id<A> {
+    type Back = ()
+    fn forward(_ a: A) -> (A, ()) { (a, ()) }
+    fn backward(_ back: (), _ ct: A) -> A { ct }
+}
+
+// A value that can fill an array slot before the loop writes it.
+pub trait Blank { fn blank() -> Self }
+impl Blank for () { fn blank() -> Self { () } }
+impl Blank for u256 { fn blank() -> Self { 0 } }
+impl<A: Blank, B: Blank> Blank for (A, B) { fn blank() -> Self { (A::blank(), B::blank()) } }
+
+// The loop combinator: run an endomorphism N times at runtime.
+pub struct Iterate<Body, const N: usize> {}
+impl<Body: Arrow, const N: usize> Arrow for Iterate<Body, N> {
+    type Dom = <Body as Arrow>::Dom
+    type Cod = <Body as Arrow>::Dom
+}
+impl<Body: Arrow<Cod = <Body as Arrow>::Dom> + Eval, const N: usize> Eval for Iterate<Body, N>
+    where <Body as Arrow>::Dom: Copy
+{
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod {
+        let mut s = a
+        let mut i: usize = 0
+        while i < N {
+            s = Body::eval(s)
+            i = i + 1
+        }
+        s
+    }
+}
+// Reverse mode through a loop: one saved Back per iteration (the carry store),
+// then the transposed bodies run in reverse order.
+impl<Body: Arrow<Cod = <Body as Arrow>::Dom> + Rev, const N: usize> Rev for Iterate<Body, N>
+    where <Body as Rev>::Back: Copy + Blank, <Body as Arrow>::Dom: Copy
+{
+    type Back = [<Body as Rev>::Back; N]
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back) {
+        let mut saved: [<Body as Rev>::Back; N] = [<Body as Rev>::Back::blank(); N]
+        let mut s = a
+        let mut i: usize = 0
+        while i < N {
+            let step = Body::forward(s)
+            saved[i] = step.1
+            s = step.0
+            i = i + 1
+        }
+        (s, saved)
+    }
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom {
+        let mut c = ct
+        let mut i: usize = N
+        while i > 0 {
+            i = i - 1
+            c = Body::backward(back[i], c)
+        }
+        c
+    }
+}
+
+// Squaring as a primitive (the Comp<Mul, Fork<Id, Id>> form hits error 16-0004;
+// see c2c_loop_ice.fe).
+pub struct Sq {}
+impl Arrow for Sq { type Dom = u256  type Cod = u256 }
+impl Eval for Sq { fn eval(_ a: u256) -> u256 { a * a } }
+impl Rev for Sq {
+    type Back = u256
+    fn forward(_ a: u256) -> (u256, u256) { (a * a, a) }
+    fn backward(_ back: u256, _ ct: u256) -> u256 { ct * 2 * back }
+}
+type Square = Sq
+type Pow8 = Iterate<Square, 3>
+
+pub fn pow8(_ s: u256) -> u256 { <Pow8 as Eval>::eval(s) }
+pub fn pow8_grad(_ s: u256) -> u256 {
+    let r = <Pow8 as Rev>::forward(s)
+    <Pow8 as Rev>::backward(r.1, 1)
+}
+
+#[test]
+fn loop_value_and_reverse_gradient() {
+    assert!(pow8(2) == 256)
+    assert!(pow8_grad(2) == 1024)
+}

@@ -11,7 +11,7 @@ application-specific Rust. The legacy scalar-generation experiment is separate.
 
 ## Admitted interface
 
-- A concrete nongeneric record invokes a reusable const provider through
+- A record invokes a reusable const provider through
   `#[generate(path)]`. Ordinary resolution and visibility select the provider.
   Its root is a safe nongeneric module function with one `Record` parameter,
   no entry requirements, and no effects. Checked helpers and explicit coherent
@@ -24,8 +24,9 @@ application-specific Rust. The legacy scalar-generation experiment is separate.
   diagnose; they do not return false. General reflected equality is excluded.
 - Providers return complete `FunctionDefinition` values, bounded arrays of
   optional functions, or `RecordImplementation` values. Implementations carry
-  their record handle, a trait path, up to two scalar constants, and one optional
-  owned-receiver method. These values do not certify their own correctness.
+  their record handle, a trait path, up to two associated constants, and one
+  optional owned-receiver method. Constants can use the same bounded expression
+  nodes as generated functions. These values do not certify their own correctness.
 - All explicit providers see authored inputs. Their declarations become visible
   together in an isolated output database, before ordinary checking of consumers.
   A provider cannot observe a declaration from its own output phase. Recursion
@@ -46,8 +47,8 @@ The ABI provider derives `AbiSize` and `Encode<Sol>` implementations plus offset
 accessors. Fe walks the record, computes layout using `abi_record_layout`, and
 emits calls to existing codecs on field projections. Rust constructs generic
 declaration syntax and checks owner authority; it contains no ABI layout or
-encoding policy. `IS_DYNAMIC` is a separate generated constant, independent of
-the generated `HEAD_SIZE` constant.
+encoding policy. `HEAD_SIZE` is emitted as a sum of field-codec calls and checked
+as an ordinary associated constant. `IS_DYNAMIC` is a separate constant.
 
 | Record | Fields and values in declaration order | Offsets | Bytes | Exact payload words |
 | --- | --- | --- | ---: | --- |
@@ -84,9 +85,11 @@ All driver test names below are in `tests/elaboration_inputs.rs`.
 | Selection-dependent API and provider edits | `scoped_fe_policy_selects_a_checked_accessor_set` |
 | Record, field-type and provider edits versus fresh output | `abi_record_field_type_and_provider_edits_match_fresh_generated_output` |
 | Supporting codec removal, restoration, and fresh comparison | `unused_generated_encoder_requires_each_codec_after_supporting_impl_edits` |
+| Deferred associated-constant expressions and unused-node rejection | `generated_const_expression_keeps_generic_field_sizes`, `generated_const_expression_checks_unused_nodes` |
 | Output visibility and name collisions | `project_preparation_admits_all_invocations_before_checking_authored_consumers`, `generation_rejects_output_collisions_and_observation_of_its_own_output` |
 | Dependency selection and isolation | `selected_generation_skips_unrelated_ingots_but_includes_dependencies`, `elaboration_input_views_preserve_resolution_and_isolate_real_edits` |
-| Recursion, step, declared allocation and emitted-byte limits | `structural_generation_reports_evaluation_exhaustion_and_declared_output_limits`, `generated_source_byte_limit_rejects_oversized_well_typed_call_syntax` |
+| Recursion, step, declared allocation and emitted-byte limits | `structural_generation_reports_evaluation_exhaustion_and_declared_output_limits`, `generated_declaration_limits_report_named_positions` |
+| Named construction limits and authored generation-site positions | `generated_declaration_limits_report_named_positions` and the CLI `invalid_generated_constant_reports_its_generation_site` |
 | Fixed 0/1/3/8/32 scaling series | `structural_abi_fixed_scaling_series_and_declared_field_limit`; measurements and limits in `README.md` |
 
 The descriptor types also exercise ordinary nested layouts. The HIR

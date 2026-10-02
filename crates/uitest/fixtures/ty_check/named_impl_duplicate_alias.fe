@@ -1,0 +1,12 @@
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+
+impl Compute for Subject {
+    const fn compute() -> u256 { 42 }
+}
+impl Compute for Subject as Choice {
+    const fn compute() -> u256 { 73 }
+}
+impl Compute for Subject as Choice {
+    const fn compute() -> u256 { 74 }
+}

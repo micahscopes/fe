@@ -1,0 +1,36 @@
+// expect ordinary=false
+// expect selected=true
+trait Compute {
+    const ID: u256
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject {
+    const ID: u256 = 1
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Other {
+    const ID: u256 = 2
+    const fn compute() -> u256 { 2 }
+}
+const fn ordinary() -> bool {
+    match 2 {
+        Subject::ID => true,
+        _ => false,
+    }
+}
+const fn selected() -> bool {
+    with (Other) {
+        match 2 {
+            Subject::ID => true,
+            _ => false,
+        }
+    }
+}
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(ordinary() == false)
+    assert!(selected() == true)
+}

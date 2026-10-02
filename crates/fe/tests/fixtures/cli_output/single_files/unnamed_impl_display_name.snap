@@ -1,0 +1,19 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/unnamed_impl_display_name.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/unnamed_impl_display_name.fe
+
+error[8-0102]: cannot select an unnamed implementation for `Subject: Compute`
+   ┌─ unnamed_impl_display_name.fe:12:11
+   │
+ 8 │ impl Compute for Subject where Subject: Missing {
+   │      ------- candidate `impl#2` is defined here
+   ·
+12 │     with (<Subject as Compute>) { 1 }
+   │           ^^^^^^^^^^^^^^^^^^^^ required `Subject: Missing` is not proved
+
+
+=== EXIT CODE: 1 ===

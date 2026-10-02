@@ -51,7 +51,7 @@ Root@0..72
               Colon@41..42 ":"
               WhiteSpace@42..43 " "
               TypeBound@43..46
-                Error@43..46
+                KindBoundNamed@43..46
                   Ident@43..46 "i32"
           Comma@46..47 ","
           WhiteSpace@47..48 " "
@@ -61,7 +61,7 @@ Root@0..72
               Colon@49..50 ":"
               WhiteSpace@50..51 " "
               TypeBound@51..54
-                Error@51..54
+                KindBoundNamed@51..54
                   Ident@51..54 "i32"
           Gt@54..55 ">"
         WhiteSpace@55..56 " "

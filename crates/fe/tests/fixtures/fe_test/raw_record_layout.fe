@@ -1,5 +1,6 @@
 struct Inner { code: u16, ready: bool }
-struct Packet { tag: u8, inner: Inner, samples: [u16; 3], tail: u8 }
+type InnerAlias = Inner
+struct Packet { tag: u8, inner: InnerAlias, samples: [u16; 3], tail: u8 }
 
 impl Copy for Inner {}
 impl Copy for Packet {}
@@ -45,4 +46,30 @@ fn packed_record_bytes_and_stride() {
     assert!(bytes[17] == 0xab)
     assert!(bytes[18] == 0xcd)
     assert!(bytes[21] == 0x6d)
+}
+
+mod other {
+    pub struct Inner { pub code: u32 }
+    impl Copy for Inner {}
+}
+
+#[test]
+fn distinct_nominal_and_zero_extent_layouts() {
+    assert!(core::size_of<InnerAlias>() == 3)
+    assert!(core::size_of<other::Inner>() == 4)
+    assert!(core::size_of<()>() == 0)
+    assert!(core::size_of<[Packet; 0]>() == 0)
+    let empty = core::ptr::MemArray<Packet>::new_zeroed(0)
+    assert!(empty.byte_len() == 0)
+    let mut values = core::ptr::MemArray<other::Inner>::new_zeroed(2)
+    values[0] = other::Inner { code: 0x12345678 }
+    values[1] = other::Inner { code: 0x90abcdef }
+    assert!(values.byte_len() == 8)
+    let bytes = values.span()
+    let expected: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]
+    let mut i: usize = 0
+    while i < 8 {
+        assert!(bytes[i] == expected[i])
+        i += 1
+    }
 }

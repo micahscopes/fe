@@ -548,6 +548,8 @@ pub enum SExpr<'db> {
         callee: SemanticCalleeRef<'db>,
         args: Box<[SOperand]>,
         effect_args: Box<[SEffectArg<'db>]>,
+        /// Opened evidence needed by this call's trait requirements.
+        provisions: Box<[(SOperand, crate::analysis::ty::trait_def::TraitInstId<'db>)]>,
     },
 }
 

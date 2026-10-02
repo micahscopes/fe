@@ -1,0 +1,10 @@
+struct Window<const N: usize> {}
+impl<const N: usize> Window<N> where N > 0 {
+    const VALUE: u256 = 41
+}
+fn matches(value: u256) -> bool {
+    match value {
+        Window<1>::VALUE => true,
+        _ => false,
+    }
+}

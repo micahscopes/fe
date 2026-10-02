@@ -159,6 +159,7 @@ pub trait AbiDecoder<A: Abi> {
 }
 
 /// ABI payload layout metadata and exact runtime payload size.
+#[fixed]
 pub trait AbiSize {
     const HEAD_SIZE: u256
     const IS_DYNAMIC: bool
@@ -186,6 +187,7 @@ pub trait AbiSpan<A: Abi>: AbiSize {
     }
 }
 
+#[fixed]
 pub trait Decode<A: Abi>: AbiSize {
     fn decode_payload<D: AbiDecoder<A>>(_: mut D) -> Self
 
@@ -222,6 +224,7 @@ pub trait Decode<A: Abi>: AbiSize {
     }
 }
 
+#[fixed]
 pub trait Encode<A: Abi>: AbiSize {
     fn encode(own self, _ ptr: *u8)
 }

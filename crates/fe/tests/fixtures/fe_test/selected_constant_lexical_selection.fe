@@ -1,0 +1,28 @@
+// expect selected_helper=true
+// expect selected_direct=22
+trait Compute {
+    const ID: u256
+    const OK: bool
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject {
+    const ID: u256 = 1
+    const OK: bool = false
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Other {
+    const ID: u256 = 2
+    const OK: bool = true
+    const fn compute() -> u256 { 2 }
+}
+const fn agree<T: Compute>() -> bool { T::ID == T::compute() }
+const fn selected_helper() -> bool { with (Other) { agree<Subject>() } }
+const fn selected_direct() -> u256 { with (Other) { Subject::ID * 10 + Subject::compute() } }
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(selected_helper() == true)
+    assert!(selected_direct() == 22)
+}

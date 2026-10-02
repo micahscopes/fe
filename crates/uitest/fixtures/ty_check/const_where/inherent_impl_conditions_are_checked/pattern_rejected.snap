@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/inherent_impl_conditions_are_checked/pattern_rejected.fe
+---
+error[8-0093]: const requirement is not satisfied
+  ┌─ pattern_rejected.fe:7:9
+  │
+2 │ impl<const N: usize> Window<N> where N > 0 {
+  │                                      ----- required by this predicate
+  ·
+7 │         Window<0>::VALUE => true,
+  │         ^^^^^^^^^^^^^^^^ condition evaluated to `false`

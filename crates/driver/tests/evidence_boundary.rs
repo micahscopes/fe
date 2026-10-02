@@ -69,7 +69,7 @@ fn named<'db>(db: &'db DriverDataBase, file: File, name: &str) -> Func<'db> {
 }
 
 fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
-    (match eval_body_owner_const_with_args(
+    eval_body_owner_const_with_args(
         db,
         BodyOwner::Func(named(db, file, name)),
         hir::analysis::semantic::GenericSubst::for_body_owner(
@@ -78,11 +78,9 @@ fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
             Vec::new(),
         ),
         Vec::new(),
-    ) {
-        hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-        outcome => Err(outcome),
-    })
-    .unwrap_or_else(|error| panic!("failed to evaluate `{name}`: {error:?}"))
+    )
+    .into_ready()
+    .unwrap_or_else(|| panic!("failed to evaluate `{name}`"))
     .pretty_print(db)
 }
 

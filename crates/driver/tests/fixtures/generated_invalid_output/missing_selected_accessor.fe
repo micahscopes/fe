@@ -1,0 +1,53 @@
+
+mod authors {
+    use core::meta::{Record, FieldType, field_count, field, field_type, type_is, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+    trait Select: Copy { const fn include(self, _ ty: FieldType) -> bool }
+    struct All {}
+    struct Flags {}
+    impl Copy for All {}
+    impl Copy for Flags {}
+    impl Select for All { const fn include(self, _ ty: FieldType) -> bool { true } }
+    impl Select for Flags { const fn include(self, _ ty: FieldType) -> bool { type_is<bool>(ty) } }
+    const fn generate(_ record: Record) -> [Option<FunctionDefinition<1, 2>>; 32] uses (policy: Select) {
+        let mut definitions: [Option<FunctionDefinition<1, 2>>; 32] = [Option::None; 32]
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            if policy.include(field_type(f)) {
+                definitions[i] = Option::Some(FunctionDefinition {
+                    name: DeclarationName::FieldPrefix("get_", f),
+                    public: true,
+                    const_function: false,
+                    parameters: [DeclarationType::Record(record)],
+                    return_type: DeclarationType::Field(field_type(f)),
+                    expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)],
+                    result: 1,
+                })
+            }
+            i += 1
+        }
+        definitions
+    }
+    pub const fn all(_ record: Record) -> [Option<FunctionDefinition<1, 2>>; 32] {
+        with (Select = All {}) { generate(record) }
+    }
+    pub const fn flags(_ record: Record) -> [Option<FunctionDefinition<1, 2>>; 32] {
+        with (Select = Flags {}) { generate(record) }
+    }
+}
+mod owner {
+    #[generate(ingot::authors::all)]
+    pub struct Packet { nonce: u256, ready: bool, code: u64 }
+    pub fn sample() -> Packet { Packet { nonce: 42, ready: true, code: 258 } }
+}
+
+mod flags {
+    #[generate(ingot::authors::flags)]
+    pub struct Packet { code: u64, ready: bool, nonce: u256 }
+    pub fn sample() -> Packet { Packet { code: 9, ready: false, nonce: 123 } }
+}
+mod empty {
+    #[generate(ingot::authors::all)]
+    struct Empty {}
+}
+fn missing() -> u64 { flags::get_code(flags::sample()) }

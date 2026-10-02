@@ -1,0 +1,9 @@
+pub trait Model {
+    type Point
+}
+
+pub struct Wrapped<T> {
+    pub value: T
+}
+
+pub fn consume<M: Model>(_ value: Wrapped<<M as Model>::Point>) {}

@@ -6,7 +6,7 @@ use crate::{
     HirDb, SpannedHirDb,
     core::hir_def::{
         Body, Const, Contract, Enum, Func, Impl, ImplTrait, Mod, StaticAssert, Struct, TopLevelMod,
-        Trait, TypeAlias, Use, scope_graph::ScopeId,
+        Trait, TypeAlias, TypeFnDef, Use, scope_graph::ScopeId,
     },
     core::lower::top_mod_ast,
 };
@@ -43,7 +43,8 @@ pub mod lazy_spans {
             LazyFieldDefListSpan, LazyFieldDefSpan, LazyFuncSignatureSpan, LazyFuncSpan,
             LazyImplSpan, LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyRecvArmListSpan,
             LazyRecvArmSpan, LazyStaticAssertSpan, LazyStructSpan, LazyTopModSpan, LazyTraitSpan,
-            LazyTypeAliasSpan, LazyUseSpan, LazyVariantDefListSpan, LazyVariantDefSpan,
+            LazyTypeAliasSpan, LazyTypeFnSpan, LazyUseSpan, LazyVariantDefListSpan,
+            LazyVariantDefSpan,
         },
         params::{
             LazyConstGenericParamSpan, LazyFuncParamListSpan, LazyFuncParamSpan,
@@ -144,6 +145,13 @@ pub fn type_alias_ast<'db>(
     db: &'db dyn SpannedHirDb,
     item: TypeAlias<'db>,
 ) -> &'db HirOrigin<ast::TypeAlias> {
+    item.origin(db)
+}
+
+pub fn type_fn_ast<'db>(
+    db: &'db dyn SpannedHirDb,
+    item: TypeFnDef<'db>,
+) -> &'db HirOrigin<ast::RecursiveTypeFn> {
     item.origin(db)
 }
 
@@ -250,6 +258,14 @@ pub enum DesugaredOrigin {
     Error(ErrorDesugared),
     /// The HIR node is the result of desugaring an `#[abi]` struct.
     AbiStruct(AbiStructDesugared),
+    /// HIR built from a checked `#[generate]` provider result.
+    Generation(GenerationDesugared),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GenerationDesugared {
+    pub target: AstPtr<ast::Struct>,
+    pub attribute_index: usize,
 }
 
 /// Tracks the origin of HIR nodes desugared from a `msg` block.

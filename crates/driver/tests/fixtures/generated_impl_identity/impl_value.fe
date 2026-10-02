@@ -1,0 +1,29 @@
+mod author {
+    use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr,
+        FunctionDefinition, AssociatedConstant, RecordImplementation}
+
+    pub const fn make(_ record: Record) -> RecordImplementation<0, 1> {
+        let types: [Option<DeclarationType>; 2] = [Option::None; 2]
+        let method: Option<FunctionDefinition<0, 1>> = Option::None
+        RecordImplementation {
+            owner: record,
+            trait_path: "core::abi::AbiSize",
+            types,
+            constants: [
+                Option::Some(AssociatedConstant::Expression(
+                    DeclarationName::Literal("HEAD_SIZE"), DeclarationType::U256,
+                    [BodyExpr::U256(42)], 0,
+                )),
+                Option::Some(AssociatedConstant::Bool(
+                    DeclarationName::Literal("IS_DYNAMIC"), false,
+                )),
+            ],
+            method,
+        }
+    }
+}
+
+#[generate(ingot::author::make)]
+struct Sample { value: u256 }
+
+const fn answer() -> u256 { <Sample as core::abi::AbiSize>::HEAD_SIZE }

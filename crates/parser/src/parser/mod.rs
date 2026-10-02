@@ -25,6 +25,7 @@ pub mod path;
 pub mod stmt;
 pub mod struct_;
 pub mod type_;
+mod type_fn;
 pub mod use_tree;
 
 mod expr_atom;

@@ -5,7 +5,7 @@ use super::{
     const_expr::ConstExpr,
     const_ty::{ConstCaptureEnv, ConstTyData, ConstTyId},
     trait_def::{ImplementorId, TraitInstId, TraitRefId},
-    trait_resolution::{PredicateListId, TraitGoalSolution, TraitSolverQuery},
+    trait_resolution::{ImplConditionsId, PredicateListId, TraitGoalSolution, TraitSolverQuery},
     ty_check::{EffectArg, ExprProp, LocalBinding, ResolvedEffectArg},
     ty_def::{AssocTy, InvalidCause, PrimTy, TyBase, TyData, TyFlags, TyId, TyParam, TyVar},
 };
@@ -68,6 +68,8 @@ pub trait TyVisitor<'db> {
     #[allow(unused_variables)]
     fn visit_func(&mut self, func: CallableDef<'db>) {}
 
+    fn visit_type_fn(&mut self, _def: crate::hir_def::TypeFnDef<'db>) {}
+
     #[allow(unused_variables)]
     fn visit_const_ty(&mut self, const_ty: &ConstTyId<'db>) {
         walk_const_ty(self, const_ty)
@@ -82,6 +84,11 @@ where
         TyData::TyVar(var) => visitor.visit_var(var),
         TyData::TyParam(param) => visitor.visit_param(param),
         TyData::AssocTy(assoc_ty) => visitor.visit_assoc_ty(assoc_ty),
+        TyData::TypeFamily { args, body, .. } => {
+            args.visit_with(visitor);
+            visitor.visit_ty(*body);
+        }
+        TyData::ConstraintTerm(trait_inst) => trait_inst.visit_with(visitor),
         TyData::QualifiedTy(trait_inst) => {
             visitor.visit_ty(trait_inst.self_ty(visitor.db()));
             trait_inst.visit_with(visitor);
@@ -103,6 +110,7 @@ where
         TyBase::Adt(adt) => visitor.visit_adt(*adt),
         TyBase::Contract(c) => visitor.visit_contract(*c),
         TyBase::Func(func) => visitor.visit_func(*func),
+        TyBase::TypeFn(def) => visitor.visit_type_fn(*def),
     }
 }
 
@@ -158,7 +166,14 @@ where
                 use_.visit_with(visitor);
             }
         },
-        ConstTyData::UnEvaluated { capture, .. } => capture.visit_with(visitor),
+        ConstTyData::UnEvaluated {
+            capture, impl_env, ..
+        } => {
+            capture.visit_with(visitor);
+            if let Some(env) = impl_env {
+                env.visit_with(visitor);
+            }
+        }
     }
 }
 
@@ -328,6 +343,17 @@ impl<'db> TyVisitable<'db> for TraitGoalSolution<'db> {
     {
         self.inst.visit_with(visitor);
         self.implementor.visit_with(visitor);
+        self.impl_conditions.visit_with(visitor);
+    }
+}
+
+impl<'db> TyVisitable<'db> for ImplConditionsId<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        self.instances(visitor.db()).visit_with(visitor);
+        self.trait_goals(visitor.db()).visit_with(visitor);
     }
 }
 

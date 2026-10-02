@@ -391,6 +391,14 @@ pub enum SyntaxKind {
     Enum,
     /// `type Foo = i32`
     TypeAlias,
+    RecursiveTypeFn,
+    TypeFnRetKind,
+    TypeFnBody,
+    TypeFnMatch,
+    TypeFnArmList,
+    TypeFnArm,
+    TypeFnArmPat,
+
     /// `impl Foo { .. }`
     Impl,
     /// `{ fn ... }`
@@ -513,6 +521,8 @@ pub enum SyntaxKind {
     KindBoundAbs,
     /// `*`.
     KindBoundMono,
+    /// A named kind marker such as `Constraint`.
+    KindBoundNamed,
     /// `where Option<T>: Trait1 + Trait2`
     WhereClause,
     /// `Option<T>: Trait1 + Trait2`
@@ -751,6 +761,14 @@ impl SyntaxKind {
             SyntaxKind::MsgVariantList => "message variants",
             SyntaxKind::Enum => "enum definition",
             SyntaxKind::TypeAlias => "type alias",
+            SyntaxKind::RecursiveTypeFn => "recursive type fn",
+            SyntaxKind::TypeFnRetKind => "recursive type fn return kind",
+            SyntaxKind::TypeFnBody => "recursive type fn body",
+            SyntaxKind::TypeFnMatch => "recursive type fn match",
+            SyntaxKind::TypeFnArmList => "recursive type fn arms",
+            SyntaxKind::TypeFnArm => "recursive type fn arm",
+            SyntaxKind::TypeFnArmPat => "recursive type fn pattern",
+
             SyntaxKind::Impl => "`impl` block",
             SyntaxKind::ImplItemList => "`impl` item list",
             SyntaxKind::Trait => "trait definition",
@@ -796,6 +814,7 @@ impl SyntaxKind {
             SyntaxKind::TypeBoundList => "type bound list",
             SyntaxKind::KindBoundAbs => "kind bound",
             SyntaxKind::KindBoundMono => "kind bound",
+            SyntaxKind::KindBoundNamed => "named kind bound",
             SyntaxKind::WhereClause => "`where` clause",
             SyntaxKind::WherePredicate => "`where` predicate",
             SyntaxKind::WhereConstPredicate => "const `where` predicate",

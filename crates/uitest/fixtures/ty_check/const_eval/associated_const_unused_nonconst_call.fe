@@ -1,0 +1,9 @@
+trait Fact { const VALUE: u256 }
+struct Subject {}
+fn ordinary() -> u256 { 1 }
+impl Fact for Subject { const VALUE: u256 = ordinary() }
+fn independent() -> u256 { 1 }
+
+trait DefaultFact {
+    const VALUE: u256 = ordinary()
+}

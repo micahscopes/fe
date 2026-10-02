@@ -5,7 +5,7 @@ use hir::{
         semantic::{EffectProviderSubst, GenericSubst, ImplEnv, SemanticInstance},
         ty::{
             RootProviderScope,
-            trait_def::{TraitInstId, TraitRefId},
+            trait_def::{ImplSelectionClass, TraitInstId, TraitRefId, impl_selection_class},
             ty_check::{BodyOwner, EffectParamSite},
             ty_def::{TyBase, TyData, TyId},
         },
@@ -101,7 +101,15 @@ pub fn semantic_owner_context_identity<'db>(
                     .map(|trait_ref| trait_ref.pretty_print(db))
                     .unwrap_or_else(|| "trait".to_string())
             });
-        let impl_identity = format!("{trait_identity}${}", type_identity(db, impl_trait.ty(db)));
+        let mut impl_identity =
+            format!("{trait_identity}${}", type_identity(db, impl_trait.ty(db)));
+        if matches!(
+            impl_selection_class(db, impl_trait),
+            ImplSelectionClass::Named(_)
+        ) {
+            impl_identity.push_str("$declaration$");
+            impl_identity.push_str(&impl_trait.declaration_index(db).to_string());
+        }
         return Some(format!(
             "impl_trait${}",
             stable_identity_fingerprint(&impl_identity)
@@ -267,14 +275,50 @@ fn impl_env_identity<'db>(
 ) -> String {
     let assumptions = trait_list_identity(db, env.assumptions(db).list(db).iter().copied(), mode);
     let witnesses = trait_list_identity(db, env.witnesses(db).iter().copied(), mode);
-    // Callees normalize at an ingot root, and every ingot's root module has
-    // the same name, so the scope must name its ingot.
-    let scope = env.normalization_scope(db);
-    format!(
+    // Name the ingot as well as the module in the normalization scope.
+    let mut identity = format!(
         "scope${}${}$assumptions${assumptions}$witnesses${witnesses}",
-        ingot_identity_for_top_mod(db, scope.top_mod(db)),
-        module_path_components_for_scope(db, scope).join("$")
-    )
+        ingot_identity_for_top_mod(db, env.normalization_scope(db).top_mod(db)),
+        module_path_components_for_scope(db, env.normalization_scope(db)).join("$")
+    );
+    if !env.selections(db).is_empty() {
+        let mut selections = env
+            .selections(db)
+            .iter()
+            .map(|selection| {
+                use hir::analysis::ty::trait_def::ImplementorOrigin;
+                let candidate = match selection.origin(db) {
+                    ImplementorOrigin::Hir(item) => {
+                        let discriminator = match impl_selection_class(db, item) {
+                            ImplSelectionClass::Ordinary => "anonymous".to_string(),
+                            ImplSelectionClass::Named(_) => {
+                                format!("named$declaration${}", item.declaration_index(db))
+                            }
+                        };
+                        format!(
+                            "{}${}${discriminator}",
+                            item_identity(db, item.into()),
+                            type_identity(db, item.ty(db))
+                        )
+                    }
+                    ImplementorOrigin::VirtualContract(contract) => {
+                        item_identity(db, contract.into())
+                    }
+                    ImplementorOrigin::Assumption => "assumption".into(),
+                };
+                format!(
+                    "{}$candidate${candidate}$context${}$premises${}",
+                    trait_identity(db, selection.goal()),
+                    item_identity(db, selection.scope().item()),
+                    trait_list_identity(db, selection.assumptions().list(db).iter().copied(), mode)
+                )
+            })
+            .collect::<Vec<_>>();
+        selections.sort();
+        identity.push_str("$selections$");
+        identity.push_str(&selections.join("$"));
+    }
+    identity
 }
 
 fn trait_list_identity<'db>(
@@ -352,9 +396,14 @@ fn ty_mentions_effect_provider_param<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'
     }
 
     match ty.data(db) {
+        TyData::TypeFamily { args, body, .. } => {
+            args.iter()
+                .any(|arg| ty_mentions_effect_provider_param(db, *arg))
+                || ty_mentions_effect_provider_param(db, *body)
+        }
         TyData::TyParam(param) => param.is_effect_provider(),
         TyData::AssocTy(assoc) => trait_ref_mentions_effect_provider_param(db, assoc.trait_),
-        TyData::QualifiedTy(trait_inst) => {
+        TyData::QualifiedTy(trait_inst) | TyData::ConstraintTerm(trait_inst) => {
             trait_inst_mentions_effect_provider_param(db, *trait_inst)
         }
         TyData::TyVar(_)
@@ -401,6 +450,21 @@ fn effect_param_site_identity<'db>(
     }
 }
 
+fn family_owner_identity<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: hir::hir_def::scope_graph::AssocTypeOwner<'db>,
+) -> String {
+    format!(
+        "{}${}",
+        item_identity(db, owner.scope().item()),
+        owner
+            .scope()
+            .name(db)
+            .map(|name| name.data(db).as_str())
+            .unwrap_or("unnamed")
+    )
+}
+
 pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
     if matches!(ty.data(db), TyData::TyApp(..)) {
         let base = type_identity(db, ty.base_ty(db));
@@ -420,6 +484,7 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
             TyBase::Contract(contract) => {
                 format!("contract${}", item_identity(db, (*contract).into()))
             }
+            TyBase::TypeFn(def) => format!("type_fn${}", item_identity(db, (*def).into())),
             TyBase::Func(callable) => match callable {
                 CallableDef::Func(func) => format!("func${}", item_identity(db, (*func).into())),
                 CallableDef::VariantCtor(variant) => format!(
@@ -429,6 +494,20 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
                 ),
             },
         },
+        TyData::TypeFamily { owner, args, body } => format!(
+            "family${}${}${}",
+            family_owner_identity(db, *owner),
+            args.iter()
+                .map(|arg| type_identity(db, *arg))
+                .collect::<Vec<_>>()
+                .join("$"),
+            type_identity(db, *body)
+        ),
+        TyData::TyParam(param) if param.is_assoc_ty_param() => format!(
+            "family_param${}${}",
+            family_owner_identity(db, param.owner.assoc_type_owner().unwrap()),
+            param.idx
+        ),
         TyData::TyParam(param) => {
             format!(
                 "param${}${}",
@@ -442,6 +521,9 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
             assoc.name.data(db)
         ),
         TyData::QualifiedTy(trait_inst) => format!("qualified${}", trait_identity(db, *trait_inst)),
+        TyData::ConstraintTerm(trait_inst) => {
+            format!("constraint${}", trait_identity(db, *trait_inst))
+        }
         TyData::ConstTy(const_ty) => {
             format!(
                 "const_ty${}",

@@ -1,0 +1,10 @@
+#[fixd]
+trait Compute { const fn compute() -> u256 }
+
+struct Subject {}
+impl Compute for Subject as First {
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Second {
+    const fn compute() -> u256 { 2 }
+}

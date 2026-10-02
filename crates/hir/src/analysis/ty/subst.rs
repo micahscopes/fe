@@ -3,7 +3,7 @@
 use super::{
     const_ty::ConstCaptureEnv,
     fold::{TyFoldable, TyFolder},
-    ty_def::TyId,
+    ty_def::{TyData, TyId},
     ty_lower::{CompleteSubst, ParamSchemaId, SubstError},
 };
 use crate::{
@@ -36,7 +36,7 @@ pub(crate) fn is_owned_by_schema<'db>(
     schema: ParamSchemaId<'db>,
 ) -> bool {
     ty.as_generic_param(db)
-        .is_some_and(|param| param.owner == schema.owner(db).scope() && !param.is_effect())
+        .is_some_and(|param| param.owner == schema.scope(db) && !param.is_effect())
 }
 
 struct SubstFolder<'a, 'db> {
@@ -47,6 +47,17 @@ struct SubstFolder<'a, 'db> {
 impl<'db> TyFolder<'db> for SubstFolder<'_, 'db> {
     fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
         let schema = self.subst.domain().schema(db);
+        if let TyData::TypeFamily { owner, args, body } = ty.data(db) {
+            // Captures are outside this local binder. Its own parameters remain
+            // bound even when a recursive family uses the same declaration.
+            let args = args.iter().map(|arg| arg.fold_with(db, self)).collect();
+            let body = if owner.scope() == schema.scope(db) {
+                *body
+            } else {
+                body.fold_with(db, self)
+            };
+            return TyId::type_family_with_args(db, *owner, args, body);
+        }
         if let Some(key) = schema.original_key(db, ty) {
             if let Some(replacement) = self.subst.get(db, key) {
                 return replacement;

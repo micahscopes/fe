@@ -22,6 +22,20 @@ use salsa::Update;
 use smallvec1::SmallVec;
 use thin_vec::ThinVec;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub enum AssociatedFamilyError {
+    ParameterCount { expected: usize, given: usize },
+    ParameterKind { expected: Kind, given: Kind },
+    ParameterSort,
+    ConstParameter,
+    ImplementationBound,
+    UnknownMember,
+    DuplicateParameter,
+    InvalidGuard,
+    InvalidOutputBound,
+    GuardedPartialApplication,
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone, derive_more::From, Update)]
 pub enum FuncBodyDiag<'db> {
     Ty(TyDiagCollection<'db>),
@@ -99,6 +113,11 @@ pub enum TyLowerDiag<'db> {
     },
 
     KindBoundNotAllowed(DynLazySpan<'db>),
+
+    UnknownKindBound {
+        span: DynLazySpan<'db>,
+        name: String,
+    },
 
     GenericParamAlreadyDefinedInParent {
         span: LazyGenericParamSpan<'db>,
@@ -184,7 +203,21 @@ pub enum TyLowerDiag<'db> {
     ConstEvalStepLimitExceeded(DynLazySpan<'db>),
     ConstEvalRecursionLimitExceeded(DynLazySpan<'db>),
     ConstEvalRecursiveConst(DynLazySpan<'db>),
+    ConstEvalAtUse {
+        use_span: DynLazySpan<'db>,
+        fault: Box<TyLowerDiag<'db>>,
+    },
     TypeLoweringCycle(DynLazySpan<'db>),
+    TypeNormalizationLimit(DynLazySpan<'db>),
+    ComputedTypeImplHeader(DynLazySpan<'db>),
+    ComputedTypeDeclaration {
+        span: DynLazySpan<'db>,
+        reason: String,
+    },
+    AssociatedFamilyDeclaration {
+        span: DynLazySpan<'db>,
+        error: AssociatedFamilyError,
+    },
 
     NonTrailingDefaultGenericParam(LazyGenericParamSpan<'db>),
 
@@ -294,6 +327,7 @@ impl TyLowerDiag<'_> {
             Self::TypeAliasCycle { .. } => 4,
             Self::InconsistentKindBound { .. } => 5,
             Self::KindBoundNotAllowed(_) => 6,
+            Self::UnknownKindBound { .. } => 54,
             Self::GenericParamAlreadyDefinedInParent { .. } => 7,
             Self::DuplicateArgName { .. } => 8,
             Self::InvalidConstParamTy { .. } => 9,
@@ -321,7 +355,12 @@ impl TyLowerDiag<'_> {
             Self::ConstEvalStepLimitExceeded(_) => 26,
             Self::ConstEvalRecursionLimitExceeded(_) => 27,
             Self::ConstEvalRecursiveConst(_) => 37,
+            Self::ConstEvalAtUse { fault, .. } => fault.local_code(),
             Self::TypeLoweringCycle(_) => 38,
+            Self::TypeNormalizationLimit(_) => 50,
+            Self::AssociatedFamilyDeclaration { .. } => 51,
+            Self::ComputedTypeDeclaration { .. } => 52,
+            Self::ComputedTypeImplHeader(_) => 53,
             Self::MixedRefSelfPrefixWithExplicitType { .. } => 28,
             Self::MixedOwnSelfPrefixWithExplicitType { .. } => 29,
             Self::InvalidMutSelfPrefixWithExplicitType { .. } => 30,
@@ -870,6 +909,38 @@ pub enum BodyDiag<'db> {
     },
 
     // Const fn / const-check diagnostics -----------------------------------
+    ObligationIntroduction {
+        primary: DynLazySpan<'db>,
+        reason: &'static str,
+    },
+    ObligationOpening {
+        primary: DynLazySpan<'db>,
+        reason: &'static str,
+    },
+    UnknownNamedSelection {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+        available: Vec<(IdentId<'db>, ImplTrait<'db>)>,
+    },
+    AmbiguousNamedSelection {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+        candidates: Vec<ImplTrait<'db>>,
+    },
+    NamedSelectionFailed {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+        candidate: ImplTrait<'db>,
+        reason: &'static str,
+        unproved: Option<TraitInstId<'db>>,
+    },
+    GoalSelectionFailed {
+        primary: DynLazySpan<'db>,
+        goal: TraitInstId<'db>,
+        candidates: Vec<ImplTrait<'db>>,
+        reason: &'static str,
+        unproved: Option<TraitInstId<'db>>,
+    },
     RecordShapeAcquisition {
         primary: DynLazySpan<'db>,
         reason: &'static str,
@@ -992,6 +1063,12 @@ impl<'db> BodyDiag<'db> {
             Self::IncompatibleBorrowProviders { .. } => 77,
             Self::TypeMustBeKnown(..) => 14,
             Self::TypeSizeOverflow { .. } => 88,
+            Self::ObligationIntroduction { .. } => 96,
+            Self::ObligationOpening { .. } => 97,
+            Self::UnknownNamedSelection { .. } => 99,
+            Self::AmbiguousNamedSelection { .. } => 100,
+            Self::NamedSelectionFailed { .. } => 101,
+            Self::GoalSelectionFailed { .. } => 102,
             Self::InvalidCast { .. } => 55,
             Self::ConstValueMustBeKnown(..) => 64,
             Self::ConstDependencyMustBeKnown { .. } => 90,
@@ -1118,6 +1195,8 @@ pub enum TraitConstraintDiag<'db> {
         capability_hint: Option<TyId<'db>>,
     },
 
+    NormalizationFault(DynLazySpan<'db>),
+
     InfiniteBoundRecursion(DynLazySpan<'db>, String),
 
     ConcreteTypeBound(DynLazySpan<'db>, TyId<'db>),
@@ -1132,6 +1211,7 @@ impl TraitConstraintDiag<'_> {
             Self::TraitArgNumMismatch { .. } => 1,
             Self::TraitArgKindMismatch { .. } => 2,
             Self::TraitBoundNotSat { .. } => 3,
+            Self::NormalizationFault(..) => 7,
             Self::InfiniteBoundRecursion(..) => 4,
             Self::ConcreteTypeBound(..) => 5,
             Self::ConstTyBound(..) => 6,
@@ -1202,6 +1282,11 @@ pub enum ImplDiag<'db> {
     MethodStricterBound {
         span: DynLazySpan<'db>,
         stricter_bounds: ThinVec<TraitInstId<'db>>,
+    },
+
+    MethodConstPredicateMismatch {
+        trait_m: CallableDef<'db>,
+        impl_m: CallableDef<'db>,
     },
 
     InvalidSelfType {
@@ -1317,6 +1402,7 @@ impl ImplDiag<'_> {
             Self::InherentConstShadowsFn { .. } => 21,
             Self::InvalidEffectHandleRaw { .. } => 22,
             Self::TypeNotDefinedInTrait { .. } => 23,
+            Self::MethodConstPredicateMismatch { .. } => 24,
         }
     }
 }

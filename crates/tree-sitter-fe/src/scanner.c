@@ -413,6 +413,43 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
             return true;
           }
         }
+        if (valid_symbols[GENERIC_OPEN]) {
+          // In an ambiguous context, a nested qualified argument such as
+          // Wrapped<<T as Trait>::Item> has both a completed inner `>::`
+          // path and a closing outer `>`. A plain `value<<amount` has neither.
+          lexer->mark_end(lexer);
+          int depth = 1;
+          bool qualified_inner = false;
+          for (int scanned = 0; scanned < 1024 && !lexer->eof(lexer); scanned++) {
+            int32_t c = lexer->lookahead;
+            if (c == '{' || c == '}' || c == ';') break;
+            if (c == '<') {
+              depth++;
+              advance(lexer);
+              continue;
+            }
+            if (c == '>') {
+              depth--;
+              advance(lexer);
+              if (depth == 0) {
+                if (qualified_inner) {
+                  lexer->result_symbol = GENERIC_OPEN;
+                  return true;
+                }
+                break;
+              }
+              if (depth == 1 && lexer->lookahead == ':') {
+                advance(lexer);
+                if (lexer->lookahead == ':') {
+                  qualified_inner = true;
+                  advance(lexer);
+                }
+              }
+              continue;
+            }
+            advance(lexer);
+          }
+        }
         // Otherwise let the internal lexer handle << / <<=
         return false;
       }

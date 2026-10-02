@@ -60,6 +60,51 @@ pub fn resolve_lib_type_path<'db>(
     resolve_lib_path(db, scope, path_id)
 }
 
+/// Recognize the compiler-designated evidence carrier by resolved identity.
+pub fn is_core_evidence_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    ty: TyId<'db>,
+) -> bool {
+    let (base, _) = ty.decompose_ty_app(db);
+    Some(base) == resolve_lib_type_path(db, scope, "core::obligations::Evidence")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreAbiAdt {
+    Bytes,
+    DynString,
+    DynArray,
+}
+
+/// Classify ABI containers by the identity of their designated core items.
+pub(crate) fn core_abi_adt_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<CoreAbiAdt> {
+    let ty = ty.as_capability(db).map(|(_, inner)| inner).unwrap_or(ty);
+    let base = ty.base_ty(db);
+    let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
+        return None;
+    };
+    if !base
+        .ingot(db)
+        .is_some_and(|ingot| ingot.kind(db) == IngotKind::Core)
+    {
+        return None;
+    }
+    let scope = adt.adt_ref(db).scope();
+    [
+        (CoreAbiAdt::Bytes, "core::abi::Bytes"),
+        (CoreAbiAdt::DynString, "core::abi::DynString"),
+        (CoreAbiAdt::DynArray, "core::abi::DynArray"),
+    ]
+    .into_iter()
+    .find_map(|(kind, path)| {
+        (resolve_lib_type_path(db, scope, path)?.base_ty(db) == base).then_some(kind)
+    })
+}
+
 /// Resolve a function by a fully-qualified `core::...` or `std::...` path string.
 ///
 /// Returns the `Func` HIR item for the resolved function.
@@ -779,6 +824,13 @@ pub fn intrinsic_contract<'db>(
         || [
             "core::intrinsic::size_of",
             "core::intrinsic::contract_field_slot",
+            "core::obligations::prove",
+            "core::meta::field_count",
+            "core::meta::field",
+            "core::meta::field_type",
+            "core::meta::type_is",
+            "core::meta::query_field",
+            "core::meta::record_field_count",
         ]
         .iter()
         .any(|path| lib_func_matches(db, func, path))
@@ -890,13 +942,16 @@ fn runtime_builtin_func_path<'db>(
     Some(segments)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
 pub enum PrimitiveWrapperCallKind {
     Unary(UnOp),
     Binary(BinOp),
     Assign(BinOp),
 }
 
+/// The resolved core declaration and result type determine the operation.
+/// CTFE asks at each call site, so cache the trait lookup across calls.
+#[salsa::tracked]
 pub fn core_primitive_wrapper_call_kind<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,

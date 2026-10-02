@@ -1,0 +1,99 @@
+---
+source: crates/parser/tests/syntax_node.rs
+expression: node
+input_file: test_files/syntax_node/items/impl_trait_named.fe
+---
+Root@0..145
+  ItemList@0..144
+    Item@0..40
+      Trait@0..40
+        TraitKw@0..5 "trait"
+        WhiteSpace@5..6 " "
+        Ident@6..13 "Compute"
+        WhiteSpace@13..14 " "
+        TraitItemList@14..40
+          LBrace@14..15 "{"
+          Newline@15..16 "\n"
+          WhiteSpace@16..20 "    "
+          Func@20..38
+            FnKw@20..22 "fn"
+            WhiteSpace@22..23 " "
+            FuncSignature@23..38
+              Ident@23..28 "value"
+              FuncParamList@28..30
+                LParen@28..29 "("
+                RParen@29..30 ")"
+              WhiteSpace@30..31 " "
+              Arrow@31..33 "->"
+              WhiteSpace@33..34 " "
+              PathType@34..38
+                Path@34..38
+                  PathSegment@34..38
+                    Ident@34..38 "u256"
+          Newline@38..39 "\n"
+          RBrace@39..40 "}"
+    Newline@40..42 "\n\n"
+    Item@42..59
+      Struct@42..59
+        StructKw@42..48 "struct"
+        WhiteSpace@48..49 " "
+        Ident@49..56 "Subject"
+        WhiteSpace@56..57 " "
+        RecordFieldDefList@57..59
+          LBrace@57..58 "{"
+          RBrace@58..59 "}"
+    Newline@59..61 "\n\n"
+    Item@61..144
+      ImplTrait@61..144
+        ImplKw@61..65 "impl"
+        WhiteSpace@65..66 " "
+        TraitRef@66..73
+          Path@66..73
+            PathSegment@66..73
+              Ident@66..73 "Compute"
+        WhiteSpace@73..74 " "
+        ForKw@74..77 "for"
+        WhiteSpace@77..78 " "
+        PathType@78..85
+          Path@78..85
+            PathSegment@78..85
+              Ident@78..85 "Subject"
+        WhiteSpace@85..86 " "
+        AsKw@86..88 "as"
+        WhiteSpace@88..89 " "
+        Ident@89..98 "Alternate"
+        WhiteSpace@98..99 " "
+        TraitItemList@99..144
+          LBrace@99..100 "{"
+          Newline@100..101 "\n"
+          WhiteSpace@101..105 "    "
+          Func@105..142
+            FnKw@105..107 "fn"
+            WhiteSpace@107..108 " "
+            FuncSignature@108..123
+              Ident@108..113 "value"
+              FuncParamList@113..115
+                LParen@113..114 "("
+                RParen@114..115 ")"
+              WhiteSpace@115..116 " "
+              Arrow@116..118 "->"
+              WhiteSpace@118..119 " "
+              PathType@119..123
+                Path@119..123
+                  PathSegment@119..123
+                    Ident@119..123 "u256"
+            WhiteSpace@123..124 " "
+            BlockExpr@124..142
+              LBrace@124..125 "{"
+              Newline@125..126 "\n"
+              WhiteSpace@126..134 "        "
+              ExprStmt@134..136
+                LitExpr@134..136
+                  Lit@134..136
+                    Int@134..136 "42"
+              Newline@136..137 "\n"
+              WhiteSpace@137..141 "    "
+              RBrace@141..142 "}"
+          Newline@142..143 "\n"
+          RBrace@143..144 "}"
+  Newline@144..145 "\n"

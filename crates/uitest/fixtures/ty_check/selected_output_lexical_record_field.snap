@@ -1,0 +1,11 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/selected_output_lexical_record_field.fe
+---
+error[8-0000]: type mismatch
+   ┌─ selected_output_lexical_record_field.fe:31:39
+   │
+31 │     let h = with (Flag) { Holder { v: true } }
+   │                                       ^^^^ expected `u256`, but `bool` is given

@@ -5,10 +5,15 @@ use codespan_reporting::term::{
 };
 use common::file::File;
 use common::{
-    define_input_db,
+    compilation::CompilationSettings,
+    dependencies::DependencyGraph,
     diagnostics::{
-        CompleteDiagnostic, Severity, cmp_complete_diagnostics, trim_trailing_line_whitespace,
+        CompleteDiagnostic, Severity, sort_and_coalesce_complete_diagnostics,
+        trim_trailing_line_whitespace,
     },
+    file::Workspace,
+    impl_input_db,
+    options::CompilerOptions,
 };
 use hir::analysis::{
     analysis_pass::AnalysisPassManager,
@@ -18,15 +23,96 @@ use hir::analysis::{
 };
 use hir::{
     Ingot,
+    core::meta::{FrozenGeneration, GeneratedModuleInput, GenerationManifest},
     hir_def::{HirIngot, TopLevelMod},
     lower::{map_file_to_mod, module_tree},
 };
 
 use crate::diagnostics::ToCsDiag;
 
-define_input_db!(DriverDataBase);
+#[derive(Clone)]
+#[salsa::db]
+pub struct DriverDataBase {
+    storage: salsa::Storage<Self>,
+    index: Option<Workspace>,
+    graph: Option<DependencyGraph>,
+    options: Option<CompilerOptions>,
+    settings: Option<CompilationSettings>,
+    salsa_event_counters: Option<std::sync::Arc<std::sync::Mutex<common::SalsaEventCounters>>>,
+    generation: Option<GenerationManifest>,
+}
+
+#[salsa::db]
+impl salsa::Database for DriverDataBase {
+    fn salsa_event(&self, event: &dyn Fn() -> salsa::Event) {
+        if let Some(counters) = &self.salsa_event_counters
+            && let Ok(mut counters) = counters.lock()
+        {
+            counters.record_event(&event());
+        }
+    }
+}
+
+impl_input_db!(DriverDataBase);
+
+#[salsa::db]
+impl hir::HirDb for DriverDataBase {
+    fn generated_module(&self, url: &url::Url) -> Option<GeneratedModuleInput> {
+        self.generation?.modules(self).get(url).copied()
+    }
+}
+
+impl Default for DriverDataBase {
+    fn default() -> Self {
+        let mut db = Self {
+            storage: salsa::Storage::default(),
+            index: None,
+            graph: None,
+            options: None,
+            settings: None,
+            salsa_event_counters: None,
+            generation: None,
+        };
+        db.index = Some(Workspace::default(&db));
+        db.graph = Some(DependencyGraph::default(&db));
+        db.options = Some(CompilerOptions::default(&db));
+        db.settings = Some(CompilationSettings::default(&db));
+        db.generation = Some(GenerationManifest::new(&db, Default::default()));
+        common::stdlib::HasBuiltinCore::initialize_builtin_core(&mut db);
+        common::stdlib::HasBuiltinStd::initialize_builtin_std(&mut db);
+        db
+    }
+}
 
 impl DriverDataBase {
+    pub fn set_salsa_event_counters(
+        &mut self,
+        counters: Option<std::sync::Arc<std::sync::Mutex<common::SalsaEventCounters>>>,
+    ) {
+        self.salsa_event_counters = counters;
+    }
+
+    /// Publish a completed generation pass as tracked, lifetime-free input.
+    pub(crate) fn publish_generation(&mut self, requests: Vec<FrozenGeneration>) {
+        use salsa::Setter;
+
+        let mut by_module = std::collections::BTreeMap::new();
+        for request in requests {
+            by_module
+                .entry(request.target.file.clone())
+                .or_insert_with(Vec::new)
+                .push(request);
+        }
+        let modules = by_module
+            .into_iter()
+            .map(|(url, requests)| (url, GeneratedModuleInput::new(self, requests)))
+            .collect();
+        self.generation
+            .expect("generation manifest initialized")
+            .set_modules(self)
+            .to(modules);
+    }
+
     /// Create an independent input view for explicit elaboration.
     ///
     /// Unlike cloning a Salsa database handle, this creates new input identities
@@ -106,7 +192,7 @@ impl DriverDataBase {
             .into_iter()
             .map(|diag| diag.to_complete(self))
             .collect();
-        sort_and_dedup_complete_diagnostics(&mut diagnostics);
+        sort_and_coalesce_complete_diagnostics(&mut diagnostics);
         diagnostics
     }
 
@@ -125,7 +211,7 @@ impl DriverDataBase {
             .into_iter()
             .map(|diag| diag.to_complete(self))
             .collect();
-        sort_and_dedup_complete_diagnostics(&mut diagnostics);
+        sort_and_coalesce_complete_diagnostics(&mut diagnostics);
         diagnostics
     }
 
@@ -134,7 +220,7 @@ impl DriverDataBase {
         let mut buffer = writer.buffer();
         let config = term::Config::default();
         let mut diagnostics = diagnostics.to_vec();
-        sort_and_dedup_complete_diagnostics(&mut diagnostics);
+        sort_and_coalesce_complete_diagnostics(&mut diagnostics);
 
         for diag in diagnostics {
             term::emit(&mut buffer, &config, &CsDbWrapper(self), &diag.to_cs(self)).unwrap();
@@ -150,7 +236,7 @@ impl DriverDataBase {
         let mut buffer = writer.buffer();
         let config = term::Config::default();
         let mut diagnostics = diagnostics.to_vec();
-        sort_and_dedup_complete_diagnostics(&mut diagnostics);
+        sort_and_coalesce_complete_diagnostics(&mut diagnostics);
 
         for diag in diagnostics {
             term::emit(&mut buffer, &config, &CsDbWrapper(self), &diag.to_cs(self)).unwrap();
@@ -208,16 +294,7 @@ impl DiagnosticsCollection<'_> {
 
     fn finalize(&self, db: &DriverDataBase) -> Vec<CompleteDiagnostic> {
         let mut diags: Vec<_> = self.0.iter().map(|d| d.as_ref().to_complete(db)).collect();
-        sort_and_dedup_complete_diagnostics(&mut diags);
+        sort_and_coalesce_complete_diagnostics(&mut diags);
         diags
     }
-}
-
-fn sort_complete_diagnostics(diags: &mut [CompleteDiagnostic]) {
-    diags.sort_by(cmp_complete_diagnostics);
-}
-
-fn sort_and_dedup_complete_diagnostics(diags: &mut Vec<CompleteDiagnostic>) {
-    sort_complete_diagnostics(diags);
-    diags.dedup();
 }

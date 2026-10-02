@@ -55,7 +55,8 @@ use super::{
 };
 use crate::analysis::name_resolution::{
     NameDomain, NameResKind, PathRes, TypePosition, path_resolver::PathResolutionResult,
-    resolve_ident_to_bucket, resolve_path_with_minter, resolve_type_position_path_with_minter,
+    resolve_ident_to_bucket, resolve_path_with_minter, resolve_type_path_definition,
+    resolve_type_position_path_with_minter,
 };
 use crate::analysis::{
     HirAnalysisDb,
@@ -106,8 +107,14 @@ fn lower_hir_ty_impl<'db>(
         }
 
         HirTyKind::Path(path) => {
-            lower_path_impl(db, scope, *path, assumptions, TypePosition::Type, minter)
+            if let Some(goal) = lower_constraint_term(db, *path, scope, assumptions, minter) {
+                goal
+            } else {
+                lower_path_impl(db, scope, *path, assumptions, TypePosition::Type, minter)
+            }
         }
+
+        HirTyKind::Primitive(primitive) => TyId::new(db, TyData::TyBase(TyBase::from(*primitive))),
 
         HirTyKind::Tuple(tuple_id) => {
             let elems = tuple_id.data(db);
@@ -303,7 +310,7 @@ fn collect_layout_root_uses_in_hir_ty<'db>(
                 }
             }
         }
-        HirTyKind::Never => {}
+        HirTyKind::Primitive(_) | HirTyKind::Never => {}
     }
 }
 
@@ -415,10 +422,13 @@ fn lower_opt_const_body<'db>(
             None,
             ConstCaptureEnv::identity_for_body(db, body, Some(minter)),
             UnevaluatedConstPolicy::DeferValidation,
-        );
+        )
+        .with_optional_impl_env(db, minter.const_impl_env(db, scope));
     }
-    lower_const_body_path(db, body, scope, assumptions, minter)
-        .unwrap_or_else(|| ConstTyId::from_body(db, body, None, None))
+    lower_const_body_path(db, body, scope, assumptions, minter).unwrap_or_else(|| {
+        ConstTyId::from_body(db, body, None, None)
+            .with_optional_impl_env(db, minter.const_impl_env(db, scope))
+    })
 }
 
 /// Whether lowering reads an anonymous constant as the constant, trait
@@ -480,7 +490,13 @@ pub(crate) fn lower_const_body_path<'db>(
                     // Defer evaluation: the use position's expected type may
                     // differ in integer shape from the const's declared type
                     // (e.g. a `u256` trait const used as an array length).
-                    let assoc = AssocConstUse::new(scope, assumptions, inst, name);
+                    let assoc = AssocConstUse::new(
+                        scope,
+                        minter.const_assumptions(assumptions),
+                        inst,
+                        name,
+                    )
+                    .with_selection(minter.selection_for(db, inst));
                     super::const_ty::abstract_const_ty_from_assoc_const_use(db, assoc, expected_ty)
                 } else {
                     ConstTyId::invalid(db, InvalidCause::Other)
@@ -502,6 +518,77 @@ pub(crate) fn lower_const_body_path<'db>(
                 )
             }
             _ => return None,
+        },
+    )
+}
+
+/// Constraint applications spell their subject first: `Produce<T, Args...>`.
+/// Reuse ordinary trait-reference lowering after separating that subject.
+/// Resolving the declaration is not candidate search and establishes no proof.
+fn lower_constraint_term<'db>(
+    db: &'db dyn HirAnalysisDb,
+    path: Partial<PathId<'db>>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    minter: &LoweringContext<'db>,
+) -> Option<TyId<'db>> {
+    use crate::analysis::name_resolution::{NameResKind, resolve_type_path_definition};
+    use crate::hir_def::{ItemKind, PathKind, TraitRefId};
+    let path = path.to_opt()?;
+    let NameResKind::Scope(ScopeId::Item(ItemKind::Trait(_))) =
+        resolve_type_path_definition(db, path, scope)?
+    else {
+        return None;
+    };
+    let arguments = path.generic_args(db).data(db);
+    let (GenericArg::Type(subject), rest) = arguments.split_first()? else {
+        return Some(TyId::invalid(db, InvalidCause::Other));
+    };
+    let subject = lower_opt_hir_ty_with_minter(db, subject.ty, scope, assumptions, minter);
+    if !subject.is_star_kind(db) {
+        return Some(TyId::invalid(
+            db,
+            InvalidCause::NormalTypeExpected { given: subject },
+        ));
+    }
+    let reference_path = PathId::new(
+        db,
+        PathKind::Ident {
+            ident: path.ident(db),
+            generic_args: GenericArgListId::given(db, rest.to_vec()),
+        },
+        path.parent(db),
+    );
+    let reference = TraitRefId::new(db, Partial::Present(reference_path));
+    Some(
+        match super::trait_lower::lower_trait_ref(db, subject, reference, scope, assumptions, None)
+        {
+            Ok(goal) => {
+                // Ordinary trait-reference callers validate bindings separately.
+                // A goal term must not retain unknown or repeated binding names.
+                let written_bindings = rest
+                    .iter()
+                    .filter(|arg| matches!(arg, GenericArg::AssocType(_)))
+                    .count();
+                if written_bindings != goal.assoc_type_bindings(db).len() {
+                    return None;
+                }
+                for (name, ty) in goal.assoc_type_bindings(db) {
+                    let trait_def = goal.def(db);
+                    let declaration = trait_def.assoc_ty(db, *name)?;
+                    let scope = trait_def
+                        .assoc_types(db)
+                        .find(|view| view.name(db) == Some(*name))?
+                        .scope();
+                    let expected =
+                        lower_kind_in_bounds(db, scope, &declaration.bounds).unwrap_or(Kind::Star);
+                    if !expected.does_match(ty.kind(db)) {
+                        return None;
+                    }
+                }
+                TyId::new(db, TyData::ConstraintTerm(goal))
+            }
+            Err(_) => return None,
         },
     )
 }
@@ -559,7 +646,9 @@ pub(crate) fn lower_type_position_path<'db>(
                 .and_then(|v| v.ty_binder(db))
                 .map(|b| b.instantiate(db, inst.args(db)))
             {
-                let assoc = AssocConstUse::new(scope, assumptions, inst, name);
+                let assoc =
+                    AssocConstUse::new(scope, minter.const_assumptions(assumptions), inst, name)
+                        .with_selection(minter.selection_for(db, inst));
                 if let Some(const_ty) = super::const_ty::const_ty_or_abstract_from_assoc_const_use(
                     db,
                     assoc,
@@ -3806,6 +3895,10 @@ pub struct LoweredSlot(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum ParamKey<'db> {
+    AssociatedType {
+        owner: crate::hir_def::scope_graph::AssocTypeOwner<'db>,
+        index: SourceParamIndex,
+    },
     TraitSelf(crate::hir_def::Trait<'db>),
     Source {
         owner: GenericParamOwner<'db>,
@@ -3827,6 +3920,7 @@ pub enum ParamKey<'db> {
 #[salsa::interned]
 #[derive(Debug)]
 pub struct ParamSchemaId<'db> {
+    pub associated_owner: Option<crate::hir_def::scope_graph::AssocTypeOwner<'db>>,
     pub owner: GenericParamOwner<'db>,
     pub basis: ParamBasis,
     #[return_ref]
@@ -3836,6 +3930,31 @@ pub struct ParamSchemaId<'db> {
 impl<'db> ParamSchemaId<'db> {
     pub fn full(db: &'db dyn HirAnalysisDb, owner: GenericParamOwner<'db>) -> Self {
         param_schema(db, owner, ParamBasis::Full)
+    }
+
+    /// A declaration-local associated type binder uses the same checked
+    /// substitution domains as item parameters, without inheriting trait slots.
+    pub(crate) fn associated_type(
+        db: &'db dyn HirAnalysisDb,
+        owner: crate::hir_def::scope_graph::AssocTypeOwner<'db>,
+    ) -> Self {
+        use crate::hir_def::scope_graph::AssocTypeOwner;
+        let parent: GenericParamOwner<'db> = match owner {
+            AssocTypeOwner::Trait(trait_, _) => trait_.into(),
+            AssocTypeOwner::Impl(impl_, _) => impl_.into(),
+        };
+        let keys = (0..owner.generic_params(db).data(db).len())
+            .map(|index| ParamKey::AssociatedType {
+                owner,
+                index: SourceParamIndex(index),
+            })
+            .collect::<Vec<_>>();
+        Self::new(db, Some(owner), parent, ParamBasis::Full, keys)
+    }
+
+    pub(crate) fn scope(self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
+        self.associated_owner(db)
+            .map_or_else(|| self.owner(db).scope(), |owner| owner.scope())
     }
 
     pub fn callable(db: &'db dyn HirAnalysisDb, callable: CallableDef<'db>) -> Self {
@@ -3873,6 +3992,9 @@ impl<'db> ParamSchemaId<'db> {
     }
 
     pub fn formal_at(self, db: &'db dyn HirAnalysisDb, slot: LoweredSlot) -> Option<TyId<'db>> {
+        if let Some(owner) = self.associated_owner(db) {
+            return (slot.0 < self.keys(db).len()).then(|| assoc_type_param(db, owner, slot.0));
+        }
         self.param_set(db).params(db).get(slot.0).copied()
     }
 
@@ -3908,6 +4030,9 @@ impl<'db> ParamSchemaId<'db> {
     }
 
     fn parent_schema(self, db: &'db dyn HirAnalysisDb) -> Option<Self> {
+        if self.associated_owner(db).is_some() {
+            return None;
+        }
         match self.owner(db) {
             GenericParamOwner::Func(func) if func.is_associated_func(db) => {
                 Some(Self::full(db, self.owner(db).parent(db)?))
@@ -4105,6 +4230,18 @@ impl<'db> CompleteSubst<'db> {
         )
     }
 
+    pub(crate) fn for_associated_type(
+        db: &'db dyn HirAnalysisDb,
+        owner: crate::hir_def::scope_graph::AssocTypeOwner<'db>,
+        values: Vec<TyId<'db>>,
+    ) -> Result<Self, SubstError<'db>> {
+        Self::new(
+            ParamDomainId::full(db, ParamSchemaId::associated_type(db, owner)),
+            db,
+            values,
+        )
+    }
+
     /// Binds the leading slots of `domain` to `prefix` and leaves the remaining
     /// slots at their declaration formals.
     pub fn with_prefix(
@@ -4224,6 +4361,7 @@ pub fn param_schema<'db>(
     }
     ParamSchemaId::new(
         db,
+        None,
         owner,
         basis,
         keys.into_iter()
@@ -4379,7 +4517,8 @@ impl<'db> GenericParamCollector<'db> {
                 GenericParam::Type(param) => {
                     let name = param.name;
 
-                    let kind = lower_kind_in_bounds(param.bounds.as_slice());
+                    let kind =
+                        lower_kind_in_bounds(hir_db, self.owner.scope(), param.bounds.as_slice());
                     let default_hir_ty = param.default_ty;
                     self.params
                         .push(TyParamPrecursor::ty_param(name, kind, default_hir_ty));
@@ -4610,31 +4749,139 @@ impl<'db> TyParamPrecursor<'db> {
     }
 }
 
-pub(super) fn lower_kind(kind: &HirKindBound) -> Kind {
+pub(crate) fn is_core_constraint_bound<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    reference: crate::hir_def::TraitRefId<'db>,
+) -> bool {
+    let Some(path) = reference.path(db).to_opt() else {
+        return false;
+    };
+    let marker_path = super::corelib::lib_root_path(db, scope, "core")
+        .push_str(db, "obligations")
+        .push_str(db, "Constraint");
+    let marker = resolve_type_path_definition(db, marker_path, scope);
+    matches!(
+        (resolve_type_path_definition(db, path, scope), marker),
+        (Some(NameResKind::Scope(found)), Some(NameResKind::Scope(core))) if found == core
+    )
+}
+
+pub(crate) fn lower_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    kind: &HirKindBound,
+) -> Kind {
     match kind {
         HirKindBound::Mono => Kind::Star,
-        HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
-            (Partial::Present(lhs), Partial::Present(rhs)) => {
-                Kind::Abs(Box::new((lower_kind(lhs), lower_kind(rhs))))
+        HirKindBound::Named(name) => {
+            let ident = IdentId::new(db, name.clone());
+            let reference = crate::hir_def::TraitRefId::new(
+                db,
+                Partial::Present(PathId::from_ident(db, ident)),
+            );
+            if is_core_constraint_bound(db, scope, reference) {
+                Kind::Constraint
+            } else {
+                Kind::Any
             }
+        }
+        HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
+            (Partial::Present(lhs), Partial::Present(rhs)) => Kind::Abs(Box::new((
+                lower_kind(db, scope, lhs),
+                lower_kind(db, scope, rhs),
+            ))),
             (Partial::Present(lhs), Partial::Absent) => {
-                Kind::Abs(Box::new((lower_kind(lhs), Kind::Any)))
+                Kind::Abs(Box::new((lower_kind(db, scope, lhs), Kind::Any)))
             }
             (Partial::Absent, Partial::Present(rhs)) => {
-                Kind::Abs(Box::new((Kind::Any, lower_kind(rhs))))
+                Kind::Abs(Box::new((Kind::Any, lower_kind(db, scope, rhs))))
             }
             (Partial::Absent, Partial::Absent) => Kind::Abs(Box::new((Kind::Any, Kind::Any))),
         },
     }
 }
 
+/// Return the first named kind that does not resolve to the designated core marker.
+pub(crate) fn unknown_named_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    kind: &HirKindBound,
+) -> Option<String> {
+    match kind {
+        HirKindBound::Named(name) if lower_kind(db, scope, kind) == Kind::Any => Some(name.clone()),
+        HirKindBound::Abs(lhs, rhs) => lhs
+            .borrowed()
+            .to_opt()
+            .and_then(|kind| unknown_named_kind(db, scope, kind))
+            .or_else(|| {
+                rhs.borrowed()
+                    .to_opt()
+                    .and_then(|kind| unknown_named_kind(db, scope, kind))
+            }),
+        _ => None,
+    }
+}
+
 /// Helper for extracting a lowered kind from a slice of HIR `TypeBound`s.
 /// Returns the first kind bound if present.
-pub(super) fn lower_kind_in_bounds<'db>(bounds: &[TypeBound<'db>]) -> Option<Kind> {
+pub(super) fn lower_kind_in_bounds<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    bounds: &[TypeBound<'db>],
+) -> Option<Kind> {
     for bound in bounds {
         if let TypeBound::Kind(Partial::Present(k)) = bound {
-            return Some(lower_kind(k));
+            return Some(lower_kind(db, scope, k));
+        }
+        if let TypeBound::Trait(reference) = bound
+            && is_core_constraint_bound(db, scope, *reference)
+        {
+            return Some(Kind::Constraint);
         }
     }
     None
+}
+
+/// Lower a family parameter in its declaration-local index space.
+pub(crate) fn assoc_type_param<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: crate::hir_def::scope_graph::AssocTypeOwner<'db>,
+    idx: usize,
+) -> TyId<'db> {
+    let params = owner.generic_params(db);
+    let Some(GenericParam::Type(param)) = params.data(db).get(idx) else {
+        return TyId::invalid(db, InvalidCause::Other);
+    };
+    let Some(name) = param.name.to_opt() else {
+        return TyId::invalid(db, InvalidCause::Other);
+    };
+    let kind = lower_kind_in_bounds(db, owner.scope(), &param.bounds).unwrap_or(Kind::Star);
+    TyId::new(
+        db,
+        TyData::TyParam(TyParam::normal_param(
+            name,
+            idx,
+            kind,
+            owner.scope(),
+            Some(idx),
+        )),
+    )
+}
+
+pub(crate) fn assoc_family_kind(
+    db: &dyn HirAnalysisDb,
+    scope: ScopeId<'_>,
+    params: crate::hir_def::GenericParamListId<'_>,
+    result: Kind,
+) -> Kind {
+    params.data(db).iter().rev().fold(result, |result, param| {
+        let input = match param {
+            GenericParam::Type(param) => {
+                lower_kind_in_bounds(db, scope, &param.bounds).unwrap_or(Kind::Star)
+            }
+            GenericParam::Const(_) => Kind::Star,
+        };
+        Kind::Abs(Box::new((input, result)))
+    })
 }

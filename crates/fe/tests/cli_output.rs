@@ -4548,3 +4548,40 @@ fn test_cli_build_payable_return_abi() {
         serde_json::json!([{"name": "", "type": "uint256"}])
     );
 }
+
+#[test]
+fn public_obligations_check_build_and_execute() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fe_test/public_obligations.fe");
+    let fixture = fixture.to_str().expect("fixture path");
+    let (output, code) = run_fe_main(&["check", fixture]);
+    assert_eq!(code, 0, "evidence source failed checking:\n{output}");
+    for level in ["0", "2"] {
+        let out = tempdir().expect("build output");
+        let (output, code) = run_fe_main(&[
+            "build",
+            "-O",
+            level,
+            "--emit",
+            "runtime-bytecode",
+            "--out-dir",
+            out.path().to_str().unwrap(),
+            fixture,
+        ]);
+        assert_eq!(
+            code, 0,
+            "evidence consumer failed building at O{level}:\n{output}"
+        );
+        assert!(
+            fs::read_dir(out.path())
+                .unwrap()
+                .any(|entry| entry.unwrap().metadata().unwrap().len() > 0),
+            "build must emit an artifact"
+        );
+        let (output, code) = run_fe_main(&["test", "-O", level, "--jobs", "1", fixture]);
+        assert_eq!(
+            code, 0,
+            "evidence consumer failed executing at O{level}:\n{output}"
+        );
+    }
+}

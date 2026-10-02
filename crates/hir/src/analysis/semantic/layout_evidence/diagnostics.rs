@@ -97,6 +97,7 @@ pub fn collect_layout_evidence_diagnostic_vouchers<'db>(
             | ItemKind::Impl(_)
             | ItemKind::ImplTrait(_)
             | ItemKind::TypeAlias(_)
+            | ItemKind::TypeFn(_)
             | ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::TopMod(_)

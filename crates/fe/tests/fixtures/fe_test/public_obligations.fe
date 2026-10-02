@@ -1,0 +1,44 @@
+// Trait evidence is introduced, forwarded and explicitly opened during CTFE.
+// The returned value's type is bound by the same complete goal as its witness.
+use core::obligations::{Evidence, prove}
+
+trait Produce {
+    type Output
+    const fn produce() -> Self::Output
+}
+
+struct Subject {}
+impl Produce for Subject {
+    type Output = u64
+    const fn produce() -> u64 { 42 }
+}
+
+const fn forward<G: Constraint>(_ evidence: Evidence<G>) -> Evidence<G> {
+    evidence
+}
+
+const fn consume<T, Output>(_ evidence: Evidence<Produce<T, Output = Output>>) -> Output {
+    with (evidence) { T::produce() }
+}
+
+const fn answer() -> u64 {
+    consume(forward(prove<Produce<Subject, Output = u64>>()))
+}
+
+const ANSWER: u64 = answer()
+
+#[test]
+fn checked_obligation_returns_a_typed_payload() {
+    assert!(ANSWER == 42)
+}
+
+msg ResultMsg {
+    #[selector = 0x12345678]
+    Read -> u64,
+}
+
+pub contract ObligationResult {
+    recv ResultMsg {
+        Read -> u64 { return ANSWER }
+    }
+}

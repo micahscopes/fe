@@ -1,0 +1,14 @@
+use core::obligations::{Constraint as GoalKind, Evidence}
+
+trait Constraint {}
+impl Constraint for u256 {}
+
+fn bounded<T: Constraint>() {}
+fn bounded_where<T>() where T: Constraint {}
+
+const fn carry<G: GoalKind>(evidence: Evidence<G>) -> Evidence<G> { evidence }
+
+fn answer() {
+    bounded<u256>()
+    bounded_where<u256>()
+}

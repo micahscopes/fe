@@ -1,0 +1,45 @@
+use std::evm::StorageMap
+
+struct Reader {}
+
+trait Choose {
+    fn choose<const ROOT: u256>(
+        self,
+        first: StorageMap<u256, u256, ROOT>,
+        second: StorageMap<u256, u256, ROOT>,
+    ) -> StorageMap<u256, u256, ROOT>
+}
+
+impl Choose for Reader {
+    fn choose<const ROOT: u256>(
+        self,
+        first: StorageMap<u256, u256, ROOT>,
+        second: StorageMap<u256, u256, ROOT>,
+    ) -> StorageMap<u256, u256, ROOT> {
+        first
+    }
+}
+
+impl Choose for Reader as Alternative {
+    fn choose<const ROOT: u256>(
+        self,
+        first: StorageMap<u256, u256, ROOT>,
+        second: StorageMap<u256, u256, ROOT>,
+    ) -> StorageMap<u256, u256, ROOT> {
+        second
+    }
+}
+
+fn ordinary<const ROOT: u256>(
+    first: StorageMap<u256, u256, ROOT>,
+    second: StorageMap<u256, u256, ROOT>,
+) -> StorageMap<u256, u256, ROOT> {
+    Reader {}.choose(first: first, second: second)
+}
+
+fn selected<const ROOT: u256>(
+    first: StorageMap<u256, u256, ROOT>,
+    second: StorageMap<u256, u256, ROOT>,
+) -> StorageMap<u256, u256, ROOT> {
+    with (Alternative) { Reader {}.choose(first: first, second: second) }
+}

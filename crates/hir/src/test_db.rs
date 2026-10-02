@@ -14,7 +14,7 @@ use crate::analysis::{
     initialize_pre_contract_analysis_pass,
 };
 use crate::{
-    Ingot, SpannedHirDb,
+    HirDb, Ingot, SpannedHirDb,
     hir_def::{Contract, Func, ItemKind, TopLevelMod, scope_graph::ScopeGraph},
     lower::{self, map_file_to_mod, module_tree, scope_graph},
     span::{DynLazySpan, LazySpan},
@@ -209,6 +209,9 @@ where
 }
 
 define_input_db!(HirAnalysisTestDb);
+
+#[salsa::db]
+impl HirDb for HirAnalysisTestDb {}
 
 pub fn find_contract<'db>(
     db: &'db HirAnalysisTestDb,
@@ -435,6 +438,9 @@ pub fn initialize_test_analysis_pass() -> AnalysisPassManager {
 // --- Simple test database for unit tests ---
 
 define_input_db!(TestDb);
+
+#[salsa::db]
+impl HirDb for TestDb {}
 
 #[allow(dead_code)]
 impl TestDb {

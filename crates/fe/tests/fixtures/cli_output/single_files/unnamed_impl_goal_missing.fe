@@ -1,0 +1,8 @@
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+impl Compute for Subject as Only {
+    const fn compute() -> u256 { 2 }
+}
+const fn selected() -> u256 {
+    with (<Subject as Compute>) { 1 }
+}

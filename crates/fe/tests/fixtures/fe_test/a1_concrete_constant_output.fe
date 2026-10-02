@@ -1,0 +1,23 @@
+trait Compute {
+    type Output
+    const ID: u256
+}
+struct Subject {}
+impl Compute for Subject {
+    type Output = u256
+    const ID: u256 = 1
+}
+impl Compute for Subject as Flag {
+    type Output = bool
+    const ID: u256 = 2
+}
+
+const fn bounded<T: Compute>() -> u256 { Subject::ID }
+const fn selected() -> u256 { with (Flag) { bounded<Subject>() } }
+const fn through_bound<T: Compute>() -> u256 { T::ID }
+
+#[test]
+fn concrete_constant_keeps_its_lexical_impl() {
+    assert!(selected() == 1)
+    assert!(with (Flag) { through_bound<Subject>() } == 2)
+}

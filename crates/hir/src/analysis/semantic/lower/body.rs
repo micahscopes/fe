@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     analysis::semantic::instance::{
         CallSiteLowering, ForLoopCallSites, SemanticInstance, provisional_semantic_callee_key,
-        resolve_semantic_const_ref, semantic_callee_key_with_effect_providers,
+        resolve_semantic_const_ref_in_instance, semantic_callee_key_with_effect_providers,
     },
     analysis::{
         HirAnalysisDb,
@@ -29,7 +29,7 @@ use crate::{
             ty_check::{
                 BodyOwner, Callable, CodeRegionIntrinsicKind, ConstIntrinsicKind, ConstRef,
                 LocalBinding, PathReadSemantics, RecordInitLowering, RecordLike,
-                SemanticExprLowering, TypedBody, ValuePathRef,
+                SemanticExprLowering, TypedBody, ValuePathRef, infer_body,
             },
             ty_def::{BorrowKind, TyData, TyId},
             ty_is_copy,
@@ -758,9 +758,48 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
 
     fn lower_const_ref(&mut self, expr: ExprId, const_ref: ConstRef<'db>) -> SValueId {
         let ty = self.expr_ty(expr);
-        if let Some(const_ref) =
-            resolve_semantic_const_ref(self.db, const_ref, ty, SemOrigin::Expr(expr))
-        {
+        // A reference written through `Self` remains scoped to the selected
+        // impl even after `Self` has been substituted with a concrete type.
+        // A concrete path in the same body keeps ordinary lookup semantics.
+        let through_self = matches!(
+            expr.data(self.db, self.body).borrowed().to_opt(),
+            Some(Expr::Path(Partial::Present(path)))
+                if path.segment(self.db, 0).is_some_and(|root| root.is_self_ty(self.db))
+        );
+        let inherit_trait_selection = matches!(
+            infer_body(self.db, self.instance.key(self.db).owner(self.db))
+                .1
+                .expr_const_ref(expr),
+            Some(ConstRef::TraitConst(original))
+                if through_self
+                    || original.inst().args(self.db).iter().any(|ty| ty.has_param(self.db))
+                    || original
+                        .inst()
+                        .assoc_type_bindings(self.db)
+                        .values()
+                        .any(|ty| ty.has_param(self.db))
+        );
+        let const_ref = match const_ref {
+            ConstRef::TraitConst(assoc)
+                if assoc.selection().is_none() && inherit_trait_selection =>
+            {
+                let selection = self
+                    .instance
+                    .key(self.db)
+                    .impl_env(self.db)
+                    .selection_for(self.db, assoc.inst());
+                ConstRef::TraitConst(assoc.with_selection(selection))
+            }
+            other => other,
+        };
+        if let Some(const_ref) = resolve_semantic_const_ref_in_instance(
+            self.db,
+            Some(self.instance.key(self.db)),
+            const_ref,
+            ty,
+            SemOrigin::Expr(expr),
+            inherit_trait_selection,
+        ) {
             return self.emit_expr_with_origin(
                 SemOrigin::Expr(expr),
                 ty,
@@ -1114,6 +1153,18 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .callee
                     .unwrap_or_else(|| panic!("call lowering plan missing callee for {expr:?}"));
                 let effect_args = self.lower_effect_arg_slice(&call_site.effect_args);
+                let provisions = callable
+                    .opened_provisions
+                    .iter()
+                    .map(|(value, goal)| {
+                        let Some(WithBindingSource::Value(witness)) =
+                            self.with_binding_sources.get(value)
+                        else {
+                            panic!("opened evidence must retain its lexical value");
+                        };
+                        (*witness, *goal)
+                    })
+                    .collect();
                 self.emit_expr_with_origin(
                     SemOrigin::Expr(expr),
                     ty,
@@ -1122,6 +1173,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                         callee,
                         args: values.into_boxed_slice(),
                         effect_args,
+                        provisions,
                     },
                 )
             }
@@ -1262,6 +1314,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     callable,
                     &[],
                     callable.effect_providers(),
+                    false,
                 ),
                 BindingRoleMode::Provisional => provisional_semantic_callee_key(
                     self.db,
@@ -1269,6 +1322,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     callable,
                     &[],
                     self.assumptions,
+                    false,
                 ),
             }
             .ok()
@@ -1425,6 +1479,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .expect("Seq::len should lower to a semantic callee"),
                 args: vec![iter_operand].into_boxed_slice(),
                 effect_args: len_effect_args,
+                provisions: Box::new([]),
             },
         );
 
@@ -1469,6 +1524,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .expect("Seq::get should lower to a semantic callee"),
                 args: vec![iter_operand, SOperand::synthetic(idx_local)].into_boxed_slice(),
                 effect_args: get_effect_args,
+                provisions: Box::new([]),
             },
         );
         if seq.element_layout_backing_source {

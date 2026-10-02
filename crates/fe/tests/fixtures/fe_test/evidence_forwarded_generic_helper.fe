@@ -1,0 +1,26 @@
+use core::obligations::{Evidence, prove}
+
+trait Produce {
+    const fn produce() -> u64
+}
+
+struct Subject {}
+
+impl Produce for Subject {
+    const fn produce() -> u64 { 42 }
+}
+
+const fn helper<T: Produce>() -> u64 {
+    T::produce()
+}
+
+const fn consume<T>(_ evidence: Evidence<Produce<T>>) -> u64 {
+    with (evidence) { helper<T>() }
+}
+
+const ANSWER: u64 = consume(prove<Produce<Subject>>())
+
+#[test]
+fn opened_evidence_reaches_the_helper() {
+    assert!(ANSWER == 42)
+}

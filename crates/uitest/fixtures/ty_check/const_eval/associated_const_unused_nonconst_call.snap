@@ -1,0 +1,16 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_eval/associated_const_unused_nonconst_call.fe
+---
+error[3-0024]: non-const function call in const context
+  ┌─ associated_const_unused_nonconst_call.fe:4:45
+  │
+4 │ impl Fact for Subject { const VALUE: u256 = ordinary() }
+  │                                             ^^^^^^^^^^ calls in const context must be `const fn`
+
+error[3-0024]: non-const function call in const context
+  ┌─ associated_const_unused_nonconst_call.fe:8:25
+  │
+8 │     const VALUE: u256 = ordinary()
+  │                         ^^^^^^^^^^ calls in const context must be `const fn`

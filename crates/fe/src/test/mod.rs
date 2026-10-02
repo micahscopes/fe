@@ -1642,7 +1642,7 @@ fn prepare_tests_single_file(
     let prepared = match driver::elaboration::prepare_target(db, &file_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            let message = format!("{}: {}", error.url, error.message);
+            let message = error.render(db);
             let _ = writeln!(output, "{message}");
             if let Some(report) = report {
                 write_report_error(report, "compilation_errors.txt", &message);
@@ -1856,7 +1856,7 @@ fn prepare_tests_ingot(
     let prepared = match driver::elaboration::prepare_target(db, &ingot_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            let message = format!("{}: {}", error.url, error.message);
+            let message = error.render(db);
             let _ = writeln!(output, "{message}");
             if let Some(report) = report {
                 write_report_error(report, "compilation_errors.txt", &message);

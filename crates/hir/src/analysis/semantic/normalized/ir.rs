@@ -424,6 +424,7 @@ pub enum NExpr<'db> {
         callee: SemanticCalleeRef<'db>,
         args: Box<[NOperand]>,
         effect_args: Box<[NEffectArg<'db>]>,
+        provisions: Box<[(NOperand, crate::analysis::ty::trait_def::TraitInstId<'db>)]>,
     },
 }
 
@@ -449,8 +450,14 @@ impl<'db> NExpr<'db> {
                 fields.iter().copied().for_each(f);
             }
             Self::Call {
-                args, effect_args, ..
+                args,
+                effect_args,
+                provisions,
+                ..
             } => {
+                for (value, _) in provisions {
+                    f(*value);
+                }
                 args.iter().copied().for_each(&mut f);
                 effect_args
                     .iter()

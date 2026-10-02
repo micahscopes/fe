@@ -1,0 +1,12 @@
+struct Cell<const N: u256> {}
+
+const fn payload() -> u256 { core::size_of<Tree<0>>() }
+
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{payload()}>
+        _ => Tree<{N - 1}>
+    }
+}
+
+fn use_it(x: Tree<0>) -> Tree<0> { x }

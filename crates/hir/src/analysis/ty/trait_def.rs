@@ -10,7 +10,7 @@ use crate::{
         trait_resolution::{GoalSatisfiability, PredicateListId, Selection},
     },
     hir_def::{
-        Body, Contract, Func, GenericParamOwner, HirIngot, IdentId, ImplTrait, Trait,
+        Body, Contract, Func, GenericParamOwner, HirIngot, IdentId, ImplTrait, ItemKind, Trait,
         scope_graph::ScopeId,
     },
 };
@@ -46,6 +46,50 @@ use super::{
 };
 use crate::analysis::HirAnalysisDb;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplSelectionClass<'db> {
+    Ordinary,
+    Named(IdentId<'db>),
+}
+
+/// The single semantic read of an authored impl's selection name.
+pub fn impl_selection_class<'db>(
+    db: &'db dyn HirAnalysisDb,
+    item: ImplTrait<'db>,
+) -> ImplSelectionClass<'db> {
+    match item.selection_name(db) {
+        Some(name) => ImplSelectionClass::Named(name),
+        None => ImplSelectionClass::Ordinary,
+    }
+}
+
+/// A module-local name for diagnostics. Auto names are never entered into
+/// name resolution, so moving an impl can only change how it is displayed.
+pub(crate) fn impl_display_name<'db>(db: &'db dyn HirAnalysisDb, item: ImplTrait<'db>) -> String {
+    match impl_selection_class(db, item) {
+        ImplSelectionClass::Named(name) => name.data(db).to_string(),
+        ImplSelectionClass::Ordinary => {
+            let ordinal = item
+                .scope()
+                .parent_module(db)
+                .into_iter()
+                .flat_map(|module| module.child_items(db))
+                .filter_map(|child| match child {
+                    ItemKind::ImplTrait(candidate)
+                        if impl_selection_class(db, candidate) == ImplSelectionClass::Ordinary =>
+                    {
+                        Some(candidate)
+                    }
+                    _ => None,
+                })
+                .position(|candidate| candidate == item)
+                .map(|index| index + 1)
+                .unwrap_or(1);
+            format!("impl#{ordinal}")
+        }
+    }
+}
+
 /// Returns [`TraitEnv`] for the given ingot.
 #[salsa::tracked(return_ref, cycle_fn=ingot_trait_env_cycle_recover, cycle_initial=ingot_trait_env_cycle_initial)]
 pub(crate) fn ingot_trait_env<'db>(db: &'db dyn HirAnalysisDb, ingot: Ingot<'db>) -> TraitEnv<'db> {
@@ -66,7 +110,7 @@ pub(crate) fn impls_for_trait_def<'db>(
     trait_def: Trait<'db>,
 ) -> Vec<ImplementorId<'db>> {
     let env = ingot_trait_env(db, ingot);
-    let mut out = env.impls_for_trait(db, trait_def);
+    let mut out = env.all_impls_for_trait(db, trait_def);
 
     if is_std_evm_contract_trait_def(db, trait_def) {
         out.extend(contract_virtual_impls(db, ingot).iter().copied());
@@ -77,7 +121,7 @@ pub(crate) fn impls_for_trait_def<'db>(
         .collect()
 }
 
-/// Returns implementors for `trait_def` whose self type can apply to `ty`.
+/// Returns ordinary implementors for `trait_def` whose self type can apply to `ty`.
 ///
 /// Method lookup knows both halves of this key for explicitly selected traits
 /// (notably operator traits). Intersecting them before completing candidates is
@@ -133,19 +177,74 @@ pub(crate) fn impls_for_trait_in_ingots<'db>(
     primary: Ingot<'db>,
     secondary: Option<Ingot<'db>>,
     trait_: Canonical<TraitInstId<'db>>,
+    selected: Option<ImplementorId<'db>>,
 ) -> Vec<ImplementorId<'db>> {
     let mut table = UnificationTable::new(db);
     let trait_def = trait_.extract_identity(&mut table).def(db);
     let mut dedup: IndexSet<ImplementorId<'db>> = IndexSet::default();
-    dedup.extend(impls_for_trait_def(db, primary, trait_def).iter().copied());
+    let candidates = |ingot| match selected {
+        Some(candidate) => selected_candidate_in_ingot(db, ingot, trait_def, candidate)
+            .into_iter()
+            .collect(),
+        None => ordinary_impls_for_trait_def(db, ingot, trait_def),
+    };
+    dedup.extend(candidates(primary));
     if let Some(secondary) = secondary {
-        dedup.extend(
-            impls_for_trait_def(db, secondary, trait_def)
-                .iter()
-                .copied(),
-        );
+        dedup.extend(candidates(secondary));
     }
     dedup.into_iter().collect()
+}
+
+fn ordinary_impls_for_trait_def<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    trait_def: Trait<'db>,
+) -> Vec<ImplementorId<'db>> {
+    let mut out = ingot_trait_env(db, ingot).impls_for_trait(db, trait_def);
+    if is_std_evm_contract_trait_def(db, trait_def) {
+        out.extend(contract_virtual_impls(db, ingot).iter().copied());
+    }
+    out.into_iter()
+        .map(|candidate| complete_impl_trait(db, candidate))
+        .collect()
+}
+
+fn selected_candidate_in_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    trait_def: Trait<'db>,
+    candidate: ImplementorId<'db>,
+) -> Option<ImplementorId<'db>> {
+    if candidate.trait_def(db) != trait_def {
+        return None;
+    }
+    match candidate.origin(db) {
+        ImplementorOrigin::Hir(item) => {
+            let env = ingot_trait_env(db, ingot);
+            let visible = match impl_selection_class(db, item) {
+                ImplSelectionClass::Ordinary => env
+                    .impls
+                    .get(&trait_def)
+                    .is_some_and(|items| items.contains(&item)),
+                ImplSelectionClass::Named(name) => env
+                    .named_by_name
+                    .get(&name)
+                    .is_some_and(|items| items.contains(&item)),
+            };
+            if !visible {
+                return None;
+            }
+            let completed = complete_impl_trait(db, candidate);
+            (completed == candidate).then_some(completed)
+        }
+        ImplementorOrigin::VirtualContract(_) if is_std_evm_contract_trait_def(db, trait_def) => {
+            contract_virtual_impls(db, ingot)
+                .iter()
+                .copied()
+                .find(|item| *item == candidate)
+        }
+        ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => None,
+    }
 }
 
 fn is_std_evm_contract_trait_def<'db>(db: &'db dyn HirAnalysisDb, trait_def: Trait<'db>) -> bool {
@@ -239,6 +338,8 @@ fn ingot_trait_env_cycle_initial<'db>(
         impls: FxHashMap::default(),
         impls_by_self: FxHashMap::default(),
         unindexed_self_impls: Vec::new(),
+        named_by_trait: FxHashMap::default(),
+        named_by_name: FxHashMap::default(),
         ingot,
     }
 }
@@ -492,8 +593,38 @@ pub struct SelectedImplEvidence<'db> {
 }
 
 impl<'db> SelectedImplEvidence<'db> {
+    /// Carries concrete selected associated bindings into lexical checking.
+    pub fn goal_with_associated_bindings(&self) -> Result<TraitInstId<'db>, SelectedEvidenceError> {
+        let mut bindings = self.goal.assoc_type_bindings(self.db).clone();
+        for assoc in self.goal.def(self.db).assoc_types(self.db) {
+            if let Some(name) = assoc.name(self.db) {
+                let ty = self
+                    .associated_type(name)?
+                    .ok_or(SelectedEvidenceError::Unsupported)?;
+                bindings.insert(name, ty);
+            }
+        }
+        Ok(TraitInstId::new(
+            self.db,
+            self.goal.def(self.db),
+            self.goal.args(self.db).clone(),
+            bindings,
+        ))
+    }
+
+    /// Resolves a body from this proved application without ordinary impl search.
+    /// Callers still need ordinary signature checking and method requirements;
+    /// application evidence alone does not establish those requirements.
+    pub fn method_instance(&self, name: IdentId<'db>) -> Option<(Func<'db>, Vec<TyId<'db>>)> {
+        self.instance.method_instance(self.db, name)
+    }
+
     pub fn selected(&self) -> ImplementorId<'db> {
         self.candidate
+    }
+
+    pub(crate) fn resolved_instance(&self) -> ResolvedImplInstance<'db> {
+        self.instance
     }
 
     pub fn goal(&self) -> TraitInstId<'db> {
@@ -628,6 +759,9 @@ impl<'db> SelectedImplEvidence<'db> {
                     GoalSatisfiability::ContainsInvalid => {
                         return Err(SelectedEvidenceError::Unsupported);
                     }
+                    GoalSatisfiability::NormalizationFault => {
+                        return Err(SelectedEvidenceError::Unsupported);
+                    }
                 }
             }
         }
@@ -669,18 +803,25 @@ pub fn prove_selected_impl_evidence<'db>(
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
-    use super::trait_resolution::{TargetSolutionStatus, candidate_proves_goal};
+    use super::trait_resolution::{TargetSolutionStatus, candidate_proves_goal_with_conditions};
     if !evidence_types_supported(db, goal)
         || !evidence_types_supported(db, context.assumptions())
         || matches!(candidate.origin(db), ImplementorOrigin::Assumption)
     {
         return Err(SelectedEvidenceError::Unsupported);
     }
-    match candidate_proves_goal(db, context, candidate, goal) {
+    let proof = candidate_proves_goal_with_conditions(db, context, candidate, goal);
+    match proof.status {
         TargetSolutionStatus::NotFound => return Err(SelectedEvidenceError::NotProven),
         TargetSolutionStatus::Incomplete => return Err(SelectedEvidenceError::Incomplete),
+        TargetSolutionStatus::NormalizationFault => {
+            return Err(SelectedEvidenceError::Unsupported);
+        }
         TargetSolutionStatus::Found => {}
     }
+    let conditions = proof
+        .impl_conditions
+        .ok_or(SelectedEvidenceError::Incomplete)?;
     let selected =
         complete_selected_impl(db, candidate).ok_or(SelectedEvidenceError::Unsupported)?;
     let instance =
@@ -690,12 +831,62 @@ pub fn prove_selected_impl_evidence<'db>(
     if !evidence_types_supported(db, instance.impl_args(db).to_vec()) {
         return Err(SelectedEvidenceError::Unsupported);
     }
+    if !evidence_types_supported(db, conditions) {
+        return Err(SelectedEvidenceError::Unsupported);
+    }
+    if !super::ty_check::selected_impl_requirements_hold(db, conditions, context.scope()) {
+        return Err(SelectedEvidenceError::NotProven);
+    }
     Ok(SelectedImplEvidence {
         db,
         candidate,
         goal,
         context,
         instance,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrdinaryEvidenceError {
+    NotUnique,
+    PrerequisitesNotProven,
+}
+
+/// Ordinary discovery and evidence introduction share one checked lookup.
+/// Explicit selection uses `prove_selected_impl_evidence` with its candidate.
+pub(crate) fn resolve_ordinary_impl_evidence<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+) -> Result<SelectedImplEvidence<'db>, OrdinaryEvidenceError> {
+    let Selection::Unique(instance) = resolve_trait_impl_instance(db, context, goal) else {
+        return Err(OrdinaryEvidenceError::NotUnique);
+    };
+    prove_selected_impl_evidence(db, context, instance.selected(), goal)
+        .map_err(|_| OrdinaryEvidenceError::PrerequisitesNotProven)
+}
+
+/// Introduces a ground public obligation through ordinary coherent lookup.
+/// Source admission and CTFE use the same proof boundary. Scoped selection is
+/// separate: this operation must not silently pick among competing candidates.
+pub(crate) fn introduce_obligation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    term: TyId<'db>,
+) -> Result<SelectedImplEvidence<'db>, &'static str> {
+    let super::ty_def::TyData::ConstraintTerm(goal) = term.data(db) else {
+        return Err("expected a concrete trait goal");
+    };
+    if term.has_param(db) || term.has_var(db) || term.has_invalid(db) || term.has_projection(db) {
+        return Err("goal must be concrete and resolved");
+    }
+    resolve_ordinary_impl_evidence(db, context, *goal).map_err(|error| match error {
+        OrdinaryEvidenceError::NotUnique => {
+            "ordinary lookup did not establish a unique implementation"
+        }
+        OrdinaryEvidenceError::PrerequisitesNotProven => {
+            "selected implementation prerequisites were not proved"
+        }
     })
 }
 
@@ -710,6 +901,146 @@ pub fn prove_selected_hir_impl_evidence<'db>(
     let candidate = super::trait_lower::lower_impl_trait(db, selected)
         .ok_or(SelectedEvidenceError::Unsupported)?;
     prove_selected_impl_evidence(db, context, candidate, goal)
+}
+
+/// Find a specific unsatisfied trait bound for a failed named selection.
+/// This is diagnostic-only and does not replace the selected proof result.
+pub(crate) fn unproved_named_impl_requirement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    item: ImplTrait<'db>,
+    goal: TraitInstId<'db>,
+) -> Option<TraitInstId<'db>> {
+    let candidate = super::trait_lower::lower_impl_trait(db, item)?;
+    let selected = complete_selected_impl(db, candidate)?;
+    let instance = instantiate_selected_impl(db, selected, goal)?;
+    let requirements =
+        collect_candidate_constraints(db, item.into()).instantiate(db, instance.impl_args(db));
+    requirements.list(db).iter().copied().find(|&requirement| {
+        matches!(
+            is_goal_satisfiable(db, context, requirement),
+            GoalSatisfiability::UnSat(_)
+        )
+    })
+}
+
+/// Aliases are a fallback namespace for lexical selection, not value bindings.
+pub(crate) fn named_impl_candidates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    name: IdentId<'db>,
+) -> Vec<ImplTrait<'db>> {
+    ingot_trait_env(db, scope.top_mod(db).ingot(db))
+        .named_by_name
+        .get(&name)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// One representative declaration per selectable name in the current ingot.
+pub(crate) fn named_impl_aliases<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> Vec<(IdentId<'db>, ImplTrait<'db>)> {
+    let mut aliases: Vec<_> = ingot_trait_env(db, scope.top_mod(db).ingot(db))
+        .named_by_name
+        .iter()
+        .filter_map(|(&name, items)| items.first().copied().map(|item| (name, item)))
+        .collect();
+    aliases.sort_by(|(left, _), (right, _)| left.data(db).cmp(right.data(db)));
+    aliases
+}
+
+/// Ordinary impls that a qualified `with (<Type as Trait>)` head can explicitly
+/// select. Named alternatives remain addressable only by name.
+pub(crate) fn unnamed_impl_candidates_for_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    goal: TraitInstId<'db>,
+) -> Vec<ImplTrait<'db>> {
+    let trait_def = goal.def(db);
+    let current = scope.ingot(db);
+    let trait_ingot = trait_def.top_mod(db).ingot(db);
+    let mut seen = FxHashSet::default();
+    let mut matching = Vec::new();
+    for ingot in [
+        Some(current),
+        (trait_ingot != current).then_some(trait_ingot),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for binder in ordinary_impls_for_trait_def(db, ingot, trait_def) {
+            let ImplementorOrigin::Hir(item) = binder.origin(db) else {
+                continue;
+            };
+            if !seen.insert(item) {
+                continue;
+            }
+            let mut table = UnificationTable::new(db);
+            let instantiated = table.instantiate_with_fresh_vars(binder);
+            if table.unify(instantiated.trait_inst(db), goal).is_ok() {
+                matching.push(item);
+            }
+        }
+    }
+    matching
+}
+
+/// Find concrete named impls that expose `member` on `receiver` after ordinary
+/// lookup has failed. This only matches candidate headers; selection still
+/// checks each impl's premises through the normal proof path.
+pub(crate) fn named_impls_for_member<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    receiver: TyId<'db>,
+    member: IdentId<'db>,
+) -> Vec<(IdentId<'db>, ImplTrait<'db>)> {
+    if receiver.has_invalid(db) || receiver.has_var(db) || receiver.has_param(db) {
+        return Vec::new();
+    }
+    let env = ingot_trait_env(db, scope.ingot(db));
+    let mut current = receiver;
+    loop {
+        let mut found = Vec::new();
+        for (&selection, items) in &env.named_by_name {
+            for &item in items {
+                let Some(candidate) = lower_impl_trait_header(db, item) else {
+                    continue;
+                };
+                let trait_def = candidate.trait_def(db);
+                if trait_def.method(db, member).is_none() && trait_def.const_(db, member).is_none()
+                {
+                    continue;
+                }
+                let mut table = UnificationTable::new(db);
+                let instantiated = table.instantiate_with_fresh_vars(candidate);
+                let impl_ty = table.instantiate_to_term(instantiated.self_ty(db));
+                let receiver = table.instantiate_to_term(current);
+                if table.unify(impl_ty, receiver).is_err() {
+                    continue;
+                }
+                let goal = instantiated.trait_(db).fold_with(db, &mut table);
+                if goal
+                    .args(db)
+                    .iter()
+                    .chain(goal.assoc_type_bindings(db).values())
+                    .any(|ty| ty.has_invalid(db) || ty.has_var(db) || ty.has_param(db))
+                {
+                    continue;
+                }
+                found.push((selection, item));
+            }
+        }
+        if !found.is_empty() {
+            found.sort_by(|(left, _), (right, _)| left.data(db).cmp(right.data(db)));
+            return found;
+        }
+        let Some((_, inner)) = current.as_capability(db) else {
+            return Vec::new();
+        };
+        current = inner;
+    }
 }
 
 pub(crate) fn resolve_trait_impl_instance<'db>(
@@ -772,6 +1103,7 @@ pub struct ResolvedMethodInstance<'db> {
 
 #[derive(Debug, Clone)]
 pub enum MethodArgMapError<'db> {
+    SelectedEvidence(SelectedEvidenceError),
     MissingBody,
     NominalArity {
         expected: usize,
@@ -972,7 +1304,7 @@ pub fn resolve_trait_method_instance<'db>(
 }
 
 /// Builds the ordinary method record from an already checked selection.
-fn resolved_method_instance<'db>(
+pub(crate) fn resolved_method_instance<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     resolved: ResolvedImplInstance<'db>,
@@ -1124,7 +1456,7 @@ fn impls_for_ty_with_constraint_mode<'db>(
         .collect()
 }
 
-/// Returns all implementors for the given `ty`.
+/// Returns ordinary implementors for the given `ty`, excluding named alternatives.
 #[salsa::tracked(return_ref)]
 pub(crate) fn impls_for_ty<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -1254,7 +1586,7 @@ pub fn trait_inst_selects_concrete_impl<'db>(
 /// implementors which can be used in the ingot.
 #[derive(Debug, PartialEq, Eq, Clone, Update)]
 pub(crate) struct TraitEnv<'db> {
-    /// Syntax-only impl candidates grouped by trait definition.
+    /// Ordinary syntax-only impl candidates grouped by trait definition.
     pub(crate) impls: FxHashMap<Trait<'db>, Vec<ImplTrait<'db>>>,
 
     /// Syntax-only impl candidates grouped by their nominal self-type root.
@@ -1263,6 +1595,10 @@ pub(crate) struct TraitEnv<'db> {
     /// Blanket, alias-rooted, projection-rooted, or otherwise unindexable impls
     /// that must be considered for every receiver type.
     unindexed_self_impls: Vec<ImplTrait<'db>>,
+
+    /// Named alternatives never enter ordinary candidate lookup.
+    named_by_trait: FxHashMap<Trait<'db>, Vec<ImplTrait<'db>>>,
+    named_by_name: FxHashMap<IdentId<'db>, Vec<ImplTrait<'db>>>,
 
     ingot: Ingot<'db>,
 }
@@ -1273,6 +1609,8 @@ impl<'db> TraitEnv<'db> {
         let mut impls_by_self: FxHashMap<ImplSelfKey<'db>, Vec<ImplTrait<'db>>> =
             FxHashMap::default();
         let mut unindexed_self_impls = Vec::new();
+        let mut named_by_trait: FxHashMap<Trait<'db>, Vec<ImplTrait<'db>>> = FxHashMap::default();
+        let mut named_by_name: FxHashMap<IdentId<'db>, Vec<ImplTrait<'db>>> = FxHashMap::default();
 
         for impl_map in ingot
             .resolved_external_ingots(db)
@@ -1295,12 +1633,26 @@ impl<'db> TraitEnv<'db> {
                     .extend(implementors.iter().copied());
             }
             unindexed_self_impls.extend(impl_map.unindexed_self.iter().copied());
+            for (trait_def, implementors) in &impl_map.named_by_trait {
+                named_by_trait
+                    .entry(*trait_def)
+                    .or_default()
+                    .extend(implementors.iter().copied());
+            }
+            for (name, implementors) in &impl_map.named_by_name {
+                named_by_name
+                    .entry(*name)
+                    .or_default()
+                    .extend(implementors.iter().copied());
+            }
         }
 
         Self {
             impls,
             impls_by_self,
             unindexed_self_impls,
+            named_by_trait,
+            named_by_name,
             ingot,
         }
     }
@@ -1336,6 +1688,23 @@ impl<'db> TraitEnv<'db> {
             .filter_map(|impl_trait| lower_impl_trait_header(db, *impl_trait))
             .collect()
     }
+
+    fn all_impls_for_trait(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        trait_def: Trait<'db>,
+    ) -> Vec<ImplementorId<'db>> {
+        self.impls_for_trait(db, trait_def)
+            .into_iter()
+            .chain(
+                self.named_by_trait
+                    .get(&trait_def)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| lower_impl_trait_header(db, *item)),
+            )
+            .collect()
+    }
 }
 
 /// Represents a slim, internal view of a trait impl, derived from an
@@ -1357,6 +1726,15 @@ pub struct ImplementorId<'db> {
 }
 
 impl<'db> ImplementorId<'db> {
+    fn selection_class(self, db: &'db dyn HirAnalysisDb) -> ImplSelectionClass<'db> {
+        match self.origin(db) {
+            ImplementorOrigin::Hir(item) => impl_selection_class(db, item),
+            ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => {
+                ImplSelectionClass::Ordinary
+            }
+        }
+    }
+
     pub(crate) fn assumption(db: &'db dyn HirAnalysisDb, inst: TraitInstId<'db>) -> Self {
         ImplementorId::new(
             db,
@@ -1499,7 +1877,8 @@ impl<'db> ImplementorId<'db> {
 
 /// Returns `true` if the given two implementors conflict.
 ///
-/// This mirrors the legacy `Implementor`-based semantics:
+/// Different named selections may overlap unless the trait is `#[fixed]`.
+/// Within one selection, retain the ordinary coherence check:
 /// - instantiate both implementors with fresh vars and unify them;
 /// - then check that the merged constraints are satisfiable.
 pub(crate) fn does_impl_trait_conflict<'db>(
@@ -1507,6 +1886,15 @@ pub(crate) fn does_impl_trait_conflict<'db>(
     a: ImplementorId<'db>,
     b: ImplementorId<'db>,
 ) -> bool {
+    let a_class = a.selection_class(db);
+    let b_class = b.selection_class(db);
+    let trait_ = a.trait_def(db);
+    let fixed = crate::hir_def::ItemKind::Trait(trait_)
+        .attrs(db)
+        .is_some_and(|attrs| attrs.has_attr(db, "fixed"));
+    if !fixed && a_class != b_class {
+        return false;
+    }
     let mut table = UnificationTable::new(db);
     let a = table.instantiate_with_fresh_vars(a);
     let b = table.instantiate_with_fresh_vars(b);

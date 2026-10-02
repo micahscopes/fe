@@ -1,0 +1,12 @@
+struct Leaf {}
+struct Node<A, B> {}
+struct Z<const K: usize> {}
+trait Grow { type Out }
+recursive type fn Spine<F: Grow, const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<Spine<F, {N - 1}>, <F as Grow>::Out>
+    }
+}
+impl<const K: usize> Grow for Z<K> { type Out = Spine<Z<{ K + 1 }>, 1> }
+fn probe(x: Spine<Z<0>, 1>) -> Spine<Z<0>, 1> { x }

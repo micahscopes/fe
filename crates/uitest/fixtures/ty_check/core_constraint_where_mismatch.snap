@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/core_constraint_where_mismatch.fe
+---
+error[3-0005]: duplicate type bound is not allowed.
+  ┌─ core_constraint_where_mismatch.fe:1:32
+  │
+1 │ fn impossible<T: *>() where T: Constraint {}
+  │                                ^^^^^^^^^^ `T` is already declared with `*` kind, but found `Constraint` kind here

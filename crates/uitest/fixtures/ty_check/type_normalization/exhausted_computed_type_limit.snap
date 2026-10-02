@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/exhausted_computed_type_limit.fe
+---
+error[3-0050]: type normalization limit exceeded
+   ┌─ exhausted_computed_type_limit.fe:10:26
+   │
+10 │ fn invalid_conversion(x: Tree<4096>) -> bool { x }
+   │                          ^^^^^^^^^^ this type requires more nested reductions than supported

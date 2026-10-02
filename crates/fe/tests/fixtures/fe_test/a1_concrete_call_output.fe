@@ -1,0 +1,23 @@
+trait Compute {
+    type Output
+    const fn compute() -> Self::Output
+}
+struct Subject {}
+impl Compute for Subject {
+    type Output = u256
+    const fn compute() -> u256 { 42 }
+}
+impl Compute for Subject as Flag {
+    type Output = bool
+    const fn compute() -> bool { true }
+}
+
+const fn bounded<T: Compute>() -> u256 { Subject::compute() + 1 }
+const fn selected() -> u256 { with (Flag) { bounded<Subject>() } }
+const fn through_bound<T: Compute>() -> <T as Compute>::Output { T::compute() }
+
+#[test]
+fn concrete_call_keeps_its_lexical_output() {
+    assert!(selected() == 43)
+    assert!(with (Flag) { through_bound<Subject>() })
+}

@@ -1,0 +1,37 @@
+trait Compute {
+    const fn compute() -> u256
+    const fn defaulted() -> u256 { Self::compute() + 1 }
+}
+trait Derived: Compute {
+    const fn inherited() -> u256 { Self::defaulted() + 1 }
+}
+trait Leaf: Derived {}
+struct Subject {}
+impl Compute for Subject { const fn compute() -> u256 { 1 } }
+impl Compute for Subject as Alternative { const fn compute() -> u256 { 10 } }
+impl Compute for Subject as Other { const fn compute() -> u256 { 100 } }
+impl Derived for Subject {}
+impl Derived for Subject as Special {
+    const fn inherited() -> u256 { Self::defaulted() + 50 }
+}
+impl Leaf for Subject {}
+const fn first<T: Leaf>() -> u256 { second<T>() }
+const fn second<T: Leaf>() -> u256 { T::inherited() }
+const fn ordinary() -> u256 { first<Subject>() }
+const fn selected() -> u256 {
+    let nested = with (Alternative) {
+        let before = first<Subject>()
+        let inner = with (Other) { first<Subject>() }
+        before + inner + first<Subject>()
+    }
+    nested + ordinary()
+}
+const fn both() -> u256 { with (Alternative, Special) { first<Subject>() } }
+fn target() -> Subject { Subject {} }
+
+#[test]
+fn inherited_selections_stay_lexical() {
+    assert!(ordinary() == 3)
+    assert!(selected() == 129)
+    assert!(both() == 61)
+}

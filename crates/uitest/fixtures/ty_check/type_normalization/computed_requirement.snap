@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/computed_requirement.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ computed_requirement.fe:13:9
+   │
+13 │ fn f(x: Guard<Bad, 2>) -> bool { x }
+   │         ^^^^^^^^^^^^^ `Bad` doesn't implement `Marker`

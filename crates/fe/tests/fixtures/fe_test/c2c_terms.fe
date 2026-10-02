@@ -1,0 +1,118 @@
+// Probe: a closure-free C2C encoding. A program is a point-free term TYPE;
+// each interpretation is a trait implemented once per term constructor.
+// f(x, y) = x * y + x   as   Comp<Add, Fork<Mul, Exl>>
+
+pub struct Exl {}
+pub struct Exr {}
+pub struct Mul {}
+pub struct Add {}
+pub struct Fork<F, G> {}
+pub struct Comp<G, F> {}
+
+// Object constraint for the derivative categories: plain bounds on impls.
+pub trait Additive {
+    fn zero() -> Self
+    fn plus(self, _ other: Self) -> Self
+}
+impl Additive for u256 {
+    fn zero() -> Self { 0 }
+    fn plus(self, _ other: Self) -> Self { self + other }
+}
+impl<A: Additive, B: Additive> Additive for (A, B) {
+    fn zero() -> Self { (A::zero(), B::zero()) }
+    fn plus(self, _ other: Self) -> Self { (self.0.plus(other.0), self.1.plus(other.1)) }
+}
+
+// Interpretation 1: ordinary evaluation (the function category).
+pub trait Eval<A> {
+    type Out
+    fn eval(_ a: A) -> Self::Out
+}
+impl Eval<(u256, u256)> for Exl {
+    type Out = u256
+    fn eval(_ a: (u256, u256)) -> u256 { a.0 }
+}
+impl Eval<(u256, u256)> for Mul {
+    type Out = u256
+    fn eval(_ a: (u256, u256)) -> u256 { a.0 * a.1 }
+}
+impl Eval<(u256, u256)> for Add {
+    type Out = u256
+    fn eval(_ a: (u256, u256)) -> u256 { a.0 + a.1 }
+}
+impl<A: core::marker::Copy, F: Eval<A>, G: Eval<A>> Eval<A> for Fork<F, G> {
+    type Out = (<F as Eval<A>>::Out, <G as Eval<A>>::Out)
+    fn eval(_ a: A) -> Self::Out { (F::eval(a), G::eval(a)) }
+}
+impl<A, F: Eval<A>, G: Eval< <F as Eval<A>>::Out>> Eval<A> for Comp<G, F> {
+    type Out = <G as Eval< <F as Eval<A>>::Out>>::Out
+    fn eval(_ a: A) -> Self::Out { G::eval(F::eval(a)) }
+}
+
+// Interpretation 2: reverse mode. `Back` is the linear map's data: exactly the
+// primal values the transpose needs. No tape, no closures.
+pub trait Rev<A> {
+    type Out
+    type Back
+    fn forward(_ a: A) -> (Self::Out, Self::Back)
+    fn backward(_ back: Self::Back, _ ct: Self::Out) -> A
+}
+impl Rev<(u256, u256)> for Exl {
+    type Out = u256
+    type Back = ()
+    fn forward(_ a: (u256, u256)) -> (u256, ()) { (a.0, ()) }
+    fn backward(_ back: (), _ ct: u256) -> (u256, u256) { (ct, 0) }
+}
+impl Rev<(u256, u256)> for Mul {
+    type Out = u256
+    type Back = (u256, u256)
+    fn forward(_ a: (u256, u256)) -> (u256, (u256, u256)) { (a.0 * a.1, a) }
+    fn backward(_ back: (u256, u256), _ ct: u256) -> (u256, u256) { (ct * back.1, ct * back.0) }
+}
+impl Rev<(u256, u256)> for Add {
+    type Out = u256
+    type Back = ()
+    fn forward(_ a: (u256, u256)) -> (u256, ()) { (a.0 + a.1, ()) }
+    fn backward(_ back: (), _ ct: u256) -> (u256, u256) { (ct, ct) }
+}
+impl<A: core::marker::Copy + Additive, F: Rev<A>, G: Rev<A>> Rev<A> for Fork<F, G> {
+    type Out = (<F as Rev<A>>::Out, <G as Rev<A>>::Out)
+    type Back = (<F as Rev<A>>::Back, <G as Rev<A>>::Back)
+    fn forward(_ a: A) -> (Self::Out, Self::Back) {
+        let f = F::forward(a)
+        let g = G::forward(a)
+        ((f.0, g.0), (f.1, g.1))
+    }
+    fn backward(_ back: Self::Back, _ ct: Self::Out) -> A {
+        F::backward(back.0, ct.0).plus(G::backward(back.1, ct.1))
+    }
+}
+impl<A, F: Rev<A>, G: Rev< <F as Rev<A>>::Out>> Rev<A> for Comp<G, F> {
+    type Out = <G as Rev< <F as Rev<A>>::Out>>::Out
+    type Back = (<F as Rev<A>>::Back, <G as Rev< <F as Rev<A>>::Out>>::Back)
+    fn forward(_ a: A) -> (Self::Out, Self::Back) {
+        let f = F::forward(a)
+        let g = G::forward(f.0)
+        (g.0, (f.1, g.1))
+    }
+    fn backward(_ back: Self::Back, _ ct: Self::Out) -> A {
+        F::backward(back.0, G::backward(back.1, ct))
+    }
+}
+
+type F = Comp<Add, Fork<Mul, Exl>>
+
+pub fn value(_ x: u256, _ y: u256) -> u256 { <F as Eval<(u256, u256)>>::eval((x, y)) }
+
+pub fn gradient(_ x: u256, _ y: u256) -> (u256, u256) {
+    let r = <F as Rev<(u256, u256)>>::forward((x, y))
+    <F as Rev<(u256, u256)>>::backward(r.1, 1)
+}
+
+#[test]
+fn eval_and_reverse_gradient() {
+    assert!(value(3, 5) == 18)
+    let g = gradient(3, 5)
+    assert!(g.0 == 6)
+    assert!(g.1 == 3)
+}

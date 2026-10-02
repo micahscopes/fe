@@ -357,7 +357,7 @@ fn check_ingot_and_dependencies(
     let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}: {}", error.url, error.message);
+            eprintln!("{}", error.render(db));
             return true;
         }
     };
@@ -452,7 +452,7 @@ fn check_single_file(
     let prepared = match driver::elaboration::prepare_target(db, &file_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}: {}", error.url, error.message);
+            eprintln!("{}", error.render(db));
             return true;
         }
     };

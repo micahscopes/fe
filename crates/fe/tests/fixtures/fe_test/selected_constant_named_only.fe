@@ -1,0 +1,17 @@
+// expect selected=2
+trait Compute {
+    const ID: u256
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject as Only {
+    const ID: u256 = 2
+    const fn compute() -> u256 { 2 }
+}
+const fn selected() -> u256 { with (Only) { Subject::ID } }
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(selected() == 2)
+}

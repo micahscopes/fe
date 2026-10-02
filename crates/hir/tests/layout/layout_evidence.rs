@@ -213,6 +213,7 @@ fn assert_layoutizes_in(name: &str, src: &str, std_module: bool) {
             | ItemKind::Impl(_)
             | ItemKind::ImplTrait(_)
             | ItemKind::TypeAlias(_)
+            | ItemKind::TypeFn(_)
             | ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::TopMod(_) => {}

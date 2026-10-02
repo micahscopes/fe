@@ -1,0 +1,22 @@
+// expect selected=20
+trait Compute {
+    const N: usize
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject as Only {
+    const N: usize = 2
+    const fn compute() -> u256 { 2 }
+}
+const fn selected() -> u256 {
+    with (Only) {
+        let values: [u256; Subject::N + 0] = [10, 20]
+        20
+    }
+}
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(selected() == 20)
+}

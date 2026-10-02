@@ -3,7 +3,7 @@ use super::{
     canonical::{Canonical, Canonicalized, Solution},
     const_expr::ConstExpr,
     const_ty::ConstTyData,
-    fold::TyFoldable,
+    fold::{TyFoldable, ty_contains},
     normalize::normalize_from_assumptions,
     trait_def::{ImplementorId, TraitInstId},
     ty_def::{TyData, TyFlags, TyId},
@@ -28,13 +28,42 @@ use common::indexmap::IndexSet;
 use constraint::collect_constraints;
 use rustc_hash::FxHashSet;
 use salsa::Update;
+use std::cell::Cell;
 
 pub(crate) mod constraint;
 mod table_solver;
 
+pub(crate) use table_solver::TargetSearchResult;
 pub use table_solver::TargetSolutionStatus;
 
 pub(crate) const TRAIT_SOLVER_ROOT_ANSWER_LIMIT: usize = 2;
+
+// RD74 permits pure, fueled type normalization in proof search. Impl const
+// conditions belong to the checker after the proof returns. Keep this guard
+// across indirect helper calls and cached obligation queries.
+std::thread_local! {
+    static PROOF_SEARCH_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(super) struct ProofSearchGuard;
+
+pub(super) fn enter_proof_search() -> ProofSearchGuard {
+    PROOF_SEARCH_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    ProofSearchGuard
+}
+
+impl Drop for ProofSearchGuard {
+    fn drop(&mut self) {
+        PROOF_SEARCH_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+pub(crate) fn assert_outside_proof_search() {
+    assert!(
+        PROOF_SEARCH_DEPTH.with(|depth| depth.get() == 0),
+        "impl const condition discharged during trait proof search"
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub struct TraitSolverQuery<'db> {
@@ -121,6 +150,7 @@ pub enum Selection<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub struct TraitSolveCx<'db> {
+    scope: ScopeId<'db>,
     origin_ingot: Ingot<'db>,
     assumptions: PredicateListId<'db>,
 }
@@ -128,6 +158,7 @@ pub struct TraitSolveCx<'db> {
 impl<'db> TraitSolveCx<'db> {
     pub fn new(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Self {
         Self {
+            scope,
             origin_ingot: scope.ingot(db),
             assumptions: PredicateListId::empty_list(db),
         }
@@ -144,8 +175,8 @@ impl<'db> TraitSolveCx<'db> {
         self.assumptions
     }
 
-    pub(crate) fn origin_ingot(self) -> Ingot<'db> {
-        self.origin_ingot
+    pub(crate) fn scope(self) -> ScopeId<'db> {
+        self.scope
     }
 
     pub(crate) fn select_impl(
@@ -191,6 +222,7 @@ impl<'db> TraitSolveCx<'db> {
             GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
                 Selection::NotFound
             }
+            GoalSatisfiability::NormalizationFault => Selection::Ambiguous(IndexSet::default()),
         }
     }
 
@@ -249,6 +281,8 @@ impl<'db> TraitSolveCx<'db> {
         norm_ingot.root_mod(db).scope()
     }
 
+    // Type normalization uses the ingot context. The caller scope is retained
+    // separately for const conditions and the solver's cache identity.
     pub(crate) fn origin_scope(self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
         self.origin_ingot.root_mod(db).scope()
     }
@@ -291,19 +325,19 @@ pub(crate) fn normalize_trait_inst_preserving_validity<'db>(
 )]
 fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
-    origin_ingot: Ingot<'db>,
+    use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
 ) -> GoalSatisfiability<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return GoalSatisfiability::ContainsInvalid;
     };
 
-    solve(db, origin_ingot, query)
+    solve(db, use_scope, query)
 }
 
 fn is_query_satisfiable_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _origin_ingot: Ingot<'db>,
+    _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
 ) -> GoalSatisfiability<'db> {
     // A cycle can arise while collecting an impl whose constraints contain an associated-type
@@ -320,7 +354,7 @@ fn is_query_satisfiable_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
     _value: &GoalSatisfiability<'db>,
     _count: u32,
-    _origin_ingot: Ingot<'db>,
+    _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
 ) -> salsa::CycleRecoveryAction<GoalSatisfiability<'db>> {
     salsa::CycleRecoveryAction::Iterate
@@ -332,7 +366,7 @@ fn is_query_satisfiable_cycle_recover<'db>(
 )]
 fn query_has_solution<'db>(
     db: &'db dyn HirAnalysisDb,
-    origin_ingot: Ingot<'db>,
+    use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
     target: Canonical<TraitInstId<'db>>,
     relation: TargetSolutionMatch,
@@ -340,7 +374,7 @@ fn query_has_solution<'db>(
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return TargetSolutionStatus::NotFound;
     }
-    has_solution(db, origin_ingot, query, target, relation, None)
+    has_solution(db, use_scope, query, target, relation, None).status
 }
 
 #[salsa::tracked(
@@ -349,17 +383,20 @@ fn query_has_solution<'db>(
 )]
 fn query_candidate_proves_goal<'db>(
     db: &'db dyn HirAnalysisDb,
-    origin_ingot: Ingot<'db>,
+    use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
     candidate: ImplementorId<'db>,
     target: Canonical<TraitInstId<'db>>,
-) -> TargetSolutionStatus {
+) -> TargetSearchResult<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
-        return TargetSolutionStatus::NotFound;
+        return TargetSearchResult {
+            status: TargetSolutionStatus::NotFound,
+            impl_conditions: None,
+        };
     }
     has_solution(
         db,
-        origin_ingot,
+        use_scope,
         query,
         target,
         TargetSolutionMatch::Equal,
@@ -369,23 +406,26 @@ fn query_candidate_proves_goal<'db>(
 
 fn query_candidate_proves_goal_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _origin_ingot: Ingot<'db>,
+    _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _candidate: ImplementorId<'db>,
     _target: Canonical<TraitInstId<'db>>,
-) -> TargetSolutionStatus {
-    TargetSolutionStatus::Incomplete
+) -> TargetSearchResult<'db> {
+    TargetSearchResult {
+        status: TargetSolutionStatus::Incomplete,
+        impl_conditions: None,
+    }
 }
 
 fn query_candidate_proves_goal_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _value: &TargetSolutionStatus,
+    _value: &TargetSearchResult<'db>,
     _count: u32,
-    _origin_ingot: Ingot<'db>,
+    _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _candidate: ImplementorId<'db>,
     _target: Canonical<TraitInstId<'db>>,
-) -> salsa::CycleRecoveryAction<TargetSolutionStatus> {
+) -> salsa::CycleRecoveryAction<TargetSearchResult<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
 
@@ -406,12 +446,21 @@ pub fn candidate_proves_goal<'db>(
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
 ) -> TargetSolutionStatus {
+    candidate_proves_goal_with_conditions(db, solve_cx, candidate, goal).status
+}
+
+pub(crate) fn candidate_proves_goal_with_conditions<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+) -> TargetSearchResult<'db> {
     let scope = solve_cx.normalization_scope_for_trait_inst(db, goal);
     let goal = normalize_trait_inst_preserving_validity(db, goal, scope, solve_cx.assumptions());
     let query = CanonicalGoalQuery::new(db, goal, solve_cx.assumptions());
     query_candidate_proves_goal(
         db,
-        solve_cx.origin_ingot(),
+        solve_cx.origin_scope(db),
         query.canonical(),
         candidate,
         Canonical::new(db, goal),
@@ -420,7 +469,7 @@ pub fn candidate_proves_goal<'db>(
 
 fn query_has_solution_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _origin_ingot: Ingot<'db>,
+    _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: Canonical<TraitInstId<'db>>,
     _relation: TargetSolutionMatch,
@@ -432,7 +481,7 @@ fn query_has_solution_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
     _value: &TargetSolutionStatus,
     _count: u32,
-    _origin_ingot: Ingot<'db>,
+    _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: Canonical<TraitInstId<'db>>,
     _relation: TargetSolutionMatch,
@@ -449,7 +498,7 @@ pub(crate) fn goal_query_has_solution<'db>(
     matches!(
         query_has_solution(
             db,
-            solve_cx.origin_ingot(),
+            solve_cx.origin_scope(db),
             query.canonical(),
             target,
             TargetSolutionMatch::Equal,
@@ -467,7 +516,7 @@ pub(crate) fn goal_query_has_no_distinct_solution<'db>(
     matches!(
         query_has_solution(
             db,
-            solve_cx.origin_ingot(),
+            solve_cx.origin_scope(db),
             query.canonical(),
             target,
             TargetSolutionMatch::NotEqual,
@@ -481,7 +530,7 @@ pub fn is_goal_query_satisfiable<'db>(
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
 ) -> GoalSatisfiability<'db> {
-    is_query_satisfiable(db, solve_cx.origin_ingot(), query.canonical()).clone()
+    is_query_satisfiable(db, solve_cx.origin_scope(db), query.canonical()).clone()
 }
 
 pub fn is_goal_satisfiable<'db>(
@@ -501,68 +550,97 @@ pub(crate) fn check_ty_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     ty: TyId<'db>,
 ) -> WellFormedness<'db> {
-    // Check the arguments and the structural content of the application base
-    // (projections and const expressions). The base's *constraints* are not
-    // checked here: `ty_constraints` of a partial application instantiates
-    // the constraint binder with missing arguments, producing spurious
-    // unsatisfied goals; the fully-applied type's constraints are checked
-    // below.
-    let (base, args) = ty.decompose_ty_app(db);
-    for &arg in args {
-        let wf = check_ty_wf(db, solve_cx, arg);
-        if !wf.is_wf() {
-            return wf;
-        }
-    }
-    match base.data(db) {
-        TyData::AssocTy(assoc) => {
-            let wf = check_projected_trait_use_wf(db, solve_cx, assoc.trait_.as_predicate(db));
-            if !wf.is_wf() {
-                return wf;
+    // Check arguments before their enclosing application without nesting a
+    // tracked Salsa query for every node in a deep finite type. The base's
+    // constraints are not checked as a partial application: that would
+    // instantiate its binder with missing arguments.
+    let mut pending = vec![(ty, false)];
+    let mut seen = FxHashSet::default();
+    while let Some((ty, ready)) = pending.pop() {
+        let (base, args) = ty.decompose_ty_app(db);
+        if !ready {
+            if !seen.insert(ty) {
+                continue;
             }
+            pending.push((ty, true));
+            pending.extend(args.iter().rev().map(|&arg| (arg, false)));
+            continue;
         }
-        TyData::QualifiedTy(inst) => {
-            let wf = check_projected_trait_use_wf(db, solve_cx, *inst);
-            if !wf.is_wf() {
-                return wf;
+        let family_wf = check_type_application_requirements(db, solve_cx, ty);
+        if !family_wf.is_wf() {
+            return family_wf;
+        }
+        match base.data(db) {
+            // The body is checked under its declaration's binder, not the caller's.
+            TyData::TypeFamily { .. } => {}
+            TyData::AssocTy(assoc) => {
+                let wf = check_projected_trait_use_wf(db, solve_cx, assoc.trait_.as_predicate(db));
+                if !wf.is_wf() {
+                    return wf;
+                }
             }
-        }
-        TyData::ConstTy(const_ty) => {
-            let wf = check_const_ty_wf(db, solve_cx, *const_ty);
-            if !wf.is_wf() {
-                return wf;
+            TyData::ConstraintTerm(goal) => {
+                for &arg in goal
+                    .args(db)
+                    .iter()
+                    .chain(goal.assoc_type_bindings(db).values())
+                {
+                    let wf = check_ty_wf(db, solve_cx, arg);
+                    if !wf.is_wf() {
+                        return wf;
+                    }
+                }
             }
+            TyData::QualifiedTy(inst) => {
+                let wf = check_projected_trait_use_wf(db, solve_cx, *inst);
+                if !wf.is_wf() {
+                    return wf;
+                }
+            }
+            TyData::ConstTy(const_ty) => {
+                let wf = check_const_ty_wf(db, solve_cx, *const_ty);
+                if !wf.is_wf() {
+                    return wf;
+                }
+            }
+            TyData::TyApp(..)
+            | TyData::TyVar(_)
+            | TyData::TyParam(_)
+            | TyData::TyBase(_)
+            | TyData::Never
+            | TyData::Invalid(_) => {}
         }
-        TyData::TyApp(..)
-        | TyData::TyVar(_)
-        | TyData::TyParam(_)
-        | TyData::TyBase(_)
-        | TyData::Never
-        | TyData::Invalid(_) => {}
-    }
 
-    let constraints = ty_constraints(db, ty);
-    let assumptions = solve_cx.assumptions();
+        let constraints = ty_constraints(db, ty);
+        if constraints.is_empty(db) {
+            continue;
+        }
+        let assumptions = solve_cx.assumptions();
 
-    // Normalize constraints to resolve associated types
-    let normalized_constraints = {
-        let scope = solve_cx.origin_scope(db);
-        let normalized_list: Vec<_> = constraints
-            .list(db)
-            .iter()
-            .map(|&goal| goal.normalize(db, scope, assumptions))
-            .collect();
-        PredicateListId::new(db, normalized_list)
-    };
+        // Normalize constraints to resolve associated types.
+        let normalized_constraints = {
+            let scope = solve_cx.origin_scope(db);
+            let normalized_list: Vec<_> = constraints
+                .list(db)
+                .iter()
+                .map(|&goal| goal.normalize(db, scope, assumptions))
+                .collect();
+            PredicateListId::new(db, normalized_list)
+        };
 
-    for &goal in normalized_constraints.list(db) {
-        let mut table = UnificationTable::new(db);
-        let query = CanonicalGoalQuery::new(db, goal, assumptions);
+        for &goal in normalized_constraints.list(db) {
+            let mut table = UnificationTable::new(db);
+            let query = CanonicalGoalQuery::new(db, goal, assumptions);
 
-        if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query)
-        {
-            let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-            return WellFormedness::IllFormed { goal, subgoal };
+            if let GoalSatisfiability::UnSat(subgoal) =
+                is_goal_query_satisfiable(db, solve_cx, &query)
+            {
+                if super::type_fn::induction::discharge(db, solve_cx, goal) {
+                    continue;
+                }
+                let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
+                return WellFormedness::IllFormed { goal, subgoal };
+            }
         }
     }
 
@@ -734,6 +812,40 @@ fn check_const_expr_wf<'db>(
     WellFormedness::WellFormed
 }
 
+/// Check formation before normalization can erase a computed type or family. This
+/// is also used by source-path diagnostics, which see intermediate projections.
+pub(crate) fn check_type_application_requirements<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    ty: TyId<'db>,
+) -> WellFormedness<'db> {
+    if ty.has_unsaturated_family_guards(db) {
+        return WellFormedness::UnsaturatedGuardedFamily;
+    }
+    let requirements = if matches!(
+        ty.decompose_ty_app(db).0.data(db),
+        TyData::TyBase(super::ty_def::TyBase::TypeFn(_))
+    ) {
+        Some(ty_constraints(db, ty))
+    } else {
+        ty.associated_family_requirements(db)
+    };
+    if let Some(requirements) = requirements {
+        for &goal in requirements.list(db) {
+            if !matches!(
+                is_goal_satisfiable(db, solve_cx, goal),
+                GoalSatisfiability::Satisfied(_)
+            ) {
+                return WellFormedness::IllFormed {
+                    goal,
+                    subgoal: None,
+                };
+            }
+        }
+    }
+    WellFormedness::WellFormed
+}
+
 fn check_projected_trait_use_wf<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
@@ -764,6 +876,9 @@ fn unsatisfied_goal<'db>(
     let mut table = UnificationTable::new(db);
     let query = CanonicalGoalQuery::new(db, goal, assumptions);
     if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query) {
+        if super::type_fn::induction::discharge(db, solve_cx, goal) {
+            return None;
+        }
         let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
         Some(WellFormedness::IllFormed { goal, subgoal })
     } else {
@@ -774,15 +889,53 @@ fn unsatisfied_goal<'db>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Update)]
 pub(crate) enum WellFormedness<'db> {
     WellFormed,
+    UnsaturatedGuardedFamily,
     IllFormed {
         goal: TraitInstId<'db>,
         subgoal: Option<TraitInstId<'db>>,
     },
 }
 
-impl WellFormedness<'_> {
+impl<'db> WellFormedness<'db> {
     pub(crate) fn is_wf(self) -> bool {
         matches!(self, WellFormedness::WellFormed)
+    }
+
+    pub(crate) fn without_subgoal(self) -> Self {
+        match self {
+            Self::IllFormed { goal, .. } => Self::IllFormed {
+                goal,
+                subgoal: None,
+            },
+            other => other,
+        }
+    }
+
+    pub(crate) fn into_diag(
+        self,
+        span: crate::span::DynLazySpan<'db>,
+    ) -> Option<super::diagnostics::TyDiagCollection<'db>> {
+        use super::diagnostics::{AssociatedFamilyError, TraitConstraintDiag, TyLowerDiag};
+        match self {
+            Self::WellFormed => None,
+            Self::IllFormed { goal, subgoal } => Some(
+                TraitConstraintDiag::TraitBoundNotSat {
+                    span,
+                    primary_goal: goal,
+                    unsat_subgoal: subgoal,
+                    required_by: None,
+                    capability_hint: None,
+                }
+                .into(),
+            ),
+            Self::UnsaturatedGuardedFamily => Some(
+                TyLowerDiag::AssociatedFamilyDeclaration {
+                    span,
+                    error: AssociatedFamilyError::GuardedPartialApplication,
+                }
+                .into(),
+            ),
+        }
     }
 }
 
@@ -793,6 +946,28 @@ pub(crate) fn check_trait_inst_wf<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     trait_inst: TraitInstId<'db>,
+) -> WellFormedness<'db> {
+    check_trait_inst_wf_inner(db, solve_cx, trait_inst, false)
+}
+
+/// A recursive associated output bound promises that the output implements
+/// this trait. Its `Self`-dependent parameter constraints are checked when an
+/// impl supplies a concrete output. Independent constraints remain obligations
+/// of the declaration.
+pub(crate) fn check_trait_inst_wf_with_deferred_self_constraints<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    trait_inst: TraitInstId<'db>,
+    defer_self_constraints: bool,
+) -> WellFormedness<'db> {
+    check_trait_inst_wf_inner(db, solve_cx, trait_inst, defer_self_constraints)
+}
+
+fn check_trait_inst_wf_inner<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    trait_inst: TraitInstId<'db>,
+    defer_self_constraints: bool,
 ) -> WellFormedness<'db> {
     for &arg in trait_inst.args(db) {
         let wf = check_ty_wf(db, solve_cx, arg);
@@ -807,8 +982,22 @@ pub(crate) fn check_trait_inst_wf<'db>(
         }
     }
 
-    let constraints =
-        collect_constraints(db, trait_inst.def(db).into()).instantiate(db, trait_inst.args(db));
+    let declared = collect_constraints(db, trait_inst.def(db).into());
+    let deferred = defer_self_constraints.then(|| {
+        let self_param = trait_inst.def(db).self_param(db);
+        declared
+            .skip_binder()
+            .list(db)
+            .iter()
+            .map(|goal| {
+                goal.args(db)
+                    .iter()
+                    .chain(goal.assoc_type_bindings(db).values())
+                    .any(|&arg| ty_contains(db, arg, self_param))
+            })
+            .collect::<Vec<_>>()
+    });
+    let constraints = declared.instantiate(db, trait_inst.args(db));
     let assumptions = solve_cx.assumptions();
 
     // Normalize constraints after instantiation to resolve associated types
@@ -817,7 +1006,11 @@ pub(crate) fn check_trait_inst_wf<'db>(
         let normalized_list: Vec<_> = constraints
             .list(db)
             .iter()
-            .map(|&goal| goal.normalize(db, scope, assumptions))
+            .enumerate()
+            .filter_map(|(idx, &goal)| {
+                (!deferred.as_ref().is_some_and(|flags| flags[idx])).then_some(goal)
+            })
+            .map(|goal| goal.normalize(db, scope, assumptions))
             .collect();
         PredicateListId::new(db, normalized_list)
     };
@@ -827,6 +1020,9 @@ pub(crate) fn check_trait_inst_wf<'db>(
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query)
         {
+            if super::type_fn::induction::discharge(db, solve_cx, goal) {
+                continue;
+            }
             let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
             return WellFormedness::IllFormed { goal, subgoal };
         }
@@ -839,6 +1035,17 @@ pub(crate) fn check_trait_inst_wf<'db>(
 pub struct TraitGoalSolution<'db> {
     pub(crate) inst: TraitInstId<'db>,
     pub(crate) implementor: ImplementorId<'db>,
+    /// Const conditions left for the use-site checker after structural proof.
+    pub(crate) impl_conditions: ImplConditionsId<'db>,
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct ImplConditionsId<'db> {
+    #[return_ref]
+    pub instances: Vec<ImplementorId<'db>>,
+    #[return_ref]
+    pub trait_goals: Vec<TraitInstId<'db>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
@@ -884,6 +1091,8 @@ pub enum GoalSatisfiability<'db> {
 
     /// Goal contains invalid.
     ContainsInvalid,
+    /// A ground type or const needed for matching failed to normalize.
+    NormalizationFault,
     /// The goal is not satisfied.
     /// It contains an unsatisfied subgoal if we can know the exact subgoal
     /// that makes the proof step stuck.
@@ -970,6 +1179,12 @@ impl<'db> PredicateListId<'db> {
             let formal_trait =
                 TraitInstId::new_simple(db, hir_trait, hir_trait.params(db).to_vec());
             for trait_type in hir_trait.assoc_types(db) {
+                // Family bounds quantify over a separate binder. They are
+                // conditional rules for applied types, not predicates on the
+                // bare constructor, and cannot enter this flat closure.
+                if !trait_type.generic_params(db).data(db).is_empty() {
+                    continue;
+                }
                 // Get the associated type name
                 let Some(assoc_ty_name) = trait_type.name(db) else {
                     continue;
@@ -1096,6 +1311,7 @@ fn ty_has_recursive_assoc_projection<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'
 #[cfg(test)]
 mod tests {
     use common::indexmap::{IndexMap, IndexSet};
+    use dir_test::{Fixture, dir_test};
 
     use super::{
         CanonicalGoalQuery, GoalSatisfiability, Selection, TargetSolutionStatus, TraitInstId,
@@ -1175,7 +1391,7 @@ mod tests {
     ) -> Vec<ImplementorId<'db>> {
         let solve_cx = TraitSolveCx::new(db, top_mod.scope());
         let (primary, secondary) = solve_cx.search_ingots_for_trait_inst(db, goal);
-        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, goal))
+        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, goal), None)
             .iter()
             .copied()
             .collect()
@@ -2271,5 +2487,52 @@ impl<T> Grow for T where Wrap<T>: Grow {}
             ),
             Err(SelectedEvidenceError::Incomplete)
         ));
+    }
+
+    #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/impl_const_requirements", glob: "evidence.fe")]
+    fn selected_evidence_checks_instantiated_impl_const_conditions(fixture: Fixture<&str>) {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(fixture.path().into(), fixture.content());
+        let (top_mod, _) = db.top_mod(file);
+        // Exercise the evidence boundary directly while source admission of
+        // generic impl conditions is extended separately.
+        for trait_name in ["Marker", "Lifted", "Twice"] {
+            let marker = named_trait(&db, top_mod, trait_name);
+            for (name, expected) in [("Good", true), ("Bad", false)] {
+                let carrier = top_mod
+                    .all_structs(&db)
+                    .iter()
+                    .copied()
+                    .find(|record| {
+                        record
+                            .name(&db)
+                            .to_opt()
+                            .is_some_and(|id| id.data(&db) == name)
+                    })
+                    .unwrap();
+                let subject = AdtRef::Struct(carrier).as_adt(&db).fields(&db)[0]
+                    .ty(&db, 0)
+                    .instantiate_identity();
+                let goal = TraitInstId::new(&db, marker, vec![subject], IndexMap::new());
+                let candidate = candidates_for_goal(&db, top_mod, goal)[0];
+                let result = prove_selected_impl_evidence(
+                    &db,
+                    TraitSolveCx::new(&db, top_mod.scope()),
+                    candidate,
+                    goal,
+                );
+                assert_eq!(result.is_ok(), expected, "{trait_name} for {name}");
+                let GoalSatisfiability::Satisfied(solution) =
+                    is_goal_satisfiable(&db, TraitSolveCx::new(&db, top_mod.scope()), goal)
+                else {
+                    panic!("structural proof missing for {trait_name} on {name}");
+                };
+                assert_eq!(
+                    solution.value.impl_conditions.instances(&db).len(),
+                    1,
+                    "const condition from Marker was not retained for {trait_name} on {name}"
+                );
+            }
+        }
     }
 }

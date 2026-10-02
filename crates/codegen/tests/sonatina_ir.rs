@@ -19,13 +19,18 @@ fn with_top_mod_for_source<T>(
     fixture: &Fixture<&str>,
     f: impl for<'db> FnOnce(&'db DriverDataBase, hir::hir_def::TopLevelMod<'db>) -> T,
 ) -> T {
+    with_top_mod_for_text(Path::new(fixture.path()), fixture.content(), f)
+}
+
+fn with_top_mod_for_text<T>(
+    path: &Path,
+    source: &str,
+    f: impl for<'db> FnOnce(&'db DriverDataBase, hir::hir_def::TopLevelMod<'db>) -> T,
+) -> T {
     let mut db = DriverDataBase::default();
-    let file_url = Url::from_file_path(fixture.path()).expect("fixture path should be absolute");
-    db.workspace().touch(
-        &mut db,
-        file_url.clone(),
-        Some(fixture.content().to_string()),
-    );
+    let file_url = Url::from_file_path(path).expect("fixture path should be absolute");
+    db.workspace()
+        .touch(&mut db, file_url.clone(), Some(source.to_string()));
     let file = db
         .workspace()
         .get(&db, &file_url)
@@ -79,6 +84,47 @@ fn observability_preserves_creation_and_runtime_bytecode(fixture: Fixture<&str>)
             }
         }
     });
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/selection_identity",
+    glob: "*_before.fe"
+)]
+fn selected_impl_alias_does_not_define_symbol_identity(fixture: Fixture<&str>) {
+    let after_path = Path::new(fixture.path()).with_file_name(
+        Path::new(fixture.path())
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace("_before.fe", "_after.fe"),
+    );
+    let after = std::fs::read_to_string(after_path).expect("renamed fixture should exist");
+    let emit = |source: &str| {
+        with_top_mod_for_text(Path::new(fixture.path()), source, |db, top_mod| {
+            emit_module_sonatina_ir(db, top_mod).expect("selected impls should lower")
+        })
+    };
+
+    let before_names = sonatina_function_names(&emit(fixture.content()));
+    let after_names = sonatina_function_names(&emit(&after));
+    assert_eq!(
+        before_names, after_names,
+        "renaming `as Name` changed symbols"
+    );
+    assert!(
+        before_names
+            .iter()
+            .filter(|name| name.contains("compute"))
+            .count()
+            >= 2,
+        "both selected implementations must have distinct symbols: {before_names:?}"
+    );
+    assert_eq!(
+        before_names.len(),
+        before_names.iter().collect::<HashSet<_>>().len(),
+        "selected implementations emitted colliding symbols: {before_names:?}"
+    );
 }
 
 fn sonatina_function_body<'a>(ir: &'a str, symbol_segment: &str) -> Option<&'a str> {

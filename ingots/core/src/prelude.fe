@@ -2,6 +2,7 @@ pub use super::{
     clone::Clone,
     default::Default,
     marker::Copy,
+    obligations::Constraint,
     error::ErrorVariant,
     message::MsgVariant,
     num::Abs,

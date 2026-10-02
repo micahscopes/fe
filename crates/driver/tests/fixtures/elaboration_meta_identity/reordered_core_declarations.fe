@@ -1,0 +1,20 @@
+mod author {
+    use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+
+    pub const fn make(_record: Record) -> FunctionDefinition<0, 2> {
+        FunctionDefinition {
+            name: DeclarationName::Literal("calc"),
+            public: false,
+            const_function: true,
+            parameters: [],
+            return_type: DeclarationType::U256,
+            expressions: [BodyExpr::U256(42), BodyExpr::End],
+            result: 0,
+        }
+    }
+}
+
+#[generate(ingot::author::make)]
+struct Sample {}
+
+const fn answer() -> u256 { calc() }

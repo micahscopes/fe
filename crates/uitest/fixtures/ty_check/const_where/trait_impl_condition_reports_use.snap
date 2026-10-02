@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/trait_impl_condition_reports_use.fe
+---
+error[8-0093]: const requirement is not satisfied
+  ┌─ trait_impl_condition_reports_use.fe:9:24
+  │
+5 │ impl<const N: usize> Value for Wrapped<N> where N > 0 {
+  │                                                 ----- required by this predicate
+  ·
+9 │ fn consume() -> u256 { Wrapped<0> { value: 41 }.value() }
+  │                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`

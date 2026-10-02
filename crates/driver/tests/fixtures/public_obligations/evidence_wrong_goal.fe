@@ -1,0 +1,38 @@
+use core::obligations::{Evidence, prove}
+
+trait Produce {
+    type Output
+    const fn produce() -> Self::Output
+}
+
+struct Subject {}
+impl Produce for Subject {
+    type Output = u64
+    const fn produce() -> u64 { 42 }
+}
+impl Produce for Subject as Alternative {
+    type Output = u64
+    const fn produce() -> u64 { 77 }
+}
+
+struct Other {}
+impl Produce for Other {
+    type Output = u64
+    const fn produce() -> u64 { 99 }
+}
+
+const fn helper<T: Produce>() -> T::Output {
+    T::produce()
+}
+
+const fn consume<T, Output>(_ evidence: Evidence<Produce<T, Output = Output>>) -> Output {
+    with (evidence) { helper<T>() }
+}
+
+const fn evidence_a() -> Evidence<Produce<Subject, Output = u64>> {
+    prove<Produce<Subject, Output = u64>>()
+}
+
+const fn evidence_b() -> Evidence<Produce<Other, Output = u64>> {
+    prove<Produce<Other, Output = u64>>()
+}

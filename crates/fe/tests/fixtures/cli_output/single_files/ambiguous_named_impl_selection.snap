@@ -1,0 +1,24 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/ambiguous_named_impl_selection.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/ambiguous_named_impl_selection.fe
+
+error[8-0100]: `Dup` is an ambiguous implementation name
+   ┌─ ambiguous_named_impl_selection.fe:11:11
+   │
+ 4 │ impl Compute for Subject as Dup {
+   │                             --- also names this implementation: `Subject: Compute`
+   ·
+ 7 │ impl Other for Subject as Dup {
+   │                           --- also names this implementation: `Subject: Other`
+   ·
+11 │     with (Dup) { 1 }
+   │           ^^^ `Dup` names more than one implementation: `Subject: Compute` and `Subject: Other`
+   │
+   = give these implementations distinct `as Name` names
+
+
+=== EXIT CODE: 1 ===

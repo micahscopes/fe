@@ -1,0 +1,4 @@
+struct W<T> {}
+trait Grow { type Out }
+impl<T> Grow for W<T> { type Out = <W<W<T>> as Grow>::Out }
+fn probe(x: <W<bool> as Grow>::Out) -> <W<bool> as Grow>::Out { x }

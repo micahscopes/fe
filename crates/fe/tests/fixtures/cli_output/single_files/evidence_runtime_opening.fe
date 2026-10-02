@@ -1,0 +1,9 @@
+use core::obligations::Evidence
+
+trait Produce {
+    const fn produce() -> u64
+}
+
+fn consume<T: Produce>(_ evidence: Evidence<Produce<T>>) -> u64 {
+    with (evidence) { T::produce() }
+}

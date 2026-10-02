@@ -1,0 +1,19 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/failed_named_impl_selection.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/failed_named_impl_selection.fe
+
+error[8-0101]: cannot select implementation `Only`
+  ┌─ failed_named_impl_selection.fe:8:11
+  │
+4 │ impl Compute for Subject as Only where Subject: Missing {
+  │                             ---- implementation `Only` is defined here
+  ·
+8 │     with (Only) { 1 }
+  │           ^^^^ required `Subject: Missing` is not proved
+
+
+=== EXIT CODE: 1 ===

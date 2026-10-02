@@ -1,0 +1,20 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/selected_output_requirements.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ selected_output_requirements.fe:26:19
+   │
+19 │ const fn guarded<T: Compute<Output=O>, O: Gate>() -> O { T::compute() }
+   │                                           ---- required by this bound on `guarded`
+   ·
+26 │     with (Flag) { guarded<Subject, bool>() }
+   │                   ^^^^^^^^^^^^^^^^^^^^^^ `bool` doesn't implement `Gate`
+
+error[8-0097]: trait evidence opening failed
+   ┌─ selected_output_requirements.fe:22:19
+   │
+22 │     with (Flag) { choose<Subject, u256>() }
+   │                   ^^^^^^^^^^^^^^^^^^^^^ the selected application could not establish this complete trait goal

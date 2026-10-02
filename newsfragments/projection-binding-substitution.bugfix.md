@@ -1,0 +1,1 @@
+Generic substitution now updates associated-type bindings together with the trait arguments that contain them, including nested projections. Scoped substitution preserves parameters belonging to other declarations.

@@ -26,12 +26,9 @@ error[1-0001]: missing type bound for field
   │
 6 │     foo
   │        ^ expected `:`
-
-error[1-0001]: missing closing `}` for record field list
-  ┌─ struct_.fe:6:8
   │
-6 │     foo
-  │        ^ expected `}` or `,`
+  = missing closing `}` for record field list
+  = expected `}` or `,`
 
 error[1-0001]: function definition in struct is not allowed
    ┌─ struct_.fe:11:9

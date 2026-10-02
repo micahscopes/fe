@@ -1,6 +1,6 @@
 use crate::analysis::HirAnalysisDb;
+use crate::analysis::semantic::resolve_trait_method_with_selections;
 use crate::analysis::ty::diagnostics::{BodyDiag, FuncBodyDiag};
-use crate::analysis::ty::trait_def::resolve_trait_method_instance;
 use crate::analysis::ty::trait_resolution::{Selection, TraitSolveCx};
 use crate::analysis::ty::ty_check::{
     Callable, EffectArgLayoutView, EffectParamSite, EffectPassMode, TypedBody,
@@ -80,6 +80,31 @@ impl<'db> ConstFnChecker<'db, '_> {
             return false;
         };
 
+        if let Some((_, goal)) = callable.opened_obligation(self.db)
+            && (callee.params(self.db).next().is_some()
+                || callee.has_effects(self.db)
+                || callee.is_unsafe(self.db)
+                || super::ty_lower::param_schema(
+                    self.db,
+                    callee.into(),
+                    super::ty_lower::ParamBasis::Full,
+                )
+                .keys(self.db)
+                .len()
+                    != goal.args(self.db).len()
+                || !crate::hir_def::WhereClauseOwner::Func(callee)
+                    .clause(self.db)
+                    .id
+                    .const_predicates(self.db)
+                    .is_empty())
+        {
+            self.push(BodyDiag::ObligationOpening {
+                primary,
+                reason: "evidence dispatch currently requires a safe nullary const method without effects, method generics or const predicates",
+            });
+            return true;
+        }
+
         let diag = if !callee.is_const(self.db) {
             BodyDiag::ConstFnNonConstCall {
                 primary,
@@ -101,15 +126,18 @@ impl<'db> ConstFnChecker<'db, '_> {
         let CallableDef::Func(func) = callable.callable_def() else {
             return None;
         };
-        if let Some(inst) = callable.trait_inst()
+        if callable.opened_obligation(self.db).is_none()
+            && let Some(inst) = callable.trait_inst()
             && let Some(name) = func.name(self.db).to_opt()
-            && let Selection::Unique(method) = resolve_trait_method_instance(
+            && let Selection::Unique(method) = resolve_trait_method_with_selections(
                 self.db,
                 TraitSolveCx::new(self.db, self.body.scope())
                     .with_assumptions(self.typed_body.assumptions()),
                 inst,
                 name,
+                &callable.selected_applications,
             )
+            .ok()?
             && let Some(impl_func) = method.body()
         {
             return Some(impl_func);

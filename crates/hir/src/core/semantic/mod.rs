@@ -31,6 +31,7 @@ use crate::analysis::ty::fold::TyFoldable;
 use crate::analysis::ty::normalize::normalize_ty;
 use crate::analysis::ty::ty_def::Kind;
 use crate::analysis::ty::ty_error::collect_hir_ty_diags;
+use crate::hir_def::GenericParamListId;
 use crate::hir_def::params::KindBound as HirKindBound;
 use crate::hir_def::scope_graph::ScopeId;
 use crate::{HirDb, SpannedHirDb};
@@ -54,22 +55,12 @@ pub use symbol::{
     item_kind_to_url_suffix, qualify_path_with_ingot_name, scope_to_doc_path,
 };
 
-pub fn lower_hir_kind_local(k: &HirKindBound) -> Kind {
-    use crate::hir_def::Partial;
-    match k {
-        HirKindBound::Mono => Kind::Star,
-        HirKindBound::Abs(lhs, rhs) => {
-            let lhs_k = match lhs {
-                Partial::Present(inner) => lower_hir_kind_local(inner),
-                Partial::Absent => Kind::Any,
-            };
-            let rhs_k = match rhs {
-                Partial::Present(inner) => lower_hir_kind_local(inner),
-                Partial::Absent => Kind::Any,
-            };
-            Kind::Abs(Box::new((lhs_k, rhs_k)))
-        }
-    }
+pub fn lower_hir_kind_local<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    kind: &HirKindBound,
+) -> Kind {
+    crate::analysis::ty::ty_lower::lower_kind(db, scope, kind)
 }
 use crate::analysis::ty::binder::Binder;
 use crate::hir_def::*;
@@ -1343,21 +1334,14 @@ impl<'db> FuncParamView<'db> {
         }
 
         // Well-formedness / trait-bound satisfaction for parameter type
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, func.scope()).with_assumptions(param_env(db, func.into())),
             ty,
-        ) {
-            out.push(
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: ty_span.clone(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                    capability_hint: None,
-                }
-                .into(),
-            );
+        )
+        .into_diag(ty_span.clone())
+        {
+            out.push(diag);
         }
 
         // Self-parameter type shape check
@@ -3138,6 +3122,7 @@ impl<'db> WhereClauseView<'db> {
             WhereClauseOwner::Func(f) => f.span().where_clause(),
             WhereClauseOwner::Struct(s) => s.span().where_clause(),
             WhereClauseOwner::Enum(e) => e.span().where_clause(),
+            WhereClauseOwner::TypeFn(def) => def.span().where_clause(),
             WhereClauseOwner::Impl(i) => i.span().where_clause(),
             WhereClauseOwner::Trait(t) => t.span().where_clause(),
             WhereClauseOwner::ImplTrait(i) => i.span().where_clause(),
@@ -3178,7 +3163,16 @@ impl<'db> WherePredicateView<'db> {
         use crate::hir_def::Partial;
         for b in &self.hir_pred(db).bounds {
             if let TypeBound::Kind(Partial::Present(kb)) = b {
-                return Some(lower_hir_kind_local(kb));
+                return Some(lower_hir_kind_local(db, self.owner_item().scope(), kb));
+            }
+            if let TypeBound::Trait(reference) = b
+                && crate::analysis::ty::ty_lower::is_core_constraint_bound(
+                    db,
+                    self.owner_item().scope(),
+                    *reference,
+                )
+            {
+                return Some(Kind::Constraint);
             }
         }
         None
@@ -3191,14 +3185,25 @@ impl<'db> WherePredicateView<'db> {
     /// Iterate trait bounds as per-bound semantic views.
     pub fn bounds(
         self,
-        db: &'db dyn HirDb,
+        db: &'db dyn HirAnalysisDb,
     ) -> impl Iterator<Item = WherePredicateBoundView<'db>> + 'db {
         let idxs: Vec<usize> = self
             .hir_pred(db)
             .bounds
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| matches!(b, TypeBound::Trait(_)).then_some(i))
+            .filter_map(|(i, b)| match b {
+                TypeBound::Trait(reference)
+                    if !crate::analysis::ty::ty_lower::is_core_constraint_bound(
+                        db,
+                        self.owner_item().scope(),
+                        *reference,
+                    ) =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            })
             .collect();
         idxs.into_iter()
             .map(move |idx| WherePredicateBoundView { pred: self, idx })
@@ -3244,15 +3249,54 @@ impl<'db> WherePredicateView<'db> {
 
         for (i, bound) in hir.bounds.iter().enumerate() {
             match bound {
-                TypeBound::Trait(_) => {
+                TypeBound::Trait(reference)
+                    if crate::analysis::ty::ty_lower::is_core_constraint_bound(
+                        db,
+                        self.owner_item().scope(),
+                        *reference,
+                    ) =>
+                {
+                    let expected = Kind::Constraint;
+                    if !subject.kind(db).does_match(&expected) {
+                        out.push(
+                            TyLowerDiag::InconsistentKindBound {
+                                span: self.span().bounds().bound(i).trait_bound().into(),
+                                ty: subject,
+                                bound: expected,
+                            }
+                            .into(),
+                        );
+                    }
+                }
+                TypeBound::Trait(reference)
+                    if !crate::analysis::ty::ty_lower::is_core_constraint_bound(
+                        db,
+                        self.owner_item().scope(),
+                        *reference,
+                    ) =>
+                {
                     let bview = WherePredicateBoundView::new(self, i);
                     out.extend(bview.diags(db));
                 }
                 TypeBound::Kind(crate::hir_def::Partial::Present(kb)) => {
-                    let expected = lower_hir_kind_local(kb);
+                    let span = self.span().bounds().bound(i).kind_bound();
+                    if let Some(name) = crate::analysis::ty::ty_lower::unknown_named_kind(
+                        db,
+                        self.owner_item().scope(),
+                        kb,
+                    ) {
+                        out.push(
+                            TyLowerDiag::UnknownKindBound {
+                                span: span.into(),
+                                name,
+                            }
+                            .into(),
+                        );
+                        continue;
+                    }
+                    let expected = lower_hir_kind_local(db, self.owner_item().scope(), kb);
                     let actual = subject.kind(db);
                     if !actual.does_match(&expected) {
-                        let span = self.span().bounds().bound(i).kind_bound();
                         out.push(
                             TyLowerDiag::InconsistentKindBound {
                                 span: span.into(),
@@ -3348,21 +3392,14 @@ impl<'db> TypeAlias<'db> {
         };
         let assumptions = constraints_for(db, self.into());
         let ty = lower_hir_ty(db, hir_ty, self.scope(), assumptions);
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, self.scope()).with_assumptions(param_env(db, self.into())),
             ty,
-        ) {
-            vec![
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: self.span().ty().into(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                    capability_hint: None,
-                }
-                .into(),
-            ]
+        )
+        .into_diag(self.span().ty().into())
+        {
+            vec![diag]
         } else {
             Vec::new()
         }
@@ -3721,8 +3758,7 @@ pub(crate) enum InherentImplAdmissibility<'db> {
     },
     IllFormed {
         ty: TyId<'db>,
-        goal: TraitInstId<'db>,
-        subgoal: Option<TraitInstId<'db>>,
+        error: WellFormedness<'db>,
     },
 }
 
@@ -3807,9 +3843,7 @@ impl<'db> Impl<'db> {
             ty,
         ) {
             WellFormedness::WellFormed => InherentImplAdmissibility::Admissible { ty },
-            WellFormedness::IllFormed { goal, subgoal } => {
-                InherentImplAdmissibility::IllFormed { ty, goal, subgoal }
-            }
+            error => InherentImplAdmissibility::IllFormed { ty, error },
         }
     }
 
@@ -4195,7 +4229,7 @@ impl<'db> ImplTrait<'db> {
         Self::impl_trait_local_nominal_root(db, impl_trait).is_some_and(|root| match root {
             TyBase::Adt(adt) => adt.ingot(db) == impl_trait_ingot,
             TyBase::Contract(contract) => contract.top_mod(db).ingot(db) == impl_trait_ingot,
-            TyBase::Prim(_) | TyBase::Func(_) => false,
+            TyBase::Prim(_) | TyBase::Func(_) | TyBase::TypeFn(_) => false,
         })
     }
 
@@ -4259,7 +4293,7 @@ impl<'db> ImplTrait<'db> {
                 } else {
                     view.ty(db)
                 };
-                view.name(db).zip(ty)
+                view.name(db).zip(ty.map(|ty| view.bind_body(db, ty)))
             })
             .collect();
 
@@ -4279,7 +4313,7 @@ impl<'db> ImplTrait<'db> {
             };
 
             types.entry(name).or_insert_with(|| {
-                Binder::bind(trait_inst.def(db).into(), default)
+                Binder::bind(trait_inst.def(db).into(), view.bind_body(db, default))
                     .instantiate(db, trait_inst.args(db))
             });
         }
@@ -4352,24 +4386,14 @@ impl<'db> ImplTrait<'db> {
             return (None, Vec::new());
         }
 
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, self.scope()).with_assumptions(param_env(db, self.into())),
             ty,
-        ) {
-            return (
-                None,
-                vec![
-                    TraitConstraintDiag::TraitBoundNotSat {
-                        span: self.span().ty().into(),
-                        primary_goal: goal,
-                        unsat_subgoal: subgoal,
-                        required_by: None,
-                        capability_hint: None,
-                    }
-                    .into(),
-                ],
-            );
+        )
+        .into_diag(self.span().ty().into())
+        {
+            return (None, vec![diag]);
         }
 
         match self.lowered_implementor(db) {
@@ -4469,6 +4493,52 @@ pub struct ImplAssocTypeView<'db> {
 }
 
 impl<'db> ImplAssocTypeView<'db> {
+    fn with_declared_guards(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        assumptions: PredicateListId<'db>,
+    ) -> PredicateListId<'db> {
+        if self.generic_params(db).data(db).is_empty() {
+            return assumptions;
+        }
+        let Some(inst) = self.owner.trait_inst(db) else {
+            return assumptions;
+        };
+        let Some(decl) = inst
+            .def(db)
+            .assoc_types(db)
+            .find(|decl| decl.name(db) == self.name(db))
+        else {
+            return assumptions;
+        };
+        let owner = self.scope().assoc_type_owner().unwrap();
+        let args: Vec<_> = (0..self.generic_params(db).data(db).len())
+            .map(|idx| crate::analysis::ty::ty_lower::assoc_type_param(db, owner, idx))
+            .collect();
+        let Some(guards) = decl.parameter_requirements(db, inst, &args) else {
+            return assumptions;
+        };
+        let mut predicates = assumptions.list(db).to_vec();
+        predicates.extend_from_slice(guards.list(db));
+        PredicateListId::new(db, predicates).extend_all_bounds(db)
+    }
+
+    pub fn scope(self) -> ScopeId<'db> {
+        ScopeId::ImplTraitType(self.owner, self.idx as u16)
+    }
+
+    pub(crate) fn bind_body(self, db: &'db dyn HirAnalysisDb, body: TyId<'db>) -> TyId<'db> {
+        TyId::type_family(
+            db,
+            crate::hir_def::scope_graph::AssocTypeOwner::Impl(self.owner, self.idx as u16),
+            body,
+        )
+    }
+
+    pub fn generic_params(self, db: &'db dyn HirDb) -> GenericParamListId<'db> {
+        self.owner.types(db)[self.idx].generic_params
+    }
+
     fn hole_anchor(self) -> HoleAnchor<'db> {
         HoleAnchor::ImplAssocType {
             impl_trait: self.owner,
@@ -4492,12 +4562,12 @@ impl<'db> ImplAssocTypeView<'db> {
     /// Semantic type of this associated type implementation.
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
-        let assumptions = constraints_for(db, self.owner.into());
+        let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
         let minter = LoweringContext::new(self.hole_anchor());
         Some(lower_hir_ty_with_minter(
             db,
             hir,
-            self.owner.scope(),
+            self.scope(),
             assumptions,
             &minter,
         ))
@@ -4505,13 +4575,15 @@ impl<'db> ImplAssocTypeView<'db> {
 
     pub(crate) fn candidate_ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
-        let assumptions =
-            collect_candidate_constraints(db, self.owner.into()).instantiate_identity();
+        let assumptions = self.with_declared_guards(
+            db,
+            collect_candidate_constraints(db, self.owner.into()).instantiate_identity(),
+        );
         let minter = LoweringContext::deferred(self.hole_anchor());
         Some(lower_hir_ty_with_minter(
             db,
             hir,
-            self.owner.scope(),
+            self.scope(),
             assumptions,
             &minter,
         ))
@@ -4521,13 +4593,13 @@ impl<'db> ImplAssocTypeView<'db> {
         let Some(hir) = self.owner.types(db)[self.idx].type_ref.to_opt() else {
             return Vec::new();
         };
-        let scope = self.owner.scope();
+        let scope = self.scope();
         let minter = LoweringContext::new(self.hole_anchor());
         lower_layout_root_uses_in_hir_ty(
             db,
             hir,
             scope,
-            constraints_for(db, self.owner.into()),
+            self.with_declared_guards(db, constraints_for(db, self.owner.into())),
             &minter,
         )
     }
@@ -4539,10 +4611,9 @@ impl<'db> ImplAssocTypeView<'db> {
         };
 
         let ty_span = self.span().ty();
-        let assumptions = constraints_for(db, self.owner.into());
+        let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
 
-        let errs =
-            collect_ty_lower_errors(db, self.owner.scope(), hir, ty_span.clone(), assumptions);
+        let errs = collect_ty_lower_errors(db, self.scope(), hir, ty_span.clone(), assumptions);
         if !errs.is_empty() {
             return errs;
         }
@@ -4553,22 +4624,19 @@ impl<'db> ImplAssocTypeView<'db> {
         if let Some(diag) = ty.emit_diag(db, ty_span.clone().into()) {
             return vec![diag];
         }
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        let normalized = normalize_ty(db, ty, self.scope(), assumptions);
+        if let Some(diag) = normalized.emit_diag(db, ty_span.clone().into()) {
+            return vec![diag];
+        }
+        if let Some(diag) = check_ty_wf(
             db,
-            TraitSolveCx::new(db, self.owner.scope())
-                .with_assumptions(param_env(db, self.owner.into())),
+            TraitSolveCx::new(db, self.scope())
+                .with_assumptions(self.with_declared_guards(db, param_env(db, self.owner.into()))),
             ty,
-        ) {
-            return vec![
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: ty_span.into(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                    capability_hint: None,
-                }
-                .into(),
-            ];
+        )
+        .into_diag(ty_span.into())
+        {
+            return vec![diag];
         }
 
         Vec::new()
@@ -4662,6 +4730,22 @@ pub struct TraitAssocTypeView<'db> {
 }
 
 impl<'db> TraitAssocTypeView<'db> {
+    pub fn scope(self) -> ScopeId<'db> {
+        ScopeId::TraitType(self.owner, self.idx as u16)
+    }
+
+    pub(crate) fn bind_body(self, db: &'db dyn HirAnalysisDb, body: TyId<'db>) -> TyId<'db> {
+        TyId::type_family(
+            db,
+            crate::hir_def::scope_graph::AssocTypeOwner::Trait(self.owner, self.idx as u16),
+            body,
+        )
+    }
+
+    pub fn generic_params(self, db: &'db dyn HirDb) -> GenericParamListId<'db> {
+        self.decl(db).generic_params
+    }
+
     fn decl(self, db: &'db dyn HirDb) -> &'db crate::core::hir_def::AssocTyDecl<'db> {
         &self.owner.types(db)[self.idx]
     }
@@ -4687,8 +4771,12 @@ impl<'db> TraitAssocTypeView<'db> {
     ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
         let hir = self.decl(db).default?;
         let trait_ = self.owner;
-        let assumptions = constraints_for(db, trait_.into());
-        Some(lower_hir_ty(db, hir, trait_.scope(), assumptions))
+        let assumptions = self.with_declared_guards(db, constraints_for(db, trait_.into()));
+        Some(lower_hir_ty(db, hir, self.scope(), assumptions))
+    }
+
+    pub(crate) fn default_hir_ty(self, db: &'db dyn HirDb) -> Option<crate::hir_def::TypeId<'db>> {
+        self.decl(db).default
     }
 
     pub(crate) fn candidate_default_ty(
@@ -4697,16 +4785,19 @@ impl<'db> TraitAssocTypeView<'db> {
     ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
         let hir = self.decl(db).default?;
         let trait_ = self.owner;
-        let assumptions = collect_candidate_constraints(db, trait_.into()).instantiate_identity();
-        Some(lower_hir_ty_deferred(db, hir, trait_.scope(), assumptions))
+        let assumptions = self.with_declared_guards(
+            db,
+            collect_candidate_constraints(db, trait_.into()).instantiate_identity(),
+        );
+        Some(lower_hir_ty_deferred(db, hir, self.scope(), assumptions))
     }
 
     pub(crate) fn layout_root_uses(self, db: &'db dyn HirAnalysisDb) -> Vec<LayoutRootUse<'db>> {
         let Some(hir) = self.decl(db).default else {
             return Vec::new();
         };
-        let scope = self.owner.scope();
-        let assumptions = constraints_for(db, self.owner.into());
+        let scope = self.scope();
+        let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
         let minter = LoweringContext::new(HoleAnchor::TemplateTy {
             ty: hir,
             scope,
@@ -4764,11 +4855,108 @@ pub struct AssocTypeBoundView<'db> {
 }
 
 impl<'db> TraitAssocTypeView<'db> {
+    pub(crate) fn family_parameters(self, db: &'db dyn HirAnalysisDb) -> Vec<TyId<'db>> {
+        let owner = self.scope().assoc_type_owner().unwrap();
+        (0..self.generic_params(db).data(db).len())
+            .map(|idx| crate::analysis::ty::ty_lower::assoc_type_param(db, owner, idx))
+            .collect()
+    }
+
+    /// Declaration-owned requirements, instantiated for a particular enclosing
+    /// trait and local family arguments. Both callers and definitions use this.
+    pub(crate) fn parameter_requirements(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+        args: &[TyId<'db>],
+    ) -> Option<PredicateListId<'db>> {
+        if inst.def(db) != self.owner || args.len() != self.generic_params(db).data(db).len() {
+            return None;
+        }
+        let params = self.family_parameters(db);
+        let mut requirements = Vec::new();
+        for (subject, param) in params.into_iter().zip(self.generic_params(db).data(db)) {
+            let GenericParam::Type(param) = param else {
+                return None;
+            };
+            for bound in &param.bounds {
+                if let TypeBound::Trait(trait_ref) = bound
+                    && !crate::analysis::ty::ty_lower::is_core_constraint_bound(
+                        db,
+                        self.scope(),
+                        *trait_ref,
+                    )
+                {
+                    let guard = lower_trait_ref(
+                        db,
+                        subject,
+                        *trait_ref,
+                        self.scope(),
+                        constraints_for(db, self.owner.into()),
+                        Some(self.owner.self_param(db)),
+                    )
+                    .ok()?;
+                    let mapping =
+                        crate::analysis::ty::ty_lower::CompleteSubst::for_associated_type(
+                            db,
+                            self.scope().assoc_type_owner()?,
+                            args.to_vec(),
+                        )
+                        .ok()?;
+                    let guard =
+                        crate::analysis::ty::subst::substitute_complete(db, guard, &mapping)
+                            .ok()?;
+                    requirements.push(
+                        Binder::bind(self.owner.into(), guard).instantiate(db, inst.args(db)),
+                    );
+                }
+            }
+        }
+        Some(PredicateListId::new(db, requirements))
+    }
+
+    pub(crate) fn with_declared_guards(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        assumptions: PredicateListId<'db>,
+    ) -> PredicateListId<'db> {
+        if self.generic_params(db).data(db).is_empty() {
+            return assumptions;
+        }
+        let inst = TraitInstId::new(
+            db,
+            self.owner,
+            collect_generic_params(db, self.owner.into())
+                .params(db)
+                .to_vec(),
+            IndexMap::new(),
+        );
+        let Some(guards) = self.parameter_requirements(db, inst, &self.family_parameters(db))
+        else {
+            return assumptions;
+        };
+        let mut predicates = assumptions.list(db).to_vec();
+        predicates.extend_from_slice(guards.list(db));
+        PredicateListId::new(db, predicates).extend_all_bounds(db)
+    }
+
     /// Iterate trait bounds as per-bound semantic views.
-    pub fn bounds(self, db: &'db dyn HirDb) -> impl Iterator<Item = AssocTypeBoundView<'db>> + 'db {
+    pub fn bounds(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl Iterator<Item = AssocTypeBoundView<'db>> + 'db {
         let len = self.bounds_raw(db).len();
         let idxs: Vec<usize> = (0..len)
-            .filter(|&i| matches!(self.bounds_raw(db)[i], TypeBound::Trait(_)))
+            .filter(|&i| match self.bounds_raw(db)[i] {
+                TypeBound::Trait(reference) => {
+                    !crate::analysis::ty::ty_lower::is_core_constraint_bound(
+                        db,
+                        self.scope(),
+                        reference,
+                    )
+                }
+                _ => false,
+            })
             .collect();
         idxs.into_iter()
             .map(move |idx| AssocTypeBoundView { owner: self, idx })
@@ -4794,24 +4982,25 @@ struct AssocTypeBounds<'db> {
 impl<'db> AssocTypeBounds<'db> {
     fn bounds(self, db: &'db dyn HirAnalysisDb) -> impl Iterator<Item = TraitInstId<'db>> + 'db {
         let owner_trait = self.base.owner;
-        let scope = owner_trait.scope();
+        let scope = self.base.scope();
         let assumptions = constraints_for(db, owner_trait.into());
         self.base.bounds(db).filter_map(move |b| {
-            b.to_trait_inst(db, self.subject, self.owner_self, scope, assumptions)
+            b.lower_trait_inst(db, self.subject, self.owner_self, scope, assumptions)
+                .ok()
         })
     }
 }
 
 impl<'db> AssocTypeBoundView<'db> {
     /// Lower this bound to a trait instance for the given subject and owner `Self`.
-    fn to_trait_inst(
+    pub(crate) fn lower_trait_inst(
         self,
         db: &'db dyn HirAnalysisDb,
         subject: TyId<'db>,
         owner_self: TyId<'db>,
         scope: ScopeId<'db>,
         assumptions: PredicateListId<'db>,
-    ) -> Option<TraitInstId<'db>> {
+    ) -> Result<TraitInstId<'db>, TraitRefLowerError<'db>> {
         lower_trait_ref(
             db,
             subject,
@@ -4820,7 +5009,6 @@ impl<'db> AssocTypeBoundView<'db> {
             assumptions,
             Some(owner_self),
         )
-        .ok()
     }
 }
 
@@ -4832,6 +5020,16 @@ pub struct ImplementorAssocTypeView<'db> {
 }
 
 impl<'db> ImplementorAssocTypeView<'db> {
+    pub(crate) fn parameter_requirements(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
+        self.assoc
+            .parameter_requirements(
+                db,
+                self.implementor.trait_(db),
+                &self.assoc.family_parameters(db),
+            )
+            .unwrap_or_else(|| PredicateListId::empty_list(db))
+    }
+
     pub fn name(self, db: &'db dyn HirDb) -> Option<IdentId<'db>> {
         self.assoc.name(db)
     }
@@ -4840,8 +5038,27 @@ impl<'db> ImplementorAssocTypeView<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> impl Iterator<Item = TraitInstId<'db>> + 'db {
+        // Check a family pointwise under the declaration's rigid parameters.
+        // Its constructor is not the subject promised to implement the bound.
+        // Substitution is owner-exact: enclosing impl parameters can have the
+        // same numeric indices without being family parameters.
+        let subject = match self.impl_ty.data(db) {
+            TyData::TypeFamily { owner, body, .. } => {
+                let params = self.assoc.family_parameters(db);
+                crate::analysis::ty::subst::substitute_complete(
+                    db,
+                    *body,
+                    &crate::analysis::ty::ty_lower::CompleteSubst::for_associated_type(
+                        db, *owner, params,
+                    )
+                    .expect("associated family parameters"),
+                )
+                .expect("associated family parameter substitution")
+            }
+            _ => self.impl_ty,
+        };
         self.assoc
-            .bounds_on_subject_with_owner(db, self.impl_ty, self.implementor.self_ty(db))
+            .bounds_on_subject_with_owner(db, subject, self.implementor.self_ty(db))
     }
 
     pub fn impl_ty(self) -> TyId<'db> {
@@ -4871,6 +5088,101 @@ impl<'db> ImplementorId<'db> {
 }
 
 impl<'db> TyId<'db> {
+    /// Recover the declaration and enclosing arguments even after projection
+    /// selected an implementation body. Captures matter even when the body's
+    /// result does not mention any of these arguments.
+    fn associated_family_context(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<(TraitAssocTypeView<'db>, TraitInstId<'db>, &'db [TyId<'db>])> {
+        use crate::hir_def::scope_graph::AssocTypeOwner;
+        let (head, args) = self.decompose_ty_app(db);
+        let (inst, name) = match head.data(db) {
+            TyData::AssocTy(projected) => (projected.trait_.as_predicate(db), projected.name),
+            TyData::TypeFamily {
+                owner,
+                args: captures,
+                ..
+            } => match *owner {
+                AssocTypeOwner::Trait(trait_, idx) => (
+                    TraitInstId::new(db, trait_, captures.clone(), IndexMap::new()),
+                    trait_.types(db).get(idx as usize)?.name.to_opt()?,
+                ),
+                AssocTypeOwner::Impl(impl_, idx) => (
+                    Binder::bind(impl_.into(), impl_.trait_inst(db)?).instantiate(db, captures),
+                    impl_.types(db).get(idx as usize)?.name.to_opt()?,
+                ),
+            },
+            _ => return None,
+        };
+        let decl = inst
+            .def(db)
+            .assoc_types(db)
+            .find(|decl| decl.name(db) == Some(name))?;
+        let params = decl.generic_params(db).data(db);
+        if params.is_empty() {
+            return None;
+        }
+        Some((decl, inst, args))
+    }
+
+    pub(crate) fn has_unsaturated_family_guards(self, db: &'db dyn HirAnalysisDb) -> bool {
+        self.associated_family_context(db).is_some_and(|(decl, _, args)| {
+            let params = decl.generic_params(db).data(db);
+            args.len() != params.len() && params.iter().any(|param| {
+                matches!(param, GenericParam::Type(param) if param.bounds.iter().any(|bound| match bound {
+                    TypeBound::Trait(reference) =>
+                        !crate::analysis::ty::ty_lower::is_core_constraint_bound(db, decl.scope(), *reference),
+                    _ => false,
+                }))
+            })
+        })
+    }
+
+    /// Local declaration guards instantiated at a family application. The
+    /// enclosing trait obligation is checked separately from these guards.
+    pub(crate) fn associated_family_requirements(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<PredicateListId<'db>> {
+        let (decl, inst, args) = self.associated_family_context(db)?;
+        decl.parameter_requirements(db, inst, args)
+    }
+
+    /// Declared output rules for a saturated associated family application.
+    /// These are candidates, not assumptions: consumers must establish every
+    /// requirement before using a bound. Keep this separate from normalization,
+    /// which can erase the projection and its formation requirements.
+    pub(crate) fn associated_family_rules(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<(PredicateListId<'db>, PredicateListId<'db>)> {
+        let (head, _) = self.decompose_ty_app(db);
+        if !matches!(head.data(db), TyData::AssocTy(_)) {
+            return None;
+        }
+        let (decl, inst, args) = self.associated_family_context(db)?;
+        let trait_owner = inst.def(db);
+        let instantiate = |bound| {
+            let mapping = crate::analysis::ty::ty_lower::CompleteSubst::for_associated_type(
+                db,
+                decl.scope().assoc_type_owner().expect("family owner"),
+                args.to_vec(),
+            )
+            .expect("saturated family arguments");
+            let bound = crate::analysis::ty::subst::substitute_complete(db, bound, &mapping)
+                .expect("family bound substitution");
+            Binder::bind(trait_owner.into(), bound).instantiate(db, inst.args(db))
+        };
+        let mut requirements = vec![inst];
+        requirements.extend_from_slice(self.associated_family_requirements(db)?.list(db));
+        let bounds: Vec<_> = decl.bounds_on_subject(db, self).map(instantiate).collect();
+        Some((
+            PredicateListId::new(db, requirements),
+            PredicateListId::new(db, bounds).extend_all_bounds(db),
+        ))
+    }
+
     /// Type-rooted entry to associated-type bounds: attach this type as subject.
     pub fn assoc_type_bounds(
         self,
@@ -5227,21 +5539,14 @@ impl<'db> FieldView<'db> {
 
         // Trait-bound well-formedness for field type.
         let owner_item = self.owner_item();
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, owner_item.scope()).with_assumptions(param_env(db, owner_item)),
             ty,
-        ) {
-            out.push(
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: span.clone(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                    capability_hint: None,
-                }
-                .into(),
-            );
+        )
+        .into_diag(span.clone())
+        {
+            out.push(diag);
             return out;
         }
 

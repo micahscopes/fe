@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_eval/symbolic_repeat_demanded_fault.fe
+---
+error[3-0025]: division by zero in const context
+  ┌─ symbolic_repeat_demanded_fault.fe:7:25
+  │
+4 │     const VALUE: [u8; N] = [1 / 0; N]
+  │                             ----- cannot divide by zero
+  ·
+7 │ const DEMAND: [u8; 1] = Marker<1>::VALUE
+  │                         ^^^^^^^^^^^^^^^^ constant is evaluated here

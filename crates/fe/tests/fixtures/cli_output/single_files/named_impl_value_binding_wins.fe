@@ -1,0 +1,9 @@
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+impl Compute for Subject as Casual {
+    const fn compute() -> u256 { 1 }
+}
+const Casul: u256 = 7
+const fn selected() -> u256 {
+    with (Casul) { 1 }
+}

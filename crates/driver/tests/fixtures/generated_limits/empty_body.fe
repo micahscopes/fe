@@ -1,0 +1,16 @@
+use core::meta::{Record, DeclarationName, DeclarationType, FunctionDefinition}
+
+const fn generate(_ record: Record) -> FunctionDefinition<0, 0> {
+    FunctionDefinition {
+        name: DeclarationName::Literal("empty"),
+        public: true,
+        const_function: true,
+        parameters: [],
+        return_type: DeclarationType::Unit,
+        expressions: [],
+        result: 0,
+    }
+}
+
+#[generate(generate)]
+struct Empty {}

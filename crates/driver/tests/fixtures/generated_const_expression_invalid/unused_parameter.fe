@@ -1,0 +1,21 @@
+use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr,
+    AssociatedConstant, RecordImplementation}
+
+const fn bad(_ record: Record) -> RecordImplementation<0, 2> {
+    RecordImplementation {
+        owner: record,
+        trait_path: "core::abi::AbiSize",
+        types: [Option::None; 2],
+        constants: [
+            Option::Some(AssociatedConstant::Expression(
+                DeclarationName::Literal("HEAD_SIZE"), DeclarationType::U256,
+                [BodyExpr::U256(1), BodyExpr::Parameter(0)], 0,
+            )),
+            Option::Some(AssociatedConstant::Bool(DeclarationName::Literal("IS_DYNAMIC"), false)),
+        ],
+        method: Option::None,
+    }
+}
+
+#[generate(bad)]
+struct Target {}

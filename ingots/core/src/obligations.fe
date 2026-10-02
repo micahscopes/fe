@@ -1,0 +1,16 @@
+//! Checked compile-time trait evidence.
+use ingot::Copy
+
+/// Designated kind marker for trait goals.
+pub struct Constraint { seal: bool }
+
+/// Compiler-issued evidence, not a source-constructible marker or runtime value.
+/// The compiler retains the selected implementation and proving context.
+pub struct Evidence<G: Constraint> { seal: bool }
+impl<G: Constraint> Copy for Evidence<G> {}
+
+extern {
+    /// Prove a concrete trait goal using ordinary coherent implementation lookup.
+    /// Explicit scoped selection is a separate admission rule, not implied here.
+    pub const fn prove<G: Constraint>() -> Evidence<G>
+}

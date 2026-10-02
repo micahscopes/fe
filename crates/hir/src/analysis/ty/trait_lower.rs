@@ -20,7 +20,9 @@ use super::{
     },
     fold::{TyFoldable, TyFolder},
     generic_defaults::DefaultApplication,
-    trait_def::{ImplementorId, ImplementorOrigin, TraitInstId},
+    trait_def::{
+        ImplSelectionClass, ImplementorId, ImplementorOrigin, TraitInstId, impl_selection_class,
+    },
     trait_resolution::PredicateListId,
     ty_def::{InvalidCause, PrimTy, TyBase, TyId},
     ty_lower::{lower_hir_ty_with_minter, lower_opt_hir_ty_with_minter},
@@ -45,6 +47,8 @@ pub(crate) struct TraitImplTable<'db> {
     pub(crate) by_trait: FxHashMap<Trait<'db>, Vec<ImplTrait<'db>>>,
     pub(crate) by_self: FxHashMap<ImplSelfKey<'db>, Vec<ImplTrait<'db>>>,
     pub(crate) unindexed_self: Vec<ImplTrait<'db>>,
+    pub(crate) named_by_trait: FxHashMap<Trait<'db>, Vec<ImplTrait<'db>>>,
+    pub(crate) named_by_name: FxHashMap<IdentId<'db>, Vec<ImplTrait<'db>>>,
 }
 
 fn raw_impl_trait_def<'db>(
@@ -76,7 +80,9 @@ fn raw_impl_self_key<'db>(
             {
                 NameResKind::Prim(prim) => match TyBase::from(prim) {
                     TyBase::Prim(prim) => Some(ImplSelfKey::Prim(prim)),
-                    TyBase::Adt(_) | TyBase::Contract(_) | TyBase::Func(_) => unreachable!(),
+                    TyBase::Adt(_) | TyBase::Contract(_) | TyBase::Func(_) | TyBase::TypeFn(_) => {
+                        unreachable!()
+                    }
                 },
                 NameResKind::Scope(
                     scope @ ScopeId::Item(
@@ -84,6 +90,10 @@ fn raw_impl_self_key<'db>(
                     ),
                 ) => Some(ImplSelfKey::Item(scope)),
                 NameResKind::Scope(_) => None,
+            },
+            HirTyKind::Primitive(primitive) => match TyBase::from(*primitive) {
+                TyBase::Prim(primitive) => Some(ImplSelfKey::Prim(primitive)),
+                _ => unreachable!(),
             },
             HirTyKind::Tuple(tuple) => Some(ImplSelfKey::Prim(PrimTy::Tuple(tuple.data(db).len()))),
             HirTyKind::Array(..) => Some(ImplSelfKey::Prim(PrimTy::Array)),
@@ -114,6 +124,21 @@ pub(crate) fn collect_trait_impls<'db>(
 ) -> TraitImplTable<'db> {
     let mut impl_table = TraitImplTable::default();
     for &impl_ in ingot.all_impl_traits(db).iter() {
+        if let ImplSelectionClass::Named(name) = impl_selection_class(db, impl_) {
+            if let Some(trait_def) = raw_impl_trait_def(db, impl_) {
+                impl_table
+                    .named_by_trait
+                    .entry(trait_def)
+                    .or_default()
+                    .push(impl_);
+                impl_table
+                    .named_by_name
+                    .entry(name)
+                    .or_default()
+                    .push(impl_);
+            }
+            continue;
+        }
         if let Some(trait_def) = raw_impl_trait_def(db, impl_) {
             impl_table
                 .by_trait
@@ -193,15 +218,15 @@ pub(crate) fn lower_checked_impl_assoc_ty<'db>(
         .assoc_types(db)
         .find(|assoc| assoc.name(db) == Some(name))
     {
-        return assoc.ty(db);
+        return assoc.ty(db).map(|ty| assoc.bind_body(db, ty));
     }
 
     let trait_inst = impl_trait.trait_inst_result(db).ok()?;
-    let default = trait_inst
+    let view = trait_inst
         .def(db)
         .assoc_types(db)
-        .find(|assoc| assoc.name(db) == Some(name))?
-        .default_ty(db)?;
+        .find(|assoc| assoc.name(db) == Some(name))?;
+    let default = view.bind_body(db, view.default_ty(db)?);
     Some(Binder::bind(trait_inst.def(db).into(), default).instantiate(db, trait_inst.args(db)))
 }
 
@@ -269,15 +294,15 @@ pub(crate) fn lower_candidate_impl_assoc_ty<'db>(
         .assoc_types(db)
         .find(|assoc| assoc.name(db) == Some(name))
     {
-        return assoc.candidate_ty(db);
+        return assoc.candidate_ty(db).map(|ty| assoc.bind_body(db, ty));
     }
 
     let trait_inst = impl_trait.candidate_trait_inst_result(db).ok()?;
-    let default = trait_inst
+    let view = trait_inst
         .def(db)
         .assoc_types(db)
-        .find(|assoc| assoc.name(db) == Some(name))?
-        .candidate_default_ty(db)?;
+        .find(|assoc| assoc.name(db) == Some(name))?;
+    let default = view.bind_body(db, view.candidate_default_ty(db)?);
     Some(Binder::bind(trait_inst.def(db).into(), default).instantiate(db, trait_inst.args(db)))
 }
 
@@ -599,6 +624,9 @@ pub(crate) enum TraitArgError<'db> {
     ConstHoleNotAllowed {
         arg_idx: usize,
     },
+    AssociatedFamilyBinding {
+        name: crate::hir_def::IdentId<'db>,
+    },
     Ignored,
 }
 
@@ -660,6 +688,11 @@ pub(crate) fn lower_trait_ref_impl_with_minter<'db>(
             },
             GenericArg::AssocType(AssocTypeGenericArg { name, ty }) => {
                 if let (Some(name), Some(ty)) = (name.to_opt(), ty.to_opt()) {
+                    if t.assoc_ty(db, name)
+                        .is_some_and(|decl| !decl.generic_params.data(db).is_empty())
+                    {
+                        return Err(TraitArgError::AssociatedFamilyBinding { name });
+                    }
                     let ty = lower_hir_ty_with_minter(db, ty, scope, assumptions, minter);
                     assoc_bindings.insert(name, ty);
                 }

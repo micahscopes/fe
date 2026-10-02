@@ -1,0 +1,22 @@
+pub trait T<A> {
+    type Out
+    fn f(_ a: A) -> Self::Out
+}
+pub struct X {}
+pub struct Wrap<P> {}
+impl T<u256> for X {
+    type Out = u256
+    fn f(_ a: u256) -> u256 { a + 1 }
+}
+// generic impl: assoc type defined through a projection on the impl's parameter
+impl<P: T<u256>> T<u256> for Wrap<P> {
+    type Out = (<P as T<u256>>::Out, u256)
+    fn f(_ a: u256) -> Self::Out { (P::f(a), a) }
+}
+pub fn use_it() -> (u256, u256) { <Wrap<X> as T<u256>>::f(4) }
+#[test]
+fn m1() {
+    let r = use_it()
+    assert!(r.0 == 5)
+    assert!(r.1 == 4)
+}

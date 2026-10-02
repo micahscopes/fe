@@ -18,7 +18,7 @@ use crate::{
     AbiRecordDiagnosticKind, AbiStructDiagnostic, AbiStructDiagnosticKind, AttrMisuseError,
     FieldModifierError, MsgDiagnostic, ParserError,
     hir_def::{ModuleTree, Partial, TopLevelMod, TypeKind},
-    lower::{parse_file_impl, scope_graph_impl, top_mod_ast},
+    lower::{base_scope_graph_impl, parse_file_impl, top_mod_ast},
     semantic::constraints_for,
     span::{DesugaredOrigin, HirOrigin},
 };
@@ -114,7 +114,7 @@ impl ModuleAnalysisPass for MsgLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        scope_graph_impl::accumulated::<MsgDiagnostic>(db, top_mod)
+        base_scope_graph_impl::accumulated::<MsgDiagnostic>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>()
@@ -224,7 +224,7 @@ fn accumulated_abi_record_diagnostics<'db>(
     top_mod: TopLevelMod<'db>,
     context: AbiFieldContext,
 ) -> impl Iterator<Item = AbiRecordDiagnostic> {
-    scope_graph_impl::accumulated::<AbiRecordDiagnostic>(db, top_mod)
+    base_scope_graph_impl::accumulated::<AbiRecordDiagnostic>(db, top_mod)
         .into_iter()
         .filter(move |diag| diag.kind.context() == context)
         .cloned()
@@ -238,7 +238,7 @@ fn accumulated_abi_field_diagnostics<'db>(
     top_mod: TopLevelMod<'db>,
     context: AbiFieldContext,
 ) -> impl Iterator<Item = AbiFieldDiagnostic> {
-    scope_graph_impl::accumulated::<AbiFieldDiagnostic>(db, top_mod)
+    base_scope_graph_impl::accumulated::<AbiFieldDiagnostic>(db, top_mod)
         .into_iter()
         .filter(move |diag| diag.context == context)
         .cloned()
@@ -390,7 +390,7 @@ impl ModuleAnalysisPass for AbiStructLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        let mut diags = scope_graph_impl::accumulated::<AbiStructDiagnostic>(db, top_mod)
+        let mut diags = base_scope_graph_impl::accumulated::<AbiStructDiagnostic>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>();
@@ -483,12 +483,12 @@ impl ModuleAnalysisPass for AttrMisusePass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        let mut diags = scope_graph_impl::accumulated::<AttrMisuseError>(db, top_mod)
+        let mut diags = base_scope_graph_impl::accumulated::<AttrMisuseError>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>();
         diags.extend(
-            scope_graph_impl::accumulated::<FieldModifierError>(db, top_mod)
+            base_scope_graph_impl::accumulated::<FieldModifierError>(db, top_mod)
                 .into_iter()
                 .map(|d| Box::new(d.clone()) as _),
         );

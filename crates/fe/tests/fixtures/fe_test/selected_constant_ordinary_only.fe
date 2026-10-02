@@ -1,0 +1,20 @@
+trait Compute {
+    const fn compute() -> u256
+}
+
+struct Subject {}
+
+impl Compute for Subject {
+    const fn compute() -> u256 { 42 }
+}
+
+fn target() -> Subject { Subject {} }
+
+const fn ordinary() -> u256 { Subject::compute() }
+
+// expect ordinary=42
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(ordinary() == 42)
+}

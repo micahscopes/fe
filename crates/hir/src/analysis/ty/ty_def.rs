@@ -5,9 +5,9 @@ use std::fmt;
 use crate::{
     hir_def::{
         Body, Enum, ExprId, GenericParamOwner, IdentId, ItemKind, PathId,
-        TypeAlias as HirTypeAlias, VariantKind,
+        TypeAlias as HirTypeAlias, TypeFnDef, VariantKind,
         prim_ty::{IntTy as HirIntTy, PrimTy as HirPrimTy, UintTy as HirUintTy},
-        scope_graph::ScopeId,
+        scope_graph::{AssocTypeOwner, ScopeId},
     },
     span::DynLazySpan,
 };
@@ -27,10 +27,10 @@ use super::{
     const_ty::{
         ConstTyData, ConstTyId, TypePrintMode, UnevaluatedConstPolicy, const_ty_from_sem_const,
     },
-    diagnostics::{TraitConstraintDiag, TyDiagCollection},
+    diagnostics::TyDiagCollection,
     effects::place_effect_provider_param_index_map,
     trait_def::{TraitInstId, TraitRefId},
-    trait_resolution::{PredicateListId, WellFormedness},
+    trait_resolution::PredicateListId,
     ty_lower::collect_generic_params,
     unify::{InferenceKey, UnificationTable},
     visitor::{TyVisitable, TyVisitor, walk_const_ty, walk_ty},
@@ -170,6 +170,34 @@ impl<'db> TyId<'db> {
         }
     }
 
+    pub(crate) fn type_family(
+        db: &'db dyn HirAnalysisDb,
+        owner: AssocTypeOwner<'db>,
+        body: Self,
+    ) -> Self {
+        if owner.generic_params(db).data(db).is_empty() {
+            return body;
+        }
+        let item_owner = GenericParamOwner::from_item_opt(owner.scope().item()).unwrap();
+        let args = collect_generic_params(db, item_owner).params(db).to_vec();
+        Self::type_family_with_args(db, owner, args, body)
+    }
+
+    pub(crate) fn type_family_with_args(
+        db: &'db dyn HirAnalysisDb,
+        owner: AssocTypeOwner<'db>,
+        args: Vec<Self>,
+        body: Self,
+    ) -> Self {
+        if matches!(body.data(db), TyData::Invalid(_))
+            || owner.generic_params(db).data(db).is_empty()
+        {
+            body
+        } else {
+            Self::new(db, TyData::TypeFamily { owner, args, body })
+        }
+    }
+
     pub fn invalid_cause(self, db: &'db dyn HirAnalysisDb) -> Option<InvalidCause<'db>> {
         match self.data(db) {
             TyData::Invalid(cause) => Some(cause.clone()),
@@ -184,7 +212,9 @@ impl<'db> TyId<'db> {
             TyData::TyVar(_) => TyFlags::HAS_VAR,
             TyData::TyParam(_) => TyFlags::HAS_PARAM,
             TyData::Invalid(_) => TyFlags::HAS_INVALID,
-            TyData::TyApp(..)
+            TyData::TypeFamily { .. }
+            | TyData::ConstraintTerm(_)
+            | TyData::TyApp(..)
             | TyData::AssocTy(_)
             | TyData::QualifiedTy(_)
             | TyData::ConstTy(_) => ty_flags(db, self),
@@ -214,7 +244,7 @@ impl<'db> TyId<'db> {
 
     /// Returns `true` if the type has a `*` kind.
     pub fn has_star_kind(self, db: &dyn HirAnalysisDb) -> bool {
-        !matches!(self.kind(db), Kind::Abs(..))
+        self.is_star_kind(db)
     }
 
     #[salsa::tracked(return_ref)]
@@ -226,6 +256,14 @@ impl<'db> TyId<'db> {
         match self.data(db) {
             TyData::TyVar(var) => var.pretty_print(),
             TyData::TyParam(param) => param.pretty_print(db),
+            TyData::TypeFamily { owner, body, .. } => format!(
+                "type {} = {}",
+                owner
+                    .scope()
+                    .pretty_path(db)
+                    .unwrap_or_else(|| "<associated family>".into()),
+                body.pretty_print_with_mode(db, mode)
+            ),
             TyData::AssocTy(assoc_ty) => {
                 let self_ty = assoc_ty.trait_.self_ty(db);
                 format!(
@@ -234,6 +272,11 @@ impl<'db> TyId<'db> {
                     assoc_ty.name.data(db)
                 )
             }
+            TyData::ConstraintTerm(goal) => format!(
+                "Constraint<{} as {}>",
+                goal.self_ty(db).pretty_print_with_mode(db, mode),
+                goal.pretty_print(db, false)
+            ),
             TyData::QualifiedTy(trait_inst) => {
                 format!(
                     "<{} as {}>",
@@ -539,21 +582,7 @@ impl<'db> TyId<'db> {
     }
 
     pub fn is_core_dyn_string(self, db: &'db dyn HirAnalysisDb) -> bool {
-        let ty = self.as_capability(db).map_or(self, |(_, inner)| inner);
-        let base = ty.base_ty(db);
-        let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
-            return false;
-        };
-        let adt_ref = adt.adt_ref(db);
-        let Some(name) = adt_ref.name(db) else {
-            return false;
-        };
-        if name.data(db) != "DynString" {
-            return false;
-        }
-
-        base.ingot(db)
-            .is_some_and(|ingot| ingot.kind(db) == IngotKind::Core)
+        super::corelib::core_abi_adt_kind(db, self) == Some(super::corelib::CoreAbiAdt::DynString)
     }
 
     pub(crate) fn is_param(self, db: &dyn HirAnalysisDb) -> bool {
@@ -611,10 +640,14 @@ impl<'db> TyId<'db> {
         match self.base_ty(db).data(db) {
             TyData::TyParam(param) => Some(param.scope(db)),
             TyData::AssocTy(assoc_ty) => assoc_ty.scope(db),
-            TyData::QualifiedTy(trait_inst) => Some(trait_inst.def(db).scope()),
+            TyData::TypeFamily { owner, .. } => Some(owner.scope()),
+            TyData::QualifiedTy(trait_inst) | TyData::ConstraintTerm(trait_inst) => {
+                Some(trait_inst.def(db).scope())
+            }
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.scope(db)),
             TyData::TyBase(TyBase::Contract(c)) => Some(c.scope()),
             TyData::TyBase(TyBase::Func(func)) => Some(func.scope()),
+            TyData::TyBase(TyBase::TypeFn(def)) => Some(def.scope()),
             TyData::TyBase(TyBase::Prim(..)) => None,
             TyData::ConstTy(const_ty) => match const_ty.data(db) {
                 ConstTyData::TyVar(..) => None,
@@ -638,11 +671,15 @@ impl<'db> TyId<'db> {
             TyData::TyVar(_) => None,
             TyData::TyParam(param) => param.scope(db).name_span(db),
             TyData::AssocTy(assoc_ty) => assoc_ty.scope(db)?.name_span(db),
-            TyData::QualifiedTy(trait_inst) => trait_inst.def(db).scope().name_span(db),
+            TyData::TypeFamily { owner, .. } => Some(owner.span().name().into()),
+            TyData::QualifiedTy(trait_inst) | TyData::ConstraintTerm(trait_inst) => {
+                trait_inst.def(db).scope().name_span(db)
+            }
 
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.name_span(db)),
             TyData::TyBase(TyBase::Contract(c)) => c.scope().name_span(db),
             TyData::TyBase(TyBase::Func(func)) => Some(func.name_span()),
+            TyData::TyBase(TyBase::TypeFn(def)) => Some(def.span().name().into()),
             TyData::TyBase(TyBase::Prim(_)) => None,
 
             TyData::ConstTy(ty) => match ty.data(db) {
@@ -671,22 +708,7 @@ impl<'db> TyId<'db> {
         assumptions: PredicateListId<'db>,
         span: DynLazySpan<'db>,
     ) -> Option<TyDiagCollection<'db>> {
-        if let WellFormedness::IllFormed { goal, subgoal } =
-            check_ty_wf(db, solve_cx.with_assumptions(assumptions), self)
-        {
-            Some(
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span,
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                    capability_hint: None,
-                }
-                .into(),
-            )
-        } else {
-            None
-        }
+        check_ty_wf(db, solve_cx.with_assumptions(assumptions), self).into_diag(span)
     }
 
     pub(super) fn ty_var(
@@ -719,6 +741,11 @@ impl<'db> TyId<'db> {
     }
 
     pub fn app(db: &'db dyn HirAnalysisDb, lhs: Self, rhs: Self) -> TyId<'db> {
+        // Preserve the originating error, including a cycle recovery seed.
+        // Wrapping that seed on every query iteration prevents convergence.
+        if matches!(lhs.data(db), TyData::Invalid(_)) {
+            return lhs;
+        }
         let Some(applicable_ty) = lhs.applicable_ty(db) else {
             return Self::invalid(
                 db,
@@ -946,7 +973,7 @@ impl<'db> TyId<'db> {
         }
 
         let applicable_kind = match self.kind(db) {
-            Kind::Star => return None,
+            Kind::Star | Kind::Constraint => return None,
             Kind::Abs(inner) => inner.0.clone(),
             Kind::Any => Kind::Any,
         };
@@ -959,6 +986,10 @@ impl<'db> TyId<'db> {
         };
 
         let const_ty = match base {
+            TyBase::TypeFn(def) => collect_generic_params(db, (*def).into())
+                .params(db)
+                .get(args.len())
+                .and_then(|ty| ty.const_ty_ty(db)),
             TyBase::Func(func_def) => {
                 let params = func_def.params(db);
                 let param = params.get(args.len()).copied();
@@ -1051,8 +1082,19 @@ pub enum TyData<'db> {
 
     AssocTy(AssocTy<'db>),
 
+    /// An associated type body retaining its local parameter binder.
+    TypeFamily {
+        owner: AssocTypeOwner<'db>,
+        /// Enclosing item arguments, including those unused by the body.
+        args: Vec<TyId<'db>>,
+        body: TyId<'db>,
+    },
+
     /// Qualified type, e.g., `<T as Iterator>`.
     QualifiedTy(TraitInstId<'db>),
+
+    /// A well-formed trait goal. This is not proof or a runtime value type.
+    ConstraintTerm(TraitInstId<'db>),
 
     // Type application,
     // e.g., `Option<i32>` is represented as `TApp(TyConst(Option), TyConst(i32))`.
@@ -1221,6 +1263,8 @@ pub enum InvalidCause<'db> {
     /// bounds); this cause keeps any uncovered shape loud instead of
     /// silently invalid.
     TypeLoweringCycle,
+    TypeNormalizationLimit,
+    ComputedTypeDefinitionInvalid,
 
     // TraitConstraintNotSat(PredicateId),
     ParseError,
@@ -1310,6 +1354,8 @@ impl InvalidCause<'_> {
             }
             InvalidCause::ConstEvalRecursiveConst { .. } => "ConstEvalRecursiveConst".into(),
             InvalidCause::TypeLoweringCycle => "TypeLoweringCycle".into(),
+            InvalidCause::TypeNormalizationLimit => "TypeNormalizationLimit".into(),
+            InvalidCause::ComputedTypeDefinitionInvalid => "ComputedTypeDefinitionInvalid".into(),
         }
     }
 }
@@ -1325,6 +1371,9 @@ fn string_capacity_from_const_ty(db: &dyn HirAnalysisDb, ty: TyId<'_>) -> Option
 pub enum Kind {
     /// Represents star kind, i.e., `*` kind.
     Star,
+
+    /// Represents a trait goal, not evidence that the goal holds.
+    Constraint,
 
     /// Represents higher kinded types.
     /// e.g.,
@@ -1342,7 +1391,7 @@ impl Kind {
 
     pub fn does_match(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Star, Self::Star) => true,
+            (Self::Star, Self::Star) | (Self::Constraint, Self::Constraint) => true,
             (Self::Abs(a), Self::Abs(b)) => a.0.does_match(&b.0) && a.1.does_match(&b.1),
             (Self::Any, _) => true,
             (_, Self::Any) => true,
@@ -1355,6 +1404,7 @@ impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Star => write!(f, "*"),
+            Self::Constraint => write!(f, "Constraint"),
             Self::Abs(inner) => write!(f, "({} -> {})", inner.0, inner.1),
             Self::Any => write!(f, "Any"),
         }
@@ -1615,9 +1665,33 @@ impl<'db> TyParam<'db> {
         }
     }
 
+    /// A rigid parameter confined to an induction proof query.
+    pub(super) fn induction_param(
+        name: IdentId<'db>,
+        idx: usize,
+        kind: Kind,
+        owner: ScopeId<'db>,
+    ) -> Self {
+        Self {
+            name,
+            idx,
+            kind,
+            owner,
+            declared_index: None,
+            variant: Variant::Induction,
+        }
+    }
+
+    pub fn is_assoc_ty_param(&self) -> bool {
+        self.owner.assoc_type_owner().is_some()
+    }
+
     pub fn original_idx(&self, db: &'db dyn HirAnalysisDb) -> usize {
         if let Some(index) = self.declared_index {
             return index;
+        }
+        if self.is_assoc_ty_param() {
+            return self.idx;
         }
         match self.variant {
             Variant::Normal | Variant::TraitSelf => {
@@ -1631,24 +1705,30 @@ impl<'db> TyParam<'db> {
             Variant::Effect => self.idx,
             Variant::EffectProvider => self.idx,
             Variant::Implicit => self.idx,
+            Variant::Induction => panic!("induction parameter escaped proof query"),
         }
     }
 
     pub fn scope(&self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
         match self.variant {
             Variant::TraitSelf => self.owner,
+            Variant::Normal if self.is_assoc_ty_param() => {
+                ScopeId::AssocTypeParam(self.owner.assoc_type_owner().unwrap(), self.idx as u16)
+            }
             Variant::Normal => {
                 ScopeId::GenericParam(self.owner.item(), self.original_idx(db) as u16)
             }
             Variant::Effect => ScopeId::FuncParam(self.owner.item(), self.idx as u16),
             Variant::EffectProvider => self.owner,
             Variant::Implicit => self.owner,
+            Variant::Induction => panic!("induction parameter escaped proof query"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Variant {
+    Induction,
     Normal,
     TraitSelf,
     /// Effect parameter local to a function `uses` list
@@ -1668,6 +1748,7 @@ pub enum TyBase<'db> {
     Adt(AdtDef<'db>),
     Contract(crate::hir_def::Contract<'db>),
     Func(CallableDef<'db>),
+    TypeFn(TypeFnDef<'db>),
 }
 
 impl<'db> TyBase<'db> {
@@ -1726,6 +1807,11 @@ impl<'db> TyBase<'db> {
                 .to_opt()
                 .map_or_else(|| "<unknown>".to_string(), |i| i.data(db).to_string()),
 
+            Self::TypeFn(def) => def
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_owned())
+                .unwrap_or_else(|| "<unknown>".to_owned()),
             Self::Func(func) => format!(
                 "fn {}",
                 func.name(db)
@@ -1884,13 +1970,30 @@ impl HasKind for TyData<'_> {
         match self {
             TyData::TyVar(ty_var) => ty_var.kind(db),
             TyData::TyParam(ty_param) => ty_param.kind.clone(),
-            TyData::AssocTy(assoc) => assoc
-                .trait_
-                .def(db)
-                .assoc_ty(db, assoc.name)
-                .and_then(|decl| super::ty_lower::lower_kind_in_bounds(&decl.bounds))
-                .unwrap_or(Kind::Star),
+            TyData::TypeFamily { owner, body, .. } => super::ty_lower::assoc_family_kind(
+                db,
+                owner.scope(),
+                owner.generic_params(db),
+                body.kind(db).clone(),
+            ),
+            TyData::AssocTy(assoc) => {
+                let trait_def = assoc.trait_.def(db);
+                let Some(decl) = trait_def.assoc_ty(db, assoc.name) else {
+                    return Kind::Star;
+                };
+                let Some(view) = trait_def
+                    .assoc_types(db)
+                    .find(|view| view.name(db) == Some(assoc.name))
+                else {
+                    return Kind::Star;
+                };
+                let scope = view.scope();
+                let result = super::ty_lower::lower_kind_in_bounds(db, scope, &decl.bounds)
+                    .unwrap_or(Kind::Star);
+                super::ty_lower::assoc_family_kind(db, scope, decl.generic_params, result)
+            }
             TyData::QualifiedTy(_) => Kind::Star,
+            TyData::ConstraintTerm(_) => Kind::Constraint,
             TyData::TyBase(base) => base.kind(db),
             TyData::TyApp(abs, _) => match abs.kind(db) {
                 // `TyId::app` method handles the kind mismatch, so we don't need to verify it again
@@ -1921,6 +2024,7 @@ impl HasKind for TyBase<'_> {
             TyBase::Adt(adt) => adt.kind(db),
             TyBase::Contract(_) => Kind::Star, // Contracts have no generic params
             TyBase::Func(func) => func.kind(db),
+            TyBase::TypeFn(def) => def.kind(db),
         }
     }
 }
@@ -2148,6 +2252,7 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
     struct Collector<'db> {
         db: &'db dyn HirAnalysisDb,
         flags: TyFlags,
+        bound: Vec<ScopeId<'db>>,
     }
 
     impl<'db> TyVisitor<'db> for Collector<'db> {
@@ -2156,6 +2261,28 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
         }
 
         fn visit_ty(&mut self, ty: TyId<'db>) {
+            if matches!(ty.data(self.db), TyData::TyApp(..)) {
+                let (head, args) = ty.decompose_ty_app(self.db);
+                if let TyData::TypeFamily { owner, .. } = head.data(self.db)
+                    && args.len() >= owner.generic_params(self.db).data(self.db).len()
+                {
+                    self.flags.insert(TyFlags::HAS_PROJECTION);
+                }
+                if let TyData::TyBase(TyBase::TypeFn(def)) = head.data(self.db)
+                    && args.len() == def.generic_params(self.db).data(self.db).len()
+                {
+                    self.flags.insert(TyFlags::HAS_PROJECTION);
+                }
+            }
+            if let TyData::TypeFamily { owner, args, body } = ty.data(self.db) {
+                for arg in args {
+                    self.visit_ty(*arg);
+                }
+                self.bound.push(owner.scope());
+                self.visit_ty(*body);
+                self.bound.pop();
+                return;
+            }
             if matches!(
                 ty.data(self.db),
                 TyData::AssocTy(_) | TyData::QualifiedTy(_)
@@ -2169,12 +2296,16 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
             self.flags.insert(TyFlags::HAS_VAR);
         }
 
-        fn visit_param(&mut self, _: &TyParam) {
-            self.flags.insert(TyFlags::HAS_PARAM)
+        fn visit_param(&mut self, param: &TyParam) {
+            if !self.bound.contains(&param.owner) {
+                self.flags.insert(TyFlags::HAS_PARAM);
+            }
         }
 
-        fn visit_const_param(&mut self, _: &TyParam<'db>, _: TyId<'db>) {
-            self.flags.insert(TyFlags::HAS_PARAM)
+        fn visit_const_param(&mut self, param: &TyParam<'db>, _: TyId<'db>) {
+            if !self.bound.contains(&param.owner) {
+                self.flags.insert(TyFlags::HAS_PARAM);
+            }
         }
 
         fn visit_invalid(&mut self, _: &InvalidCause) {
@@ -2192,8 +2323,161 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
     let mut collector = Collector {
         db,
         flags: TyFlags::empty(),
+        bound: Vec::new(),
     };
 
     ty.visit_with(&mut collector);
     collector.flags
+}
+
+impl HasKind for TypeFnDef<'_> {
+    fn kind(&self, db: &dyn HirAnalysisDb) -> Kind {
+        let mut result = self
+            .ret_kind(db)
+            .to_opt()
+            .map(|kind| super::ty_lower::lower_kind(db, self.scope(), &kind))
+            .unwrap_or(Kind::Star);
+        for param in collect_generic_params(db, (*self).into())
+            .params(db)
+            .iter()
+            .rev()
+        {
+            result = Kind::abs(param.kind(db).clone(), result);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod computed_type_tests {
+    use super::*;
+    use crate::test_db::HirAnalysisTestDb;
+    use camino::Utf8PathBuf;
+
+    #[test]
+    fn computed_type_parameters_keep_owner_and_const_argument_sorts() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("computed_type_parameters.fe"),
+            "recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {\n\
+             match N {\n0 => T\n_ => Tree<T, O, {N - 1}>\n}\n}\n\
+             recursive type fn Other<T, const O: usize, const N: usize>() -> (*) {\n\
+             match N {\n0 => T\n_ => Other<T, O, {N - 1}>\n}\n}",
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let defs: Vec<_> = top_mod
+            .all_items(&db)
+            .iter()
+            .filter_map(|item| match item {
+                ItemKind::TypeFn(def) => Some(*def),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(defs.len(), 2);
+        let first = collect_generic_params(&db, defs[0].into()).params(&db);
+        let second = collect_generic_params(&db, defs[1].into()).params(&db);
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().zip(second).all(|(a, b)| a != b));
+        for def in defs {
+            let params = collect_generic_params(&db, def.into()).params(&db);
+            let constructor = TyId::new(&db, TyData::TyBase(TyBase::TypeFn(def)));
+            assert_eq!(constructor.as_scope(&db), Some(def.scope()));
+            assert!(constructor.applicable_ty(&db).unwrap().const_ty.is_none());
+            let partial = TyId::app(&db, constructor, TyId::bool(&db));
+            assert_eq!(
+                partial.applicable_ty(&db).unwrap().const_ty,
+                params[1].const_ty_ty(&db)
+            );
+            let partial = TyId::app(&db, partial, params[1]);
+            assert_eq!(
+                partial.applicable_ty(&db).unwrap().const_ty,
+                params[2].const_ty_ty(&db)
+            );
+            let applied = TyId::app(&db, partial, params[2]);
+            assert!(applied.applicable_ty(&db).is_none());
+            assert_eq!(applied.kind(&db), &Kind::Star);
+            assert!(!applied.has_invalid(&db));
+        }
+    }
+
+    #[test]
+    fn computed_type_step_uses_ordinary_scoped_substitution() {
+        use crate::analysis::ty::{
+            binder::Binder, const_ty::ConstTyId, trait_resolution::PredicateListId,
+            ty_lower::lower_hir_ty_deferred,
+        };
+        for payload in [false, true] {
+            let mut db = HirAnalysisTestDb::default();
+            let source = r#"
+struct Tagged<const I: usize, T> { value: T }
+const fn payload(_ i: usize) -> usize {
+    let mut result: usize = 1
+    let mut cursor: usize = 0
+    while cursor < i {
+        result = result + 3
+        cursor = cursor + 1
+    }
+    result
+}
+recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
+    match N {
+        0 => T
+        _ => STEP
+    }
+}
+"#
+            .replace(
+                "STEP",
+                if payload {
+                    "Tagged<{payload(N - 1)}, Tree<T, O, {N - 1}>>"
+                } else {
+                    "Tree<T, O, {N - 1}>"
+                },
+            );
+            let file = db.new_stand_alone(Utf8PathBuf::from("computed_type_step.fe"), &source);
+            let (top_mod, _) = db.top_mod(file);
+            let def = top_mod
+                .all_items(&db)
+                .iter()
+                .find_map(|item| match item {
+                    ItemKind::TypeFn(def) => Some(*def),
+                    _ => None,
+                })
+                .unwrap();
+            let usize_ty = TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+            let literal =
+                |n: u32| TyId::const_ty(&db, ConstTyId::integer(&db, usize_ty, BigInt::from(n)));
+            fn evaluated_arg<'db>(
+                db: &'db dyn HirAnalysisDb,
+                arg: TyId<'db>,
+                expected: TyId<'db>,
+            ) -> TyId<'db> {
+                let TyData::ConstTy(value) = arg.data(db) else {
+                    panic!("expected a const argument")
+                };
+                TyId::const_ty(db, value.evaluate(db, Some(expected)))
+            }
+            let body = lower_hir_ty_deferred(
+                &db,
+                def.arms(&db)[1].ty.to_opt().unwrap(),
+                def.scope(),
+                PredicateListId::empty_list(&db),
+            );
+            assert!(!body.has_invalid(&db), "{}", body.pretty_print(&db));
+            let mut applied = Binder::bind(def.into(), body)
+                .instantiate(&db, &[TyId::bool(&db), literal(7), literal(3)]);
+            if payload {
+                let (_, args) = applied.decompose_ty_app(&db);
+                assert_eq!(evaluated_arg(&db, args[0], usize_ty), literal(7));
+                applied = args[1];
+            }
+            let (head, args) = applied.decompose_ty_app(&db);
+            assert!(
+                matches!(head.data(&db), TyData::TyBase(TyBase::TypeFn(owner)) if *owner == def)
+            );
+            assert_eq!(args[0], TyId::bool(&db));
+            assert_eq!(args[1], literal(7));
+            assert_eq!(evaluated_arg(&db, args[2], usize_ty), literal(2));
+        }
+    }
 }

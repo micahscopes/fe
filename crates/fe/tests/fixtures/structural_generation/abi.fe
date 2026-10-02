@@ -28,21 +28,35 @@ mod authors {
         }
         abi_record_layout(sizes)
     }
-    pub const fn size(_ record: Record) -> RecordImplementation<0, 1> {
+    pub const fn size(_ record: Record) -> RecordImplementation<0, 65> {
         let mut is_dynamic = false
+        let mut expressions: [BodyExpr; 65] = [BodyExpr::End; 65]
+        expressions[0] = BodyExpr::U256(0)
         let mut i: usize = 0
         while i < field_count(record) {
-            is_dynamic = is_dynamic || dynamic(field_type(field(record, i)))
+            let f = field(record, i)
+            is_dynamic = is_dynamic || dynamic(field_type(f))
+            let call = FunctionCall {
+                path: "core::abi::abi_field_head_size",
+                types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None],
+                arguments: [Option::None; 4],
+            }
+            let node = 1 + i * 2
+            expressions[node] = BodyExpr::Call(call)
+            expressions[node + 1] = BodyExpr::Add(node - 1, node)
             i += 1
         }
         let types: [Option<DeclarationType>; 2] = [Option::None; 2]
-        let method: Option<FunctionDefinition<0, 1>> = Option::None
+        let method: Option<FunctionDefinition<0, 65>> = Option::None
         RecordImplementation {
             owner: record,
             trait_path: "core::abi::AbiSize",
             types,
             constants: [
-                Option::Some(AssociatedConstant::U256(DeclarationName::Literal("HEAD_SIZE"), layout(record).head_size)),
+                Option::Some(AssociatedConstant::Expression(
+                    DeclarationName::Literal("HEAD_SIZE"), DeclarationType::U256,
+                    expressions, field_count(record) * 2,
+                )),
                 Option::Some(AssociatedConstant::Bool(DeclarationName::Literal("IS_DYNAMIC"), is_dynamic)),
             ],
             method,
@@ -69,7 +83,7 @@ mod authors {
     pub const fn encoder(_ record: Record) -> RecordImplementation<2, 100> {
         let plan = layout(record)
         let no_label: Option<String<31>> = Option::None
-        let constants: [Option<AssociatedConstant>; 2] = [Option::None; 2]
+        let constants: [Option<AssociatedConstant<100>>; 2] = [Option::None; 2]
         let mut expressions: [BodyExpr; 100] = [BodyExpr::End; 100]
         expressions[0] = BodyExpr::Parameter(0)
         expressions[1] = BodyExpr::Parameter(1)

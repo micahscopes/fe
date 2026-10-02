@@ -7,7 +7,9 @@ use crate::analysis::name_resolution::{
     method_selection::{MethodCandidate, select_method_candidate},
     resolve_path_with_minter,
 };
+use crate::analysis::semantic::{SelectedApplication, eval_const_instance};
 use crate::analysis::ty::canonical::Canonicalized;
+use crate::analysis::ty::trait_def::ImplementorOrigin;
 use crate::analysis::ty::{
     const_ty::ConstBodyLowering,
     subst::substitute_complete,
@@ -16,7 +18,7 @@ use crate::analysis::ty::{
 use crate::hir_def::{GenericArg, GenericArgListId, ItemKind, UnOp, scope_graph::ScopeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PredicateKey<'db> {
+pub(crate) struct PredicateKey<'db> {
     ty: TyId<'db>,
     arithmetic: crate::hir_def::attr::ArithmeticMode,
     operation: Option<Callable<'db>>,
@@ -38,6 +40,283 @@ enum PredicateTerm<'db> {
     Unary(UnOp, Box<PredicateKey<'db>>),
     Cast(Box<PredicateKey<'db>>),
     Call(Vec<PredicateKey<'db>>),
+}
+
+/// A substituted const condition waiting for the checker, with the caller's
+/// lexical premises and recorded selections kept separate from proof search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConstObligation<'db> {
+    declaration: WhereClauseOwner<'db>,
+    predicate: Body<'db>,
+    args: Vec<TyId<'db>>,
+    caller: Option<GenericParamOwner<'db>>,
+    selections: Vec<SelectedApplication<'db>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PendingConstObligation<'db> {
+    obligation: ConstObligation<'db>,
+    use_span: crate::span::DynLazySpan<'db>,
+}
+
+impl<'db> PendingConstObligation<'db> {
+    pub(super) fn fold_with<F>(mut self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: crate::analysis::ty::fold::TyFolder<'db>,
+    {
+        self.obligation.args = self.obligation.args.fold_with(db, folder);
+        self.obligation.selections = self.obligation.selections.fold_with(db, folder);
+        self
+    }
+
+    pub(super) fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
+    {
+        use crate::analysis::ty::visitor::TyVisitable;
+        self.obligation.args.visit_with(visitor);
+        self.obligation.selections.visit_with(visitor);
+    }
+}
+
+pub(super) fn pending_owner_const_obligations<'db>(
+    db: &'db dyn HirAnalysisDb,
+    declaration: WhereClauseOwner<'db>,
+    args: &[TyId<'db>],
+    use_scope: ScopeId<'db>,
+    use_span: crate::span::DynLazySpan<'db>,
+) -> Vec<PendingConstObligation<'db>> {
+    owner_const_obligations(db, declaration, args, use_scope)
+        .into_iter()
+        .map(|obligation| PendingConstObligation {
+            obligation,
+            use_span: use_span.clone(),
+        })
+        .collect()
+}
+
+fn owner_const_obligations<'db>(
+    db: &'db dyn HirAnalysisDb,
+    declaration: WhereClauseOwner<'db>,
+    args: &[TyId<'db>],
+    use_scope: ScopeId<'db>,
+) -> Vec<ConstObligation<'db>> {
+    let caller =
+        premise_owner_in_scope(db, use_scope).filter(|_| args.iter().any(|ty| ty.has_param(db)));
+    declaration
+        .where_clause(db)
+        .const_predicates(db)
+        .iter()
+        .map(|&predicate| ConstObligation {
+            declaration,
+            predicate,
+            args: args.to_vec(),
+            caller,
+            selections: Vec::new(),
+        })
+        .collect()
+}
+
+fn selected_impl_condition_obligations<'db>(
+    db: &'db dyn HirAnalysisDb,
+    conditions: crate::analysis::ty::trait_resolution::ImplConditionsId<'db>,
+    use_scope: ScopeId<'db>,
+) -> Vec<ConstObligation<'db>> {
+    let mut obligations = Vec::new();
+    for &goal in conditions.trait_goals(db) {
+        for obligation in owner_const_obligations(
+            db,
+            WhereClauseOwner::Trait(goal.def(db)),
+            goal.args(db),
+            use_scope,
+        ) {
+            if !obligations.contains(&obligation) {
+                obligations.push(obligation);
+            }
+        }
+    }
+    for &instance in conditions.instances(db) {
+        let ImplementorOrigin::Hir(implementation) = instance.origin(db) else {
+            continue;
+        };
+        for obligation in owner_const_obligations(
+            db,
+            WhereClauseOwner::ImplTrait(implementation),
+            instance.params(db),
+            use_scope,
+        ) {
+            if !obligations.contains(&obligation) {
+                obligations.push(obligation);
+            }
+        }
+    }
+    obligations
+}
+
+pub(super) fn selected_impl_condition_uses<'db>(
+    db: &'db dyn HirAnalysisDb,
+    conditions: crate::analysis::ty::trait_resolution::ImplConditionsId<'db>,
+    use_scope: ScopeId<'db>,
+    use_span: crate::span::DynLazySpan<'db>,
+) -> Vec<PendingConstObligation<'db>> {
+    selected_impl_condition_obligations(db, conditions, use_scope)
+        .into_iter()
+        .map(|obligation| PendingConstObligation {
+            obligation,
+            use_span: use_span.clone(),
+        })
+        .collect()
+}
+
+pub(crate) fn selected_impl_requirements_hold<'db>(
+    db: &'db dyn HirAnalysisDb,
+    conditions: crate::analysis::ty::trait_resolution::ImplConditionsId<'db>,
+    scope: ScopeId<'db>,
+) -> bool {
+    crate::analysis::ty::trait_resolution::assert_outside_proof_search();
+    selected_impl_condition_obligations(db, conditions, scope)
+        .iter()
+        .all(|use_| {
+            matches!(
+                discharge_selected_requirement(
+                    db,
+                    use_.declaration,
+                    use_.predicate,
+                    use_.args.clone(),
+                    use_.caller,
+                    use_.selections.clone()
+                ),
+                Discharge::Holds
+            )
+        })
+}
+
+fn check_recorded_condition_uses<'db>(
+    db: &'db dyn HirAnalysisDb,
+    uses: &[PendingConstObligation<'db>],
+) -> RequirementCheck<'db> {
+    let mut check = RequirementCheck::default();
+    let mut seen = Vec::new();
+    for use_ in uses {
+        if seen.contains(use_) {
+            continue;
+        }
+        seen.push(use_.clone());
+        let obligation = &use_.obligation;
+        if let Discharge::Fails(failure) = discharge_selected_requirement(
+            db,
+            obligation.declaration,
+            obligation.predicate,
+            obligation.args.clone(),
+            obligation.caller,
+            obligation.selections.clone(),
+        ) {
+            check.unmet(use_.use_span.clone(), obligation.predicate, failure);
+        }
+    }
+    check
+}
+
+pub(crate) fn check_impl_trait_header_const_requirements<'db>(
+    db: &'db dyn HirAnalysisDb,
+    implementation: crate::hir_def::ImplTrait<'db>,
+) -> Vec<FuncBodyDiag<'db>> {
+    let Some(implementor) = super::super::trait_lower::lower_impl_trait(db, implementation) else {
+        return Vec::new();
+    };
+    let goal = implementor.trait_(db);
+    let uses = pending_owner_const_obligations(
+        db,
+        WhereClauseOwner::Trait(goal.def(db)),
+        goal.args(db),
+        implementation.scope(),
+        implementation.span().trait_ref().into(),
+    );
+    check_recorded_condition_uses(db, &uses).diags
+}
+
+impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for PredicateKey<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
+    {
+        self.ty.visit_with(visitor);
+        if let Some(operation) = &self.operation {
+            operation.visit_with(visitor);
+        }
+        match &self.term {
+            PredicateTerm::TypeConst(ty) | PredicateTerm::InherentConst(_, ty, _) => {
+                ty.visit_with(visitor)
+            }
+            PredicateTerm::TraitConst(goal, _) => goal.visit_with(visitor),
+            PredicateTerm::Binary(_, lhs, rhs) => {
+                lhs.visit_with(visitor);
+                rhs.visit_with(visitor);
+            }
+            PredicateTerm::Unary(_, value) | PredicateTerm::Cast(value) => {
+                value.visit_with(visitor)
+            }
+            PredicateTerm::Call(args) => args.visit_with(visitor),
+            PredicateTerm::Literal(_) | PredicateTerm::Const(_) => {}
+        }
+    }
+}
+
+impl<'db> crate::analysis::ty::fold::TyFoldable<'db> for PredicateKey<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: crate::analysis::ty::fold::TyFolder<'db>,
+    {
+        let term = match self.term {
+            PredicateTerm::TypeConst(ty) => PredicateTerm::TypeConst(ty.fold_with(db, folder)),
+            PredicateTerm::TraitConst(goal, name) => {
+                PredicateTerm::TraitConst(goal.fold_with(db, folder), name)
+            }
+            PredicateTerm::InherentConst(owner, ty, name) => {
+                PredicateTerm::InherentConst(owner, ty.fold_with(db, folder), name)
+            }
+            PredicateTerm::Binary(op, lhs, rhs) => PredicateTerm::Binary(
+                op,
+                Box::new((*lhs).fold_with(db, folder)),
+                Box::new((*rhs).fold_with(db, folder)),
+            ),
+            PredicateTerm::Unary(op, arg) => {
+                PredicateTerm::Unary(op, Box::new((*arg).fold_with(db, folder)))
+            }
+            PredicateTerm::Cast(arg) => PredicateTerm::Cast(Box::new((*arg).fold_with(db, folder))),
+            PredicateTerm::Call(args) => PredicateTerm::Call(args.fold_with(db, folder)),
+            term => term,
+        };
+        Self {
+            ty: self.ty.fold_with(db, folder),
+            arithmetic: self.arithmetic,
+            operation: self
+                .operation
+                .map(|callable| callable.fold_with(db, folder)),
+            term,
+        }
+    }
+}
+
+pub(crate) fn comparable_const_predicate_key<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    scope: ScopeId<'db>,
+    args: &[TyId<'db>],
+) -> Option<PredicateKey<'db>> {
+    let (diags, typed) = infer_body(
+        db,
+        BodyOwner::AnonConstBody {
+            body,
+            expected: TyId::bool(db),
+        },
+    );
+    if !diags_allow_evaluation(db, diags) {
+        return None;
+    }
+    let owner = GenericParamOwner::from_item_opt(scope.item())?;
+    let subst = CompleteSubst::for_owner(db, owner, args.to_vec()).ok()?;
+    predicate_key(db, body, typed, &subst).ok().flatten()
 }
 
 // A declaration's full parameter schema also resolves the parameters that
@@ -605,6 +884,10 @@ pub(super) fn check_body_requirements<'db>(
         }
     }
     let mut check = checker.check_inferred_types(&entered);
+    check.extend(check_recorded_condition_uses(
+        db,
+        &typed.tables.pending_const_obligations,
+    ));
     for (nested, expected) in expression_const_bodies(db, body, typed) {
         check.extend(anon_const_position_check(db, nested, expected));
     }
@@ -1501,13 +1784,24 @@ fn check_type_requirements<'db>(
         })
 }
 
-#[salsa::tracked(cycle_initial=requirement_cycle_initial, cycle_fn=requirement_cycle_recover)]
 fn discharge_requirement<'db>(
     db: &'db dyn HirAnalysisDb,
     declaration: WhereClauseOwner<'db>,
     predicate: Body<'db>,
     args: Vec<TyId<'db>>,
     caller: Option<GenericParamOwner<'db>>,
+) -> Discharge {
+    discharge_selected_requirement(db, declaration, predicate, args, caller, Vec::new())
+}
+
+#[salsa::tracked(cycle_initial=requirement_cycle_initial, cycle_fn=requirement_cycle_recover)]
+fn discharge_selected_requirement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    declaration: WhereClauseOwner<'db>,
+    predicate: Body<'db>,
+    args: Vec<TyId<'db>>,
+    caller: Option<GenericParamOwner<'db>>,
+    selections: Vec<SelectedApplication<'db>>,
 ) -> Discharge {
     let typed = match &check_predicate_formation(db, predicate).status {
         FormationStatus::WellFormed(typed) => typed,
@@ -1565,7 +1859,30 @@ fn discharge_requirement<'db>(
         });
     }
     let owner = BodyOwner::const_predicate(db, predicate);
-    match condition_outcome(db, owner, GenericSubst::for_body_owner(db, owner, args)) {
+    let subst = GenericSubst::for_body_owner(db, owner, args);
+    let outcome = if selections.is_empty() {
+        condition_outcome(db, owner, subst)
+    } else {
+        let key = SemanticInstanceKey::new(
+            db,
+            owner,
+            subst,
+            EffectProviderSubst::empty(db),
+            ImplEnv::new(
+                db,
+                owner.scope(),
+                crate::analysis::ty::const_ty::const_body_assumptions(db, owner.scope()),
+                Vec::new(),
+            )
+            .with_selections(db, selections),
+        );
+        condition_outcome_from_evaluation(
+            db,
+            owner,
+            eval_const_instance(db, get_or_build_semantic_instance(db, key)),
+        )
+    };
+    match outcome {
         ConditionOutcome::True => Discharge::Holds,
         ConditionOutcome::False => Discharge::Fails(RequirementFailure::False),
         ConditionOutcome::NotBool | ConditionOutcome::Blocked(_) => {
@@ -1584,6 +1901,7 @@ fn requirement_cycle_initial<'db>(
     _predicate: Body<'db>,
     _args: Vec<TyId<'db>>,
     _caller: Option<GenericParamOwner<'db>>,
+    _selections: Vec<SelectedApplication<'db>>,
 ) -> Discharge {
     Discharge::Fails(RequirementFailure::Recursive)
 }
@@ -1596,6 +1914,7 @@ fn requirement_cycle_recover<'db>(
     _predicate: Body<'db>,
     _args: Vec<TyId<'db>>,
     _caller: Option<GenericParamOwner<'db>>,
+    _selections: Vec<SelectedApplication<'db>>,
 ) -> salsa::CycleRecoveryAction<Discharge> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -1681,7 +2000,18 @@ pub(crate) fn check_declared_type_requirements<'db>(
     top_mod
         .all_items(db)
         .iter()
-        .flat_map(|&item| written_type_check(db, item).iter().cloned())
+        .flat_map(|&item| {
+            let mut diags = written_type_check(db, item).clone();
+            if let ItemKind::ImplTrait(implementation) = item {
+                // Written types check applications in the header. The trait's
+                // own predicates are a distinct use of the same Discharge.
+                diags.extend(check_impl_trait_header_const_requirements(
+                    db,
+                    implementation,
+                ));
+            }
+            diags
+        })
         .collect()
 }
 

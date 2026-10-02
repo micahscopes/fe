@@ -1,0 +1,38 @@
+use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr,
+    FunctionDefinition, RecordImplementation, field, field_type}
+
+trait Value<T> {
+    fn value(own self) -> T
+}
+
+const fn derive_value(_ record: Record) -> RecordImplementation<1, 2> {
+    let f = field(record, 0)
+    RecordImplementation {
+        owner: record,
+        trait_path: "ingot::Value",
+        types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None],
+        constants: [Option::None; 2],
+        method: Option::Some(FunctionDefinition {
+            name: DeclarationName::Literal("value"),
+            public: false,
+            const_function: false,
+            parameters: [DeclarationType::Record(record)],
+            return_type: DeclarationType::Field(field_type(f)),
+            expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)],
+            result: 1,
+        }),
+    }
+}
+
+#[generate(derive_value)]
+struct Wrapped<T, const N: usize> where N > 0 { value: T }
+
+pub fn main() -> u256 {
+    let wrapped = Wrapped<u256, 7> { value: 41 }
+    wrapped.value()
+}
+
+#[test]
+fn generic_owner_preserves_value() {
+    assert!(main() == 41)
+}

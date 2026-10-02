@@ -37,7 +37,7 @@ use crate::{
             ty_check::{
                 BodyOwner, Callable, ConstIntrinsicKind, EffectParamSite,
                 EffectProviderSpecialization, LocalBinding, ParamSite, ResolvedEffectArg,
-                SemanticExprLowering, SmirLoweringIssue, TypedBody,
+                SemanticExprLowering, SmirLoweringIssue, TypedBody, infer_body,
             },
             ty_def::{BorrowKind, CapabilityKind, InvalidCause, TyId},
             ty_lower::{
@@ -344,6 +344,7 @@ fn provisional_call_sites<'db>(
     instance: SemanticInstance<'db>,
 ) -> ProvisionalCallSiteData<'db, CallSiteLowering<'db>> {
     let typed_body = instance.key(db).typed_body(db);
+    let template = &infer_body(db, instance.key(db).owner(db)).1;
     let Some(body) = typed_body.body() else {
         return ProvisionalCallSiteData {
             sites: Vec::new(),
@@ -370,6 +371,9 @@ fn provisional_call_sites<'db>(
             typed_body.call_effect_args(expr).unwrap_or(&[]),
             assumptions,
             SemOrigin::Expr(expr),
+            matches!(template.semantic_expr_lowering(expr),
+                Some(SemanticExprLowering::Call { callable })
+                    if template_trait_goal_uses_owner_param(db, callable)),
             &mut diagnostic,
         );
         site.receiver =
@@ -386,6 +390,7 @@ fn provisional_for_loop_call_sites<'db>(
     instance: SemanticInstance<'db>,
 ) -> ProvisionalCallSiteData<'db, ForLoopCallSites<'db>> {
     let typed_body = instance.key(db).typed_body(db);
+    let template = &infer_body(db, instance.key(db).owner(db)).1;
     let Some(body) = typed_body.body() else {
         return ProvisionalCallSiteData {
             sites: Vec::new(),
@@ -408,6 +413,9 @@ fn provisional_for_loop_call_sites<'db>(
                 &seq.len_effect_args,
                 assumptions,
                 origin,
+                template
+                    .for_loop_seq(stmt)
+                    .is_some_and(|seq| template_trait_goal_uses_owner_param(db, &seq.len_callable)),
                 &mut diagnostic,
             ),
             get: provisional_call_site(
@@ -417,6 +425,9 @@ fn provisional_for_loop_call_sites<'db>(
                 &seq.get_effect_args,
                 assumptions,
                 origin,
+                template
+                    .for_loop_seq(stmt)
+                    .is_some_and(|seq| template_trait_goal_uses_owner_param(db, &seq.get_callable)),
                 &mut diagnostic,
             ),
         });
@@ -434,6 +445,7 @@ fn provisional_call_site<'db>(
     nominal_effect_args: &[ResolvedEffectArg<'db>],
     assumptions: PredicateListId<'db>,
     origin: SemOrigin<'db>,
+    inherit_trait_selection: bool,
     diagnostic: &mut Option<SemanticDiagnosticId<'db>>,
 ) -> CallSiteLowering<'db> {
     let mut report = |error| {
@@ -445,6 +457,7 @@ fn provisional_call_site<'db>(
         callable,
         nominal_effect_args,
         assumptions,
+        inherit_trait_selection,
     )
     .unwrap_or_else(|error| {
         report(error);
@@ -567,6 +580,7 @@ fn finalize_call_sites<'db>(
     for_loop_call_sites: &mut [Option<ForLoopCallSites<'db>>],
     by_site: &FxHashMap<CallSiteId, Vec<CallSiteProviderRefinement>>,
 ) -> Result<(), SemanticDiagnosticId<'db>> {
+    let template = &infer_body(db, instance.key(db).owner(db)).1;
     let refinements = |site| by_site.get(&site).map(Vec::as_slice);
     let same_assumptions = instance.assumptions(db)
         == semantic_instance_base_assumptions_for_key(db, instance.key(db));
@@ -590,6 +604,9 @@ fn finalize_call_sites<'db>(
             refinements(CallSiteId::Expr(expr)),
             SemOrigin::Expr(expr),
             same_assumptions,
+            matches!(template.semantic_expr_lowering(expr),
+                Some(SemanticExprLowering::Call { callable })
+                    if template_trait_goal_uses_owner_param(db, callable)),
         )?;
         // The provisional plan already used these assumptions.
         if !same_assumptions {
@@ -614,6 +631,7 @@ fn finalize_call_sites<'db>(
         let Some(seq) = typed_body.for_loop_seq(stmt) else {
             continue;
         };
+        let template_seq = template.for_loop_seq(stmt);
         finalize_call_site(
             db,
             instance,
@@ -623,6 +641,8 @@ fn finalize_call_sites<'db>(
             refinements(CallSiteId::ForLoopLen(stmt)),
             SemOrigin::Stmt(stmt),
             same_assumptions,
+            template_seq
+                .is_some_and(|seq| template_trait_goal_uses_owner_param(db, &seq.len_callable)),
         )?;
         finalize_call_site(
             db,
@@ -633,6 +653,8 @@ fn finalize_call_sites<'db>(
             refinements(CallSiteId::ForLoopGet(stmt)),
             SemOrigin::Stmt(stmt),
             same_assumptions,
+            template_seq
+                .is_some_and(|seq| template_trait_goal_uses_owner_param(db, &seq.get_callable)),
         )?;
     }
     Ok(())
@@ -787,6 +809,7 @@ fn finalize_call_site<'db>(
     refinements: Option<&[CallSiteProviderRefinement]>,
     origin: SemOrigin<'db>,
     same_assumptions: bool,
+    inherit_trait_selection: bool,
 ) -> Result<(), SemanticDiagnosticId<'db>> {
     // A plain call without provider refinements or effect providers, under the
     // provisional assumptions, resolves exactly as its provisional plan did:
@@ -807,6 +830,7 @@ fn finalize_call_site<'db>(
         nominal_effect_args,
         refinements,
         origin,
+        inherit_trait_selection,
     )
 }
 
@@ -818,6 +842,7 @@ fn replan_call_site<'db>(
     nominal_effect_args: &[ResolvedEffectArg<'db>],
     refinements: Option<&[CallSiteProviderRefinement]>,
     origin: SemOrigin<'db>,
+    inherit_trait_selection: bool,
 ) -> Result<(), SemanticDiagnosticId<'db>> {
     let mut effect_providers = callable.effect_providers().to_vec();
     let mapping_diag = |error| method_arg_map_diagnostic(db, instance, error, origin);
@@ -868,6 +893,7 @@ fn replan_call_site<'db>(
         callable,
         &refined_nominal_effect_args,
         &effect_providers,
+        inherit_trait_selection,
     )
     .map_err(mapping_diag)?;
     if let Some(callee) = callee {
@@ -943,6 +969,19 @@ fn invalid_size_diagnostic<'db>(
         diagnostic.primary.message = message;
     }
     SemanticDiagnosticId::new(db, diagnostic)
+}
+
+fn template_trait_goal_uses_owner_param<'db>(
+    db: &'db dyn HirAnalysisDb,
+    callable: &Callable<'db>,
+) -> bool {
+    callable.trait_inst().is_some_and(|goal| {
+        goal.args(db).iter().any(|ty| ty.has_param(db))
+            || goal
+                .assoc_type_bindings(db)
+                .values()
+                .any(|ty| ty.has_param(db))
+    })
 }
 
 fn specialize_provider_address_space<'db>(
@@ -1968,6 +2007,12 @@ pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
     let mut predicates: IndexSet<_> = typed_body.assumptions().list(db).iter().copied().collect();
     predicates.extend(impl_env.assumptions(db).list(db).iter().copied());
     predicates.extend(impl_env.witnesses(db).iter().copied());
+    predicates.extend(
+        impl_env
+            .selections(db)
+            .iter()
+            .map(|selection| selection.goal()),
+    );
     PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db)
 }
 
@@ -2455,6 +2500,7 @@ mod tests {
                 typed_body.call_effect_args(expr).unwrap_or(&[]),
                 None,
                 SemOrigin::Expr(expr),
+                false,
             )
             .unwrap();
             let Partial::Present(expr_data) = expr_data else {
@@ -2523,6 +2569,9 @@ mod tests {
             &[],
             instance.assumptions(db),
             SemOrigin::Expr(expr),
+            matches!(typed_body.semantic_expr_lowering(expr),
+                Some(SemanticExprLowering::Call { callable })
+                    if template_trait_goal_uses_owner_param(db, callable)),
             &mut diagnostic,
         );
         assert!(diagnostic.is_none());
@@ -2535,6 +2584,7 @@ mod tests {
             None,
             SemOrigin::Expr(expr),
             true,
+            template_trait_goal_uses_owner_param(db, &callable),
         )
         .unwrap_err();
         assert!(
@@ -2596,6 +2646,7 @@ mod tests {
             Some(&[refinement]),
             SemOrigin::Expr(expr),
             true,
+            template_trait_goal_uses_owner_param(db, &callable),
         )
         .unwrap();
         assert_eq!(

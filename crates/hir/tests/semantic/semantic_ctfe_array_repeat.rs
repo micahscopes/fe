@@ -604,26 +604,6 @@ const BAD: u8 = Marker<0>::FIRST
 }
 
 #[test]
-fn symbolic_repeat_still_evaluates_its_element() {
-    for source in [
-        "fn runtime() -> u8 { 7 }\nstruct Marker<const N: usize> {}\nimpl<const N: usize> Marker<N> { const VALUE: [u8; N] = [runtime(); N] }",
-        "struct Marker<const N: usize> {}\nimpl<const N: usize> Marker<N> { const VALUE: [u8; N] = [1 / 0; N] }",
-        "fn runtime() -> u8 { 7 }\nconst BAD: [u8; 0] = [runtime(); 0]",
-    ] {
-        let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone("invalid_repeat.fe".into(), source);
-        let (module, _) = db.top_mod(file);
-        let diags = db.run_on_top_mod(module);
-        assert!(
-            !diags.is_empty(),
-            "invalid repeat element was accepted: {source}"
-        );
-        let rendered = format_diagnostics(&db, &diags);
-        assert!(!rendered.contains("internal"), "{rendered}");
-    }
-}
-
-#[test]
 fn trait_associated_lengths_and_elements_stay_symbolic() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

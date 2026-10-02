@@ -1,0 +1,11 @@
+trait Compute {
+    fn value() -> u256
+}
+
+struct Subject {}
+
+impl Compute for Subject as Alternate {
+    fn value() -> u256 {
+        42
+    }
+}

@@ -1,0 +1,20 @@
+trait Family<M> { type Output }
+
+struct Subject {}
+
+impl Family<u256> for Subject { type Output = bool }
+impl Family<bool> for Subject { type Output = u256 }
+
+const fn left<T>() -> <T as Family<bool>>::Output
+    where T: Family<u256, Output=bool>, T: Family<bool, Output=u256>
+{ 42 }
+
+const fn right<T>() -> <T as Family<bool>>::Output
+    where T: Family<bool, Output=u256>, T: Family<u256, Output=bool>
+{ 42 }
+
+#[test]
+fn associated_equalities_keep_trait_arguments_in_both_orders() {
+    assert!(left<Subject>() == 42)
+    assert!(right<Subject>() == 42)
+}

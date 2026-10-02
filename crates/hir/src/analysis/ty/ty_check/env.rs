@@ -7,13 +7,14 @@ use crate::{
     span::DynLazySpan,
 };
 
-use crate::hir_def::CallableDef;
 use crate::hir_def::params::FuncParamMode;
+use crate::hir_def::{CallableDef, ItemKind};
 use cranelift_entity::{PrimaryMap, SecondaryMap};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Update;
 use thin_vec::ThinVec;
 
+use super::const_requirements::PendingConstObligation;
 use super::effect_env as keyed_effect_env;
 use super::owner::BodyOwner;
 use super::{
@@ -49,6 +50,21 @@ use crate::core::semantic::{
     EffectEnvView, EffectRequirement, ProviderBinding, ResolvedEffectBindingInfo,
 };
 
+#[derive(Clone, Copy)]
+pub(super) enum ScopedProvision<'db> {
+    Evidence(ExprId, TraitInstId<'db>),
+    Selection(crate::analysis::semantic::SelectedApplication<'db>),
+}
+
+impl<'db> ScopedProvision<'db> {
+    pub(super) fn goal(self) -> TraitInstId<'db> {
+        match self {
+            Self::Evidence(_, goal) => goal,
+            Self::Selection(selection) => selection.goal(),
+        }
+    }
+}
+
 pub(crate) struct TyCheckEnv<'db> {
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
@@ -60,6 +76,11 @@ pub(crate) struct TyCheckEnv<'db> {
     /// Owned-context moves and the type each value is moved as. Whether that
     /// type is `Copy` is decided in `finish`, once inference has resolved it.
     implicit_moves: FxHashMap<ExprId, TyId<'db>>,
+    pat_selections:
+        SecondaryMap<PatId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
+    expr_selections:
+        SecondaryMap<ExprId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
+    pub(super) static_selection_exprs: FxHashSet<ExprId>,
     const_refs: SecondaryMap<ExprId, Option<ConstRef<'db>>>,
     value_path_refs: SecondaryMap<ExprId, Option<ValuePathRef<'db>>>,
     callables: SecondaryMap<ExprId, Option<Callable<'db>>>,
@@ -73,6 +94,7 @@ pub(crate) struct TyCheckEnv<'db> {
     effect_bounds: ThinVec<TraitInstId<'db>>,
     base_assumptions: PredicateListId<'db>,
     assumptions: PredicateListId<'db>,
+    provisions: Vec<ScopedProvision<'db>>,
     var_env: Vec<BlockEnv<'db>>,
     pending_vars: FxHashMap<IdentId<'db>, LocalBinding<'db>>,
     loop_stack: Vec<StmtId>,
@@ -136,6 +158,9 @@ impl<'db> TyCheckEnv<'db> {
             pat_ty: SecondaryMap::new(),
             expr_ty: SecondaryMap::new(),
             implicit_moves: FxHashMap::default(),
+            pat_selections: SecondaryMap::new(),
+            expr_selections: SecondaryMap::new(),
+            static_selection_exprs: FxHashSet::default(),
             const_refs: SecondaryMap::new(),
             value_path_refs: SecondaryMap::new(),
             callables: SecondaryMap::new(),
@@ -147,6 +172,7 @@ impl<'db> TyCheckEnv<'db> {
             effect_bounds: ThinVec::new(),
             base_assumptions,
             assumptions: base_assumptions,
+            provisions: Vec::new(),
             var_env: vec![BlockEnv::new(owner_scope, 0)],
             pending_vars: FxHashMap::default(),
             loop_stack: Vec::new(),
@@ -507,7 +533,18 @@ impl<'db> TyCheckEnv<'db> {
         }
     }
 
-    pub(super) fn register_semantic_call(&mut self, expr: ExprId, callable: Callable<'db>) {
+    pub(super) fn register_semantic_call(&mut self, expr: ExprId, mut callable: Callable<'db>) {
+        callable.selected_applications = self.selected_applications();
+        let requirements = callable.selection_requirements(self.db);
+        callable.opened_provisions = self
+            .opened_obligations()
+            .filter(|(_, opened)| {
+                requirements.list(self.db).iter().any(|required| {
+                    opened.def(self.db) == required.def(self.db)
+                        && opened.args(self.db) == required.args(self.db)
+                })
+            })
+            .collect();
         self.register_callable(expr, callable.clone());
         self.register_semantic_expr_lowering(expr, SemanticExprLowering::Call { callable });
     }
@@ -559,6 +596,95 @@ impl<'db> TyCheckEnv<'db> {
         // Return the assumptions we computed in new, which includes
         // both generic bounds (if any) AND the effect parameter bounds.
         self.assumptions
+    }
+
+    pub(super) fn provision_count(&self) -> usize {
+        self.provisions.len()
+    }
+
+    pub(super) fn truncate_provisions(&mut self, count: usize) {
+        self.provisions.truncate(count);
+    }
+
+    pub(super) fn push_evidence(&mut self, value: ExprId, goal: TraitInstId<'db>) {
+        self.provisions.push(ScopedProvision::Evidence(value, goal));
+    }
+
+    pub(super) fn push_selection(
+        &mut self,
+        selection: crate::analysis::semantic::SelectedApplication<'db>,
+    ) {
+        self.provisions.push(ScopedProvision::Selection(selection));
+    }
+
+    pub(super) fn opened_obligations(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
+        self.provisions
+            .iter()
+            .filter_map(|provision| match *provision {
+                ScopedProvision::Evidence(value, goal) => Some((value, goal)),
+                ScopedProvision::Selection(_) => None,
+            })
+    }
+
+    pub(super) fn selections(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = crate::analysis::semantic::SelectedApplication<'db>> + '_
+    {
+        self.provisions
+            .iter()
+            .filter_map(|provision| match *provision {
+                ScopedProvision::Evidence(..) => None,
+                ScopedProvision::Selection(selection) => Some(selection),
+            })
+    }
+
+    pub(super) fn selected_applications(
+        &self,
+    ) -> Vec<crate::analysis::semantic::SelectedApplication<'db>> {
+        self.selections().collect()
+    }
+
+    pub(super) fn provision_for_goal(
+        &self,
+        goal: TraitInstId<'db>,
+    ) -> Option<ScopedProvision<'db>> {
+        self.provisions.iter().rev().copied().find(|provision| {
+            let provided = provision.goal();
+            provided.def(self.db) == goal.def(self.db)
+                && provided.args(self.db) == goal.args(self.db)
+        })
+    }
+
+    pub(super) fn selection_for_goal(
+        &self,
+        goal: TraitInstId<'db>,
+    ) -> Option<crate::analysis::semantic::SelectedApplication<'db>> {
+        match self.provision_for_goal(goal) {
+            Some(ScopedProvision::Selection(selection)) => Some(selection),
+            _ => None,
+        }
+    }
+
+    pub(super) fn opened_for_goal(&self, goal: TraitInstId<'db>) -> Option<ExprId> {
+        match self.provision_for_goal(goal) {
+            Some(ScopedProvision::Evidence(value, _)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
+        let mut premises = self.assumptions.list(self.db).to_vec();
+        for selection in self.selections() {
+            premises.retain(|goal| !selection.matches(self.db, *goal));
+            premises.push(selection.goal());
+        }
+        PredicateListId::new(self.db, premises).extend_all_bounds(self.db)
+    }
+
+    pub(super) fn replace_assumptions(&mut self, assumptions: PredicateListId<'db>) {
+        self.assumptions = assumptions;
     }
 
     pub(crate) fn base_assumptions(&self) -> PredicateListId<'db> {
@@ -732,10 +858,14 @@ impl<'db> TyCheckEnv<'db> {
 
     pub(super) fn type_expr(&mut self, expr: ExprId, typed: ExprProp<'db>) {
         self.expr_ty[expr] = Some(typed);
+        let selections = self.selected_applications();
+        self.expr_selections[expr] = (!selections.is_empty()).then_some(selections);
     }
 
     pub(super) fn type_pat(&mut self, pat: PatId, ty: TyId<'db>) {
         self.pat_ty[pat] = Some(ty);
+        let selections = self.selected_applications();
+        self.pat_selections[pat] = (!selections.is_empty()).then_some(selections);
     }
 
     pub(super) fn alloc_validated_pat(&mut self, pat: ValidatedPat<'db>) -> ValidatedPatId {
@@ -806,6 +936,22 @@ impl<'db> TyCheckEnv<'db> {
         self.deferred.push(DeferredTask::Obligation(obligation))
     }
 
+    pub(super) fn register_const_obligation(&mut self, obligation: PendingConstObligation<'db>) {
+        self.deferred.push(DeferredTask::Const(obligation));
+    }
+
+    pub(super) fn register_type_formation(&mut self, ty: TyId<'db>, span: DynLazySpan<'db>) {
+        self.deferred.push(DeferredTask::TypeFormation {
+            ty,
+            assumptions: self.assumptions(),
+            span,
+        });
+    }
+
+    pub(super) fn requeue_task(&mut self, task: DeferredTask<'db>) {
+        self.deferred.push(task);
+    }
+
     pub(super) fn deferred_len(&self) -> usize {
         self.deferred.len()
     }
@@ -843,6 +989,14 @@ impl<'db> TyCheckEnv<'db> {
     /// the unification table.
     ///
     pub(super) fn finish(mut self, table: &mut UnificationTable<'db>) -> TypedBody<'db> {
+        let mut pending_const_obligations = self
+            .deferred
+            .drain(..)
+            .filter_map(|task| match task {
+                DeferredTask::Const(obligation) => Some(obligation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let mut prober = Prober {
             table,
             scope: self.scope(),
@@ -862,6 +1016,29 @@ impl<'db> TyCheckEnv<'db> {
             .values_mut()
             .flatten()
             .for_each(|cref| *cref = (*cref).fold_with(self.db, &mut prober));
+        for (expr, reference) in self.const_refs.iter() {
+            let Some(ConstRef::InherentConst(reference)) = reference else {
+                continue;
+            };
+            let mut table = UnificationTable::new(self.db);
+            let Some(args) = crate::analysis::ty::const_ty::unify_inherent_impl_receiver(
+                self.db,
+                &mut table,
+                reference.impl_(),
+                reference.receiver_ty(),
+            ) else {
+                continue;
+            };
+            pending_const_obligations.extend(
+                super::const_requirements::pending_owner_const_obligations(
+                    self.db,
+                    crate::hir_def::WhereClauseOwner::Impl(reference.impl_()),
+                    &args,
+                    self.owner_scope,
+                    expr.span(self.body).into(),
+                ),
+            );
+        }
 
         self.call_effect_args
             .values_mut()
@@ -896,7 +1073,52 @@ impl<'db> TyCheckEnv<'db> {
         self.semantic_expr_lowering
             .values_mut()
             .flatten()
-            .for_each(|lowering| *lowering = lowering.clone().fold_with(self.db, &mut prober));
+            .for_each(|lowering| {
+                *lowering = lowering.clone().fold_with(self.db, &mut prober);
+                let (SemanticExprLowering::Call { callable }
+                | SemanticExprLowering::CodeRegionIntrinsic { callable, .. }
+                | SemanticExprLowering::ConstIntrinsic { callable, .. }) = lowering;
+                if !callable.selected_applications.is_empty() {
+                    // Freeze applicability after inference, before generic
+                    // specialization. An unrelated concrete lexical choice must
+                    // not become applicable to a rigid type parameter later.
+                    let required = callable.selection_requirements(self.db);
+                    callable.selected_applications.retain(|selection| {
+                        required
+                            .list(self.db)
+                            .iter()
+                            .any(|goal| selection.matches(self.db, *goal))
+                    });
+                }
+            });
+        for (expr, lowering) in self.semantic_expr_lowering.iter() {
+            let Some(SemanticExprLowering::Call { callable }) = lowering else {
+                continue;
+            };
+            let CallableDef::Func(func) = callable.callable_def() else {
+                continue;
+            };
+            let Some(ItemKind::Impl(implementation)) = func.scope().parent_item(self.db) else {
+                continue;
+            };
+            let count = crate::analysis::ty::ty_lower::collect_generic_params(
+                self.db,
+                implementation.into(),
+            )
+            .params(self.db)
+            .len();
+            if let Some(args) = callable.generic_args().get(..count) {
+                pending_const_obligations.extend(
+                    super::const_requirements::pending_owner_const_obligations(
+                        self.db,
+                        crate::hir_def::WhereClauseOwner::Impl(implementation),
+                        args,
+                        self.owner_scope,
+                        expr.span(self.body).into(),
+                    ),
+                );
+            }
+        }
         self.record_init_lowering
             .values_mut()
             .flatten()
@@ -909,6 +1131,9 @@ impl<'db> TyCheckEnv<'db> {
         self.path_applications
             .iter_mut()
             .for_each(|(_, ty)| *ty = ty.fold_with(self.db, &mut prober));
+        pending_const_obligations.iter_mut().for_each(|obligation| {
+            *obligation = obligation.clone().fold_with(self.db, &mut prober);
+        });
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -940,6 +1165,9 @@ impl<'db> TyCheckEnv<'db> {
             pat_ty: self.pat_ty,
             expr_ty: self.expr_ty,
             implicit_moves,
+            pat_selections: self.pat_selections,
+            expr_selections: self.expr_selections,
+            static_selection_exprs: self.static_selection_exprs,
             const_refs: self.const_refs,
             value_path_refs: self.value_path_refs,
             semantic_expr_lowering: self.semantic_expr_lowering,
@@ -953,6 +1181,7 @@ impl<'db> TyCheckEnv<'db> {
             pattern_store,
             pattern_status: self.pattern_status,
             for_loop_seq: self.for_loop_seq,
+            pending_const_obligations,
             expr_place,
             expr_places,
             path_applications: self.path_applications,
@@ -1558,7 +1787,13 @@ impl PendingPrimitiveOp {
 
 #[derive(Debug, Clone)]
 pub(super) enum DeferredTask<'db> {
+    TypeFormation {
+        ty: TyId<'db>,
+        assumptions: PredicateListId<'db>,
+        span: DynLazySpan<'db>,
+    },
     Obligation(TraitObligation<'db>),
+    Const(PendingConstObligation<'db>),
     Method(PendingMethod<'db>),
     PrimitiveOp(PendingPrimitiveOp),
 }
@@ -1576,6 +1811,9 @@ pub(super) enum TraitObligationOrigin<'db> {
 #[derive(Debug, Clone)]
 pub(super) struct TraitObligation<'db> {
     pub goal: TraitInstId<'db>,
+    /// Premises at the use site, retained when solving is deferred past a scope.
+    pub assumptions: PredicateListId<'db>,
+    pub selected_applications: Vec<crate::analysis::semantic::SelectedApplication<'db>>,
     pub origin: TraitObligationOrigin<'db>,
     pub span: DynLazySpan<'db>,
 }

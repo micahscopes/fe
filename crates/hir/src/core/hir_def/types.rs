@@ -1,4 +1,4 @@
-use super::{Body, IdentId, Partial, PathId};
+use super::{Body, IdentId, Partial, PathId, prim_ty::PrimTy};
 use crate::HirDb;
 
 #[salsa::interned]
@@ -48,6 +48,7 @@ impl<'db> TypeId<'db> {
             TypeKind::Path(p) => p
                 .to_opt()
                 .map_or_else(|| "<missing>".into(), |p| p.pretty_print(db)),
+            TypeKind::Primitive(primitive) => primitive.name(db).data(db).clone(),
             TypeKind::Tuple(tup) => {
                 let elems = tup
                     .data(db)
@@ -100,6 +101,8 @@ pub enum TypeKind<'db> {
     Ptr(Partial<TypeId<'db>>),
     Mode(TypeMode, Partial<TypeId<'db>>),
     Path(Partial<PathId<'db>>),
+    /// Generated built-in types retain their identity even if a local name shadows them.
+    Primitive(PrimTy),
     Tuple(TupleTypeId<'db>),
     /// The first `TypeId` is the element type, the second `Body` is the length.
     Array(Partial<TypeId<'db>>, Partial<Body<'db>>),

@@ -1,0 +1,16 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/unnamed_impl_goal_missing.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/unnamed_impl_goal_missing.fe
+
+error[8-0102]: cannot select an unnamed implementation for `Subject: Compute`
+  ┌─ unnamed_impl_goal_missing.fe:7:11
+  │
+7 │     with (<Subject as Compute>) { 1 }
+  │           ^^^^^^^^^^^^^^^^^^^^ no unnamed implementation matches this goal
+
+
+=== EXIT CODE: 1 ===

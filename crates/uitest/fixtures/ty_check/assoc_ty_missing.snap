@@ -1,8 +1,15 @@
 ---
 source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
 expression: diags
 input_file: fixtures/ty_check/assoc_ty_missing.fe
 ---
+error[3-0051]: invalid associated type output bound
+  ┌─ assoc_ty_missing.fe:3:13
+  │
+3 │     type Bar: T2
+  │             ^^^^ invalid associated type output bound
+
 error[6-0012]: missing associated type in trait implementation
   ┌─ assoc_ty_missing.fe:9:13
   │

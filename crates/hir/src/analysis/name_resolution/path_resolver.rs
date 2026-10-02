@@ -120,6 +120,9 @@ pub enum PathResErrorKind<'db> {
     TraitConstHoleArg {
         arg_idx: usize,
     },
+    AssociatedFamilyBinding {
+        name: IdentId<'db>,
+    },
 
     /// Trait path generic argument expected a type; wrong domain was found.
     /// Carries the argument index and offending ident/kind for precise diagnostics.
@@ -209,6 +212,9 @@ impl<'db> PathResError<'db> {
             }
             PathResErrorKind::TraitConstHoleArg { .. } => {
                 "Layout hole is not allowed in trait generic arguments".to_string()
+            }
+            PathResErrorKind::AssociatedFamilyBinding { .. } => {
+                "An associated family binding must preserve its parameters".to_string()
             }
             PathResErrorKind::TraitGenericArgType { .. } => {
                 "Trait generic argument expects a type".to_string()
@@ -309,6 +315,9 @@ impl<'db> PathResError<'db> {
                 expected,
                 given,
             },
+            PathResErrorKind::AssociatedFamilyBinding { name } => {
+                PathResDiag::AssociatedFamilyBinding { span, name }
+            }
 
             PathResErrorKind::ArgKindMisMatch { expected, given } => PathResDiag::ArgKindMismatch {
                 span,
@@ -495,6 +504,12 @@ pub(crate) fn resolve_type_path_definition<'db>(
     let mut parent_scope = None;
     for segment_idx in 0..path.len(db) {
         let segment = path.segment(db, segment_idx)?;
+        if segment_idx == 0
+            && let PathKind::BoundIngot { ingot, .. } = segment.kind(db)
+        {
+            parent_scope = Some(ingot.root_mod(db).scope());
+            continue;
+        }
         if !matches!(segment.kind(db), PathKind::Ident { .. }) {
             return None;
         }
@@ -995,6 +1010,15 @@ fn resolve_segment<'db, F>(
 where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
+    if let PathKind::BoundIngot { ingot, .. } = path.kind(db) {
+        if path.parent(db).is_some() {
+            return Err(PathResError::parse_err(path));
+        }
+        let result = PathRes::Mod(ingot.root_mod(db).scope());
+        observer(path, &result);
+        return Ok(result);
+    }
+
     if let PathKind::QualifiedType { type_, trait_ } = path.kind(db) {
         if path.parent(db).is_some() {
             return Err(PathResError::new(
@@ -1086,6 +1110,15 @@ where
             if let TyData::QualifiedTy(trait_inst) = ty.data(db) {
                 // Associated type projection
                 if let Some(assoc_ty) = trait_inst.project_assoc_ty(db, ident) {
+                    let args = lower_generic_arg_list(
+                        db,
+                        path.generic_args(db),
+                        scope,
+                        assumptions,
+                        LayoutHoleArgSite::Path(path),
+                        minter,
+                    );
+                    let assoc_ty = apply_associated_type_args(db, path, assoc_ty, &args)?;
                     let r = PathRes::Ty(assoc_ty);
                     observer(path, &r);
                     return Ok(r);
@@ -1259,18 +1292,7 @@ where
                     LayoutHoleArgSite::Path(path),
                     minter,
                 );
-                let assoc_ty = TyId::foldl(db, assoc_ty, &seg_args);
-                if let TyData::Invalid(InvalidCause::TooManyGenericArgs { expected, given }) =
-                    assoc_ty.data(db)
-                {
-                    return Err(PathResError::new(
-                        PathResErrorKind::ArgNumMismatch {
-                            expected: *expected,
-                            given: *given,
-                        },
-                        path,
-                    ));
-                }
+                let assoc_ty = apply_associated_type_args(db, path, assoc_ty, &seg_args)?;
                 let result = PathRes::Ty(assoc_ty);
                 observer(path, &result);
                 return Ok(result);
@@ -1317,26 +1339,26 @@ where
                 LayoutHoleArgSite::Path(path),
                 minter,
             );
+            // A qualified trait projection already fixes its trait. During
+            // candidate lowering, leave that sole projection for the caller's
+            // bounded reducer. Unqualified paths still need normalization to
+            // detect ambiguity among traits with the same member name.
+            if minter.const_bodies() == ConstBodyLowering::Deferred
+                && path
+                    .parent(db)
+                    .is_some_and(|parent| matches!(parent.kind(db), PathKind::QualifiedType { .. }))
+                && let [(_, ty_candidate)] = assoc_tys.as_slice()
+            {
+                let applied = apply_associated_type_args(db, path, *ty_candidate, &seg_args)?;
+                let r = PathRes::Ty(applied);
+                observer(path, &r);
+                return Ok(r);
+            }
             let evidence = assoc_ty_candidate_evidence(db, ty, assumptions);
             let mut dedup: IndexMap<TyId<'db>, (TraitInstId<'db>, TyId<'db>, TyId<'db>)> =
                 IndexMap::new();
             for (inst, ty_candidate) in assoc_tys.iter().copied() {
-                let applied = if seg_args.is_empty() {
-                    ty_candidate
-                } else {
-                    TyId::foldl(db, ty_candidate, &seg_args)
-                };
-                if let TyData::Invalid(InvalidCause::TooManyGenericArgs { expected, given }) =
-                    applied.data(db)
-                {
-                    return Err(PathResError::new(
-                        PathResErrorKind::ArgNumMismatch {
-                            expected: *expected,
-                            given: *given,
-                        },
-                        path,
-                    ));
-                }
+                let applied = apply_associated_type_args(db, path, ty_candidate, &seg_args)?;
 
                 // Interpret each candidate's own equality when comparing it
                 // with other candidates. Normalizing the binding-free
@@ -1348,7 +1370,8 @@ where
                     .copied()
                     .map_or(applied, |bound| TyId::foldl(db, bound, &seg_args));
                 let norm = normalize_ty(db, candidate_ty, scope, evidence);
-                dedup.entry(norm).or_insert((inst, applied, norm));
+                let key = if norm.has_invalid(db) { applied } else { norm };
+                dedup.entry(key).or_insert((inst, applied, norm));
             }
 
             match dedup.len() {
@@ -1421,9 +1444,11 @@ where
         pick_type_domain_from_bucket(parent_res, bucket, path, path.parent(db))?
     };
 
-    let r = resolve_name_res_with_minter(db, &res, parent_ty, path, scope, assumptions, minter)?;
+    let r = resolve_name_res_unexpanded(db, &res, parent_ty, path, scope, assumptions, minter)?;
+    // Observers must see the application before reduction can erase its
+    // declaration's requirements or its nominal visibility.
     observer(path, &r);
-    Ok(r)
+    Ok(normalize_computed_path(db, r, scope, assumptions, minter))
 }
 
 enum AssocConstSelection<'db> {
@@ -1780,6 +1805,21 @@ fn select_assoc_const_candidate<'db>(
         };
     }
 
+    // A selected impl supplies a concrete premise to its const body even when
+    // the impl is named and absent from ordinary impl search.
+    let assumption_matches: IndexSet<_> = assumptions
+        .extend_all_bounds(db)
+        .list(db)
+        .iter()
+        .copied()
+        .filter(|goal| goal.self_ty(db) == receiver_ty && goal.def(db).const_(db, name).is_some())
+        .collect();
+    match assumption_matches.len() {
+        0 => {}
+        1 => return AssocConstSelection::Found(*assumption_matches.iter().next().unwrap()),
+        _ => return AssocConstSelection::Ambiguous(assumption_matches.into_iter().collect()),
+    }
+
     let receiver = Canonicalized::new(db, receiver_ty);
     let scope_ingot = scope.ingot(db);
     let search_ingots = [
@@ -1949,6 +1989,19 @@ fn find_associated_type_in_mode<'db>(
         }
     }
 
+    if let Some((_, bounds)) = original_ty.associated_family_rules(db) {
+        let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+        for &bound in bounds.list(db) {
+            if bound.def(db).assoc_ty(db, name).is_some()
+                && matches!(
+                    is_goal_satisfiable(db, solve_cx, bound),
+                    GoalSatisfiability::Satisfied(_)
+                )
+            {
+                candidates.push((bound, TyId::assoc_ty(db, bound.trait_ref(db), name)));
+            }
+        }
+    }
     let search_ingots = [
         Some(scope_ingot),
         original_ty.ingot(db).filter(|&ingot| ingot != scope_ingot),
@@ -2115,6 +2168,52 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
     assumptions: PredicateListId<'db>,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
+    let resolved =
+        resolve_name_res_unexpanded(db, nameres, parent_ty, path, scope, assumptions, minter)?;
+    Ok(normalize_computed_path(
+        db,
+        resolved,
+        scope,
+        assumptions,
+        minter,
+    ))
+}
+
+fn normalize_computed_path<'db>(
+    db: &'db dyn HirAnalysisDb,
+    resolved: PathRes<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    minter: &LoweringContext<'db>,
+) -> PathRes<'db> {
+    if minter.const_bodies() == ConstBodyLowering::Eager
+        && let PathRes::Ty(ty) = &resolved
+        && matches!(
+            ty.decompose_ty_app(db).0.data(db),
+            crate::analysis::ty::ty_def::TyData::TyBase(
+                crate::analysis::ty::ty_def::TyBase::TypeFn(_)
+            )
+        )
+    {
+        return PathRes::Ty(crate::analysis::ty::normalize::normalize_ty(
+            db,
+            *ty,
+            scope,
+            assumptions,
+        ));
+    }
+    resolved
+}
+
+fn resolve_name_res_unexpanded<'db>(
+    db: &'db dyn HirAnalysisDb,
+    nameres: &NameRes<'db>,
+    parent_ty: Option<TyId<'db>>,
+    path: PathId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    minter: &LoweringContext<'db>,
+) -> PathResolutionResult<'db, PathRes<'db>> {
     // Lowered only by the resolutions that apply them: lowering arguments that
     // are then rejected or ignored repeats the whole nested lowering whenever a
     // caller resolves the path again in another namespace.
@@ -2168,6 +2267,25 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                     PathRes::Const(const_, ty)
                 }
 
+                ItemKind::TypeFn(def) => {
+                    let expected = def.generic_params(db).data(db).len();
+                    if args().len() != expected {
+                        return Err(PathResError::new(
+                            PathResErrorKind::ArgNumMismatch {
+                                expected,
+                                given: args().len(),
+                            },
+                            path,
+                        ));
+                    }
+                    let base = TyId::new(
+                        db,
+                        crate::analysis::ty::ty_def::TyData::TyBase(
+                            crate::analysis::ty::ty_def::TyBase::TypeFn(def),
+                        ),
+                    );
+                    PathRes::Ty(TyId::foldl(db, base, &args()))
+                }
                 ItemKind::TypeAlias(type_alias) => {
                     let alias = match minter.const_bodies() {
                         ConstBodyLowering::Eager => lower_type_alias(db, type_alias),
@@ -2269,6 +2387,9 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                                     TraitArgError::ConstHoleNotAllowed { arg_idx } => {
                                         PathResErrorKind::TraitConstHoleArg { arg_idx }
                                     }
+                                    TraitArgError::AssociatedFamilyBinding { name } => {
+                                        PathResErrorKind::AssociatedFamilyBinding { name }
+                                    }
                                     TraitArgError::Ignored => PathResErrorKind::ParseError,
                                 };
                                 return Err(PathResError {
@@ -2296,13 +2417,20 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                 PathRes::Ty(ty)
             }
 
+            ScopeId::AssocTypeParam(owner, idx) => {
+                let ty = crate::analysis::ty::ty_lower::assoc_type_param(db, owner, idx as usize);
+                PathRes::Ty(TyId::foldl(db, ty, &args()))
+            }
+            ScopeId::ImplTraitType(_, _) => {
+                unreachable!("impl associated definitions have no named edge")
+            }
             // A bare associated name inside its trait means `<Self as Trait<..>>`
             // with the trait's own parameters; the name itself takes no arguments.
             ScopeId::TraitType(t, idx) => {
-                reject_generic_args(db, path)?;
                 let trait_inst = trait_self_predicate(db, t);
                 let assoc_ty_name = t.assoc_ty_by_index(db, idx as usize).name.unwrap();
-                PathRes::Ty(TyId::assoc_ty(db, trait_inst.trait_ref(db), assoc_ty_name))
+                let assoc_ty = TyId::assoc_ty(db, trait_inst.trait_ref(db), assoc_ty_name);
+                PathRes::Ty(apply_associated_type_args(db, path, assoc_ty, &args())?)
             }
 
             ScopeId::TraitConst(t, idx) => {
@@ -2407,4 +2535,24 @@ fn pick_type_domain_from_bucket<'db>(
             }
             err => PathResError::from_name_res_error(err, path),
         })
+}
+
+fn apply_associated_type_args<'db>(
+    db: &'db dyn HirAnalysisDb,
+    path: PathId<'db>,
+    head: TyId<'db>,
+    args: &[TyId<'db>],
+) -> Result<TyId<'db>, PathResError<'db>> {
+    let applied = TyId::foldl(db, head, args);
+    if let TyData::Invalid(InvalidCause::TooManyGenericArgs { expected, given }) = applied.data(db)
+    {
+        return Err(PathResError::new(
+            PathResErrorKind::ArgNumMismatch {
+                expected: *expected,
+                given: *given,
+            },
+            path,
+        ));
+    }
+    Ok(applied)
 }

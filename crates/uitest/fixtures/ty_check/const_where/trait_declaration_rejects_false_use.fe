@@ -1,0 +1,19 @@
+trait Size {
+    const SIZE: u256
+}
+
+struct Small {}
+impl Size for Small {
+    const SIZE: u256 = 1
+}
+
+trait BigOnly<T> where T: Size, T::SIZE >= 50 {
+    fn big(self) -> u256
+}
+
+struct Carrier {}
+impl BigOnly<Small> for Carrier {
+    fn big(self) -> u256 { 7 }
+}
+
+fn use_small() -> u256 { <Carrier as BigOnly<Small>>::big(Carrier {}) }

@@ -1,0 +1,21 @@
+pub trait T<A> {
+    type Out
+    fn f(_ a: A) -> Self::Out
+}
+pub struct X {}
+pub struct Wrap<P> {}
+impl T<u256> for X {
+    type Out = u256
+    fn f(_ a: u256) -> u256 { a + 1 }
+}
+// same, but the assoc type does not mention the parameter's projection
+impl<P: T<u256>> T<u256> for Wrap<P> {
+    type Out = (u256, u256)
+    fn f(_ a: u256) -> Self::Out { (a, a) }
+}
+pub fn use_it() -> (u256, u256) { <Wrap<X> as T<u256>>::f(4) }
+#[test]
+fn m2() {
+    let r = use_it()
+    assert!(r.0 == 4)
+}

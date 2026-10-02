@@ -1,0 +1,24 @@
+trait Fact {
+    const VALUE: u256
+}
+
+struct Subject {}
+impl Fact for Subject {
+    const VALUE: u256 = spin()
+}
+
+const fn spin() -> u256 {
+    while true {}
+    0
+}
+
+fn independent() -> u256 { 1 }
+
+trait DefaultFact {
+    const VALUE: u256 = spin()
+}
+
+struct Inherent {}
+impl Inherent {
+    const VALUE: u256 = spin()
+}

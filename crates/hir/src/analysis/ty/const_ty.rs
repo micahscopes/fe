@@ -38,10 +38,10 @@ use crate::analysis::{
     name_resolution::{PathRes, resolve_path},
     semantic::{
         ConstDesc, ConstRepr, CtfeConfig, CtfeError, EffectProviderSubst, EvalFailure, EvalOutcome,
-        GenericSubst, ImplEnv, PrimitiveFault, SConst, SemConstId, SemConstScalar, SemConstValue,
-        SemOrigin, SemanticInstanceKey, VariantIndex, VerifiedConstValueId,
-        const_computation_for_instance, describe_const_computation, enum_const,
-        eval_body_owner_const, execute_source_int_binary, execute_source_int_unary,
+        GenericSubst, ImplEnv, PrimitiveFault, SConst, SelectedApplication, SemConstId,
+        SemConstScalar, SemConstValue, SemOrigin, SemanticInstanceKey, VariantIndex,
+        VerifiedConstValueId, const_computation_for_instance, describe_const_computation,
+        enum_const, eval_body_owner_const, execute_source_int_binary, execute_source_int_unary,
         force_const_description, force_const_term_value, int_const, int_ty_shape,
         normalize_int_to_shape, sem_const_from_ty,
     },
@@ -465,6 +465,8 @@ impl<'db> HoleMinter<'db> {
 pub(crate) struct LoweringContext<'db> {
     holes: HoleMinter<'db>,
     const_bodies: ConstBodyLowering,
+    selections: Vec<SelectedApplication<'db>>,
+    selected_const_assumptions: Option<PredicateListId<'db>>,
     source_params: Option<GenericParamOwner<'db>>,
     default_capture: Option<(GenericParamOwner<'db>, SourceParamIndex)>,
     /// Every path segment this lowering resolved, in resolution order, when
@@ -494,11 +496,51 @@ impl<'db> LoweringContext<'db> {
         Self {
             holes: HoleMinter::new(anchor),
             const_bodies,
+            selections: Vec::new(),
+            selected_const_assumptions: None,
             source_params: None,
             default_capture: None,
             resolutions: None,
             recording_paused: std::cell::Cell::new(false),
         }
+    }
+
+    pub(crate) fn with_selections(
+        mut self,
+        selections: Vec<SelectedApplication<'db>>,
+        assumptions: PredicateListId<'db>,
+    ) -> Self {
+        self.selections = selections;
+        self.selected_const_assumptions = Some(assumptions);
+        self
+    }
+
+    pub(crate) fn const_assumptions(&self, default: PredicateListId<'db>) -> PredicateListId<'db> {
+        self.selected_const_assumptions.unwrap_or(default)
+    }
+
+    pub(crate) fn selection_for(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> Option<SelectedApplication<'db>> {
+        self.selections
+            .iter()
+            .rev()
+            .copied()
+            .find(|selection| selection.matches(db, goal))
+    }
+
+    pub(crate) fn const_impl_env(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+    ) -> Option<ImplEnv<'db>> {
+        let assumptions = self.selected_const_assumptions?;
+        Some(
+            ImplEnv::new(db, scope, assumptions, Vec::new())
+                .with_selections(db, self.selections.clone()),
+        )
     }
 
     /// Makes this lowering keep every path segment it resolves, with the
@@ -858,12 +900,39 @@ pub fn demand_concrete_array_length<'db>(
 
 pub(crate) fn ty_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
     match ty.data(db) {
+        TyData::TypeFamily { .. } => {
+            struct Constants<'db> {
+                db: &'db dyn HirAnalysisDb,
+                ground: bool,
+            }
+            impl<'db> super::visitor::TyVisitor<'db> for Constants<'db> {
+                fn db(&self) -> &'db dyn HirAnalysisDb {
+                    self.db
+                }
+                fn visit_const_ty(&mut self, ty: &ConstTyId<'db>) {
+                    self.ground &= const_ty_is_fully_ground(self.db, *ty);
+                }
+            }
+            if ty.has_param(db)
+                || ty.has_var(db)
+                || ty.has_invalid(db)
+                || ty
+                    .flags(db)
+                    .contains(super::ty_def::TyFlags::HAS_PROJECTION)
+            {
+                return false;
+            }
+            let mut visitor = Constants { db, ground: true };
+            super::visitor::TyVisitable::visit_with(&ty, &mut visitor);
+            visitor.ground
+        }
         TyData::TyVar(_)
         | TyData::TyParam(_)
         | TyData::AssocTy(_)
         | TyData::QualifiedTy(_)
         | TyData::Invalid(_) => false,
         TyData::TyApp(abs, arg) => ty_is_fully_ground(db, *abs) && ty_is_fully_ground(db, *arg),
+        TyData::ConstraintTerm(goal) => trait_inst_is_fully_ground(db, *goal),
         TyData::ConstTy(const_ty) => const_ty_is_fully_ground(db, *const_ty),
         TyData::TyBase(_) | TyData::Never => true,
     }
@@ -1292,6 +1361,7 @@ pub fn canonicalize_const_ty_for_mode<'db>(
             const_def,
             capture,
             policy,
+            impl_env,
         } => ConstTyId::new(
             db,
             ConstTyData::UnEvaluated {
@@ -1302,6 +1372,7 @@ pub fn canonicalize_const_ty_for_mode<'db>(
                 capture: capture
                     .map_bound_values(|arg| canonicalize_ty_for_mode(db, arg, env, mode)),
                 policy: *policy,
+                impl_env: *impl_env,
             },
         ),
     };
@@ -1413,6 +1484,14 @@ pub fn canonicalize_ty_for_mode<'db>(
         let env = env.without_assoc_evidence();
 
         let mut ty = match ty.data(db) {
+            TyData::TypeFamily { owner, args, body } => TyId::type_family_with_args(
+                db,
+                *owner,
+                args.iter()
+                    .map(|arg| canonicalize_ty_impl(db, *arg, env, mode, true))
+                    .collect(),
+                canonicalize_ty_impl(db, *body, env, mode, false),
+            ),
             TyData::TyApp(abs, arg) => {
                 let abs = canonicalize_ty_impl(db, *abs, env, mode, false);
                 let arg = canonicalize_ty_impl(db, *arg, env, mode, true);
@@ -1429,6 +1508,10 @@ pub fn canonicalize_ty_for_mode<'db>(
                 canonicalize_trait_inst_for_mode(db, assoc.trait_.as_predicate(db), env, mode)
                     .trait_ref(db),
                 assoc.name,
+            ),
+            TyData::ConstraintTerm(goal) => TyId::new(
+                db,
+                TyData::ConstraintTerm(canonicalize_trait_inst_for_mode(db, *goal, env, mode)),
             ),
             TyData::QualifiedTy(trait_inst) => TyId::qualified_ty(
                 db,
@@ -1526,12 +1609,29 @@ pub(crate) fn normalize_const_tys_for_comparison<'db>(
     let TyData::ConstTy(const_ty) = ty.data(db) else {
         return ty;
     };
-    let canonicalized = const_canon_env(db, *const_ty).map_or(ty, |env| {
-        canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity)
-    });
-    let TyData::ConstTy(const_ty) = canonicalized.data(db) else {
-        return canonicalized;
+    if let Some(env) = const_canon_env(db, *const_ty) {
+        return canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity);
+    }
+    normalize_const_tys_for_comparison_checked(db, ty).unwrap_or(ty)
+}
+
+/// RD74: proof matching may reduce a ground const, but a failed reduction
+/// cannot be reinterpreted as a candidate mismatch.
+pub(crate) fn normalize_const_tys_for_comparison_checked<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Result<TyId<'db>, ()> {
+    let TyData::ConstTy(const_ty) = ty.data(db) else {
+        return Ok(ty);
     };
+    if let Some(env) = const_canon_env(db, *const_ty) {
+        let canonical = canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity);
+        return if canonical.has_invalid(db) {
+            Err(())
+        } else {
+            Ok(canonical)
+        };
+    }
 
     match const_ty.data(db) {
         ConstTyData::UnEvaluated {
@@ -1539,26 +1639,48 @@ pub(crate) fn normalize_const_tys_for_comparison<'db>(
             ..
         } => {
             let normalized = const_ty.evaluate(db, Some(*expected_ty));
-            if normalized.ty(db).invalid_cause(db).is_none()
-                && !matches!(normalized.data(db), ConstTyData::UnEvaluated { .. })
-            {
+            if normalized.ty(db).has_invalid(db) {
+                return Err(());
+            }
+            if matches!(
+                normalized.data(db),
+                ConstTyData::Value(..) | ConstTyData::Description(..) | ConstTyData::Abstract(..)
+            ) {
                 if let ConstTyData::Abstract(expr, expected_ty) = normalized.data(db) {
-                    evaluate_type_level_int_const_expr(db, *expr, *expected_ty).map_or_else(
-                        || TyId::const_ty(db, normalized),
-                        |evaluated| TyId::const_ty(db, evaluated),
-                    )
+                    checked_int_const_reduction(db, *expr, *expected_ty)
+                        .map(|evaluated| TyId::const_ty(db, evaluated.unwrap_or(normalized)))
                 } else {
-                    TyId::const_ty(db, normalized)
+                    Ok(TyId::const_ty(db, normalized))
                 }
             } else {
-                canonicalized
+                Ok(ty)
             }
         }
         ConstTyData::Abstract(expr, expected_ty) => {
-            evaluate_type_level_int_const_expr(db, *expr, *expected_ty)
-                .map_or(canonicalized, |evaluated| TyId::const_ty(db, evaluated))
+            checked_int_const_reduction(db, *expr, *expected_ty)
+                .map(|evaluated| evaluated.map_or(ty, |value| TyId::const_ty(db, value)))
         }
-        _ => canonicalized,
+        _ => Ok(ty),
+    }
+}
+
+fn checked_int_const_reduction<'db>(
+    db: &'db dyn HirAnalysisDb,
+    expr: ConstExprId<'db>,
+    expected_ty: TyId<'db>,
+) -> Result<Option<ConstTyId<'db>>, ()> {
+    if !matches!(
+        expr.data(db),
+        ConstExpr::ArithBinOp { .. } | ConstExpr::UnOp { .. } | ConstExpr::Cast { .. }
+    ) {
+        return Ok(None);
+    }
+    let term = ConstTyId::new(db, ConstTyData::Abstract(expr, expected_ty));
+    match force_const_term_value(db, term, CtfeConfig::default(), SemOrigin::Synthetic) {
+        EvalOutcome::Ready(value) => Ok(Some(const_ty_from_sem_const(db, value.value()))),
+        EvalOutcome::Blocked(_) if const_expr_is_fully_ground(db, expr) => Err(()),
+        EvalOutcome::Blocked(_) => Ok(None),
+        EvalOutcome::Failed(_) => Err(()),
     }
 }
 
@@ -1790,6 +1912,7 @@ fn eval_int_expr<'db>(
     expr: &Expr<'db>,
     expected: Option<TyId<'db>>,
     has_captures: &dyn Fn() -> bool,
+    impl_env: Option<ImplEnv<'db>>,
 ) -> Result<BigInt, ConstIntError> {
     match expr {
         Expr::Block(stmts) => {
@@ -1805,14 +1928,14 @@ fn eval_int_expr<'db>(
             let Partial::Present(inner) = expr_id.data(db, body) else {
                 return Err(ConstIntError::NotIntExpr);
             };
-            eval_int_expr(db, body, inner, expected, has_captures)
+            eval_int_expr(db, body, inner, expected, has_captures, impl_env)
         }
         Expr::Lit(LitKind::Int(value)) => Ok(BigInt::from(value.data(db).clone())),
         Expr::Un(inner, op) => {
             let Partial::Present(inner) = inner.data(db, body) else {
                 return Err(ConstIntError::Overflow);
             };
-            let value = eval_int_expr(db, body, inner, expected, has_captures)?;
+            let value = eval_int_expr(db, body, inner, expected, has_captures, impl_env)?;
             if matches!(op, UnOp::Minus) && expected.is_none() {
                 return Err(ConstIntError::Overflow);
             }
@@ -1833,8 +1956,8 @@ fn eval_int_expr<'db>(
                 return Err(ConstIntError::Overflow);
             };
             let expected = expected.unwrap_or_else(|| TyId::u256(db));
-            let lhs = eval_int_expr(db, body, lhs, Some(expected), has_captures)?;
-            let rhs = eval_int_expr(db, body, rhs, Some(expected), has_captures)?;
+            let lhs = eval_int_expr(db, body, lhs, Some(expected), has_captures, impl_env)?;
+            let rhs = eval_int_expr(db, body, rhs, Some(expected), has_captures, impl_env)?;
             let BinOp::Arith(op) = op else {
                 return Err(ConstIntError::NotIntExpr);
             };
@@ -1849,7 +1972,7 @@ fn eval_int_expr<'db>(
             let Some(path) = path.to_opt() else {
                 return Err(ConstIntError::NotIntExpr);
             };
-            let assumptions = assumptions_for_body(db, body);
+            let assumptions = selected_const_body_assumptions(db, body, impl_env);
             let resolved = resolve_path(db, path, body.scope(), assumptions, true)
                 .map_err(|_| ConstIntError::NotIntExpr)?;
             let const_ty = match resolved {
@@ -1860,11 +1983,20 @@ fn eval_int_expr<'db>(
                         .ok_or(ConstIntError::NotIntExpr)?;
                     ConstTyId::from_body(db, body, Some(declared_ty), Some(const_def))
                 }
-                PathRes::TraitConst(_, inst, name) => {
-                    let solve_cx =
-                        TraitSolveCx::new(db, body.scope()).with_assumptions(assumptions);
-                    const_ty_from_trait_const(db, solve_cx, inst, name)
-                        .ok_or(ConstIntError::NotIntExpr)?
+                PathRes::TraitConst(recv_ty, inst, name) => {
+                    let mut args = inst.args(db).clone();
+                    if let Some(self_arg) = args.first_mut() {
+                        *self_arg = recv_ty;
+                    }
+                    let inst = TraitInstId::new(
+                        db,
+                        inst.def(db),
+                        args,
+                        inst.assoc_type_bindings(db).clone(),
+                    );
+                    let assoc =
+                        assoc_const_use_for_body(db, body, impl_env, assumptions, inst, name);
+                    const_ty_from_assoc_const_use(db, assoc).ok_or(ConstIntError::NotIntExpr)?
                 }
                 PathRes::InherentConst(recv_ty, impl_, name) => {
                     const_ty_from_inherent_const(db, impl_, recv_ty, name)
@@ -1898,6 +2030,7 @@ pub(super) fn try_eval_const_int_expr<'db>(
         expr,
         int_ty_shape(db, expected_ty).map(|_| expected_ty),
         &|| false,
+        None,
     )
     .ok()
 }
@@ -2031,26 +2164,40 @@ pub(crate) fn evaluate_const_ty<'db>(
         return const_ty;
     }
 
-    let (body, const_ty_ty, template_ty, capture, const_def) = if let ConstTyData::UnEvaluated {
-        body,
-        ty,
-        template_ty,
-        capture,
-        const_def,
-        ..
-    } = const_ty.data(db)
-    {
-        (*body, *ty, *template_ty, capture.clone(), *const_def)
-    } else {
-        let const_ty_ty = const_ty.ty(db);
-        return match check_const_ty(db, const_ty_ty, expected_ty, &mut UnificationTable::new(db)) {
-            Ok(_) => const_ty,
-            Err(cause) => {
-                let ty = TyId::invalid(db, cause);
-                return const_ty.swap_ty(db, ty);
-            }
+    let (body, const_ty_ty, template_ty, capture, const_def, impl_env) =
+        if let ConstTyData::UnEvaluated {
+            body,
+            ty,
+            template_ty,
+            capture,
+            const_def,
+            impl_env,
+            ..
+        } = const_ty.data(db)
+        {
+            (
+                *body,
+                *ty,
+                *template_ty,
+                capture.clone(),
+                *const_def,
+                *impl_env,
+            )
+        } else {
+            let const_ty_ty = const_ty.ty(db);
+            return match check_const_ty(
+                db,
+                const_ty_ty,
+                expected_ty,
+                &mut UnificationTable::new(db),
+            ) {
+                Ok(_) => const_ty,
+                Err(cause) => {
+                    let ty = TyId::invalid(db, cause);
+                    return const_ty.swap_ty(db, ty);
+                }
+            };
         };
-    };
 
     let expected_ty = expected_ty.or(const_ty_ty);
     let check_ty = template_ty.or(expected_ty);
@@ -2072,7 +2219,7 @@ pub(crate) fn evaluate_const_ty<'db>(
             return ConstTyId::invalid(db, InvalidCause::ParseError);
         };
 
-        let assumptions = assumptions_for_body(db, body);
+        let assumptions = selected_const_body_assumptions(db, body, impl_env);
         if let Ok(resolved_path) = resolve_path(db, path, body.scope(), assumptions, true) {
             match resolved_path {
                 PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
@@ -2115,8 +2262,10 @@ pub(crate) fn evaluate_const_ty<'db>(
                     let mk_abstract = |expected_ty: TyId<'db>| {
                         let expr = ConstExprId::new(
                             db,
-                            ConstExpr::TraitConst(AssocConstUse::new(
-                                body.scope(),
+                            ConstExpr::TraitConst(assoc_const_use_for_body(
+                                db,
+                                body,
+                                impl_env,
                                 assumptions,
                                 inst,
                                 name,
@@ -2125,9 +2274,9 @@ pub(crate) fn evaluate_const_ty<'db>(
                         ConstTyId::new(db, ConstTyData::Abstract(expr, expected_ty))
                     };
 
-                    let solve_cx =
-                        TraitSolveCx::new(db, body.scope()).with_assumptions(assumptions);
-                    if let Some(const_ty) = const_ty_from_trait_const(db, solve_cx, inst, name) {
+                    let assoc =
+                        assoc_const_use_for_body(db, body, impl_env, assumptions, inst, name);
+                    if let Some(const_ty) = const_ty_from_assoc_const_use(db, assoc) {
                         let evaluated = const_ty.evaluate(db, expected_ty);
                         if evaluated.ty(db).has_invalid(db) {
                             return evaluated;
@@ -2206,7 +2355,7 @@ pub(crate) fn evaluate_const_ty<'db>(
         Expr::Block(..) | Expr::Un(..) | Expr::Bin(..) | Expr::Lit(LitKind::Int(..))
     ) {
         let expected_int_ty = expected_ty.filter(|ty| int_ty_shape(db, *ty).is_some());
-        match eval_int_expr(db, body, &expr, expected_int_ty, &has_captures) {
+        match eval_int_expr(db, body, &expr, expected_int_ty, &has_captures, impl_env) {
             Ok(value) => {
                 if let Some(word) = bigint_to_u256_word(&value) {
                     let mut table = UnificationTable::new(db);
@@ -2262,7 +2411,7 @@ pub(crate) fn evaluate_const_ty<'db>(
         owner,
         capture.generic_subst(db),
         EffectProviderSubst::empty(db),
-        ImplEnv::empty(db, owner.scope()),
+        impl_env.unwrap_or_else(|| ImplEnv::empty(db, owner.scope())),
     );
     let request = const_computation_for_instance(db, key, Vec::new());
     let evaluated = match describe_const_computation(db, request, CtfeConfig::default()) {
@@ -2463,6 +2612,37 @@ pub(crate) fn const_ty_from_sem_const<'db>(
     }
 }
 
+fn selected_const_body_assumptions<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    impl_env: Option<ImplEnv<'db>>,
+) -> PredicateListId<'db> {
+    let Some(env) = impl_env else {
+        return assumptions_for_body(db, body);
+    };
+    let mut assumptions = env.assumptions(db).list(db).clone();
+    for selection in env.selections(db) {
+        if !assumptions.contains(&selection.goal()) {
+            assumptions.push(selection.goal());
+        }
+    }
+    PredicateListId::new(db, assumptions).extend_all_bounds(db)
+}
+
+fn assoc_const_use_for_body<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    impl_env: Option<ImplEnv<'db>>,
+    assumptions: PredicateListId<'db>,
+    inst: TraitInstId<'db>,
+    name: IdentId<'db>,
+) -> AssocConstUse<'db> {
+    let scope = impl_env.map_or(body.scope(), |env| env.normalization_scope(db));
+    let assumptions = impl_env.map_or(assumptions, |env| env.assumptions(db));
+    AssocConstUse::new(scope, assumptions, inst, name)
+        .with_selection(impl_env.and_then(|env| env.selection_for(db, inst)))
+}
+
 pub(crate) fn assumptions_for_body<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
@@ -2517,21 +2697,34 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
     db: &'db dyn HirAnalysisDb,
     assoc: AssocConstUse<'db>,
 ) -> Option<ConstTyId<'db>> {
-    const_ty_from_trait_const(db, assoc.solve_cx(db), assoc.inst(), assoc.name())
+    if let Some(selection) = assoc.selection() {
+        let proof = selection
+            .revalidate(db, assoc.solve_cx(db), assoc.inst())
+            .ok()?;
+        let const_ty =
+            const_ty_from_resolved_trait_const(db, proof.resolved_instance(), assoc.name())?;
+        let impl_env = ImplEnv::new(
+            db,
+            assoc.origin_scope(),
+            assoc.assumptions(),
+            vec![assoc.inst()],
+        )
+        .with_selections(db, vec![selection]);
+        Some(const_ty.with_impl_env(db, impl_env))
+    } else {
+        const_ty_from_trait_const(db, assoc.solve_cx(db), assoc.inst(), assoc.name())
+    }
 }
 
 /// Whether `start_body`'s value definition can re-enter `start_body` when
 /// its const references (module consts and associated consts through their
 /// selected impls or defaults) are resolved transitively.
 ///
-/// This detects recursive associated-const definitions on *generic* impls at
-/// the definition site: evaluation under the impl's own binder never errors
-/// (param-dependent consts legitimately stay symbolic, and the recursive
-/// fixpoint in `evaluate_const_ty` recovers with the unevaluated form), so
-/// recursion is invisible to the evaluation result. The typed body's
-/// registered const refs give the same resolution edges lowering will take;
+/// This detects recursive associated-const definitions without running their
+/// bodies, including values that will only be evaluated at a use. The typed
+/// body's registered const refs give the same resolution edges lowering takes;
 /// refs whose resolution depends on unknown params (no impl selected) end
-/// the walk — those are deferred to instantiation sites.
+/// the walk; those are deferred to instantiation sites.
 pub(crate) fn const_body_resolution_reenters<'db>(
     db: &'db dyn HirAnalysisDb,
     start_body: Body<'db>,
@@ -3011,6 +3204,7 @@ impl<'db> ConstTyId<'db> {
             const_def,
             capture: ConstCaptureEnv::identity_for_body(db, body, None),
             policy: UnevaluatedConstPolicy::Evaluate,
+            impl_env: None,
         };
         Self::new(db, data)
     }
@@ -3022,7 +3216,23 @@ impl<'db> ConstTyId<'db> {
         }
     }
 
-    /// A deferred body interpreted through an explicit capture environment.
+    pub(crate) fn with_optional_impl_env(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        env: Option<ImplEnv<'db>>,
+    ) -> Self {
+        env.map_or(self, |env| self.with_impl_env(db, env))
+    }
+
+    pub(crate) fn with_impl_env(self, db: &'db dyn HirAnalysisDb, impl_env: ImplEnv<'db>) -> Self {
+        let mut data = self.data(db).clone();
+        if let ConstTyData::UnEvaluated { impl_env: env, .. } = &mut data {
+            *env = Some(impl_env);
+            return Self::new(db, data);
+        }
+        self
+    }
+
     pub(super) fn unevaluated(
         db: &'db dyn HirAnalysisDb,
         body: Partial<Body<'db>>,
@@ -3041,6 +3251,7 @@ impl<'db> ConstTyId<'db> {
             const_def: None,
             capture,
             policy,
+            impl_env: None,
         };
         Self::new(db, data)
     }
@@ -3174,6 +3385,7 @@ impl<'db> ConstTyId<'db> {
                 const_def,
                 capture,
                 policy,
+                impl_env,
                 ..
             } => ConstTyData::UnEvaluated {
                 body: *body,
@@ -3182,6 +3394,7 @@ impl<'db> ConstTyId<'db> {
                 const_def: *const_def,
                 capture: capture.clone(),
                 policy: *policy,
+                impl_env: *impl_env,
             },
         };
 
@@ -3424,6 +3637,7 @@ pub enum ConstTyData<'db> {
         const_def: Option<Const<'db>>,
         capture: ConstCaptureEnv<'db>,
         policy: UnevaluatedConstPolicy,
+        impl_env: Option<ImplEnv<'db>>,
     },
 }
 
@@ -3630,6 +3844,7 @@ mod tests {
                     const_def: None,
                     capture: ConstCaptureEnv::Empty,
                     policy: UnevaluatedConstPolicy::Evaluate,
+                    impl_env: None,
                 },
             ),
         );

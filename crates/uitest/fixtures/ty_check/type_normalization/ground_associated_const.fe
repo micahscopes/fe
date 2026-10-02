@@ -1,0 +1,5 @@
+struct Slot<const N: usize> {}
+struct S<const N: usize> {}
+trait Step { type Out }
+impl<const N: usize> Step for S<N> { type Out = Slot<{ N + 1 }> }
+fn probe(x: <S<2> as Step>::Out) -> Slot<3> { x }

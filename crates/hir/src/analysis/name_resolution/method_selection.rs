@@ -231,6 +231,14 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
     fn assemble_trait_method_candidates(&mut self) {
         let scope_ingot = self.scope.ingot(self.db);
 
+        // Discovery does not grant these bounds. check_inst sends each
+        // candidate through the solver, including the family rule's premises.
+        if let Some((_, bounds)) = self.receiver.original().associated_family_rules(self.db) {
+            for &bound in bounds.list(self.db) {
+                self.insert_assumption_trait_method_cand(bound);
+            }
+        }
+
         // When the receiver is a type parameter (e.g. `D` in `fn f<D: Trait>(d: D)`),
         // we don't know its concrete type yet, so probing impls would pull in many
         // unrelated candidates and frequently lead to spurious ambiguity.
@@ -681,7 +689,9 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
                     || (reached_answer_cutoff
                         && goal_query_has_solution(self.db, solve_cx, &query, confirmed))
             }
-            GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => false,
+            GoalSatisfiability::ContainsInvalid
+            | GoalSatisfiability::NormalizationFault
+            | GoalSatisfiability::UnSat(_) => false,
         }
     }
 
@@ -735,7 +745,8 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
                     let _ = table.unify(constraint, solved);
                 }
                 GoalSatisfiability::NeedsConfirmation { .. }
-                | GoalSatisfiability::ContainsInvalid => {
+                | GoalSatisfiability::ContainsInvalid
+                | GoalSatisfiability::NormalizationFault => {
                     needs_confirmation = true;
                 }
                 GoalSatisfiability::UnSat(_) => {
@@ -748,6 +759,11 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         let inst = implementor
             .trait_inst(self.db)
             .fold_with(self.db, &mut table);
+        let Some(refined) = self.with_associated_equalities(inst) else {
+            return TraitCandidateCheck::Rejected;
+        };
+        needs_confirmation |= refined != inst;
+        let inst = refined;
         let cand = TraitMethodCand::new(
             self.receiver
                 .canonicalize_solution(self.db, &mut table, inst),
@@ -762,6 +778,39 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         }
     }
 
+    fn with_associated_equalities(&self, mut inst: TraitInstId<'db>) -> Option<TraitInstId<'db>> {
+        // Lookup selects a trait method signature, not an implementation body.
+        // Retain associated equalities from the lexical context so that its
+        // constrained signature is not a second, ambiguous copy of the same
+        // unconstrained method. The refined goal still needs independent proof.
+        let mut bindings = inst.assoc_type_bindings(self.db).clone();
+        let mut consistent = true;
+        for &premise in self.assumptions.list(self.db) {
+            if premise.def(self.db) != inst.def(self.db)
+                || premise.args(self.db) != inst.args(self.db)
+            {
+                continue;
+            }
+            for (&name, &ty) in premise.assoc_type_bindings(self.db) {
+                if let Some(previous) = bindings.insert(name, ty) {
+                    consistent &= previous == ty;
+                }
+            }
+        }
+        if !consistent {
+            return None;
+        }
+        if bindings != *inst.assoc_type_bindings(self.db) {
+            inst = TraitInstId::new(
+                self.db,
+                inst.def(self.db),
+                inst.args(self.db).clone(),
+                bindings,
+            );
+        }
+        Some(inst)
+    }
+
     /// Finds an instance of a trait method for the given trait definition and
     /// method.
     ///
@@ -771,6 +820,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
     /// Depending on the result, it either returns a confirmed trait method
     /// candidate or one that needs further confirmation.
     fn check_inst(&self, inst: TraitInstId<'db>, method: Func<'db>) -> MethodCandidate<'db> {
+        let inst = self.with_associated_equalities(inst).unwrap_or(inst);
         let mut table = UnificationTable::new(self.db);
         // Seed the table with receiver's canonical variables so that subsequent
         // canonicalization can safely probe them.
@@ -816,6 +866,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
 
             GoalSatisfiability::NeedsConfirmation { .. }
             | GoalSatisfiability::ContainsInvalid
+            | GoalSatisfiability::NormalizationFault
             | GoalSatisfiability::UnSat(_) => {
                 MethodCandidate::NeedsConfirmation(TraitMethodCand::new(
                     self.receiver

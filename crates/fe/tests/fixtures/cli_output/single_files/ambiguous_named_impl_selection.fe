@@ -1,0 +1,12 @@
+trait Compute { const fn compute() -> u256 }
+trait Other { const fn other() -> u256 }
+struct Subject {}
+impl Compute for Subject as Dup {
+    const fn compute() -> u256 { 1 }
+}
+impl Other for Subject as Dup {
+    const fn other() -> u256 { 2 }
+}
+const fn selected() -> u256 {
+    with (Dup) { 1 }
+}

@@ -1,0 +1,15 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/named_impl_requires_selection_method.fe
+---
+error[2-0022]: `compute` requires named implementation `Only`
+  ┌─ named_impl_requires_selection_method.fe:6:40
+  │
+3 │ impl Compute for Subject as Only {
+  │                             ---- `Only` is defined here
+  ·
+6 │ const fn ordinary() -> u256 { Subject::compute() }
+  │                                        ^^^^^^^ `compute` is not available through ordinary lookup
+  │
+  = hint: select it with `with (Only) { ... }`; its prerequisites are checked when selected

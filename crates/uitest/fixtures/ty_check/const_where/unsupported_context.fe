@@ -1,4 +1,4 @@
-// Const where predicates are rejected where use sites are not checked yet.
+// Ground conditions are valid here; an impl method must match its trait method.
 trait Marker where true {}
 
 trait Read {

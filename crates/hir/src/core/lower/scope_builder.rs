@@ -5,10 +5,10 @@ use crate::{
     HirDb,
     hir_def::{
         Body, Enum, EnumVariant, ExprId, FieldDefListId, FieldParent, FuncParamListId,
-        FuncParamName, GenericParamListId, GenericParamOwner, HirIngot, Impl, ItemKind,
+        FuncParamName, GenericParamListId, GenericParamOwner, HirIngot, Impl, ImplTrait, ItemKind,
         TopLevelMod, TrackedItemId, TrackedItemVariant, Trait, Use, VariantDefListId, VariantKind,
         Visibility,
-        scope_graph::{EdgeKind, Scope, ScopeEdge, ScopeGraph, ScopeId},
+        scope_graph::{AssocTypeOwner, EdgeKind, Scope, ScopeEdge, ScopeGraph, ScopeId},
     },
 };
 
@@ -53,6 +53,43 @@ impl<'db> ScopeGraphBuilder<'db> {
         let id = TrackedItemId::new(db, None, TrackedItemVariant::TopLevelMod(top_mod.name(db)));
         builder.enter_item_scope(id, true);
         builder
+    }
+
+    pub(super) fn enter_expansion(db: &'db dyn HirDb, top_mod: TopLevelMod<'db>) -> Self {
+        let mut builder = Self {
+            db,
+            top_mod,
+            graph: IntermediateScopeGraph::default(),
+            scope_stack: Default::default(),
+            module_stack: Default::default(),
+            id_stack: Default::default(),
+            declared_blocks: vec![],
+        };
+        let root = TrackedItemVariant::TopLevelMod(top_mod.name(db));
+        builder.id_stack.push(TrackedItemId::new(
+            db,
+            Some(TrackedItemId::new(db, None, root)),
+            TrackedItemVariant::Expansion,
+        ));
+        builder
+    }
+
+    pub(super) fn enter_shim_scope(&mut self, scope: ScopeId<'db>, vis: Visibility) {
+        let node = self.graph.push(scope, Scope::new(scope, vis));
+        self.scope_stack.push(node);
+    }
+
+    pub(super) fn leave_shim_scope(&mut self) {
+        self.scope_stack.pop().expect("expansion shim scope");
+    }
+
+    pub(super) fn enter_id_namespace(&mut self, variant: TrackedItemVariant<'db>) {
+        let parent = *self.id_stack.last().expect("expansion ID root");
+        self.id_stack.push(parent.join(self.db, variant));
+    }
+
+    pub(super) fn leave_id_namespace(&mut self) {
+        self.id_stack.pop().expect("generated item namespace");
     }
 
     pub(super) fn build(self) -> ScopeGraph<'db> {
@@ -223,6 +260,20 @@ impl<'db> ScopeGraphBuilder<'db> {
                     .map_or_else(EdgeKind::anon, EdgeKind::type_)
             }
 
+            TypeFn(inner) => {
+                self.graph.add_lex_edge(item_node, parent_node);
+                self.add_generic_param_scope(
+                    item_node,
+                    inner.into(),
+                    inner.generic_params(self.db),
+                );
+                inner
+                    .name(self.db)
+                    .to_opt()
+                    .map(EdgeKind::type_)
+                    .unwrap_or_else(EdgeKind::anon)
+            }
+
             Impl(inner) => {
                 self.graph.add_lex_edge(item_node, parent_node);
                 self.add_generic_param_scope(
@@ -260,6 +311,7 @@ impl<'db> ScopeGraphBuilder<'db> {
                     inner.into(),
                     inner.generic_params(self.db),
                 );
+                self.add_impl_type_scope(item_node, inner);
                 self.graph
                     .add_edge(item_node, item_node, EdgeKind::self_ty());
                 EdgeKind::anon()
@@ -444,8 +496,41 @@ impl<'db> ScopeGraphBuilder<'db> {
             let kind = trait_type
                 .name
                 .to_opt()
-                .map_or_else(EdgeKind::anon, EdgeKind::trait_type);
-            self.graph.add_edge(parent_node, trait_type_node, kind)
+                .map(EdgeKind::trait_type)
+                .unwrap_or_else(EdgeKind::anon);
+            self.graph.add_edge(parent_node, trait_type_node, kind);
+            self.add_assoc_type_params(trait_type_node, AssocTypeOwner::Trait(trait_, i as u16));
+        }
+    }
+
+    fn add_assoc_type_params(&mut self, parent: NodeId, owner: AssocTypeOwner<'db>) {
+        for (idx, param) in owner
+            .generic_params(self.db)
+            .data(self.db)
+            .iter()
+            .enumerate()
+        {
+            let id = ScopeId::AssocTypeParam(owner, idx as u16);
+            let node = self.graph.push(id, Scope::new(id, Visibility::Private));
+            self.graph.add_lex_edge(node, parent);
+            let edge = param
+                .name()
+                .to_opt()
+                .map(EdgeKind::generic_param)
+                .unwrap_or_else(EdgeKind::anon);
+            self.graph.add_edge(parent, node, edge);
+        }
+    }
+
+    fn add_impl_type_scope(&mut self, parent: NodeId, impl_: ImplTrait<'db>) {
+        for idx in 0..impl_.types(self.db).len() {
+            let owner = AssocTypeOwner::Impl(impl_, idx as u16);
+            let id = owner.scope();
+            let node = self.graph.push(id, Scope::new(id, Visibility::Private));
+            self.graph.add_lex_edge(node, parent);
+            // Definition nodes are lexical parents, not names exported by the impl.
+            self.graph.add_edge(parent, node, EdgeKind::anon());
+            self.add_assoc_type_params(node, owner);
         }
     }
 

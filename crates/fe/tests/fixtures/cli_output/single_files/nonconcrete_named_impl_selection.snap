@@ -1,0 +1,19 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/nonconcrete_named_impl_selection.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/nonconcrete_named_impl_selection.fe
+
+error[8-0101]: cannot select implementation `Generic`
+  ┌─ nonconcrete_named_impl_selection.fe:7:11
+  │
+3 │ impl<T> Compute for Subject<T> as Generic {
+  │                                   ------- implementation `Generic` is defined here
+  ·
+7 │     with (Generic) { 1 }
+  │           ^^^^^^^ named selection currently requires a concrete implementation application
+
+
+=== EXIT CODE: 1 ===

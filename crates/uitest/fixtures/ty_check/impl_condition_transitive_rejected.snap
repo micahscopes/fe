@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/impl_condition_transitive_rejected.fe
+---
+error[8-0093]: const requirement is not satisfied
+   ┌─ impl_condition_transitive_rejected.fe:10:16
+   │
+ 6 │ impl<const N: usize> Positive for Wrapped<N> where N > 0 {}
+   │                                                    ----- required by this predicate
+   ·
+10 │ fn consume() { needs<Wrapped<0>>() }
+   │                ^^^^^^^^^^^^^^^^^ condition evaluated to `false`

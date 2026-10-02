@@ -384,6 +384,14 @@ fn canonicalize_expr<'db>(
             {
                 FoldAttempt::Folded(value) => {
                     let value = canonicalize_const_value(cx.db, value.value());
+                    if matches!(value.value(cx.db), SemConstValue::Structural { .. })
+                        && cx.instance.normalized_ty(
+                            cx.db,
+                            crate::analysis::semantic::sem_const_ty(cx.db, value),
+                        ) == cx.instance.normalized_ty(cx.db, result_ty)
+                    {
+                        return (expr.clone(), Some(value));
+                    }
                     if let Some(value) =
                         reify_runtime_const_for_ty(cx.db, cx.instance, result_ty, value)
                     {

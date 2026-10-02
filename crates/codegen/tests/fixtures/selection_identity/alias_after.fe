@@ -1,0 +1,18 @@
+trait Compute { fn compute() -> u256 }
+struct Subject {}
+
+impl Compute for Subject as Renamed {
+    fn compute() -> u256 { 1 }
+}
+
+impl Compute for Subject as Second {
+    fn compute() -> u256 { 2 }
+}
+
+pub fn first() -> u256 {
+    with (Renamed) { Subject::compute() }
+}
+
+pub fn second() -> u256 {
+    with (Second) { Subject::compute() }
+}

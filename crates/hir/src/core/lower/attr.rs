@@ -21,6 +21,7 @@ pub struct AttrMisuseError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AttrMisuseErrorKind {
     UnsupportedTarget { supported_targets: &'static str },
+    Unavailable,
     InvalidForm { expected_form: &'static str },
     Duplicate,
     UnknownInRestrictedContext { expected_attrs: &'static str },
@@ -64,6 +65,7 @@ impl AttrForm {
 pub(super) enum AttrSupport {
     Supported,
     Unsupported { supported_targets: &'static str },
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,7 +107,19 @@ impl AttrRule {
             support: AttrSupport::Unsupported { supported_targets },
         }
     }
+
+    pub(super) const fn unavailable(name: &'static str) -> Self {
+        Self {
+            name,
+            form: AttrForm::Bare,
+            expected_form: "",
+            singleton: true,
+            support: AttrSupport::Unavailable,
+        }
+    }
 }
+
+const UNAVAILABLE_ATTRS: &[&str] = &["derive"];
 
 impl AttrTarget {
     pub(super) fn new(kind: &'static str, name: Option<String>) -> Self {
@@ -175,13 +189,28 @@ pub(super) fn validate_attr_rules<'db>(
     target: AttrTarget,
     rules: &[AttrRule],
 ) {
-    for rule in rules {
+    for rule in rules
+        .iter()
+        .copied()
+        .chain(UNAVAILABLE_ATTRS.iter().copied().map(AttrRule::unavailable))
+    {
         let specs = named_attr_specs(attrs.clone(), rule.name);
         if specs.is_empty() {
             continue;
         }
 
         match rule.support {
+            AttrSupport::Unavailable => {
+                for spec in specs {
+                    report_attr_misuse(
+                        ctxt,
+                        spec.range,
+                        rule.name.to_string(),
+                        target.clone(),
+                        AttrMisuseErrorKind::Unavailable,
+                    );
+                }
+            }
             AttrSupport::Unsupported { supported_targets } => {
                 for spec in specs {
                     report_attr_misuse(
@@ -239,7 +268,9 @@ pub(super) fn validate_unknown_attrs_in_restricted_context<'db>(
             .path()
             .map(|path| path.text().to_string())
             .unwrap_or_default();
-        if allowed_names.contains(&attr_name.as_str()) {
+        if allowed_names.contains(&attr_name.as_str())
+            || UNAVAILABLE_ATTRS.contains(&attr_name.as_str())
+        {
             continue;
         }
         report_attr_misuse(

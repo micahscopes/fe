@@ -11,6 +11,7 @@ use crate::analysis::HirAnalysisDb;
 use crate::analysis::ty::{
     adt_def::{AdtRef, ConcreteTypeView, instantiate_adt_field_for_concrete_demand},
     const_ty::{ConcreteArrayLengthError, demand_concrete_array_length},
+    corelib::{CoreAbiAdt, core_abi_adt_kind},
     ty_def::{InvalidCause, PrimTy, TyBase, TyData, TyId},
 };
 use crate::analysis::ty::{trait_resolution::PredicateListId, ty_is_copy};
@@ -352,56 +353,20 @@ fn is_std_address_ty(db: &dyn HirAnalysisDb, ty: TyId<'_>, adt_ref: AdtRef<'_>) 
 }
 
 fn core_dyn_array_elem_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<TyId<'db>> {
-    if let Some((_, inner)) = ty.as_capability(db) {
-        return core_dyn_array_elem_ty(db, inner);
-    }
-
-    let (base, args) = ty.decompose_ty_app(db);
-    let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
-        return None;
-    };
-    let adt_ref = adt.adt_ref(db);
-    let name = adt_ref.name(db)?;
-    if name.data(db) != "DynArray" {
+    if core_abi_adt_kind(db, ty) != Some(CoreAbiAdt::DynArray) {
         return None;
     }
-    if !base
-        .ingot(db)
-        .is_some_and(|ingot| ingot.kind(db) == IngotKind::Core)
-    {
-        return None;
-    }
-
+    let ty = ty.as_capability(db).map(|(_, inner)| inner).unwrap_or(ty);
+    let (_, args) = ty.decompose_ty_app(db);
     args.first().copied()
 }
 
-fn is_core_adt_named(db: &dyn HirAnalysisDb, ty: TyId<'_>, expected_name: &str) -> bool {
-    if let Some((_, inner)) = ty.as_capability(db) {
-        return is_core_adt_named(db, inner, expected_name);
-    }
-
-    let base = ty.base_ty(db);
-    let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
-        return false;
-    };
-    let adt_ref = adt.adt_ref(db);
-    let Some(name) = adt_ref.name(db) else {
-        return false;
-    };
-    if name.data(db) != expected_name {
-        return false;
-    }
-
-    base.ingot(db)
-        .is_some_and(|ingot| ingot.kind(db) == IngotKind::Core)
-}
-
 fn is_core_bytes_ty(db: &dyn HirAnalysisDb, ty: TyId<'_>) -> bool {
-    is_core_adt_named(db, ty, "Bytes")
+    core_abi_adt_kind(db, ty) == Some(CoreAbiAdt::Bytes)
 }
 
 fn is_core_dyn_string_ty(db: &dyn HirAnalysisDb, ty: TyId<'_>) -> bool {
-    is_core_adt_named(db, ty, "DynString")
+    core_abi_adt_kind(db, ty) == Some(CoreAbiAdt::DynString)
 }
 
 pub(crate) fn is_dynamic_event_ty(db: &dyn HirAnalysisDb, ty: TyId<'_>) -> bool {
@@ -413,10 +378,7 @@ pub(crate) fn is_dynamic_event_ty(db: &dyn HirAnalysisDb, ty: TyId<'_>) -> bool 
             .first()
             .is_some_and(|&elem_ty| is_dynamic_event_ty(db, elem_ty));
     }
-    ty.is_string(db)
-        || ["Bytes", "DynString", "DynArray"]
-            .into_iter()
-            .any(|name| is_core_adt_named(db, ty, name))
+    ty.is_string(db) || core_abi_adt_kind(db, ty).is_some()
 }
 
 /// Fixed arrays, tuples and `#[abi]` structs. Solidity hashes the encoding

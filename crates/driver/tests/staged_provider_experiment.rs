@@ -131,7 +131,7 @@ impl Request {
         let invocation = self.invocations;
         self.invocations += 1;
         self.ctfe_requests += 1;
-        let value = (match eval_body_owner_const_with_args(
+        let value = match eval_body_owner_const_with_args(
             db,
             BodyOwner::Func(provider),
             hir::analysis::semantic::GenericSubst::for_body_owner(
@@ -141,17 +141,16 @@ impl Request {
             ),
             vec![],
         ) {
-            hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-            outcome => Err(outcome),
-        })
-        .map_err(|error| Failure::Execution(format!("{error:?}")))?;
-        let SemConstValue::Array { elems, .. } = value.value(db).clone() else {
+            hir::analysis::semantic::EvalOutcome::Ready(value) => value,
+            other => return Err(Failure::Execution(format!("{other:?}"))),
+        };
+        let SemConstValue::Array { elems, .. } = value.value(db) else {
             return Err(Failure::Protocol);
         };
         assert_eq!(elems.len(), len);
         let bytes = elems
             .iter()
-            .map(|elem| match elem.value(db).clone() {
+            .map(|elem| match elem.value(db) {
                 SemConstValue::Scalar {
                     value: SemConstScalar::Int { value },
                     ..
@@ -196,16 +195,15 @@ fn consume(receipt: &Receipt, consumer: &str) -> Result<(String, Range<usize>), 
         return Err(Failure::Consumer(message));
     }
     let caller = named(&db, file, "consume");
-    let value = (match eval_body_owner_const_with_args(
+    let value = match eval_body_owner_const_with_args(
         &db,
         BodyOwner::Func(caller),
         hir::analysis::semantic::GenericSubst::for_body_owner(&db, BodyOwner::Func(caller), vec![]),
         vec![],
     ) {
-        hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-        outcome => Err(outcome),
-    })
-    .map_err(|error| Failure::Execution(format!("{error:?}")))?;
+        hir::analysis::semantic::EvalOutcome::Ready(value) => value,
+        other => return Err(Failure::Execution(format!("{other:?}"))),
+    };
     Ok((value.pretty_print(&db), output_span))
 }
 
@@ -263,7 +261,7 @@ fn provider_errors_are_rejected_before_ctfe_even_in_untaken_code() {
         (good.replace("-> [u8;", "-> [bool;"), "type mismatch"),
         (
             good.replacen(" {", " uses (value: u256) {", 1),
-            "effects are not allowed",
+            "may only use immutable trait providers",
         ),
     ] {
         let mut db = database();
@@ -522,13 +520,8 @@ fn borrow_checking_and_ctfe_support_are_separate_gates() {
             );
             assert_eq!(request.ctfe_requests, 0);
         } else {
-            // The valid local alias passes both analysis gates but this CTFE
-            // path currently cannot execute it. Record that limitation without
-            // treating well-typed code as automatically const-evaluable.
-            assert!(
-                matches!(result, Err(Failure::Execution(ref error)) if error.contains("InvalidProviderUse")),
-                "{result:?}"
-            );
+            let receipt = result.expect("the valid local alias is const-evaluable");
+            assert_eq!(receipt.output_source, " ");
             assert_eq!(request.ctfe_requests, 1);
         }
     }

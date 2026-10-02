@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/selected_body_unrelated_false.fe
+---
+error[3-0057]: const requirement is not satisfied
+   ┌─ selected_body_unrelated_false.fe:11:18
+   │
+ 7 │ struct Bounded<const N: usize> where N > 0 { value: u256 }
+   │                                      ----- required by this predicate
+   ·
+11 │         let bad: Bounded<0> = Bounded<0> { value: 1 }
+   │                  ^^^^^^^^^^ condition evaluated to `false`
+
+error[3-0057]: const requirement is not satisfied
+   ┌─ selected_body_unrelated_false.fe:11:31
+   │
+ 7 │ struct Bounded<const N: usize> where N > 0 { value: u256 }
+   │                                      ----- required by this predicate
+   ·
+11 │         let bad: Bounded<0> = Bounded<0> { value: 1 }
+   │                               ^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`

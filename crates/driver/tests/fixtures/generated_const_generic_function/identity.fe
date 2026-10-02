@@ -1,0 +1,18 @@
+use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+
+const fn make(record: Record) -> FunctionDefinition<1, 2> {
+    FunctionDefinition {
+        name: DeclarationName::Literal("pass"),
+        public: false,
+        const_function: true,
+        parameters: [DeclarationType::Record(record)],
+        return_type: DeclarationType::Record(record),
+        expressions: [BodyExpr::Parameter(0), BodyExpr::End],
+        result: 0,
+    }
+}
+
+#[generate(make)]
+struct Wrapped<const N: usize> { value: u256 }
+
+const fn answer() -> u256 { pass(Wrapped<3> { value: 42 }).value }

@@ -1,0 +1,17 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_eval/associated_const_demanded.fe
+---
+error[3-0026]: const evaluation exceeded the step limit
+   ┌─ associated_const_demanded.fe:15:22
+   │
+10 │   const fn spin() -> u256 {
+   │ ╭─────────────────────────'
+11 │ │     while true {}
+12 │ │     0
+13 │ │ }
+   │ ╰─' const evaluation takes too many steps
+14 │
+15 │   const DEMAND: u256 = Subject::VALUE
+   │                        ^^^^^^^^^^^^^^ constant is evaluated here

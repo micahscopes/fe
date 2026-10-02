@@ -1,0 +1,24 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/unknown_named_impl_selection.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/unknown_named_impl_selection.fe
+
+error[8-0099]: no implementation named `Casul` in scope
+   ┌─ unknown_named_impl_selection.fe:10:11
+   │
+ 3 │ impl Compute for Subject as Casual {
+   │                             ------ `Casual` is defined here
+   ·
+ 6 │ impl Compute for Subject as Formal {
+   │                             ------ `Formal` is defined here
+   ·
+10 │     with (Casul) { 1 }
+   │           ^^^^^ `with (Casul)` names no implementation here
+   │
+   = did you mean `Casual`?
+
+
+=== EXIT CODE: 1 ===

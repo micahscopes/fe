@@ -5,10 +5,10 @@
 //! canonicalization, candidate lookup, unification, evidence construction, and
 //! the small amount of diagnostic state needed for an unsatisfied subgoal.
 
-use std::convert::Infallible;
+use std::{cell::Cell, convert::Infallible};
 
 use common::indexmap::{IndexMap, IndexSet};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tablesolve::{
     AnswerlessMode, CallbackOutcome, Canonical as TabledCanonical, CanonicalizeOutcome, Completion,
     Config, ConsumerId, ContextTransition, Event, Limits, Observer, ReportOptions,
@@ -17,8 +17,8 @@ use tablesolve::{
 };
 
 use super::{
-    CanonicalGoalQuery, GoalSatisfiability, TRAIT_SOLVER_ROOT_ANSWER_LIMIT, TraitGoalSolution,
-    TraitSolveCompletion, TraitSolveCx, TraitSolverQuery, normalize_trait_inst_preserving_validity,
+    CanonicalGoalQuery, GoalSatisfiability, ImplConditionsId, TRAIT_SOLVER_ROOT_ANSWER_LIMIT,
+    TraitGoalSolution, TraitSolveCompletion, TraitSolveCx, TraitSolverQuery,
 };
 use crate::analysis::{
     HirAnalysisDb,
@@ -100,9 +100,37 @@ fn normalize_assoc_binding<'db>(
     ty: TyId<'db>,
     scope: ScopeId<'db>,
     assumptions: super::PredicateListId<'db>,
-) -> TyId<'db> {
+) -> Result<TyId<'db>, UnificationError> {
     let ty = ty.fold_with(db, table);
-    crate::analysis::ty::normalize::normalize_ty(db, ty, scope, assumptions)
+    let normalized = crate::analysis::ty::normalize::normalize_ty(db, ty, scope, assumptions);
+    if !ty.has_invalid(db) && normalized.has_invalid(db) {
+        Err(UnificationError::NormalizationFault)
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn normalize_trait_inst_for_matching<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    assumptions: super::PredicateListId<'db>,
+) -> Result<TraitInstId<'db>, UnificationError> {
+    // RD74 permits bounded pure normalization here, but a fault must stop
+    // proof search rather than make this candidate disappear.
+    let normalized = inst.normalize(db, scope, assumptions);
+    let has_invalid = |inst: TraitInstId<'db>| {
+        inst.args(db).iter().any(|ty| ty.has_invalid(db))
+            || inst
+                .assoc_type_bindings(db)
+                .values()
+                .any(|ty| ty.has_invalid(db))
+    };
+    if !has_invalid(inst) && has_invalid(normalized) {
+        Err(UnificationError::NormalizationFault)
+    } else {
+        Ok(normalized)
+    }
 }
 
 fn unify_trait_inst_with_normalized_assoc_bindings<'db>(
@@ -118,9 +146,9 @@ fn unify_trait_inst_with_normalized_assoc_bindings<'db>(
     for (name, &candidate_assoc_ty) in candidate.assoc_type_bindings(db) {
         if let Some(&goal_assoc_ty) = goal.assoc_type_bindings(db).get(name) {
             let candidate_assoc_ty =
-                normalize_assoc_binding(db, table, candidate_assoc_ty, scope, assumptions);
+                normalize_assoc_binding(db, table, candidate_assoc_ty, scope, assumptions)?;
             let goal_assoc_ty =
-                normalize_assoc_binding(db, table, goal_assoc_ty, scope, assumptions);
+                normalize_assoc_binding(db, table, goal_assoc_ty, scope, assumptions)?;
             table.unify(candidate_assoc_ty, goal_assoc_ty)?;
         }
     }
@@ -140,6 +168,7 @@ fn unify_trait_inst_with_normalized_assoc_bindings<'db>(
 enum StopReason {
     MaximumTypeDepth,
     TargetFound,
+    NormalizationFault,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
@@ -147,6 +176,22 @@ pub enum TargetSolutionStatus {
     Found,
     NotFound,
     Incomplete,
+    NormalizationFault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub(crate) struct TargetSearchResult<'db> {
+    pub(crate) status: TargetSolutionStatus,
+    pub(crate) impl_conditions: Option<ImplConditionsId<'db>>,
+}
+
+impl<'db> TargetSearchResult<'db> {
+    fn without_conditions(status: TargetSolutionStatus) -> Self {
+        Self {
+            status,
+            impl_conditions: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -159,6 +204,10 @@ pub(crate) enum TargetSolutionMatch {
 enum Clause<'db> {
     Implementor(ImplementorId<'db>),
     Assumption(usize),
+    FamilyBound {
+        bound: TraitInstId<'db>,
+        requirements: super::PredicateListId<'db>,
+    },
 }
 
 #[derive(Clone)]
@@ -167,6 +216,9 @@ struct Branch<'db> {
     root_goal: TraitInstId<'db>,
     remaining_goals: Vec<TraitInstId<'db>>,
     selected_impl: ImplementorId<'db>,
+    establishes_goal: bool,
+    impl_conditions: Vec<ImplementorId<'db>>,
+    trait_conditions: Vec<TraitInstId<'db>>,
 }
 
 #[derive(Clone)]
@@ -211,6 +263,9 @@ impl TypeDepthBudget {
 }
 
 fn type_depth_growth_exceeded(initial_depth: usize, current_depth: usize) -> bool {
+    if initial_depth == usize::MAX || current_depth == usize::MAX {
+        return true;
+    }
     current_depth.saturating_sub(initial_depth) > MAXIMUM_TYPE_GROWTH
 }
 
@@ -219,31 +274,33 @@ struct TraitResolutionContext<'db> {
     origin_ingot: crate::Ingot<'db>,
     prepared_queries: FxHashMap<Query<'db>, PreparedQuery<'db>>,
     target: Option<TargetAnswer<'db>>,
+    found_target_conditions: Cell<Option<ImplConditionsId<'db>>>,
     type_depth_budget: TypeDepthBudget,
 }
 
 impl<'db> TraitResolutionContext<'db> {
     fn new(
         db: &'db dyn HirAnalysisDb,
-        origin_ingot: crate::Ingot<'db>,
+        use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
         root: TraitSolverQuery<'db>,
         target: Option<TargetAnswer<'db>>,
     ) -> Self {
         Self {
             db,
-            origin_ingot,
+            origin_ingot: use_scope.ingot(db),
             prepared_queries: FxHashMap::default(),
             target,
+            found_target_conditions: Cell::new(None),
             type_depth_budget: TypeDepthBudget::new(db, root, target),
         }
     }
 
-    fn prepare_query(&mut self, key: Query<'db>) -> PreparedQuery<'db> {
+    fn prepare_query(&mut self, key: Query<'db>) -> Result<PreparedQuery<'db>, UnificationError> {
         if let Some(prepared) = self.prepared_queries.get(&key) {
-            return prepared.clone();
+            return Ok(prepared.clone());
         }
 
-        let mut table = PersistentUnificationTable::new(self.db);
+        let mut table = PersistentUnificationTable::new_proof(self.db);
         let query = key.query.extract_identity(&mut table);
         let scope = TraitSolveCx::normalization_scope_for_trait_inst_with_origin(
             self.db,
@@ -251,7 +308,7 @@ impl<'db> TraitResolutionContext<'db> {
             query.goal,
         );
         let normalized_goal =
-            normalize_trait_inst_preserving_validity(self.db, query.goal, scope, query.assumptions);
+            normalize_trait_inst_for_matching(self.db, query.goal, scope, query.assumptions)?;
         let prepared = PreparedQuery {
             table,
             query,
@@ -259,7 +316,7 @@ impl<'db> TraitResolutionContext<'db> {
             normalized_goal,
         };
         self.prepared_queries.insert(key, prepared.clone());
-        prepared
+        Ok(prepared)
     }
 
     fn goal_can_use_assumptions(&self, goal: TraitInstId<'db>) -> bool {
@@ -279,12 +336,39 @@ impl<'db> TraitResolutionContext<'db> {
         branch: &mut Branch<'db>,
         goal: TraitInstId<'db>,
     ) -> GoalSolution<'db> {
+        let mut trait_conditions = branch
+            .trait_conditions
+            .iter()
+            .map(|&inst| inst.fold_with(self.db, &mut branch.table))
+            .collect::<Vec<_>>();
+        let goal = goal.fold_with(self.db, &mut branch.table);
+        // Structural proof only records these conditions. The checker decides
+        // whether they hold after inference, outside proof search.
+        if branch.establishes_goal
+            && !crate::hir_def::WhereClauseOwner::Trait(goal.def(self.db))
+                .where_clause(self.db)
+                .const_predicates(self.db)
+                .is_empty()
+            && !trait_conditions.contains(&goal)
+        {
+            trait_conditions.push(goal);
+        }
+        let impl_conditions = ImplConditionsId::new(
+            self.db,
+            branch
+                .impl_conditions
+                .iter()
+                .map(|&instance| instance.fold_with(self.db, &mut branch.table))
+                .collect::<Vec<_>>(),
+            trait_conditions,
+        );
         parent.query.canonicalize_solution(
             self.db,
             &mut branch.table,
             TraitGoalSolution {
                 inst: goal,
                 implementor: branch.selected_impl,
+                impl_conditions,
             },
         )
     }
@@ -306,6 +390,8 @@ impl<'db> TraitResolutionContext<'db> {
                 TargetSolutionMatch::NotEqual => !equal,
             }
         }) {
+            self.found_target_conditions
+                .set(Some(answer.value.impl_conditions));
             Transition::Stop(StopReason::TargetFound)
         } else {
             Transition::Answer(answer)
@@ -381,7 +467,13 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
         &mut self,
         key: &Self::Key,
     ) -> Result<CallbackOutcome<Vec<Self::Clause>, Self::StopReason>, Self::Error> {
-        let prepared = self.prepare_query(*key);
+        let prepared = match self.prepare_query(*key) {
+            Ok(prepared) => prepared,
+            Err(UnificationError::NormalizationFault) => {
+                return Ok(CallbackOutcome::Stop(StopReason::NormalizationFault));
+            }
+            Err(_) => unreachable!("preparing a proof query only normalizes types"),
+        };
         let (primary, secondary) = TraitSolveCx::search_ingots_for_trait_inst_with_origin(
             self.db,
             self.origin_ingot,
@@ -392,6 +484,7 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             primary,
             secondary,
             Canonical::new(self.db, prepared.query.goal),
+            key.selected_candidate,
         );
 
         let mut clauses =
@@ -414,6 +507,18 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             clauses.extend(
                 (0..prepared.query.assumptions.list(self.db).len()).map(Clause::Assumption),
             );
+            if let Some((requirements, bounds)) = prepared
+                .normalized_goal
+                .self_ty(self.db)
+                .associated_family_rules(self.db)
+            {
+                clauses.extend(bounds.list(self.db).iter().copied().map(|bound| {
+                    Clause::FamilyBound {
+                        bound,
+                        requirements,
+                    }
+                }));
+            }
         }
         Ok(CallbackOutcome::Continue(clauses))
     }
@@ -428,31 +533,91 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             query,
             scope,
             normalized_goal,
-        } = self.prepare_query(*key);
+        } = match self.prepare_query(*key) {
+            Ok(prepared) => prepared,
+            Err(UnificationError::NormalizationFault) => {
+                return Ok(Transition::Stop(StopReason::NormalizationFault));
+            }
+            Err(_) => unreachable!("preparing a proof query only normalizes types"),
+        };
 
         let selected_impl = match clause {
+            Clause::FamilyBound {
+                bound,
+                requirements,
+            } => {
+                let scope = TraitSolveCx::normalization_scope_for_trait_inst_with_origin(
+                    self.db,
+                    self.origin_ingot,
+                    query.goal,
+                );
+                if let Err(error) = unify_trait_inst_with_normalized_assoc_bindings(
+                    self.db,
+                    &mut table,
+                    bound,
+                    normalized_goal,
+                    scope,
+                    query.assumptions,
+                ) {
+                    return Ok(match error {
+                        UnificationError::NormalizationFault => {
+                            Transition::Stop(StopReason::NormalizationFault)
+                        }
+                        _ => Transition::Reject,
+                    });
+                }
+                let selected_impl =
+                    ImplementorId::assumption(self.db, query.goal.fold_with(self.db, &mut table));
+                let remaining_goals = requirements
+                    .list(self.db)
+                    .iter()
+                    .map(|goal| goal.fold_with(self.db, &mut table))
+                    .collect();
+                return Ok(self.continue_branch(
+                    key,
+                    Branch {
+                        table,
+                        root_goal: query.goal,
+                        remaining_goals,
+                        selected_impl,
+                        establishes_goal: false,
+                        impl_conditions: Vec::new(),
+                        trait_conditions: Vec::new(),
+                    },
+                    query.assumptions,
+                ));
+            }
             Clause::Implementor(selected_impl) => {
                 if !impl_header_may_match(self.db, selected_impl, normalized_goal) {
                     return Ok(Transition::Reject);
                 }
                 let candidate = table.instantiate_with_fresh_vars(selected_impl);
-                let normalized_candidate = normalize_trait_inst_preserving_validity(
+                let normalized_candidate = match normalize_trait_inst_for_matching(
                     self.db,
                     candidate.trait_inst(self.db),
                     scope,
                     query.assumptions,
-                );
-                if unify_trait_inst_with_normalized_assoc_bindings(
+                ) {
+                    Ok(candidate) => candidate,
+                    Err(UnificationError::NormalizationFault) => {
+                        return Ok(Transition::Stop(StopReason::NormalizationFault));
+                    }
+                    Err(_) => unreachable!("candidate normalization only normalizes types"),
+                };
+                if let Err(error) = unify_trait_inst_with_normalized_assoc_bindings(
                     self.db,
                     &mut table,
                     normalized_candidate,
                     normalized_goal,
                     scope,
                     query.assumptions,
-                )
-                .is_err()
-                {
-                    return Ok(Transition::Reject);
+                ) {
+                    return Ok(match error {
+                        UnificationError::NormalizationFault => {
+                            Transition::Stop(StopReason::NormalizationFault)
+                        }
+                        _ => Transition::Reject,
+                    });
                 }
 
                 let constraints = candidate.constraints(self.db);
@@ -466,6 +631,21 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                     root_goal: query.goal,
                     remaining_goals,
                     selected_impl,
+                    establishes_goal: true,
+                    impl_conditions: if let crate::analysis::ty::trait_def::ImplementorOrigin::Hir(
+                        implementation,
+                    ) = candidate.origin(self.db)
+                        && !crate::hir_def::WhereClauseOwner::ImplTrait(implementation)
+                            .clause(self.db)
+                            .id
+                            .const_predicates(self.db)
+                            .is_empty()
+                    {
+                        vec![candidate]
+                    } else {
+                        Vec::new()
+                    },
+                    trait_conditions: Vec::new(),
                 };
                 return Ok(self.continue_branch(key, branch, query.assumptions));
             }
@@ -473,17 +653,20 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 let Some(&assumption) = query.assumptions.list(self.db).get(index) else {
                     return Ok(Transition::Reject);
                 };
-                if unify_trait_inst_with_normalized_assoc_bindings(
+                if let Err(error) = unify_trait_inst_with_normalized_assoc_bindings(
                     self.db,
                     &mut table,
                     assumption,
                     normalized_goal,
                     scope,
                     query.assumptions,
-                )
-                .is_err()
-                {
-                    return Ok(Transition::Reject);
+                ) {
+                    return Ok(match error {
+                        UnificationError::NormalizationFault => {
+                            Transition::Stop(StopReason::NormalizationFault)
+                        }
+                        _ => Transition::Reject,
+                    });
                 }
                 ImplementorId::assumption(self.db, query.goal.fold_with(self.db, &mut table))
             }
@@ -494,6 +677,9 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             root_goal: query.goal,
             remaining_goals: Vec::new(),
             selected_impl,
+            establishes_goal: false,
+            impl_conditions: Vec::new(),
+            trait_conditions: Vec::new(),
         };
         Ok(self.finish_branch(key, branch))
     }
@@ -506,7 +692,19 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
         rebase: Self::Rebase,
     ) -> Result<ContextTransition<Self>, Self::Error> {
         let pending_goal = rebase.goal();
-        let solution = rebase.extract_solution(&mut branch.table, answer).inst;
+        let solution = rebase.extract_solution(&mut branch.table, answer);
+        let child_conditions = solution.impl_conditions.instances(self.db);
+        for &instance in child_conditions {
+            if !branch.impl_conditions.contains(&instance) {
+                branch.impl_conditions.push(instance);
+            }
+        }
+        for &goal in solution.impl_conditions.trait_goals(self.db) {
+            if !branch.trait_conditions.contains(&goal) {
+                branch.trait_conditions.push(goal);
+            }
+        }
+        let solution = solution.inst;
 
         let normalized_pending = {
             let scope = TraitSolveCx::normalization_scope_for_trait_inst_with_origin(
@@ -514,12 +712,18 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 self.origin_ingot,
                 pending_goal,
             );
-            normalize_trait_inst_preserving_validity(
+            match normalize_trait_inst_for_matching(
                 self.db,
                 pending_goal.fold_with(self.db, &mut branch.table),
                 scope,
                 rebase.assumptions(),
-            )
+            ) {
+                Ok(goal) => goal,
+                Err(UnificationError::NormalizationFault) => {
+                    return Ok(Transition::Stop(StopReason::NormalizationFault));
+                }
+                Err(_) => unreachable!("pending-goal normalization only normalizes types"),
+            }
         };
         let normalized_solution = {
             let scope = TraitSolveCx::normalization_scope_for_trait_inst_with_origin(
@@ -527,19 +731,26 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 self.origin_ingot,
                 solution,
             );
-            normalize_trait_inst_preserving_validity(
+            match normalize_trait_inst_for_matching(
                 self.db,
                 solution.fold_with(self.db, &mut branch.table),
                 scope,
                 rebase.assumptions(),
-            )
+            ) {
+                Ok(goal) => goal,
+                Err(UnificationError::NormalizationFault) => {
+                    return Ok(Transition::Stop(StopReason::NormalizationFault));
+                }
+                Err(_) => unreachable!("solution normalization only normalizes types"),
+            }
         };
-        if branch
-            .table
-            .unify(normalized_pending, normalized_solution)
-            .is_err()
-        {
-            return Ok(Transition::Reject);
+        if let Err(error) = branch.table.unify(normalized_pending, normalized_solution) {
+            return Ok(match error {
+                UnificationError::NormalizationFault => {
+                    Transition::Stop(StopReason::NormalizationFault)
+                }
+                _ => Transition::Reject,
+            });
         }
         let resumed_root = branch.root_goal.fold_with(self.db, &mut branch.table);
         let resumed_assumptions = rebase.assumptions().fold_with(self.db, &mut branch.table);
@@ -675,17 +886,21 @@ fn map_completion(completion: Completion<StopReason>) -> TraitSolveCompletion {
         Completion::Adapter(StopReason::TargetFound) => {
             unreachable!("ordinary trait solving never installs a target")
         }
+        Completion::Adapter(StopReason::NormalizationFault) => {
+            unreachable!("normalization faults are handled before completion mapping")
+        }
     }
 }
 
 pub(super) fn solve<'db>(
     db: &'db dyn HirAnalysisDb,
-    origin_ingot: crate::Ingot<'db>,
+    use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
 ) -> GoalSatisfiability<'db> {
-    let mut root_table = PersistentUnificationTable::new(db);
+    let _proof_search = super::enter_proof_search();
+    let mut root_table = PersistentUnificationTable::new_proof(db);
     let root_goal = query.extract_identity(&mut root_table);
-    let mut context = TraitResolutionContext::new(db, origin_ingot, root_goal, None);
+    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, None);
     let mut observer = UnresolvedGoalObserver::default();
     let config = Config {
         limits: Limits {
@@ -710,6 +925,12 @@ pub(super) fn solve<'db>(
     };
     let root = report.root;
     let solutions: IndexSet<_> = report.answers.into_iter().collect();
+    if matches!(
+        report.completion,
+        Completion::Adapter(StopReason::NormalizationFault)
+    ) {
+        return GoalSatisfiability::NormalizationFault;
+    }
     let completion = map_completion(report.completion);
 
     match (completion, solutions.len()) {
@@ -728,13 +949,14 @@ pub(super) fn solve<'db>(
 
 pub(super) fn has_solution<'db>(
     db: &'db dyn HirAnalysisDb,
-    origin_ingot: crate::Ingot<'db>,
+    use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
     target: Canonical<TraitInstId<'db>>,
     relation: TargetSolutionMatch,
     selected_candidate: Option<ImplementorId<'db>>,
-) -> TargetSolutionStatus {
-    let mut root_table = PersistentUnificationTable::new(db);
+) -> TargetSearchResult<'db> {
+    let _proof_search = super::enter_proof_search();
+    let mut root_table = PersistentUnificationTable::new_proof(db);
     let root_goal = query.extract_identity(&mut root_table);
     let root_key = Query {
         query,
@@ -745,7 +967,7 @@ pub(super) fn has_solution<'db>(
         inst: target,
         relation,
     };
-    let mut context = TraitResolutionContext::new(db, origin_ingot, root_goal, Some(target));
+    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, Some(target));
     let options = ReportOptions::default().with_answerless(AnswerlessMode::Omit);
     // A target can occur after a non-regular recursive clause. Fair scheduling
     // keeps that branch from starving later root clauses before the type-depth
@@ -767,33 +989,86 @@ pub(super) fn has_solution<'db>(
         Err(never) => match never {},
     };
     match report.completion {
-        Completion::Adapter(StopReason::TargetFound) => TargetSolutionStatus::Found,
-        Completion::Saturated => TargetSolutionStatus::NotFound,
+        Completion::Adapter(StopReason::TargetFound) => TargetSearchResult {
+            status: TargetSolutionStatus::Found,
+            impl_conditions: context.found_target_conditions.get(),
+        },
+        Completion::Adapter(StopReason::NormalizationFault) => {
+            TargetSearchResult::without_conditions(TargetSolutionStatus::NormalizationFault)
+        }
+        Completion::Saturated => {
+            TargetSearchResult::without_conditions(TargetSolutionStatus::NotFound)
+        }
         Completion::RootAnswerLimit { .. }
         | Completion::StepLimit { .. }
         | Completion::TableLimit { .. }
         | Completion::PendingWorkLimit { .. }
-        | Completion::Adapter(StopReason::MaximumTypeDepth) => TargetSolutionStatus::Incomplete,
+        | Completion::Adapter(StopReason::MaximumTypeDepth) => {
+            TargetSearchResult::without_conditions(TargetSolutionStatus::Incomplete)
+        }
     }
 }
 
 #[salsa::tracked]
 pub(crate) fn ty_depth_impl<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> usize {
-    match ty.data(db) {
-        TyData::ConstTy(cty) => ty_depth_impl(db, cty.ty(db)),
-        TyData::Invalid(_)
-        | TyData::Never
-        | TyData::TyBase(_)
-        | TyData::TyParam(_)
-        | TyData::AssocTy { .. }
-        | TyData::TyVar(_) => 1,
-        TyData::QualifiedTy(trait_inst) => ty_depth_impl(db, trait_inst.self_ty(db)) + 1,
-        TyData::TyApp(lhs, rhs) => {
-            let lhs_depth = ty_depth_impl(db, *lhs);
-            let rhs_depth = ty_depth_impl(db, *rhs);
-            std::cmp::max(lhs_depth, rhs_depth) + 1
+    enum Task<'db> {
+        Visit(TyId<'db>),
+        Finish(TyId<'db>, Vec<TyId<'db>>, usize),
+    }
+
+    let mut pending = vec![Task::Visit(ty)];
+    let mut active = FxHashSet::default();
+    let mut depths = FxHashMap::default();
+    while let Some(task) = pending.pop() {
+        match task {
+            Task::Visit(ty) => {
+                if depths.contains_key(&ty) {
+                    continue;
+                }
+                if !active.insert(ty) {
+                    // Interned type graphs should be acyclic. If one is not,
+                    // refuse to establish a finite growth bound.
+                    return usize::MAX;
+                }
+                let (children, cost) = match ty.data(db) {
+                    TyData::TypeFamily { args, body, .. } => (
+                        args.iter().copied().chain(std::iter::once(*body)).collect(),
+                        1,
+                    ),
+                    TyData::ConstTy(cty) => (vec![cty.ty(db)], 0),
+                    TyData::ConstraintTerm(goal) => (
+                        goal.args(db)
+                            .iter()
+                            .chain(goal.assoc_type_bindings(db).values())
+                            .copied()
+                            .collect(),
+                        1,
+                    ),
+                    TyData::QualifiedTy(trait_inst) => (vec![trait_inst.self_ty(db)], 1),
+                    TyData::TyApp(lhs, rhs) => (vec![*lhs, *rhs], 1),
+                    TyData::Invalid(_)
+                    | TyData::Never
+                    | TyData::TyBase(_)
+                    | TyData::TyParam(_)
+                    | TyData::AssocTy { .. }
+                    | TyData::TyVar(_) => (Vec::new(), 1),
+                };
+                pending.push(Task::Finish(ty, children.clone(), cost));
+                pending.extend(children.into_iter().rev().map(Task::Visit));
+            }
+            Task::Finish(ty, children, cost) => {
+                let depth = children
+                    .iter()
+                    .map(|child| depths[child])
+                    .max()
+                    .unwrap_or(0usize)
+                    .saturating_add(cost);
+                depths.insert(ty, depth);
+                active.remove(&ty);
+            }
         }
     }
+    depths[&ty]
 }
 
 fn maximum_ty_depth<'db, V>(db: &'db dyn HirAnalysisDb, value: V) -> usize

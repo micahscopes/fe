@@ -1,0 +1,7 @@
+trait Value { fn value(own self) -> u256 }
+struct Wrapped<const N: usize> { value: u256 }
+impl<const N: usize> Value for Wrapped<N> where N > 0 {
+    fn value(own self) -> u256 { self.value }
+}
+fn helper<T: Value>(_ value: own T) -> u256 { value.value() }
+fn consume() -> u256 { helper(Wrapped<7> { value: 41 }) }

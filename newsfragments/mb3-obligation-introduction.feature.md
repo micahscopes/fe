@@ -1,0 +1,3 @@
+Add `core::obligations::Evidence<G>` and `prove<G>()` for concrete trait goals. Ordinary Fe const functions can introduce and forward opaque compiler-issued evidence retaining the selected implementation, complete goal and proving context. Introduction checks implementation prerequisites and associated bindings even in unused functions and untaken branches.
+
+Explicit `with (evidence)` consumption supplies the trait premise within its lexical scope. Supported nullary const-method calls retain the selected implementation, revalidate its proof and method requirements, and check the result against the evidence's associated-type binding. Implicit forwarding through generic bounds, inherited-trait selection transport and runtime opening remain unsupported.

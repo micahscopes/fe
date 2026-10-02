@@ -1,0 +1,11 @@
+use core::obligations::prove
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject { const fn compute() -> u256 { 1 } }
+impl Compute for Subject as Alt { const fn compute() -> u256 { 10 } }
+const fn helper<T: Compute>() -> u256 { T::compute() }
+const fn two() -> u256 {
+    let e = prove<Compute<Subject>>()
+    with (Alt, e) { <Subject as Compute>::compute() * 100 + helper<Subject>() }
+}

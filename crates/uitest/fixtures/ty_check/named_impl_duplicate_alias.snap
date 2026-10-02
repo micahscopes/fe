@@ -1,0 +1,14 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/named_impl_duplicate_alias.fe
+---
+error[5-0001]: conflicting trait implementations
+   ┌─ named_impl_duplicate_alias.fe:7:18
+   │
+ 7 │ impl Compute for Subject as Choice {
+   │                  ^^^^^^^ this trait implementation
+   ·
+10 │ impl Compute for Subject as Choice {
+   │                  ------- conflicts with this trait implementation

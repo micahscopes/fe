@@ -28,6 +28,19 @@ pub enum PathResDiag<'db> {
         receiver: Either<TyId<'db>, TraitInstId<'db>>,
     },
 
+    NamedImplementationRequired {
+        primary: DynLazySpan<'db>,
+        member: IdentId<'db>,
+        selection: IdentId<'db>,
+        defined_at: DynLazySpan<'db>,
+    },
+
+    NamedImplementationChoiceRequired {
+        primary: DynLazySpan<'db>,
+        member: IdentId<'db>,
+        choices: Vec<(IdentId<'db>, DynLazySpan<'db>)>,
+    },
+
     /// The resolved name is not visible.
     Invisible(DynLazySpan<'db>, IdentId<'db>, Option<DynLazySpan<'db>>),
 
@@ -94,6 +107,10 @@ pub enum PathResDiag<'db> {
         span: DynLazySpan<'db>,
         ident: IdentId<'db>,
     },
+    AssociatedFamilyBinding {
+        span: DynLazySpan<'db>,
+        name: IdentId<'db>,
+    },
 
     // Method selection related diagnostics
     TypeMustBeKnown(DynLazySpan<'db>),
@@ -124,6 +141,8 @@ impl<'db> PathResDiag<'db> {
                 .unwrap(),
             Self::NotFound(span, _) => span.top_mod(db).unwrap(),
             Self::MethodNotFound { primary, .. } => primary.top_mod(db).unwrap(),
+            Self::NamedImplementationRequired { primary, .. } => primary.top_mod(db).unwrap(),
+            Self::NamedImplementationChoiceRequired { primary, .. } => primary.top_mod(db).unwrap(),
             Self::Invisible(span, _, _) => span.top_mod(db).unwrap(),
             Self::Ambiguous(span, _, _) => span.top_mod(db).unwrap(),
             Self::AmbiguousAssociatedType { span, .. } => span.top_mod(db).unwrap(),
@@ -135,6 +154,7 @@ impl<'db> PathResDiag<'db> {
             Self::ArgKindMismatch { span, .. } => span.top_mod(db).unwrap(),
             Self::ArgTypeMismatch { span, .. } => span.top_mod(db).unwrap(),
             Self::TraitConstHoleArg { span, .. } => span.top_mod(db).unwrap(),
+            Self::AssociatedFamilyBinding { span, .. } => span.top_mod(db).unwrap(),
             Self::TypeMustBeKnown(span) => span.top_mod(db).unwrap(),
             Self::AmbiguousInherentMethod { primary, .. } => primary.top_mod(db).unwrap(),
             Self::AmbiguousTrait { primary, .. } => primary.top_mod(db).unwrap(),
@@ -177,10 +197,13 @@ impl<'db> PathResDiag<'db> {
             Self::AmbiguousAssociatedType { .. } => 9,
             Self::AmbiguousAssociatedConst { .. } => 18,
             Self::MethodNotFound { .. } => 10,
+            Self::NamedImplementationRequired { .. } => 22,
+            Self::NamedImplementationChoiceRequired { .. } => 22,
             Self::ArgNumMismatch { .. } => 11,
             Self::ArgKindMismatch { .. } => 12,
             Self::ArgTypeMismatch { .. } => 13,
             Self::TraitConstHoleArg { .. } => 19,
+            Self::AssociatedFamilyBinding { .. } => 21,
             Self::TypeMustBeKnown(..) => 14,
             Self::AmbiguousInherentMethod { .. } => 15,
             Self::AmbiguousTrait { .. } => 16,

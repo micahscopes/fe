@@ -1,0 +1,12 @@
+struct Node<T> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Tree<{N - 1}>>
+    }
+}
+trait Assoc { type Out }
+struct Subject<const N: usize> {}
+impl<const N: usize> Assoc for Subject<N> { type Out = Tree<N> }
+fn consume<T: Assoc<Out = bool>>(_value: T) {}
+fn trigger() { consume(_value: Subject<4096> {}) }

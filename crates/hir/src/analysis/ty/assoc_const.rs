@@ -8,7 +8,7 @@ use super::{
     visitor::{TyVisitable, TyVisitor},
 };
 use crate::{
-    analysis::HirAnalysisDb,
+    analysis::{HirAnalysisDb, semantic::SelectedApplication},
     hir_def::{IdentId, Impl, scope_graph::ScopeId},
 };
 
@@ -18,6 +18,7 @@ pub struct AssocConstUse<'db> {
     assumptions: PredicateListId<'db>,
     inst: TraitInstId<'db>,
     name: IdentId<'db>,
+    selection: Option<SelectedApplication<'db>>,
 }
 
 impl<'db> AssocConstUse<'db> {
@@ -32,6 +33,7 @@ impl<'db> AssocConstUse<'db> {
             assumptions,
             inst,
             name,
+            selection: None,
         }
     }
 
@@ -63,6 +65,14 @@ impl<'db> AssocConstUse<'db> {
         self.name
     }
 
+    pub(crate) fn selection(self) -> Option<SelectedApplication<'db>> {
+        self.selection
+    }
+
+    pub(crate) fn with_selection(self, selection: Option<SelectedApplication<'db>>) -> Self {
+        Self { selection, ..self }
+    }
+
     pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
         TraitSolveCx::new(db, self.origin_scope).with_assumptions(self.assumptions)
     }
@@ -75,6 +85,9 @@ impl<'db> TyVisitable<'db> for AssocConstUse<'db> {
     {
         self.assumptions.visit_with(visitor);
         self.inst.visit_with(visitor);
+        if let Some(selection) = self.selection {
+            selection.visit_with(visitor);
+        }
     }
 }
 
@@ -88,6 +101,9 @@ impl<'db> TyFoldable<'db> for AssocConstUse<'db> {
             assumptions: self.assumptions.fold_with(db, folder),
             inst: self.inst.fold_with(db, folder),
             name: self.name,
+            selection: self
+                .selection
+                .map(|selection| selection.fold_with(db, folder)),
         }
     }
 }

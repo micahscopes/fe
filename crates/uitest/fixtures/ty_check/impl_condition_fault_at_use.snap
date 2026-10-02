@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/impl_condition_fault_at_use.fe
+---
+error[8-0093]: const requirement is not satisfied
+  ┌─ impl_condition_fault_at_use.fe:9:24
+  │
+5 │ impl<const N: usize> Value for Wrapped<N> where 1 / (N - 1) == 0 {
+  │                                                 ---------------- required by this predicate
+  ·
+9 │ fn consume() -> u256 { Wrapped<1> { value: 41 }.value() }
+  │                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ constant evaluation encountered division by zero

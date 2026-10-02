@@ -24,7 +24,8 @@ use crate::analysis::{
         normalize::{normalize_ty, normalize_with_trait_evidence},
         trait_def::TraitInstId,
         trait_resolution::{
-            TraitSolveCx, check_trait_inst_wf, constraint::collect_func_decl_constraints,
+            GoalSatisfiability, PredicateListId, TraitSolveCx, check_trait_inst_wf,
+            constraint::collect_func_decl_constraints, is_goal_satisfiable,
         },
         ty_def::{BorrowKind, CapabilityKind},
         ty_def::{InvalidCause, TyBase, TyData, TyFlags, TyId},
@@ -273,6 +274,10 @@ pub struct Callable<'db> {
     /// The originating trait instance if this callable comes from a trait method
     /// (e.g., operator overloading, method call, indexing). None for inherent functions.
     pub trait_inst: Option<TraitInstId<'db>>,
+    /// Open evidence values needed by this call's trait requirements, including
+    /// direct trait calls. CTFE revalidates their selected applications.
+    pub opened_provisions: Vec<(ExprId, TraitInstId<'db>)>,
+    pub selected_applications: Vec<crate::analysis::semantic::SelectedApplication<'db>>,
 }
 
 impl<'db> TyVisitable<'db> for Callable<'db> {
@@ -281,9 +286,13 @@ impl<'db> TyVisitable<'db> for Callable<'db> {
         V: TyVisitor<'db> + ?Sized,
     {
         self.generic_args.visit_with(visitor);
+        self.selected_applications.visit_with(visitor);
         self.effect_providers.visit_with(visitor);
         if let Some(inputs) = &self.checked_input_tys {
             inputs.visit_with(visitor);
+        }
+        for (_, goal) in &self.opened_provisions {
+            goal.visit_with(visitor);
         }
         if let Some(inst) = self.trait_inst {
             inst.visit_with(visitor);
@@ -298,6 +307,7 @@ impl<'db> TyFoldable<'db> for Callable<'db> {
     {
         Self {
             callable_def: self.callable_def,
+            selected_applications: self.selected_applications.fold_with(db, folder),
             base_ty: self.base_ty,
             generic_args: self.generic_args.fold_with(db, folder),
             effect_providers: self.effect_providers.fold_with(db, folder),
@@ -305,11 +315,54 @@ impl<'db> TyFoldable<'db> for Callable<'db> {
                 .checked_input_tys
                 .map(|inputs| inputs.fold_with(db, folder)),
             trait_inst: self.trait_inst.map(|i| i.fold_with(db, folder)),
+            opened_provisions: self
+                .opened_provisions
+                .into_iter()
+                .map(|(value, goal)| (value, goal.fold_with(db, folder)))
+                .collect(),
         }
     }
 }
 
 impl<'db> Callable<'db> {
+    pub(crate) fn opened_obligation(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<(ExprId, TraitInstId<'db>)> {
+        let goal = self.trait_inst?;
+        self.opened_provisions
+            .iter()
+            .rev()
+            .copied()
+            .find(|(_, opened)| {
+                opened.def(db) == goal.def(db)
+                    && opened.args(db) == goal.args(db)
+                    && goal
+                        .assoc_type_bindings(db)
+                        .iter()
+                        .all(|(name, ty)| opened.assoc_type_bindings(db).get(name) == Some(ty))
+            })
+    }
+
+    pub(crate) fn selection_requirements(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> PredicateListId<'db> {
+        let declared = collect_func_decl_constraints(db, self.callable_def, true)
+            .instantiate(db, &self.generic_args);
+        // A method's enclosing trait also contributes inherited requirements.
+        PredicateListId::new(
+            db,
+            declared
+                .list(db)
+                .iter()
+                .copied()
+                .chain(self.trait_inst)
+                .collect::<Vec<_>>(),
+        )
+        .extend_all_bounds(db)
+    }
+
     pub fn callable_def(&self) -> CallableDef<'db> {
         self.callable_def
     }
@@ -361,6 +414,8 @@ impl<'db> Callable<'db> {
             effect_providers: Vec::new(),
             checked_input_tys: None,
             trait_inst,
+            opened_provisions: Vec::new(),
+            selected_applications: Vec::new(),
         })
     }
 
@@ -378,6 +433,8 @@ impl<'db> Callable<'db> {
             effect_providers: Vec::new(),
             checked_input_tys: None,
             trait_inst,
+            opened_provisions: Vec::new(),
+            selected_applications: Vec::new(),
         }
     }
 
@@ -481,6 +538,19 @@ impl<'db> Callable<'db> {
             anchor,
             CallGenericArgPhase::Check,
             |tc, idx, given, current| {
+                if given.has_invalid(tc.db) {
+                    for diag in crate::analysis::ty::ty_error::collect_generic_arg_errors(
+                        tc.db,
+                        tc.env.scope(),
+                        &args.data(tc.db)[idx],
+                        span.clone().arg(idx),
+                        tc.env.assumptions(),
+                    ) {
+                        tc.push_diag(diag);
+                    }
+                }
+                tc.env
+                    .register_type_formation(given, span.clone().arg(idx).into());
                 *current = tc.equate_ty(given, *current, span.clone().arg(idx).into());
                 true
             },
@@ -1061,6 +1131,28 @@ impl<'db> Callable<'db> {
     ) -> bool {
         let mut progressed = false;
         let db = tc.db;
+        if tc.env.opened_obligations().next().is_some()
+            && let Some(target) = self.trait_inst
+        {
+            let target = tc.normalize_trait_goal(target);
+            let directly_opened = tc.env.opened_for_goal(target).is_some();
+            if !directly_opened
+                && !matches!(
+                    is_goal_satisfiable(
+                        db,
+                        TraitSolveCx::new(db, tc.env.scope())
+                            .with_assumptions(tc.env.base_assumptions()),
+                        target
+                    ),
+                    GoalSatisfiability::Satisfied(_)
+                )
+            {
+                tc.push_diag(BodyDiag::ObligationOpening {
+                    primary: span.clone(),
+                    reason: "open evidence for the called trait explicitly; derived selection transport is not yet supported",
+                });
+            }
+        }
         let constraints = collect_func_decl_constraints(db, self.callable_def, true);
         let declared = constraints.instantiate_identity();
         let instantiated = constraints.instantiate(db, &self.generic_args);
@@ -1092,6 +1184,8 @@ impl<'db> Callable<'db> {
             }
 
             let obligation = super::env::TraitObligation {
+                selected_applications: tc.env.selected_applications(),
+                assumptions: tc.env.assumptions(),
                 goal: constraint,
                 origin: super::env::TraitObligationOrigin::CallConstraint {
                     call_expr,

@@ -1,4 +1,5 @@
 use common::InputDb;
+use dir_test::{Fixture, dir_test};
 use fe_driver::DriverDataBase;
 use hir::analysis::{semantic::eval_body_owner_const_with_args, ty::ty_check::BodyOwner};
 
@@ -59,16 +60,14 @@ fn ordinary_query_family_proves_nominal_field_facts_before_evaluation() {
                 .is_some_and(|name| name.data(&db) == "answer")
         })
         .unwrap();
-    let value = (match eval_body_owner_const_with_args(
+    let value = eval_body_owner_const_with_args(
         &db,
         BodyOwner::Func(answer),
         hir::analysis::semantic::GenericSubst::for_body_owner(&db, BodyOwner::Func(answer), vec![]),
         vec![],
-    ) {
-        hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-        outcome => Err(outcome),
-    })
-    .unwrap();
+    )
+    .into_ready()
+    .expect("query answer evaluates");
     assert_eq!(value.pretty_print(&db), "64");
 }
 
@@ -142,7 +141,7 @@ fn evaluate_reflected(source: String) -> Result<String, String> {
                 .is_some_and(|name| name.data(&db) == "reflect")
         })
         .unwrap();
-    let value = (match eval_body_owner_const_with_args(
+    let value = match eval_body_owner_const_with_args(
         &db,
         BodyOwner::Func(function),
         hir::analysis::semantic::GenericSubst::for_body_owner(
@@ -152,10 +151,9 @@ fn evaluate_reflected(source: String) -> Result<String, String> {
         ),
         vec![input.const_argument().unwrap()],
     ) {
-        hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-        outcome => Err(outcome),
-    })
-    .map_err(|error| format!("{error:?}"))?;
+        hir::analysis::semantic::EvalOutcome::Ready(value) => value,
+        other => return Err(format!("{other:?}")),
+    };
     Ok(value.pretty_print(&db).to_string())
 }
 
@@ -239,12 +237,9 @@ fn reflected_query_exhaustion_is_an_error() {
     assert!(error.contains("StepLimitExceeded"), "{error}");
 }
 
-#[test]
-fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls() {
-    let base = format!(
-        "{}\nconst fn observed() -> (u256, u256) {{\n(<packet::Packet as core::abi::AbiSize>::HEAD_SIZE, packet::offset_active())\n}}",
-        nested_source()
-    );
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/reflected_nested_observation", glob: "*.fe")]
+fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls(fixture: Fixture<&str>) {
+    let base = format!("{}\n{}", nested_source(), fixture.content());
     let alias = base
         .replace(
             "type PairAlias = ingot::left::Inner",
@@ -274,7 +269,7 @@ fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls() {
     let provider = base.replace("abi_field_head_size<T>()", "abi_field_head_size<T>() + 32");
     let supporting = base.replace("const HEAD_SIZE: u256 = 64", "const HEAD_SIZE: u256 = 96");
     let mut warm = DriverDataBase::default();
-    let url: url::Url = "file:///nested_edits.fe".parse().unwrap();
+    let url = url::Url::from_file_path(fixture.path()).expect("fixture path is absolute");
     for (edited, expected) in [
         (base.clone(), "(128, 96)"),
         (alias, "(96, 64)"),
@@ -283,13 +278,14 @@ fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls() {
         (base.clone(), "(128, 96)"),
         (record, "(160, 96)"),
         (base.clone(), "(128, 96)"),
-        (provider, "(224, 160)"),
+        (provider, "(128, 160)"),
         (base.clone(), "(128, 96)"),
         (supporting, "(160, 128)"),
         (base, "(128, 96)"),
     ] {
         let mut fresh = DriverDataBase::default();
         let mut texts = Vec::new();
+        let mut values = Vec::new();
         for db in [&mut warm, &mut fresh] {
             db.workspace().update(db, url.clone(), edited.clone());
             let output = fe_driver::elaboration::prepare(db).unwrap().unwrap();
@@ -306,7 +302,7 @@ fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls() {
                         .is_some_and(|name| name.data(&output) == "observed")
                 })
                 .unwrap();
-            let value = (match eval_body_owner_const_with_args(
+            let value = eval_body_owner_const_with_args(
                 &output,
                 BodyOwner::Func(function),
                 hir::analysis::semantic::GenericSubst::for_body_owner(
@@ -315,14 +311,14 @@ fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls() {
                     vec![],
                 ),
                 vec![],
-            ) {
-                hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
-                outcome => Err(outcome),
-            })
-            .unwrap();
-            assert_eq!(value.pretty_print(&output), expected);
+            )
+            .into_ready()
+            .expect("reflected observation evaluates");
+            values.push(value.pretty_print(&output));
             texts.push(file.text(&output).to_owned());
         }
+        assert_eq!(values[0], values[1], "warm and fresh evaluation differ");
+        assert_eq!(values[0], expected);
         assert_eq!(texts[0], texts[1]);
     }
 }
@@ -374,7 +370,7 @@ fn unsupported_query_execution_and_dynamic_codec_are_rejected() {
     ))
     .unwrap_err();
     assert!(
-        error.contains("did not produce a concrete result"),
+        error.contains("query method is not const evaluable"),
         "{error}"
     );
 

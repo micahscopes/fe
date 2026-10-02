@@ -494,9 +494,17 @@ impl TraitRef {
 
 ast_node! {
     pub struct KindBound,
-     SK::KindBoundAbs | SK::KindBoundMono
+     SK::KindBoundAbs | SK::KindBoundMono | SK::KindBoundNamed
 }
 impl KindBound {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        if self.syntax().kind() == SK::KindBoundNamed {
+            support::token(self.syntax(), SK::Ident)
+        } else {
+            None
+        }
+    }
+
     pub fn mono(&self) -> Option<KindBoundMono> {
         match self.syntax().kind() {
             SK::KindBoundMono => Some(KindBoundMono::cast(self.syntax().clone()).unwrap()),

@@ -1,0 +1,11 @@
+struct Node<T> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N { 0 => bool
+        _ => Node<Tree<{N - 1}>> }
+}
+
+trait Mark { fn value() -> u256 }
+impl Mark for Tree<1> { fn value() -> u256 { 11 } }
+impl Mark for Node<bool> { fn value() -> u256 { 22 } }
+fn take<T: Mark>() -> u256 { T::value() }
+fn caller() -> u256 { take<Node<bool>>() }

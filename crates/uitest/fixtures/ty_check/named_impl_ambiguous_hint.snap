@@ -1,0 +1,18 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/named_impl_ambiguous_hint.fe
+---
+error[2-0022]: `compute` requires a named implementation choice
+  ┌─ named_impl_ambiguous_hint.fe:9:40
+  │
+3 │ impl Compute for Subject as First {
+  │                             ----- `First` is defined here
+  ·
+6 │ impl Compute for Subject as Second {
+  │                             ------ `Second` is defined here
+  ·
+9 │ const fn ordinary() -> u256 { Subject::compute() }
+  │                                        ^^^^^^^ `compute` is not available through ordinary lookup
+  │
+  = hint: select one with `with (First) { ... }` or `with (Second) { ... }`; its prerequisites are checked when selected

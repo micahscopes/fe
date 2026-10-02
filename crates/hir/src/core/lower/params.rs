@@ -285,7 +285,10 @@ impl<'db> TypeBound<'db> {
 }
 
 impl KindBound {
-    fn lower_ast_opt(_ctxt: &mut FileLowerCtxt<'_>, ast: Option<ast::KindBound>) -> Partial<Self> {
+    pub(super) fn lower_ast_opt(
+        _ctxt: &mut FileLowerCtxt<'_>,
+        ast: Option<ast::KindBound>,
+    ) -> Partial<Self> {
         let Some(ast) = ast else {
             return Partial::Absent;
         };
@@ -302,6 +305,8 @@ impl KindBound {
                 .into();
 
             Partial::Present(KindBound::Abs(lhs, rhs))
+        } else if let Some(name) = ast.name() {
+            Partial::Present(KindBound::Named(name.text().to_string()))
         } else if ast.mono().is_some() {
             Partial::Present(KindBound::Mono)
         } else {

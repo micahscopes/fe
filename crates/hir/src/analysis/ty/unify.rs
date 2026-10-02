@@ -16,7 +16,9 @@ use super::{
 };
 use crate::analysis::{
     HirAnalysisDb,
-    ty::const_ty::{ConstTyData, normalize_const_tys_for_comparison},
+    ty::const_ty::{
+        ConstTyData, normalize_const_tys_for_comparison, normalize_const_tys_for_comparison_checked,
+    },
 };
 
 pub(crate) type UnificationTable<'db> = UnificationTableBase<'db, InPlace<InferenceKey<'db>>>;
@@ -37,6 +39,7 @@ pub type UnificationResult = Result<(), UnificationError>;
 pub enum UnificationError {
     OccursCheckFailed,
     TypeMismatch,
+    NormalizationFault,
 }
 
 pub trait UnificationStore<'db>:
@@ -63,6 +66,7 @@ where
 {
     pub db: &'db dyn HirAnalysisDb,
     table: ena::unify::UnificationTable<U>,
+    proof_mode: bool,
 }
 
 impl<'db, U> UnificationTableBase<'db, U>
@@ -73,6 +77,14 @@ where
         Self {
             db,
             table: ena::unify::UnificationTable::new(),
+            proof_mode: false,
+        }
+    }
+
+    pub(crate) fn new_proof(db: &'db dyn HirAnalysisDb) -> Self {
+        Self {
+            proof_mode: true,
+            ..Self::new(db)
         }
     }
 
@@ -119,6 +131,11 @@ where
     /// refer to `unify`[Self::unify] if you need to roll back the table
     /// automatically when unification fails.
     fn unify_ty(&mut self, ty1: TyId<'db>, ty2: TyId<'db>) -> UnificationResult {
+        // Equality is reflexive even when a symbolic component cannot be
+        // reduced in this inference context.
+        if ty1 == ty2 {
+            return Ok(());
+        }
         if !ty1.kind(self.db).does_match(ty2.kind(self.db)) {
             return Err(UnificationError::TypeMismatch);
         }
@@ -126,12 +143,49 @@ where
         let ty1 = ty1.fold_with(self.db, self);
         let ty2 = ty2.fold_with(self.db, self);
 
+        if ty1 == ty2 {
+            return Ok(());
+        }
+
         match (ty1.data(self.db), ty2.data(self.db)) {
             (TyData::TyVar(_), TyData::TyVar(_)) => self.unify_var_var(ty1, ty2),
 
             (TyData::TyVar(var), _) => self.unify_var_value(var, ty2),
 
             (_, TyData::TyVar(var)) => self.unify_var_value(var, ty1),
+
+            (
+                TyData::TypeFamily {
+                    owner: a,
+                    args: left_args,
+                    body: left,
+                },
+                TyData::TypeFamily {
+                    owner: b,
+                    args: right_args,
+                    body: right,
+                },
+            ) if a == b && left_args.len() == right_args.len() => {
+                for (&a, &b) in left_args.iter().zip(right_args) {
+                    self.unify_ty(a, b)?;
+                }
+                self.unify_ty(*left, *right)
+            }
+            (TyData::ConstraintTerm(left), TyData::ConstraintTerm(right)) => {
+                // Equality of goal terms is stricter than directional goal matching.
+                // In particular, dropping an associated binding changes the term.
+                let left_bindings = left.assoc_type_bindings(self.db);
+                let right_bindings = right.assoc_type_bindings(self.db);
+                if left.args(self.db).len() != right.args(self.db).len()
+                    || left_bindings.len() != right_bindings.len()
+                    || left_bindings
+                        .keys()
+                        .any(|name| !right_bindings.contains_key(name))
+                {
+                    return Err(UnificationError::TypeMismatch);
+                }
+                Unifiable::unify(*left, self, *right)
+            }
 
             (TyData::TyApp(ty1_1, ty1_2), TyData::TyApp(ty2_1, ty2_2)) => {
                 self.unify_ty(*ty1_1, *ty2_1)?;
@@ -152,21 +206,20 @@ where
             | (_, TyData::Never) => Ok(()),
 
             (TyData::ConstTy(const_ty1), TyData::ConstTy(const_ty2)) => {
-                let const_ty1 = match normalize_const_tys_for_comparison(
-                    self.db,
-                    TyId::const_ty(self.db, *const_ty1),
-                )
-                .data(self.db)
-                {
+                let normalize = |const_ty| {
+                    let ty = TyId::const_ty(self.db, const_ty);
+                    if self.proof_mode {
+                        normalize_const_tys_for_comparison_checked(self.db, ty)
+                            .map_err(|()| UnificationError::NormalizationFault)
+                    } else {
+                        Ok(normalize_const_tys_for_comparison(self.db, ty))
+                    }
+                };
+                let const_ty1 = match normalize(*const_ty1)?.data(self.db) {
                     TyData::ConstTy(const_ty) => *const_ty,
                     _ => *const_ty1,
                 };
-                let const_ty2 = match normalize_const_tys_for_comparison(
-                    self.db,
-                    TyId::const_ty(self.db, *const_ty2),
-                )
-                .data(self.db)
-                {
+                let const_ty2 = match normalize(*const_ty2)?.data(self.db) {
                     TyData::ConstTy(const_ty) => *const_ty,
                     _ => *const_ty2,
                 };

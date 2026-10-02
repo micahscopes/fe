@@ -1,0 +1,6 @@
+trait A<T> {}
+
+trait RecursiveParam<T: A<Self::Item::Assoc>> {
+    type Item: RecursiveParam<T>
+    type Assoc
+}

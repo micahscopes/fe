@@ -1,0 +1,8 @@
+trait Compute { const fn compute() -> u256 }
+struct Subject<T> {}
+impl<T> Compute for Subject<T> {
+    const fn compute() -> u256 { 1 }
+}
+const fn selected<T>() -> u256 {
+    with (<Subject<T> as Compute>) { Subject<T>::compute() }
+}

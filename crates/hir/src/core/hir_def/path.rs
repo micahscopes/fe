@@ -1,5 +1,6 @@
 use super::{GenericArgListId, IdentId, TraitRefId, TypeId};
 use crate::{HirDb, hir_def::Partial};
+use common::{ingot::Ingot, stdlib::BUILTIN_CORE_BASE_URL};
 
 #[salsa::interned]
 #[derive(Debug)]
@@ -13,6 +14,11 @@ pub enum PathKind<'db> {
     Ident {
         ident: Partial<IdentId<'db>>,
         generic_args: GenericArgListId<'db>,
+    },
+    /// A generated path root captured to an ingot before output-scope lookup.
+    BoundIngot {
+        ingot: Ingot<'db>,
+        display: IdentId<'db>,
     },
     QualifiedType {
         type_: TypeId<'db>,
@@ -83,6 +89,7 @@ impl<'db> PathId<'db> {
         } else {
             match self.kind(db) {
                 PathKind::Ident { ident, .. } => ident.to_opt(),
+                PathKind::BoundIngot { display, .. } => Some(display),
                 PathKind::QualifiedType { .. } => None,
             }
         }
@@ -145,10 +152,12 @@ impl<'db> PathId<'db> {
     pub fn is_core_lib_path(self, db: &'db dyn HirDb) -> bool {
         match self.parent(db) {
             Some(parent) => parent.is_core_lib_path(db),
-            None => self
-                .as_ident(db)
-                .map(|id| id.data(db) == "core")
-                .unwrap_or_default(),
+            None => match self.kind(db) {
+                PathKind::BoundIngot { ingot, .. } => {
+                    ingot.base(db).as_str() == BUILTIN_CORE_BASE_URL
+                }
+                _ => self.as_ident(db).is_some_and(|id| id.data(db) == "core"),
+            },
         }
     }
 
@@ -197,6 +206,7 @@ impl<'db> PathId<'db> {
     pub fn ident(self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
         match self.kind(db) {
             PathKind::Ident { ident, .. } => ident,
+            PathKind::BoundIngot { display, .. } => Partial::Present(display),
             PathKind::QualifiedType { .. } => Partial::Absent,
         }
     }
@@ -204,6 +214,7 @@ impl<'db> PathId<'db> {
     pub fn generic_args(self, db: &'db dyn HirDb) -> GenericArgListId<'db> {
         match self.kind(db) {
             PathKind::Ident { generic_args, .. } => generic_args,
+            PathKind::BoundIngot { .. } => GenericArgListId::none(db),
             PathKind::QualifiedType { .. } => GenericArgListId::none(db),
         }
     }
@@ -215,6 +226,7 @@ impl<'db> PathId<'db> {
                 ident,
                 generic_args: GenericArgListId::none(db),
             },
+            kind @ PathKind::BoundIngot { .. } => kind,
             kind @ PathKind::QualifiedType { .. } => kind,
         };
         PathId::new(db, kind, parent)
@@ -245,6 +257,7 @@ impl<'db> PathId<'db> {
                     generic_args.pretty_print(db)
                 )
             }
+            PathKind::BoundIngot { display, .. } => display.data(db).clone(),
             PathKind::QualifiedType { type_, trait_ } => {
                 format!(
                     "<{} as {}>",

@@ -3,11 +3,11 @@
 // recurring "trait const handled X, inherent const forgot X" (and vice versa)
 // drift class: if the two paths ever diverge, this snapshot changes.
 //
-// Note: the non-const-body (CTFE) check is intentionally asymmetric and so is
-// not asserted here. Inherent and top-level const bodies are CTFE-validated,
-// but trait-impl const bodies are deliberately skipped because desugared
-// `#[event]`/`#[error]` impls rely on their synthetic bodies' errors being
-// suppressed. See `inherent_const_non_const_body.fe` for the inherent case.
+// Const-language checks apply to both kinds at declaration. Execution faults
+// in ordinary associated values wait until use. Generated `#[event]` and
+// `#[error]` implementations have their own materialization checks and error
+// ownership. See `inherent_const_non_const_body.fe` for the non-const-call
+// case, which remains a declaration error even when the value is unused.
 
 trait HasConst {
     const C: u256

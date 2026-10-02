@@ -1,0 +1,14 @@
+#[fixed]
+trait Compute {
+    fn value() -> u256
+}
+
+struct Subject {}
+
+impl Compute for Subject as First {
+    fn value() -> u256 { 1 }
+}
+
+impl Compute for Subject as Second {
+    fn value() -> u256 { 2 }
+}

@@ -1,0 +1,15 @@
+trait Compute { type Output
+    const fn compute() -> Self::Output
+}
+struct Subject {}
+impl Compute for Subject as Only {
+    type Output = bool
+    const fn compute() -> bool { true }
+}
+fn target() -> Subject { Subject {} }
+const fn selected() -> bool { with (Only) { Subject::compute() } }
+
+#[test]
+fn a_named_impl_needs_explicit_selection() {
+    assert!(selected())
+}

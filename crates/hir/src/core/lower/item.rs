@@ -3,13 +3,16 @@ use salsa::Accumulator as _;
 
 use super::{
     FileLowerCtxt,
-    attr::{AttrForm, AttrRule, AttrTarget, report_unsupported_attr, validate_attr_rules},
+    attr::{
+        AttrForm, AttrRule, AttrTarget, report_unsupported_attr, validate_attr_rules,
+        validate_unknown_attrs_in_restricted_context,
+    },
 };
 use crate::{
     hir_def::{
         AttrListId, Body, BodyKind, CompBinOp, EffectParamListId, FuncParamListId,
-        GenericParamListId, IdentId, TraitRefId, TupleTypeId, TypeBound, TypeId, WhereClauseId,
-        item::*,
+        GenericParamListId, IdentId, IntegerId, KindBound, Partial, TraitRefId, TupleTypeId,
+        TypeBound, TypeId, WhereClauseId, item::*,
     },
     lower::msg::lower_msg_as_mod,
     span::HirOrigin,
@@ -108,6 +111,7 @@ const BARE_FORM: AttrForm = AttrForm::Bare;
 const ARITHMETIC_EXPECTED: &str = "`#[arithmetic(checked)]` or `#[arithmetic(unchecked)]`";
 const INLINE_EXPECTED: &str = "`#[inline]`, `#[inline(always)]`, or `#[inline(never)]`";
 const MUST_USE_EXPECTED: &str = "`#[must_use]`";
+const FIXED_EXPECTED: &str = "`#[fixed]`";
 
 const ARITHMETIC_TARGETS: &str = "functions and modules";
 const EVENT_TARGETS: &str = "structs";
@@ -116,6 +120,7 @@ const ABI_TARGETS: &str = "structs";
 const MUST_USE_TARGETS: &str = "functions, structs, and enums";
 const PAYABLE_TARGETS: &str = "init blocks and recv arms";
 const INDEXED_TARGETS: &str = "event fields";
+const FIXED_TARGETS: &str = "traits";
 
 fn target(kind: &'static str, name: Option<String>) -> AttrTarget {
     AttrTarget::new(kind, name)
@@ -135,6 +140,7 @@ fn validate_mod_attrs<'db>(
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("abi", ABI_TARGETS),
+            AttrRule::unsupported("fixed", FIXED_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
@@ -151,6 +157,7 @@ pub(super) fn validate_module_inner_attrs<'db>(
         target("module", None),
         &[
             AttrRule::supported("arithmetic", ARITHMETIC_FORM, ARITHMETIC_EXPECTED),
+            AttrRule::unsupported("fixed", FIXED_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
             AttrRule::unsupported("abi", ABI_TARGETS),
@@ -181,6 +188,7 @@ fn validate_func_attrs<'db>(
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("abi", ABI_TARGETS),
+            AttrRule::unsupported("fixed", FIXED_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
     );
@@ -200,6 +208,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported("event", BARE_FORM, "`#[event]`"),
             AttrRule::supported("error", BARE_FORM, "`#[error]`"),
             AttrRule::supported("abi", BARE_FORM, "`#[abi]`"),
+            AttrRule::unsupported("fixed", FIXED_TARGETS),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
@@ -220,6 +229,7 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("abi", ABI_TARGETS),
+            AttrRule::unsupported("fixed", FIXED_TARGETS),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
@@ -232,19 +242,45 @@ fn validate_unsupported_item_attrs<'db>(
     kind: &'static str,
     name: Option<String>,
 ) {
-    validate_attr_rules(
+    validate_plain_item_attrs(
         ctxt,
         attrs,
-        target(kind, name),
-        &[
-            AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
-            AttrRule::unsupported("event", EVENT_TARGETS),
-            AttrRule::unsupported("error", ERROR_TARGETS),
-            AttrRule::unsupported("abi", ABI_TARGETS),
-            AttrRule::unsupported("must_use", MUST_USE_TARGETS),
-            AttrRule::unsupported("payable", PAYABLE_TARGETS),
-        ],
+        kind,
+        name,
+        AttrRule::unsupported("fixed", FIXED_TARGETS),
+        None,
     );
+}
+
+fn validate_plain_item_attrs<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    attrs: Option<ast::AttrList>,
+    kind: &'static str,
+    name: Option<String>,
+    fixed_rule: AttrRule,
+    expected_unknown: Option<&'static str>,
+) {
+    let target = target(kind, name);
+    let rules = [
+        AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
+        AttrRule::unsupported("event", EVENT_TARGETS),
+        AttrRule::unsupported("error", ERROR_TARGETS),
+        AttrRule::unsupported("abi", ABI_TARGETS),
+        fixed_rule,
+        AttrRule::unsupported("must_use", MUST_USE_TARGETS),
+        AttrRule::unsupported("payable", PAYABLE_TARGETS),
+    ];
+    if let Some(expected) = expected_unknown {
+        let names = rules.iter().map(|rule| rule.name).collect::<Vec<_>>();
+        validate_unknown_attrs_in_restricted_context(
+            ctxt,
+            attrs.clone(),
+            target.clone(),
+            &names,
+            expected,
+        );
+    }
+    validate_attr_rules(ctxt, attrs, target, &rules);
 }
 
 pub(super) fn validate_for_loop_attrs<'db>(
@@ -377,16 +413,27 @@ impl<'db> ItemKind<'db> {
                 );
                 TypeAlias::lower_ast(ctxt, alias);
             }
+            ast::ItemKind::RecursiveTypeFn(def) => {
+                validate_unsupported_item_attrs(
+                    ctxt,
+                    def.attr_list(),
+                    "recursive type fn",
+                    def.name().map(|name| name.text().to_string()),
+                );
+                TypeFnDef::lower_ast(ctxt, def);
+            }
             ast::ItemKind::Impl(impl_) => {
                 validate_unsupported_item_attrs(ctxt, impl_.attr_list(), "impl", None);
                 Impl::lower_ast(ctxt, impl_);
             }
             ast::ItemKind::Trait(trait_) => {
-                validate_unsupported_item_attrs(
+                validate_plain_item_attrs(
                     ctxt,
                     trait_.attr_list(),
                     "trait",
                     trait_.name().map(|name| name.text().to_string()),
+                    AttrRule::supported("fixed", BARE_FORM, FIXED_EXPECTED),
+                    Some(FIXED_EXPECTED),
                 );
                 Trait::lower_ast(ctxt, trait_);
             }
@@ -656,6 +703,79 @@ impl<'db> TypeAlias<'db> {
     }
 }
 
+impl<'db> TypeFnDef<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::RecursiveTypeFn) -> Self {
+        let name = IdentId::lower_token_partial(ctxt, ast.name());
+        let id = ctxt.joined_id(TrackedItemVariant::TypeFn(name));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let vis = super::lower_visibility(&ast);
+        let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
+        let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
+        let ret_kind =
+            KindBound::lower_ast_opt(ctxt, ast.ret_kind().and_then(|rk| rk.kind_bound()));
+
+        let match_ = ast.body().and_then(|body| body.match_());
+        let match_subject =
+            IdentId::lower_token_partial(ctxt, match_.as_ref().and_then(|m| m.subject()));
+        let arms = match_
+            .and_then(|m| m.arms())
+            .map(|arm_list| {
+                arm_list
+                    .into_iter()
+                    .map(|arm| TypeFnArmData::lower_ast(ctxt, arm))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let origin = HirOrigin::raw(&ast);
+
+        let type_fn = Self::new(
+            ctxt.db(),
+            id,
+            name,
+            attributes,
+            vis,
+            generic_params,
+            where_clause,
+            ret_kind,
+            match_subject,
+            arms,
+            ctxt.top_mod(),
+            origin,
+        );
+        ctxt.leave_item_scope(type_fn)
+    }
+}
+
+impl<'db> TypeFnArmData<'db> {
+    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TypeFnArm) -> Self {
+        let pat = TypeFnPat::lower_ast_opt(ctxt, ast.pat());
+        let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
+        Self { pat, ty }
+    }
+}
+
+impl<'db> TypeFnPat<'db> {
+    fn lower_ast_opt(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: Option<ast::TypeFnArmPat>,
+    ) -> Partial<Self> {
+        let Some(ast) = ast else {
+            return Partial::Absent;
+        };
+
+        if let Some(tok) = ast.int_token() {
+            Partial::Present(Self::Lit(IntegerId::lower_token(ctxt, tok)))
+        } else if ast.underscore_token().is_some() {
+            Partial::Present(Self::Wild)
+        } else {
+            Partial::Absent
+        }
+    }
+}
+
 impl<'db> Impl<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Impl) -> Self {
         let idx = ctxt.next_impl_idx();
@@ -805,6 +925,7 @@ impl<'db> AssocTyDecl<'db> {
         let default = TypeId::lower_ast_partial(ctxt, ast.ty()).to_opt();
 
         AssocTyDecl {
+            generic_params: GenericParamListId::lower_ast_opt(ctxt, ast.generic_params()),
             attributes,
             name,
             bounds,
@@ -869,6 +990,7 @@ impl<'db> ImplTrait<'db> {
             id,
             trait_ref,
             ty,
+            IdentId::lower_token_partial(ctxt, ast.selection_name()).to_opt(),
             attributes,
             generic_params,
             where_clause,
@@ -885,6 +1007,7 @@ impl<'db> AssocTyDef<'db> {
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TraitTypeItem) -> Self {
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         AssocTyDef {
+            generic_params: GenericParamListId::lower_ast_opt(ctxt, ast.generic_params()),
             attributes,
             name: IdentId::lower_token_partial(ctxt, ast.name()),
             type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),

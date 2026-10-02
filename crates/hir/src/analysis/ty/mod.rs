@@ -62,6 +62,7 @@ pub mod ty_check;
 pub mod ty_def;
 pub mod ty_error;
 pub mod ty_lower;
+pub(crate) mod type_fn;
 pub mod unify;
 pub mod visitor;
 
@@ -286,6 +287,7 @@ fn walk<'db>(
                 | ItemKind::Contract(_)
                 | ItemKind::Enum(_)
                 | ItemKind::TypeAlias(_)
+                | ItemKind::TypeFn(_)
                 | ItemKind::Trait(_) => Domain::Type,
 
                 ItemKind::TopMod(_)

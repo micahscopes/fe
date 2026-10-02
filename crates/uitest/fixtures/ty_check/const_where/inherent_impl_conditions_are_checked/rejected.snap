@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/inherent_impl_conditions_are_checked/rejected.fe
+---
+error[8-0093]: const requirement is not satisfied
+  ┌─ rejected.fe:5:23
+  │
+2 │ impl<const N: usize> Window<N> where N > 0 {
+  │                                      ----- required by this predicate
+  ·
+5 │ fn answer() -> u256 { Window<0> { value: 41 }.read() }
+  │                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`

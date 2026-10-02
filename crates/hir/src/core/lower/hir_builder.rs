@@ -12,11 +12,11 @@ use crate::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
         ConstGenericArg, ConstGenericArgValue, EffectParamListId, Expr, ExprId, FieldDefListId,
         FieldIndex, Func, FuncModifiers, FuncParam, FuncParamListId, FuncParamMode, FuncParamName,
-        GenericArg, GenericArgListId, GenericParam, GenericParamListId, IdentId, ImplTrait,
-        IntegerId, ItemKind, LitKind, Mod, NormalAttr, Partial, Pat, PatId, PathId, PathKind, Stmt,
-        StmtId, Struct, TopLevelMod, TrackedItemId, TrackedItemVariant, TraitRefId, TypeBound,
-        TypeGenericArg, TypeGenericParam, TypeId, TypeKind, TypeMode, Visibility, WhereClauseId,
-        expr::CallArg,
+        GenericArg, GenericArgListId, GenericParam, GenericParamListId, GenericParamOwner, IdentId,
+        ImplTrait, IntegerId, ItemKind, LitKind, Mod, NormalAttr, Partial, Pat, PatId, PathId,
+        PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId, TrackedItemVariant, TraitRefId,
+        TypeBound, TypeGenericArg, TypeGenericParam, TypeId, TypeKind, TypeMode, Visibility,
+        WhereClauseId, WhereClauseOwner, expr::CallArg,
     },
     span::{DesugaredOrigin, HirOrigin},
 };
@@ -86,6 +86,21 @@ pub(super) struct GeneratedFunctionSpec<'db> {
     pub(super) effects: EffectParamListId<'db>,
     pub(super) ret_ty: Option<TypeId<'db>>,
     pub(super) modifiers: FuncModifiers,
+}
+
+/// Complete declaration data for a generated trait implementation.
+///
+/// The impl's parameters and requirements are part of its meaning. A caller
+/// building an impl from a checked description must supply them explicitly.
+pub(super) struct GeneratedImplSpec<'db> {
+    pub(super) trait_ref: Partial<TraitRefId<'db>>,
+    pub(super) ty: Partial<TypeId<'db>>,
+    pub(super) selection_name: Option<IdentId<'db>>,
+    pub(super) attrs: AttrListId<'db>,
+    pub(super) generic_params: GenericParamListId<'db>,
+    pub(super) where_clause: WhereClauseId<'db>,
+    pub(super) types: Vec<AssocTyDef<'db>>,
+    pub(super) consts: Vec<AssocConstDef<'db>>,
 }
 
 impl<'ctxt, 'db, O> HirBuilder<'ctxt, 'db, O>
@@ -361,6 +376,7 @@ where
 
     pub(super) fn assoc_ty(&self, name: &str, type_ref: Partial<TypeId<'db>>) -> AssocTyDef<'db> {
         AssocTyDef {
+            generic_params: GenericParamListId::new(self.db(), Vec::new()),
             attributes: self.empty_attrs(),
             name: Partial::Present(self.ident(name)),
             type_ref,
@@ -470,6 +486,210 @@ where
         self.struct_simple(name, attributes, Visibility::Public, fields)
     }
 
+    pub(super) fn new_impl_trait_complete(
+        &mut self,
+        id: TrackedItemId<'db>,
+        spec: GeneratedImplSpec<'db>,
+        origin: HirOrigin<ast::ImplTrait>,
+    ) -> ImplTrait<'db> {
+        ImplTrait::new(
+            self.db(),
+            id,
+            spec.trait_ref,
+            spec.ty,
+            spec.selection_name,
+            spec.attrs,
+            spec.generic_params,
+            spec.where_clause,
+            spec.types,
+            spec.consts,
+            self.top_mod(),
+            origin,
+        )
+    }
+
+    pub(super) fn generated_impl_with_children<E, T>(
+        &mut self,
+        build_spec: impl FnOnce(&mut Self) -> Result<(GeneratedImplSpec<'db>, T), E>,
+        build_children: impl FnOnce(&mut Self, T) -> Result<Vec<AssocConstDef<'db>>, E>,
+    ) -> Result<ImplTrait<'db>, E> {
+        let index = self.ctxt.next_impl_trait_idx();
+        let id = self.ctxt.joined_id(TrackedItemVariant::ImplTrait(index));
+        self.ctxt.enter_item_scope(id, false);
+        let (mut spec, state) = build_spec(self)?;
+        spec.consts = build_children(self, state)?;
+        let impl_trait = self.new_impl_trait_complete(id, spec, self.origin());
+        Ok(self.ctxt.leave_item_scope(impl_trait))
+    }
+
+    pub(super) fn owner_generic_params_without_defaults(
+        &self,
+        owner: Struct<'db>,
+    ) -> GenericParamListId<'db> {
+        let mut params = GenericParamOwner::Struct(owner)
+            .params_list(self.db())
+            .data(self.db())
+            .clone();
+        for param in &mut params {
+            match param {
+                GenericParam::Type(value) => value.default_ty = None,
+                GenericParam::Const(value) => value.default = None,
+            }
+        }
+        GenericParamListId::new(self.db(), params)
+    }
+
+    pub(super) fn owner_where_clause(&mut self, owner: Struct<'db>) -> WhereClauseId<'db> {
+        let db = self.db();
+        let source = WhereClauseOwner::Struct(owner).where_clause(db);
+        let mut const_predicates = Vec::new();
+        for (index, predicate) in source.const_predicates(db).iter().enumerate() {
+            // The checked nodes are reusable, but their body scope must be
+            // under the generated declaration's own generic binders.
+            let id = self
+                .ctxt
+                .joined_id(TrackedItemVariant::WhereConstPredicate(index as u32));
+            let mut body = BodyCtxt::new(self.ctxt, id);
+            body.stmts = predicate.stmts(db).clone();
+            body.exprs = predicate.exprs(db).clone();
+            body.conds = predicate.conds(db).clone();
+            body.pats = predicate.pats(db).clone();
+            body.source_map = predicate.source_map(db).clone();
+            const_predicates.push(body.build(None, predicate.expr(db), BodyKind::Anonymous));
+        }
+        let mut generated = const_predicates.into_iter();
+        let predicates = source
+            .predicates(db)
+            .iter()
+            .map(|predicate| match predicate {
+                crate::hir_def::WhereClausePredicate::Type(predicate) => {
+                    crate::hir_def::WhereClausePredicate::Type(predicate.clone())
+                }
+                crate::hir_def::WhereClausePredicate::Const(_) => {
+                    crate::hir_def::WhereClausePredicate::Const(
+                        generated.next().expect("generated predicate body"),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        WhereClauseId::new(db, predicates)
+    }
+
+    pub(super) fn generated_record_type(
+        &mut self,
+        owner: Struct<'db>,
+    ) -> Result<TypeId<'db>, String> {
+        let db = self.db();
+        let name = owner
+            .name(db)
+            .to_opt()
+            .ok_or_else(|| "authorized record name is missing".to_owned())?;
+        let params = GenericParamOwner::Struct(owner).params_list(db);
+        let mut args = Vec::new();
+        for param in params.data(db) {
+            let param_name = param
+                .name()
+                .to_opt()
+                .ok_or_else(|| "record generic parameter name is missing".to_owned())?;
+            let argument = match param {
+                GenericParam::Type(_) => GenericArg::Type(TypeGenericArg {
+                    ty: Partial::Present(TypeId::new(
+                        db,
+                        TypeKind::Path(Partial::Present(PathId::from_ident(db, param_name))),
+                    )),
+                }),
+                GenericParam::Const(_) => {
+                    self.ctxt
+                        .enter_id_namespace(TrackedItemVariant::Const(Partial::Present(
+                            param_name,
+                        )));
+                    let id = self.ctxt.joined_id(TrackedItemVariant::NamelessBody);
+                    let origin = self.origin();
+                    let mut body = BodyCtxt::new(self.ctxt, id);
+                    let expr = body.push_expr(
+                        Expr::Path(Partial::Present(PathId::from_ident(db, param_name))),
+                        origin,
+                    );
+                    let body = body.build(None, expr, BodyKind::Anonymous);
+                    self.ctxt.leave_id_namespace();
+                    GenericArg::Const(ConstGenericArg {
+                        value: ConstGenericArgValue::Expr(Partial::Present(body)),
+                    })
+                }
+            };
+            args.push(argument);
+        }
+        let path = if args.is_empty() {
+            PathId::from_ident(db, name)
+        } else {
+            PathId::new(
+                db,
+                PathKind::Ident {
+                    ident: Partial::Present(name),
+                    generic_args: GenericArgListId::given(db, args),
+                },
+                None,
+            )
+        };
+        Ok(TypeId::new(db, TypeKind::Path(Partial::Present(path))))
+    }
+
+    pub(super) fn generated_func_with_body_checked<E, T>(
+        &mut self,
+        name: IdentId<'db>,
+        build_spec: impl FnOnce(&mut Self) -> Result<(GeneratedFunctionSpec<'db>, T), E>,
+        build_body: impl FnOnce(&mut BodyBuilder<'_, 'db, O>, T) -> Result<(), E>,
+    ) -> Result<Func<'db>, E> {
+        let id = self
+            .ctxt
+            .joined_id(TrackedItemVariant::Func(Partial::Present(name)));
+        self.ctxt.enter_item_scope(id, false);
+        let (spec, state) = build_spec(self)?;
+        let roots = self.roots;
+        let origin = self.desugared.clone();
+        let mut body = BodyBuilder::new(
+            self.ctxt,
+            roots,
+            origin,
+            self.reserved.clone(),
+            TrackedItemVariant::FuncBody,
+        );
+        build_body(&mut body, state)?;
+        let body = body.finish();
+        let function = Func::new(
+            self.db(),
+            id,
+            Partial::Present(spec.name),
+            spec.attrs,
+            spec.generic_params,
+            spec.where_clause,
+            Partial::Present(spec.params),
+            spec.effects,
+            spec.ret_ty,
+            spec.modifiers,
+            Some(body),
+            self.top_mod(),
+            self.origin(),
+        );
+        Ok(self.ctxt.leave_item_scope(function))
+    }
+
+    pub(super) fn generated_body<E>(
+        &mut self,
+        id: TrackedItemVariant<'db>,
+        build_body: impl FnOnce(&mut BodyBuilder<'_, 'db, O>) -> Result<(), E>,
+    ) -> Result<Body<'db>, E> {
+        let mut body = BodyBuilder::new(
+            self.ctxt,
+            self.roots,
+            self.desugared.clone(),
+            self.reserved.clone(),
+            id,
+        );
+        build_body(&mut body)?;
+        Ok(body.finish())
+    }
+
     pub(super) fn new_impl_trait(
         &mut self,
         id: TrackedItemId<'db>,
@@ -479,23 +699,8 @@ where
         consts: Vec<AssocConstDef<'db>>,
         origin: HirOrigin<ast::ImplTrait>,
     ) -> ImplTrait<'db> {
-        let attrs = self.empty_attrs();
-        let generic_params = self.empty_generic_params();
-        let where_clause = self.empty_where_clause();
-
-        ImplTrait::new(
-            self.db(),
-            id,
-            trait_ref,
-            ty,
-            attrs,
-            generic_params,
-            where_clause,
-            types,
-            consts,
-            self.top_mod(),
-            origin,
-        )
+        let spec = self.impl_spec(trait_ref, ty, types, consts);
+        self.new_impl_trait_complete(id, spec, origin)
     }
 
     pub(super) fn impl_trait(
@@ -519,7 +724,8 @@ where
         let idx = self.ctxt.next_impl_trait_idx();
         self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
             let (types, consts) = build_assocs(this);
-            this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin())
+            let spec = this.impl_spec(trait_ref, ty, types, consts);
+            this.new_impl_trait_complete(id, spec, this.origin())
         })
     }
 
@@ -536,10 +742,30 @@ where
 
         let idx = self.ctxt.next_impl_trait_idx();
         self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
-            let impl_trait = this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin());
+            let spec = this.impl_spec(trait_ref, ty, types, consts);
+            let impl_trait = this.new_impl_trait_complete(id, spec, this.origin());
             build_children(this);
             impl_trait
         })
+    }
+
+    fn impl_spec(
+        &self,
+        trait_ref: Partial<TraitRefId<'db>>,
+        ty: Partial<TypeId<'db>>,
+        types: Vec<AssocTyDef<'db>>,
+        consts: Vec<AssocConstDef<'db>>,
+    ) -> GeneratedImplSpec<'db> {
+        GeneratedImplSpec {
+            trait_ref,
+            ty,
+            selection_name: None,
+            attrs: self.empty_attrs(),
+            generic_params: self.empty_generic_params(),
+            where_clause: self.empty_where_clause(),
+            types,
+            consts,
+        }
     }
 
     pub(super) fn func_with_body_inline_always(

@@ -1,0 +1,26 @@
+trait Compute {
+    fn compute(self) -> u256
+}
+
+struct Subject {}
+
+impl Compute for Subject as First {
+    fn compute(self) -> u256 { 1 }
+}
+
+impl Compute for Subject as Second {
+    fn compute(self) -> u256 { 2 }
+}
+
+fn ordinary(value: Subject) -> u256 { value.compute() }
+
+fn selected(value: Subject) -> u256 { with (First) { value.compute() } }
+
+struct Single {}
+
+impl Compute for Single as Only {
+    fn compute(self) -> u256 { 3 }
+}
+
+fn single(value: Single) -> u256 { value.compute() }
+fn selected_single(value: Single) -> u256 { with (Only) { value.compute() } }

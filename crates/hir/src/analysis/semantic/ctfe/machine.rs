@@ -15,14 +15,14 @@ use crate::{
             get_or_build_semantic_instance,
         },
         semantic::{
-            BlockedInfo, ConstDemandKind, ConstDependency, EvalFailure, EvalOutcome, FieldIndex,
-            PrimitiveFault, RuntimeSizeError, SConst, SEffectArgValue, SExpr, SLocalId, SOperand,
-            SPlace, SStmt, SStmtKind, STerminatorKind, SemConstId, SemConstScalar, SemConstValue,
-            SemOrigin, SemanticBody, SemanticConstRef, StructuralHandle, VariantIndex, array_const,
-            bool_const, bytes_const, consts::instantiate_const_template, enum_const,
-            execute_scalar_cast, execute_source_int_binary, execute_source_int_unary, int_const,
-            int_in_range, int_ty_shape, normalize_int_to_shape, runtime_size_bytes, sem_const_eq,
-            sem_const_from_ty, sem_const_ty, struct_const, tuple_const, unit_const,
+            BlockedInfo, CallSiteId, ConstDemandKind, ConstDependency, EvalFailure, EvalOutcome,
+            FieldIndex, PrimitiveFault, RuntimeSizeError, SConst, SEffectArgValue, SExpr, SLocalId,
+            SOperand, SPlace, SStmt, SStmtKind, STerminatorKind, SemConstId, SemConstScalar,
+            SemConstValue, SemOrigin, SemanticBody, SemanticConstRef, StructuralHandle,
+            VariantIndex, array_const, bool_const, bytes_const, consts::instantiate_const_template,
+            enum_const, execute_scalar_cast, execute_source_int_binary, execute_source_int_unary,
+            int_const, int_in_range, int_ty_shape, normalize_int_to_shape, runtime_size_bytes,
+            sem_const_eq, sem_const_from_ty, sem_const_ty, struct_const, tuple_const, unit_const,
         },
         ty::{
             const_check::const_effects_supported,
@@ -41,7 +41,7 @@ use crate::{
         },
     },
     core::hir_def::expr::LogicalBinOp,
-    hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp, attr::ArithmeticMode},
+    hir_def::{ArithBinOp, BinOp, CallableDef, CompBinOp, UnOp, attr::ArithmeticMode},
     projection::{IndexSource, Projection},
 };
 
@@ -352,7 +352,7 @@ pub(super) fn attempt_optional_const_fold<'db>(
             origin,
             message: "optional CTFE fold completed with a dependent value".into(),
         }),
-        Err(EvalStop::Blocked(info)) => FoldAttempt::NotFoldable(FoldMissReason::Dependent(info)),
+        Err(EvalStop::Blocked(info)) => FoldAttempt::NotFoldable(FoldMissReason::Dependent(*info)),
         Err(EvalStop::Failed(EvalFailure::Ctfe(CtfeError::UninitializedLocal { .. }))) => {
             FoldAttempt::NotFoldable(FoldMissReason::UnknownRuntimeInput)
         }
@@ -1035,11 +1035,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     if let Some(dependency) =
                         sem_const_dependency(self.db, value.materialize(self.db))
                     {
-                        return Err(EvalStop::Blocked(BlockedInfo::new(
+                        return Err(EvalStop::Blocked(Box::new(BlockedInfo::new(
                             ConstDemandKind::Value,
                             dependency,
                             origin,
-                        )));
+                        ))));
                     }
                 }
                 CtfeValue::Ref(_) => {
@@ -1067,6 +1067,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             let result = (|| {
                 let args = self.value_args(args, origin)?;
                 self.eval_extern_const_fn(
+                    self.frames.len() - 1,
                     instance,
                     func,
                     instance.key(self.db).typed_body(self.db).result_ty(),
@@ -1354,6 +1355,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             BodyOwner::Func(func) if !func.is_const(self.db) => {
                 Err(CtfeError::NonConstCall { origin })
             }
+            // An abstract trait method has no value to evaluate. Its empty
+            // semantic body is a lowering placeholder, not a unit result.
+            BodyOwner::Func(func) if func.body(self.db).is_none() => {
+                Err(CtfeError::NotConstEvaluable { origin })
+            }
             BodyOwner::Func(func) if !const_effects_supported(self.db, func) => {
                 Err(CtfeError::NotConstEvaluable { origin })
             }
@@ -1463,11 +1469,22 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         // Keep the large value-operation frame off recursive call paths.
         match expr {
             SExpr::Call {
+                call_site,
                 callee,
                 args,
                 effect_args,
-                ..
+                provisions,
             } => {
+                let (callee_key, opened_call) = self.call_key_with_opened_provisions(
+                    frame_idx,
+                    call_site,
+                    callee.key,
+                    &provisions,
+                    origin,
+                )?;
+                if opened_call && (!args.is_empty() || !effect_args.is_empty()) {
+                    return Err(CtfeError::NotConstEvaluable { origin }.into());
+                }
                 let mut effects = Vec::with_capacity(effect_args.len());
                 for arg in &effect_args {
                     if arg.required_mut
@@ -1510,7 +1527,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     .eval_args(frame_idx, &args, origin)?
                     .into_iter()
                     .collect::<Vec<_>>();
-                let instance = self.instance_for_key(callee.key);
+                let instance = self.instance_for_key(callee_key);
                 if !effect_args.is_empty() {
                     let BodyOwner::Func(func) = instance.key(self.db).owner(self.db) else {
                         return Err(CtfeError::NotConstEvaluable { origin }.into());
@@ -1532,7 +1549,14 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     }
                     let value_args = self.value_args(args, origin)?;
                     return self
-                        .eval_extern_const_fn(instance, func, result_ty, &value_args, origin)
+                        .eval_extern_const_fn(
+                            frame_idx,
+                            instance,
+                            func,
+                            result_ty,
+                            &value_args,
+                            origin,
+                        )
                         .map(CtfeValue::Value)
                         .map_err(Into::into);
                 }
@@ -1541,7 +1565,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 {
                     return Err(CtfeError::NonConstCall { origin }.into());
                 }
-                match self.eval_instance(instance, args, effects, origin) {
+                let result = match self.eval_instance(instance, args, effects, origin) {
                     Ok(value) => Ok(value),
                     Err(EvalStop::Blocked(mut info)) => {
                         info.trace.push(instance.key(self.db));
@@ -1554,6 +1578,22 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     }
                     .into()),
                     Err(stop) => Err(stop),
+                };
+                if opened_call {
+                    match result {
+                        Ok(CtfeValue::Value(value)) if value.ty(self.db) == result_ty => {
+                            Ok(CtfeValue::Value(value))
+                        }
+                        Ok(_) => Err(CtfeError::InvalidOperation {
+                            origin,
+                            message: "invalid evidence opening or unsupported selected method"
+                                .into(),
+                        }
+                        .into()),
+                        Err(stop) => Err(stop),
+                    }
+                } else {
+                    result
                 }
             }
             SExpr::Const(SConst::Ref(cref)) => {
@@ -1879,6 +1919,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
 
     fn eval_extern_const_fn(
         &mut self,
+        frame_idx: usize,
         instance: SemanticInstance<'db>,
         func: crate::hir_def::Func<'db>,
         result_ty: TyId<'db>,
@@ -1901,6 +1942,17 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 return self
                     .eval_structural_intrinsic(instance, operation, result_ty, args, origin);
             }
+        }
+        if func.top_mod(self.db).ingot(self.db).kind(self.db) == common::ingot::IngotKind::Core
+            && crate::analysis::ty::corelib::lib_func_matches(
+                self.db,
+                func,
+                "core::obligations::prove",
+            )
+        {
+            return Ok(
+                self.eval_evidence_introduction(frame_idx, instance, result_ty, args, origin)?
+            );
         }
         match ctfe_extern_intrinsic_kind(self.db, func) {
             Some(CtfeExternIntrinsic::AddMod) => {
@@ -1943,8 +1995,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         use crate::analysis::ty::{
             adt_def::AdtRef,
             corelib::resolve_core_trait,
-            trait_def::{TraitInstId, prove_selected_impl_evidence, resolve_trait_impl_instance},
-            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+            trait_def::{OrdinaryEvidenceError, TraitInstId, resolve_ordinary_impl_evidence},
+            trait_resolution::{PredicateListId, TraitSolveCx},
             ty_check::check_func_body,
         };
         let db = self.db;
@@ -1985,11 +2037,14 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             common::indexmap::IndexMap::<crate::hir_def::IdentId<'db>, TyId<'db>>::default(),
         );
         let context = TraitSolveCx::new(db, owner.scope());
-        let Selection::Unique(selected) = resolve_trait_impl_instance(db, context, goal) else {
-            return Err(invalid("no unique proven FieldQuery implementation").into());
-        };
-        let evidence = prove_selected_impl_evidence(db, context, selected.selected(), goal)
-            .map_err(|_| invalid("selected query prerequisites were not proved"))?;
+        let evidence = resolve_ordinary_impl_evidence(db, context, goal).map_err(|error| {
+            invalid(match error {
+                OrdinaryEvidenceError::NotUnique => "no unique proven FieldQuery implementation",
+                OrdinaryEvidenceError::PrerequisitesNotProven => {
+                    "selected query prerequisites were not proved"
+                }
+            })
+        })?;
         let method = crate::hir_def::IdentId::new(db, "evaluate".to_owned());
         let (function, generic_args) = evidence
             .nullary_const_method(method)
@@ -2024,6 +2079,141 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             return Err(invalid("query result type differs from its declared result").into());
         }
         Ok(value)
+    }
+
+    fn call_key_with_opened_provisions(
+        &mut self,
+        frame_idx: usize,
+        call_site: CallSiteId,
+        key: SemanticInstanceKey<'db>,
+        provisions: &[(SOperand, crate::analysis::ty::trait_def::TraitInstId<'db>)],
+        origin: SemOrigin<'db>,
+    ) -> Result<(SemanticInstanceKey<'db>, bool), CtfeError<'db>> {
+        use crate::analysis::ty::trait_resolution::TraitSolveCx;
+        // Direct opened calls are registered from this same provision list.
+        if provisions.is_empty() {
+            return Ok((key, false));
+        }
+        let invalid = || CtfeError::InvalidOperation {
+            origin,
+            message: "opened evidence does not prove this call's requirements".into(),
+        };
+        let db = self.db;
+        let opened_call = match call_site {
+            CallSiteId::Expr(expr) => self.frames[frame_idx]
+                .body
+                .owner
+                .key(db)
+                .typed_body(db)
+                .callable_expr(expr)
+                .and_then(|callable| {
+                    let (_, goal) = callable.opened_obligation(db)?;
+                    let CallableDef::Func(func) = callable.callable_def() else {
+                        return None;
+                    };
+                    Some((goal, func.name(db).to_opt()?))
+                }),
+            CallSiteId::ForLoopLen(_) | CallSiteId::ForLoopGet(_) => None,
+        };
+        let env = key.impl_env(db);
+        // Validate at the call site. The callee's own trait requirements
+        // cannot establish the selected application's prerequisites.
+        let caller_env = self.frames[frame_idx].body.owner.key(db).impl_env(db);
+        let destination = TraitSolveCx::new(db, caller_env.normalization_scope(db))
+            .with_assumptions(caller_env.assumptions(db));
+        let mut selections = env.selections(db).clone();
+        let mut opened_method = None;
+        for &(witness, goal) in provisions {
+            let CtfeValue::Value(value) = self.read_operand(frame_idx, witness, origin)? else {
+                return Err(invalid());
+            };
+            let SemConstValue::Structural {
+                handle: StructuralHandle::Evidence(selection),
+                ..
+            } = value.materialize(db).value(db)
+            else {
+                return Err(invalid());
+            };
+            if selection.goal() != goal || env.selection_for(db, goal).is_some() {
+                return Err(invalid());
+            }
+            let proof = selection
+                .revalidate(db, destination, goal)
+                .map_err(|_| invalid())?;
+            if opened_call.is_some_and(|(required, _)| required == goal) {
+                opened_method = Some(proof);
+            }
+            selections.push(*selection);
+        }
+        let env = env.with_selections(db, selections);
+        let key = SemanticInstanceKey::new(
+            db,
+            key.owner(db),
+            key.subst(db),
+            key.effect_providers(db),
+            env,
+        );
+        let Some((goal, method)) = opened_call else {
+            return Ok((key, false));
+        };
+        let proof = opened_method.ok_or_else(invalid)?;
+        let (func, args) = proof
+            .nullary_const_method(method)
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        let owner = BodyOwner::Func(func);
+        let key = SemanticInstanceKey::new(
+            db,
+            owner,
+            GenericSubst::complete(db, args),
+            crate::analysis::semantic::EffectProviderSubst::empty(db),
+            ImplEnv::new(db, owner.scope(), proof.context().assumptions(), vec![goal])
+                .with_selections(
+                    db,
+                    vec![crate::analysis::semantic::SelectedApplication::from_evidence(&proof)],
+                ),
+        );
+        Ok((key, true))
+    }
+
+    fn eval_evidence_introduction(
+        &mut self,
+        frame_idx: usize,
+        invocation: SemanticInstance<'db>,
+        result_ty: TyId<'db>,
+        args: &[CtfeConstValue<'db>],
+        origin: SemOrigin<'db>,
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        use crate::analysis::ty::{
+            trait_def::introduce_obligation, trait_resolution::TraitSolveCx,
+        };
+        let db = self.db;
+        let invalid = |message: &str| CtfeError::InvalidOperation {
+            origin,
+            message: format!("evidence introduction: {message}"),
+        };
+        let generic_args = invocation.key(db).subst(db).generic_args(db);
+        let [term] = generic_args else {
+            return Err(invalid("expected one concrete trait goal"));
+        };
+        if !args.is_empty() {
+            return Err(invalid("expected no value arguments"));
+        }
+        // The caller scope, rather than the intrinsic's core scope, owns lookup.
+        let scope = self.frames[frame_idx].body.template_owner.scope();
+        let context = TraitSolveCx::new(db, scope);
+        let evidence = introduce_obligation(db, context, *term).map_err(invalid)?;
+        let value = SemConstId::new(
+            db,
+            SemConstValue::Structural {
+                ty: result_ty,
+                handle: StructuralHandle::Evidence(
+                    crate::analysis::semantic::SelectedApplication::from_evidence(&evidence),
+                ),
+            },
+        );
+        let verified = VerifiedConstValueId::from_complete_execution(db, value).map_err(invalid)?;
+        Ok(CtfeConstValue::concrete(db, verified))
     }
 
     fn eval_structural_intrinsic(

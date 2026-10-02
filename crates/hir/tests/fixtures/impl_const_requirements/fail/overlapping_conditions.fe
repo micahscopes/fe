@@ -1,0 +1,4 @@
+trait Marker {}
+struct Wrapped<const N: usize> {}
+impl<const N: usize> Marker for Wrapped<N> where N > 0 {}
+impl<const N: usize> Marker for Wrapped<N> where N == 0 {}

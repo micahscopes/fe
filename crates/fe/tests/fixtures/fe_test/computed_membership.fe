@@ -1,0 +1,61 @@
+struct Par {}
+struct Pair {}
+struct Comp<A: Reduce, B: Reduce> {}
+trait Reduce { fn leaves() -> usize }
+impl Reduce for Par { fn leaves() -> usize { 1 } }
+impl Reduce for Pair { fn leaves() -> usize { 2 } }
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {
+ fn leaves() -> usize { A::leaves() * B::leaves() }
+}
+recursive type fn RPow<F: Reduce, const N: usize>() -> (*) {
+ match N { 0 => Par
+ _ => Comp<RPow<F, {N - 1}>, F> }
+}
+fn count<F: Reduce, const N: usize>() -> usize where RPow<F, N>: Reduce {
+ <RPow<F, N> as Reduce>::leaves()
+}
+
+struct Reducer<S> where S: Reduce {}
+fn admitted<F: Reduce, const N: usize>(_ value: Reducer<RPow<F, N>>) -> usize { N }
+
+type Ground0 = Par
+type Ground1 = Comp<Ground0, Pair>
+type Ground2 = Comp<Ground1, Pair>
+type Ground3 = Comp<Ground2, Pair>
+type Ground4 = Comp<Ground3, Pair>
+type Ground5 = Comp<Ground4, Pair>
+type Ground6 = Comp<Ground5, Pair>
+type Ground7 = Comp<Ground6, Pair>
+type Ground8 = Comp<Ground7, Pair>
+
+pub fn main() -> usize { count<Pair, 4>() }
+#[test]
+fn symbolic_membership_preserves_ground_execution() {
+    assert!(admitted<Pair, 2>(Reducer<RPow<Pair, 2>> {}) == 2)
+    assert!(admitted<Pair, 4>(Reducer<RPow<Pair, 4>> {}) == 4)
+    assert!(count<Pair, 2>() == 4)
+    assert!(count<Pair, 4>() == 16)
+}
+
+#[test]
+fn symbolic_membership_agrees_with_ground_shapes() {
+    assert!(admitted<Pair, 0>(Reducer<RPow<Pair, 0>> {}) == 0)
+    assert!(admitted<Pair, 1>(Reducer<RPow<Pair, 1>> {}) == 1)
+    assert!(admitted<Pair, 2>(Reducer<RPow<Pair, 2>> {}) == 2)
+    assert!(admitted<Pair, 3>(Reducer<RPow<Pair, 3>> {}) == 3)
+    assert!(admitted<Pair, 4>(Reducer<RPow<Pair, 4>> {}) == 4)
+    assert!(admitted<Pair, 5>(Reducer<RPow<Pair, 5>> {}) == 5)
+    assert!(admitted<Pair, 6>(Reducer<RPow<Pair, 6>> {}) == 6)
+    assert!(admitted<Pair, 7>(Reducer<RPow<Pair, 7>> {}) == 7)
+    assert!(admitted<Pair, 8>(Reducer<RPow<Pair, 8>> {}) == 8)
+
+    assert!(count<Pair, 0>() == <Ground0 as Reduce>::leaves())
+    assert!(count<Pair, 1>() == <Ground1 as Reduce>::leaves())
+    assert!(count<Pair, 2>() == <Ground2 as Reduce>::leaves())
+    assert!(count<Pair, 3>() == <Ground3 as Reduce>::leaves())
+    assert!(count<Pair, 4>() == <Ground4 as Reduce>::leaves())
+    assert!(count<Pair, 5>() == <Ground5 as Reduce>::leaves())
+    assert!(count<Pair, 6>() == <Ground6 as Reduce>::leaves())
+    assert!(count<Pair, 7>() == <Ground7 as Reduce>::leaves())
+    assert!(count<Pair, 8>() == <Ground8 as Reduce>::leaves())
+}

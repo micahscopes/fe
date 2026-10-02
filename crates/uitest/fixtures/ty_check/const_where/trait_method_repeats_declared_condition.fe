@@ -1,0 +1,12 @@
+trait Size {
+    const SIZE: u256
+}
+
+trait Bounded {
+    fn must_fit<T>() where T: Size, T::SIZE < 100
+}
+
+struct Checker {}
+impl Bounded for Checker {
+    fn must_fit<T>() where T: Size, T::SIZE < 100 {}
+}

@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeMemoryLayoutError {
     Overflow,
     Recursive,
@@ -92,6 +92,19 @@ impl<'db> RuntimeMemoryLayout<'db> {
             .fields
             .get(field)
             .ok_or(RuntimeMemoryLayoutError::InvalidProjection("field"))?;
+        if matches!(self.unit, RuntimeMemoryUnit::Byte) {
+            let mut offset = 0;
+            let mut size = 0u64;
+            for (index, class) in layout.fields.iter().enumerate() {
+                if index == field {
+                    offset = size;
+                }
+                size = size
+                    .checked_add(self.class_size(class)?)
+                    .ok_or(RuntimeMemoryLayoutError::Overflow)?;
+            }
+            return Ok(offset);
+        }
         self.class_sizes_sum(&layout.fields[..field], &mut FxHashSet::default())
     }
 
@@ -103,7 +116,8 @@ impl<'db> RuntimeMemoryLayout<'db> {
         if index >= layout.len {
             return Err(RuntimeMemoryLayoutError::InvalidProjection("array element"));
         }
-        self.class_size(&layout.elem)?
+        let stride = self.class_size(&layout.elem)?;
+        stride
             .checked_mul(index)
             .ok_or(RuntimeMemoryLayoutError::Overflow)
     }
@@ -115,7 +129,8 @@ impl<'db> RuntimeMemoryLayout<'db> {
         let Layout::Array(layout) = layout.data(self.db) else {
             return Err(RuntimeMemoryLayoutError::InvalidProjection("index"));
         };
-        self.class_size(&layout.elem)
+        let stride = self.class_size(&layout.elem)?;
+        Ok(stride)
     }
 
     pub fn variant_field_offset(
@@ -162,10 +177,12 @@ impl<'db> RuntimeMemoryLayout<'db> {
         }
         let size = match layout.data(self.db) {
             Layout::Struct(data) => self.class_sizes_sum(&data.fields, visiting),
-            Layout::Array(data) => self
-                .class_size_inner(&data.elem, visiting)?
-                .checked_mul(data.len)
-                .ok_or(RuntimeMemoryLayoutError::Overflow),
+            Layout::Array(data) => {
+                let stride = self.class_size_inner(&data.elem, visiting)?;
+                stride
+                    .checked_mul(data.len)
+                    .ok_or(RuntimeMemoryLayoutError::Overflow)
+            }
             Layout::Enum(data) => self
                 .scalar_size(&data.tag)
                 .checked_add(

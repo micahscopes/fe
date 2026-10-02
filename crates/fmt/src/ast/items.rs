@@ -4,7 +4,8 @@ use pretty::DocAllocator;
 
 use crate::RewriteContext;
 use parser::ast::{
-    self, ImplItemKind, ItemKind, ItemModifierOwner, TraitItemKind, prelude::AstNode,
+    self, GenericParamsOwner, ImplItemKind, ItemKind, ItemModifierOwner, TraitItemKind,
+    prelude::AstNode,
 };
 
 use super::types::{
@@ -351,6 +352,7 @@ impl ToDoc for ast::Item {
             Some(ItemKind::Contract(contract)) => contract.to_doc(ctx),
             Some(ItemKind::Enum(enum_)) => enum_.to_doc(ctx),
             Some(ItemKind::TypeAlias(type_alias)) => type_alias.to_doc(ctx),
+            Some(ItemKind::RecursiveTypeFn(def)) => def.to_doc(ctx),
             Some(ItemKind::Impl(impl_)) => impl_.to_doc(ctx),
             Some(ItemKind::Trait(trait_)) => trait_.to_doc(ctx),
             Some(ItemKind::ImplTrait(impl_trait)) => impl_trait.to_doc(ctx),
@@ -1207,6 +1209,11 @@ impl ToDoc for ast::TraitTypeItem {
         attrs
             .append(alloc.text("type "))
             .append(name)
+            .append(
+                self.generic_params()
+                    .map(|p| p.to_doc(ctx))
+                    .unwrap_or_else(|| alloc.nil()),
+            )
             .append(bounds_doc)
             .append(ty_doc)
     }
@@ -1306,6 +1313,10 @@ impl ToDoc for ast::ImplTrait {
         );
 
         let where_clause = where_doc(self, ctx);
+        let selection = self
+            .selection_name()
+            .map(|name| alloc.text(" as ").append(alloc.text(ctx.token(&name))))
+            .unwrap_or_else(|| alloc.nil());
 
         let items_doc = self.item_list().map_or_else(
             || alloc.text(" {}"),
@@ -1317,6 +1328,7 @@ impl ToDoc for ast::ImplTrait {
             .append(generics)
             .append(trait_doc)
             .append(ty_doc)
+            .append(selection)
             .append(where_clause)
             .append(items_doc)
     }
@@ -1496,6 +1508,20 @@ impl ToDoc for ast::TypeAlias {
             .append(alias)
             .append(generics)
             .append(ty_doc)
+    }
+}
+
+impl ToDoc for ast::RecursiveTypeFn {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        // Preserve the complete declaration, including comments and type arms.
+        // The ordinary item token walker does not handle the match or return kind.
+        intersperse(
+            &ctx.alloc,
+            ctx.snippet_trimmed(self)
+                .lines()
+                .map(|line| ctx.alloc.text(line.to_owned())),
+            ctx.alloc.hardline(),
+        )
     }
 }
 

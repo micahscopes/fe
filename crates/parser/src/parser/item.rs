@@ -129,6 +129,11 @@ impl super::Parse for ItemScope {
             parser.error(&error_msg);
         }
 
+        if parser.is_ident("recursive") {
+            parser.parse_cp(super::type_fn::RecursiveTypeFnScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
         parser.expect(
             &[
                 ModKw,
@@ -746,6 +751,8 @@ impl super::Parse for TraitTypeItemScope {
             parser.bump();
         }
 
+        parse_generic_params_opt(parser, false)?;
+
         if parser.current_kind() == Some(SyntaxKind::Colon) {
             parser.parse(TypeBoundListScope::new(false))?;
         }
@@ -825,6 +832,13 @@ impl super::Parse for ImplScope {
         }
 
         parse_type(parser, None)?;
+
+        if is_impl_trait
+            && parser.bump_if(SyntaxKind::AsKw)
+            && parser.find(SyntaxKind::Ident, ExpectedKind::Name(SyntaxKind::ImplTrait))?
+        {
+            parser.bump();
+        }
 
         parser.expect_and_pop_recovery_stack()?;
         parse_where_clause_opt(parser, ItemBlock::Required)?;

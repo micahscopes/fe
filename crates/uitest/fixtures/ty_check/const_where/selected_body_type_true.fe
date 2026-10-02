@@ -1,0 +1,13 @@
+trait Compute { const OK: bool }
+struct Subject {}
+
+impl Compute for Subject { const OK: bool = false }
+impl Compute for Subject as Other { const OK: bool = true }
+
+struct Gate<T: Compute> where T::OK { value: T }
+
+fn selected() {
+    with (Other) {
+        let gate: Gate<Subject> = Gate<Subject> { value: Subject {} }
+    }
+}

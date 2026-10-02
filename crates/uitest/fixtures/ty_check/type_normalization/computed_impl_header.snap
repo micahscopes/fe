@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/computed_impl_header.fe
+---
+error[3-0053]: computed types are not allowed in implementation headers
+  ┌─ computed_impl_header.fe:8:1
+  │
+8 │ impl Mark for Tree<1> { fn value() -> u256 { 11 } }
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implement the trait on its structural type instead of a computed application

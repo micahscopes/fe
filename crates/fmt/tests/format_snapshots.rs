@@ -3,6 +3,19 @@ use fe_fmt::{Config, format_str};
 use parser::{RecoveryMode, SyntaxKind, SyntaxNode, parse_source_file};
 use test_utils::snap_test;
 
+#[test]
+fn named_impl_selection_survives_formatting() {
+    let source = "impl<T> Compute for Box<T> as Alternative where T: Gate { const fn compute() -> u256 { 73 } }";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert!(formatted.contains("as Alternative"), "{formatted}");
+    assert_eq!(
+        format_str(&formatted, &Config::default()).unwrap(),
+        formatted
+    );
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures",
     glob: "*.fe"

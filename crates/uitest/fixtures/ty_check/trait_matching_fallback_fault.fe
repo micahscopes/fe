@@ -1,0 +1,8 @@
+trait Marker<const N: usize> {}
+struct Wrapped<const N: usize> {}
+
+impl<const N: usize> Marker<{ 1 / (N - 1) }> for Wrapped<N> {}
+impl Marker<0> for Wrapped<1> {}
+
+fn consume<T: Marker<0>>(_value: T) {}
+fn trigger() { consume(_value: Wrapped<1> {}) }

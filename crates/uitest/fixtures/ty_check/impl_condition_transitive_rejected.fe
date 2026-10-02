@@ -1,0 +1,10 @@
+trait Positive {}
+trait Use {}
+
+struct Wrapped<const N: usize> {}
+
+impl<const N: usize> Positive for Wrapped<N> where N > 0 {}
+impl<T: Positive> Use for T {}
+
+fn needs<T: Use>() {}
+fn consume() { needs<Wrapped<0>>() }

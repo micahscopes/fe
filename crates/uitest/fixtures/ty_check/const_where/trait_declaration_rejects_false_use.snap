@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/trait_declaration_rejects_false_use.fe
+---
+error[8-0093]: const requirement is not satisfied
+   ┌─ trait_declaration_rejects_false_use.fe:15:6
+   │
+10 │ trait BigOnly<T> where T: Size, T::SIZE >= 50 {
+   │                                 ------------- required by this predicate
+   ·
+15 │ impl BigOnly<Small> for Carrier {
+   │      ^^^^^^^^^^^^^^ condition evaluated to `false`
+
+error[8-0093]: const requirement is not satisfied
+   ┌─ trait_declaration_rejects_false_use.fe:19:26
+   │
+10 │ trait BigOnly<T> where T: Size, T::SIZE >= 50 {
+   │                                 ------------- required by this predicate
+   ·
+19 │ fn use_small() -> u256 { <Carrier as BigOnly<Small>>::big(Carrier {}) }
+   │                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`

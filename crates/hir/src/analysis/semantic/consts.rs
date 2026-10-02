@@ -27,6 +27,8 @@ use super::ir::VariantIndex;
 /// A Fe struct with the same type and fields is not a structural handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
 pub enum StructuralHandle<'db> {
+    /// Checked trait evidence shares opaque CTFE transport, not reflection authority.
+    Evidence(crate::analysis::semantic::SelectedApplication<'db>),
     Record(crate::hir_def::Struct<'db>),
     Field {
         owner: crate::hir_def::Struct<'db>,
@@ -254,7 +256,24 @@ fn verify_sem_const_children<'db>(
             && actual_ty != expected_ty
             && const_identity_ty(db, actual_ty) != const_identity_ty(db, expected_ty)
         {
-            return Err("constant child type differs from its aggregate field type");
+            // A fixed string length can arrive as either a sealed value or a
+            // checked expression. Compare only lengths reduced without faults.
+            let same_ground_string = if actual_ty.is_string(db) && expected_ty.is_string(db) {
+                let (_, actual_args) = actual_ty.decompose_ty_app(db);
+                let (_, expected_args) = expected_ty.decompose_ty_app(db);
+                actual_args.first().zip(expected_args.first()).is_some_and(
+                    |(&actual, &expected)| {
+                        let actual = crate::analysis::ty::const_ty::normalize_const_tys_for_comparison_checked(db, actual);
+                        let expected = crate::analysis::ty::const_ty::normalize_const_tys_for_comparison_checked(db, expected);
+                        matches!((actual, expected), (Ok(actual), Ok(expected)) if actual == expected)
+                    },
+                )
+            } else {
+                false
+            };
+            if !same_ground_string {
+                return Err("constant child type differs from its aggregate field type");
+            }
         }
     }
     Ok(())

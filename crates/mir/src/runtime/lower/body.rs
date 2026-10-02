@@ -194,6 +194,20 @@ pub(super) fn check_runtime_body_supported<'db>(
         .map_err(|error| layout_evidence_failure(key, &error))?;
     for block in &body.normalized.blocks {
         for stmt in &block.statements {
+            if matches!(
+                &stmt.kind,
+                NStatementKind::Define {
+                    expr: NExpr::Call {
+                        provisions,
+                        ..
+                    },
+                    ..
+                } if !provisions.is_empty()
+            ) {
+                return Err(LowerError::Unsupported(
+                    "trait evidence opening requires compile-time execution".into(),
+                ));
+            }
             if let NStatementKind::Define {
                 expr: NExpr::Call { callee, .. },
                 ..
@@ -226,11 +240,8 @@ pub(super) fn check_runtime_body_supported<'db>(
                     }
                     SConst::Ref(..) => unreachable!(),
                 };
-                if let Some(ty) = oversized_size_of_ty(db, key, value) {
-                    return Err(LowerError::Unsupported(format!(
-                        "type `{}` exceeds the supported 64-bit raw-memory layout size",
-                        ty.pretty_print(db)
-                    )));
+                if let Some(error) = invalid_size_of(db, key, value) {
+                    return Err(LowerError::Unsupported(error));
                 }
                 let bindings = evidence
                     .constant_bindings
@@ -320,13 +331,20 @@ fn formal_runtime_layout_root_binding<'a, 'db>(
     bindings.iter().find(|binding| binding.param == param_ty)
 }
 
-fn oversized_size_of_ty<'db>(
+fn invalid_size_of<'db>(
     db: &'db dyn MirDb,
     key: SemanticInstanceKey<'db>,
     value: SemConstId<'db>,
-) -> Option<TyId<'db>> {
-    let SemConstValue::Description(term) = value.value(db) else {
-        return None;
+) -> Option<String> {
+    let term = match value.value(db) {
+        SemConstValue::Description(term) => *term,
+        SemConstValue::TypeLevel { const_ty, .. } => {
+            let TyData::ConstTy(term) = const_ty.data(db) else {
+                return None;
+            };
+            *term
+        }
+        _ => return None,
     };
     let ConstTyData::Abstract(expr, _) = term.data(db) else {
         return None;
@@ -339,7 +357,8 @@ fn oversized_size_of_ty<'db>(
         return None;
     }
     let ty = *invocation.key.subst(db).generic_args(db).first()?;
-    matches!(runtime_size_bytes(db, ty), Err(RuntimeSizeError::Overflow)).then_some(ty)
+    matches!(runtime_size_bytes(db, ty), Err(RuntimeSizeError::Overflow))
+        .then(|| format!("runtime size overflow for {}", ty.pretty_print(db)))
 }
 
 fn semantic_const_ref_name<'db>(

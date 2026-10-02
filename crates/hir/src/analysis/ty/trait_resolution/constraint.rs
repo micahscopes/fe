@@ -157,6 +157,10 @@ pub(crate) fn ty_constraints<'db>(
             adt.params(db),
             collect_constraints(db, adt.as_generic_param_owner(db)),
         ),
+        TyData::TyBase(TyBase::TypeFn(def)) => (
+            collect_generic_params(db, (*def).into()).params(db),
+            collect_constraints(db, (*def).into()),
+        ),
         TyData::TyBase(TyBase::Func(func_def)) => (
             func_def.params(db),
             collect_func_def_constraints(db, *func_def, true),
@@ -474,7 +478,9 @@ fn collect_decl_constraint_pairs_impl<'db>(
             continue;
         };
         for (bound_idx, bound) in hir_param.bounds.iter().enumerate() {
-            if let TypeBound::Trait(trait_ref) = bound {
+            if let TypeBound::Trait(trait_ref) = bound
+                && !super::super::ty_lower::is_core_constraint_bound(db, owner_scope, *trait_ref)
+            {
                 deferred.push(Deferred {
                     bound_ty: Either::Right(ty),
                     trait_ref: *trait_ref,
@@ -510,7 +516,9 @@ fn collect_decl_constraint_pairs_impl<'db>(
             }
 
             for (bound_idx, bound) in pred.bounds.iter().enumerate() {
-                if let TypeBound::Trait(trait_ref) = *bound {
+                if let TypeBound::Trait(trait_ref) = *bound
+                    && !super::super::ty_lower::is_core_constraint_bound(db, owner_scope, trait_ref)
+                {
                     deferred.push(Deferred {
                         bound_ty: Either::Left(hir_ty),
                         trait_ref,

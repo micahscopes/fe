@@ -875,6 +875,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                 callee,
                 args,
                 effect_args,
+                provisions,
             } => NExpr::Call {
                 call_site: *call_site,
                 callee: *callee,
@@ -1003,6 +1004,13 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                                 .map(|ty| self.instance.normalized_ty(self.db, ty)),
                             provider: arg.provider,
                         })
+                    })
+                    .collect::<Result<Vec<_>, NormalizeError<'db>>>()?
+                    .into_boxed_slice(),
+                provisions: provisions
+                    .iter()
+                    .map(|(value, goal)| {
+                        Ok((self.read_operand(block, origin, *value, None)?, *goal))
                     })
                     .collect::<Result<Vec<_>, NormalizeError<'db>>>()?
                     .into_boxed_slice(),

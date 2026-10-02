@@ -1,0 +1,7 @@
+trait A<T> {}
+trait Marker {}
+
+trait Recursive<T: A<Self::Item::Assoc>, U: Marker> {
+    type Item: Recursive<T, u256>
+    type Assoc
+}

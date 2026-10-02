@@ -12,6 +12,7 @@ use crate::{
         },
         ty::{
             ProviderAddressSpace, ProviderKind,
+            corelib::is_core_evidence_ty,
             effects::EffectKeyKind,
             provider::provider_semantics,
             ty_check::{
@@ -46,26 +47,33 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         let mut saved = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let value_expr = binding.value;
-            let source = if self.is_root_provider_expr(value_expr) {
-                if let Some(place) = self.try_lower_place_expr(value_expr, true) {
-                    WithBindingSource::Place(place)
+            if self.typed_body.is_static_selection(value_expr) {
+                continue;
+            }
+            // Evidence remains a lexical value rather than a provider root.
+            let source =
+                if !is_core_evidence_ty(self.db, self.body.scope(), self.expr_ty(value_expr))
+                    && self.is_root_provider_expr(value_expr)
+                {
+                    if let Some(place) = self.try_lower_place_expr(value_expr, true) {
+                        WithBindingSource::Place(place)
+                    } else {
+                        let value = self.lower_expr(value_expr);
+                        let local =
+                            self.alloc_local(self.expr_ty(value_expr), Mutability::Immutable, None);
+                        self.push_stmt(
+                            SemOrigin::Expr(value_expr),
+                            SStmtKind::Assign {
+                                dst: local,
+                                expr: SExpr::UseValue(SOperand::expr(value, value_expr)),
+                            },
+                        );
+                        WithBindingSource::Temporary(local)
+                    }
                 } else {
                     let value = self.lower_expr(value_expr);
-                    let local =
-                        self.alloc_local(self.expr_ty(value_expr), Mutability::Immutable, None);
-                    self.push_stmt(
-                        SemOrigin::Expr(value_expr),
-                        SStmtKind::Assign {
-                            dst: local,
-                            expr: SExpr::UseValue(SOperand::expr(value, value_expr)),
-                        },
-                    );
-                    WithBindingSource::Temporary(local)
-                }
-            } else {
-                let value = self.lower_expr(value_expr);
-                WithBindingSource::Value(SOperand::expr(value, value_expr))
-            };
+                    WithBindingSource::Value(SOperand::expr(value, value_expr))
+                };
             saved.push((
                 value_expr,
                 self.with_binding_sources.insert(value_expr, source),

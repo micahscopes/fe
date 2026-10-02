@@ -8,12 +8,9 @@ error[1-0001]: missing closing `)` for tuple type definition
   │
 2 │     X(u32, T
   │             ^ expected `)` or `,`
-
-error[1-0001]: missing closing `}` for `enum` variant list
-  ┌─ enum_.fe:2:13
   │
-2 │     X(u32, T
-  │             ^ expected `}` or `,`
+  = missing closing `}` for `enum` variant list
+  = expected `}` or `,`
 
 error[1-0001]: missing closing `}` for `enum` variant list
   ┌─ enum_.fe:3:6
@@ -32,5 +29,3 @@ error[1-0001]: missing closing `}` for `enum` variant list
   │
 4 │     Y(T, u32) A
   │                ^ expected `}` or `,`
-
-

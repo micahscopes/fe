@@ -1,7 +1,8 @@
 use super::{
     EffectProviderSubst, GenericSubst, ImplEnv, SemanticInstance, SemanticInstanceKey,
     provisional_provider_binding_for_instance_effect, provisional_provider_idx_for_requirement,
-    resolved_effect_binding_ty_for_instance_effect, resolved_provider_binding_for_instance_effect,
+    resolve_trait_method_with_selections, resolved_effect_binding_ty_for_instance_effect,
+    resolved_provider_binding_for_instance_effect,
 };
 use crate::{
     analysis::{
@@ -22,6 +23,7 @@ use crate::{
             trait_def::{
                 ImplementorOrigin, MethodArgMapError, ResolvedImplInstance, TraitInstId,
                 assoc_const_body_template_for_trait_inst, resolve_trait_method_instance,
+                selected_assoc_const_body_template,
             },
             trait_resolution::{
                 GoalSatisfiability, PredicateListId, Selection, TraitSolveCx,
@@ -319,6 +321,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
     callable: &Callable<'db>,
     effect_args: &[ResolvedEffectArg<'db>],
     effect_providers: &[EffectProviderSpecialization<'db>],
+    inherit_trait_selection: bool,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let caller = SemanticInstance::new(db, caller_key);
     semantic_callee_key_with_assumptions(
@@ -330,6 +333,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
         effect_providers,
         caller.assumptions(db),
         ProviderResolutionMode::Final,
+        inherit_trait_selection,
     )
 }
 
@@ -339,6 +343,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
     callable: &Callable<'db>,
     effect_args: &[ResolvedEffectArg<'db>],
     assumptions: PredicateListId<'db>,
+    inherit_trait_selection: bool,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     semantic_callee_key_with_assumptions(
         db,
@@ -349,6 +354,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
         callable.effect_providers(),
         assumptions,
         ProviderResolutionMode::Provisional,
+        inherit_trait_selection,
     )
 }
 
@@ -396,6 +402,7 @@ pub fn generated_callee_key<'db>(
         &[],
         assumptions,
         ProviderResolutionMode::Final,
+        false,
     )?
     .expect("function callee");
     if !callee.concrete_dispatch {
@@ -414,10 +421,32 @@ fn semantic_callee_key_with_assumptions<'db>(
     effect_providers: &[EffectProviderSpecialization<'db>],
     assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
+    inherit_trait_selection: bool,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
     };
+    let impl_env = impl_env.with_selections(
+        db,
+        impl_env
+            .selections(db)
+            .iter()
+            .copied()
+            .chain(callable.selected_applications.iter().copied())
+            .collect(),
+    );
+    let requirements = callable.selection_requirements(db);
+    let retained_selections = impl_env
+        .selections(db)
+        .iter()
+        .copied()
+        .filter(|selection| {
+            requirements
+                .list(db)
+                .iter()
+                .any(|goal| selection.matches(db, *goal))
+        })
+        .collect::<Vec<_>>();
     let mut selected_trait_method: Option<(ResolvedImplInstance<'db>, TraitInstId<'db>)> = None;
     let mut effect_pairs = Vec::new();
     let mut provider_pairs = Vec::new();
@@ -430,14 +459,21 @@ fn semantic_callee_key_with_assumptions<'db>(
         })
         .collect::<Vec<_>>();
     let mut subst_args = callable.generic_args().to_vec();
-    let body_func = if let Some(inst) = callable.trait_inst()
+    let body_func = if callable.opened_obligation(db).is_none()
+        && let Some(inst) = callable.trait_inst()
         && let Some(name) = nominal_func.name(db).to_opt()
-        && let Selection::Unique(method) = resolve_trait_method_instance(
+        && let Selection::Unique(method) = resolve_trait_method_with_selections(
             db,
             TraitSolveCx::new(db, impl_env.normalization_scope(db)).with_assumptions(assumptions),
             inst,
             name,
+            if inherit_trait_selection {
+                impl_env.selections(db)
+            } else {
+                &callable.selected_applications
+            },
         )
+        .map_err(MethodArgMapError::SelectedEvidence)?
         && let Some(impl_func) = method.body()
     {
         subst_args = method
@@ -676,7 +712,8 @@ fn semantic_callee_key_with_assumptions<'db>(
             assumptions
         },
         witnesses.into_iter().collect::<Vec<_>>(),
-    );
+    )
+    .with_selections(db, retained_selections);
 
     if matches!(provider_resolution_mode, ProviderResolutionMode::Final)
         && let Some((resolved, nominal_inst)) = selected_trait_method
@@ -885,9 +922,21 @@ pub(crate) fn resolve_semantic_const_ref<'db>(
     ty: TyId<'db>,
     origin: SemOrigin<'db>,
 ) -> Option<SemanticConstRef<'db>> {
+    resolve_semantic_const_ref_in_instance(db, None, const_ref, ty, origin, false)
+}
+
+pub(crate) fn resolve_semantic_const_ref_in_instance<'db>(
+    db: &'db dyn HirAnalysisDb,
+    caller_key: Option<SemanticInstanceKey<'db>>,
+    const_ref: ConstRef<'db>,
+    ty: TyId<'db>,
+    origin: SemOrigin<'db>,
+    inherit_trait_selection: bool,
+) -> Option<SemanticConstRef<'db>> {
+    let caller_key = caller_key.filter(|_| inherit_trait_selection);
     let instance = match const_ref {
         ConstRef::Const(const_) => semantic_const_key_for_const(db, const_),
-        ConstRef::TraitConst(assoc) => semantic_const_key_for_assoc_const(db, assoc),
+        ConstRef::TraitConst(assoc) => semantic_const_key_for_assoc_const(db, caller_key, assoc),
         ConstRef::InherentConst(use_) => semantic_const_key_for_inherent_const(db, use_),
     }?;
     Some(SemanticConstRef::new(db, instance, ty, origin))
@@ -925,14 +974,25 @@ fn semantic_const_key_for_inherent_const<'db>(
 
 fn semantic_const_key_for_assoc_const<'db>(
     db: &'db dyn HirAnalysisDb,
+    caller_key: Option<SemanticInstanceKey<'db>>,
     assoc: AssocConstUse<'db>,
 ) -> Option<SemanticInstanceKey<'db>> {
-    let (body, ty, subst) = assoc_const_body_template_for_trait_inst(
-        db,
-        assoc.solve_cx(db),
-        assoc.inst(),
-        assoc.name(),
-    )?;
+    let selection = assoc
+        .selection()
+        .or_else(|| caller_key.and_then(|key| key.impl_env(db).selection_for(db, assoc.inst())));
+    let (body, ty, subst) = if let Some(selection) = selection {
+        let proof = selection
+            .revalidate(db, assoc.solve_cx(db), assoc.inst())
+            .ok()?;
+        selected_assoc_const_body_template(db, proof.resolved_instance(), assoc.name())?
+    } else {
+        assoc_const_body_template_for_trait_inst(
+            db,
+            assoc.solve_cx(db),
+            assoc.inst(),
+            assoc.name(),
+        )?
+    };
     Some(SemanticInstanceKey::new(
         db,
         BodyOwner::AnonConstBody { body, expected: ty },
@@ -943,7 +1003,8 @@ fn semantic_const_key_for_assoc_const<'db>(
             assoc.origin_scope(),
             assoc.assumptions(),
             vec![assoc.inst()],
-        ),
+        )
+        .with_selections(db, selection.into_iter().collect()),
     ))
 }
 

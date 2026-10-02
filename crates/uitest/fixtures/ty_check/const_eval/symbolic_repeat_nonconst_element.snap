@@ -1,0 +1,16 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_eval/symbolic_repeat_nonconst_element.fe
+---
+error[3-0024]: non-const function call in const context
+  ┌─ symbolic_repeat_nonconst_element.fe:5:29
+  │
+5 │     const VALUE: [u8; N] = [runtime(); N]
+  │                             ^^^^^^^^^ calls in const context must be `const fn`
+
+error[3-0024]: non-const function call in const context
+  ┌─ symbolic_repeat_nonconst_element.fe:8:25
+  │
+8 │ const EMPTY: [u8; 0] = [runtime(); 0]
+  │                         ^^^^^^^^^ calls in const context must be `const fn`

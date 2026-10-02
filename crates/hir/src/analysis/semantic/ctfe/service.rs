@@ -841,7 +841,7 @@ fn force_const_term_operand_impl<'db>(
                 SemOrigin::Body(source.owner(db)),
             ) {
                 EvalOutcome::Ready(value) => Ok(value.value()),
-                EvalOutcome::Blocked(info) => Err(EvalStop::Blocked(info)),
+                EvalOutcome::Blocked(info) => Err(EvalStop::Blocked(Box::new(info))),
                 EvalOutcome::Failed(EvalFailure::Ctfe(error)) => Err(CtfeError::CalleeError {
                     origin,
                     callee: SemanticInstance::new(db, *source),
@@ -871,7 +871,7 @@ fn force_const_term_operand_impl<'db>(
                 );
                 match cx.force_computation(db, request) {
                     EvalOutcome::Ready(value) => Ok(value.value()),
-                    EvalOutcome::Blocked(info) => Err(EvalStop::Blocked(info)),
+                    EvalOutcome::Blocked(info) => Err(EvalStop::Blocked(Box::new(info))),
                     EvalOutcome::Failed(failure) => Err(EvalStop::Failed(failure)),
                 }
             }
@@ -886,24 +886,25 @@ fn force_const_term_operand_impl<'db>(
                 );
                 match cx.force_computation(db, request) {
                     EvalOutcome::Ready(value) => Ok(value.value()),
-                    EvalOutcome::Blocked(info) => Err(EvalStop::Blocked(info)),
+                    EvalOutcome::Blocked(info) => Err(EvalStop::Blocked(Box::new(info))),
                     EvalOutcome::Failed(failure) => Err(EvalStop::Failed(failure)),
                 }
             }
             _ => force_const_term(db, *term, *ty, cx, origin, provenance),
         },
         ConstTyData::TyParam(..) | ConstTyData::TyVar(..) | ConstTyData::Hole(..) => {
-            Err(EvalStop::Blocked(BlockedInfo::new(
+            Err(EvalStop::Blocked(Box::new(BlockedInfo::new(
                 ConstDemandKind::Value,
                 ConstDependency::Value(operand),
                 origin,
-            )))
+            ))))
         }
         ConstTyData::UnEvaluated {
             body,
             ty: Some(expected),
             template_ty,
             capture,
+            impl_env: selected_env,
             ..
         } => {
             let owner = BodyOwner::AnonConstBody {
@@ -915,7 +916,7 @@ fn force_const_term_operand_impl<'db>(
                 owner,
                 capture.generic_subst(db),
                 EffectProviderSubst::empty(db),
-                ImplEnv::empty(db, owner.scope()),
+                selected_env.unwrap_or_else(|| ImplEnv::empty(db, owner.scope())),
             );
             let request = const_computation_for_instance(db, key, Vec::new());
             cx.force_computation(db, request)
@@ -1183,7 +1184,7 @@ fn force_const_term<'db>(
                 EvalOutcome::Ready(value) => {
                     values.push(ConstDesc::value(db, value, invocation.parameter_owner))
                 }
-                EvalOutcome::Blocked(info) => return Err(EvalStop::Blocked(info)),
+                EvalOutcome::Blocked(info) => return Err(EvalStop::Blocked(Box::new(info))),
                 EvalOutcome::Failed(failure) => return Err(EvalStop::Failed(failure)),
             }
         }
@@ -1206,7 +1207,7 @@ fn force_const_term<'db>(
                     info.trace
                         .extend(provenance.frames.iter().rev().map(|frame| frame.callee));
                 }
-                Err(EvalStop::Blocked(info))
+                Err(EvalStop::Blocked(Box::new(info)))
             }
             EvalOutcome::Failed(EvalFailure::Ctfe(error)) => {
                 let error = if wraps_callee {
@@ -1513,6 +1514,7 @@ fn force_selected_const_ty<'db>(
             ty,
             template_ty,
             capture,
+            impl_env: selected_env,
             ..
         } => {
             let owner = BodyOwner::AnonConstBody {
@@ -1524,7 +1526,7 @@ fn force_selected_const_ty<'db>(
                 owner,
                 capture.generic_subst(db),
                 EffectProviderSubst::empty(db),
-                impl_env,
+                selected_env.unwrap_or(impl_env),
             );
             cx.execute_body(db, key, Vec::new(), origin)
         }

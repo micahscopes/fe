@@ -29,24 +29,6 @@ extern {
     pub const fn query_field<F: * -> *, R>(_ ty: FieldType) -> R
 }
 
-/// A computed value for a generated function body.
-///
-/// The driver accepts bool and u256 bodies against an explicit function
-/// template. This value carries no authority to alter the template's signature.
-pub struct FunctionBody<T> {
-    pub value: T,
-}
-
-/// A request to fill one driver-authorized function template with a value.
-///
-/// Constructing this request grants no authority. The driver checks `target`
-/// against explicit grants for the current request, then checks the complete
-/// generated declaration. A target number is not a portable evidence identity.
-pub struct FunctionEmission<T> {
-    pub target: u256,
-    pub value: T,
-}
-
 extern {
     /// Count the fields of a nongeneric record from its defining module.
     ///
@@ -55,29 +37,10 @@ extern {
     pub const fn record_field_count<T>() -> u256
 }
 
-/// A bounded straight-line scalar body. References are zero-based node indices
-/// and must point backward. Every node is evaluated in array order.
-pub struct ScalarBody<T, const N: usize> {
-    pub nodes: [ScalarOp; N],
-    pub result: u256,
-}
-
-/// Operations in an authored scalar body. Parameter indices use declaration
-/// order, independently of argument labels. Operations retain ordinary Fe rules.
-pub enum ScalarOp {
-    U256(u256),
-    Bool(bool),
-    U256Parameter(u256),
-    BoolParameter(u256),
-    Add(u256, u256),
-    Less(u256, u256),
-    Equal(u256, u256),
-    Not(u256),
-}
-impl Copy for ScalarOp {}
-
 /// Structural declaration syntax. Reflected leaves keep their owner identity;
 /// constructing a value does not authorize its emission or certify its types.
+/// Bool, U64, U256 and BytePointer name built-in types, even when the target
+/// module defines an alias with the same spelling.
 pub enum DeclarationType {
     Unit,
     Bool,
@@ -112,9 +75,10 @@ pub enum BodyExpr {
 }
 impl Copy for BodyExpr {}
 
-/// Explicit source paths are resolved in the generated declaration's owner
-/// scope. They are syntax, not captured bindings or evidence. Paths must start
-/// with `ingot`, `core`, or `std`; ordinary visibility and requirements apply.
+/// Explicit paths start with `ingot`, `core`, or `std`. Their root is bound to
+/// that ingot before the generated declaration is checked, so a target module
+/// cannot redirect them with a local name. `ingot` means the provider's ingot.
+/// Ordinary visibility and requirements apply.
 /// Optional argument slots must form a prefix, with no holes.
 pub struct FunctionCall {
     pub path: String<31>,
@@ -142,21 +106,25 @@ pub struct FunctionDefinition<const P: usize, const N: usize> {
 }
 impl<const P: usize, const N: usize> Copy for FunctionDefinition<P, N> {}
 
-pub enum AssociatedConstant {
+pub enum AssociatedConstant<const N: usize> {
     Bool(DeclarationName, bool),
     U256(DeclarationName, u256),
+    /// An associated constant whose value is checked after generation. The
+    /// expression references have the same rules as a generated function body.
+    Expression(DeclarationName, DeclarationType, [BodyExpr; N], usize),
 }
-impl Copy for AssociatedConstant {}
+impl<const N: usize> Copy for AssociatedConstant<N> {}
 
-/// An implementation for the authorized record. An optional method reuses the
-/// function syntax: its first parameter must be Record(owner) and denotes
-/// `own self`. Trait methods must set `public` to false. Ordinary checking
-/// establishes the trait contract and coherence, including unused members.
+/// An implementation for the authorized record. N bounds both constant
+/// expressions and the optional method body. The method's first parameter
+/// must be Record(owner) and denotes `own self`. Trait methods must set
+/// `public` to false. Ordinary checking establishes the trait contract and
+/// coherence, including unused members.
 pub struct RecordImplementation<const P: usize, const N: usize> {
     pub owner: Record,
     pub trait_path: String<31>,
     pub types: [Option<DeclarationType>; 2],
-    pub constants: [Option<AssociatedConstant>; 2],
+    pub constants: [Option<AssociatedConstant<N>>; 2],
     pub method: Option<FunctionDefinition<P, N>>,
 }
 impl<const P: usize, const N: usize> Copy for RecordImplementation<P, N> {}

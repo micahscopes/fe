@@ -1,0 +1,25 @@
+// expect ordinary=11
+// expect selected=12
+trait Compute {
+    const N: u256
+    const M: u256 = Self::N + 10
+    const fn compute() -> u256
+}
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject {
+    const N: u256 = 1
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Other {
+    const N: u256 = 2
+    const fn compute() -> u256 { 2 }
+}
+const fn ordinary() -> u256 { Subject::M }
+const fn selected() -> u256 { with (Other) { Subject::M } }
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(ordinary() == 11)
+    assert!(selected() == 12)
+}

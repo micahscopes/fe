@@ -1,0 +1,13 @@
+struct Node<T> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N { 0 => bool
+        _ => Node<Tree<{N - 1}>> }
+}
+
+trait Marker {}
+struct Bad {}
+recursive type fn Guard<T, const N: usize>() -> (*) where T: Marker {
+    match N { 0 => bool
+        _ => Guard<T, {N - 1}> }
+}
+fn f(x: Guard<Bad, 2>) -> bool { x }

@@ -1,0 +1,138 @@
+// Encoding 2: each morphism TYPE names its own domain and codomain.
+// Interpretation traits take no parameters, so every goal has a concrete head.
+use core::marker::Copy
+
+pub trait Arrow {
+    type Dom
+    type Cod
+}
+pub struct Exl<A, B> {}
+pub struct Mul {}
+pub struct Add {}
+pub struct Fork<F, G> {}
+pub struct Comp<G, F> {}
+
+impl<A, B> Arrow for Exl<A, B> { type Dom = (A, B)  type Cod = A }
+impl Arrow for Mul { type Dom = (u256, u256)  type Cod = u256 }
+impl Arrow for Add { type Dom = (u256, u256)  type Cod = u256 }
+impl<F: Arrow, G: Arrow> Arrow for Fork<F, G> {
+    type Dom = <F as Arrow>::Dom
+    type Cod = (<F as Arrow>::Cod, <G as Arrow>::Cod)
+}
+impl<F: Arrow, G: Arrow> Arrow for Comp<G, F> {
+    type Dom = <F as Arrow>::Dom
+    type Cod = <G as Arrow>::Cod
+}
+
+// Interpretation 1: evaluation.
+pub trait Eval: Arrow {
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod
+}
+impl<A: Copy, B: Copy> Eval for Exl<A, B> { fn eval(_ a: (A, B)) -> A { a.0 } }
+impl Eval for Mul { fn eval(_ a: (u256, u256)) -> u256 { a.0 * a.1 } }
+impl Eval for Add { fn eval(_ a: (u256, u256)) -> u256 { a.0 + a.1 } }
+impl<F: Eval, G: Arrow<Dom = <F as Arrow>::Dom> + Eval> Eval for Fork<F, G>
+    where <F as Arrow>::Dom: Copy
+{
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod { (F::eval(a), G::eval(a)) }
+}
+impl<F: Eval, G: Arrow<Dom = <F as Arrow>::Cod> + Eval> Eval for Comp<G, F> {
+    fn eval(_ a: <Self as Arrow>::Dom) -> <Self as Arrow>::Cod { G::eval(F::eval(a)) }
+}
+
+// Object constraint for the derivative categories: ordinary bounds on impls.
+pub trait Additive {
+    fn zero() -> Self
+    fn plus(self, _ other: Self) -> Self
+}
+impl Additive for u256 {
+    fn zero() -> Self { 0 }
+    fn plus(self, _ other: Self) -> Self { self + other }
+}
+impl<A: Additive, B: Additive> Additive for (A, B) {
+    fn zero() -> Self { (A::zero(), B::zero()) }
+    fn plus(self, _ other: Self) -> Self { (self.0.plus(other.0), self.1.plus(other.1)) }
+}
+
+// Interpretation 2: reverse mode (Conal's dual category). `Back` is the data
+// the transposed linear map needs: saved primal values, shaped by the program.
+pub trait Rev: Arrow {
+    type Back
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back)
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom
+}
+impl<A: Copy, B: Copy + Additive> Rev for Exl<A, B> {
+    type Back = ()
+    fn forward(_ a: (A, B)) -> (A, ()) { (a.0, ()) }
+    fn backward(_ back: (), _ ct: A) -> (A, B) { (ct, B::zero()) }
+}
+impl Rev for Mul {
+    type Back = (u256, u256)
+    fn forward(_ a: (u256, u256)) -> (u256, (u256, u256)) { (a.0 * a.1, a) }
+    fn backward(_ back: (u256, u256), _ ct: u256) -> (u256, u256) { (ct * back.1, ct * back.0) }
+}
+impl Rev for Add {
+    type Back = ()
+    fn forward(_ a: (u256, u256)) -> (u256, ()) { (a.0 + a.1, ()) }
+    fn backward(_ back: (), _ ct: u256) -> (u256, u256) { (ct, ct) }
+}
+impl<F: Rev, G: Arrow<Dom = <F as Arrow>::Dom> + Rev> Rev for Fork<F, G>
+    where <F as Arrow>::Dom: Copy + Additive
+{
+    type Back = (<F as Rev>::Back, <G as Rev>::Back)
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back) {
+        let f = F::forward(a)
+        let g = G::forward(a)
+        ((f.0, g.0), (f.1, g.1))
+    }
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom {
+        F::backward(back.0, ct.0).plus(G::backward(back.1, ct.1))
+    }
+}
+impl<F: Rev, G: Arrow<Dom = <F as Arrow>::Cod> + Rev> Rev for Comp<G, F> {
+    type Back = (<F as Rev>::Back, <G as Rev>::Back)
+    fn forward(_ a: <Self as Arrow>::Dom) -> (<Self as Arrow>::Cod, <Self as Rev>::Back) {
+        let f = F::forward(a)
+        let g = G::forward(f.0)
+        (g.0, (f.1, g.1))
+    }
+    fn backward(_ back: <Self as Rev>::Back, _ ct: <Self as Arrow>::Cod) -> <Self as Arrow>::Dom {
+        F::backward(back.0, G::backward(back.1, ct))
+    }
+}
+
+// Interpretation 3: compile-time cost analysis (the FactorAnalysis pattern).
+pub trait Cost: Arrow {
+    const MULS: u256
+}
+impl<A, B> Cost for Exl<A, B> { const MULS: u256 = 0 }
+impl Cost for Mul { const MULS: u256 = 1 }
+impl Cost for Add { const MULS: u256 = 0 }
+impl<F: Cost, G: Cost> Cost for Fork<F, G> { const MULS: u256 = F::MULS + G::MULS }
+impl<F: Cost, G: Cost> Cost for Comp<G, F> { const MULS: u256 = F::MULS + G::MULS }
+
+type Fxy = Comp<Add, Fork<Mul, Exl<u256, u256>>>
+
+pub fn gradient(_ x: u256, _ y: u256) -> (u256, u256) {
+    let r = <Fxy as Rev>::forward((x, y))
+    <Fxy as Rev>::backward(r.1, 1)
+}
+
+pub fn value(_ x: u256, _ y: u256) -> u256 { <Fxy as Eval>::eval((x, y)) }
+
+#[test]
+fn eval_arrow() {
+    assert!(value(3, 5) == 18)
+}
+
+#[test]
+fn cost_analysis() {
+    assert!(<Fxy as Cost>::MULS == 1)
+}
+
+#[test]
+fn reverse_gradient() {
+    let g = gradient(3, 5)
+    assert!(g.0 == 6)
+    assert!(g.1 == 3)
+}

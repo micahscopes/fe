@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/trait_matching_normalization_fault.fe
+---
+error[6-0007]: type or constant normalization failed during trait matching
+   ┌─ trait_matching_normalization_fault.fe:12:16
+   │
+12 │ fn trigger() { consume(_value: Subject<4096> {}) }
+   │                ^^^^^^^ a ground value needed to choose an implementation could not be normalized

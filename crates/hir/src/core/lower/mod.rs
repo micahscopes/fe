@@ -16,6 +16,7 @@ use crate::{
         AttrListId, ExprId, IdentId, IntegerId, ItemKind, LitKind, ModuleTree, Partial, StringId,
         TopLevelMod, TrackedItemId, TrackedItemVariant, Use, Visibility, module_tree_impl,
         scope_graph::ScopeGraph,
+        scope_graph::ScopeId,
         use_tree::{UsePathId, UsePathSegment},
     },
     span::HirOrigin,
@@ -26,6 +27,7 @@ pub use abi_field::{
 };
 pub use abi_struct::{AbiStructDiagnostic, AbiStructDiagnosticKind};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
+pub use generated::generated_hir_errors;
 pub use item::{FieldModifierError, FieldModifierErrorKind, MsgDiagnostic, MsgDiagnosticKind};
 pub use parse::parse_file_impl;
 
@@ -39,6 +41,7 @@ mod contract;
 mod error;
 mod event;
 mod expr;
+mod generated;
 mod hir_builder;
 mod item;
 mod msg;
@@ -153,8 +156,47 @@ pub(crate) fn map_file_to_mod_impl<'db>(db: &'db dyn HirDb, file: File) -> TopLe
     TopLevelMod::new(db, mod_name, file)
 }
 
-#[salsa::tracked(return_ref)]
 pub(crate) fn scope_graph_impl<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+) -> &'db ScopeGraph<'db> {
+    if generated::generated_functions_impl(db, top_mod)
+        .graph
+        .scopes
+        .is_empty()
+    {
+        base_scope_graph_impl(db, top_mod)
+    } else {
+        merged_scope_graph_impl(db, top_mod)
+    }
+}
+
+#[salsa::tracked(return_ref)]
+pub(crate) fn merged_scope_graph_impl<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+) -> ScopeGraph<'db> {
+    let mut merged = base_scope_graph_impl(db, top_mod).clone();
+    let generated = &generated::generated_functions_impl(db, top_mod).graph;
+    for (scope_id, scope) in &generated.scopes {
+        if let Some(existing) = merged.scopes.get_mut(scope_id) {
+            existing.edges.extend(scope.edges.iter().cloned());
+        } else {
+            merged.scopes.insert(*scope_id, scope.clone());
+        }
+    }
+    merged
+        .unresolved_uses
+        .extend(generated.unresolved_uses.iter().copied());
+    merged
+}
+
+/// Authored items and local syntactic desugarings, without a generation pass.
+/// The output graph will merge generated HIR over this query. Keeping the
+/// authored query separate lets expansion find its targets without reading
+/// the output whose construction is in progress.
+#[salsa::tracked(return_ref)]
+pub(crate) fn base_scope_graph_impl<'db>(
     db: &'db dyn HirDb,
     top_mod: TopLevelMod<'db>,
 ) -> ScopeGraph<'db> {
@@ -206,6 +248,31 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
         }
+    }
+
+    pub(super) fn enter_expansion(db: &'db dyn HirDb, top_mod: TopLevelMod<'db>) -> Self {
+        Self {
+            builder: ScopeGraphBuilder::enter_expansion(db, top_mod),
+            next_impl_idx: 0,
+            next_impl_trait_idx: 0,
+            next_static_assert_idx: 0,
+        }
+    }
+
+    pub(super) fn enter_shim_scope(&mut self, scope: ScopeId<'db>, vis: Visibility) {
+        self.builder.enter_shim_scope(scope, vis);
+    }
+
+    pub(super) fn leave_shim_scope(&mut self) {
+        self.builder.leave_shim_scope();
+    }
+
+    pub(super) fn enter_id_namespace(&mut self, variant: TrackedItemVariant<'db>) {
+        self.builder.enter_id_namespace(variant);
+    }
+
+    pub(super) fn leave_id_namespace(&mut self) {
+        self.builder.leave_id_namespace();
     }
 
     pub(super) fn build(self) -> ScopeGraph<'db> {
@@ -390,7 +457,11 @@ impl<'db> LitKind<'db> {
 
 impl<'db> IntegerId<'db> {
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::LitInt) -> Self {
-        let text = ast.token().text();
+        Self::lower_token(ctxt, ast.token().clone())
+    }
+
+    pub(super) fn lower_token(ctxt: &mut FileLowerCtxt<'db>, token: parser::SyntaxToken) -> Self {
+        let text = token.text();
         // Parser ensures that the text is valid pair with a radix and a number.
         if text.len() < 2 {
             return Self::new(ctxt.db(), BigUint::from_str_radix(text, 10).unwrap());

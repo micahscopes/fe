@@ -5,6 +5,7 @@ use ingot::evm::word::WordRepr
 use core::{EffectRef, EffectRefMut, ptr}
 
 /// Keys that can be written into the mapping preimage for keccak hashing.
+#[fixed]
 pub trait StorageKey {
     /// Returns the exact byte length of this key's mapping encoding.
     fn encoded_len(self) -> u256

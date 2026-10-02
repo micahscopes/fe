@@ -505,14 +505,20 @@ impl<'db> TyChecker<'db> {
                 );
 
                 let trait_ = inst.def(self.db);
-                if !super::trait_const_goal_has_foreign_params(self.db, inst, self.env.scope())
-                    && let GoalSatisfiability::UnSat(_) = is_goal_satisfiable(
-                        self.db,
-                        TraitSolveCx::new(self.db, self.env.scope())
-                            .with_assumptions(self.env.assumptions()),
-                        inst,
-                    )
-                {
+                let selection = self.env.selection_for_goal(inst);
+                let context = TraitSolveCx::new(self.db, self.env.scope())
+                    .with_assumptions(self.env.assumptions());
+                let unsatisfied =
+                    !super::trait_const_goal_has_foreign_params(self.db, inst, self.env.scope())
+                        && if let Some(selection) = selection {
+                            selection.revalidate(self.db, context, inst).is_err()
+                        } else {
+                            matches!(
+                                is_goal_satisfiable(self.db, context, inst),
+                                GoalSatisfiability::UnSat(_)
+                            )
+                        };
+                if unsatisfied {
                     self.push_diag(TyDiagCollection::from(
                         TraitConstraintDiag::TraitBoundNotSat {
                             span: span.clone().into(),
@@ -535,12 +541,10 @@ impl<'db> TyChecker<'db> {
                 {
                     let instantiated = ty_binder.instantiate(self.db, inst.args(self.db));
                     let ty = self.table.instantiate_to_term(instantiated);
-                    let cref = ConstRef::TraitConst(AssocConstUse::new(
-                        self.env.scope(),
-                        self.env.assumptions(),
-                        inst,
-                        name,
-                    ));
+                    let cref = ConstRef::TraitConst(
+                        AssocConstUse::new(self.env.scope(), self.env.assumptions(), inst, name)
+                            .with_selection(selection),
+                    );
                     (
                         ty,
                         self.eval_const_pattern_literal(cref, expected)
@@ -571,6 +575,22 @@ impl<'db> TyChecker<'db> {
                         recv_ty,
                         name,
                     ));
+                    if let Some(args) = crate::analysis::ty::const_ty::unify_inherent_impl_receiver(
+                        self.db,
+                        &mut self.table,
+                        impl_,
+                        recv_ty,
+                    ) {
+                        for obligation in super::const_requirements::pending_owner_const_obligations(
+                            self.db,
+                            crate::hir_def::WhereClauseOwner::Impl(impl_),
+                            &args,
+                            self.env.scope(),
+                            pat.span(self.body()).into(),
+                        ) {
+                            self.env.register_const_obligation(obligation);
+                        }
+                    }
                     (
                         ty,
                         self.eval_const_pattern_literal(cref, expected)

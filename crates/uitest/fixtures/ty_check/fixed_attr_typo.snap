@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/fixed_attr_typo.fe
+---
+error[12-0004]: unsupported `#[fixd]` attribute on trait `Compute`
+  ┌─ fixed_attr_typo.fe:1:1
+  │
+1 │ #[fixd]
+  │ ^^^^^^^ expected `#[fixed]`

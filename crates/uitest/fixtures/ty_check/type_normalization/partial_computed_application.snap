@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/partial_computed_application.fe
+---
+error[2-0011]: incorrect number of generic arguments for `Tree`; expected 1, given 0
+  ┌─ partial_computed_application.fe:8:15
+  │
+8 │ fn f() { take<Tree>() }
+  │               ^^^^ expected 1 arguments, but 0 were given

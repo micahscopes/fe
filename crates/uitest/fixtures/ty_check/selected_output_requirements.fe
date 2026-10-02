@@ -1,0 +1,27 @@
+trait Compute {
+    type Output
+    const fn compute() -> Self::Output
+}
+trait Gate {}
+impl Gate for u256 {}
+
+struct Subject {}
+impl Compute for Subject {
+    type Output = u256
+    const fn compute() -> u256 { 42 }
+}
+impl Compute for Subject as Flag {
+    type Output = bool
+    const fn compute() -> bool { true }
+}
+
+const fn choose<T: Compute<Output=O>, O>() -> O { T::compute() }
+const fn guarded<T: Compute<Output=O>, O: Gate>() -> O { T::compute() }
+
+const fn wrong_selected_output() -> u256 {
+    with (Flag) { choose<Subject, u256>() }
+}
+
+const fn missing_independent_bound() -> bool {
+    with (Flag) { guarded<Subject, bool>() }
+}

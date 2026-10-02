@@ -1,0 +1,3 @@
+fn outer<const N: usize>() {
+    struct Inner where N > 0 {}
+}

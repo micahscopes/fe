@@ -1,0 +1,20 @@
+pub const fn bump(_ value: u256) -> u256 { value + 100 }
+use policy::make as make
+
+#[generate(policy::make)]
+struct Target { value: u256 }
+
+const fn answer() -> u256 { apply(42) }
+
+mod shadow {
+    mod policy {
+        pub const fn bump(_ value: u256) -> u256 { value + 100 }
+    }
+
+    #[generate(ingot::make)]
+    struct Target { value: u256 }
+
+    pub const fn answer() -> u256 { apply(42) }
+}
+
+const fn answer_shadow() -> u256 { shadow::answer() }

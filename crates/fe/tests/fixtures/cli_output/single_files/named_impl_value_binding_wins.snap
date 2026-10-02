@@ -1,0 +1,7 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/named_impl_value_binding_wins.fe
+---
+
+=== EXIT CODE: 0 ===

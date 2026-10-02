@@ -1,0 +1,7 @@
+struct Marker<const N: usize> {}
+
+impl<const N: usize> Marker<N> {
+    const VALUE: [u8; N] = [1 / 0; N]
+}
+
+const DEMAND: [u8; 1] = Marker<1>::VALUE

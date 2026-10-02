@@ -19,10 +19,12 @@ pub mod test_db;
 pub use common::{file::File, file::Workspace, ingot::Ingot};
 
 #[salsa::db]
-pub trait HirDb: salsa::Database + InputDb {}
-
-#[salsa::db]
-impl<T> HirDb for T where T: salsa::Database + InputDb {}
+pub trait HirDb: salsa::Database + InputDb {
+    /// Frozen generated values for one module, if its authored pass finished.
+    fn generated_module(&self, _url: &url::Url) -> Option<crate::core::meta::GeneratedModuleInput> {
+        None
+    }
+}
 
 /// `LowerHirDb` is a marker trait for lowering AST to HIR items.
 /// All code that requires [`LowerHirDb`] is considered have a possibility to

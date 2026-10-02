@@ -1,0 +1,27 @@
+use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition, FunctionCall, CallArgument}
+
+pub const fn bump(_ value: u256) -> u256 { value + 1 }
+
+pub const fn make(_ record: Record) -> FunctionDefinition<1, 2> {
+    FunctionDefinition {
+        name: DeclarationName::Literal("apply"),
+        public: true,
+        const_function: true,
+        parameters: [DeclarationType::U256],
+        return_type: DeclarationType::U256,
+        expressions: [
+            BodyExpr::Parameter(0),
+            BodyExpr::Call(FunctionCall {
+                path: "ingot::bump",
+                types: [Option::None, Option::None],
+                arguments: [
+                    Option::Some(CallArgument { label: Option::None, expression: 0 }),
+                    Option::None,
+                    Option::None,
+                    Option::None,
+                ],
+            }),
+        ],
+        result: 1,
+    }
+}

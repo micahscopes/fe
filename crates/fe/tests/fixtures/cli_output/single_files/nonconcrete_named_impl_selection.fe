@@ -1,0 +1,8 @@
+trait Compute { const fn compute() -> u256 }
+struct Subject<T> {}
+impl<T> Compute for Subject<T> as Generic {
+    const fn compute() -> u256 { 2 }
+}
+const fn selected<T>() -> u256 {
+    with (Generic) { 1 }
+}

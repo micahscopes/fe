@@ -86,3 +86,104 @@ where
         substitute_complete(db, self.value, subst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use common::indexmap::IndexMap;
+
+    use super::Binder;
+    use crate::{
+        analysis::ty::{
+            trait_def::TraitInstId,
+            ty_def::{Kind, TyData, TyId, TyParam},
+        },
+        hir_def::{IdentId, ItemKind},
+        test_db::HirAnalysisTestDb,
+    };
+
+    #[test]
+    fn substitution_visits_projection_bindings_even_when_trait_arguments_change() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("projection_substitution.fe"),
+            "trait Family { type Output }\nfn caller<T>() {}\nfn other<U>() {}",
+        );
+        let (top, _) = db.top_mod(file);
+        db.assert_no_diags(top);
+        let trait_ = top
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Trait(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        let funcs: Vec<_> = top
+            .children_non_nested(&db)
+            .filter_map(|item| match item {
+                ItemKind::Func(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let owner = funcs[0].scope();
+        let other_owner = funcs[1].scope();
+        let param = |scope, name: &str| {
+            TyId::new(
+                &db,
+                TyData::TyParam(TyParam::normal_param(
+                    IdentId::new(&db, name),
+                    0,
+                    Kind::Star,
+                    scope,
+                    Some(0),
+                )),
+            )
+        };
+        let t = param(owner, "T");
+        let u = param(other_owner, "U");
+        let output = IdentId::new(&db, "Output");
+        let projection = |subject, binding| {
+            TraitInstId::new(
+                &db,
+                trait_,
+                vec![subject],
+                IndexMap::from_iter([(output, binding)]),
+            )
+        };
+        let assoc_projection = |subject| {
+            TyId::assoc_ty(
+                &db,
+                TraitInstId::new(
+                    &db,
+                    trait_,
+                    vec![subject],
+                    IndexMap::from_iter([(output, subject)]),
+                )
+                .trait_ref(&db),
+                output,
+            )
+        };
+        let concrete = TyId::u256(&db);
+        // Nest a binding to require the ordinary recursive type traversal.
+        let nested = projection(t, assoc_projection(t));
+        let expected = projection(concrete, assoc_projection(concrete));
+        assert_eq!(
+            Binder::bind(funcs[0].into(), nested).instantiate(&db, &[concrete]),
+            expected
+        );
+        assert_eq!(
+            Binder::bind(funcs[0].into(), nested).instantiate(&db, &[concrete]),
+            expected
+        );
+        // Same numeric index under a different owner must remain untouched.
+        let mixed = projection(t, assoc_projection(u));
+        assert_eq!(
+            Binder::bind(funcs[0].into(), mixed).instantiate(&db, &[concrete]),
+            projection(concrete, assoc_projection(u)),
+        );
+        assert_eq!(
+            Binder::bind(funcs[1].into(), mixed).instantiate(&db, &[concrete]),
+            projection(t, assoc_projection(concrete))
+        );
+    }
+}

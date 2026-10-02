@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/derive_unavailable.fe
+---
+error[12-0005]: `#[derive]` is not supported yet
+  ┌─ derive_unavailable.fe:1:1
+  │
+1 │ #[derive(Eq)]
+  │ ^^^^^^^^^^^^^ deriving implementations is not supported yet

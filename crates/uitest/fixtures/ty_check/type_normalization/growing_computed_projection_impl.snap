@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/growing_computed_projection_impl.fe
+---
+error[3-0050]: type normalization limit exceeded
+   ┌─ growing_computed_projection_impl.fe:11:49
+   │
+11 │ impl<const K: usize> Grow for Z<K> { type Out = Spine<Z<{ K + 1 }>, 1> }
+   │                                                 ^^^^^^^^^^^^^^^^^^^^^^ this type requires more nested reductions than supported

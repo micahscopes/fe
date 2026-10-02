@@ -1,0 +1,4 @@
+use std::abi::DynArray
+
+#[event]
+struct Dynamic { values: DynArray<u256> }

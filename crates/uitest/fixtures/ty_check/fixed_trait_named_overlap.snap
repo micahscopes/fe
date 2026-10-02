@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/fixed_trait_named_overlap.fe
+---
+error[5-0001]: conflicting trait implementations
+   ┌─ fixed_trait_named_overlap.fe:8:18
+   │
+ 8 │ impl Compute for Subject as First {
+   │                  ^^^^^^^ this trait implementation
+   ·
+12 │ impl Compute for Subject as Second {
+   │                  ------- conflicts with this trait implementation

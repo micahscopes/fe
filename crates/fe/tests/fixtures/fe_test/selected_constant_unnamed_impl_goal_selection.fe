@@ -1,0 +1,25 @@
+// expect ordinary=1
+// expect nested=212
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+fn target() -> Subject { Subject {} }
+impl Compute for Subject {
+    const fn compute() -> u256 { 1 }
+}
+impl Compute for Subject as Other {
+    const fn compute() -> u256 { 2 }
+}
+const fn ordinary() -> u256 { Subject::compute() }
+const fn nested() -> u256 {
+    with (Other) {
+        let before = Subject::compute()
+        let inner = with (<Subject as Compute>) { Subject::compute() }
+        before * 100 + inner * 10 + Subject::compute()
+    }
+}
+
+#[test]
+fn selected_constant_expectations() {
+    assert!(ordinary() == 1)
+    assert!(nested() == 212)
+}

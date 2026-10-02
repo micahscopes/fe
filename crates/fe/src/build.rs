@@ -569,7 +569,7 @@ fn build_file(
     let prepared = match driver::elaboration::prepare_target(db, &url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}: {}", error.url, error.message);
+            eprintln!("{}", error.render(db));
             return true;
         }
     };
@@ -958,7 +958,7 @@ fn analyze_ingot_build_artifacts(
     let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}: {}", error.url, error.message);
+            eprintln!("{}", error.render(db));
             return Err(());
         }
     };
@@ -1156,7 +1156,7 @@ fn build_ingot_url(
     let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}: {}", error.url, error.message);
+            eprintln!("{}", error.render(db));
             return BuildSummary { had_errors: true };
         }
     };
