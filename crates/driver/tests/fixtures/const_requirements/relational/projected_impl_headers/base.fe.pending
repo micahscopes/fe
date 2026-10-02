@@ -1,0 +1,7 @@
+// fixed on mainline by the cached trait-lowering query; resolves at the rebase
+trait HasInner { type Value }
+pub enum Inner { A, B(u256) }
+struct Key {}
+impl HasInner for Key { type Value = Inner }
+trait Marker {}
+impl Marker for Key::Value {}

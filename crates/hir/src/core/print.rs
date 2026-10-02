@@ -867,7 +867,7 @@ impl<'db> Field<'db> {
         let expr = unwrap_partial_ref(self.expr.data(db, body), "Field::expr");
         let expr_str = expr.pretty_print(db, body, indent);
 
-        if let Some(label) = self.label {
+        if let Some(crate::hir_def::FieldLabel::Ident(label)) = self.label {
             format!("{}: {}", label.data(db), expr_str)
         } else {
             // Shorthand: check if expr is a path matching what would be the inferred label

@@ -13,7 +13,7 @@ use common::{
 use hir::{
     analysis::{
         diagnostics::DiagnosticVoucher,
-        semantic::{EvalOutcome, GenericSubst, SemConstScalar, eval_body_owner_const_with_args},
+        semantic::{EvalOutcome, GenericSubst, eval_body_owner_const_with_args},
         ty::{
             normalize::normalize_ty,
             trait_resolution::PredicateListId,
@@ -238,7 +238,7 @@ fn unique_quote_location(value: &FrozenMetaValue) -> Option<FrozenQuoteSpan> {
         match value {
             FrozenMetaValue::Code(code) => {
                 for node in &code.nodes {
-                    if let Some(template) = &node.template
+                    if let Some(template) = node.template()
                         && let Some(range) = &template.span
                     {
                         locations.push(FrozenQuoteSpan {
@@ -365,7 +365,7 @@ fn annotate_generated_diagnostics(
             FrozenMetaValue::Code(code) => code
                 .nodes
                 .get(code.root)
-                .and_then(|node| node.template.as_ref())
+                .and_then(|node| node.template())
                 .and_then(|template| {
                     template.span.as_ref().map(|range| FrozenQuoteSpan {
                         file: template.owner.file().clone(),

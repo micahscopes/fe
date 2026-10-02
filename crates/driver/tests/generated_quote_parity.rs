@@ -79,10 +79,7 @@ fn quoted_impl_owner_survives_sibling_insertion(fixture: Fixture<&str>) {
         self_type_path,
         member_name,
         ..
-    }) = code.nodes[code.root]
-        .template
-        .as_ref()
-        .map(|key| &key.owner)
+    }) = code.nodes[code.root].template().map(|key| &key.owner)
     else {
         panic!("expected an impl-member quote owner");
     };

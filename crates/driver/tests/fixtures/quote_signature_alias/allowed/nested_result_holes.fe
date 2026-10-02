@@ -1,0 +1,25 @@
+use core::meta::{Code, Item, Record, field, field_type}
+pub trait Pair<U> {
+    fn pair(_ left: own U, _ right: own U) -> (U, U)
+}
+const fn emit(record: Record) -> Code<Item> {
+    let ty = field_type(field(record, 0))
+    quote {
+        impl ingot::Pair<${ty}> for ${record} {
+            fn pair(_ left: own ${ty}, _ right: own ${ty}) -> (${ty}, ${ty}) {
+                (left, right)
+            }
+        }
+    }
+}
+#[generate(emit)]
+pub struct Target<T> { pub value: T }
+#[test]
+fn values() {
+    let small: (u8, u8) = Target<u8>::pair(200, 7)
+    let wide: (u256, u256) = Target<u256>::pair(1000, 999)
+    let flags: (bool, bool) = Target<bool>::pair(true, false)
+    assert!(small.0 == 200 && small.1 == 7)
+    assert!(wide.0 == 1000 && wide.1 == 999)
+    assert!(flags.0 && !flags.1)
+}

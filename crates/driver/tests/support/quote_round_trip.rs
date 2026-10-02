@@ -16,9 +16,10 @@ use hir::{
     HirDb,
     analysis::semantic::SemConstScalar,
     core::meta::{
-        FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenGeneration, FrozenHandleKind,
-        FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase, FrozenQuoteConstructorSite,
-        FrozenQuoteSignatureType, FrozenTemplateSource, FrozenVariantBinding, MetaItem,
+        FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenCodeSource, FrozenGeneration,
+        FrozenHandleKind, FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase,
+        FrozenQuoteConstructorSite, FrozenQuoteSignatureType, FrozenTemplateSource,
+        FrozenVariantBinding, MetaItem,
     },
     hir_def::{
         Body, Cond, CondId, Expr, ExprId, FieldIndex, FieldParent, Func, GenericParamOwner,
@@ -86,7 +87,7 @@ fn owner<'db>(db: &'db DriverDataBase, locator: &FrozenItemLocator) -> Func<'db>
 }
 
 fn quote<'db>(db: &'db DriverDataBase, node: &FrozenCodeNode) -> Option<&'db Quote<'db>> {
-    let key = node.template.as_ref()?;
+    let key = node.template()?;
     assert_eq!(key.source, FrozenTemplateSource::Quote);
     let body = owner(db, &key.owner).body(db).expect("template owner body");
     let Expr::Quote(quote) = body.exprs(db)[key.expr].unwrap_ref() else {
@@ -138,7 +139,7 @@ struct Comparison<'a, 'db> {
 impl<'a, 'db> Comparison<'a, 'db> {
     fn frame(&self, node: usize, function: u32) -> Frame<'db> {
         let frozen = &self.code.nodes[node];
-        let key = frozen.template.as_ref().expect("nonempty body fragment");
+        let key = frozen.template().expect("nonempty body fragment");
         let owner = owner(self.authored, &key.owner);
         let source = owner.body(self.authored).expect("source owner body");
         let (body, open, member) = match key.source {
@@ -479,8 +480,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 let source_owner = owner(
                     self.authored,
                     &self.code.nodes[frame.node]
-                        .template
-                        .as_ref()
+                        .template()
                         .expect("template")
                         .owner,
                 );
@@ -646,7 +646,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         {
             self.parameter(actual, 0);
         } else if let Some(use_) = node.open_uses.iter().find(|use_| use_.site == expected) {
-            let key = node.template.as_ref().unwrap();
+            let key = node.template().unwrap();
             if key.source == FrozenTemplateSource::CheckedBody {
                 self.parameter(actual, use_.index as usize);
             } else {
@@ -878,12 +878,9 @@ impl<'a, 'db> Comparison<'a, 'db> {
         if let Expr::Hole(slot) = source {
             match &self.code.nodes[frame.node].holes[*slot as usize] {
                 FrozenCodeHole::Code(child, ..) => {
-                    if let Some(binding) = &self.code.nodes[*child].variant_binding {
-                        let field = binding.field.expect("expression code is a field reference");
-                        let mut group = binding.clone();
-                        group.field = None;
+                    if let FrozenCodeSource::Field(group, field) = &self.code.nodes[*child].source {
                         let binder =
-                            frame.groups.get(&group).expect("binder group in scope")[field];
+                            frame.groups.get(group).expect("binder group in scope")[*field];
                         assert!(self.actual.locals.iter().any(|local| local.binder == binder && local.uses.contains(&actual)),
                             "selected payload field must use its checked binder identity");
                         return;
@@ -1077,11 +1074,14 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 }
                 assert_eq!(fields.len(), actual_fields.len());
                 for (field, actual_field) in fields.iter().zip(actual_fields) {
-                    if let Some(slot) = field.label_hole {
+                    let label_hole = match field.label {
+                        Some(hir::hir_def::FieldLabel::Hole(slot)) => Some(slot),
+                        _ => None,
+                    };
+                    if let Some(slot) = label_hole {
                         self.field_authority(frame.node, slot, actual);
                     }
-                    let expected = field
-                        .label_hole
+                    let expected = label_hole
                         .map(|slot| self.field_hole(frame.node, slot))
                         .or_else(|| {
                             field
@@ -1203,11 +1203,9 @@ impl<'a, 'db> Comparison<'a, 'db> {
             else {
                 panic!("pattern splice must be code");
             };
-            let binding = self.code.nodes[child]
-                .variant_binding
-                .as_ref()
-                .expect("issued binder pattern");
-            assert!(binding.field.is_none());
+            let FrozenCodeSource::Pattern(binding) = &self.code.nodes[child].source else {
+                panic!("issued binder pattern");
+            };
             let root = self
                 .actual
                 .rooted_constructors

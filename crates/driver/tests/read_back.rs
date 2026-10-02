@@ -327,7 +327,7 @@ fn read_back_preserves_checked_binding_classes(fixture: Fixture<&str>) {
     let literal = read_back(&db, named_function(&db, &url, "literal")).expect("literal body");
     let node = &literal.nodes[literal.root];
     assert_eq!(
-        node.template.as_ref().unwrap().source,
+        node.template().unwrap().source,
         FrozenTemplateSource::CheckedBody
     );
     assert!(node.open_uses.is_empty());
@@ -1462,6 +1462,7 @@ fn quoted_long_arm_composition_is_checked(fixture: Fixture<&str>) {
     glob: "pending/quote_string_*.fe",
 )]
 #[dir_test_attr(#[ignore = "pre-RD86 string splice transport is pending"])]
+// Includes raw bytes whose storage width differs from the String capacity.
 fn quoted_string_splices_are_checked(fixture: Fixture<&str>) {
     let (authored, url) = fixture_db(fixture);
     let output = prepare(&authored)
@@ -1618,11 +1619,14 @@ fn enum_arm_fold_comparison_rejects_missing_arm(fixture: Fixture<&str>) {
             else {
                 return None;
             };
-            code.nodes[*lhs]
-                .variant_binding
-                .as_ref()
-                .filter(|binding| binding.field.is_none() && binding.variant_index == 3)
-                .map(|_| (index, *previous))
+            match &code.nodes[*lhs].source {
+                hir::core::meta::FrozenCodeSource::Pattern(binding)
+                    if binding.variant_index == 3 =>
+                {
+                    Some((index, *previous))
+                }
+                _ => None,
+            }
         })
         .expect("last folded arm");
     code.nodes[index] = code.nodes[previous].clone();
@@ -1685,21 +1689,30 @@ fn enum_group_binders_comparison_rejects_changed_coordinates(fixture: Fixture<&s
         let FrozenMetaValue::Code(code) = &mut expected[0].value else {
             panic!("binder fixture emits code");
         };
-        let binding = code
+        let (binding, field) = code
             .nodes
             .iter_mut()
-            .filter_map(|node| node.variant_binding.as_mut())
-            .find(|binding| {
+            .filter_map(|node| match &mut node.source {
+                hir::core::meta::FrozenCodeSource::Pattern(binding) => Some((binding, None)),
+                hir::core::meta::FrozenCodeSource::Field(binding, index) => {
+                    Some((binding, Some(index)))
+                }
+                _ => None,
+            })
+            .find(|(binding, field)| {
                 binding.variant_index == 0
                     && binding.group == 0
-                    && binding.field.is_some() == matches!(change, "group" | "field")
+                    && field.is_some() == matches!(change, "group" | "field")
             })
             .expect("selected compiler-issued coordinate");
         match change {
             "owner" => binding.owner.owner.path.push_str("::wrong_owner"),
             "variant" => binding.variant_index = 2,
             "group" => binding.group = 1,
-            "field" => binding.field = Some(1 - binding.field.unwrap()),
+            "field" => {
+                let field = field.unwrap();
+                *field = 1 - *field;
+            }
             _ => unreachable!(),
         }
         let failure = catch_unwind(AssertUnwindSafe(|| {
@@ -3679,7 +3692,7 @@ fn replay_preflights_nested_binder_metadata(fixture: Fixture<&str>) {
         panic!("code")
     };
     let node = &mut code.nodes[code.root];
-    let site = node.template.as_ref().unwrap().expr;
+    let site = node.template().unwrap().expr;
     let local = node.locals.first_mut().expect("shadowing local");
     // Resource mutation, not a valid binder-identity mutation. The guard must
     // run before attempting to consume or clone the oversized use table.
@@ -3807,7 +3820,7 @@ fn fragment_local_comparison_rejects_changed_binder_identity(fixture: Fixture<&s
                         .any(|local| local.member == hir::core::meta::QuoteMember::Fragment)
                 })
                 .expect("arm fragment locals");
-            let key = node.template.as_ref().unwrap();
+            let key = node.template().unwrap();
             let file = authored
                 .workspace()
                 .get(authored, key.owner.file())

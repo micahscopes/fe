@@ -1883,7 +1883,7 @@ pub fn walk_field<'db, V>(
 ) where
     V: Visitor<'db> + ?Sized,
 {
-    if let Some(name) = field.label {
+    if let Some(crate::hir_def::FieldLabel::Ident(name)) = field.label {
         ctxt.with_new_ctxt(|span| span.label(), |ctxt| visitor.visit_ident(ctxt, name));
     }
 

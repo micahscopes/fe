@@ -2357,6 +2357,15 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             _ => Err(invalid("code inspection requires a node cursor")),
         };
         let (code, site, body, typed, description) = node(&args[0])?;
+        let child_index = |label| {
+            self.index_from_value(args[1].clone(), origin)
+                .map_err(|error| {
+                    invalid(&match error {
+                        CtfeError::OutOfBounds { .. } => format!("invalid {label} child index"),
+                        _ => format!("{label} child index must be an integer"),
+                    })
+                })
+        };
         let output = match operation {
             CodeOp::NodeKind | CodeOp::NodeAssignmentOperator => {
                 let kind =
@@ -2400,12 +2409,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 ));
             }
             CodeOp::NodeChild => {
-                let value = self
-                    .expect_int(args[1].clone(), origin)
-                    .map_err(|_| invalid("code child index must be an integer"))?;
-                let index = value
-                    .to_usize()
-                    .ok_or_else(|| invalid("invalid code child index"))?;
+                let index = child_index("code")?;
                 let site = description.children.get(index).ok_or_else(|| {
                     invalid(&format!(
                         "code child index {index} is out of bounds for {} children",
@@ -2518,12 +2522,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 else {
                     return Err(invalid("node is not a record constructor"));
                 };
-                let value = self
-                    .expect_int(args[1].clone(), origin)
-                    .map_err(|_| invalid("record child index must be an integer"))?;
-                let index = value
-                    .to_usize()
-                    .ok_or_else(|| invalid("invalid record child index"))?;
+                let index = child_index("record")?;
                 let field = fields
                     .get(index)
                     .ok_or_else(|| invalid("record child index is out of bounds"))?;

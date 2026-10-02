@@ -1,0 +1,19 @@
+// Pending: transport checked const arguments through the shared type carrier.
+// String capacities must use the same argument mechanism as nominal types.
+pub struct Sized<const N: usize> { pub value: u256 }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            fn generated(value: ingot::Sized<8>) -> ingot::Sized<8> { value }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+fn ordinary(value: Sized<8>) -> Sized<8> { value }
+#[test]
+fn nominal_const_argument_matches_twin() {
+    assert!(ordinary(Sized<8> { value: 7 }).value == 7)
+    assert!(generated(Sized<8> { value: 7 }).value == 7)
+}

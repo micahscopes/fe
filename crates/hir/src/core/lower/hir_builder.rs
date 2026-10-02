@@ -18,18 +18,18 @@ use crate::{
         ty::{adt_def::AdtRef, ty_def::PrimTy as SemPrimTy},
     },
     core::meta::{
-        FrozenCode, FrozenCodeHole, FrozenMetaValue, FrozenQuoteConstructorSite,
+        FrozenCode, FrozenCodeHole, FrozenCodeSource, FrozenMetaValue, FrozenQuoteConstructorSite,
         FrozenTemplateSource, FrozenVariantBinding,
     },
     hir_def::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
         Cond, CondId, ConstGenericArg, ConstGenericArgValue, EffectParamListId, Expr, ExprId,
         FieldDefListId, FieldIndex, Func, FuncModifiers, FuncParam, FuncParamListId, FuncParamMode,
-        FuncParamName, GenericArg, GenericArgListId, GenericParam, GenericParamListId,
-        GenericParamOwner, IdentId, ImplTrait, IntegerId, ItemKind, LitKind, Mod, NormalAttr,
-        Partial, Pat, PatId, PathId, PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId,
-        TrackedItemVariant, TraitRefId, TypeBound, TypeGenericArg, TypeGenericParam, TypeId,
-        TypeKind, TypeMode, Visibility, WhereClauseId, WhereClauseOwner, WherePredicate,
+        FuncParamName, GenericArg, GenericArgListId, GenericParam, GenericParamListId, IdentId,
+        ImplTrait, IntegerId, ItemKind, LitKind, Mod, NormalAttr, Partial, Pat, PatId, PathId,
+        PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId, TrackedItemVariant, TraitRefId,
+        TypeBound, TypeGenericArg, TypeGenericParam, TypeId, TypeKind, TypeMode, Visibility,
+        WhereClauseId, WhereClauseOwner, WherePredicate,
         expr::CallArg,
         prim_ty::{IntTy, PrimTy as HirPrimTy, UintTy},
         scope_graph::ScopeId,
@@ -681,11 +681,7 @@ where
         names: &[IdentId<'db>],
     ) -> Result<WhereClauseId<'db>, QuoteConstructionError> {
         let db = self.db();
-        let params = match owner {
-            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => GenericParamOwner::Struct(owner),
-            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
-        }
-        .params_list(db);
+        let params = owner.generic_owner().params_list(db);
         if params.data(db).len() != names.len() {
             return Err(QuoteConstructionFault::TargetParameterCountChanged.into());
         }
@@ -762,10 +758,7 @@ where
                 .ctxt
                 .joined_id(TrackedItemVariant::WhereConstPredicate(index));
             let mut body = BodyCtxt::new(self.ctxt, id);
-            body.stmts = predicate.stmts(db).clone();
             body.exprs = predicate.exprs(db).clone();
-            body.conds = predicate.conds(db).clone();
-            body.pats = predicate.pats(db).clone();
             body.source_map = predicate.source_map(db).clone();
             for (_, expr) in body.exprs.iter_mut() {
                 match expr {
@@ -825,16 +818,10 @@ where
         names: &[IdentId<'db>],
     ) -> Result<TypeId<'db>, QuoteConstructionFault> {
         let db = self.db();
-        let name = match owner {
-            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => owner.name(db).to_opt(),
-            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => owner.name(db).to_opt(),
-        }
-        .ok_or(QuoteConstructionFault::AuthorizedRecordNameIsMissing)?;
-        let params = match owner {
-            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => GenericParamOwner::Struct(owner),
-            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
-        }
-        .params_list(db);
+        let name = owner
+            .name(db)
+            .ok_or(QuoteConstructionFault::AuthorizedRecordNameIsMissing)?;
+        let params = owner.generic_owner().params_list(db);
         if params.data(db).len() != names.len() {
             return Err(QuoteConstructionFault::RecordGenericParameterCountChanged);
         }
@@ -949,7 +936,6 @@ where
         rooted_funcs: &[(ExprId, PathId<'db>)],
         generic_uses: &[(ExprId, IdentId<'db>)],
     ) -> Result<(Body<'db>, Vec<(ExprId, IdentId<'db>)>), QuoteConstructionError> {
-        let db = self.db();
         let mut body = BodyBuilder::new(
             self.ctxt,
             self.roots,
@@ -957,37 +943,23 @@ where
             self.reserved.clone(),
             TrackedItemVariant::WhereConstPredicate(index),
         );
-        let mut map = QuoteCopyMap::new(db, holes, rooted_funcs, &[], &[], generic_uses, &[])?;
-        map.budget = body.body.f_ctxt.quote_budget.clone();
-        map.provider_scope = Some(provider_scope);
-        let root = body.copy_quote_expr(template, root, &mut map)?;
-        for site in &map.method_calls {
-            body.body
-                .quote_scopes
-                .push(((*site).into(), provider_scope.into()));
-        }
-        for (site, _) in rooted_funcs {
-            let copied = map.copied_expr(
-                *site,
-                QuoteConstructionFault::ConstPredicateNameWasNotCopied,
-            )?;
-            body.body
-                .quote_scopes
-                .push((copied.into(), provider_scope.into()));
-        }
-        let generics = generic_uses
-            .iter()
-            .map(|(site, name)| {
-                Ok((
-                    map.copied_expr(
-                        *site,
-                        QuoteConstructionFault::ConstPredicateNameWasNotCopied,
-                    )?,
-                    *name,
-                ))
-            })
-            .collect::<Result<Vec<_>, QuoteConstructionFault>>()?;
-        Ok((body.body.build(None, root, BodyKind::Anonymous), generics))
+        let budget = body.body.f_ctxt.quote_budget.clone();
+        let (root, copied) = body.copy_closed_quote_body(
+            template,
+            root,
+            provider_scope,
+            budget,
+            QuoteBodyBindings {
+                holes,
+                rooted_funcs,
+                generic_uses,
+                ..Default::default()
+            },
+        )?;
+        Ok((
+            body.body.build(None, root, BodyKind::Anonymous),
+            copied.generics,
+        ))
     }
 
     pub(super) fn new_impl_trait(
@@ -1098,36 +1070,17 @@ where
         spec: GeneratedFunctionSpec<'db>,
         build_body: impl FnOnce(&mut BodyBuilder<'_, 'db, O>),
     ) -> Func<'db> {
-        self.with_item_scope(
-            TrackedItemVariant::Func(Partial::Present(spec.name)),
-            |this, id| {
-                let mut body_builder = BodyBuilder::new(
-                    this.ctxt,
-                    this.roots,
-                    this.desugared.clone(),
-                    this.reserved.clone(),
-                    TrackedItemVariant::FuncBody,
-                );
-                build_body(&mut body_builder);
-                let body = body_builder.finish();
-
-                Func::new(
-                    this.db(),
-                    id,
-                    Partial::Present(spec.name),
-                    spec.attrs,
-                    spec.generic_params,
-                    spec.where_clause,
-                    Partial::Present(spec.params),
-                    spec.effects,
-                    spec.ret_ty,
-                    spec.modifiers,
-                    Some(body),
-                    this.top_mod(),
-                    this.origin(),
-                )
+        match self.generated_func_with_body_checked(
+            spec.name,
+            |_| Ok((spec, ())),
+            |body, ()| {
+                build_body(body);
+                Ok::<_, std::convert::Infallible>(())
             },
-        )
+        ) {
+            Ok(function) => function,
+            Err(never) => match never {},
+        }
     }
 
     pub(super) fn func_generic_inline_always(
@@ -1185,15 +1138,14 @@ struct QuoteCopyMap<'a, 'db> {
     groups: Rc<HashMap<FrozenVariantBinding, Vec<(IdentId<'db>, PatId)>>>,
     group_locals: Rc<RefCell<HashMap<PatId, Vec<ExprId>>>>,
     group_names: Rc<Cell<usize>>,
-    code: Option<&'a FrozenCode>,
-    fragments: Option<&'a [Option<QuoteFragmentSource<'db>>]>,
+    fragments: Option<(&'a FrozenCode, &'a [Option<QuoteFragmentSource<'db>>])>,
     fragment_depth: usize,
     provider_scope: Option<ScopeId<'db>>,
     budget: QuoteBudget,
-    open_bindings: Vec<(IdentId<'db>, usize)>,
+    open_bindings: &'a [(IdentId<'db>, usize)],
     visible_locals: Vec<(IdentId<'db>, IdentId<'db>, PatId)>,
-    owner_generic_bindings: Vec<IdentId<'db>>,
-    generic_bindings: Vec<IdentId<'db>>,
+    owner_generic_bindings: &'a [IdentId<'db>],
+    generic_bindings: &'a [IdentId<'db>],
     allow_self: bool,
     self_record_inits: Vec<ExprId>,
     constructor_paths: HashMap<FrozenQuoteConstructorSite, PathId<'db>>,
@@ -1462,15 +1414,6 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
         Ok(())
     }
 
-    fn charge_context_copy(&self) -> Result<(), QuoteConstructionError> {
-        self.budget.charge_auxiliary(
-            self.open_bindings.len()
-                + self.visible_locals.len()
-                + self.owner_generic_bindings.len()
-                + self.generic_bindings.len(),
-        )
-    }
-
     fn charge_node(&mut self) -> Result<(), QuoteConstructionError> {
         self.budget.charge()
     }
@@ -1529,15 +1472,14 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
             groups: Rc::new(HashMap::new()),
             group_locals: Rc::new(RefCell::new(HashMap::new())),
             group_names: Rc::new(Cell::new(0)),
-            code: None,
             fragments: None,
             fragment_depth: 0,
             provider_scope: None,
             budget: QuoteBudget::default(),
-            open_bindings: Vec::new(),
+            open_bindings: &[],
             visible_locals: Vec::new(),
-            owner_generic_bindings: Vec::new(),
-            generic_bindings: Vec::new(),
+            owner_generic_bindings: &[],
+            generic_bindings: &[],
             allow_self: false,
             self_record_inits: Vec::new(),
             paths,
@@ -1595,6 +1537,21 @@ where
         provider_scope: ScopeId<'db>,
         bindings: QuoteBodyBindings<'_, 'db>,
     ) -> Result<QuoteCopySummary<'db>, QuoteConstructionError> {
+        let budget = self.body.f_ctxt.quote_budget.for_body();
+        let (root, copied) =
+            self.copy_closed_quote_body(template, root, provider_scope, budget, bindings)?;
+        self.emit_expr_stmt(root);
+        Ok(copied)
+    }
+
+    fn copy_closed_quote_body(
+        &mut self,
+        template: Body<'db>,
+        root: ExprId,
+        provider_scope: ScopeId<'db>,
+        budget: QuoteBudget,
+        bindings: QuoteBodyBindings<'_, 'db>,
+    ) -> Result<(ExprId, QuoteCopySummary<'db>), QuoteConstructionError> {
         let QuoteBodyBindings {
             holes,
             fragments,
@@ -1632,14 +1589,11 @@ where
             generic_uses,
             member_holes,
         )?;
-        map.budget = self.body.f_ctxt.quote_budget.for_body();
-        if let Some((code, sources)) = fragments {
-            map.code = Some(code);
-            map.fragments = Some(sources);
-        }
-        map.open_bindings = open_bindings.to_vec();
-        map.owner_generic_bindings = owner_generic_bindings.to_vec();
-        map.generic_bindings = generic_bindings.to_vec();
+        map.budget = budget;
+        map.fragments = fragments;
+        map.open_bindings = open_bindings;
+        map.owner_generic_bindings = owner_generic_bindings;
+        map.generic_bindings = generic_bindings;
         for (site, path, _) in constructor_paths {
             map.add_constructor_path(
                 *site,
@@ -1659,7 +1613,6 @@ where
         }
         map.provider_scope = Some(provider_scope);
         let root = self.copy_quote_expr(template, root, &mut map)?;
-        self.emit_expr_stmt(root);
         for site in &map.method_calls {
             self.body
                 .quote_scopes
@@ -1770,14 +1723,17 @@ where
             })
             .collect::<Vec<_>>();
         method_calls.extend(map.fragment_method_calls);
-        Ok(QuoteCopySummary {
-            constructor_sites,
-            locals,
-            bindings,
-            effects,
-            generics,
-            method_calls,
-        })
+        Ok((
+            root,
+            QuoteCopySummary {
+                constructor_sites,
+                locals,
+                bindings,
+                effects,
+                generics,
+                method_calls,
+            },
+        ))
     }
 
     fn quote_scalar_expr(
@@ -1861,10 +1817,9 @@ where
             };
             let issued_field_reference = match hole {
                 FrozenCodeHole::Code(child, ..) => map
-                    .code
-                    .and_then(|code| code.nodes.get(*child))
-                    .and_then(|node| node.variant_binding.as_ref())
-                    .is_some_and(|binding| binding.field.is_some()),
+                    .fragments
+                    .and_then(|(code, _)| code.nodes.get(*child))
+                    .is_some_and(|node| matches!(node.source, FrozenCodeSource::Field(..))),
                 FrozenCodeHole::Value(..) => false,
             };
             if matches!(hole, FrozenCodeHole::Value(..)) || issued_field_reference {
@@ -1912,18 +1867,17 @@ where
                     .iter()
                     .map(|field| {
                         map.charge_node()?;
-                        let label = match field.label_hole {
-                            Some(slot) => Some(
+                        let label = match field.label {
+                            Some(crate::hir_def::FieldLabel::Hole(slot)) => Some(
                                 map.members
                                     .get(&slot)
                                     .ok_or(QuoteConstructionFault::FieldLabelHasNoCheckedField)?
                                     .label,
                             ),
-                            None => field.label_eagerly(db, template),
+                            _ => field.label_eagerly(db, template),
                         };
                         Ok(crate::hir_def::Field {
-                            label,
-                            label_hole: None,
+                            label: label.map(crate::hir_def::FieldLabel::Ident),
                             expr: self.copy_quote_expr(template, field.expr, map)?,
                         })
                     })
@@ -2068,10 +2022,10 @@ where
                 Partial::Present(Expr::RecordInit(_, fields)) => fields
                     .iter()
                     .filter_map(|field| {
-                        field
-                            .label_hole
-                            .and_then(|slot| map.members.get(&slot))
-                            .map(|member| member.field)
+                        let Some(crate::hir_def::FieldLabel::Hole(slot)) = field.label else {
+                            return None;
+                        };
+                        map.members.get(&slot).map(|member| member.field)
                     })
                     .collect(),
                 _ => Vec::new(),
@@ -2156,12 +2110,9 @@ where
             Fragment(usize, Option<crate::core::meta::FrozenQuoteSpan>),
             Arm(crate::hir_def::MatchArm),
         }
-        let code = parent
-            .code
-            .ok_or(QuoteConstructionFault::ArmSpliceHasNoFrozenCode)?;
-        let sources = parent
+        let (code, sources) = parent
             .fragments
-            .ok_or(QuoteConstructionFault::ArmSpliceHasNoCheckedSources)?;
+            .ok_or(QuoteConstructionFault::ArmSpliceHasNoFrozenCode)?;
         let mut pending = vec![Work::Fragment(child, None)];
         let mut copied = Vec::new();
         while let Some(work) = pending.pop() {
@@ -2243,20 +2194,18 @@ where
                 MAX_QUOTED_FRAGMENT_DEPTH,
             ));
         }
-        let code = parent
-            .code
+        let (code, _) = parent
+            .fragments
             .ok_or(QuoteConstructionFault::CodeSpliceRequiresFragmentTransplantation)?;
         let node = code
             .nodes
             .get(child)
             .ok_or(QuoteConstructionFault::CodeSpliceHasNoFrozenNode)?;
-        if let Some(binding) = &node.variant_binding {
-            let field = binding
-                .field
-                .ok_or(QuoteConstructionFault::PatternCodeCannotStandForAnExpression)?;
-            let mut group = binding.clone();
-            group.field = None;
-            let (name, binder) = map_group_field(parent, &group, field)?;
+        if matches!(node.source, FrozenCodeSource::Pattern(_)) {
+            return Err(QuoteConstructionFault::PatternCodeCannotStandForAnExpression.into());
+        }
+        if let FrozenCodeSource::Field(group, field) = &node.source {
+            let (name, binder) = map_group_field(parent, group, *field)?;
             let expr = self.push_expr(Expr::Path(Partial::Present(PathId::from_ident(
                 self.db(),
                 name,
@@ -2287,12 +2236,9 @@ where
             &mut QuoteCopyMap<'_, 'db>,
         ) -> Result<T, QuoteConstructionError>,
     ) -> Result<T, QuoteConstructionError> {
-        let code = parent
-            .code
-            .ok_or(QuoteConstructionFault::CodeSpliceRequiresFragmentTransplantation)?;
-        let sources = parent
+        let (code, sources) = parent
             .fragments
-            .ok_or(QuoteConstructionFault::CodeSpliceHasNoCheckedSource)?;
+            .ok_or(QuoteConstructionFault::CodeSpliceRequiresFragmentTransplantation)?;
         let node = code
             .nodes
             .get(child)
@@ -2326,8 +2272,7 @@ where
         let mut param_uses = Vec::new();
         let mut bound_sites = Vec::new();
         let is_checked_body = node
-            .template
-            .as_ref()
+            .template()
             .is_some_and(|key| key.source == FrozenTemplateSource::CheckedBody);
         let generic_uses = node
             .generic_uses
@@ -2404,8 +2349,8 @@ where
             &parent.budget,
             node,
             source,
-            &parent.owner_generic_bindings,
-            &parent.generic_bindings,
+            parent.owner_generic_bindings,
+            parent.generic_bindings,
         )?;
         let mut rooted_paths = types.rooted_paths;
         rooted_paths.extend(
@@ -2415,7 +2360,9 @@ where
                 .map(|(site, path)| (*site, *path)),
         );
         parent.budget.charge_auxiliary(node.metadata_nodes())?;
-        parent.charge_context_copy()?;
+        parent
+            .budget
+            .charge_auxiliary(parent.visible_locals.len())?;
         let locals = node
             .locals
             .iter()
@@ -2438,15 +2385,14 @@ where
             &source.member_holes,
         )?;
         map.provider_scope = Some(source.provider_scope);
-        map.code = Some(code);
-        map.fragments = Some(sources);
+        map.fragments = Some((code, sources));
         map.fragment_depth = parent.fragment_depth
             + usize::from(matches!(source.root, QuoteFragmentRoot::Expr { .. }));
         map.budget = parent.budget.clone();
-        map.open_bindings = parent.open_bindings.clone();
+        map.open_bindings = parent.open_bindings;
         map.visible_locals = parent.visible_locals.clone();
-        map.owner_generic_bindings = parent.owner_generic_bindings.clone();
-        map.generic_bindings = parent.generic_bindings.clone();
+        map.owner_generic_bindings = parent.owner_generic_bindings;
+        map.generic_bindings = parent.generic_bindings;
         map.allow_self = parent.allow_self;
         map.groups = parent.groups.clone();
         map.group_locals = parent.group_locals.clone();
@@ -2647,17 +2593,24 @@ where
             else {
                 return Err(QuoteConstructionFault::PatternSpliceRequiresCodePat.into());
             };
-            let binding = map
-                .code
-                .and_then(|code| code.nodes.get(*child))
-                .and_then(|node| node.variant_binding.as_ref())
+            let source = &map
+                .fragments
+                .and_then(|(code, _)| code.nodes.get(*child))
                 .ok_or(QuoteConstructionFault::PatternSpliceNeedsACompilerIssuedBinder)?
-                .clone();
-            if binding.field.is_some() {
-                return Err(
-                    QuoteConstructionFault::FieldReferenceCodeCannotStandForAPattern.into(),
-                );
-            }
+                .source;
+            let binding = match source {
+                FrozenCodeSource::Pattern(binding) => binding.clone(),
+                FrozenCodeSource::Field(..) => {
+                    return Err(
+                        QuoteConstructionFault::FieldReferenceCodeCannotStandForAPattern.into(),
+                    );
+                }
+                _ => {
+                    return Err(
+                        QuoteConstructionFault::PatternSpliceNeedsACompilerIssuedBinder.into(),
+                    );
+                }
+            };
             if map.groups.contains_key(&binding) {
                 return Err(
                     QuoteConstructionFault::BinderGroupAlreadyBoundInAnEnclosingPattern.into(),
@@ -3328,8 +3281,7 @@ where
             .iter()
             .copied()
             .map(|field_name| crate::hir_def::Field {
-                label: Some(field_name),
-                label_hole: None,
+                label: Some(crate::hir_def::FieldLabel::Ident(field_name)),
                 expr: self.ident_expr(field_name),
             })
             .collect();

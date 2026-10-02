@@ -439,15 +439,13 @@ impl<'db> Field<'db> {
     fn lower_ast(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::RecordField) -> Self {
         let label = ast
             .label()
-            .map(|label| IdentId::lower_token(ctxt.f_ctxt, label));
-        let label_hole = ast
-            .label_hole()
-            .and_then(|hole| super::quote::lower_field_label_hole(ctxt, &hole));
+            .map(|label| FieldLabel::Ident(IdentId::lower_token(ctxt.f_ctxt, label)))
+            .or_else(|| {
+                ast.label_hole()
+                    .and_then(|hole| super::quote::lower_field_label_hole(ctxt, &hole))
+                    .map(FieldLabel::Hole)
+            });
         let expr = Expr::push_to_body_opt(ctxt, ast.expr());
-        Self {
-            label,
-            label_hole,
-            expr,
-        }
+        Self { label, expr }
     }
 }

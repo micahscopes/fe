@@ -183,11 +183,18 @@ pub struct FrozenCode {
     pub nodes: Vec<FrozenCodeNode>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FrozenCodeSource {
+    #[default]
+    Empty,
+    Template(FrozenTemplateKey),
+    Pattern(FrozenVariantBinding),
+    Field(FrozenVariantBinding, usize),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FrozenCodeNode {
-    /// Absent for empty fragments and compiler-issued variant bindings.
-    pub template: Option<FrozenTemplateKey>,
-    pub variant_binding: Option<FrozenVariantBinding>,
+    pub source: FrozenCodeSource,
     pub holes: Vec<FrozenCodeHole>,
     /// Authored expression paths that were resolved before generation.
     pub rooted_funcs: Vec<FrozenQuoteFunction>,
@@ -203,7 +210,7 @@ pub struct FrozenCodeNode {
     pub impl_trait_type_arguments: Option<Vec<FrozenQuoteSignatureType>>,
     /// Pattern binders and their checked uses in the quoted template.
     pub locals: Vec<FrozenQuoteLocal>,
-    /// Checked primitive targets of casts in a read-back body.
+    /// Checked primitive targets of casts in quoted fragments or checked bodies.
     pub cast_primitives: Vec<(ExprId, PrimTy)>,
     /// Provider-checked types of local annotations in quoted bodies.
     pub local_types: Vec<FrozenQuoteLocalType>,
@@ -290,8 +297,7 @@ impl FrozenCodeNode {
     /// Destructure exhaustively so adding a carrier field requires an accounting decision.
     pub fn metadata_nodes(&self) -> usize {
         let Self {
-            template: _,
-            variant_binding: _,
+            source: _,
             holes,
             rooted_funcs,
             rooted_constructors,
@@ -379,32 +385,16 @@ impl FrozenCodeNode {
         }
         count
     }
+    pub fn template(&self) -> Option<&FrozenTemplateKey> {
+        match &self.source {
+            FrozenCodeSource::Template(key) => Some(key),
+            _ => None,
+        }
+    }
     pub fn empty(template: Option<FrozenTemplateKey>) -> Self {
         Self {
-            template,
-            variant_binding: None,
-            holes: Vec::new(),
-            rooted_funcs: Vec::new(),
-            rooted_constructors: Vec::new(),
-            selected_methods: Vec::new(),
-            rooted_traits: Vec::new(),
-            qualified_consts: Vec::new(),
-            impl_trait_type_arguments: None,
-            locals: Vec::new(),
-            cast_primitives: Vec::new(),
-            local_types: Vec::new(),
-            record_types: Vec::new(),
-            param_uses: Vec::new(),
-            effect_uses: Vec::new(),
-            generic_uses: Vec::new(),
-            self_uses: Vec::new(),
-            self_record_inits: Vec::new(),
-            open_uses: Vec::new(),
-            free_self_uses: Vec::new(),
-            function_types: Vec::new(),
-            where_predicates: Vec::new(),
-            assoc_const_primitives: Vec::new(),
-            assoc_type_values: Vec::new(),
+            source: template.map_or(FrozenCodeSource::Empty, FrozenCodeSource::Template),
+            ..Self::default()
         }
     }
 }
@@ -414,8 +404,6 @@ pub struct FrozenVariantBinding {
     pub owner: FrozenQuoteNominal,
     pub variant_index: u16,
     pub group: usize,
-    /// Absent for the pattern, present for a reference to a bound payload field.
-    pub field: Option<usize>,
 }
 
 /// The expression body or quoted item owning a classified quotation site.
@@ -602,29 +590,26 @@ pub enum FrozenQuoteSignatureType {
 impl FrozenQuoteSignatureType {
     /// HIR nodes emitted for this type, excluding recursively emitted children.
     pub fn reification_nodes(&self) -> usize {
-        match self {
+        let root_nodes = match self {
+            Self::Nominal { root, .. } => authored_path_nodes(&root.owner.path),
+            Self::Trait { root, .. } => authored_path_nodes(&root.owner.path),
+            Self::Tuple(_) | Self::SelfType | Self::FunctionGeneric(_) | Self::OwnerGeneric(_) => {
+                return 2;
+            }
+            _ => return 1,
+        };
+        let arguments_given = matches!(
+            self,
             Self::Nominal {
-                root,
-                arguments,
-                arguments_given,
-            } => {
-                2 + authored_path_nodes(&root.owner.path)
-                    + arguments.len()
-                    + 2 * usize::from(*arguments_given || !arguments.is_empty())
+                arguments_given: true,
+                ..
+            } | Self::Trait {
+                arguments_given: true,
+                ..
             }
-            Self::Trait {
-                root,
-                arguments,
-                arguments_given,
-            } => {
-                2 + authored_path_nodes(&root.owner.path)
-                    + arguments.len()
-                    + 2 * usize::from(*arguments_given || !arguments.is_empty())
-            }
-            Self::Tuple(_) => 2, // TypeId plus TupleTypeId.
-            Self::SelfType | Self::FunctionGeneric(_) | Self::OwnerGeneric(_) => 2,
-            _ => 1,
-        }
+        );
+        let arguments = self.children();
+        2 + root_nodes + arguments.len() + 2 * usize::from(arguments_given || !arguments.is_empty())
     }
 
     /// Direct type-syntax children, shared by construction budget walks.

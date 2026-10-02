@@ -208,12 +208,8 @@ impl<'db> AdtRef<'db> {
         }
     }
 
-    pub fn name(self, db: &'db dyn HirAnalysisDb) -> Option<IdentId<'db>> {
-        match self {
-            AdtRef::Enum(e) => e.name(db),
-            AdtRef::Struct(s) => s.name(db),
-        }
-        .to_opt()
+    pub fn name(self, db: &'db dyn crate::HirDb) -> Option<IdentId<'db>> {
+        self.as_item().name(db)
     }
 
     pub fn kind_name(self) -> &'static str {

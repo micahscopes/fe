@@ -972,12 +972,15 @@ impl<'db> RecordInput<'db> {
                 if field.is_some_and(|index| index >= shape.num_types()) {
                     return Err(FreezingProtocolFault::BinderFieldIndexIsOutOfBounds.into());
                 }
-                nodes[index].variant_binding = Some(hir::core::meta::FrozenVariantBinding {
+                let binding = hir::core::meta::FrozenVariantBinding {
                     owner: frozen_quote_nominal_ref(self.db, adt)?,
                     variant_index: variant.idx,
                     group,
-                    field,
-                });
+                };
+                nodes[index].source = match field {
+                    Some(index) => hir::core::meta::FrozenCodeSource::Field(binding, index),
+                    None => hir::core::meta::FrozenCodeSource::Pattern(binding),
+                };
                 return Ok(());
             }
         };
@@ -2047,19 +2050,15 @@ impl<'db> RecordInput<'db> {
             holes.push(hole);
         }
         nodes[index] = FrozenCodeNode {
-            template,
-            variant_binding: None,
             holes,
             rooted_funcs,
             rooted_constructors,
-            selected_methods: Vec::new(),
             rooted_traits,
             qualified_consts,
             impl_trait_type_arguments,
             locals,
             cast_primitives,
             local_types,
-            record_types: Vec::new(),
             param_uses,
             effect_uses,
             generic_uses,
@@ -2071,6 +2070,7 @@ impl<'db> RecordInput<'db> {
             where_predicates,
             assoc_const_primitives,
             assoc_type_values,
+            ..FrozenCodeNode::empty(template)
         };
         // Hole edges were charged before allocation, types by their shared freezer.
         for _ in 0..nodes[index]

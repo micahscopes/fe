@@ -245,23 +245,19 @@ impl<'db> CallArg<'db> {
     /// 2. If 1. is not true, then the argument is labeled when the expression
     ///    is a path expression and the path is an identifier.
     pub fn label_eagerly(&self, db: &'db dyn HirDb, body: Body<'db>) -> Option<IdentId<'db>> {
-        if let Some(label) = self.label {
-            return Some(label);
-        };
-
-        let Partial::Present(Expr::Path(Partial::Present(path))) = self.expr.data(db, body) else {
-            return None;
-        };
-
-        path.as_ident(db)
+        self.label.or_else(|| inferred_label(db, body, self.expr))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum FieldLabel<'db> {
+    Ident(IdentId<'db>),
+    Hole(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub struct Field<'db> {
-    pub label: Option<IdentId<'db>>,
-    /// A quoted label to replace with a checked target field at generation.
-    pub label_hole: Option<u32>,
+    pub label: Option<FieldLabel<'db>>,
     pub expr: ExprId,
 }
 
@@ -271,16 +267,18 @@ impl<'db> Field<'db> {
     /// 2. If 1. is not true, then the field is labeled when the expression is a
     ///    path expression and the path is an identifier.
     pub fn label_eagerly(&self, db: &'db dyn HirDb, body: Body<'db>) -> Option<IdentId<'db>> {
-        if let Some(label) = self.label {
-            return Some(label);
-        };
-
-        let Partial::Present(Expr::Path(Partial::Present(path))) = self.expr.data(db, body) else {
-            return None;
-        };
-
-        path.as_ident(db)
+        match self.label {
+            Some(FieldLabel::Ident(label)) => Some(label),
+            _ => inferred_label(db, body, self.expr),
+        }
     }
+}
+
+fn inferred_label<'db>(db: &'db dyn HirDb, body: Body<'db>, expr: ExprId) -> Option<IdentId<'db>> {
+    let Partial::Present(Expr::Path(Partial::Present(path))) = expr.data(db, body) else {
+        return None;
+    };
+    path.as_ident(db)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]

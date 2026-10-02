@@ -1,0 +1,32 @@
+// fixed on mainline by the cached trait-lowering query; resolves at the rebase
+pub trait Score {
+    fn score(self) -> u256
+    fn make(_ value: u256) -> Self
+}
+pub enum Inner { A, B(u256) }
+trait HasInner { type Value }
+struct Key {}
+impl HasInner for Key { type Value = Inner }
+mod author {
+    use core::meta::{Code, Item, Record, field, field_type}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let ty = field_type(field(record, 0))
+        quote {
+            impl ingot::Score for ${ty} {
+                fn make(_ value: u256) -> Self { Self::B(value) }
+                fn score(self) -> u256 {
+                    match self { Self::A => 1, Self::B(x) => x }
+                }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+pub struct Outer { pub inner: Key::Value }
+#[test]
+fn values() {
+    let made: Inner = Inner::make(23)
+    assert!(made.score() == 23)
+    assert!(Inner::A.score() == 1)
+    assert!(Inner::B(8).score() == 8)
+}

@@ -1,0 +1,36 @@
+// Pending string transport: checked capacity differs from scalar storage width.
+// Non-UTF-8 and hidden high bytes must keep ordinary fixed-string behavior.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let raw: String<31> = 0xff as String<31>
+        let narrow: String<4> = 0x01000000434f4f4c as String<4>
+        quote {
+            fn generated_raw_matches() -> bool {
+                let value = ${raw}
+                value == (0xff as String<31>)
+            }
+            fn generated_narrow_matches() -> bool {
+                let value = ${narrow}
+                value == (0x01000000434f4f4c as String<4>)
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+fn ordinary_raw_matches() -> bool {
+    let value: String<31> = 0xff as String<31>
+    value == (0xff as String<31>)
+}
+fn ordinary_narrow_matches() -> bool {
+    let value: String<4> = 0x01000000434f4f4c as String<4>
+    value == (0x01000000434f4f4c as String<4>)
+}
+#[test]
+fn raw_string_splices_match_twins() {
+    assert!(ordinary_raw_matches())
+    assert!(ordinary_narrow_matches())
+    assert!(generated_raw_matches() == ordinary_raw_matches())
+    assert!(generated_narrow_matches() == ordinary_narrow_matches())
+}

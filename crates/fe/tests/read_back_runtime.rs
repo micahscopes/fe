@@ -170,6 +170,7 @@ fn enum_destination_constants_execute_at_o0_and_o2(fixture: Fixture<&str>) {
     glob: "pending/quote_string_*.fe",
 )]
 #[dir_test_attr(#[ignore = "pre-RD86 string splice transport is pending"])]
+// Includes raw bytes whose storage width differs from the String capacity.
 fn string_splices_execute_at_o0_and_o2(fixture: Fixture<&str>) {
     execute_quoted_fixture(fixture);
 }
