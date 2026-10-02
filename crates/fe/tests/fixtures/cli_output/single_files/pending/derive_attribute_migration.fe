@@ -1,0 +1,7 @@
+// Target: RD84 (1), M2-c. `#[derive(..)]` stays rejected (12-0005), and its help now names the declared form.
+// expect: rejected at line 6 with 12-0005, plus help: write `impl Eq for Point with (..)` naming a deriver
+//   (snapshot update only; today's message has no such help).
+use core::ops::Eq
+
+#[derive(Eq)] // <- here
+pub struct Point { pub x: u256, pub y: u256 }

@@ -1,0 +1,32 @@
+mod source {
+    pub type Word = u256
+    pub struct Wrapped<T> { pub value: T }
+    pub trait Tag { const VALUE: u256 }
+    impl Tag for u256 { const VALUE: u256 = 2 }
+    impl Tag for bool { const VALUE: u256 = 1 }
+
+    pub fn id<T>(_ value: own T) -> T { value }
+    pub fn tag<T: Tag>() -> u256 { T::VALUE }
+
+    pub fn call_primitive(_ a: u8) -> u256 {
+        id<Word>(a as Word) + tag<Word>()
+    }
+
+    pub fn call_nominal(_ a: u8) -> u256 {
+        let value = Wrapped<u256> { value: a as u256 }
+        id<Wrapped<Word>>(value).value
+    }
+}
+
+mod dest {
+    pub type Word = bool
+    pub struct Wrapped<T> { pub value: bool }
+    pub fn id<T>(_ value: own T) -> T { value }
+    pub fn tag<T: ingot::source::Tag>() -> u256 { 99 }
+}
+
+#[test]
+fn authored_values() {
+    assert!(source::call_primitive(6) == 8)
+    assert!(source::call_nominal(6) == 6)
+}

@@ -1,0 +1,64 @@
+// Target: RD84 (1), M2-a with QUOTATION_DESIGN section 9 (generic records). A declared derivation for a generic struct carries its own parameters and per-field bounds.
+// Oracle: values from mb2 `fe_test/derived_eq_default_generic.fe` (VERIFIED in the parity audit); `Wrapper<Point>` needs
+//   `Point: Eq`, met by `Point`'s own declared derivation. The header names the nominal type only; the deriver supplies generics.
+// Positions: generic impl; nested generics; derived code relying on derived code.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Pair<A, B> { pub a: A, pub b: B }
+
+impl Eq for Pair with (StableEq)
+
+pub struct Wrapper<T> { pub inner: T }
+
+impl Eq for Wrapper with (StableEq)
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point with (StableEq)
+
+#[test]
+fn generic_pair() {
+    let p: Pair<u256, bool> = Pair { a: 1, b: true }
+    let q: Pair<u256, bool> = Pair { a: 1, b: true }
+    assert!(p.eq(q))
+    let r: Pair<u256, bool> = Pair { a: 1, b: true }
+    let s: Pair<u256, bool> = Pair { a: 1, b: false }
+    assert!(!r.eq(s))
+}
+
+#[test]
+fn generic_over_derived_field() {
+    let w1 = Wrapper { inner: Point { x: 7, y: 8 } }
+    let w2 = Wrapper { inner: Point { x: 7, y: 8 } }
+    let w3 = Wrapper { inner: Point { x: 7, y: 9 } }
+    assert!(w1.eq(w2))
+    let w4 = Wrapper { inner: Point { x: 7, y: 8 } }
+    assert!(!w4.eq(w3))
+}
+
+#[test]
+fn nested_generics() {
+    let a: Wrapper<Pair<u256, bool>> = Wrapper { inner: Pair { a: 2, b: false } }
+    let b: Wrapper<Pair<u256, bool>> = Wrapper { inner: Pair { a: 2, b: false } }
+    assert!(a == b)
+}

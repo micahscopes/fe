@@ -1596,13 +1596,14 @@ fn blocked_const_detail<'db>(
     (primary, dependency)
 }
 
-/// A code value exists only at compile time, so a const item holding one is
-/// not reified for runtime; a runtime use of it is refused where it is used.
+/// A code value or its read-only cursor exists only at compile time. A const
+/// item holding one is not reified; a runtime use is refused where it is used.
 fn is_code_value<'db>(db: &'db dyn HirAnalysisDb, value: SemConstId<'db>) -> bool {
     matches!(
         value.value(db),
         SemConstValue::Structural {
-            handle: crate::analysis::semantic::StructuralHandle::Code(_),
+            handle: crate::analysis::semantic::StructuralHandle::Code(_)
+                | crate::analysis::semantic::StructuralHandle::CodeNode { .. },
             ..
         }
     )

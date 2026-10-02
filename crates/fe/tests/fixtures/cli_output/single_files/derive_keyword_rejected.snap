@@ -1,0 +1,16 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/derive_keyword_rejected.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/derive_keyword_rejected.fe
+
+error[1-0001]: expected item
+  ┌─ derive_keyword_rejected.fe:9:1
+  │
+9 │ derive Eq for Point using StableEq // <- here
+  │ ^ expected `mod`, `fn`, `struct`, `contract`, `msg`, `enum`, `trait`, `impl`, `use`, `const`, `static_assert`, `extern` or `type`
+
+
+=== EXIT CODE: 1 ===

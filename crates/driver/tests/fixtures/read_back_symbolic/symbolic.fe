@@ -1,0 +1,35 @@
+pub trait Tag { const VALUE: u256 }
+impl Tag for u256 { const VALUE: u256 = 2 }
+impl Tag for bool { const VALUE: u256 = 1 }
+pub fn choose<T: Tag>() -> u256 { T::VALUE }
+
+mod source {
+    use ingot::{Tag, choose}
+
+    pub fn generic_call<T: Tag, U: Tag>() -> u256 {
+        choose<T>() * 10 + choose<U>()
+    }
+
+    pub fn annotation<T>(_ value: own T) -> T {
+        let local: T = value
+        local
+    }
+
+    pub struct Pair<A: Tag, B: Tag> { pub a: A, pub b: B }
+    impl<A: Tag, B: Tag> Pair<A, B> {
+        pub fn owner_call<C: Tag>(own self) -> u256 {
+            choose<A>() * 100 + choose<B>() * 10 + choose<C>()
+        }
+    }
+}
+
+type T = bool
+type U = u256
+
+#[test]
+fn authored_values() {
+    assert!(source::generic_call<u256, bool>() == 21)
+    assert!(source::generic_call<bool, u256>() == 12)
+    assert!(source::annotation<u256>(9) == 9)
+    assert!(source::Pair<u256, bool> { a: 3, b: true }.owner_call<bool>() == 211)
+}

@@ -1,0 +1,9 @@
+// Target: RD84 (1) ("no `derive` or `using` keywords"). mb2's `derive G for T using P` item does not parse.
+// expect: rejected at line 9 with a parse error and nothing else; `derive` and `using` are not keywords.
+use core::ops::Eq
+
+pub struct StableEq {}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+derive Eq for Point using StableEq // <- here

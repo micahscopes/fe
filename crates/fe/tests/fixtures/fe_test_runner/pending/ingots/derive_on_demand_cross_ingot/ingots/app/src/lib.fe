@@ -1,0 +1,27 @@
+// Target: RD84 (3), M2-d in another ingot (PR_HYGIENE 26). A block in the app ingot derives the app's own trait for a dependency's type with public fields.
+// Oracle: hand-computed field count (2). The trait is local so a hand-written impl here would be legal; deriving a foreign
+//   trait for a foreign type on the fly (orphan rule versus block-scoped hidden impls) is left open in README.md.
+use core::derive::Derive
+use core::meta::{Code, Item, Record, field_count}
+
+pub trait FieldCount {
+    const N: usize
+}
+
+// CountFields: the number of fields as an associated const.
+pub struct CountFields {}
+
+impl Derive<FieldCount> for CountFields {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record)
+        quote { impl FieldCount for ${record} { const N: usize = ${n} } }
+    }
+}
+
+fn count<T: FieldCount>() -> usize { T::N }
+
+#[test]
+fn block_derives_for_dependency_type() {
+    let n = with (CountFields) { count<geo::Point>() }
+    assert!(n == 2)
+}

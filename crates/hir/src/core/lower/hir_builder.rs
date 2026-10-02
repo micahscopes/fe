@@ -9,8 +9,11 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     HirDb,
-    analysis::{semantic::SemConstScalar, ty::ty_def::PrimTy as SemPrimTy},
-    core::meta::{FrozenCode, FrozenCodeHole, FrozenMetaValue},
+    analysis::{
+        semantic::SemConstScalar,
+        ty::{adt_def::AdtRef, ty_def::PrimTy as SemPrimTy},
+    },
+    core::meta::{FrozenCode, FrozenCodeHole, FrozenMetaValue, FrozenTemplateSource},
     hir_def::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
         Cond, CondId, ConstGenericArg, ConstGenericArgValue, EffectParamListId, Expr, ExprId,
@@ -18,7 +21,7 @@ use crate::{
         FuncParamName, GenericArg, GenericArgListId, GenericParam, GenericParamListId,
         GenericParamOwner, IdentId, ImplTrait, IntegerId, ItemKind, LitKind, Mod, NormalAttr,
         Partial, Pat, PatId, PathId, PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId,
-        TrackedItemVariant, TraitRefId, TypeBound, TypeGenericArg, TypeGenericParam, TypeId,
+        TrackedItemVariant, Trait, TraitRefId, TypeBound, TypeGenericArg, TypeGenericParam, TypeId,
         TypeKind, TypeMode, Visibility, WhereClauseId, WhereClauseOwner, WherePredicate,
         expr::CallArg,
         prim_ty::{IntTy, PrimTy as HirPrimTy, UintTy},
@@ -53,6 +56,136 @@ impl<'db> LibRoots<'db> {
 
         Self { core, std }
     }
+}
+
+fn rebind_owner_bound_type<'db>(
+    db: &'db dyn HirDb,
+    ty: TypeId<'db>,
+    renames: &HashMap<IdentId<'db>, IdentId<'db>>,
+) -> Result<TypeId<'db>, String> {
+    let kind = match ty.data(db) {
+        TypeKind::Path(Partial::Present(path)) => TypeKind::Path(Partial::Present(
+            rebind_owner_bound_path(db, *path, renames)?,
+        )),
+        TypeKind::Mode(mode, Partial::Present(inner)) => TypeKind::Mode(
+            *mode,
+            Partial::Present(rebind_owner_bound_type(db, *inner, renames)?),
+        ),
+        TypeKind::Ptr(Partial::Present(inner)) => TypeKind::Ptr(Partial::Present(
+            rebind_owner_bound_type(db, *inner, renames)?,
+        )),
+        TypeKind::Tuple(elements) => TypeKind::Tuple(crate::hir_def::TupleTypeId::new(
+            db,
+            elements
+                .data(db)
+                .iter()
+                .map(|element| {
+                    element
+                        .to_opt()
+                        .ok_or_else(|| "quoted target bound type is missing".to_owned())
+                        .and_then(|ty| rebind_owner_bound_type(db, ty, renames))
+                        .map(Partial::Present)
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        TypeKind::Primitive(_) | TypeKind::Never => ty.data(db).clone(),
+        _ => return Err("quoted target bound type needs checked reification".to_owned()),
+    };
+    Ok(TypeId::new(db, kind))
+}
+
+fn rebind_owner_bound_path<'db>(
+    db: &'db dyn HirDb,
+    path: PathId<'db>,
+    renames: &HashMap<IdentId<'db>, IdentId<'db>>,
+) -> Result<PathId<'db>, String> {
+    let parent = path
+        .parent(db)
+        .map(|parent| rebind_owner_bound_path(db, parent, renames))
+        .transpose()?;
+    let kind = match path.kind(db) {
+        PathKind::Ident {
+            ident: Partial::Present(ident),
+            generic_args,
+        } => {
+            let args = generic_args
+                .data(db)
+                .iter()
+                .map(|arg| match arg {
+                    GenericArg::Type(arg) => {
+                        let ty = arg
+                            .ty
+                            .to_opt()
+                            .ok_or_else(|| "quoted target bound argument is missing".to_owned())?;
+                        Ok(GenericArg::Type(TypeGenericArg {
+                            ty: Partial::Present(rebind_owner_bound_type(db, ty, renames)?),
+                        }))
+                    }
+                    GenericArg::AssocType(arg) => {
+                        let ty = arg.ty.to_opt().ok_or_else(|| {
+                            "quoted target associated bound argument is missing".to_owned()
+                        })?;
+                        Ok(GenericArg::AssocType(crate::hir_def::AssocTypeGenericArg {
+                            name: arg.name,
+                            ty: Partial::Present(rebind_owner_bound_type(db, ty, renames)?),
+                        }))
+                    }
+                    GenericArg::Const(_) => Err(
+                        "quoted target const bound argument needs checked reification".to_owned(),
+                    ),
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            PathKind::Ident {
+                ident: Partial::Present(if parent.is_none() {
+                    renames.get(&ident).copied().unwrap_or(ident)
+                } else {
+                    ident
+                }),
+                generic_args: GenericArgListId::new(db, args, generic_args.is_given(db)),
+            }
+        }
+        PathKind::BoundIngot { .. } => path.kind(db),
+        PathKind::QualifiedType { type_, trait_ } => {
+            let trait_path = trait_
+                .path(db)
+                .to_opt()
+                .ok_or_else(|| "quoted target qualified bound trait is missing".to_owned())?;
+            PathKind::QualifiedType {
+                type_: rebind_owner_bound_type(db, type_, renames)?,
+                trait_: TraitRefId::new(
+                    db,
+                    Partial::Present(rebind_owner_bound_path(db, trait_path, renames)?),
+                ),
+            }
+        }
+        _ => return Err("quoted target bound path needs checked reification".to_owned()),
+    };
+    Ok(PathId::new(db, kind, parent))
+}
+
+pub(super) fn rebind_owner_bound<'db>(
+    db: &'db dyn HirDb,
+    bound: &TypeBound<'db>,
+    renames: &HashMap<IdentId<'db>, IdentId<'db>>,
+) -> Result<TypeBound<'db>, String> {
+    let TypeBound::Trait(trait_ref) = bound else {
+        return Ok(bound.clone());
+    };
+    let trait_path = trait_ref
+        .path(db)
+        .to_opt()
+        .ok_or_else(|| "quoted target where bound is missing".to_owned())?;
+    if trait_path
+        .root_ident(db)
+        .is_some_and(|root| renames.contains_key(&root))
+    {
+        return Err("quoted target where bound is not a trait".to_owned());
+    }
+    let path = rebind_owner_bound_path(db, trait_path, renames)?;
+    Ok(TypeBound::Trait(TraitRefId::new(
+        db,
+        Partial::Present(path),
+    )))
 }
 
 pub(super) struct HirBuilder<'ctxt, 'db, O>
@@ -573,30 +706,17 @@ where
                 let name = renames
                     .get(&original)
                     .ok_or_else(|| "quoted target where type is not an owner binder".to_owned())?;
-                for bound in &predicate.bounds {
-                    let TypeBound::Trait(trait_ref) = bound else {
-                        continue;
-                    };
-                    let trait_path = trait_ref
-                        .path(db)
-                        .to_opt()
-                        .ok_or_else(|| "quoted target where bound is missing".to_owned())?;
-                    if trait_path
-                        .root_ident(db)
-                        .is_some_and(|root| renames.contains_key(&root))
-                        || trait_path.strip_generic_args(db) != trait_path
-                    {
-                        return Err(
-                            "quoted target where bound needs checked reification".to_owned()
-                        );
-                    }
-                }
+                let bounds = predicate
+                    .bounds
+                    .iter()
+                    .map(|bound| rebind_owner_bound(db, bound, &renames))
+                    .collect::<Result<Vec<_>, String>>()?;
                 Ok(WherePredicate {
                     ty: Partial::Present(TypeId::new(
                         db,
                         TypeKind::Path(Partial::Present(PathId::from_ident(db, *name))),
                     )),
-                    bounds: predicate.bounds.clone(),
+                    bounds,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1019,20 +1139,27 @@ struct QuoteCopyMap<'a, 'db> {
     fragment_depth: usize,
     budget: Rc<Cell<usize>>,
     open_bindings: Vec<(IdentId<'db>, usize)>,
+    owner_generic_bindings: Vec<IdentId<'db>>,
+    generic_bindings: Vec<IdentId<'db>>,
     allow_self: bool,
     self_record_inits: Vec<ExprId>,
     paths: HashMap<ExprId, PathId<'db>>,
     members: HashMap<u32, IdentId<'db>>,
     local_binders: HashMap<PatId, IdentId<'db>>,
     local_types: HashMap<StmtId, TypeId<'db>>,
+    cast_types: HashMap<ExprId, TypeId<'db>>,
+    record_paths: HashMap<ExprId, PathId<'db>>,
     exprs: HashMap<ExprId, ExprId>,
     stmts: HashMap<StmtId, StmtId>,
     conds: HashMap<CondId, CondId>,
     pats: HashMap<PatId, PatId>,
     method_calls: Vec<ExprId>,
-    fragment_method_calls: Vec<(ExprId, ScopeId<'db>)>,
+    fragment_method_calls: Vec<QuoteMethodCall<'db>>,
     fragment_rooted_paths: Vec<(ExprId, Func<'db>, ScopeId<'db>)>,
+    fragment_nominal_types: Vec<(TypeId<'db>, AdtRef<'db>)>,
     fragment_params: Vec<(ExprId, usize)>,
+    fragment_generics: Vec<(ExprId, IdentId<'db>)>,
+    fragment_qualified_paths: Vec<(ExprId, Trait<'db>, ScopeId<'db>)>,
 }
 
 pub(super) struct QuoteExprSource<'db> {
@@ -1041,8 +1168,18 @@ pub(super) struct QuoteExprSource<'db> {
     pub(super) open_names: Vec<IdentId<'db>>,
     pub(super) member_holes: Vec<(u32, IdentId<'db>)>,
     pub(super) rooted_funcs: Vec<(ExprId, PathId<'db>, Func<'db>)>,
+    pub(super) qualified_paths: Vec<(ExprId, PathId<'db>, Trait<'db>)>,
+    pub(super) selected_methods: Vec<(ExprId, Func<'db>)>,
     pub(super) provider_scope: ScopeId<'db>,
     pub(super) has_block_items: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+pub(crate) struct QuoteMethodCall<'db> {
+    pub(super) site: ExprId,
+    pub(super) scope: ScopeId<'db>,
+    /// Read-back already selected a declaration; authored quotes select after substitution.
+    pub(super) selected: Option<Func<'db>>,
 }
 
 pub(super) struct QuoteCopySummary<'db> {
@@ -1052,9 +1189,12 @@ pub(super) struct QuoteCopySummary<'db> {
     pub(super) params: Vec<ExprId>,
     pub(super) generics: Vec<ExprId>,
     pub(super) method_calls: Vec<ExprId>,
-    pub(super) fragment_method_calls: Vec<(ExprId, ScopeId<'db>)>,
+    pub(super) fragment_method_calls: Vec<QuoteMethodCall<'db>>,
     pub(super) fragment_rooted_paths: Vec<(ExprId, Func<'db>)>,
+    pub(super) fragment_nominal_types: Vec<(TypeId<'db>, AdtRef<'db>)>,
     pub(super) fragment_params: Vec<(ExprId, usize)>,
+    pub(super) fragment_generics: Vec<(ExprId, IdentId<'db>)>,
+    pub(super) fragment_qualified_paths: Vec<(ExprId, Trait<'db>)>,
 }
 
 impl<'a, 'db> QuoteCopyMap<'a, 'db> {
@@ -1121,12 +1261,16 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
             fragment_depth: 0,
             budget: Rc::new(Cell::new(0)),
             open_bindings: Vec::new(),
+            owner_generic_bindings: Vec::new(),
+            generic_bindings: Vec::new(),
             allow_self: false,
             self_record_inits: Vec::new(),
             paths,
             members,
             local_binders,
             local_types: HashMap::new(),
+            cast_types: HashMap::new(),
+            record_paths: HashMap::new(),
             exprs: HashMap::new(),
             stmts: HashMap::new(),
             conds: HashMap::new(),
@@ -1134,7 +1278,10 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
             method_calls: Vec::new(),
             fragment_method_calls: Vec::new(),
             fragment_rooted_paths: Vec::new(),
+            fragment_nominal_types: Vec::new(),
             fragment_params: Vec::new(),
+            fragment_generics: Vec::new(),
+            fragment_qualified_paths: Vec::new(),
         })
     }
 }
@@ -1175,6 +1322,8 @@ where
         holes: &[FrozenCodeHole],
         fragments: Option<(&FrozenCode, &[Option<QuoteExprSource<'db>>])>,
         open_bindings: &[(IdentId<'db>, usize)],
+        owner_generic_bindings: &[IdentId<'db>],
+        generic_bindings: &[IdentId<'db>],
         allow_self: bool,
         rooted_funcs: &[(ExprId, PathId<'db>)],
         qualified_paths: &[(ExprId, PathId<'db>)],
@@ -1201,6 +1350,8 @@ where
             map.fragments = Some(sources);
         }
         map.open_bindings = open_bindings.to_vec();
+        map.owner_generic_bindings = owner_generic_bindings.to_vec();
+        map.generic_bindings = generic_bindings.to_vec();
         map.allow_self = allow_self;
         map.self_record_inits = self_record_inits.to_vec();
         for (stmt, ty) in local_types {
@@ -1213,11 +1364,18 @@ where
         for site in &map.method_calls {
             self.body.quote_method_scopes.push((*site, provider_scope));
         }
-        self.body
-            .quote_method_scopes
-            .extend(map.fragment_method_calls.iter().copied());
+        self.body.quote_method_scopes.extend(
+            map.fragment_method_calls
+                .iter()
+                .map(|call| (call.site, call.scope)),
+        );
         self.body.quote_path_scopes.extend(
             map.fragment_rooted_paths
+                .iter()
+                .map(|(site, _, scope)| (*site, *scope)),
+        );
+        self.body.quote_path_scopes.extend(
+            map.fragment_qualified_paths
                 .iter()
                 .map(|(site, _, scope)| (*site, *scope)),
         );
@@ -1297,6 +1455,13 @@ where
                 .map(|(site, expected, _)| (site, expected))
                 .collect(),
             fragment_params: map.fragment_params,
+            fragment_generics: map.fragment_generics,
+            fragment_qualified_paths: map
+                .fragment_qualified_paths
+                .into_iter()
+                .map(|(site, expected, _)| (site, expected))
+                .collect(),
+            fragment_nominal_types: map.fragment_nominal_types,
         })
     }
 
@@ -1369,10 +1534,16 @@ where
                 Expr::Path(Partial::Present(*path))
             }
             Expr::RecordInit(Partial::Present(path), fields) => {
-                if !map.allow_self || !map.self_record_inits.contains(&old) || !path.is_self_ty(db)
+                let path = if let Some(path) = map.record_paths.get(&old) {
+                    *path
+                } else if map.allow_self
+                    && map.self_record_inits.contains(&old)
+                    && path.is_self_ty(db)
                 {
+                    PathId::self_ty(db, GenericArgListId::none(db))
+                } else {
                     return Err("quoted record construction needs checked Self rewriting".into());
-                }
+                };
                 let fields = fields
                     .iter()
                     .map(|field| {
@@ -1381,7 +1552,7 @@ where
                             Some(slot) => Some(*map.members.get(&slot).ok_or_else(|| {
                                 "quoted field label has no checked field".to_owned()
                             })?),
-                            None => field.label,
+                            None => field.label_eagerly(db, template),
                         };
                         Ok(crate::hir_def::Field {
                             label,
@@ -1390,10 +1561,7 @@ where
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
-                Expr::RecordInit(
-                    Partial::Present(PathId::self_ty(db, GenericArgListId::none(db))),
-                    fields,
-                )
+                Expr::RecordInit(Partial::Present(path), fields)
             }
             Expr::Call(callee, args) => Expr::Call(
                 self.copy_quote_expr(template, *callee, map)?,
@@ -1447,10 +1615,41 @@ where
                 self.copy_quote_expr(template, *rhs, map)?,
                 *op,
             ),
+            Expr::Un(value, op) => Expr::Un(self.copy_quote_expr(template, *value, map)?, *op),
+            Expr::Cast(value, Partial::Present(ty)) => {
+                let checked = map
+                    .cast_types
+                    .get(&old)
+                    .copied()
+                    .or_else(|| matches!(ty.data(db), TypeKind::Primitive(_)).then_some(*ty));
+                let checked = checked.ok_or_else(|| {
+                    "quoted cast needs a checked type before transplantation".to_owned()
+                })?;
+                Expr::Cast(
+                    self.copy_quote_expr(template, *value, map)?,
+                    Partial::Present(checked),
+                )
+            }
+            Expr::Tuple(values) => Expr::Tuple(
+                values
+                    .iter()
+                    .map(|value| self.copy_quote_expr(template, *value, map))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Expr::Array(values) => Expr::Array(
+                values
+                    .iter()
+                    .map(|value| self.copy_quote_expr(template, *value, map))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             Expr::AugAssign(lhs, rhs, op) => Expr::AugAssign(
                 self.copy_quote_expr(template, *lhs, map)?,
                 self.copy_quote_expr(template, *rhs, map)?,
                 *op,
+            ),
+            Expr::Assign(lhs, rhs) => Expr::Assign(
+                self.copy_quote_expr(template, *lhs, map)?,
+                self.copy_quote_expr(template, *rhs, map)?,
             ),
             Expr::If(cond, then, otherwise) => Expr::If(
                 self.copy_quote_cond(template, *cond, map)?,
@@ -1509,17 +1708,38 @@ where
                 .rooted_funcs
                 .iter()
                 .any(|root| root.func.is_some() || root.assoc_const.is_some())
-            || !node.rooted_traits.is_empty()
-            || !node.locals.is_empty()
+            || node.rooted_traits.iter().any(|root| {
+                !node
+                    .qualified_consts
+                    .iter()
+                    .any(|use_| use_.trait_site == root.site)
+            })
             || !node.param_uses.is_empty()
             || !node.effect_uses.is_empty()
-            || !node.generic_uses.is_empty()
             || !node.self_uses.is_empty()
         {
             return Err("quoted expression fragment needs checked name transplantation".into());
         }
         let mut param_uses = Vec::new();
         let mut bound_sites = Vec::new();
+        let is_checked_body = node
+            .template
+            .as_ref()
+            .is_some_and(|key| key.source == FrozenTemplateSource::CheckedBody);
+        let generic_uses = node
+            .generic_uses
+            .iter()
+            .map(|use_| {
+                if !is_checked_body || use_.func != 0 || use_.where_predicate.is_some() {
+                    return Err("quoted fragment generic use needs a checked body".to_owned());
+                }
+                let name = parent
+                    .generic_bindings
+                    .get(use_.index as usize)
+                    .ok_or_else(|| "read-back generic has no destination binding".to_owned())?;
+                Ok((use_.site, *name))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         for use_ in &node.open_uses {
             let open_name = source
                 .open_names
@@ -1528,8 +1748,20 @@ where
             let (name, index) = parent
                 .open_bindings
                 .iter()
-                .find(|(name, _)| name == open_name)
-                .ok_or_else(|| "quoted open name has no destination parameter".to_owned())?;
+                .find(|(name, index)| {
+                    if is_checked_body {
+                        *index == use_.index as usize
+                    } else {
+                        name == open_name
+                    }
+                })
+                .ok_or_else(|| {
+                    if is_checked_body {
+                        "read-back parameter has no destination binding".to_owned()
+                    } else {
+                        "quoted open name has no destination parameter".to_owned()
+                    }
+                })?;
             param_uses.push((use_.site, *name));
             bound_sites.push((use_.site, *index));
         }
@@ -1540,18 +1772,39 @@ where
             param_uses.push((*site, IdentId::make_self(self.db())));
             bound_sites.push((*site, 0));
         }
-        let rooted_paths = source
-            .rooted_funcs
+        let types = super::generated::reify_quote_expr_types(
+            self.db(),
+            node,
+            source,
+            &parent.owner_generic_bindings,
+            &parent.generic_bindings,
+        )?;
+        let mut rooted_paths = types.rooted_paths;
+        rooted_paths.extend(
+            source
+                .qualified_paths
+                .iter()
+                .map(|(site, path, _)| (*site, *path)),
+        );
+        let locals = node
+            .locals
             .iter()
-            .map(|(site, path, _)| (*site, *path))
+            .enumerate()
+            .map(|(index, local)| {
+                (
+                    local.binder,
+                    IdentId::new(self.db(), format!("<quote-fragment-local-{child}-{index}>")),
+                    local.uses.clone(),
+                )
+            })
             .collect::<Vec<_>>();
         let mut map = QuoteCopyMap::new(
             self.db(),
             &node.holes,
             &rooted_paths,
-            &[],
+            &locals,
             &param_uses,
-            &[],
+            &generic_uses,
             &source.member_holes,
         )?;
         map.code = Some(code);
@@ -1559,7 +1812,12 @@ where
         map.fragment_depth = parent.fragment_depth + 1;
         map.budget = parent.budget.clone();
         map.open_bindings = parent.open_bindings.clone();
+        map.owner_generic_bindings = parent.owner_generic_bindings.clone();
+        map.generic_bindings = parent.generic_bindings.clone();
         map.allow_self = parent.allow_self;
+        map.cast_types = types.cast_types.into_iter().collect();
+        map.local_types = types.local_types.into_iter().collect();
+        map.record_paths = types.record_paths.into_iter().collect();
         let copied = self.copy_quote_expr(source.template, source.root, &mut map)?;
         for (site, index) in bound_sites {
             let copied_site = map
@@ -1570,11 +1828,49 @@ where
             parent.fragment_params.push((copied_site, index));
         }
         parent.fragment_params.extend(map.fragment_params);
-        parent.fragment_method_calls.extend(
-            map.method_calls
-                .into_iter()
-                .map(|site| (site, source.provider_scope)),
-        );
+        for (site, name) in generic_uses {
+            let copied_site = map
+                .exprs
+                .get(&site)
+                .copied()
+                .ok_or_else(|| "read-back generic was not copied".to_owned())?;
+            parent.fragment_generics.push((copied_site, name));
+        }
+        parent.fragment_generics.extend(map.fragment_generics);
+        for (site, _, expected) in &source.qualified_paths {
+            let copied_site = map
+                .exprs
+                .get(site)
+                .copied()
+                .ok_or_else(|| "read-back qualified constant was not copied".to_owned())?;
+            parent
+                .fragment_qualified_paths
+                .push((copied_site, *expected, source.provider_scope));
+        }
+        parent
+            .fragment_qualified_paths
+            .extend(map.fragment_qualified_paths);
+        let mut selected_methods = HashMap::new();
+        for (old, selected) in &source.selected_methods {
+            let site = map
+                .exprs
+                .get(old)
+                .copied()
+                .ok_or_else(|| "read-back selected method was not copied".to_owned())?;
+            if selected_methods.insert(site, *selected).is_some() {
+                return Err("read-back method is classified twice".into());
+            }
+        }
+        if is_checked_body && selected_methods.len() != map.method_calls.len() {
+            return Err("read-back method has no checked selection".into());
+        }
+        parent
+            .fragment_method_calls
+            .extend(map.method_calls.into_iter().map(|site| QuoteMethodCall {
+                site,
+                scope: source.provider_scope,
+                selected: selected_methods.get(&site).copied(),
+            }));
         parent
             .fragment_method_calls
             .extend(map.fragment_method_calls);
@@ -1591,6 +1887,10 @@ where
         parent
             .fragment_rooted_paths
             .extend(map.fragment_rooted_paths);
+        parent.fragment_nominal_types.extend(types.nominal_types);
+        parent
+            .fragment_nominal_types
+            .extend(map.fragment_nominal_types);
         Ok(copied)
     }
 
@@ -1662,7 +1962,17 @@ where
                 self.copy_quote_cond(template, *cond, map)?,
                 self.copy_quote_expr(template, *body, map)?,
             ),
-            _ => return Err("quoted function contains an unsupported statement".into()),
+            Stmt::For(pat, iterable, body, unroll_hint) => {
+                let iterable = self.copy_quote_expr(template, *iterable, map)?;
+                Stmt::For(
+                    self.copy_quote_pat(template, *pat, map)?,
+                    iterable,
+                    self.copy_quote_expr(template, *body, map)?,
+                    *unroll_hint,
+                )
+            }
+            Stmt::Break => Stmt::Break,
+            Stmt::Continue => Stmt::Continue,
         };
         let id = self.push_stmt_raw(stmt);
         map.stmts.insert(old, id);

@@ -1,0 +1,51 @@
+// Target: F1. A generated method binds `self` to a local and calls a trait method on the local.
+// Oracle: hand-written twin type `B` gives the same value.
+// Position: receiver is a let-bound local.
+trait Read {
+    fn get(self) -> u256
+}
+
+trait Twice {
+    fn twice(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn twice(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Twice for ${record} {
+                fn twice(self) -> u256 {
+                    let s = self
+                    s.get() * 2
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::twice)]
+struct A { v: u256 }
+
+impl Read for A {
+    fn get(self) -> u256 { self.v }
+}
+
+struct B { v: u256 }
+
+impl Read for B {
+    fn get(self) -> u256 { self.v }
+}
+
+impl Twice for B {
+    fn twice(self) -> u256 {
+        let s = self
+        s.get() * 2
+    }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(A { v: 4 }.twice() == 8)
+    assert!(A { v: 4 }.twice() == (B { v: 4 }).twice())
+}

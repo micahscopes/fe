@@ -1,0 +1,112 @@
+// Probe: Conal's "Calculating compilers categorically" (ccc.pdf pp. 1-9) on mb3.
+// Terms are types (as in c2c_arrow.fe). Two stack meanings:
+//   StackRun  = StackFun: run(a, z) = (eval a, z) for every z (ccc.pdf p. 1).
+//   Compile   = StackProg: a type-level list of typed stack ops (ccc.pdf pp. 8-9).
+use core::marker::Copy
+
+pub trait Arrow { type Dom  type Cod }
+pub struct Exl<A, B> {}
+pub struct Dup<A> {}
+pub struct Swap<A, B> {}
+pub struct Mul {}
+pub struct Add {}
+pub struct Fork<F, G> {}
+pub struct Comp<G, F> {}
+
+impl<A, B> Arrow for Exl<A, B> { type Dom = (A, B)  type Cod = A }
+impl<A> Arrow for Dup<A> { type Dom = A  type Cod = (A, A) }
+impl<A, B> Arrow for Swap<A, B> { type Dom = (A, B)  type Cod = (B, A) }
+impl Arrow for Mul { type Dom = (u256, u256)  type Cod = u256 }
+impl Arrow for Add { type Dom = (u256, u256)  type Cod = u256 }
+impl<F: Arrow, G: Arrow> Arrow for Fork<F, G> {
+    type Dom = <F as Arrow>::Dom
+    type Cod = (<F as Arrow>::Cod, <G as Arrow>::Cod)
+}
+impl<F: Arrow, G: Arrow> Arrow for Comp<G, F> {
+    type Dom = <F as Arrow>::Dom
+    type Cod = <G as Arrow>::Cod
+}
+
+// Meaning 1: StackFun. The "for every z" is a method type parameter.
+pub trait StackRun: Arrow {
+    fn run<Z>(_ s: own (<Self as Arrow>::Dom, Z)) -> (<Self as Arrow>::Cod, Z)
+}
+impl<A: Copy, B: Copy> StackRun for Exl<A, B> {
+    fn run<Z>(_ s: own ((A, B), Z)) -> (A, Z) { (s.0.0, s.1) }
+}
+impl StackRun for Mul {
+    fn run<Z>(_ s: own ((u256, u256), Z)) -> (u256, Z) { (s.0.0 * s.0.1, s.1) }
+}
+impl StackRun for Add {
+    fn run<Z>(_ s: own ((u256, u256), Z)) -> (u256, Z) { (s.0.0 + s.0.1, s.1) }
+}
+impl<F: StackRun, G: Arrow<Dom = <F as Arrow>::Cod> + StackRun> StackRun for Comp<G, F> {
+    fn run<Z>(_ s: own (<Self as Arrow>::Dom, Z)) -> (<Self as Arrow>::Cod, Z) { G::run(F::run(s)) }
+}
+impl<F: StackRun, G: Arrow<Dom = <F as Arrow>::Dom> + StackRun> StackRun for Fork<F, G>
+    where <F as Arrow>::Dom: Copy
+{
+    fn run<Z>(_ s: own (<Self as Arrow>::Dom, Z)) -> (<Self as Arrow>::Cod, Z) {
+        let a = s.0
+        let t = F::run((a, (a, s.1)))
+        let u = G::run((t.1.0, (t.0, t.1.1)))
+        ((u.1.0, u.0), u.1.1)
+    }
+}
+
+// Meaning 2: StackProg. Typed ops (ccc.pdf p. 8: Prim, Push, Pop) as types;
+// Step<S> types each op by the stack S it accepts.
+pub trait Step<S> {
+    type Out
+    fn step(_ s: own S) -> Self::Out
+}
+pub struct PrimOp<P> {}
+pub struct Push {}
+pub struct Pop {}
+pub struct Nil {}
+pub struct Cons<Op, Rest> {}
+
+impl<Z> Step<((u256, u256), Z)> for PrimOp<Mul> {
+    type Out = (u256, Z)
+    fn step(_ s: own ((u256, u256), Z)) -> (u256, Z) { (s.0.0 * s.0.1, s.1) }
+}
+impl<Z> Step<((u256, u256), Z)> for PrimOp<Add> {
+    type Out = (u256, Z)
+    fn step(_ s: own ((u256, u256), Z)) -> (u256, Z) { (s.0.0 + s.0.1, s.1) }
+}
+impl<A, B, Z> Step<((A, B), Z)> for PrimOp<Exl<A, B>> {
+    type Out = (A, Z)
+    fn step(_ s: own ((A, B), Z)) -> (A, Z) { (s.0.0, s.1) }
+}
+impl<A: Copy, Z> Step<(A, Z)> for PrimOp<Dup<A>> {
+    type Out = ((A, A), Z)
+    fn step(_ s: own (A, Z)) -> ((A, A), Z) { ((s.0, s.0), s.1) }
+}
+impl<A, B, Z> Step<((A, B), Z)> for PrimOp<Swap<A, B>> {
+    type Out = ((B, A), Z)
+    fn step(_ s: own ((A, B), Z)) -> ((B, A), Z) { ((s.0.1, s.0.0), s.1) }
+}
+impl<A, B, Z> Step<((A, B), Z)> for Push {
+    type Out = (A, (B, Z))
+    fn step(_ s: own ((A, B), Z)) -> (A, (B, Z)) { (s.0.0, (s.0.1, s.1)) }
+}
+impl<A, B, Z> Step<(A, (B, Z))> for Pop {
+    type Out = ((A, B), Z)
+    fn step(_ s: own (A, (B, Z))) -> ((A, B), Z) { ((s.0, s.1.0), s.1.1) }
+}
+impl<S> Step<S> for Nil {
+    type Out = S
+    fn step(_ s: own S) -> S { s }
+}
+impl<S, Op: Step<S>, Rest: Step<<Op as Step<S>>::Out>> Step<S> for Cons<Op, Rest> {
+    type Out = <Rest as Step<<Op as Step<S>>::Out>>::Out
+    fn step(_ s: own S) -> Self::Out { Rest::step(Op::step(s)) }
+}
+
+
+type P3 = Cons<Pop, Nil>
+#[test]
+fn pop_alone() {
+    let r: ((u256, u256), u256) = <P3 as Step<(u256, (u256, u256))>>::step((3, (5, 7)))
+    assert!(r.1 == 7)
+}

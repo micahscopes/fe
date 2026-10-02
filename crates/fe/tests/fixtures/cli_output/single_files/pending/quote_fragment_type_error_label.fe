@@ -1,0 +1,23 @@
+// Target: O3 (known multi-quote follow-up). A type error inside a spliced fragment is labelled at that fragment's quote, not only at `#[generate]`.
+// expect: rejected at line 13 (`self.${f} + true`), because `u256 + bool` does not type-check; primary label on the
+//   generated item as today, plus a secondary label on this fragment quote.
+trait Work {
+    fn work(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        let bad: Code<Expr> = quote { self.${f} + true } // <- here
+        quote {
+            impl ingot::Work for ${record} {
+                fn work(self) -> u256 { ${bad} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct G { a: u256 }

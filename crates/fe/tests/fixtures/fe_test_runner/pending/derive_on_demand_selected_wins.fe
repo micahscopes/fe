@@ -1,0 +1,46 @@
+// Target: RD84 (3), design section 5(a) ("any selected impl wins over any deriver"). A selected named impl meets the demand before a deriver is considered.
+// Oracle: hand-computed values: the selected `Always` answers true for different points.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+// AlwaysEq: everything is equal.
+pub struct AlwaysEq {}
+
+impl Derive<Eq> for AlwaysEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { impl Eq for ${record} { fn eq(self, _ other: Self) -> bool { true } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point as Always with (AlwaysEq)
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+#[test]
+fn selection_beats_deriver() {
+    let r = with (Always) { with (StableEq) { same(pt(1, 2), pt(3, 4)) } }
+    assert!(r)
+}

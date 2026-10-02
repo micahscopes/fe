@@ -1,0 +1,60 @@
+// Target: RD84 (1), M2-a. A declared derivation serves direct method calls, `==`/`!=`, and the default method `ne`, directly and through a bound and an alias.
+// Oracle: values from mb2 `fe_test/derived_decl.fe` (VERIFIED in PARITY_FIXTURE_AUDIT_2026-09-28), kept unchanged.
+// Positions: default trait method; trait impl through a generic bound; type alias.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct It { pub a: u256, pub flag: bool }
+
+impl Eq for It with (StableEq)
+
+type Alias = It
+
+fn differ<T: Eq>(_ x: T, _ y: T) -> bool { x.ne(y) }
+
+fn same_alias(_ x: Alias, _ y: Alias) -> bool { x == y }
+
+#[test]
+fn direct_calls() {
+    assert!(It { a: 10, flag: true }.eq(It { a: 10, flag: true }))
+    assert!(!It { a: 10, flag: true }.eq(It { a: 11, flag: true }))
+    assert!(!It { a: 10, flag: true }.eq(It { a: 10, flag: false }))
+    assert!(It { a: 1, flag: false }.ne(It { a: 2, flag: false }))
+    assert!(!It { a: 1, flag: false }.ne(It { a: 1, flag: false }))
+}
+
+#[test]
+fn operators() {
+    let x = It { a: 7, flag: true }
+    let y = It { a: 7, flag: true }
+    assert!(x == y)
+    let z = It { a: 7, flag: true }
+    let w = It { a: 8, flag: true }
+    assert!(z != w)
+}
+
+#[test]
+fn through_bound_and_alias() {
+    assert!(differ(It { a: 1, flag: false }, It { a: 2, flag: false }))
+    assert!(!differ(It { a: 1, flag: false }, It { a: 1, flag: false }))
+    assert!(same_alias(It { a: 3, flag: true }, It { a: 3, flag: true }))
+}

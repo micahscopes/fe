@@ -1,0 +1,26 @@
+// Probe: one effectful program, two interpretations chosen by the provider (Kleisli-style meaning).
+pub trait Tick { fn tick(mut self, _ cost: u256) }
+pub struct Count { pub n: u256 }
+pub struct Silent {}
+impl Tick for Count { fn tick(mut self, _ cost: u256) { self.n = self.n + cost } }
+impl Tick for Silent { fn tick(mut self, _ cost: u256) {} }
+
+fn mul_counted(_ x: u256, _ y: u256) -> u256 uses (t: mut Tick) {
+    t.tick(5)
+    x * y
+}
+fn f(_ x: u256, _ y: u256) -> u256 uses (t: mut Tick) {
+    let p = mul_counted(x, y)
+    t.tick(3)
+    p + x
+}
+
+#[test]
+fn same_program_two_meanings() {
+    let mut c = Count { n: 0 }
+    let v1: u256 = with (Tick = c) { f(3, 5) }
+    assert!(v1 == 18)
+    assert!(c.n == 8)
+    let v2: u256 = with (Tick = Silent {}) { f(3, 5) }
+    assert!(v2 == 18)
+}

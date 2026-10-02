@@ -1,0 +1,38 @@
+// Target: RD84 (1), QUOTATION_DESIGN section 9. A declared generic derivation applies only where its derived bounds hold.
+// expect: rejected at line 37 (the demand), because `Pair<NoEq>: Eq` needs `NoEq: Eq` from the derived where clause,
+//   and `NoEq` has no `Eq`; secondary label at the where-clause quote.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Pair<T> { pub a: T, pub b: T }
+
+impl Eq for Pair with (StableEq)
+
+pub struct NoEq { pub v: u256 }
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn check() -> bool {
+    let p = Pair { a: NoEq { v: 1 }, b: NoEq { v: 1 } }
+    let q = Pair { a: NoEq { v: 1 }, b: NoEq { v: 1 } }
+    same(p, q) // <- here
+}

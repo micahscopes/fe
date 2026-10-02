@@ -1,0 +1,27 @@
+// Target: RD85 (the error is only for a real collision). A name that is only a named impl selects it; a name that is only a value provides it.
+// Oracle: hand-computed values (the named impl returns 2, the unnamed impl 1).
+trait Greet {
+    fn greet(self) -> u32
+}
+
+struct U { id: u256 }
+
+impl Greet for U {
+    fn greet(self) -> u32 { return 1 }
+}
+
+impl Greet for U as Formal {
+    fn greet(self) -> u32 { return 2 }
+}
+
+const SEVEN: u32 = 7
+
+#[test]
+fn distinct_names_are_not_ambiguous() {
+    let a = U { id: 1 }
+    let formal = with (Formal) { a.greet() }
+    assert!(formal == 2)
+    let b = U { id: 1 }
+    let value = with (SEVEN) { b.greet() }
+    assert!(value == 1)
+}

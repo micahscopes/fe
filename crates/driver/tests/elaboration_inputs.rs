@@ -424,6 +424,43 @@ fn generated_const_expression_keeps_generic_field_sizes(fixture: Fixture<&str>) 
     assert_eq!(evaluate_named(&output, &url, "answer"), "160");
 }
 
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_generic_*_bound.fe"
+)]
+fn generated_impl_rebinds_owner_where_trait_arguments(fixture: Fixture<&str>) {
+    let mut db = DriverDataBase::default();
+    let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
+    db.workspace()
+        .update(&mut db, url.clone(), fixture.content().to_string());
+    let output = fe_driver::elaboration::prepare(&db).unwrap().unwrap();
+    assert_eq!(evaluate_named(&output, &url, "answer"), "160");
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_call_type_args_*.fe"
+)]
+fn quoted_call_type_arguments_retain_checked_meaning(fixture: Fixture<&str>) {
+    let mut db = DriverDataBase::default();
+    let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
+    db.workspace()
+        .update(&mut db, url.clone(), fixture.content().to_string());
+    let output = fe_driver::elaboration::prepare(&db)
+        .expect("quoted call type arguments elaborate")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let diagnostics = output.run_on_ingot(output.top_mod(file).ingot(&output));
+    assert!(
+        !diagnostics.has_errors(&output),
+        "{}",
+        diagnostics.format_diags(&output)
+    );
+    if fixture.path().ends_with("_const.fe") {
+        assert_eq!(evaluate_named(&output, &url, "answer"), "64");
+    }
+}
+
 #[test]
 fn elaboration_input_views_preserve_resolution_and_isolate_real_edits() {
     let mut db = DriverDataBase::default();
@@ -1640,6 +1677,35 @@ fn generation_rejects_output_collisions_and_observation_of_its_own_output() {
 }
 
 #[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_limits",
+    glob: "*.fe"
+)]
+fn generated_quote_limits_report_named_positions(fixture: Fixture<&str>) {
+    let path = std::path::PathBuf::from(fixture.path());
+    let content = fixture.content().to_string();
+    let rendered = std::thread::Builder::new()
+        .name("quoted generation budget".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let mut db = DriverDataBase::default();
+            let url = Url::from_file_path(path).expect("fixture path is absolute");
+            db.workspace().update(&mut db, url.clone(), content);
+            let error = match fe_driver::elaboration::prepare(&db) {
+                Err(error) => error,
+                Ok(_) => panic!("oversized generated quote was admitted"),
+            };
+            assert_eq!(error.position(&db), Some((15, 1)));
+            error.render(&db).replace(url.as_str(), "<fixture>")
+        })
+        .expect("budget test thread")
+        .join()
+        .expect("budget test thread did not panic");
+    let snapshot = std::path::Path::new(fixture.path()).with_extension("snap");
+    let expected = std::fs::read_to_string(snapshot).expect("fixture diagnostic snapshot");
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_invalid_output",
     glob: "*.fe"
 )]
@@ -1691,19 +1757,20 @@ fn generated_generic_implementation_preserves_owner_binders_and_conditions() {
         .collect::<Vec<_>>();
     assert_eq!(parameters.len(), 2);
     assert_ne!(parameters[0], parameters[1]);
+    assert_eq!(parameters[0], "<quote-record-type-0:T>");
+    assert_eq!(parameters[1], "<quote-record-const-1:N>");
     let trait_ref = implementation.hir_trait_ref(&output).to_opt().unwrap();
     let trait_ref = trait_ref.pretty_print(&output);
-    assert!(trait_ref.starts_with("ingot::Value<"), "{trait_ref}");
-    assert!(trait_ref.contains(&parameters[0]), "{trait_ref}");
+    assert_eq!(trait_ref, "ingot::Value<T>");
     let methods = implementation
         .methods(&output)
         .map(|method| method.pretty_print(&output))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        methods.contains(&format!("fn value(own self) -> {}", parameters[0])),
-        "{methods}"
-    );
+    assert!(methods.contains("fn value(own self) -> T"), "{methods}");
+    let printed = implementation.pretty_print(&output);
+    assert!(printed.contains("const N: usize"), "{printed}");
+    assert!(!printed.contains("<quote-record-"), "{printed}");
 }
 
 #[test]

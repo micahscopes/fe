@@ -1,0 +1,8 @@
+// expect-error: node has no checked binding
+use core::meta::{Code, Expr, code_root, node_same_binding}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> bool {
+    let root = code_root(code)
+    node_same_binding(root, root)
+    true
+}

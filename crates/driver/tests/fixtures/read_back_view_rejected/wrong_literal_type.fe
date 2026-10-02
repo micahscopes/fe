@@ -1,0 +1,8 @@
+// expect-error: literal query requires its checked type
+use core::meta::{Code, Expr, code_root, node_child, node_literal}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> bool {
+    let literal = node_child(node_child(code_root(code), 0), 0)
+    node_literal<bool>(literal)
+    true
+}

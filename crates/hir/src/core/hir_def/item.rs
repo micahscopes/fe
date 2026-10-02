@@ -16,12 +16,12 @@ use super::{
     scope_graph::{ScopeGraph, ScopeId},
 };
 use crate::{
-    HirDb,
+    HirDb, SpannedHirDb,
     core::meta::{FrozenItemLocator, FrozenOwner},
     hir_def::{PathId, TraitRefId},
     lower,
     span::{
-        DynLazySpan, HirOrigin,
+        DynLazySpan, HirOrigin, LazySpan,
         item::{
             LazyConstSpan, LazyContractSpan, LazyEnumSpan, LazyFuncSpan, LazyImplSpan,
             LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyStaticAssertSpan, LazyStructSpan,
@@ -725,6 +725,43 @@ pub struct Func<'db> {
 impl<'db> Func<'db> {
     pub fn span(self) -> LazyFuncSpan<'db> {
         LazyFuncSpan::new(self)
+    }
+
+    /// A source-stable locator for checked code that may outlive this database
+    /// view. Method identities use their containing declaration's header.
+    pub fn frozen_locator(self, db: &'db dyn SpannedHirDb) -> Option<FrozenItemLocator> {
+        let file = self.span().resolve(db)?.file.url(db)?;
+        let parent = self.scope().parent(db).and_then(|scope| scope.to_item());
+        let member_name = || self.name(db).to_opt().map(|name| name.data(db).clone());
+        match parent {
+            Some(ItemKind::ImplTrait(implementation)) => Some(FrozenItemLocator::ImplMember {
+                file,
+                module_path: implementation.scope().parent(db)?.pretty_path(db)?,
+                trait_path: Some(implementation.hir_trait_ref(db).to_opt()?.pretty_print(db)),
+                self_type_path: implementation.hir_type_ref(db).to_opt()?.pretty_print(db),
+                selection_name: implementation
+                    .selection_name(db)
+                    .map(|name| name.data(db).clone()),
+                member_name: member_name()?,
+            }),
+            Some(ItemKind::Impl(implementation)) => Some(FrozenItemLocator::ImplMember {
+                file,
+                module_path: implementation.scope().parent(db)?.pretty_path(db)?,
+                trait_path: None,
+                self_type_path: implementation.hir_type_ref(db).to_opt()?.pretty_print(db),
+                selection_name: None,
+                member_name: member_name()?,
+            }),
+            Some(ItemKind::Trait(trait_)) => Some(FrozenItemLocator::TraitMember {
+                file,
+                trait_path: trait_.scope().pretty_path(db)?,
+                member_name: member_name()?,
+            }),
+            _ => Some(FrozenItemLocator::Named(FrozenOwner {
+                file,
+                path: self.scope().pretty_path(db)?,
+            })),
+        }
     }
 
     pub fn scope(self) -> ScopeId<'db> {

@@ -1,0 +1,33 @@
+// Target: F1. A generated free function calls a trait method on a parameter of another, non-Copy record type.
+// Oracle: the hand-written twin `other_twin` gives the same value.
+// Position: receiver type is an authored record other than the target, named by a rooted path.
+trait Read {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn other(_ b: ingot::B) -> u256 { b.get() * 2 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct A { v: u256 }
+
+pub struct B { pub v: u256 }
+
+impl Read for B {
+    fn get(self) -> u256 { self.v }
+}
+
+fn other_twin(_ b: B) -> u256 { b.get() * 2 }
+
+#[test]
+fn generated_matches_twin() {
+    assert!(other_twin(B { v: 4 }) == 8)
+    assert!(other(B { v: 4 }) == other_twin(B { v: 4 }))
+}

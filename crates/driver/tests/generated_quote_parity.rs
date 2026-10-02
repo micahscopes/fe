@@ -8,6 +8,28 @@ use hir::{
 use salsa::plumbing::AsId;
 use url::Url;
 
+fn assert_on_the_fly_identity(_fixture: Fixture<&str>) {
+    unimplemented!("RD84 on-the-fly derivation identity")
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/derive_identity",
+    glob: "*.fe",
+)]
+#[allow(dead_code)] // The first derivation identity fixture is still pending.
+fn on_the_fly_derivation_identity(fixture: Fixture<&str>) {
+    assert_on_the_fly_identity(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/derive_identity",
+    glob: "pending/*.fe",
+)]
+#[dir_test_attr(#[ignore = "target not built yet"])]
+fn on_the_fly_derivation_identity_pending(fixture: Fixture<&str>) {
+    assert_on_the_fly_identity(fixture);
+}
+
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
     glob: "quote_generated_function.fe"

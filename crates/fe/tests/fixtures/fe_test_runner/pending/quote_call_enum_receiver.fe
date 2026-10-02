@@ -1,0 +1,38 @@
+// Target: F1. A generated free function calls an inherent method on a non-Copy enum parameter.
+// Oracle: the hand-written twin `score_twin` gives the same values.
+// Position: enum receiver.
+pub enum Choice {
+    Low,
+    High(u256),
+}
+
+impl Choice {
+    pub fn weight(self) -> u256 {
+        match self {
+            Choice::Low => 1
+            Choice::High(n) => n
+        }
+    }
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn score(_ c: ingot::Choice) -> u256 { c.weight() + 1 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn score_twin(_ c: Choice) -> u256 { c.weight() + 1 }
+
+#[test]
+fn generated_matches_twin() {
+    assert!(score_twin(Choice::Low) == 2)
+    assert!(score(Choice::Low) == score_twin(Choice::Low))
+    assert!(score(Choice::High(9)) == score_twin(Choice::High(9)))
+}

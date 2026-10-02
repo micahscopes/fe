@@ -1,0 +1,31 @@
+// Target: Q5 extended by Q6 (QUOTATION_DESIGN section 7: "`match` joins with Q6"). Bodies with `match` on an enum and on a bool read back and round-trip.
+// Oracle: the authored values below; the harness re-emits both functions and requires the same results at O0 and O2.
+pub enum Shape {
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+    Empty,
+}
+
+pub fn area(_ s: Shape) -> u256 {
+    match s {
+        Shape::Circle(r) => r * r
+        Shape::Rect { w, h } => w * h
+        Shape::Empty => 0
+    }
+}
+
+pub fn pick(_ b: bool, _ x: u256) -> u256 {
+    match b {
+        true => x
+        false => 0
+    }
+}
+
+#[test]
+fn authored_values() {
+    assert!(area(Shape::Circle(2)) == 4)
+    assert!(area(Shape::Rect { w: 2, h: 5 }) == 10)
+    assert!(area(Shape::Empty) == 0)
+    assert!(pick(true, 4) == 4)
+    assert!(pick(false, 4) == 0)
+}

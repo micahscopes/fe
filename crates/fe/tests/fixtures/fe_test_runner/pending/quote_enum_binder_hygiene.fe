@@ -1,0 +1,63 @@
+// Target: Q6 with QUOTATION_DESIGN amendment 2 and RD79 (1). Pattern binders from `binders(v, n)` stay binders even when the destination has constants spelled like the fields.
+// Oracle: hand-computed values. If a binder were emitted as the field's name, `w` and `h` below would resolve to the
+//   constants (Fe reads a constant in a bare identifier pattern), and the first assert would fail.
+// Placeholders: as in quote_enum_eq.fe.
+use core::ops::Eq
+
+mod author {
+    use core::ops::Eq
+    use core::meta::{Arm, Code, Expr, Item, Record, binders, empty, variant, variant_count, variant_field, variant_field_count}
+
+    pub const fn enum_eq(record: Record) -> Code<Item> {
+        let mut arms = empty<Arm>()
+        let mut i: usize = 0
+        while i < variant_count(record) {
+            let v = variant(record, i)
+            let lhs = binders(v, 0)
+            let rhs = binders(v, 1)
+            let mut cmp: Code<Expr> = quote { true }
+            let mut j: usize = 0
+            while j < variant_field_count(v) {
+                let f = variant_field(v, j)
+                cmp = quote { ${cmp} && ${lhs.at(f)} == ${rhs.at(f)} }
+                j += 1
+            }
+            arms = quote(other) {
+                ${arms}
+                ${lhs} => match other {
+                    ${rhs} => ${cmp}
+                    _ => false
+                }
+            }
+            i += 1
+        }
+        quote {
+            impl Eq for ${record} {
+                fn eq(self, _ other: Self) -> bool { match self { ${arms} } }
+            }
+        }
+    }
+}
+
+mod dest {
+    pub const w: u256 = 99
+    pub const h: u256 = 99
+
+    #[generate(ingot::author::enum_eq)]
+    pub enum Shape {
+        Rect { w: u256, h: u256 },
+        Empty,
+    }
+}
+
+#[test]
+fn binders_are_not_captured() {
+    let a = dest::Shape::Rect { w: 1, h: 2 }
+    let b = dest::Shape::Rect { w: 1, h: 2 }
+    let c = dest::Shape::Rect { w: 1, h: 2 }
+    let d = dest::Shape::Rect { w: 3, h: 2 }
+    let e = dest::Shape::Rect { w: 99, h: 99 }
+    assert!(a == b)
+    assert!(c != d)
+    assert!(dest::Shape::Empty != e)
+}

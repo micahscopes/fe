@@ -8,7 +8,7 @@ use hir::{
     analysis::{
         semantic::{QuotedCode, SemConstId, SemConstValue, StructuralHandle},
         ty::{
-            adt_def::AdtRef,
+            adt_def::{AdtDef, AdtRef},
             trait_resolution::PredicateListId,
             ty_check::{
                 QuoteBinder, QuoteNameClass, QuoteNameSite, QuoteNameUse, QuoteSignatureSite,
@@ -25,12 +25,12 @@ use hir::{
         FrozenQuoteLocal, FrozenQuoteLocalType, FrozenQuoteNominal, FrozenQuoteOpenUse,
         FrozenQuoteParamUse, FrozenQuoteQualifiedConst, FrozenQuoteSelfUse,
         FrozenQuoteSignatureType, FrozenQuoteTrait, FrozenQuoteWherePredicate, FrozenTemplateKey,
-        MetaItem,
+        FrozenTemplateSource, MetaItem,
     },
     hir_def::{
-        CallableDef, Expr, Func, GenericArg, GenericParam, ItemKind, Partial, PathKind,
-        QuoteFragment, QuoteFunc, QuoteItem, QuoteWherePredicate, Trait, TypeBound, TypeId,
-        TypeKind,
+        CallableDef, Expr, Func, GenericArg, GenericParam, Partial, PathKind, QuoteFragment,
+        QuoteFunc, QuoteItem, QuoteWherePredicate, Trait, TypeBound, TypeId, TypeKind,
+        scope_graph::ScopeId,
     },
     span::LazySpan,
 };
@@ -53,7 +53,7 @@ fn protocol(message: &'static str) -> ConstructionError {
     ConstructionError::Protocol(message)
 }
 
-fn frozen_quote_trait<'db>(
+pub(super) fn frozen_quote_trait<'db>(
     db: &'db DriverDataBase,
     trait_: Trait<'db>,
     site: u32,
@@ -85,6 +85,89 @@ fn frozen_quote_trait<'db>(
             path: full_path,
         },
     })
+}
+
+fn frozen_quote_nominal<'db>(
+    db: &'db DriverDataBase,
+    adt: AdtDef<'db>,
+) -> Result<FrozenQuoteNominal, ConstructionError> {
+    let scope = adt.scope(db);
+    let full_path = scope
+        .pretty_path(db)
+        .ok_or(protocol("quoted nominal type path is missing"))?;
+    let module = scope
+        .top_mod(db)
+        .scope()
+        .pretty_path(db)
+        .ok_or(protocol("quoted nominal type module path is missing"))?;
+    let path = full_path
+        .strip_prefix(&format!("{module}::"))
+        .ok_or(protocol(
+            "quoted nominal type is outside its defining module",
+        ))?
+        .to_owned();
+    let file = match adt.adt_ref(db) {
+        AdtRef::Struct(item) => item.span().resolve(db),
+        AdtRef::Enum(item) => item.span().resolve(db),
+    }
+    .and_then(|span| span.file.url(db))
+    .ok_or(protocol("quoted nominal type file is missing"))?;
+    Ok(FrozenQuoteNominal {
+        ingot: scope.ingot(db).base(db).clone(),
+        path,
+        owner: FrozenOwner {
+            file,
+            path: full_path,
+        },
+    })
+}
+
+/// Freeze a checked type without resolving its spelling again. Normal generic
+/// parameters retain their declaration namespace and index, not their name.
+pub(super) fn freeze_checked_quote_type<'db>(
+    db: &'db DriverDataBase,
+    ty: TyId<'db>,
+    func: Func<'db>,
+) -> Result<Option<FrozenQuoteSignatureType>, ConstructionError> {
+    let (base, args) = ty.decompose_ty_app(db);
+    let mut arguments = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(arg) = freeze_checked_quote_type(db, *arg, func)? else {
+            return Ok(None);
+        };
+        arguments.push(arg);
+    }
+    let frozen = match base.data(db) {
+        TyData::TyParam(param) if arguments.is_empty() => {
+            let Some(ScopeId::GenericParam(owner, index)) = param.declaration_scope(db) else {
+                return Ok(None);
+            };
+            if owner == func.into() {
+                FrozenQuoteSignatureType::FunctionGeneric(u32::from(index))
+            } else if func.is_associated_func(db) && func.scope().parent_item(db) == Some(owner) {
+                FrozenQuoteSignatureType::OwnerGeneric(u32::from(index))
+            } else {
+                return Ok(None);
+            }
+        }
+        TyData::Never if arguments.is_empty() => FrozenQuoteSignatureType::Never,
+        TyData::TyBase(TyBase::Prim(primitive))
+            if arguments.is_empty()
+                && (primitive.is_integral() || *primitive == SemPrimTy::Bool) =>
+        {
+            FrozenQuoteSignatureType::Primitive(*primitive)
+        }
+        TyData::TyBase(TyBase::Prim(SemPrimTy::Tuple(size))) if arguments.len() == *size => {
+            FrozenQuoteSignatureType::Tuple(arguments)
+        }
+        TyData::TyBase(TyBase::Adt(adt)) => FrozenQuoteSignatureType::Nominal {
+            root: frozen_quote_nominal(db, *adt)?,
+            arguments_given: !arguments.is_empty(),
+            arguments,
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(frozen))
 }
 
 fn freeze_quote_signature_type<'a, 'db>(
@@ -203,36 +286,8 @@ where
             if let QuoteNameClass::Rooted(PathRes::Ty(selected)) = &name_use.class
                 && let TyData::TyBase(TyBase::Adt(adt)) = selected.base_ty(db).data(db)
             {
-                let scope = adt.scope(db);
-                let full_path = scope
-                    .pretty_path(db)
-                    .ok_or(protocol("quoted nominal type path is missing"))?;
-                let module = scope
-                    .top_mod(db)
-                    .scope()
-                    .pretty_path(db)
-                    .ok_or(protocol("quoted nominal type module path is missing"))?;
-                let path = full_path
-                    .strip_prefix(&format!("{module}::"))
-                    .ok_or(protocol(
-                        "quoted nominal type is outside its defining module",
-                    ))?
-                    .to_owned();
-                let file = match adt.adt_ref(db) {
-                    AdtRef::Struct(item) => item.span().resolve(db),
-                    AdtRef::Enum(item) => item.span().resolve(db),
-                }
-                .and_then(|span| span.file.url(db))
-                .ok_or(protocol("quoted nominal type file is missing"))?;
                 return Ok(Some(FrozenQuoteSignatureType::Nominal {
-                    root: FrozenQuoteNominal {
-                        ingot: scope.ingot(db).base(db).clone(),
-                        path,
-                        owner: FrozenOwner {
-                            file,
-                            path: full_path,
-                        },
-                    },
+                    root: frozen_quote_nominal(db, *adt)?,
                     arguments,
                     arguments_given,
                 }));
@@ -295,98 +350,9 @@ impl<'db> RecordInput<'db> {
         &self,
         function: Func<'db>,
     ) -> Result<FrozenItemLocator, ConstructionError> {
-        let db = self.db;
-        let file = function
-            .span()
-            .resolve(db)
-            .and_then(|span| span.file.url(db))
-            .ok_or(protocol("quote owner file is missing"))?;
-        let parent = function.scope().parent(db);
-        match parent.and_then(|scope| scope.to_item()) {
-            Some(ItemKind::ImplTrait(implementation)) => {
-                let module_path = implementation
-                    .scope()
-                    .parent(db)
-                    .and_then(|scope| scope.pretty_path(db))
-                    .ok_or(protocol("quote owner module path is missing"))?;
-                let trait_path = implementation
-                    .hir_trait_ref(db)
-                    .to_opt()
-                    .ok_or(protocol("quote owner trait path is missing"))?
-                    .pretty_print(db);
-                let self_type_path = implementation
-                    .hir_type_ref(db)
-                    .to_opt()
-                    .ok_or(protocol("quote owner self type is missing"))?
-                    .pretty_print(db);
-                let member_name = function
-                    .name(db)
-                    .to_opt()
-                    .ok_or(protocol("quote owner member name is missing"))?
-                    .data(db)
-                    .clone();
-                Ok(FrozenItemLocator::ImplMember {
-                    file,
-                    module_path,
-                    trait_path: Some(trait_path),
-                    self_type_path,
-                    selection_name: implementation
-                        .selection_name(db)
-                        .map(|name| name.data(db).clone()),
-                    member_name,
-                })
-            }
-            Some(ItemKind::Impl(implementation)) => {
-                let module_path = implementation
-                    .scope()
-                    .parent(db)
-                    .and_then(|scope| scope.pretty_path(db))
-                    .ok_or(protocol("quote owner module path is missing"))?;
-                let self_type_path = implementation
-                    .hir_type_ref(db)
-                    .to_opt()
-                    .ok_or(protocol("quote owner self type is missing"))?
-                    .pretty_print(db);
-                let member_name = function
-                    .name(db)
-                    .to_opt()
-                    .ok_or(protocol("quote owner member name is missing"))?
-                    .data(db)
-                    .clone();
-                Ok(FrozenItemLocator::ImplMember {
-                    file,
-                    module_path,
-                    trait_path: None,
-                    self_type_path,
-                    selection_name: None,
-                    member_name,
-                })
-            }
-            Some(ItemKind::Trait(trait_)) => {
-                let trait_path = trait_
-                    .scope()
-                    .pretty_path(db)
-                    .ok_or(protocol("quote owner trait path is missing"))?;
-                let member_name = function
-                    .name(db)
-                    .to_opt()
-                    .ok_or(protocol("quote owner member name is missing"))?
-                    .data(db)
-                    .clone();
-                Ok(FrozenItemLocator::TraitMember {
-                    file,
-                    trait_path,
-                    member_name,
-                })
-            }
-            _ => {
-                let path = function
-                    .scope()
-                    .pretty_path(db)
-                    .ok_or(protocol("quote owner path is missing"))?;
-                Ok(FrozenItemLocator::Named(FrozenOwner { file, path }))
-            }
-        }
+        function
+            .frozen_locator(self.db)
+            .ok_or(protocol("quote owner locator is missing"))
     }
 
     pub(crate) fn frozen_owner(&self) -> Result<FrozenOwner, ConstructionError> {
@@ -502,6 +468,7 @@ impl<'db> RecordInput<'db> {
                         actual_owner,
                     ),
                     StructuralHandle::Evidence(_) => return Err(ConstructionError::Authority),
+                    StructuralHandle::CodeNode { .. } => return Err(ConstructionError::Authority),
                     StructuralHandle::Code(code) => {
                         if !self.designated(*ty, MetaItem::Code) {
                             return Err(ConstructionError::Authority);
@@ -684,26 +651,7 @@ impl<'db> RecordInput<'db> {
         }
         let index = nodes.len();
         seen.insert(code, index);
-        nodes.push(FrozenCodeNode {
-            template: None,
-            holes: Vec::new(),
-            rooted_funcs: Vec::new(),
-            rooted_traits: Vec::new(),
-            qualified_consts: Vec::new(),
-            impl_trait_type_arguments: None,
-            locals: Vec::new(),
-            local_types: Vec::new(),
-            param_uses: Vec::new(),
-            effect_uses: Vec::new(),
-            generic_uses: Vec::new(),
-            self_uses: Vec::new(),
-            self_record_inits: Vec::new(),
-            open_uses: Vec::new(),
-            free_self_uses: Vec::new(),
-            function_types: Vec::new(),
-            assoc_const_primitives: Vec::new(),
-            assoc_type_values: Vec::new(),
-        });
+        nodes.push(FrozenCodeNode::empty(None));
         let mut rooted_funcs = Vec::new();
         let mut rooted_traits = Vec::new();
         let mut qualified_consts = Vec::new();
@@ -728,6 +676,18 @@ impl<'db> RecordInput<'db> {
             let body = func
                 .body(self.db)
                 .ok_or(protocol("quote owner body is missing"))?;
+            if site.source == FrozenTemplateSource::CheckedBody {
+                if site.owner != body
+                    || site.expr != body.expr(self.db)
+                    || !code.holes(self.db).is_empty()
+                {
+                    return Err(protocol("invalid checked-body code origin"));
+                }
+                let frozen = super::read_back::read_back(self.db, func)
+                    .map_err(|_| protocol("checked-body code no longer reads back"))?;
+                nodes[index] = frozen.nodes[frozen.root].clone();
+                return Ok(index);
+            }
             let Partial::Present(Expr::Quote(quote)) = &body.exprs(self.db)[site.expr] else {
                 return Err(protocol("quote site no longer names a quote"));
             };
@@ -1302,7 +1262,43 @@ impl<'db> RecordInput<'db> {
                             "quoted rooted function outside a function needs transplantation",
                         ));
                     }
-                    let type_holes = match &quote.template.exprs(self.db)[expr] {
+                    let (generics, generic_item) = if let Some(func_index) = name.func {
+                        let function = match &quote.fragment {
+                            QuoteFragment::Items(items) => {
+                                if let [QuoteItem::Impl(implementation)] = items.as_slice() {
+                                    implementation
+                                        .items
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            QuoteItem::Func(function) => Some(function),
+                                            _ => None,
+                                        })
+                                        .nth(func_index as usize)
+                                } else {
+                                    items
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            QuoteItem::Func(function) => Some(function),
+                                            _ => None,
+                                        })
+                                        .nth(func_index as usize)
+                                }
+                            }
+                            QuoteFragment::Expr | QuoteFragment::Where(_) => None,
+                        }
+                        .ok_or(protocol("quoted function generic owner is missing"))?;
+                        let generic_item = *checked
+                            .function_generic_items
+                            .get(func_index as usize)
+                            .ok_or(protocol("quoted function generic identity is missing"))?;
+                        (
+                            function.generic_params.data(self.db).as_slice(),
+                            generic_item,
+                        )
+                    } else {
+                        (&[][..], u32::MAX)
+                    };
+                    let type_arguments = match &quote.template.exprs(self.db)[expr] {
                         Partial::Present(Expr::Path(Partial::Present(path))) => {
                             for index in 0..path.len(self.db).saturating_sub(1) {
                                 let segment = path
@@ -1316,10 +1312,11 @@ impl<'db> RecordInput<'db> {
                             }
                             let args = path.generic_args(self.db);
                             if args.is_given(self.db) {
-                                let holes = args
+                                let arguments = args
                                     .data(self.db)
                                     .iter()
-                                    .map(|arg| {
+                                    .enumerate()
+                                    .map(|(index, arg)| {
                                         let GenericArg::Type(arg) = arg else {
                                             return Err(protocol(
                                                 "quoted function argument needs a type",
@@ -1330,15 +1327,34 @@ impl<'db> RecordInput<'db> {
                                                 "quoted function type argument is missing",
                                             ));
                                         };
-                                        let TypeKind::Hole(slot) = ty.data(self.db) else {
-                                            return Err(protocol(
-                                                "quoted function type argument needs checked reification",
-                                            ));
+                                        let signature = QuoteSignatureSite::CallTypeArgument {
+                                            expr,
+                                            index: index as u32,
                                         };
-                                        Ok(*slot)
+                                        let mut names = checked.names.iter().filter(|name| {
+                                            name.signature == Some(signature)
+                                                && matches!(name.site, QuoteNameSite::Type(_))
+                                        });
+                                        let frozen = freeze_quote_signature_type(
+                                            self.db,
+                                            ty,
+                                            &mut names,
+                                            generics,
+                                            generic_item,
+                                            &checked_primitive,
+                                        )?
+                                        .ok_or(protocol(
+                                            "quoted function type argument needs checked reification",
+                                        ))?;
+                                        if names.next().is_some() {
+                                            return Err(protocol(
+                                                "quoted function type argument has extra checked names",
+                                            ));
+                                        }
+                                        Ok(frozen)
                                     })
                                     .collect::<Result<Vec<_>, ConstructionError>>()?;
-                                Some(holes)
+                                Some(arguments)
                             } else {
                                 None
                             }
@@ -1348,7 +1364,7 @@ impl<'db> RecordInput<'db> {
                     rooted_funcs.push(FrozenQuoteFunction {
                         func: name.func,
                         assoc_const: name.assoc_const,
-                        type_holes,
+                        type_arguments,
                         site: expr,
                         where_predicate: match name.signature {
                             Some(QuoteSignatureSite::WhereConst { func, predicate })
@@ -1421,6 +1437,7 @@ impl<'db> RecordInput<'db> {
             Some(FrozenTemplateKey {
                 owner: self.frozen_quote_owner(func)?,
                 expr: site.expr,
+                source: FrozenTemplateSource::Quote,
                 span: site
                     .expr
                     .span(body)
@@ -1469,11 +1486,14 @@ impl<'db> RecordInput<'db> {
             template,
             holes,
             rooted_funcs,
+            selected_methods: Vec::new(),
             rooted_traits,
             qualified_consts,
             impl_trait_type_arguments,
             locals,
+            cast_primitives: Vec::new(),
             local_types,
+            record_types: Vec::new(),
             param_uses,
             effect_uses,
             generic_uses,

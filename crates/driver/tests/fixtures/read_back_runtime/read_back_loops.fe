@@ -1,0 +1,41 @@
+// The copied loop bodies must execute the same mutations and early exits.
+use core::meta::{Code, Expr, Item, Record}
+use core::abi::ByteInput
+use std::evm::CallData
+
+const fn read_back_assignment(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_assignment(_ k: u256) -> u256 { ${body} } }
+}
+const fn read_back_nested_while(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_nested_while(_ k: u256) -> u256 { ${body} } }
+}
+const fn read_back_early_exits(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_early_exits(_ k: u256) -> u256 { ${body} } }
+}
+const fn read_back_array_for(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_array_for(_ k: u256) -> u256 { ${body} } }
+}
+
+#[generate(ingot::read_back_assignment)]
+struct AssignTarget {}
+#[generate(ingot::read_back_nested_while)]
+struct WhileTarget {}
+#[generate(ingot::read_back_early_exits)]
+struct ExitsTarget {}
+#[generate(ingot::read_back_array_for)]
+struct ForTarget {}
+
+#[test]
+fn copied_values() {
+    let seed = CallData::new().word_at(0)
+    assert!(copied_assignment(seed + 4) == assignment(seed + 4))
+    assert!(copied_nested_while(seed + 3) == nested_while(seed + 3))
+    assert!(copied_nested_while(0) == 0)
+    assert!(copied_early_exits(seed + 4) == early_exits(seed + 4))
+    assert!(copied_array_for(seed + 4) == array_for(seed + 4))
+    assert!(copied_array_for(seed + 11) == array_for(seed + 11))
+}

@@ -1,0 +1,9 @@
+pub enum Either<A, B> { Left(A), Right(B) }
+fn j(_ e: own Either<u256, u256>) -> u256 {
+    match e {
+        Either::Left(x) => x + x
+        Either::Right(y) => y * y
+    }
+}
+#[test]
+fn plain() { assert!(j(Either::Right(5)) == 25) }

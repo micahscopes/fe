@@ -1,0 +1,13 @@
+// Target: O2. A self-recursive provider is reported once, by a named limit with its value, at the recursive call.
+// expect: rejected at line 8 (the recursive call), because evaluation exceeds the CTFE call-depth or step limit; the
+//   message names the limit and its maximum, the output is a few lines (today about 40 KB of nested `CalleeError`).
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        emit(record) // <- here
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { a: u256 }

@@ -1,0 +1,42 @@
+// Target: RD84 (1), M2-a. A declared derivation whose fields are themselves declared derivations: generated code calling generated code.
+// Oracle: values from mb2 `fe_test/derived_eq_default_generic.fe`, test `derived_nested_concrete_composition` (VERIFIED).
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point with (StableEq)
+
+pub struct Rect { pub top_left: Point, pub bottom_right: Point }
+
+impl Eq for Rect with (StableEq)
+
+fn rect(_ last: u256) -> Rect {
+    Rect { top_left: Point { x: 1, y: 2 }, bottom_right: Point { x: 3, y: last } }
+}
+
+#[test]
+fn nested_composition() {
+    assert!(rect(4).eq(rect(4)))
+    assert!(!rect(4).eq(rect(5)))
+    assert!(rect(4) != rect(5))
+}

@@ -1,0 +1,31 @@
+// Target: F1 (MB3_QUOTE_HUNT_2026-09-28). A generated free function calls a trait method on a non-Copy parameter of the target type.
+// Oracle: the hand-written twin `author::twin`, written where the quote is, returns the same value.
+// Position: free function; receiver is a by-value parameter.
+trait Read {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            pub fn doubled(_ v: ${record}) -> u256 { v.get() * 2 }
+        }
+    }
+
+    pub fn twin(_ v: super::A) -> u256 { v.get() * 2 }
+}
+
+#[generate(ingot::author::emit)]
+struct A { v: u256 }
+
+impl Read for A {
+    fn get(self) -> u256 { self.v }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(author::twin(A { v: 4 }) == 8)
+    assert!(doubled(A { v: 4 }) == author::twin(A { v: 4 }))
+}

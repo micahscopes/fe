@@ -1,0 +1,25 @@
+// Target: RD84 (1) with RD2 and RD67. A named derivation is never the unscoped default: with only `as Always`, a plain use is an error.
+// expect: rejected at line 25, the existing 2-0022 shape: `eq` requires named implementation `Always`, with the hint
+//   `with (Always) { ... }`.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// AlwaysEq: everything is equal.
+pub struct AlwaysEq {}
+
+impl Derive<Eq> for AlwaysEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { impl Eq for ${record} { fn eq(self, _ other: Self) -> bool { true } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point as Always with (AlwaysEq)
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+fn check() -> bool { same(pt(1, 2), pt(3, 4)) } // <- here

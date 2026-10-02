@@ -7,6 +7,52 @@ use this path. The old `FunctionDefinition` and `RecordImplementation`
 descriptor graph is no longer accepted. See the
 [current carrier](GENERATION_CARRIER.md).
 
+The compiler-internal `elaboration::read_back` API freezes an already checked
+body on the same carrier. Direct and method calls retain their selected owner, and record
+construction and local annotations retain their checked nominal and tuple
+types across destination shadowing. Its driver fixtures compare binding and
+type meaning after re-emission, including a forged record root that must fail
+owner validation. Ordinary method checking owns receiver adjustment and
+selection; quotation checks the retained scope and selected call record.
+Explicit free-function type arguments retain their checked primitive, tuple and
+nominal types through the same signature carrier. Conflicting destination aliases
+cannot change their meaning, and a forged nominal argument fails owner validation.
+Method-local const parameters map to destination generic binders by index, so
+renaming or reversing the destination's parameter names does not swap their uses.
+Qualified constants with a primitive receiver retain the checked trait identity
+and lookup scope, including a trait private to the source module. This currently
+admits traits without additional arguments. Output checks consume ordinary
+checking's const and generic records rather than resolving those paths again.
+The active read-back acceptance fixtures also compile the copied output through
+Sonatina and execute it at O0 and O2. They cover arithmetic, bindings, calls,
+records, methods and structured loops, with runtime inputs and conflicting
+destination names. Fe execution adapters live beside the authored fixtures;
+the structural and execution tests share the same frozen-body transplant.
+The compiler-internal `read_back_value` bridge supplies that same checked body
+as `Code<Expr>` to ordinary Fe const functions. `core::meta::code_root` returns
+a sealed, read-only `CodeNode` cursor. Fe can walk its children, inspect its
+operation, compare checked bindings and selected calls, and read literal,
+field and array facts. A Fe-authored visitor counts multiplications and loop
+forms in the acceptance fixture; the compiler does not calculate those counts
+or evaluate the described program. Compound assignments expose their actual
+arithmetic operation, and array repeats expose their checked length.
+Const parameters and associated constants have distinct cursor kinds; neither
+is reported as a function reference.
+
+The cursor refers to existing HIR and ordinary checking results. It stores no
+copied syntax, grants no function-body discovery, and cannot be spliced or
+published as generated output. The whole `Code<Expr>` value still passes through
+Fe and freezes through the existing quotation path. Invalid cursors, child
+indices and incompatible queries fail explicitly. Type comparison currently
+uses the existing scalar reflection contract (`bool`, `u64`, `u256`), including
+aliases; incomplete types and other requested types are unsupported. Empty and
+untyped quote templates are not checked-body inputs. Edit-and-restore tests
+compare warm and fresh compiler databases for changed operations, literal
+values and call selections.
+
+Symbolic annotations, the complete quoted-output corpus and match integration
+remain unfinished Q5/Q6 work.
+
 The next section records the original September 21 structural release, before
 quotation replaced its output format. Its descriptor limits and examples are
 historical; later sections describe subsequent work.

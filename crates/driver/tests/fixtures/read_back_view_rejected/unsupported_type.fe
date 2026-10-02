@@ -1,0 +1,7 @@
+// expect-error: node_type_is currently requires bool, u64 or u256
+use core::meta::{Code, Expr, code_root, node_type_is}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> bool {
+    node_type_is<u8>(code_root(code))
+    true
+}

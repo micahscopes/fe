@@ -1,0 +1,44 @@
+// Target: RD84 (3) ("concrete authored types"; RD52), design section 6. A block cannot derive for a type that only generation creates.
+// expect: rejected at line 43 (the demand), because `Made` is a generated type: providers read only authored records.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub struct Made { pub v: u256 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn check() -> bool {
+    let a = Made { v: 1 }
+    let b = Made { v: 1 }
+    with (StableEq) { same(a, b) } // <- here
+}

@@ -1,0 +1,32 @@
+// Target: RD84 (3). A deriver block fills a demand for a trait with an associated const, through a bound and through a qualified path.
+// Oracle: hand-computed field counts (2 and 3).
+// Position: associated consts.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+pub trait FieldCount {
+    const N: usize
+}
+
+// CountFields: the number of fields as an associated const.
+pub struct CountFields {}
+
+impl Derive<FieldCount> for CountFields {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record)
+        quote { impl FieldCount for ${record} { const N: usize = ${n} } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+pub struct Triple { pub a: u256, pub b: u256, pub c: bool }
+
+fn count<T: FieldCount>() -> usize { T::N }
+
+#[test]
+fn assoc_const_demands() {
+    let n = with (CountFields) { count<Point>() + <Triple as FieldCount>::N }
+    assert!(n == 5)
+}

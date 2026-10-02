@@ -1,0 +1,41 @@
+// Target: O4 (MB3_QUOTE_HUNT_2026-09-28). `type Out = ${field_type(f)}` in a quoted impl is accepted and names the field's type.
+// Oracle: hand-written twin type `H` with `type Out = bool`; both give the same value through the associated type.
+// Position: associated type in a generated impl, used through a generic bound.
+trait Carry {
+    type Out
+    fn out(self) -> Self::Out
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field, field_type}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        quote {
+            impl ingot::Carry for ${record} {
+                type Out = ${field_type(f)}
+                fn out(self) -> Self::Out { self.${f} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct G { flag: bool }
+
+struct H { flag: bool }
+
+impl Carry for H {
+    type Out = bool
+    fn out(self) -> Self::Out { self.flag }
+}
+
+fn carried<T: Carry>(_ t: T) -> T::Out { t.out() }
+
+#[test]
+fn generated_matches_twin() {
+    let g: bool = carried(G { flag: true })
+    let h: bool = carried(H { flag: true })
+    assert!(g == h)
+    assert!(G { flag: false }.out() == (H { flag: false }).out())
+}

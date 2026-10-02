@@ -1,0 +1,6 @@
+// expect-error: node is not a compound assignment
+use core::meta::{Code, Expr, CodeNodeKind, code_root, node_child, node_assignment_operator}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> CodeNodeKind {
+    node_assignment_operator(node_child(node_child(code_root(code), 0), 0))
+}

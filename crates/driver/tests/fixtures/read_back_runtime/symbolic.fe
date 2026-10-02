@@ -1,0 +1,32 @@
+use core::meta::{Code, Expr, Item, Record}
+
+const fn read_back_generic_call(_ record: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote {
+        pub fn copied_generic_call<U: ingot::Tag, T: ingot::Tag>() -> u256 { ${body} }
+    }
+}
+const fn read_back_annotation(_ record: Record) -> Code<Item> {
+    let body: Code<Expr> = quote(value) { value }
+    quote { pub fn copied_annotation<V>(_ value: own V) -> V { ${body} } }
+}
+trait Copied { fn copied_owner_call<Z: Tag>(own self) -> u256 }
+const fn read_back_owner_call(record: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { impl ingot::Copied for ${record} { fn copied_owner_call<Z: Tag>(own self) -> u256 { ${body} } } }
+}
+
+#[generate(ingot::read_back_generic_call)]
+struct CallTarget {}
+#[generate(ingot::read_back_annotation)]
+struct AnnotationTarget {}
+#[generate(ingot::read_back_owner_call)]
+struct GeneratedPair<X: Tag, Y: Tag> { x: X, y: Y }
+
+#[test]
+fn copied_values() {
+    assert!(copied_generic_call<u256, bool>() == 21)
+    assert!(copied_generic_call<bool, u256>() == 12)
+    assert!(copied_annotation<u256>(9) == 9)
+    assert!(GeneratedPair<u256, bool> { x: 3, y: true }.copied_owner_call<bool>() == 211)
+}

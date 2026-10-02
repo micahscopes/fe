@@ -1,0 +1,6 @@
+// expect-error: node is not an array construction
+use core::meta::{Code, Expr, code_root, node_child, node_array_length}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> usize {
+    node_array_length(node_child(node_child(code_root(code), 0), 0))
+}

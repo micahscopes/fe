@@ -11,8 +11,8 @@ impl Copy for FieldType {}
 
 /// Fe syntax held as a compile-time value, built by `quote { .. }`. `K` is its
 /// kind: `Expr`, `Item` or `Where`. A code value has no runtime
-/// representation, and nothing inspects it; generation copies it into
-/// ordinary checked code.
+/// representation; generation copies it into ordinary checked code. A checked
+/// body supplied by the compiler also supports the read-only node view below.
 pub struct Code<K> { seal: bool }
 impl<K> Copy for Code<K> {}
 
@@ -62,3 +62,119 @@ pub enum DeclarationName {
     FieldPrefix(String<31>, Field),
 }
 impl Copy for DeclarationName {}
+
+/// A read-only cursor into a checked Code<Expr> body. No syntax is stored here,
+/// and a node cannot be constructed by Fe or used as an expression splice.
+pub struct CodeNode { seal: bool }
+impl Copy for CodeNode {}
+
+/// Scalar classifications of existing nodes, with no children or constructors
+/// for building code. Children remain in the original code representation.
+pub enum CodeNodeKind {
+    Integer
+    Boolean
+    String
+    Block
+    Add
+    Sub
+    Mul
+    Div
+    Rem
+    Pow
+    LShift
+    RShift
+    BitAnd
+    BitOr
+    BitXor
+    Range
+    Eq
+    NotEq
+    Lt
+    LtEq
+    Gt
+    GtEq
+    And
+    Or
+    Index
+    Positive
+    Negative
+    Not
+    BitNot
+    Borrow
+    BorrowMut
+    Deref
+    Cast
+    Call
+    Assert
+    MethodCall
+    Parameter
+    Local
+    Function
+    ConstParameter
+    Constant
+    Record
+    Field
+    Tuple
+    Array
+    ArrayRepeat
+    If
+    Match
+    Assign
+    AugAssign
+    Let
+    For
+    While
+    Break
+    Continue
+    Return
+    Statement
+    Condition
+    ConditionLet
+    ConditionAnd
+    ConditionOr
+    Wildcard
+    Rest
+    Binding
+    PatternValue
+    PatternTuple
+    PatternVariant
+    PatternRecord
+    PatternOr
+}
+impl Copy for CodeNodeKind {}
+
+extern {
+    /// Inspect a checked body supplied by the compiler. Empty fragments and
+    /// untyped quote templates reject; this grants no function-body lookup.
+    pub const fn code_root(_ code: Code<Expr>) -> CodeNode
+    pub const fn node_kind(_ node: CodeNode) -> CodeNodeKind
+    /// The arithmetic operation of a compound assignment, such as Add for +=.
+    /// A node that is not a compound assignment rejects.
+    pub const fn node_assignment_operator(_ node: CodeNode) -> CodeNodeKind
+    /// Children follow source order. Let: pattern, value; call: callee, args;
+    /// method: receiver, args; if: condition, then, optional else; for: pattern,
+    /// iterable, body; while: condition, body; match: scrutinee, pattern/body pairs.
+    pub const fn node_child_count(_ node: CodeNode) -> usize
+    /// An invalid index is an evaluation error, never an absent child.
+    pub const fn node_child(_ node: CodeNode, _ index: usize) -> CodeNode
+    pub const fn node_parameter_index(_ node: CodeNode) -> usize
+    /// Compare checked binding identity within its original body. A node that
+    /// is not a binding or a bound use rejects.
+    pub const fn node_same_binding(_ lhs: CodeNode, _ rhs: CodeNode) -> bool
+    /// Compare the complete ordinary checker's call records, including their
+    /// instantiation and selections. A node without such a record rejects.
+    pub const fn node_same_checked_call(_ lhs: CodeNode, _ rhs: CodeNode) -> bool
+    /// Uses the existing scalar type-query contract: bool, u64 or u256.
+    /// Symbolic, invalid or unresolved types reject instead of comparing equal.
+    pub const fn node_type_is<T>(_ node: CodeNode) -> bool
+    /// The field ordinal resolved by ordinary checking, including tuple fields.
+    pub const fn node_field_index(_ node: CodeNode) -> usize
+    /// Map a record constructor's source-order child to its declared field.
+    pub const fn node_record_field_index(_ node: CodeNode, _ index: usize) -> usize
+    /// The checked length of an array literal or repeat. A repeat has one child
+    /// (the repeated expression), regardless of this length. No expression runs.
+    pub const fn node_array_length(_ node: CodeNode) -> usize
+    /// Read a checked scalar literal in its actual type. This performs no
+    /// evaluation of compound expressions. A different requested type rejects.
+    pub const fn node_literal<T>(_ node: CodeNode) -> T
+}

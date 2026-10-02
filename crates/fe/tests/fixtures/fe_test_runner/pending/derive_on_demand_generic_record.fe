@@ -1,0 +1,44 @@
+// Target: RD84 (3), design section 6 ("a concrete record written in source"). A concrete instance of an authored generic record is derivable on the fly, with its bound met by the same block.
+// Oracle: hand-computed values.
+// Positions: generic record instance; nested generics (`Pair<Point>`).
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+pub struct Pair<T> { pub a: T, pub b: T }
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+#[test]
+fn concrete_instances() {
+    let r = with (StableEq) {
+        let p: Pair<u256> = Pair { a: 1, b: 2 }
+        let q: Pair<u256> = Pair { a: 1, b: 2 }
+        let s = same(p, q)
+        let t = same(Pair { a: pt(1, 2), b: pt(3, 4) }, Pair { a: pt(1, 2), b: pt(3, 5) })
+        s && !t
+    }
+    assert!(r)
+}

@@ -1,0 +1,15 @@
+use core::abi::AbiSize
+use core::meta::{Code, Item, Record, field, field_type}
+trait Probe { fn head(own self) -> u256 }
+const fn gen(record: Record) -> Code<Item> {
+    let t0 = field_type(field(record, 0))
+    quote {
+        impl ingot::Probe for ${record} {
+            fn head(own self) -> u256 { core::abi::abi_field_head_size<${t0}>() }
+        }
+    }
+}
+#[generate(gen)]
+struct W<T> where T: AbiSize { value: T }
+#[test]
+fn a() { assert!(W { value: true }.head() == 32) }

@@ -1,0 +1,53 @@
+// Target: O4 (MB3_QUOTE_HUNT_2026-09-28). A while loop with break and continue in a quoted body is accepted.
+// Oracle: hand-written twin type `H` with the same method body; both give the value by hand in the test.
+trait Work {
+    fn work(self, _ k: u256) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let a = field(record, 0)
+        quote {
+            impl ingot::Work for ${record} {
+                fn work(self, _ k: u256) -> u256 {
+                    let mut i: u256 = 0
+                    let mut sum: u256 = 0
+                    while true {
+                        i += 1
+                        if i > k { break }
+                        if i == 2 { continue }
+                        sum += i
+                    }
+                    sum + self.${a}
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct G { a: u256 }
+
+struct H { a: u256 }
+
+impl Work for H {
+    fn work(self, _ k: u256) -> u256 {
+        let mut i: u256 = 0
+        let mut sum: u256 = 0
+        while true {
+            i += 1
+            if i > k { break }
+            if i == 2 { continue }
+            sum += i
+        }
+        sum + self.a
+    }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(H { a: 3 }.work(4) == 11)
+    assert!(G { a: 3 }.work(4) == (H { a: 3 }).work(4))
+}

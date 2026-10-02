@@ -1,0 +1,44 @@
+// Target: RD84 (1), M2-a. A deriver whose output is an associated const (`FieldCount::N`), read directly and through a bound.
+// Oracle: hand-written twin `PointH` with `const N: usize = 2`; field counts by hand (2 and 3).
+// Position: associated consts.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+pub trait FieldCount {
+    const N: usize
+}
+
+// CountFields: the number of fields as an associated const.
+pub struct CountFields {}
+
+impl Derive<FieldCount> for CountFields {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record)
+        quote { impl FieldCount for ${record} { const N: usize = ${n} } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl FieldCount for Point with (CountFields)
+
+pub struct Triple { pub a: u256, pub b: u256, pub c: bool }
+
+impl FieldCount for Triple with (CountFields)
+
+pub struct PointH { pub x: u256, pub y: u256 }
+
+impl FieldCount for PointH {
+    const N: usize = 2
+}
+
+fn count<T: FieldCount>() -> usize { T::N }
+
+#[test]
+fn counts_match_twin() {
+    assert!(<Point as FieldCount>::N == 2)
+    assert!(<Point as FieldCount>::N == <PointH as FieldCount>::N)
+    assert!(count<Triple>() == 3)
+    assert!(count<Point>() == count<PointH>())
+}

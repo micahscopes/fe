@@ -1,0 +1,29 @@
+// Target: RD84 form of mb2 `canonical_floor_generated_explicit_converge.fe` (selection-26, VERIFIED): a derived and a hand-written impl of a `#[fixed]` trait meet at one gate.
+// expect: rejected at line 24, because `AbiSize` is `#[fixed]` and `Token` gets two impls, the declared derivation
+//   and the named `Override`; today's 5-0001, both impls labelled. Named impls of a fixed trait still conflict.
+use core::abi::AbiSize
+use core::derive::Derive
+use core::meta::{Code, Item, Record}
+
+// StableAbiSize: a one-word static layout, enough for this single-field record.
+pub struct StableAbiSize {}
+
+impl Derive<AbiSize> for StableAbiSize {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote {
+            impl AbiSize for ${record} {
+                const HEAD_SIZE: u256 = 32
+                const IS_DYNAMIC: bool = false
+            }
+        }
+    }
+}
+
+pub struct Token { pub amount: u256 }
+
+impl AbiSize for Token with (StableAbiSize) // <- here
+
+impl AbiSize for Token as Override {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = true
+}

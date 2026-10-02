@@ -1,0 +1,14 @@
+// Target: RD84 (1), M2-a in another ingot (PR_HYGIENE 26). A deriver from a dependency ingot serves a declared derivation in the app ingot (RD14: derivers downstream of the goal's ingot).
+// Oracle: hand-computed values (field-by-field equality).
+use core::ops::Eq
+use geo::{StableEq, same}
+
+pub struct Tile { pub row: u256, pub col: u256 }
+
+impl Eq for Tile with (StableEq)
+
+#[test]
+fn deriver_from_dependency() {
+    assert!(same(Tile { row: 1, col: 2 }, Tile { row: 1, col: 2 }))
+    assert!(!same(Tile { row: 1, col: 2 }, Tile { row: 2, col: 2 }))
+}

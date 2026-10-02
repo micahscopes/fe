@@ -1,0 +1,39 @@
+// Target: O4 (MB3_QUOTE_HUNT_2026-09-28). Tuple construction and tuple field access in a quoted body are accepted.
+// Oracle: hand-written twin type `H` with the same method body; both give the value by hand in the test.
+trait Work {
+    fn work(self, _ k: u256) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let a = field(record, 0)
+        quote {
+            impl ingot::Work for ${record} {
+                fn work(self, _ k: u256) -> u256 {
+                    let t = (self.${a}, k)
+                    t.0 + t.1
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct G { a: u256 }
+
+struct H { a: u256 }
+
+impl Work for H {
+    fn work(self, _ k: u256) -> u256 {
+        let t = (self.a, k)
+        t.0 + t.1
+    }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(H { a: 3 }.work(4) == 7)
+    assert!(G { a: 3 }.work(4) == (H { a: 3 }).work(4))
+}

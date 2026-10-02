@@ -1,0 +1,63 @@
+// Target: Q5 (QUOTATION_DESIGN section 7, RD79 (2), RD82 (2)). Each pure function here reads back, is re-emitted through the transplant, and gives the same results at O0 and O2.
+// Oracle: the authored functions themselves (the `#[test]`s below pin their values by hand); the harness compares the
+//   read-back description with the authored body by structure (resolved roots, kinds, binders), not by bytes.
+pub struct Pt { pub x: u256, pub y: u256 }
+
+impl Pt {
+    pub fn sum(self) -> u256 { self.x + self.y }
+}
+
+fn helper(_ a: u256) -> u256 { a * 3 }
+
+pub fn literal() -> u256 { 42 }
+
+pub fn params(_ a: u256, _ b: u256) -> u256 { a - b }
+
+pub fn lets(_ a: u256) -> u256 {
+    let b = a + 1
+    let c = b * 2
+    c
+}
+
+pub fn unary_ops(_ a: bool, _ n: i32) -> i32 {
+    if !a { -n } else { n }
+}
+
+pub fn cast(_ a: u8) -> u256 { (a as u256) + 1 }
+
+pub fn call(_ a: u256) -> u256 { helper(a) + 1 }
+
+pub fn method_and_field(_ p: Pt) -> u256 { p.sum() }
+
+pub fn tuple(_ a: u256) -> u256 {
+    let t = (a, a + 1)
+    t.0 + t.1
+}
+
+pub fn record(_ a: u256) -> u256 {
+    let p = Pt { x: a, y: 2 }
+    p.x * p.y
+}
+
+pub fn block_and_if(_ a: u256) -> u256 {
+    let r = {
+        let s = a + 1
+        if s > 5 { s } else { 0 }
+    }
+    r
+}
+
+#[test]
+fn authored_values() {
+    assert!(literal() == 42)
+    assert!(params(9, 4) == 5)
+    assert!(lets(3) == 8)
+    assert!(unary_ops(false, 7) == -7)
+    assert!(cast(255) == 256)
+    assert!(call(2) == 7)
+    assert!(method_and_field(Pt { x: 2, y: 5 }) == 7)
+    assert!(tuple(4) == 9)
+    assert!(record(6) == 12)
+    assert!(block_and_if(5) == 6)
+    assert!(block_and_if(1) == 0)
+}

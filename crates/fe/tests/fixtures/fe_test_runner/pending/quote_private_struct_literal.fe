@@ -1,0 +1,37 @@
+// Target: F3 / RD83 (2). A generated body constructs a provider type with a private field and reads it back.
+// Oracle: the hand-written twin `author::twin` returns the same value (11).
+// Position: struct literal with a private field, rooted type path.
+trait Read {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Counter { value: u256 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Read for ${record} {
+                fn get(self) -> u256 {
+                    let c = Counter { value: 11 }
+                    c.value
+                }
+            }
+        }
+    }
+
+    pub fn twin() -> u256 {
+        let c = Counter { value: 11 }
+        c.value
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(author::twin() == 11)
+    assert!(Target {}.get() == author::twin())
+}

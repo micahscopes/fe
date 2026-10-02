@@ -1,0 +1,4 @@
+[workspace]
+name = "derive_declared_cross_ingot"
+version = "0.1.0"
+members = ["ingots/app"]

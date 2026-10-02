@@ -1,0 +1,32 @@
+// Execution adapter for read_back_binders_roots.fe. The generated bodies live
+// in a mirror of dest, where x and helper have different meanings from the
+// authored names. The original dest remains available as an independent control.
+use core::meta::{Code, Expr, Item, Record}
+use core::abi::ByteInput
+use std::evm::CallData
+
+const fn read_back_shadowing(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_shadowing(_ a: u256) -> u256 { ${body} } }
+}
+const fn read_back_rooted(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_rooted(_ a: u256) -> u256 { ${body} } }
+}
+
+mod copied_dest {
+    pub const x: u256 = 9
+    pub fn helper(_ a: u256) -> u256 { a + 99 }
+    #[generate(ingot::read_back_shadowing)]
+struct ShadowTarget {}
+    #[generate(ingot::read_back_rooted)]
+struct RootTarget {}
+}
+
+#[test]
+fn copied_values() {
+    let seed = CallData::new().word_at(0)
+    assert!(copied_dest::copied_shadowing(seed + 5) == shadowing(seed + 5))
+    assert!(copied_dest::copied_rooted(seed + 30) == rooted(seed + 30))
+    assert!(copied_dest::copied_rooted(seed + 30) != copied_dest::helper(seed + 30))
+}

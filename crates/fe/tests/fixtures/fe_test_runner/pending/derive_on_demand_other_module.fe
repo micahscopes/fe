@@ -1,0 +1,52 @@
+// Target: RD84 (3), design section 5(b). A deriver block in one module derives for types from another module (all fields public), also named through an alias.
+// Oracle: hand-computed values.
+// Positions: another module; type alias.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+mod geo {
+    pub struct Point { pub x: u256, pub y: u256 }
+
+    pub fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+}
+
+mod app {
+    use ingot::{StableEq, same}
+    use ingot::geo::pt
+
+    pub type Spot = ingot::geo::Point
+
+    pub fn check() -> bool {
+        with (StableEq) {
+            let a: Spot = pt(1, 2)
+            let b: Spot = pt(1, 2)
+            same(a, b) && !same(pt(1, 2), pt(2, 2))
+        }
+    }
+}
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+#[test]
+fn block_in_another_module() {
+    assert!(app::check())
+}

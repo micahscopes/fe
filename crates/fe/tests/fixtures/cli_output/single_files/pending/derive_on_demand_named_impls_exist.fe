@@ -1,0 +1,38 @@
+// Target: RD84 (3) ("gap = no impl, neither unnamed nor named"), design section 8 row "named impls exist". A type with only named impls is not a gap.
+// expect: rejected at line 37 with the existing 2-0022 (`eq` requires named implementation `Casual`), plus a note: the
+//   deriver in scope does not apply because `Point` has named `Eq` impls.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point as Casual {
+    fn eq(self, _ other: Self) -> bool { true }
+}
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+fn check() -> bool {
+    with (StableEq) { same(pt(1, 2), pt(1, 2)) } // <- here
+}

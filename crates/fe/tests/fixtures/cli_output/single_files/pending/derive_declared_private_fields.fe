@@ -1,0 +1,30 @@
+// Target: RD84 (DERIVE_USE_SITE_DESIGN section 5(a), "visibility is consent"). A declared derivation outside the type's home cannot read its private fields.
+// expect: rejected at line 30, because `StableEq` cannot derive `Eq` for `vault::Key` here: `secret` is private to
+//   `vault`; help: declare it in `vault` (the accepted twin is fe_test_runner/pending/derive_home_private_fields.fe).
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+mod vault {
+    pub struct Key { pub id: u256, secret: u256 }
+}
+
+impl Eq for vault::Key with (StableEq) // <- here

@@ -1,0 +1,19 @@
+// Target: RD83 (2). A generated item's signature may not expose a provider-private type, though its body may use one.
+// expect: rejected at line 13 (the generated signature, with `#[generate]` as secondary), because `Secret` is private to
+//   `author` and `leak` is public: the ordinary private-in-public rule. The body's call of private `make` is fine.
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    struct Secret { v: u256 }
+
+    fn make() -> Secret { Secret { v: 1 } }
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn leak() -> Secret { make() } // <- here
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}

@@ -1,0 +1,44 @@
+// Target: RD84 (2), rewrite of mb2 `fe_test/cascade_noncanonical_coexist.fe` (DECIDED). A declared derivation and a named hand-written impl of a non-fixed trait coexist.
+// Oracle: mb2 asserted only that it compiles; strengthened with the values its sibling fixtures assert (unscoped false, `Override` true).
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Speaker { pub id: u256 }
+
+// Was `#[derive(Eq)]`, the default-marked derived impl; now an ordinary declared derivation (RD84 (1)).
+impl Eq for Speaker with (StableEq)
+
+// Was an unnamed hand-written override coexisting with the derived default; now it takes a name (RD84 (2)).
+impl Eq for Speaker as Override {
+    fn eq(self, _ other: Speaker) -> bool { true }
+}
+
+#[test]
+fn default_and_override_coexist_and_compile() {
+    let a = Speaker { id: 1 }
+    let b = Speaker { id: 2 }
+    assert!(!a.eq(b))
+    let c = Speaker { id: 1 }
+    let d = Speaker { id: 2 }
+    let over = with (Override) { c.eq(d) }
+    assert!(over)
+}

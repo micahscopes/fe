@@ -1,0 +1,17 @@
+type Width = u256
+
+pub fn cast_alias(_ a: u8) -> u256 { a as Width }
+
+pub fn annotated_alias(_ a: u8) -> u256 {
+    let mut n: Width = a as u256
+    n += 1
+    n
+}
+
+pub fn unsupported_const_array() {
+    let value: [u256; 2] = [1, 2]
+}
+
+mod dest {
+    type Width = u8
+}

@@ -1,0 +1,16 @@
+use core::meta::{Code, Expr, CodeNodeKind, code_root, node_child,
+    node_kind, node_literal, node_same_checked_call}
+
+fn left(_ x: u256) -> u256 { x + 1 }
+fn right(_ x: u256) -> u256 { x + 2 }
+pub fn subject(_ x: u256) -> u256 { left(x * 3) + left(x) }
+
+pub const fn inspect(_ code: Code<Expr>) -> (bool, u256, bool) {
+    let sum = node_child(node_child(code_root(code), 0), 0)
+    let first = node_child(sum, 0)
+    let second = node_child(sum, 1)
+    let argument = node_child(first, 1)
+    (match node_kind(argument) { CodeNodeKind::Mul => true, _ => false },
+        node_literal<u256>(node_child(argument, 1)),
+        node_same_checked_call(first, second))
+}

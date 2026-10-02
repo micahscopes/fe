@@ -692,6 +692,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 let site = crate::analysis::semantic::QuoteSite {
                     owner: self.body,
                     expr,
+                    source: crate::core::meta::FrozenTemplateSource::Quote,
                 };
                 self.emit_expr_with_origin(origin, ty, SExpr::Quote { site, holes })
             }

@@ -1942,7 +1942,25 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             && let Some(name) = func.name(self.db).to_opt()
             && matches!(
                 name.data(self.db).as_str(),
-                "field_count" | "field" | "field_type" | "type_is" | "query_field" | "empty"
+                "field_count"
+                    | "field"
+                    | "field_type"
+                    | "type_is"
+                    | "query_field"
+                    | "empty"
+                    | "code_root"
+                    | "node_kind"
+                    | "node_child_count"
+                    | "node_child"
+                    | "node_parameter_index"
+                    | "node_same_binding"
+                    | "node_same_checked_call"
+                    | "node_type_is"
+                    | "node_field_index"
+                    | "node_record_field_index"
+                    | "node_literal"
+                    | "node_assignment_operator"
+                    | "node_array_length"
             )
         {
             let operation = name.data(self.db).as_str();
@@ -1960,6 +1978,26 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 func,
                 &format!("core::meta::{operation}"),
             ) {
+                if matches!(
+                    operation,
+                    "code_root"
+                        | "node_kind"
+                        | "node_child_count"
+                        | "node_child"
+                        | "node_parameter_index"
+                        | "node_same_binding"
+                        | "node_same_checked_call"
+                        | "node_type_is"
+                        | "node_field_index"
+                        | "node_record_field_index"
+                        | "node_literal"
+                        | "node_assignment_operator"
+                        | "node_array_length"
+                ) {
+                    return Ok(
+                        self.eval_code_intrinsic(instance, operation, result_ty, args, origin)?
+                    );
+                }
                 return self
                     .eval_structural_intrinsic(instance, operation, result_ty, args, origin);
             }
@@ -2262,6 +2300,295 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 }
             })?;
         Ok(CtfeConstValue::concrete(self.db, verified))
+    }
+
+    fn eval_code_intrinsic(
+        &self,
+        instance: SemanticInstance<'db>,
+        operation: &str,
+        result_ty: TyId<'db>,
+        args: &[CtfeConstValue<'db>],
+        origin: SemOrigin<'db>,
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        use super::code_view::{checked_body, describe};
+        use crate::analysis::{semantic::CodeNodeSite, ty::ty_check::check_func_body};
+        let db = self.db;
+        let invalid = |message: &str| CtfeError::InvalidOperation {
+            origin,
+            message: message.into(),
+        };
+        let count = match operation {
+            "node_child"
+            | "node_same_binding"
+            | "node_same_checked_call"
+            | "node_record_field_index" => 2,
+            _ => 1,
+        };
+        if args.len() != count {
+            return Err(invalid("wrong number of code inspection arguments"));
+        }
+        let handle = |arg: &CtfeConstValue<'db>| match arg.materialize(db).value(db) {
+            SemConstValue::Structural { handle, .. } => Ok(*handle),
+            _ => Err(invalid("code inspection requires a compiler-issued handle")),
+        };
+        let node = |arg| match handle(arg)? {
+            StructuralHandle::CodeNode { code, site } => {
+                let (body, typed) = checked_body(db, code).map_err(invalid)?;
+                describe(db, body, typed, site).map_err(invalid)?;
+                Ok((code, site, body, typed))
+            }
+            _ => Err(invalid("code inspection requires a node cursor")),
+        };
+        let output = if operation == "code_root" {
+            let StructuralHandle::Code(code) = handle(&args[0])? else {
+                return Err(invalid("code_root requires a code value"));
+            };
+            let (body, _) = checked_body(db, code).map_err(invalid)?;
+            StructuralHandle::CodeNode {
+                code,
+                site: CodeNodeSite::Expr(body.expr(db)),
+            }
+        } else {
+            let (code, site, body, typed) = node(&args[0])?;
+            let description = describe(db, body, typed, site).map_err(invalid)?;
+            match operation {
+                "node_kind" | "node_assignment_operator" => {
+                    let kind = if operation == "node_assignment_operator" {
+                        let CodeNodeSite::Expr(expr) = site else {
+                            return Err(invalid("node is not a compound assignment"));
+                        };
+                        let Some(crate::hir_def::Partial::Present(
+                            crate::hir_def::Expr::AugAssign(_, _, op),
+                        )) = body.exprs(db).get(expr)
+                        else {
+                            return Err(invalid("node is not a compound assignment"));
+                        };
+                        super::code_view::binary_kind(crate::hir_def::BinOp::Arith(*op))
+                    } else {
+                        description.kind
+                    };
+                    let TyData::TyBase(TyBase::Adt(adt)) = result_ty.base_ty(db).data(db) else {
+                        return Err(invalid("node kind result is not an enum"));
+                    };
+                    let crate::analysis::ty::adt_def::AdtRef::Enum(definition) = adt.adt_ref(db)
+                    else {
+                        return Err(invalid("node kind result is not an enum"));
+                    };
+                    let index = definition
+                        .variants(db)
+                        .position(|variant| {
+                            variant.name(db).is_some_and(|name| name.data(db) == kind)
+                        })
+                        .ok_or_else(|| invalid("checked node kind has no declared enum case"))?;
+                    let index =
+                        u16::try_from(index).map_err(|_| invalid("node kind enum is too large"))?;
+                    return Ok(CtfeConstValue::enum_(
+                        result_ty,
+                        VariantIndex(index),
+                        Vec::new(),
+                    ));
+                }
+                "node_child_count" => {
+                    return Ok(CtfeConstValue::int(
+                        db,
+                        result_ty,
+                        description.children.len().into(),
+                    ));
+                }
+                "node_child" => {
+                    let SemConstValue::Scalar {
+                        value: SemConstScalar::Int { value },
+                        ..
+                    } = args[1].materialize(db).value(db)
+                    else {
+                        return Err(invalid("code child index must be an integer"));
+                    };
+                    let index = value
+                        .to_usize()
+                        .ok_or_else(|| invalid("invalid code child index"))?;
+                    let site = description.children.get(index).ok_or_else(|| {
+                        invalid(&format!(
+                            "code child index {index} is out of bounds for {} children",
+                            description.children.len()
+                        ))
+                    })?;
+                    StructuralHandle::CodeNode { code, site }
+                }
+                "node_parameter_index" => {
+                    let CodeNodeSite::Expr(expr) = site else {
+                        return Err(invalid("node is not a parameter use"));
+                    };
+                    let Some(LocalBinding::Param { idx, .. }) = typed.expr_binding(expr) else {
+                        return Err(invalid("node is not a parameter use"));
+                    };
+                    return Ok(CtfeConstValue::int(db, result_ty, idx.into()));
+                }
+                "node_same_binding" => {
+                    let (_, rhs, rhs_body, rhs_typed) = node(&args[1])?;
+                    let binding =
+                        |typed: &crate::analysis::ty::ty_check::TypedBody<'db>, site| match site {
+                            CodeNodeSite::Expr(expr) => typed.expr_binding(expr),
+                            CodeNodeSite::Pat(pat) => typed.pat_binding(pat),
+                            _ => None,
+                        };
+                    let lhs = binding(typed, site)
+                        .ok_or_else(|| invalid("node has no checked binding"))?;
+                    let rhs = binding(rhs_typed, rhs)
+                        .ok_or_else(|| invalid("node has no checked binding"))?;
+                    return Ok(CtfeConstValue::bool(body == rhs_body && lhs == rhs));
+                }
+                "node_same_checked_call" => {
+                    let (_, rhs, _, rhs_typed) = node(&args[1])?;
+                    let (CodeNodeSite::Expr(lhs), CodeNodeSite::Expr(rhs)) = (site, rhs) else {
+                        return Err(invalid("node has no checked call record"));
+                    };
+                    let lhs = typed
+                        .callable_expr(lhs)
+                        .ok_or_else(|| invalid("node has no checked call record"))?;
+                    let rhs = rhs_typed
+                        .callable_expr(rhs)
+                        .ok_or_else(|| invalid("node has no checked call record"))?;
+                    return Ok(CtfeConstValue::bool(lhs == rhs));
+                }
+                "node_type_is" => {
+                    let ty = match site {
+                        CodeNodeSite::Expr(expr) => typed.expr_ty(db, expr),
+                        CodeNodeSite::Pat(pat) => typed.pat_ty(db, pat),
+                        _ => return Err(invalid("node has no checked value type")),
+                    };
+                    let candidate = *instance
+                        .key(db)
+                        .subst(db)
+                        .generic_args(db)
+                        .first()
+                        .ok_or_else(|| invalid("node_type_is requires a candidate type"))?;
+                    let func = body
+                        .containing_func(db)
+                        .ok_or_else(|| invalid("checked body has no function"))?;
+                    let (_, typed) = check_func_body(db, func);
+                    let normalize = |ty| normalize_ty(db, ty, func.scope(), typed.assumptions());
+                    let ty = normalize(ty.as_view(db).unwrap_or(ty));
+                    let candidate = normalize(candidate);
+                    if !matches!(
+                        candidate.data(db),
+                        TyData::TyBase(TyBase::Prim(PrimTy::Bool | PrimTy::U64 | PrimTy::U256))
+                    ) {
+                        return Err(invalid("node_type_is currently requires bool, u64 or u256"));
+                    }
+                    for ty in [ty, candidate] {
+                        if ty.has_invalid(db)
+                            || ty.has_param(db)
+                            || ty.has_var(db)
+                            || ty.has_projection(db)
+                        {
+                            return Err(invalid(
+                                "code type comparison requires complete closed types",
+                            ));
+                        }
+                    }
+                    return Ok(CtfeConstValue::bool(ty == candidate));
+                }
+                "node_field_index" => {
+                    let CodeNodeSite::Expr(expr) = site else {
+                        return Err(invalid("node is not a field projection"));
+                    };
+                    let index = typed
+                        .resolved_field_index(expr)
+                        .ok_or_else(|| invalid("node is not a checked field projection"))?;
+                    return Ok(CtfeConstValue::int(db, result_ty, index.into()));
+                }
+                "node_array_length" => {
+                    let CodeNodeSite::Expr(expr) = site else {
+                        return Err(invalid("node is not an array construction"));
+                    };
+                    if !matches!(
+                        body.exprs(db).get(expr),
+                        Some(crate::hir_def::Partial::Present(
+                            crate::hir_def::Expr::Array(_) | crate::hir_def::Expr::ArrayRep(_, _)
+                        ))
+                    ) {
+                        return Err(invalid("node is not an array construction"));
+                    }
+                    let ty = typed.expr_ty(db, expr);
+                    let length =
+                        ty.as_view(db).unwrap_or(ty).array_len(db).ok_or_else(|| {
+                            invalid("array length is not a checked concrete value")
+                        })?;
+                    return Ok(CtfeConstValue::int(db, result_ty, length.into()));
+                }
+                "node_record_field_index" => {
+                    let CodeNodeSite::Expr(expr) = site else {
+                        return Err(invalid("node is not a record constructor"));
+                    };
+                    let Some(crate::hir_def::Partial::Present(crate::hir_def::Expr::RecordInit(
+                        _,
+                        fields,
+                    ))) = body.exprs(db).get(expr)
+                    else {
+                        return Err(invalid("node is not a record constructor"));
+                    };
+                    let SemConstValue::Scalar {
+                        value: SemConstScalar::Int { value },
+                        ..
+                    } = args[1].materialize(db).value(db)
+                    else {
+                        return Err(invalid("record child index must be an integer"));
+                    };
+                    let index = value
+                        .to_usize()
+                        .ok_or_else(|| invalid("invalid record child index"))?;
+                    let field = fields
+                        .get(index)
+                        .ok_or_else(|| invalid("record child index is out of bounds"))?;
+                    let label = field
+                        .label_eagerly(db, body)
+                        .ok_or_else(|| invalid("record child has no checked field name"))?;
+                    let index =
+                        crate::analysis::ty::ty_check::RecordLike::Type(typed.expr_ty(db, expr))
+                            .record_field_idx(db, label)
+                            .ok_or_else(|| invalid("record child has no declared field"))?;
+                    return Ok(CtfeConstValue::int(db, result_ty, index.into()));
+                }
+                "node_literal" => {
+                    let CodeNodeSite::Expr(expr) = site else {
+                        return Err(invalid("node is not a scalar literal"));
+                    };
+                    if typed.expr_ty(db, expr) != result_ty {
+                        return Err(invalid("literal query requires its checked type"));
+                    }
+                    let Some(crate::hir_def::Partial::Present(crate::hir_def::Expr::Lit(literal))) =
+                        body.exprs(db).get(expr)
+                    else {
+                        return Err(invalid("node is not a scalar literal"));
+                    };
+                    return Ok(match literal {
+                        crate::hir_def::LitKind::Int(integer) => {
+                            let value = BigInt::from(integer.data(db).clone());
+                            if !int_in_range(db, result_ty, &value) {
+                                return Err(invalid(
+                                    "literal magnitude does not fit its checked type; inspect the enclosing unary form",
+                                ));
+                            }
+                            CtfeConstValue::int(db, result_ty, value)
+                        }
+                        crate::hir_def::LitKind::Bool(value) => CtfeConstValue::bool(*value),
+                        crate::hir_def::LitKind::String(value) => {
+                            CtfeConstValue::bytes(result_ty, value.data(db).as_bytes().to_vec())
+                        }
+                    });
+                }
+                _ => return Err(invalid("unknown code inspection operation")),
+            }
+        };
+        let value = SemConstId::new(
+            db,
+            SemConstValue::Structural {
+                ty: result_ty,
+                handle: output,
+            },
+        );
+        let verified = VerifiedConstValueId::from_complete_execution(db, value).map_err(invalid)?;
+        Ok(CtfeConstValue::concrete(db, verified))
     }
 
     fn eval_structural_intrinsic(

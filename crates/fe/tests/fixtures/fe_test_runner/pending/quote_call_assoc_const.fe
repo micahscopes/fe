@@ -1,0 +1,49 @@
+// Target: F1. A generated impl with an associated const has a method that calls a trait method on a non-Copy `self` and reads the const.
+// Oracle: hand-written twin type `B` gives the same value; by hand 4 * 3 = 12.
+// Position: associated const beside a method in one generated impl.
+trait Read {
+    fn get(self) -> u256
+}
+
+trait Scaled {
+    const K: u256
+    fn scaled(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn scaled(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Scaled for ${record} {
+                const K: u256 = 3
+                fn scaled(self) -> u256 { self.get() * Self::K }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::scaled)]
+struct A { v: u256 }
+
+impl Read for A {
+    fn get(self) -> u256 { self.v }
+}
+
+struct B { v: u256 }
+
+impl Read for B {
+    fn get(self) -> u256 { self.v }
+}
+
+impl Scaled for B {
+    const K: u256 = 3
+    fn scaled(self) -> u256 { self.get() * Self::K }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(B { v: 4 }.scaled() == 12)
+    assert!(A { v: 4 }.scaled() == (B { v: 4 }).scaled())
+    assert!(<A as Scaled>::K == <B as Scaled>::K)
+}

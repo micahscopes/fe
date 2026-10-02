@@ -1,0 +1,7 @@
+// expect-error: code child index 99 is out of bounds
+use core::meta::{Code, Expr, code_root, node_child}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ code: Code<Expr>) -> bool {
+    node_child(code_root(code), 99)
+    true
+}

@@ -1,0 +1,84 @@
+// Execution adapter for read_back_pure.fe. The host replaces each zero fragment
+// with its checked authored body. The tests compare actual copied execution.
+use core::meta::{Code, Expr, Item, Record}
+use core::abi::ByteInput
+use std::evm::CallData
+
+const fn read_back_literal(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_literal() -> u256 { ${body} } }
+}
+const fn read_back_params(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_params(_ lhs: u256, _ rhs: u256) -> u256 { ${body} } }
+}
+const fn read_back_lets(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_lets(_ a: u256) -> u256 { ${body} } }
+}
+const fn read_back_unary_ops(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_unary_ops(_ a: bool, _ n: i32) -> i32 { ${body} } }
+}
+const fn read_back_cast(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_cast(_ a: u8) -> u256 { ${body} } }
+}
+const fn read_back_call(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_call(_ a: u256) -> u256 { ${body} } }
+}
+const fn read_back_method_and_field(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_method_and_field(_ p: ingot::Pt) -> u256 { ${body} } }
+}
+const fn read_back_tuple(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_tuple(_ a: u256) -> u256 { ${body} } }
+}
+const fn read_back_record(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_record(_ a: u256) -> u256 { ${body} } }
+}
+const fn read_back_block_and_if(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_block_and_if(_ a: u256) -> u256 { ${body} } }
+}
+
+#[generate(ingot::read_back_literal)]
+struct LiteralTarget {}
+#[generate(ingot::read_back_params)]
+struct ParamsTarget {}
+#[generate(ingot::read_back_lets)]
+struct LetsTarget {}
+#[generate(ingot::read_back_unary_ops)]
+struct UnaryTarget {}
+#[generate(ingot::read_back_cast)]
+struct CastTarget {}
+#[generate(ingot::read_back_call)]
+struct CallTarget {}
+#[generate(ingot::read_back_method_and_field)]
+struct MethodTarget {}
+#[generate(ingot::read_back_tuple)]
+struct TupleTarget {}
+#[generate(ingot::read_back_record)]
+struct RecordTarget {}
+#[generate(ingot::read_back_block_and_if)]
+struct BlockTarget {}
+
+#[test]
+fn copied_values() {
+    let seed = CallData::new().word_at(0)
+    assert!(copied_literal() == literal())
+    assert!(copied_params(seed + 9, 4) == params(seed + 9, 4))
+    assert!(copied_lets(seed + 3) == lets(seed + 3))
+    assert!(copied_unary_ops(false, 7) == unary_ops(false, 7))
+    assert!(copied_unary_ops(true, 7) == unary_ops(true, 7))
+    assert!(copied_cast(255) == cast(255))
+    assert!(copied_call(seed + 2) == call(seed + 2))
+    assert!(copied_method_and_field(Pt { x: seed + 2, y: 5 }) == seed + 7)
+    assert!(copied_tuple(seed + 4) == tuple(seed + 4))
+    assert!(copied_record(seed + 6) == record(seed + 6))
+    assert!(copied_block_and_if(5) == block_and_if(5))
+    assert!(copied_block_and_if(1) == block_and_if(1))
+}

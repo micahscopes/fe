@@ -1,0 +1,26 @@
+// Target: Q5 round trip (QUOTATION_DESIGN section 7, amendments 2 and 5). Read-back keeps binders as binders and rooted paths on the item the body resolved.
+// Oracle: the authored values below; the harness re-emits `shadowing` and `rooted` into module `dest`, where a constant `x`
+//   and a function `helper` of the same spellings exist, and requires the same results (5 and 31), not 9 and 129.
+//   (In ordinary Fe, `let x = a` with a constant `x` in scope reads the constant, so a binder re-resolved in `dest` would give 9.)
+mod lib {
+    pub fn helper(_ a: u256) -> u256 { a + 1 }
+}
+
+pub fn shadowing(_ a: u256) -> u256 {
+    let x = a
+    x
+}
+
+pub fn rooted(_ a: u256) -> u256 { lib::helper(a) }
+
+mod dest {
+    pub const x: u256 = 9
+    pub fn helper(_ a: u256) -> u256 { a + 99 }
+}
+
+#[test]
+fn authored_values() {
+    assert!(shadowing(5) == 5)
+    assert!(rooted(30) == 31)
+    assert!(dest::helper(30) == 129)
+}

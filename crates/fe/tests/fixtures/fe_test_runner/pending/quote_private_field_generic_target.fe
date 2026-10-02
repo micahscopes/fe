@@ -1,0 +1,37 @@
+// Target: F3 / RD83 (2). A generated impl for a generic target reads a private provider field in its body.
+// Oracle: the hand-written twin `author::twin` returns the same value (7 + field); called directly and through a bound.
+// Positions: generic impl; trait impl through a generic bound.
+trait Read {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub struct Counter { value: u256 }
+
+    fn make() -> Counter { Counter { value: 7 } }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let n = field(record, 0)
+        quote {
+            impl ingot::Read for ${record} {
+                fn get(self) -> u256 { make().value + self.${n} }
+            }
+        }
+    }
+
+    pub fn twin(_ n: u256) -> u256 { make().value + n }
+}
+
+#[generate(ingot::author::emit)]
+struct Holder<T: Copy> { n: u256, t: T }
+
+fn via<T: Read>(_ t: T) -> u256 { t.get() }
+
+#[test]
+fn generated_matches_twin() {
+    assert!(author::twin(3) == 10)
+    assert!(Holder<bool> { n: 3, t: true }.get() == author::twin(3))
+    assert!(via(Holder<u256> { n: 5, t: 0 }) == author::twin(5))
+}

@@ -1,0 +1,36 @@
+// Target: RD84 (3), M2-d1. `with (StableEq) { .. }` derives `Eq` for `Point`, which declares nothing, for that block.
+// Oracle: hand-computed values (field-by-field equality).
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+#[test]
+fn derives_for_the_block() {
+    let yes = with (StableEq) { same(pt(1, 2), pt(1, 2)) }
+    let no = with (StableEq) { same(pt(1, 2), pt(1, 3)) }
+    assert!(yes && !no)
+}

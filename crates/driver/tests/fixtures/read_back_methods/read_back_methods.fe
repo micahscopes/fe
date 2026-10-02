@@ -1,0 +1,42 @@
+mod source {
+    pub trait Read { fn get(self) -> u256 }
+    pub struct Meter { pub n: u256 }
+
+    impl Meter {
+        pub fn raw(self) -> u256 { self.n + 1 }
+    }
+
+    impl Read for Meter {
+        fn get(self) -> u256 { self.n * 2 }
+    }
+
+    pub fn through_inherent(_ a: u8) -> u256 {
+        let meter = Meter { n: a as u256 }
+        meter.raw()
+    }
+
+    pub fn through_trait(_ a: u8) -> u256 {
+        let meter = Meter { n: a as u256 }
+        meter.get()
+    }
+}
+
+mod dest {
+    pub trait Read { fn get(self) -> u256 }
+
+    impl Read for ingot::source::Meter {
+        fn get(self) -> u256 { 99 }
+    }
+
+    pub fn ordinary(_ a: u8) -> u256 {
+        let meter = ingot::source::Meter { n: a as u256 }
+        meter.get()
+    }
+}
+
+#[test]
+fn authored_values() {
+    assert!(source::through_inherent(6) == 7)
+    assert!(source::through_trait(6) == 12)
+    assert!(dest::ordinary(6) == 99)
+}

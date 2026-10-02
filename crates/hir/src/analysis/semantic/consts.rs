@@ -30,6 +30,10 @@ pub enum StructuralHandle<'db> {
     /// Checked trait evidence shares opaque CTFE transport, not reflection authority.
     Evidence(crate::analysis::semantic::SelectedApplication<'db>),
     Code(QuotedCode<'db>),
+    CodeNode {
+        code: QuotedCode<'db>,
+        site: CodeNodeSite,
+    },
     Record(crate::hir_def::Struct<'db>),
     Field {
         owner: crate::hir_def::Struct<'db>,
@@ -41,23 +45,33 @@ pub enum StructuralHandle<'db> {
     },
 }
 
-/// A code value: a quote's template together with the values its splices had
-/// when the quote was built. Composition is lazy: a spliced code value is kept
-/// as a hole value, never expanded here. It exists only at compile time.
+/// A code value: a quote template and its splice values, or an issued checked
+/// body. Composition is lazy: a spliced code value is kept as a hole value,
+/// never expanded here. It exists only at compile time.
 #[salsa::interned]
 #[derive(Debug)]
 pub struct QuotedCode<'db> {
-    /// The quote, or `None` for the empty fragment `empty<K>()`.
+    /// The template's origin, or `None` for the empty fragment `empty<K>()`.
     pub site: Option<QuoteSite<'db>>,
     #[return_ref]
     pub holes: Vec<SemConstId<'db>>,
 }
 
-/// A quote expression in its owner body; the quote names its template.
+/// A quote expression or checked root in its original owner body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
 pub struct QuoteSite<'db> {
     pub owner: crate::hir_def::Body<'db>,
     pub expr: crate::hir_def::ExprId,
+    pub source: crate::core::meta::FrozenTemplateSource,
+}
+
+/// An address in a code value's existing HIR arenas, not another syntax tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum CodeNodeSite {
+    Expr(crate::hir_def::ExprId),
+    Stmt(crate::hir_def::StmtId),
+    Cond(crate::hir_def::CondId),
+    Pat(crate::hir_def::PatId),
 }
 
 #[salsa::interned]

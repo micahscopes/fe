@@ -1,0 +1,39 @@
+// Probe: shapes as kind-* descriptors whose container type is a GAT (defunctionalized functors).
+// RPow and LPow (GPF p. 7) both become ordinary computed types.
+pub struct PairV<T> { pub l: T, pub r: T }
+pub struct Par {}
+pub struct Two {}
+pub struct Comp<G, F> {}
+
+pub trait Shape { type Of<T> }
+impl Shape for Par { type Of<T> = T }
+impl Shape for Two { type Of<T> = PairV<T> }
+impl<G: Shape, F: Shape> Shape for Comp<G, F> { type Of<T> = <G as Shape>::Of<<F as Shape>::Of<T>> }
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<F, RPow<F, {N - 1}>>
+    }
+}
+recursive type fn LPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<LPow<F, {N - 1}>, F>
+    }
+}
+
+pub trait Total { fn total(self) -> u256 }
+impl Total for u256 { fn total(self) -> u256 { self } }
+impl<A: Total> Total for PairV<A> { fn total(self) -> u256 { self.l.total() + self.r.total() } }
+
+fn sum_any<S: Shape, const N: usize>(_ x: own <S as Shape>::Of<u256>) -> u256 where <S as Shape>::Of<u256>: Total { x.total() }
+
+#[test]
+fn gat_shapes_apply() {
+    let a: <RPow<Two, 3> as Shape>::Of<u256> = PairV { l: PairV { l: PairV { l: 1, r: 2 }, r: PairV { l: 3, r: 4 } }, r: PairV { l: PairV { l: 5, r: 6 }, r: PairV { l: 7, r: 8 } } }
+    let b: <LPow<Two, 2> as Shape>::Of<u256> = PairV { l: PairV { l: 1, r: 2 }, r: PairV { l: 3, r: 4 } }
+    assert!(a.total() == 36)
+    assert!(b.total() == 10)
+    assert!(sum_any<RPow<Two, 2>, 0>(b) == 10)
+}

@@ -1,0 +1,64 @@
+// Target: RD84 (1), M2-a. Declared derivations in and for other modules: at the type's home, from the root by path, and used from a third module.
+// Oracle: values from the other-module cases of mb2 `fe_test/derived_decl.fe` (VERIFIED; the audit keeps these cases).
+// Position: another module.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+mod inner {
+    pub struct Boxed { pub v: u256 }
+
+    impl Eq for Boxed with (ingot::StableEq)
+
+    pub struct Sealed { pub v: u256, pub w: u256 }
+}
+
+impl Eq for inner::Sealed with (StableEq)
+
+mod user {
+    use ingot::inner::{Boxed, Sealed}
+
+    pub fn boxed_equal(_ a: u256, _ b: u256) -> bool {
+        let x = Boxed { v: a }
+        let y = Boxed { v: b }
+        x == y
+    }
+
+    pub fn sealed_differ(_ w: u256) -> bool { Sealed { v: 1, w: 2 }.ne(Sealed { v: 1, w }) }
+}
+
+#[test]
+fn derived_at_home() {
+    assert!(inner::Boxed { v: 42 }.eq(inner::Boxed { v: 42 }))
+    assert!(!inner::Boxed { v: 42 }.eq(inner::Boxed { v: 43 }))
+}
+
+#[test]
+fn derived_by_path_from_root() {
+    assert!(inner::Sealed { v: 1, w: 2 }.eq(inner::Sealed { v: 1, w: 2 }))
+    assert!(inner::Sealed { v: 1, w: 2 }.ne(inner::Sealed { v: 1, w: 3 }))
+}
+
+#[test]
+fn used_from_a_third_module() {
+    assert!(user::boxed_equal(5, 5) && !user::boxed_equal(5, 6))
+    assert!(user::sealed_differ(3) && !user::sealed_differ(2))
+}

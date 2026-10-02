@@ -1,0 +1,17 @@
+// Target: O2 (MB3_QUOTE_HUNT_2026-09-28). A division by zero while a provider runs is a source diagnostic, not Rust debug output.
+// expect: rejected at line 9 (`5 / z`), with `#[generate]` as secondary label; the output contains no `Ctfe(`,
+//   `InvalidOperation` or `ExprId` text.
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let z: u256 = 0
+        let _ = 5 / z // <- here
+        quote {
+            pub fn answer() -> u256 { 1 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { a: u256 }

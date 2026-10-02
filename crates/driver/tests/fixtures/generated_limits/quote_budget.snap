@@ -1,0 +1,7 @@
+error[18-0001]: invalid generated declaration: generated description units limit exceeded: 213024 > 65536
+   ┌─ quote_budget.fe:15:1
+   │
+15 │ #[generate(many)]
+   │ ^^^^^^^^^^^^^^^^^ invalid generated declaration: generated description units limit exceeded: 213024 > 65536
+
+

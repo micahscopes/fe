@@ -1,0 +1,30 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_private_type_in_signature.fe
+---
+=== STDERR ===
+error[2-0003]: `Secret` is not visible
+   ┌─ quote_private_type_in_signature.fe:12:9
+   │
+ 7 │       struct Secret { v: u256 }
+   │              ------ `Secret` is defined here
+   ·
+12 │ ╭         quote {
+13 │ │             pub fn leak() -> Secret { make() } // <- here
+14 │ │         }
+   │ ╰─────────^ `Secret` is not visible
+   · │
+18 │   #[generate(ingot::author::emit)]
+   │   -------------------------------- generated here
+   │
+   = generated item:
+     pub fn leak() -> ingot::author::Secret {
+         {
+             ingot::author::make()
+         }
+     }
+
+
+
+=== EXIT CODE: 1 ===

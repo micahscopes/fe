@@ -1,0 +1,13 @@
+use core::meta::{Code, Expr, Item, Record}
+
+pub fn ordered(_ first: u256, _ second: u256) -> u256 {
+    first * 10 + second
+}
+
+const fn emit(_ record: Record) -> Code<Item> {
+    let value: Code<Expr> = quote { 0 }
+    quote { pub fn copied(_ first: u256) -> u256 { ${value} } }
+}
+
+#[generate(ingot::emit)]
+struct GeneratedTarget {}

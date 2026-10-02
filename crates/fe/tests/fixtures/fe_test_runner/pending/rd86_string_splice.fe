@@ -1,0 +1,26 @@
+// Target: RD86 prerequisite (QUOTATION_DESIGN amendments: "Restore mb2's string splices"). A provider string spliced into a quote becomes a string literal of the same type and value.
+// Oracle: hand-written twin constants with the same literals.
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let name = "Transfer"
+        let empty = ""
+        quote {
+            pub const NAME: String<8> = ${name}
+            pub const EMPTY: String<0> = ${empty}
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+const NAME_TWIN: String<8> = "Transfer"
+
+#[test]
+fn string_splices_keep_value() {
+    assert!(NAME == NAME_TWIN)
+    assert!(NAME == "Transfer")
+    assert!(EMPTY == "")
+}

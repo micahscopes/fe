@@ -1,0 +1,26 @@
+// Target: RD84 (3) ("never for `#[fixed]` traits"), design section 8. On-the-fly derivation of a `#[fixed]` trait is rejected.
+// expect: rejected at line 25 (the block), because `Tag` is `#[fixed]`: derive it once by declaration; secondary label on
+//   the attribute.
+use core::derive::Derive
+use core::meta::{Code, Item, Record}
+
+#[fixed]
+pub trait Tag {
+    const T: u256
+}
+
+pub struct TagIt {}
+
+impl Derive<Tag> for TagIt {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { impl Tag for ${record} { const T: u256 = 7 } }
+    }
+}
+
+pub struct Point { pub x: u256 }
+
+fn tag_of<T: Tag>() -> u256 { T::T }
+
+fn check() -> u256 {
+    with (TagIt) { tag_of<Point>() } // <- here
+}

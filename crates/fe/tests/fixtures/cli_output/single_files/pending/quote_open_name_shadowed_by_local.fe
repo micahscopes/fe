@@ -1,0 +1,36 @@
+// Target: O1 (hunt suggestion, not a ratified decision). An open name that a local shadows at the splice site is rejected, not silently bound to the parameter.
+// expect: rejected at line 19 (the splice), because the open name `other` would bind the parameter while the local
+//   `let other = self` shadows it at the splice site; the hand-written twin `H` reads the local and returns 1, the
+//   generated code today reads the parameter and returns 2. If Codex prefers "bind the local", this becomes a positive.
+trait Pick {
+    fn pick(self, _ other: Self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        let body: Code<Expr> = quote(other) { other.${f} }
+        quote {
+            impl ingot::Pick for ${record} {
+                fn pick(self, _ other: Self) -> u256 {
+                    let other = self
+                    ${body} // <- here
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct G { v: u256 }
+
+struct H { v: u256 }
+
+impl Pick for H {
+    fn pick(self, _ other: Self) -> u256 {
+        let other = self
+        other.v
+    }
+}

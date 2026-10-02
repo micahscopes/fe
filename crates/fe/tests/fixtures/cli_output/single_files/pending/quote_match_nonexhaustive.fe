@@ -1,0 +1,31 @@
+// Target: Q6, translation of mb2 `quote_match_nonexhaustive.fe`. A generated match that misses a variant is the ordinary exhaustiveness error in generated code.
+// expect: rejected with the ordinary non-exhaustive-match error naming `Mode::Off`; primary label at the generated item
+//   (`#[generate]`), secondary label at the match quote on line 21. mb2's provider-side check is not rebuilt (RD0).
+// Placeholders: reflection names and `Arm`, as in fe_test_runner/pending/quote_enum_eq.fe.
+trait Tagged {
+    fn tag(self) -> bool
+}
+
+mod author {
+    use core::meta::{Arm, Code, Item, Record, binders, empty, variant}
+
+    pub const fn first_only(record: Record) -> Code<Item> {
+        let first = binders(variant(record, 0), 0)
+        let mut arms = empty<Arm>()
+        arms = quote {
+            ${arms}
+            ${first} => true
+        }
+        quote {
+            impl ingot::Tagged for ${record} {
+                fn tag(self) -> bool { match self { ${arms} } } // <- here
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::first_only)]
+enum Mode {
+    On,
+    Off,
+}

@@ -1,0 +1,50 @@
+// Target: RD84 (2), rewrite (positive half) of mb2 `fe_test_unresolved_selection/constraint_violating_default_unscoped.fe` (DECIDED). Each named impl for `Wrap<NoEq>` is reached by selecting it.
+// Oracle: mb2's asserted value (`!a.eq(b)`, from the override that is now named `Override`), plus `Fast` returning true.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct NoEq { pub v: u256 }
+
+pub struct Wrap<T> { pub inner: T }
+
+// Was `#[derive(Eq)]`: a generic derivation whose bound `T: Eq` fails for `T = NoEq`.
+impl Eq for Wrap with (StableEq)
+
+impl Eq for Wrap<NoEq> as Override {
+    fn eq(self, _ other: Wrap<NoEq>) -> bool { return false }
+}
+
+impl Eq for Wrap<NoEq> as Fast {
+    fn eq(self, _ other: Wrap<NoEq>) -> bool { return true }
+}
+
+#[test]
+fn named_impls_by_selection() {
+    let a = Wrap { inner: NoEq { v: 1 } }
+    let b = Wrap { inner: NoEq { v: 1 } }
+    let over = with (Override) { a.eq(b) }
+    assert!(!over)
+    let c = Wrap { inner: NoEq { v: 1 } }
+    let d = Wrap { inner: NoEq { v: 1 } }
+    let fast = with (Fast) { c.eq(d) }
+    assert!(fast)
+}

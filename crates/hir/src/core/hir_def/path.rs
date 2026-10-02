@@ -253,7 +253,9 @@ impl<'db> PathId<'db> {
             } => {
                 format!(
                     "{}{}",
-                    ident.to_opt().map_or("_", |id| id.data(db)),
+                    ident
+                        .to_opt()
+                        .map_or_else(|| "_".to_owned(), |id| id.display_name(db)),
                     generic_args.pretty_print(db)
                 )
             }

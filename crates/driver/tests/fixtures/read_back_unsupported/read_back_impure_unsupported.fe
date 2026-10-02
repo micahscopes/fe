@@ -1,0 +1,19 @@
+// Target: Q5 with RD82 (2) ("reflects checked pure bodies"). Read-back of a function with an effect reports a named, typed unsupported result.
+// expect (harness): `read_back(bump)` returns an unsupported error naming the `uses` clause at line 7, and
+//   `read_back(pure_twin)` succeeds. Tension: QUOTATION_DESIGN's amendment drops section 7's purity subset, RD82 says pure
+//   bodies; this fixture follows RD82 (the later, ratified entry). If Codex keeps "no subset", this becomes a positive.
+pub struct Counter { pub n: u256 }
+
+pub fn bump(_ a: u256) uses (c: mut Counter) { // <- here
+    c.n = c.n + a
+}
+
+pub fn pure_twin(_ a: u256) -> u256 { a + 1 }
+
+#[test]
+fn authored_values() {
+    let mut c = Counter { n: 1 }
+    with (c) { bump(2) }
+    assert!(c.n == 3)
+    assert!(pure_twin(2) == 3)
+}

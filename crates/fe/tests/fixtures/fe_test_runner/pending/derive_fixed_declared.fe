@@ -1,0 +1,36 @@
+// Target: RD84 with DERIVE_USE_SITE_DESIGN section 5(c). A `#[fixed]` trait may be derived by declaration, counted like a written impl.
+// Oracle: hand-computed values (the deriver writes 7; the hand-written twin writes 7). Authority for `#[fixed]` (RD75) comes later.
+use core::derive::Derive
+use core::meta::{Code, Item, Record}
+
+#[fixed]
+pub trait Tag {
+    const T: u256
+}
+
+pub struct TagIt {}
+
+impl Derive<Tag> for TagIt {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n: u256 = 7
+        quote { impl Tag for ${record} { const T: u256 = ${n} } }
+    }
+}
+
+pub struct Point { pub x: u256 }
+
+impl Tag for Point with (TagIt)
+
+pub struct PointH { pub x: u256 }
+
+impl Tag for PointH {
+    const T: u256 = 7
+}
+
+fn tag_of<T: Tag>() -> u256 { T::T }
+
+#[test]
+fn fixed_trait_declared() {
+    assert!(tag_of<Point>() == 7)
+    assert!(tag_of<Point>() == tag_of<PointH>())
+}

@@ -699,7 +699,7 @@ fn pretty_print_const_arg<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Str
             let ConstTyData::TyParam(param, _) = const_ty.data(db) else {
                 unreachable!()
             };
-            param.name.data(db).to_string()
+            param.name.display_name(db)
         }
         _ => ty.pretty_print(db).to_string(),
     }

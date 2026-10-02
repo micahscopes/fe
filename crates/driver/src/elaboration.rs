@@ -8,6 +8,7 @@
 
 pub mod construction;
 mod project;
+pub mod read_back;
 pub use project::{ElaborationError, prepare, prepare_target};
 
 use common::file::File;

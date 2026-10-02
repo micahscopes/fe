@@ -1,0 +1,81 @@
+// Target: RD84 (1) with RD71 and RD55. A named derivation selected by `with` reaches a generic helper through its bound; nested selections: innermost wins, and the outer one is restored.
+// Oracle: hand-computed values; loop sums 0 (StableEq, points differ) and 16 (AlwaysEq), as in mb2 `cascade_mir_determinism.fe`.
+// Positions: trait impl through a generic bound; nested `with`.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+// AlwaysEq: everything is equal.
+pub struct AlwaysEq {}
+
+impl Derive<Eq> for AlwaysEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { impl Eq for ${record} { fn eq(self, _ other: Self) -> bool { true } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point with (StableEq)
+
+impl Eq for Point as Always with (AlwaysEq)
+
+impl Eq for Point as Strict with (StableEq)
+
+fn eq_count<T: Eq>(_ x: T, _ y: T) -> u256 {
+    if x == y {
+        return 1
+    }
+    return 0
+}
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+#[test]
+fn selection_reaches_helper() {
+    let mut plain: u256 = 0
+    let mut i: u256 = 0
+    while i < 16 {
+        plain = plain + eq_count(pt(1, 2), pt(3, 4))
+        i = i + 1
+    }
+    assert!(plain == 0)
+    let loose: u256 = with (Always) {
+        let mut sum: u256 = 0
+        let mut j: u256 = 0
+        while j < 16 {
+            sum = sum + eq_count(pt(1, 2), pt(3, 4))
+            j = j + 1
+        }
+        sum
+    }
+    assert!(loose == 16)
+}
+
+#[test]
+fn innermost_wins_and_restores() {
+    let r = with (Always) {
+        let inner = with (Strict) { eq_count(pt(1, 2), pt(3, 4)) }
+        let outer = eq_count(pt(1, 2), pt(3, 4))
+        inner * 10 + outer
+    }
+    assert!(r == 1)
+}

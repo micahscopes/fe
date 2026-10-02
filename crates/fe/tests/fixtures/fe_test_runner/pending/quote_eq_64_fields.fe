@@ -1,0 +1,49 @@
+// Target: F2. A generated field-by-field equality over a 64-field struct is accepted and agrees with its hand-written twin.
+// Oracle: hand-written twin `WideH` (same fold, written out); equal inputs give true, a differing last field gives false.
+trait MyEq {
+    fn eqq(self, _ other: Self) -> bool
+}
+
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field, field_count}
+
+    pub const fn eq(record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            i += 1
+        }
+        quote {
+            impl ingot::MyEq for ${record} {
+                fn eqq(self, _ other: Self) -> bool { ${body} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::eq)]
+struct Wide { f0: u8, f1: u8, f2: u8, f3: u8, f4: u8, f5: u8, f6: u8, f7: u8, f8: u8, f9: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8, f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8, f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8, f29: u8, f30: u8, f31: u8, f32: u8, f33: u8, f34: u8, f35: u8, f36: u8, f37: u8, f38: u8, f39: u8, f40: u8, f41: u8, f42: u8, f43: u8, f44: u8, f45: u8, f46: u8, f47: u8, f48: u8, f49: u8, f50: u8, f51: u8, f52: u8, f53: u8, f54: u8, f55: u8, f56: u8, f57: u8, f58: u8, f59: u8, f60: u8, f61: u8, f62: u8, f63: u8 }
+
+struct WideH { f0: u8, f1: u8, f2: u8, f3: u8, f4: u8, f5: u8, f6: u8, f7: u8, f8: u8, f9: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8, f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8, f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8, f29: u8, f30: u8, f31: u8, f32: u8, f33: u8, f34: u8, f35: u8, f36: u8, f37: u8, f38: u8, f39: u8, f40: u8, f41: u8, f42: u8, f43: u8, f44: u8, f45: u8, f46: u8, f47: u8, f48: u8, f49: u8, f50: u8, f51: u8, f52: u8, f53: u8, f54: u8, f55: u8, f56: u8, f57: u8, f58: u8, f59: u8, f60: u8, f61: u8, f62: u8, f63: u8 }
+
+impl MyEq for WideH {
+    fn eqq(self, _ other: Self) -> bool { true && self.f0 == other.f0 && self.f1 == other.f1 && self.f2 == other.f2 && self.f3 == other.f3 && self.f4 == other.f4 && self.f5 == other.f5 && self.f6 == other.f6 && self.f7 == other.f7 && self.f8 == other.f8 && self.f9 == other.f9 && self.f10 == other.f10 && self.f11 == other.f11 && self.f12 == other.f12 && self.f13 == other.f13 && self.f14 == other.f14 && self.f15 == other.f15 && self.f16 == other.f16 && self.f17 == other.f17 && self.f18 == other.f18 && self.f19 == other.f19 && self.f20 == other.f20 && self.f21 == other.f21 && self.f22 == other.f22 && self.f23 == other.f23 && self.f24 == other.f24 && self.f25 == other.f25 && self.f26 == other.f26 && self.f27 == other.f27 && self.f28 == other.f28 && self.f29 == other.f29 && self.f30 == other.f30 && self.f31 == other.f31 && self.f32 == other.f32 && self.f33 == other.f33 && self.f34 == other.f34 && self.f35 == other.f35 && self.f36 == other.f36 && self.f37 == other.f37 && self.f38 == other.f38 && self.f39 == other.f39 && self.f40 == other.f40 && self.f41 == other.f41 && self.f42 == other.f42 && self.f43 == other.f43 && self.f44 == other.f44 && self.f45 == other.f45 && self.f46 == other.f46 && self.f47 == other.f47 && self.f48 == other.f48 && self.f49 == other.f49 && self.f50 == other.f50 && self.f51 == other.f51 && self.f52 == other.f52 && self.f53 == other.f53 && self.f54 == other.f54 && self.f55 == other.f55 && self.f56 == other.f56 && self.f57 == other.f57 && self.f58 == other.f58 && self.f59 == other.f59 && self.f60 == other.f60 && self.f61 == other.f61 && self.f62 == other.f62 && self.f63 == other.f63 }
+}
+
+fn wide(_ last: u8) -> Wide {
+    Wide { f0: 0, f1: 1, f2: 2, f3: 3, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10, f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20, f21: 21, f22: 22, f23: 23, f24: 24, f25: 25, f26: 26, f27: 27, f28: 28, f29: 29, f30: 30, f31: 31, f32: 32, f33: 33, f34: 34, f35: 35, f36: 36, f37: 37, f38: 38, f39: 39, f40: 40, f41: 41, f42: 42, f43: 43, f44: 44, f45: 45, f46: 46, f47: 47, f48: 48, f49: 49, f50: 50, f51: 51, f52: 52, f53: 53, f54: 54, f55: 55, f56: 56, f57: 57, f58: 58, f59: 59, f60: 60, f61: 61, f62: 62, f63: last }
+}
+
+fn wide_h(_ last: u8) -> WideH {
+    WideH { f0: 0, f1: 1, f2: 2, f3: 3, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10, f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20, f21: 21, f22: 22, f23: 23, f24: 24, f25: 25, f26: 26, f27: 27, f28: 28, f29: 29, f30: 30, f31: 31, f32: 32, f33: 33, f34: 34, f35: 35, f36: 36, f37: 37, f38: 38, f39: 39, f40: 40, f41: 41, f42: 42, f43: 43, f44: 44, f45: 45, f46: 46, f47: 47, f48: 48, f49: 49, f50: 50, f51: 51, f52: 52, f53: 53, f54: 54, f55: 55, f56: 56, f57: 57, f58: 58, f59: 59, f60: 60, f61: 61, f62: 62, f63: last }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(wide_h(63).eqq(wide_h(63)))
+    assert!(!wide_h(63).eqq(wide_h(0)))
+    assert!(wide(63).eqq(wide(63)) == wide_h(63).eqq(wide_h(63)))
+    assert!(wide(63).eqq(wide(0)) == wide_h(63).eqq(wide_h(0)))
+}

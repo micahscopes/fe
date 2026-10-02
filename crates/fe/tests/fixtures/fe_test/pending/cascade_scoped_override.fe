@@ -1,0 +1,43 @@
+// Target: RD84 (2), rewrite of mb2 `fe_test/cascade_scoped_override.fe` (DECIDED). A direct call uses the derivation outside `with (Override)` and the named override inside it.
+// Oracle: mb2's asserted values, unchanged (`selection-16.rd84.fe` twin passes on mb3). `with (<Speaker as Eq>)` becomes `with (Override)`.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Speaker { pub id: u256 }
+
+// Was `#[derive(Eq)]`, the default-marked derived impl; now an ordinary declared derivation (RD84 (1)).
+impl Eq for Speaker with (StableEq)
+
+// Was an unnamed hand-written override coexisting with the derived default; now it takes a name (RD84 (2)).
+impl Eq for Speaker as Override {
+    fn eq(self, _ other: Speaker) -> bool { true }
+}
+
+#[test]
+fn scoped_override_observable_for_direct_call() {
+    let a = Speaker { id: 7 }
+    let b = Speaker { id: 8 }
+    assert!(!a.eq(b))
+    let inside: bool = with (Override) { a.eq(b) }
+    assert!(inside)
+    assert!(!a.eq(b))
+}

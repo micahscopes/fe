@@ -1,0 +1,38 @@
+// Target: RD84 (1), design section 8 row "derivation fails its bounds". A declared derivation whose derived where clause is unmet fails at the demand.
+// expect: rejected at line 38 (the demand), because `Eq` for `Segment` (derived by `StableEq`) requires `Point: Eq`,
+//   which nothing provides; secondary label at the where-clause quote in `StableEq`.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+pub struct Segment { pub a: Point, pub b: Point }
+
+impl Eq for Segment with (StableEq)
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+fn seg(_ x: u256) -> Segment { Segment { a: pt(x, 1), b: pt(2, 3) } }
+
+fn check() -> bool { same(seg(1), seg(1)) } // <- here

@@ -1,4 +1,5 @@
 mod canonicalize;
+mod code_view;
 mod machine;
 mod outcome;
 mod primitive;

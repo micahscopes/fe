@@ -1,0 +1,30 @@
+// Target: Q6, translation of mb2 `quote_pat_hole_wrong_kind.fe`. A `Field` handle in pattern position is a static kind error.
+// expect: rejected at line 17 (the `${f}` pattern hole), because a pattern hole takes a binder handle from
+//   `binders(v, n)`, not a `Field`; reported by the provider's type check.
+// Placeholders: reflection names and `Arm`, as in fe_test_runner/pending/quote_enum_eq.fe.
+trait Tagged {
+    fn tag(self) -> bool
+}
+
+mod author {
+    use core::meta::{Arm, Code, Item, Record, empty, variant, variant_field}
+
+    pub const fn tag(record: Record) -> Code<Item> {
+        let f = variant_field(variant(record, 0), 0)
+        let mut arms = empty<Arm>()
+        arms = quote {
+            ${arms}
+            ${f} => true // <- here
+        }
+        quote {
+            impl ingot::Tagged for ${record} {
+                fn tag(self) -> bool { match self { ${arms} } }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::tag)]
+enum Coin {
+    Heads(u256),
+}

@@ -1,0 +1,33 @@
+use core::abi::AbiSize
+use core::meta::{Code, Item, Record, field, field_type}
+
+const fn size(record: Record) -> Code<Item> {
+    let first = field_type(field(record, 0))
+    let second = field_type(field(record, 1))
+    quote {
+        impl core::abi::AbiSize for ${record} {
+            const HEAD_SIZE: u256 = core::abi::abi_field_head_size<${first}>() + core::abi::abi_field_head_size<${second}>()
+            const IS_DYNAMIC: bool = false
+        }
+    }
+}
+
+struct Pair {}
+impl Tagged<u256> for Pair {}
+impl Tagged<Pair> for Pair {}
+pub trait Tagged<X> {}
+impl Tagged<u256> for u256 {}
+impl AbiSize for Pair {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+
+#[generate(size)]
+struct Wrapped<T> where T: AbiSize + Tagged<u256> + Tagged<T> { value: T, tag: u256 }
+
+const fn answer() -> u256 {
+    <Wrapped<Pair> as AbiSize>::HEAD_SIZE + <Wrapped<u256> as AbiSize>::HEAD_SIZE
+}
+
+#[test]
+fn generic_head_size_uses_selected_field_types() { assert!(answer() == 160) }

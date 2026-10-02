@@ -1,0 +1,25 @@
+use core::meta::{Code, Expr, Item, Record, CodeNode, CodeNodeKind,
+    code_root, node_kind}
+
+fn helper(_ a: u256) -> u256 { a + 1 }
+pub fn subject(_ a: u256) -> u256 { a * 3 + helper(a) }
+
+pub const fn forward(_ code: Code<Expr>) -> Code<Expr> {
+    assert!(match node_kind(code_root(code)) { CodeNodeKind::Block => true, _ => false })
+    code
+}
+
+pub const fn publish(_ code: Code<Expr>) -> Code<Item> {
+    let body = forward(code)
+    quote { pub fn copied(_ a: u256) -> u256 { ${body} } }
+}
+
+const fn placeholder(_ record: Record) -> Code<Item> {
+    quote { pub fn copied(_ a: u256) -> u256 { 0 } }
+}
+
+#[generate(placeholder)]
+struct Output {}
+
+pub const fn cursor(_ code: Code<Expr>) -> CodeNode { code_root(code) }
+pub const fn inspect_cursor(_ node: CodeNode) -> CodeNodeKind { node_kind(node) }

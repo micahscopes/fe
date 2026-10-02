@@ -22,6 +22,7 @@ pub enum MetaItem {
     Field,
     FieldType,
     Code,
+    CodeNode,
     /// The kinds of `Code<K>`.
     Expr,
     Item,
@@ -30,11 +31,12 @@ pub enum MetaItem {
 }
 
 impl MetaItem {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Record,
         Self::Field,
         Self::FieldType,
         Self::Code,
+        Self::CodeNode,
         Self::Expr,
         Self::Item,
         Self::Where,
@@ -47,6 +49,7 @@ impl MetaItem {
             Self::Field => "core::meta::Field",
             Self::FieldType => "core::meta::FieldType",
             Self::Code => "core::meta::Code",
+            Self::CodeNode => "core::meta::CodeNode",
             Self::Expr => "core::meta::Expr",
             Self::Item => "core::meta::Item",
             Self::Where => "core::meta::Where",
@@ -107,12 +110,20 @@ impl FrozenItemLocator {
     }
 }
 
-/// Locate a quote in authored HIR after the output database is forked. The
-/// expression index is local to the named body's arena, not to the file.
+/// The source of a frozen template. A checked body uses its function body root
+/// while a quote uses the authored quote expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum FrozenTemplateSource {
+    Quote,
+    CheckedBody,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenTemplateKey {
     pub owner: FrozenItemLocator,
+    /// The expression index is local to the owner's body arena.
     pub expr: ExprId,
+    pub source: FrozenTemplateSource,
     /// Authored quote position, retained across the output database fork.
     pub span: Option<std::ops::Range<usize>>,
 }
@@ -131,6 +142,8 @@ pub struct FrozenCodeNode {
     pub holes: Vec<FrozenCodeHole>,
     /// Authored expression paths that were resolved before generation.
     pub rooted_funcs: Vec<FrozenQuoteFunction>,
+    /// Method declarations selected while checking a read-back body.
+    pub selected_methods: Vec<(ExprId, FrozenItemLocator)>,
     /// Authored trait paths, keyed by the type-site order in the quote.
     pub rooted_traits: Vec<FrozenQuoteTrait>,
     /// Qualified constant uses with a checked provider-side trait selection.
@@ -139,8 +152,12 @@ pub struct FrozenCodeNode {
     pub impl_trait_type_arguments: Option<Vec<FrozenQuoteSignatureType>>,
     /// Pattern binders and their checked uses in the quoted template.
     pub locals: Vec<FrozenQuoteLocal>,
+    /// Checked primitive targets of casts in a read-back body.
+    pub cast_primitives: Vec<(ExprId, PrimTy)>,
     /// Provider-checked types of local annotations in quoted bodies.
     pub local_types: Vec<FrozenQuoteLocalType>,
+    /// Checked nominal constructor types in a read-back body.
+    pub record_types: Vec<(ExprId, FrozenQuoteSignatureType)>,
     /// Uses of parameters declared by a quoted function.
     pub param_uses: Vec<FrozenQuoteParamUse>,
     pub effect_uses: Vec<FrozenQuoteEffectUse>,
@@ -160,6 +177,34 @@ pub struct FrozenCodeNode {
     pub assoc_const_primitives: Vec<Option<PrimTy>>,
     /// Checked associated-type values in the sole quoted impl.
     pub assoc_type_values: Vec<Option<FrozenQuoteSignatureType>>,
+}
+
+impl FrozenCodeNode {
+    pub fn empty(template: Option<FrozenTemplateKey>) -> Self {
+        Self {
+            template,
+            holes: Vec::new(),
+            rooted_funcs: Vec::new(),
+            selected_methods: Vec::new(),
+            rooted_traits: Vec::new(),
+            qualified_consts: Vec::new(),
+            impl_trait_type_arguments: None,
+            locals: Vec::new(),
+            cast_primitives: Vec::new(),
+            local_types: Vec::new(),
+            record_types: Vec::new(),
+            param_uses: Vec::new(),
+            effect_uses: Vec::new(),
+            generic_uses: Vec::new(),
+            self_uses: Vec::new(),
+            self_record_inits: Vec::new(),
+            open_uses: Vec::new(),
+            free_self_uses: Vec::new(),
+            function_types: Vec::new(),
+            assoc_const_primitives: Vec::new(),
+            assoc_type_values: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -250,6 +295,9 @@ pub enum FrozenQuoteSignatureType {
     Hole(u32),
     SelfType,
     FunctionGeneric(u32),
+    /// An inherited declaration binder of a checked body. Rebinding happens
+    /// only when the destination owner context is available.
+    OwnerGeneric(u32),
     Nominal {
         root: FrozenQuoteNominal,
         arguments: Vec<FrozenQuoteSignatureType>,
@@ -281,8 +329,8 @@ pub struct FrozenQuoteFunction {
     pub func: Option<u32>,
     /// An associated-constant index for item quotes, or `None` otherwise.
     pub assoc_const: Option<u32>,
-    /// Type argument slots checked as quote holes at the provider site.
-    pub type_holes: Option<Vec<u32>>,
+    /// Explicit call type arguments checked at the provider site.
+    pub type_arguments: Option<Vec<FrozenQuoteSignatureType>>,
     pub site: ExprId,
     pub where_predicate: Option<u32>,
     pub ingot: Url,

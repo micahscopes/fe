@@ -1,0 +1,48 @@
+mod source {
+    trait HasValue { const VALUE: u256 }
+    impl HasValue for u256 { const VALUE: u256 = 7 }
+
+    pub fn digits<const N: usize, const M: usize>() -> usize { N * 10 + M }
+    pub fn positive<const N: usize>() -> usize where N > 0 { N + 1 }
+    pub fn qualified() -> u256 { <u256 as HasValue>::VALUE }
+}
+
+trait HasValue { const VALUE: u256 }
+impl HasValue for u256 { const VALUE: u256 = 43 }
+const N: usize = 900
+const M: usize = 800
+
+use core::meta::{Code, CodeNode, CodeNodeKind, Expr, code_root, node_child, node_child_count, node_kind}
+
+const fn count_kind(_ node: CodeNode, _ kind: u256) -> u256 {
+    let found = match node_kind(node) {
+        CodeNodeKind::ConstParameter => kind == 0
+        CodeNodeKind::Constant => kind == 1
+        CodeNodeKind::Function => kind == 2
+        _ => false
+    }
+    let mut total: u256 = if found { 1 } else { 0 }
+    let mut index: usize = 0
+    while index < node_child_count(node) {
+        total += count_kind(node_child(node, index), kind)
+        index += 1
+    }
+    total
+}
+
+const fn verify_generic_code(_ code: Code<Expr>) -> bool {
+    count_kind(code_root(code), 0) == 2
+}
+
+const fn verify_constant_code(_ code: Code<Expr>) -> bool {
+    count_kind(code_root(code), 1) == 1
+        && count_kind(code_root(code), 2) == 0
+}
+
+#[test]
+fn authored_values() {
+    assert!(source::digits<3, 4>() == 34)
+    assert!(source::positive<4>() == 5)
+    assert!(source::qualified() == 7)
+    assert!(<u256 as HasValue>::VALUE == 43)
+}

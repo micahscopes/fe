@@ -1,0 +1,35 @@
+// Target: F1. A generated free function calls a trait method on a non-Copy type whose type and impl live in another module.
+// Oracle: the hand-written twin `shapes::side_twin` gives the same value.
+// Position: another module.
+trait Read {
+    fn get(self) -> u256
+}
+
+mod shapes {
+    pub struct Square { pub side: u256 }
+
+    impl ingot::Read for Square {
+        fn get(self) -> u256 { self.side }
+    }
+
+    pub fn side_twin(_ s: Square) -> u256 { s.get() * 4 }
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn perimeter(_ s: ingot::shapes::Square) -> u256 { s.get() * 4 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(shapes::side_twin(shapes::Square { side: 3 }) == 12)
+    assert!(perimeter(shapes::Square { side: 3 }) == shapes::side_twin(shapes::Square { side: 3 }))
+}

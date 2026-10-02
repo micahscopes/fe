@@ -1,0 +1,36 @@
+// Target: RD84 (3) ("fields visible at the block"), design section 8 row "fields not visible". A block cannot derive for a type with a field private to another module.
+// expect: rejected at line 35, because `StableEq` cannot derive `Eq` for `vault::Key` here: `secret` is private to
+//   `vault`; label on the field; help: declare it in `vault`.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+mod vault {
+    pub struct Key { pub id: u256, secret: u256 }
+
+    pub fn key(_ id: u256) -> Key { Key { id, secret: 0 } }
+}
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn check() -> bool {
+    with (StableEq) { same(vault::key(1), vault::key(1)) } // <- here
+}

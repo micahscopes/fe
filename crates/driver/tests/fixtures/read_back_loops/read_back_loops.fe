@@ -1,0 +1,55 @@
+// Structured loops retain local binders, mutation, early exits and unroll hints.
+// The driver compares the checked body with its re-emitted structure. These
+// independent values also exercise the authored functions through fe test.
+
+pub fn assignment(_ k: u256) -> u256 {
+    let mut sum: u256 = 1
+    sum = sum + k
+    sum
+}
+
+pub fn nested_while(_ k: u256) -> u256 {
+    let mut i: u256 = 0
+    let mut sum: u256 = 0
+    while i < k {
+        let mut j: u256 = 0
+        while j < 2 {
+            sum += i + j
+            j += 1
+        }
+        i += 1
+    }
+    sum
+}
+
+pub fn early_exits(_ k: u256) -> u256 {
+    let mut i: u256 = 0
+    let mut sum: u256 = 0
+    while true {
+        i += 1
+        if i > k { break }
+        if i == 2 { continue }
+        sum += i
+    }
+    sum
+}
+
+pub fn array_for(_ k: u256) -> u256 {
+    let mut sum: u256 = k
+    #[unroll(never)]
+    for (v, extra) in [(1, 0), (2, 0), (3, 0)] {
+        if v == 2 { continue }
+        sum += v + extra
+        if sum > 10 { break }
+    }
+    sum
+}
+
+#[test]
+fn authored_values() {
+    assert!(assignment(4) == 5)
+    assert!(nested_while(3) == 9)
+    assert!(early_exits(4) == 8)
+    assert!(array_for(4) == 8)
+    assert!(array_for(11) == 12)
+}

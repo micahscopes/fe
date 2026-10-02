@@ -1,0 +1,47 @@
+// Target: RD84 (1), M2-a (DERIVE_USE_SITE_DESIGN section 9). A declared derivation `impl Eq for Point with (StableEq)` gives `Point` field-by-field equality.
+// Oracle: hand-written twin `PointH` carries the impl StableEq should write; both give the same answers.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point with (StableEq)
+
+pub struct PointH { pub x: u256, pub y: u256 }
+
+impl Eq for PointH {
+    fn eq(self, _ other: Self) -> bool { true && self.x == other.x && self.y == other.y }
+}
+
+fn same<T: Eq>(_ a: T, _ b: T) -> bool { a == b }
+
+fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }
+
+fn ph(_ x: u256, _ y: u256) -> PointH { PointH { x, y } }
+
+#[test]
+fn declared_matches_twin() {
+    assert!(same(pt(1, 2), pt(1, 2)) && !same(pt(1, 2), pt(1, 3)))
+    assert!(same(pt(1, 2), pt(1, 2)) == same(ph(1, 2), ph(1, 2)))
+    assert!(same(pt(1, 2), pt(1, 3)) == same(ph(1, 2), ph(1, 3)))
+    assert!(same(pt(5, 2), pt(1, 2)) == same(ph(5, 2), ph(1, 2)))
+}

@@ -1,0 +1,155 @@
+use core::meta::{Code, Expr, CodeNode, CodeNodeKind, code_root, node_kind,
+    node_child_count, node_child, node_parameter_index, node_same_binding,
+    node_same_checked_call, node_type_is, node_field_index,
+    node_record_field_index, node_literal, node_assignment_operator, node_array_length}
+
+pub fn polynomial(_ x: u256) -> u256 {
+    let square = x * x
+    square + x * 3
+}
+
+type Amount = u256
+pub fn bindings(_ a: Amount, _ b: u256) -> u256 {
+    let x = a + 1
+    {
+        let x = b
+        x
+    } + x
+}
+
+fn helper(_ a: u256) -> u256 { a + 1 }
+pub fn calls(_ a: u256) -> u256 { helper(a) + helper(a) }
+
+pub struct Point { pub x: u256, pub y: u256 }
+pub fn record(_ a: u256) -> u256 {
+    let p = Point { y: 2, x: a }
+    p.x + p.y
+}
+
+pub fn control(_ k: u256) -> u256 {
+    let mut total: u256 = 0
+    let mut i: u256 = 0
+    while i < k {
+        if i == 2 {
+            i += 1
+            continue
+        }
+        total += i * 2
+        i += 1
+        if total > 10 { break }
+    }
+    for value in [1, 2] { total += value }
+    total
+}
+
+pub fn aggregates(_ a: u256) -> u256 {
+    let repeated = [a; 4]
+    let values = [a, 2, 3]
+    let pair = (repeated[0], values[1])
+    pair.0 + pair.1
+}
+
+// Count syntax operations in Fe, without evaluating the described program.
+const fn stats(_ node: CodeNode) -> (usize, usize, usize, usize, usize) {
+    let mut result: (usize, usize, usize, usize, usize) = match node_kind(node) {
+        CodeNodeKind::Mul => (1, 0, 0, 0, 0),
+        CodeNodeKind::While => (0, 1, 0, 0, 0),
+        CodeNodeKind::For => (0, 0, 1, 0, 0),
+        CodeNodeKind::Break => (0, 0, 0, 1, 0),
+        CodeNodeKind::Continue => (0, 0, 0, 0, 1),
+        CodeNodeKind::AugAssign => {
+            assert!(match node_assignment_operator(node) {
+                CodeNodeKind::Add => true, _ => false,
+            })
+            (0, 0, 0, 0, 0)
+        },
+        _ => (0, 0, 0, 0, 0),
+    }
+    let mut i: usize = 0
+    while i < node_child_count(node) {
+        let rest = stats(node_child(node, i))
+        result = (result.0 + rest.0, result.1 + rest.1, result.2 + rest.2,
+            result.3 + rest.3, result.4 + rest.4)
+        i += 1
+    }
+    result
+}
+
+pub const fn verify_polynomial(_ code: Code<Expr>) -> bool {
+    assert!(stats(code_root(code)).0 == 2)
+    true
+}
+
+pub const fn verify_bindings(_ code: Code<Expr>) -> bool {
+    let root = code_root(code)
+    let outer_let = node_child(root, 0)
+    let outer_pat = node_child(outer_let, 0)
+    let a = node_child(node_child(outer_let, 1), 0)
+    let sum = node_child(node_child(root, 1), 0)
+    let inner = node_child(sum, 0)
+    let inner_let = node_child(inner, 0)
+    let inner_pat = node_child(inner_let, 0)
+    let b = node_child(inner_let, 1)
+    let inner_use = node_child(node_child(inner, 1), 0)
+    let outer_use = node_child(sum, 1)
+    assert!(node_parameter_index(a) == 0)
+    assert!(node_parameter_index(b) == 1)
+    assert!(node_same_binding(outer_pat, outer_use))
+    assert!(node_same_binding(inner_pat, inner_use))
+    assert!(!node_same_binding(inner_pat, outer_pat))
+    assert!(!node_same_binding(a, b))
+    assert!(node_type_is<Amount>(a))
+    assert!(!node_type_is<bool>(a))
+    true
+}
+
+pub const fn verify_calls(_ code: Code<Expr>) -> bool {
+    let sum = node_child(node_child(code_root(code), 0), 0)
+    let first = node_child(sum, 0)
+    let second = node_child(sum, 1)
+    assert!(node_same_checked_call(first, second))
+    assert!(node_same_binding(node_child(first, 1), node_child(second, 1)))
+    assert!(node_type_is<u256>(first))
+    true
+}
+
+pub const fn verify_record(_ code: Code<Expr>) -> bool {
+    let root = code_root(code)
+    let declaration = node_child(root, 0)
+    let construction = node_child(declaration, 1)
+    assert!(node_child_count(construction) == 2)
+    assert!(node_record_field_index(construction, 0) == 1)
+    assert!(node_record_field_index(construction, 1) == 0)
+    assert!(node_literal<u256>(node_child(construction, 0)) == 2)
+    let sum = node_child(node_child(root, 1), 0)
+    assert!(node_field_index(node_child(sum, 0)) == 0)
+    assert!(node_field_index(node_child(sum, 1)) == 1)
+    assert!(node_same_binding(node_child(declaration, 0), node_child(node_child(sum, 0), 0)))
+    true
+}
+
+pub const fn verify_control(_ code: Code<Expr>) -> bool {
+    let result = stats(code_root(code))
+    assert!(result.0 == 1)
+    assert!(result.1 == 1)
+    assert!(result.2 == 1)
+    assert!(result.3 == 1)
+    assert!(result.4 == 1)
+    true
+}
+
+pub const fn verify_aggregates(_ code: Code<Expr>) -> bool {
+    let root = code_root(code)
+    let repeated = node_child(node_child(root, 0), 1)
+    let values = node_child(node_child(root, 1), 1)
+    let pair = node_child(node_child(root, 2), 1)
+    assert!(node_child_count(repeated) == 1)
+    assert!(node_array_length(repeated) == 4)
+    assert!(node_child_count(values) == 3)
+    assert!(node_array_length(values) == 3)
+    assert!(node_child_count(pair) == 2)
+    let sum = node_child(node_child(root, 3), 0)
+    assert!(node_field_index(node_child(sum, 0)) == 0)
+    assert!(node_field_index(node_child(sum, 1)) == 1)
+    true
+}

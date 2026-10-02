@@ -1,0 +1,22 @@
+// Target: RD84 with QUOTATION_DESIGN section 9 (goal check). A deriver whose output is not one impl of the requested trait for the target is rejected.
+// expect: rejected at line 22 (the request), because `BadEq` must produce one impl of `Eq` for `Point` and produced
+//   `impl Other for Point`; secondary label at the quote in `BadEq`.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+pub trait Other {
+    fn o(self) -> bool
+}
+
+pub struct BadEq {}
+
+impl Derive<Eq> for BadEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { impl Other for ${record} { fn o(self) -> bool { true } } }
+    }
+}
+
+pub struct Point { pub x: u256, pub y: u256 }
+
+impl Eq for Point with (BadEq) // <- here

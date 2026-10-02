@@ -1,0 +1,45 @@
+// Target: Q6 (and O4's `match` shape). An ordinary `match` on a field inside a quoted body is accepted.
+// Oracle: hand-written twin type `H` with the same method body; values by hand (3 + 4 = 7, and 0).
+trait Work {
+    fn work(self, _ k: u256) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let a = field(record, 0)
+        let b = field(record, 1)
+        quote {
+            impl ingot::Work for ${record} {
+                fn work(self, _ k: u256) -> u256 {
+                    match self.${b} {
+                        true => self.${a} + k
+                        false => 0
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct G { a: u256, b: bool }
+
+struct H { a: u256, b: bool }
+
+impl Work for H {
+    fn work(self, _ k: u256) -> u256 {
+        match self.b {
+            true => self.a + k
+            false => 0
+        }
+    }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(H { a: 3, b: true }.work(4) == 7)
+    assert!(G { a: 3, b: true }.work(4) == (H { a: 3, b: true }).work(4))
+    assert!(G { a: 3, b: false }.work(4) == (H { a: 3, b: false }).work(4))
+}

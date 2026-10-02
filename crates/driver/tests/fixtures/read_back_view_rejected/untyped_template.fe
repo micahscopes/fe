@@ -1,0 +1,8 @@
+// expect-error: code inspection requires a checked body
+use core::meta::{Code, Expr, code_root}
+pub fn subject() -> u256 { 1 }
+pub const fn reject(_ unused: Code<Expr>) -> bool {
+    let code: Code<Expr> = quote { 1 }
+    code_root(code)
+    true
+}

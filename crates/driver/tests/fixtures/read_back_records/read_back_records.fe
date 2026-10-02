@@ -1,0 +1,40 @@
+mod source {
+    pub struct Point { pub x: u256, pub y: u256 }
+    pub struct Wrap<T> { pub value: T }
+    type Alias = Wrap<(u256, u256)>
+
+    pub fn record_scalar(_ a: u8) -> u256 {
+        let x = a as u256
+        let p: Point = Point { x, y: 2 }
+        p.x * p.y
+    }
+
+    pub fn record_generic(_ a: u8) -> u256 {
+        let p: Alias = Wrap { value: (a as u256, 3) }
+        p.value.0 + p.value.1
+    }
+
+    pub fn annotated_tuple(_ a: u8) -> u256 {
+        let pair: (u256, u256) = (a as u256, 4)
+        pair.0 + pair.1
+    }
+
+    pub fn annotated_unit(_ a: u8) -> u256 {
+        let empty: () = ()
+        a as u256
+    }
+}
+
+mod dest {
+    struct Point { x: u8, y: bool }
+    struct Wrap<T> { other: T }
+    type Alias = bool
+}
+
+#[test]
+fn authored_values() {
+    assert!(source::record_scalar(6) == 12)
+    assert!(source::record_generic(6) == 9)
+    assert!(source::annotated_tuple(6) == 10)
+    assert!(source::annotated_unit(6) == 6)
+}

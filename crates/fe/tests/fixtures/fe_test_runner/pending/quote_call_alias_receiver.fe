@@ -1,0 +1,35 @@
+// Target: F1. A generated free function whose parameter type is a type alias calls a trait method on that non-Copy parameter.
+// Oracle: the hand-written twin `meters_twin` gives the same value.
+// Position: type alias.
+trait Read {
+    fn get(self) -> u256
+}
+
+pub struct Length { pub v: u256 }
+
+pub type Meters = Length
+
+impl Read for Length {
+    fn get(self) -> u256 { self.v }
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn meters(_ m: ingot::Meters) -> u256 { m.get() + 1 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn meters_twin(_ m: Meters) -> u256 { m.get() + 1 }
+
+#[test]
+fn generated_matches_twin() {
+    assert!(meters_twin(Length { v: 41 }) == 42)
+    assert!(meters(Length { v: 41 }) == meters_twin(Length { v: 41 }))
+}

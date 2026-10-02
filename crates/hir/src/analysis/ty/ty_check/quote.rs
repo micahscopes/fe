@@ -113,6 +113,10 @@ pub enum QuoteSignatureSite {
         func: u32,
         stmt: StmtId,
     },
+    CallTypeArgument {
+        expr: ExprId,
+        index: u32,
+    },
 }
 
 /// Where a name stands in the template.
@@ -983,7 +987,30 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
     fn value_path(&mut self, expr: ExprId, path: PathId<'db>) {
         let db = self.db();
         let site = QuoteNameSite::Expr(expr);
-        self.walk_path_args(path);
+        for index in 0..path.len(db) {
+            let Some(segment) = path.segment(db, index) else {
+                continue;
+            };
+            let args = segment.generic_args(db);
+            if index + 1 != path.len(db) {
+                self.walk_generic_args(args);
+                continue;
+            }
+            for (arg_index, arg) in args.data(db).iter().enumerate() {
+                let previous = self
+                    .signature_site
+                    .replace(QuoteSignatureSite::CallTypeArgument {
+                        expr,
+                        index: arg_index as u32,
+                    });
+                match arg {
+                    GenericArg::Type(arg) => self.walk_ty_opt(arg.ty),
+                    GenericArg::AssocType(arg) => self.walk_ty_opt(arg.ty),
+                    GenericArg::Const(_) => {}
+                }
+                self.signature_site = previous;
+            }
+        }
         if let Some(name) = path.as_ident(db) {
             if name.is_self(db) {
                 return self.push(site, QuoteNameClass::SelfName);

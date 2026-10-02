@@ -1,0 +1,48 @@
+// Target: F1. A generated impl for a generic record calls a method from a hand-written generic impl on `self`.
+// Oracle: hand-written twin `Holder2<T>` gives the same values, directly and through a bound.
+// Positions: method of a generic impl; trait impl called through a generic bound.
+trait Read {
+    fn get(self) -> u256
+}
+
+trait Twice {
+    fn twice(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn twice(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Twice for ${record} {
+                fn twice(self) -> u256 { self.get() * 2 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::twice)]
+struct Holder<T: Copy> { v: u256, t: T }
+
+impl<T: Copy> Read for Holder<T> {
+    fn get(self) -> u256 { self.v }
+}
+
+struct Holder2<T: Copy> { v: u256, t: T }
+
+impl<T: Copy> Read for Holder2<T> {
+    fn get(self) -> u256 { self.v }
+}
+
+impl<T: Copy> Twice for Holder2<T> {
+    fn twice(self) -> u256 { self.get() * 2 }
+}
+
+fn via<T: Twice>(_ t: T) -> u256 { t.twice() }
+
+#[test]
+fn generated_matches_twin() {
+    assert!(Holder<bool> { v: 5, t: true }.twice() == 10)
+    assert!(Holder<bool> { v: 5, t: true }.twice() == (Holder2<bool> { v: 5, t: true }).twice())
+    assert!(via(Holder<u256> { v: 7, t: 1 }) == via(Holder2<u256> { v: 7, t: 1 }))
+}

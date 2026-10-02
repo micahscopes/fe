@@ -7,6 +7,22 @@ pub struct IdentId<'db> {
     pub data: String,
 }
 
+impl<'db> IdentId<'db> {
+    /// Generated owner binders have unspellable identities, but diagnostics
+    /// should retain the name written on the target declaration.
+    pub fn display_name(self, db: &dyn HirDb) -> String {
+        let name = self.data(db);
+        if name.starts_with("<quote-record-")
+            && let Some(without_end) = name.strip_suffix('>')
+            && let Some((_, authored)) = without_end.rsplit_once(':')
+        {
+            authored.to_owned()
+        } else {
+            name.clone()
+        }
+    }
+}
+
 macro_rules! define_keywords {
     ($(($name: ident, $kw_str:literal),)*) => {
         impl<'db> IdentId<'db> {

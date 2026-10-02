@@ -1,0 +1,51 @@
+// Target: RD84 (2), rewrite of mb2 `fe_test/cascade_unscoped_default.fe` (DECIDED in PARITY_FIXTURE_AUDIT_2026-09-28). Unscoped calls use the one unnamed impl, the declared derivation.
+// Oracle: mb2's asserted values, unchanged; the audit's hand-written RD84 twin (`selection-18.rd84.fe`) passes on mb3 with them.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct Speaker { pub id: u256 }
+
+// Was `#[derive(Eq)]`, the default-marked derived impl; now an ordinary declared derivation (RD84 (1)).
+impl Eq for Speaker with (StableEq)
+
+// Was an unnamed hand-written override coexisting with the derived default; now it takes a name (RD84 (2)).
+impl Eq for Speaker as Override {
+    fn eq(self, _ other: Speaker) -> bool { true }
+}
+
+fn same<T: Eq>(_ x: T, _ y: T) -> bool { x.eq(y) }
+
+#[test]
+fn unscoped_call_uses_derived_default() {
+    let a = Speaker { id: 7 }
+    let b = Speaker { id: 8 }
+    assert!(!a.eq(b))
+    let c = Speaker { id: 7 }
+    let d = Speaker { id: 7 }
+    assert!(c.eq(d))
+}
+
+#[test]
+fn unscoped_call_is_not_ambiguous() {
+    assert!(!same(Speaker { id: 1 }, Speaker { id: 2 }))
+    assert!(same(Speaker { id: 5 }, Speaker { id: 5 }))
+}

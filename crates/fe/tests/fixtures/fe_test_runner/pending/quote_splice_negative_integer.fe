@@ -1,0 +1,24 @@
+// Target: RD83 (1). A negative integer spliced into a quote keeps the provider's signed type and value.
+// Oracle: independently known values (-5 as i32, i8 minimum -128); mb3 today is "Codex's current code minus negatives".
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let n: i32 = -5
+        let low: i8 = -128
+        quote {
+            pub fn neg() -> i32 { ${n} }
+            pub fn low() -> i8 { ${low} }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn negative_splices_keep_type_and_value() {
+    assert!(neg() == -5)
+    assert!(neg() + 5 == 0)
+    assert!(low() == -128)
+}

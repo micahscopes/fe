@@ -1,0 +1,17 @@
+use core::abi::AbiSize
+use core::meta::{Code, Item, Record, field, field_type}
+trait Value { const N: u256 }
+const fn mix<A: AbiSize, B: AbiSize>() -> u256 { core::abi::abi_field_head_size<A>() + core::abi::abi_field_head_size<B>() }
+const fn gen(record: Record) -> Code<Item> {
+    let t0 = field_type(field(record, 0))
+    quote {
+        impl ingot::Value for ${record} {
+            const N: u256 = ingot::mix<u256, ${t0}>()
+        }
+    }
+}
+#[generate(gen)]
+struct W { value: bool }
+const fn answer() -> u256 { <W as Value>::N }
+#[test]
+fn b() { assert!(<W as Value>::N == 64) }

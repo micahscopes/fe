@@ -1,0 +1,65 @@
+// Target: RD84 (1), M2-a after Q6. Declared derivation for a generic enum, whose payload bound is met by another declared derivation.
+// Oracle: hand-computed values.
+// Positions: enums; generic impl; nested generics.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Arm, Code, Expr, Item, Record, Where, binders, empty, field_type, variant, variant_count, variant_field, variant_field_count}
+
+// EnumEq: variant by variant, then field by field (Q6; RD79 binder holes).
+// Placeholders: the variant reflection names, the `Arm` kind and the arm-list fold are modeled on
+// `field_count`/`field` and mb2's fold; RD79 fixes only `binders(v, n)`, `${lhs}` and `${lhs.at(f)}`.
+pub struct EnumEq {}
+
+impl Derive<Eq> for EnumEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut arms = empty<Arm>()
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < variant_count(record) {
+            let v = variant(record, i)
+            let lhs = binders(v, 0)
+            let rhs = binders(v, 1)
+            let mut cmp: Code<Expr> = quote { true }
+            let mut j: usize = 0
+            while j < variant_field_count(v) {
+                let f = variant_field(v, j)
+                cmp = quote { ${cmp} && ${lhs.at(f)} == ${rhs.at(f)} }
+                bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+                j += 1
+            }
+            arms = quote(other) {
+                ${arms}
+                ${lhs} => match other {
+                    ${rhs} => ${cmp}
+                    _ => false
+                }
+            }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { match self { ${arms} } } } }
+    }
+}
+
+pub enum Opt<T> {
+    Nothing,
+    Just(T),
+}
+
+impl Eq for Opt with (EnumEq)
+
+pub enum Coin {
+    Heads,
+    Tails,
+}
+
+impl Eq for Coin with (EnumEq)
+
+#[test]
+fn generic_enum() {
+    assert!(Opt<u256>::Just(3) == Opt<u256>::Just(3))
+    assert!(Opt<u256>::Just(3) != Opt<u256>::Just(4))
+    assert!(Opt<u256>::Nothing != Opt<u256>::Just(0))
+    assert!(Opt<Coin>::Just(Coin::Heads) == Opt<Coin>::Just(Coin::Heads))
+    assert!(Opt<Coin>::Just(Coin::Heads) != Opt<Coin>::Just(Coin::Tails))
+    assert!(Opt<Opt<Coin>>::Just(Opt<Coin>::Nothing) == Opt<Opt<Coin>>::Just(Opt<Coin>::Nothing))
+}

@@ -1,0 +1,44 @@
+// Target: RD84 (2), rewrite (negative half) of mb2 `constraint_violating_default_unscoped.fe` (DECIDED; mb2's point was "a clean error, never a panic").
+// expect: rejected at line 43 at type check, because no unnamed `Eq` impl applies to `Wrap<NoEq>` (the derivation needs
+//   `NoEq: Eq`) and `Override` and `Fast` are named; the error names both as selectable (2-0022 shape). No panic.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Code, Expr, Item, Record, Where, empty, field, field_count, field_type}
+
+// StableEq: field by field, one `F: Eq` bound per field (QUOTATION_DESIGN section 9).
+pub struct StableEq {}
+
+impl Derive<Eq> for StableEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            body = quote(other) { ${body} && self.${f} == other.${f} }
+            bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+    }
+}
+
+pub struct NoEq { pub v: u256 }
+
+pub struct Wrap<T> { pub inner: T }
+
+impl Eq for Wrap with (StableEq)
+
+impl Eq for Wrap<NoEq> as Override {
+    fn eq(self, _ other: Wrap<NoEq>) -> bool { return false }
+}
+
+impl Eq for Wrap<NoEq> as Fast {
+    fn eq(self, _ other: Wrap<NoEq>) -> bool { return true }
+}
+
+fn check() -> bool {
+    let a = Wrap { inner: NoEq { v: 1 } }
+    let b = Wrap { inner: NoEq { v: 1 } }
+    a.eq(b) // <- here
+}

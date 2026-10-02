@@ -1,0 +1,6 @@
+// Target: RD84 (3), M2-d in another ingot (PR_HYGIENE 26). A block in the app ingot derives the app's own trait for a dependency's type with public fields.
+// Oracle: hand-computed field count (2). The trait is local so a hand-written impl here would be legal; deriving a foreign
+//   trait for a foreign type on the fly (orphan rule versus block-scoped hidden impls) is left open in README.md.
+pub struct Point { pub x: u256, pub y: u256 }
+
+pub fn pt(_ x: u256, _ y: u256) -> Point { Point { x, y } }

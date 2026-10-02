@@ -125,7 +125,7 @@ measurement with stable conditions before making performance claims.
 | One Fe policy for primitive and nominal fields | `authors` module in `crates/fe/tests/fixtures/structural_generation/abi.fe`, prepended unchanged to `nested_abi.fe` by the acceptance harness |
 | Actual size and independent dynamic facts at provider time | `Head<T>` and `Dynamic<T>` query families; independent-demand and exhaustion tests |
 | Existing requirement and selection machinery | `eval_field_query` in HIR CTFE calls `resolve_trait_impl_instance`, `prove_selected_impl_evidence` and `nullary_const_method`; no new solver |
-| Same reflected nominal type reaches codec calls | Checked `DeclarationType::Field` rendering in the owner's module; distinct same-spelled nominal and private-alias runtime cases |
+| Same reflected nominal type reaches codec calls | Checked field-type splices retain the target field's HIR type in its module; distinct same-spelled nominal and private-alias runtime cases |
 | Independent offsets, length and raw bytes | Fixed oracle table above and explicit `word_at` assertions in `nested_abi.fe` |
 | Normal project and standalone commands, O0/O2 | `nested_abi_preserves_aliases_and_distinct_nominal_codecs` in `structural_generation_cli.rs`; helper asserts executed test names, counts and build artifact |
 | Missing unused requirements | `unused_nested_encoder_requires_supporting_impls_after_edits_and_restoration` |

@@ -3113,6 +3113,15 @@ fn test_cli_single_file(fixture: Fixture<&str>) {
     snap_test!(output, fixture.path());
 }
 
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/cli_output/single_files",
+    glob: "pending/*.fe",
+)]
+#[dir_test_attr(#[ignore = "target not built yet"])]
+fn test_cli_single_file_pending(fixture: Fixture<&str>) {
+    test_cli_single_file(fixture);
+}
+
 // Back to dir_test - the unstable numbers are annoying but at least it works
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/cli_output/ingots",
@@ -3166,6 +3175,15 @@ fn test_fe_test(fixture: Fixture<&str>) {
         "fe test failed for {path}:\n{output}\n\nTo reproduce:\n  cargo run --bin fe -- test --jobs 1 {path}",
         path = fixture.path(),
     );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test",
+    glob: "pending/*.fe",
+)]
+#[dir_test_attr(#[ignore = "target not built yet"])]
+fn test_fe_test_pending(fixture: Fixture<&str>) {
+    test_fe_test(fixture);
 }
 
 #[test]
@@ -3252,6 +3270,43 @@ fn test_fe_test_runner(fixture: Fixture<&str>) {
 
     let (output, _) = run_fe_main(&args);
     snap_test!(output, fixture.path());
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "pending/*.fe",
+)]
+#[dir_test_attr(#[ignore = "target not built yet"])]
+fn test_fe_test_runner_pending(fixture: Fixture<&str>) {
+    test_fe_test_runner(fixture);
+}
+
+fn run_fe_test_runner_workspace(fixture: Fixture<&str>) {
+    let dir = std::path::Path::new(fixture.path())
+        .parent()
+        .expect("fe.toml should have parent");
+    let (output, _) = run_fe_main(&["test", "--jobs", "1", dir.to_str().unwrap()]);
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    let snapshot_path = dir.join(name);
+    snap_test!(output, snapshot_path.to_str().unwrap());
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "ingots/*/fe.toml",
+)]
+#[allow(dead_code)] // The first active workspace fixture is still pending.
+fn test_fe_test_runner_workspace(fixture: Fixture<&str>) {
+    run_fe_test_runner_workspace(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "pending/ingots/*/fe.toml",
+)]
+#[dir_test_attr(#[ignore = "target not built yet"])]
+fn test_fe_test_runner_workspace_pending(fixture: Fixture<&str>) {
+    run_fe_test_runner_workspace(fixture);
 }
 
 #[dir_test(

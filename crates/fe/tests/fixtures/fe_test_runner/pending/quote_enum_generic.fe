@@ -1,0 +1,63 @@
+// Target: Q6 with QUOTATION_DESIGN section 9 ("Generic and enum records"). A quoted enum equality for a generic enum carries per-payload bounds and runs.
+// Oracle: hand-computed values; `Opt<Point>` uses a hand-written `Point: Eq`, so the generated where clause `T: Eq` is exercised.
+// Placeholders: as in quote_enum_eq.fe (reflection names, `Arm`, arm-list fold).
+use core::ops::Eq
+
+mod author {
+    use core::ops::Eq
+    use core::meta::{Arm, Code, Expr, Item, Record, Where, binders, empty, field_type, variant, variant_count, variant_field, variant_field_count}
+
+    pub const fn enum_eq(record: Record) -> Code<Item> {
+        let mut arms = empty<Arm>()
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < variant_count(record) {
+            let v = variant(record, i)
+            let lhs = binders(v, 0)
+            let rhs = binders(v, 1)
+            let mut cmp: Code<Expr> = quote { true }
+            let mut j: usize = 0
+            while j < variant_field_count(v) {
+                let f = variant_field(v, j)
+                cmp = quote { ${cmp} && ${lhs.at(f)} == ${rhs.at(f)} }
+                bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+                j += 1
+            }
+            arms = quote(other) {
+                ${arms}
+                ${lhs} => match other {
+                    ${rhs} => ${cmp}
+                    _ => false
+                }
+            }
+            i += 1
+        }
+        quote {
+            impl Eq for ${record} where ${bounds} {
+                fn eq(self, _ other: Self) -> bool { match self { ${arms} } }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::enum_eq)]
+enum Opt<T> {
+    Nothing,
+    Just(T),
+}
+
+struct Point { x: u256, y: u256 }
+
+impl Eq for Point {
+    fn eq(self, _ other: Self) -> bool { self.x == other.x && self.y == other.y }
+}
+
+#[test]
+fn generic_enum_eq() {
+    assert!(Opt<u256>::Just(3) == Opt<u256>::Just(3))
+    assert!(Opt<u256>::Just(3) != Opt<u256>::Just(4))
+    assert!(Opt<u256>::Nothing == Opt<u256>::Nothing)
+    assert!(Opt<u256>::Nothing != Opt<u256>::Just(0))
+    assert!(Opt<Point>::Just(Point { x: 1, y: 2 }) == Opt<Point>::Just(Point { x: 1, y: 2 }))
+    assert!(Opt<Point>::Just(Point { x: 1, y: 2 }) != Opt<Point>::Just(Point { x: 1, y: 3 }))
+}

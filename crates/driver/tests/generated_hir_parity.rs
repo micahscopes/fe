@@ -147,6 +147,10 @@ fn normalized_item(db: &DriverDataBase, item: ItemKind<'_>) -> String {
         }
         other => panic!("unexpected generated item: {other:?}"),
     };
+    assert!(
+        !normalized.contains("<quote-record-"),
+        "generated generic names leaked into printed output: {normalized}"
+    );
     replayable_names(&normalized)
 }
 
@@ -160,7 +164,7 @@ fn is_top_level_generated_item(db: &DriverDataBase, item: ItemKind<'_>) -> bool 
         .is_some_and(|parent| matches!(parent.item(), ItemKind::ImplTrait(_)))
 }
 
-fn assert_parity(fixture: Fixture<&str>) {
+fn assert_parity(fixture: Fixture<&str>, expected_private_calls: Option<usize>) {
     let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
     let mut authored = DriverDataBase::default();
     authored
@@ -266,24 +270,44 @@ fn assert_parity(fixture: Fixture<&str>) {
         );
     }
     let diagnostics = replay.run_on_ingot(replay_module.ingot(&replay));
-    assert!(
-        !diagnostics.has_errors(&replay),
-        "{}",
-        diagnostics.format_diags(&replay)
-    );
+    if let Some(expected) = expected_private_calls {
+        // Printed source cannot carry a provider's authority to call its
+        // private helper. The HIR comparison above still checks each call.
+        let errors = diagnostics
+            .complete_diags(&replay)
+            .into_iter()
+            .filter(|diag| diag.severity == common::diagnostics::Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errors.len(),
+            expected,
+            "{}",
+            diagnostics.format_diags(&replay)
+        );
+        for error in errors {
+            assert_eq!(error.error_code.to_string(), "2-0003");
+            assert_eq!(error.message, "`encode_sol` is not visible");
+        }
+    } else {
+        assert!(
+            !diagnostics.has_errors(&replay),
+            "{}",
+            diagnostics.format_diags(&replay)
+        );
+    }
 }
 
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_const_generic_function", glob: "*.fe")]
 fn generated_function_roundtrips(fixture: Fixture<&str>) {
-    assert_parity(fixture);
+    assert_parity(fixture, None);
 }
 
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generic_derive", glob: "*.fe")]
 fn generated_implementation_roundtrips(fixture: Fixture<&str>) {
-    assert_parity(fixture);
+    assert_parity(fixture, None);
 }
 
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/structural_generation", glob: "abi.fe")]
 fn generated_abi_roundtrips(fixture: Fixture<&str>) {
-    assert_parity(fixture);
+    assert_parity(fixture, Some(7));
 }

@@ -1,0 +1,67 @@
+// Target: F1. Generated `Twice` calls generated `Read` on a non-Copy `self`, for plain and generic records, directly and through a bound.
+// Oracle: hand-written twin `D` with both impls; values computed by hand (4 * 2, 5 * 2, 6, 1 + 2).
+// Positions: generated code calling generated code; generic record; trait impl through a generic bound; attribute order.
+trait Read {
+    fn get(self) -> u256
+}
+
+trait Twice {
+    fn twice(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn read(record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        quote {
+            impl ingot::Read for ${record} {
+                fn get(self) -> u256 { self.${f} }
+            }
+        }
+    }
+
+    pub const fn twice(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Twice for ${record} {
+                fn twice(self) -> u256 { self.get() * 2 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::twice)]
+#[generate(ingot::author::read)]
+struct A { v: u256 }
+
+#[generate(ingot::author::read)]
+#[generate(ingot::author::twice)]
+struct B { w: u256, z: bool }
+
+#[generate(ingot::author::read)]
+#[generate(ingot::author::twice)]
+struct C<P: Copy> { x: u256, p: P }
+
+struct D { v: u256 }
+
+impl Read for D {
+    fn get(self) -> u256 { self.v }
+}
+
+impl Twice for D {
+    fn twice(self) -> u256 { self.get() * 2 }
+}
+
+fn via<T: Read>(_ t: T) -> u256 { t.get() }
+
+fn via_twice<T: Twice>(_ t: T) -> u256 { t.twice() }
+
+#[test]
+fn generated_calls_generated() {
+    assert!(A { v: 4 }.twice() == (D { v: 4 }).twice())
+    assert!(B { w: 5, z: true }.twice() == 10)
+    assert!(C<bool> { x: 6, p: true }.twice() == 12)
+    assert!(via(C<bool> { x: 6, p: true }) == 6)
+    assert!(via(A { v: 1 }) + via(B { w: 2, z: false }) == 3)
+    assert!(via_twice(A { v: 3 }) == via_twice(D { v: 3 }))
+}

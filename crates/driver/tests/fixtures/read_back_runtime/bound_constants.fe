@@ -1,0 +1,29 @@
+use core::meta::{Code, Expr, Item, Record}
+
+const fn read_back_digits(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_digits<const M: usize, const N: usize>() -> usize { ${body} } }
+}
+const fn read_back_positive(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_positive<const P: usize>() -> usize where P > 0 { ${body} } }
+}
+const fn read_back_qualified(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_qualified() -> u256 { ${body} } }
+}
+
+#[generate(ingot::read_back_digits)]
+struct DigitsTarget {}
+#[generate(ingot::read_back_positive)]
+struct PositiveTarget {}
+#[generate(ingot::read_back_qualified)]
+struct ConstantTarget {}
+
+#[test]
+fn copied_values() {
+    assert!(copied_digits<3, 4>() == 34)
+    assert!(copied_digits<4, 3>() == 43)
+    assert!(copied_positive<4>() == 5)
+    assert!(copied_qualified() == 7)
+}

@@ -1,0 +1,65 @@
+// Probe: interpretations as marker types. Plumbing combinators (Comp, Fork, Exl)
+// are written ONCE for every value-lifting interpretation K; only primitives vary.
+use core::marker::Copy
+
+pub trait Arrow { type Dom  type Cod }
+pub struct Exl<A, B> {}
+pub struct Mul {}
+pub struct Add {}
+pub struct Fork<F, G> {}
+pub struct Comp<G, F> {}
+impl<A, B> Arrow for Exl<A, B> { type Dom = (A, B)  type Cod = A }
+impl Arrow for Mul { type Dom = (u256, u256)  type Cod = u256 }
+impl Arrow for Add { type Dom = (u256, u256)  type Cod = u256 }
+impl<F: Arrow, G: Arrow> Arrow for Fork<F, G> { type Dom = <F as Arrow>::Dom  type Cod = (<F as Arrow>::Cod, <G as Arrow>::Cod) }
+impl<F: Arrow, G: Arrow> Arrow for Comp<G, F> { type Dom = <F as Arrow>::Dom  type Cod = <G as Arrow>::Cod }
+
+// A value-lifting interpretation: scalars mean Num<K>; pairs stay pairs.
+pub trait Lift { type Num }
+pub struct Plain {}
+pub struct Interval {}
+pub struct Ival { pub lo: u256, pub hi: u256 }
+impl Copy for Ival {}
+impl Lift for Plain { type Num = u256 }
+impl Lift for Interval { type Num = Ival }
+
+pub trait Val<K> { type V }
+impl<K: Lift> Val<K> for u256 { type V = <K as Lift>::Num }
+impl<K, A: Val<K>, B: Val<K>> Val<K> for (A, B) { type V = (<A as Val<K>>::V, <B as Val<K>>::V) }
+
+pub trait Run<K>: Arrow
+    where <Self as Arrow>::Dom: Val<K>, <Self as Arrow>::Cod: Val<K>
+{
+    fn run(_ x: <<Self as Arrow>::Dom as Val<K>>::V) -> <<Self as Arrow>::Cod as Val<K>>::V
+}
+// Primitives: one impl per interpretation.
+impl Run<Plain> for Mul { fn run(_ x: (u256, u256)) -> u256 { x.0 * x.1 } }
+impl Run<Plain> for Add { fn run(_ x: (u256, u256)) -> u256 { x.0 + x.1 } }
+impl Run<Interval> for Mul { fn run(_ x: (Ival, Ival)) -> Ival { Ival { lo: x.0.lo * x.1.lo, hi: x.0.hi * x.1.hi } } }
+impl Run<Interval> for Add { fn run(_ x: (Ival, Ival)) -> Ival { Ival { lo: x.0.lo + x.1.lo, hi: x.0.hi + x.1.hi } } }
+// Plumbing: written once for all K.
+impl<K, A: Val<K>, B: Val<K>> Run<K> for Exl<A, B> where <A as Val<K>>::V: Copy, <B as Val<K>>::V: Copy {
+    fn run(_ x: (<A as Val<K>>::V, <B as Val<K>>::V)) -> <A as Val<K>>::V { x.0 }
+}
+impl<K, F: Run<K>, G: Arrow<Dom = <F as Arrow>::Cod> + Run<K>> Run<K> for Comp<G, F>
+    where <F as Arrow>::Dom: Val<K>, <F as Arrow>::Cod: Val<K>, <G as Arrow>::Cod: Val<K>
+{
+    fn run(_ x: <<Self as Arrow>::Dom as Val<K>>::V) -> <<Self as Arrow>::Cod as Val<K>>::V { G::run(F::run(x)) }
+}
+impl<K, F: Run<K>, G: Arrow<Dom = <F as Arrow>::Dom> + Run<K>> Run<K> for Fork<F, G>
+    where <F as Arrow>::Dom: Val<K>, <F as Arrow>::Cod: Val<K>, <G as Arrow>::Cod: Val<K>,
+          <<F as Arrow>::Dom as Val<K>>::V: Copy
+{
+    fn run(_ x: <<Self as Arrow>::Dom as Val<K>>::V) -> <<Self as Arrow>::Cod as Val<K>>::V { (F::run(x), G::run(x)) }
+}
+
+type Fxy = Comp<Add, Fork<Mul, Exl<u256, u256>>>   // x*y + x (nonnegative inputs)
+
+#[test]
+fn plain_and_interval_share_plumbing() {
+    let v: u256 = <Fxy as Run<Plain>>::run((3, 5))
+    assert!(v == 18)
+    let i: Ival = <Fxy as Run<Interval>>::run((Ival { lo: 1, hi: 3 }, Ival { lo: 2, hi: 5 }))
+    assert!(i.lo == 3)
+    assert!(i.hi == 18)
+}

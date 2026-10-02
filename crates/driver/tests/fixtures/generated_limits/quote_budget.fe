@@ -1,0 +1,16 @@
+use core::meta::{Code, Item, Record, empty, DeclarationName}
+const fn many(_ record: Record) -> Code<Item> {
+    let mut items = empty<Item>()
+    let mut i: usize = 0
+    while i < 3000 {
+        let name = DeclarationName::Literal("x")
+        items = quote {
+            ${items}
+            pub const fn ${name}() -> u256 { 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 }
+        }
+        i += 1
+    }
+    items
+}
+#[generate(many)]
+struct Target {}

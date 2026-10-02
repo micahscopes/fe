@@ -1,0 +1,39 @@
+// Target: F3 / RD83 (2). A generated body reads a private field of a provider type, as a body may use provider-private items.
+// Oracle: the hand-written twin `author::twin`, written where the quote is, returns the same value (7).
+// Position: trait method body; private field read on a let-bound local.
+trait Read {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Counter { value: u256 }
+
+    fn make() -> Counter { Counter { value: 7 } }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Read for ${record} {
+                fn get(self) -> u256 {
+                    let c = make()
+                    c.value
+                }
+            }
+        }
+    }
+
+    pub fn twin() -> u256 {
+        let c = make()
+        c.value
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(author::twin() == 7)
+    assert!(Target {}.get() == author::twin())
+}

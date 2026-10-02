@@ -1,0 +1,52 @@
+// Target: RD86. A user-written provider in the style of the Fe `#[error]` port gives the same selector as `#[error]`.
+// Oracle: `#[error]` twins (the Rust desugaring today, the Fe provider after RD86) and `cast sig` values
+//   (Unauthorized() = 0x82b42900, Insufficient(uint256) = 0x91bcc564). Needs string splices (QUOTATION_DESIGN amendments).
+// The provider takes the name as a provider string; reflecting a record's name is RD86's own choice, not assumed here.
+use core::error::ErrorVariant
+use std::abi::Sol
+
+mod author {
+    use core::error::ErrorVariant
+    use std::abi::Sol
+    use std::abi::SolCompat
+    use core::meta::{Code, Item, Record, field, field_type}
+
+    pub const fn unauthorized(record: Record) -> Code<Item> {
+        let name = "Unauthorized"
+        quote {
+            impl ErrorVariant<Sol> for ${record} {
+                const SELECTOR: u32 = std::abi::sol::sol((${name}, "(", ")"))
+            }
+        }
+    }
+
+    pub const fn insufficient(record: Record) -> Code<Item> {
+        let name = "Insufficient"
+        let need = field(record, 0)
+        quote {
+            impl ErrorVariant<Sol> for ${record} {
+                const SELECTOR: u32 = std::abi::sol::sol((${name}, "(", <${field_type(need)} as SolCompat>::SOL_TYPE, ")"))
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::unauthorized)]
+pub struct UserUnauthorized {}
+
+#[generate(ingot::author::insufficient)]
+pub struct UserInsufficient { pub need: u256 }
+
+#[error]
+pub struct Unauthorized {}
+
+#[error]
+pub struct Insufficient { pub need: u256 }
+
+#[test]
+fn user_provider_matches_error_attribute() {
+    assert!(<Unauthorized as ErrorVariant<Sol>>::SELECTOR == 0x82b42900)
+    assert!(<Insufficient as ErrorVariant<Sol>>::SELECTOR == 0x91bcc564)
+    assert!(<UserUnauthorized as ErrorVariant<Sol>>::SELECTOR == <Unauthorized as ErrorVariant<Sol>>::SELECTOR)
+    assert!(<UserInsufficient as ErrorVariant<Sol>>::SELECTOR == <Insufficient as ErrorVariant<Sol>>::SELECTOR)
+}

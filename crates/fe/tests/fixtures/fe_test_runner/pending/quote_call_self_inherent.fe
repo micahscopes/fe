@@ -1,0 +1,41 @@
+// Target: F1. A generated trait method calls an inherent method on a non-Copy `self`.
+// Oracle: hand-written twin type `B` with the same impl text gives the same value.
+// Position: trait method of a generated impl calling an inherent method.
+trait Twice {
+    fn twice(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn twice(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Twice for ${record} {
+                fn twice(self) -> u256 { self.raw() * 2 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::twice)]
+struct A { v: u256 }
+
+impl A {
+    fn raw(self) -> u256 { self.v }
+}
+
+struct B { v: u256 }
+
+impl B {
+    fn raw(self) -> u256 { self.v }
+}
+
+impl Twice for B {
+    fn twice(self) -> u256 { self.raw() * 2 }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(B { v: 4 }.twice() == 8)
+    assert!(A { v: 4 }.twice() == (B { v: 4 }).twice())
+}

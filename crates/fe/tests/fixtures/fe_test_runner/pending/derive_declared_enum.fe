@@ -1,0 +1,77 @@
+// Target: RD84 (1), M2-a after Q6. Declared derivation for enums with unit, tuple and record variants.
+// Oracle: values from mb2 `fe_test/derived_eq_default_enum.fe` (VERIFIED in the parity audit), `Eq` parts.
+// Position: enums.
+use core::ops::Eq
+use core::derive::Derive
+use core::meta::{Arm, Code, Expr, Item, Record, Where, binders, empty, field_type, variant, variant_count, variant_field, variant_field_count}
+
+// EnumEq: variant by variant, then field by field (Q6; RD79 binder holes).
+// Placeholders: the variant reflection names, the `Arm` kind and the arm-list fold are modeled on
+// `field_count`/`field` and mb2's fold; RD79 fixes only `binders(v, n)`, `${lhs}` and `${lhs.at(f)}`.
+pub struct EnumEq {}
+
+impl Derive<Eq> for EnumEq {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let mut arms = empty<Arm>()
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < variant_count(record) {
+            let v = variant(record, i)
+            let lhs = binders(v, 0)
+            let rhs = binders(v, 1)
+            let mut cmp: Code<Expr> = quote { true }
+            let mut j: usize = 0
+            while j < variant_field_count(v) {
+                let f = variant_field(v, j)
+                cmp = quote { ${cmp} && ${lhs.at(f)} == ${rhs.at(f)} }
+                bounds = quote { where ${bounds}, ${field_type(f)}: Eq }
+                j += 1
+            }
+            arms = quote(other) {
+                ${arms}
+                ${lhs} => match other {
+                    ${rhs} => ${cmp}
+                    _ => false
+                }
+            }
+            i += 1
+        }
+        quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { match self { ${arms} } } } }
+    }
+}
+
+pub enum Direction {
+    North,
+    South,
+    East,
+    West,
+}
+
+impl Eq for Direction with (EnumEq)
+
+pub enum Shape {
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+    Empty,
+}
+
+impl Eq for Shape with (EnumEq)
+
+#[test]
+fn unit_variants() {
+    assert!(Direction::North.eq(Direction::North))
+    assert!(!Direction::North.eq(Direction::South))
+}
+
+#[test]
+fn payload_variants() {
+    assert!(Shape::Circle(5).eq(Shape::Circle(5)))
+    assert!(!Shape::Circle(5).eq(Shape::Circle(6)))
+    let a = Shape::Rect { w: 2, h: 3 }
+    let b = Shape::Rect { w: 2, h: 3 }
+    assert!(a.eq(b))
+    let c = Shape::Rect { w: 2, h: 3 }
+    let d = Shape::Rect { w: 2, h: 4 }
+    assert!(!c.eq(d))
+    assert!(!Shape::Circle(0).eq(Shape::Empty))
+}

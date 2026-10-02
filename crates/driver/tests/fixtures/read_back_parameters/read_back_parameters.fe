@@ -1,0 +1,8 @@
+pub fn ordered(_ first: u256, _ second: u256) -> u256 {
+    first * 10 + second
+}
+
+#[test]
+fn authored_order() {
+    assert!(ordered(2, 7) == 27)
+}

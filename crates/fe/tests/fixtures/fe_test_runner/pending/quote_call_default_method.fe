@@ -1,0 +1,46 @@
+// Target: F1. A generated method calls a default trait method on a non-Copy `self`.
+// Oracle: hand-written twin type `B` gives the same value.
+// Position: default trait method (`Read::twice` has a body in the trait).
+trait Read {
+    fn get(self) -> u256
+    fn twice(self) -> u256 { self.get() * 2 }
+}
+
+trait Quad {
+    fn quad(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn quad(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Quad for ${record} {
+                fn quad(self) -> u256 { self.twice() * 2 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::quad)]
+struct A { v: u256 }
+
+impl Read for A {
+    fn get(self) -> u256 { self.v }
+}
+
+struct B { v: u256 }
+
+impl Read for B {
+    fn get(self) -> u256 { self.v }
+}
+
+impl Quad for B {
+    fn quad(self) -> u256 { self.twice() * 2 }
+}
+
+#[test]
+fn generated_matches_twin() {
+    assert!(B { v: 3 }.quad() == 12)
+    assert!(A { v: 3 }.quad() == (B { v: 3 }).quad())
+}

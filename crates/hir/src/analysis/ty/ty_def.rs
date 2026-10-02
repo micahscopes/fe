@@ -1535,6 +1535,35 @@ pub struct TyParam<'db> {
 }
 
 impl<'db> TyParam<'db> {
+    /// Finds the authored binder, including parameters copied into a method's
+    /// lowered list from its owner. Implicit and associated-family parameters
+    /// have no declaration in this ordinary generic-parameter namespace.
+    pub fn declaration_scope(&self, db: &'db dyn HirAnalysisDb) -> Option<ScopeId<'db>> {
+        if !self.is_normal() || self.is_assoc_ty_param() {
+            return None;
+        }
+        let mut owner = GenericParamOwner::from_item_opt(self.owner.item())?;
+        if let GenericParamOwner::Func(func) = owner
+            && func.is_associated_func(db)
+        {
+            let parent = owner.parent(db)?;
+            if self.idx
+                < collect_generic_params(db, parent)
+                    .params_precursor(db)
+                    .len()
+            {
+                owner = parent;
+            }
+        }
+        let offset = collect_generic_params(db, owner).offset_to_explicit_params_position(db);
+        let index = self.idx.checked_sub(offset)?;
+        owner.params(db).nth(index)?;
+        Some(ScopeId::GenericParam(
+            owner.into(),
+            u16::try_from(index).ok()?,
+        ))
+    }
+
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         TyId::new(db, TyData::TyParam(self))
     }
@@ -1579,7 +1608,7 @@ impl<'db> TyParam<'db> {
             }
             return name_str;
         }
-        self.name.data(db).to_string()
+        self.name.display_name(db)
     }
 
     pub fn is_trait_self(&self) -> bool {

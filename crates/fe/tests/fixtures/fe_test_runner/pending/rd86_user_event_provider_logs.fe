@@ -1,0 +1,46 @@
+// Target: RD86. A user-written provider in the style of the Fe `#[event]` port gives the same topic and the same log as `#[event]`.
+// Oracle: the `#[event]` twin `Stored` and `cast keccak "Stored(uint256)"`; the file name contains `logs`, so the harness
+//   passes `--show-logs` and the snapshot shows both emitted logs, which must be byte-identical.
+// Placeholders: none beyond string splices; the emit body follows today's desugared `#[event]` output
+//   (crates/hir/test_files/desugar/event_transfer.snap), written by hand for one static `u256` data field.
+use std::evm::{Event, Evm}
+
+mod author {
+    use std::evm::{Event, Log}
+    use std::abi::SolCompat
+    use core::meta::{Code, Item, Record, field, field_type}
+
+    pub const fn stored(record: Record) -> Code<Item> {
+        let name = "Stored"
+        let value = field(record, 0)
+        quote {
+            impl Event for ${record} {
+                const TOPIC0: u256 = core::keccak((${name}, "(", <${field_type(value)} as SolCompat>::SOL_TYPE, ")"))
+
+                fn emit<L: Log>(own self, _ log: mut L) {
+                    let data = core::ptr::MemBuffer::alloc(32)
+                    core::abi::encode_field_at<std::abi::Sol, u256>(self.${value}, data.ptr(), head_pos: 0, tail: 32)
+                    log.log1(data: data.span(), topic0: Self::TOPIC0)
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::stored)]
+pub struct UserStored { pub value: u256 }
+
+#[event]
+pub struct Stored { pub value: u256 }
+
+#[test]
+fn topics_match() {
+    assert!(<Stored as Event>::TOPIC0 == 0xc6d8c0af6d21f291e7c359603aa97e0ed500f04db6e983b9fce75a91c6b8da6b)
+    assert!(<UserStored as Event>::TOPIC0 == <Stored as Event>::TOPIC0)
+}
+
+#[test]
+fn logs_match() uses (evm: mut Evm) {
+    evm.emit(Stored { value: 42 })
+    evm.emit(UserStored { value: 42 })
+}

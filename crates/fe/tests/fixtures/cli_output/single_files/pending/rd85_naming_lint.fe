@@ -1,0 +1,18 @@
+// Target: RD85 convention ("a naming lint ... warns, it never changes what a name means"). Constants not in UPPER_SNAKE and impl names not in CamelCase warn.
+// expect: accepted with two warnings: the constant `Casual` at line 18 (suggest `CASUAL`) and the impl name `casual`
+//   at line 14 (suggest `Casual`). No error, and resolution is unchanged.
+trait Greet {
+    fn greet(self) -> u32
+}
+
+struct U { id: u256 }
+
+impl Greet for U {
+    fn greet(self) -> u32 { return 1 }
+}
+
+impl Greet for U as casual {
+    fn greet(self) -> u32 { return 2 }
+}
+
+const Casual: u32 = 7 // <- here
