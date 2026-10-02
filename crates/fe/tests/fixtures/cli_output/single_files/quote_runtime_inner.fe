@@ -1,0 +1,10 @@
+use core::meta::{Code, Expr}
+
+const fn builds_code(n: u256) -> bool {
+    let _code: Code<Expr> = quote { ${10 / n} }
+    true
+}
+
+pub fn runtime_call(n: u256) -> bool {
+    builds_code(n: n)
+}

@@ -139,6 +139,9 @@ fn lower_hir_ty_impl<'db>(
         }
 
         HirTyKind::Never => TyId::never(db),
+        // A type splice stands only in a quote template, which is never
+        // lowered in place.
+        HirTyKind::Hole(_) => TyId::invalid(db, InvalidCause::Other),
     }
 }
 
@@ -310,7 +313,7 @@ fn collect_layout_root_uses_in_hir_ty<'db>(
                 }
             }
         }
-        HirTyKind::Primitive(_) | HirTyKind::Never => {}
+        HirTyKind::Primitive(_) | HirTyKind::Never | HirTyKind::Hole(_) => {}
     }
 }
 
@@ -734,22 +737,23 @@ fn lower_const_ty_ty<'db>(
     ty: HirTyId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> TyId<'db> {
-    let HirTyKind::Path(path) = ty.data(db) else {
-        return TyId::invalid(db, InvalidCause::InvalidConstParamTy);
+    // Generated HIR retains built-in identity directly; authored types use paths.
+    let ty = match ty.data(db) {
+        HirTyKind::Primitive(primitive) => TyId::new(db, TyData::TyBase(TyBase::from(*primitive))),
+        HirTyKind::Path(path) => {
+            if !path
+                .to_opt()
+                .map(|p| p.generic_args(db).is_empty(db))
+                .unwrap_or(true)
+            {
+                return TyId::invalid(db, InvalidCause::InvalidConstParamTy);
+            }
+            lower_path(db, scope, *path, assumptions)
+        }
+        _ => return TyId::invalid(db, InvalidCause::InvalidConstParamTy),
     };
 
-    if !path
-        .to_opt()
-        .is_none_or(|p| p.generic_args(db).is_empty(db))
-    {
-        return TyId::invalid(db, InvalidCause::InvalidConstParamTy);
-    }
-    let ty = normalize_ty(
-        db,
-        lower_path(db, scope, *path, assumptions),
-        scope,
-        assumptions,
-    );
+    let ty = normalize_ty(db, ty, scope, assumptions);
 
     if ty.has_invalid(db)
         || ty.is_integral(db)

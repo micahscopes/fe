@@ -1,0 +1,26 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_invalid_declaration_name.fe
+---
+=== STDOUT ===
+error[18-0004]: invalid generated declaration: generated name must be an identifier
+   ┌─ quote_invalid_declaration_name.fe:6:9
+   │
+ 6 │ ╭         quote {
+ 7 │ │             pub fn ${name}() -> u256 { 1 }
+ 8 │ │         }
+   │ ╰─────────^ invalid generated declaration: generated name must be an identifier
+   · │
+12 │   #[generate(ingot::author::emit)]
+   │   -------------------------------- generated here
+
+
+ERROR [<time>] error[18-0004]: invalid generated declaration: generated name must be an identifier
+
+test result: FAILED. 0 passed; 1 failed
+
+failures:
+    quote_invalid_declaration_name::compile
+
+=== EXIT CODE: 1 ===

@@ -1,5 +1,5 @@
 <fixture>: error[2-0002]: `get_code` is not found
-   ┌─ missing_selected_accessor.fe:53:30
+   ┌─ missing_selected_accessor.fe:50:30
    │
-53 │ fn missing() -> u64 { flags::get_code(flags::sample()) }
+50 │ fn missing() -> u64 { flags::get_code(flags::sample()) }
    │                              ^^^^^^^^ `get_code` is not found

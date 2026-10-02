@@ -1,0 +1,37 @@
+trait Family {
+    type Out
+    type Wrapped
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Tag { pub value: u256 }
+    pub struct Envelope<T> { pub item: T }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Family for ${record} {
+                type Out = Tag
+                type Wrapped = Envelope<Tag>
+            }
+        }
+    }
+}
+
+struct Tag { other: bool }
+struct Envelope<T> { other: T }
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn answer() -> Target::Out { author::Tag { value: 43 } }
+fn wrapped() -> Target::Wrapped {
+    author::Envelope { item: author::Tag { value: 44 } }
+}
+
+#[test]
+fn quoted_associated_type_keeps_provider_type() {
+    assert!(answer().value == 43)
+    assert!(wrapped().item.value == 44)
+}

@@ -43,7 +43,7 @@ fn provider_paths_keep_their_ingot(fixture: Fixture<&str>) {
         .unwrap()
         .expect("generation request");
     let file = output.workspace().get(&output, &owner_url).unwrap();
-    for name in ["answer", "answer_shadow"] {
+    for name in ["answer", "answer_quote", "answer_scratch", "answer_shadow"] {
         let function = output
             .top_mod(file)
             .all_funcs(&output)
@@ -67,4 +67,37 @@ fn provider_paths_keep_their_ingot(fixture: Fixture<&str>) {
         .pretty_print(&output);
         assert_eq!(result, "43", "{name}");
     }
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_provider_scope/private_signature/src", glob: "lib.fe")]
+fn provider_private_type_cannot_enter_generated_signature(fixture: Fixture<&str>) {
+    let project = Path::new(fixture.path())
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let policy = project.parent().unwrap().join("policy");
+    let project_url = Url::from_directory_path(project).expect("project path");
+    let policy_url = Url::from_directory_path(&policy).expect("policy path");
+    let mut db = DriverDataBase::default();
+    add_file(&mut db, project, "fe.toml");
+    add_file(&mut db, &policy, "fe.toml");
+    add_file(&mut db, &policy, "src/lib.fe");
+    add_file(&mut db, project, "src/lib.fe");
+    db.dependency_graph().add_dependency(
+        &mut db,
+        &project_url,
+        &policy_url,
+        "policy".into(),
+        DependencyArguments::default(),
+    );
+    let error = fe_driver::elaboration::prepare_target(&db, &project_url)
+        .err()
+        .expect("private type in generated signature must fail");
+    assert_eq!(error.code, 5, "{error:?}");
+    assert!(error.message.contains("Scratch"), "{error:?}");
+    assert!(
+        error.message.contains("not visible") || error.message.contains("private"),
+        "{error:?}"
+    );
 }

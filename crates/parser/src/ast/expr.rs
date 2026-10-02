@@ -26,6 +26,8 @@ ast_node! {
     | SK::IfExpr
     | SK::MatchExpr
     | SK::WithExpr
+    | SK::QuoteExpr
+    | SK::QuoteHoleExpr
     | SK::ParenExpr
     | SK::AssignExpr
     | SK::AugAssignExpr,
@@ -58,6 +60,8 @@ impl Expr {
             SK::IfExpr => ExprKind::If(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::MatchExpr => ExprKind::Match(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::WithExpr => ExprKind::With(AstNode::cast(self.syntax().clone()).unwrap()),
+            SK::QuoteExpr => ExprKind::Quote(AstNode::cast(self.syntax().clone()).unwrap()),
+            SK::QuoteHoleExpr => ExprKind::QuoteHole(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::ParenExpr => ExprKind::Paren(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::AssignExpr => ExprKind::Assign(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::AugAssignExpr => ExprKind::AugAssign(AstNode::cast(self.syntax().clone()).unwrap()),
@@ -266,6 +270,11 @@ impl FieldExpr {
         self.field_name()
             .or_else(|| self.field_index().map(|i| i.token().clone()))
     }
+
+    /// `${f}` in `x.${f}`.
+    pub fn field_hole(&self) -> Option<QuoteHole> {
+        support::child(self.syntax())
+    }
 }
 
 ast_node! {
@@ -413,6 +422,102 @@ impl WithExpr {
 }
 
 ast_node! {
+    /// `quote { .. }`: Fe syntax held as a compile-time value, optionally
+    /// naming open names that the fragment's destination binds.
+    pub struct QuoteExpr,
+    SK::QuoteExpr
+}
+impl QuoteExpr {
+    pub fn open_names(&self) -> Option<QuoteOpenList> {
+        support::child(self.syntax())
+    }
+
+    /// The body of an expression quote.
+    pub fn body(&self) -> Option<BlockExpr> {
+        support::child(self.syntax())
+    }
+
+    /// The body of an item quote.
+    pub fn items(&self) -> Option<QuoteItemList> {
+        support::child(self.syntax())
+    }
+
+    /// The body of a where-predicate quote.
+    pub fn where_predicates(&self) -> Option<QuoteWhere> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    pub struct QuoteOpenList,
+    SK::QuoteOpenList
+}
+impl QuoteOpenList {
+    pub fn names(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .filter(|token| token.kind() == SK::Ident)
+    }
+}
+
+ast_node! {
+    /// Quoted items in source order; each is an item or an items splice.
+    pub struct QuoteItemList,
+    SK::QuoteItemList
+}
+impl QuoteItemList {
+    pub fn entries(&self) -> impl Iterator<Item = QuoteItemEntry> + '_ {
+        self.syntax().children().filter_map(|node| {
+            if let Some(hole) = QuoteHole::cast(node.clone()) {
+                Some(QuoteItemEntry::Hole(hole))
+            } else {
+                super::Item::cast(node).map(QuoteItemEntry::Item)
+            }
+        })
+    }
+}
+
+pub enum QuoteItemEntry {
+    Item(super::Item),
+    Hole(QuoteHole),
+}
+
+ast_node! {
+    /// `{ where .. }` in `quote { where .. }`.
+    pub struct QuoteWhere,
+    SK::QuoteWhere
+}
+impl QuoteWhere {
+    pub fn where_clause(&self) -> Option<super::WhereClause> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `${e}` in expression position.
+    pub struct QuoteHoleExpr,
+    SK::QuoteHoleExpr
+}
+impl QuoteHoleExpr {
+    pub fn expr(&self) -> Option<Expr> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `${e}` standing for a member, a declared name, items or where
+    /// predicates; the parent node says which.
+    pub struct QuoteHole,
+    SK::QuoteHole
+}
+impl QuoteHole {
+    pub fn expr(&self) -> Option<Expr> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
     pub struct WithParamList,
     SK::WithParamList,
     IntoIterator<Item=WithParam>,
@@ -514,6 +619,8 @@ pub enum ExprKind {
     If(IfExpr),
     Match(MatchExpr),
     With(WithExpr),
+    Quote(QuoteExpr),
+    QuoteHole(QuoteHoleExpr),
     Paren(ParenExpr),
     Assign(AssignExpr),
     AugAssign(AugAssignExpr),
@@ -533,6 +640,11 @@ impl RecordField {
     /// Returns the name of the field.
     pub fn label(&self) -> Option<SyntaxToken> {
         support::token(self.syntax(), SK::Ident)
+    }
+
+    /// Returns a quoted field-label splice, when present.
+    pub fn label_hole(&self) -> Option<QuoteHole> {
+        support::child(self.syntax())
     }
 
     /// Returns the expression of the field.

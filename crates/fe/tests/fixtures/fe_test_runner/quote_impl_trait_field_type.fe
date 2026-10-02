@@ -1,0 +1,25 @@
+trait Value<T> {
+    fn value(own self) -> T
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field, field_type}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        let ty = field_type(f)
+        quote {
+            impl ingot::Value<${ty}> for ${record} {
+                fn value(own self) -> ${ty} { self.${f} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_impl_uses_reflected_field_type_as_trait_argument() {
+    assert!(Target { value: 42 }.value() == 42)
+}

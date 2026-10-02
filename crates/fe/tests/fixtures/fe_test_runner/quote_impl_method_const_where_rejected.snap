@@ -1,0 +1,24 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_impl_method_const_where_rejected.fe
+---
+=== STDOUT ===
+file://<project>/crates/fe/tests/fixtures/fe_test_runner/quote_impl_method_const_where_rejected.fe: error[8-0093]: const requirement is not satisfied
+   ┌─ quote_impl_method_const_where_rejected.fe:22:13
+   │
+ 2 │     fn value<const N: usize>(self) -> usize where N > 0
+   │                                                   ----- required by this predicate
+   ·
+22 │     assert!(Target { value: 1 }.value<0>() == 0)
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`
+
+
+ERROR [<time>] file://<project>/crates/fe/tests/fixtures/fe_test_runner/quote_impl_method_const_where_rejected.fe: error[8-0093]: const requirement is not satisfied
+
+test result: FAILED. 0 passed; 1 failed
+
+failures:
+    quote_impl_method_const_where_rejected::compile
+
+=== EXIT CODE: 1 ===

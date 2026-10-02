@@ -21,7 +21,7 @@ use crate::{
             ty_is_copy,
         },
     },
-    core::semantic::EffectEnvView,
+    core::{meta::MetaItem, semantic::EffectEnvView},
     hir_def::{ArithBinOp, BinOp, UnOp},
 };
 
@@ -479,6 +479,23 @@ fn verify_expr<'db>(
             let value_ty = capability_target_ty(db, value_ty);
             let result_ty = capability_target_ty(db, result_ty);
             type_is_boundary_compatible(db, body, value_ty, result_ty)
+                .then_some(())
+                .ok_or(NormalizedBodyVerifyError::ExpressionType)
+        }
+        NExpr::Quote { .. } => {
+            let const_owner = match body.template_owner {
+                BodyOwner::Func(func) => func.is_const(db),
+                BodyOwner::Const(_) | BodyOwner::AnonConstBody { .. } => true,
+                BodyOwner::ContractInit { .. } | BodyOwner::ContractRecvArm { .. } => false,
+            };
+            let scope = body.template_owner.scope();
+            let (base, args) = result_ty.decompose_ty_app(db);
+            let code = MetaItem::Code.resolve(db, scope);
+            let kind = args.first().copied();
+            let valid_kind = [MetaItem::Expr, MetaItem::Item, MetaItem::Where]
+                .into_iter()
+                .any(|item| item.resolve(db, scope) == kind);
+            (const_owner && code == Some(base) && args.len() == 1 && valid_kind)
                 .then_some(())
                 .ok_or(NormalizedBodyVerifyError::ExpressionType)
         }
@@ -1086,6 +1103,7 @@ fn value_has_mutable_view_origin<'db>(
             }
         }
         NExpr::CodeRegionRef { .. }
+        | NExpr::Quote { .. }
         | NExpr::Const(_)
         | NExpr::Unary { .. }
         | NExpr::Binary { .. }

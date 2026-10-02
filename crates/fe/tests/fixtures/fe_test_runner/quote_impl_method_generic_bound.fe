@@ -1,0 +1,23 @@
+trait Relay {
+    fn relay<Payload: Copy>(self, value: own Payload) -> Payload
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Relay for ${record} {
+                fn relay<Payload: Copy>(self, value: own Payload) -> Payload { value }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target<Payload: Copy> { value: Payload }
+
+#[test]
+fn quoted_method_bound_keeps_selected_trait() {
+    assert!(Target<u256> { value: 1 }.relay<bool>(value: true))
+}

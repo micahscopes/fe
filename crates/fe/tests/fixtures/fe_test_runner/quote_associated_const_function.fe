@@ -1,0 +1,29 @@
+trait Value {
+    const N: u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    const fn seven() -> u256 { 7 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Value for ${record} {
+                const N: u256 = seven()
+            }
+        }
+    }
+}
+
+mod target {
+    pub const fn seven() -> u256 { 99 }
+
+    #[generate(ingot::author::emit)]
+    struct Token {}
+
+    #[test]
+    fn quoted_associated_constant_calls_checked_function() {
+        assert!(<Token as ingot::Value>::N == 7)
+    }
+}

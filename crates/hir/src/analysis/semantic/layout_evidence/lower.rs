@@ -1317,6 +1317,7 @@ impl<'a, 'db> LayoutEvidenceBuilder<'a, 'db> {
                     NExpr::Const(_) if !result_used => (LayoutTransferBundle::default(), None),
                     NExpr::Const(_) => (self.ambient_transfer_bundle(dst)?, None),
                     NExpr::ArrayRepeat { .. }
+                    | NExpr::Quote { .. }
                     | NExpr::CodeRegionRef { .. }
                     | NExpr::Unary { .. }
                     | NExpr::Binary { .. }

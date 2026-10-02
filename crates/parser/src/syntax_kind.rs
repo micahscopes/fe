@@ -74,6 +74,9 @@ pub enum SyntaxKind {
     /// `#`
     #[token("#")]
     Pound,
+    /// `$` in a quotation splice.
+    #[token("$")]
+    Dollar,
     /// `// Comment`
     #[regex(r"//[^\n\r]*")]
     Comment,
@@ -314,6 +317,21 @@ pub enum SyntaxKind {
     MatchExpr,
     /// `with (Effect = value, ..) { Block }`
     WithExpr,
+    /// `quote { expr }` or `quote(open, ..) { expr }`
+    QuoteExpr,
+    /// Open names supplied to a quotation.
+    QuoteOpenList,
+    /// `${expr}` inside a quotation.
+    QuoteHoleExpr,
+    /// `${ty}` in type position inside a quotation.
+    QuoteHoleType,
+    /// `${e}` for a member, a declared name, items or where predicates. The
+    /// parent node says which.
+    QuoteHole,
+    /// `quote { item.. }`: quoted items, some of which may be `${items}`.
+    QuoteItemList,
+    /// `quote { where .. }`: quoted where predicates.
+    QuoteWhere,
     /// `(1 + 2)`
     ParenExpr,
     /// x = 1
@@ -621,6 +639,7 @@ impl SyntaxKind {
             SyntaxKind::FatArrow => "`=>`",
             SyntaxKind::Underscore => "`_`",
             SyntaxKind::Pound => "`#`",
+            SyntaxKind::Dollar => "`$`",
             SyntaxKind::Plus => "`+`",
             SyntaxKind::Minus => "`-`",
             SyntaxKind::Star => "`*`",
@@ -725,6 +744,13 @@ impl SyntaxKind {
             SyntaxKind::IfExpr => "`if` expression",
             SyntaxKind::MatchExpr => "`match` expression",
             SyntaxKind::WithExpr => "`with` expression",
+            SyntaxKind::QuoteExpr => "`quote` expression",
+            SyntaxKind::QuoteOpenList => "`quote` open name list",
+            SyntaxKind::QuoteHoleExpr => "`${...}` splice hole",
+            SyntaxKind::QuoteHoleType => "`${...}` type splice",
+            SyntaxKind::QuoteHole => "`${...}` splice",
+            SyntaxKind::QuoteItemList => "quoted items",
+            SyntaxKind::QuoteWhere => "quoted where predicates",
             SyntaxKind::ParenExpr => "parenthesized expression",
             SyntaxKind::AssignExpr => "assignment expression",
             SyntaxKind::AugAssignExpr => "augmented assignment expression",
@@ -860,6 +886,7 @@ impl SyntaxKind {
                 | SyntaxKind::Percent
                 | SyntaxKind::Tilde
                 | SyntaxKind::Not
+                | SyntaxKind::Dollar
                 | SyntaxKind::Hat
                 | SyntaxKind::Amp
                 | SyntaxKind::Amp2

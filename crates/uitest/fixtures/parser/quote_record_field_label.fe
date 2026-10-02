@@ -1,0 +1,4 @@
+fn record_field_splices() {
+    let _named = quote { Self { ${field}: value } }
+    let _shorthand = quote { Self { ${value} } }
+}

@@ -1,0 +1,30 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_transplant_limit.fe
+---
+=== STDOUT ===
+error[18-0004]: invalid generated declaration: quoted function exceeds 1000 transplanted HIR nodes
+    ┌─ quote_transplant_limit.fe:5:9
+    │
+  5 │ ╭         quote {
+  6 │ │             pub fn many() -> u256 {
+  7 │ │             let _ = true
+  8 │ │             let _ = true
+    · │
+509 │ │             }
+510 │ │         }
+    │ ╰─────────^ invalid generated declaration: quoted function exceeds 1000 transplanted HIR nodes
+    · │
+514 │   #[generate(ingot::author::emit)]
+    │   -------------------------------- generated here
+
+
+ERROR [<time>] error[18-0004]: invalid generated declaration: quoted function exceeds 1000 transplanted HIR nodes
+
+test result: FAILED. 0 passed; 1 failed
+
+failures:
+    quote_transplant_limit::compile
+
+=== EXIT CODE: 1 ===

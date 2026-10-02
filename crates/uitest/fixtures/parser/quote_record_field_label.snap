@@ -1,0 +1,6 @@
+---
+source: crates/uitest/tests/parser.rs
+expression: diags
+input_file: fixtures/parser/quote_record_field_label.fe
+---
+

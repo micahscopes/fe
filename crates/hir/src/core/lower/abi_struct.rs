@@ -13,7 +13,7 @@ use super::{
 use crate::{
     HirDb,
     hir_def::{
-        AbiRecordKind, AssocConstDef, AttrListId, Body, BodyKind, Expr, ExprId, FieldDefListId,
+        AbiRecordKind, AssocConstDef, AttrListId, BodyKind, Expr, ExprId, FieldDefListId,
         FuncModifiers, FuncParam, FuncParamMode, FuncParamName, GenericArgListId,
         GenericParamListId, IdentId, ImplTrait, LitKind, Partial, Pat, PathId, PathKind, Stmt,
         StringId, Struct, TrackedItemVariant, TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind,
@@ -628,20 +628,7 @@ fn lower_sol_compat_impl<'db>(
             Expr::Tuple(elems.iter().map(|(_, expr)| *expr).collect()),
             origin.clone(),
         );
-        let body = Body::new(
-            db,
-            body_id,
-            root,
-            BodyKind::Anonymous,
-            body_ctxt.stmts,
-            body_ctxt.exprs,
-            body_ctxt.conds,
-            body_ctxt.pats,
-            body_ctxt.f_ctxt.top_mod(),
-            body_ctxt.source_map,
-            origin.clone(),
-        );
-        body_ctxt.f_ctxt.leave_item_scope(body);
+        let body = body_ctxt.build_with_origin(origin.clone(), root, BodyKind::Anonymous);
 
         let self_s = TypeId::new(
             db,

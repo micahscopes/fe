@@ -1,0 +1,19 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/private_qualified_trait.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/private_qualified_trait.fe
+
+error[2-0003]: `HasK` is not visible
+   ┌─ private_qualified_trait.fe:11:41
+   │
+ 2 │     trait HasK {
+   │           ---- `HasK` is defined here
+   ·
+11 │ fn answer() -> u256 { <u256 as private::HasK>::K }
+   │                                         ^^^^ `HasK` is not visible
+
+
+=== EXIT CODE: 1 ===

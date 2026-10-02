@@ -1,0 +1,30 @@
+trait Reads {
+    fn get(self) -> u256 uses (counter: author::Counter)
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Counter { pub value: u256 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Reads for ${record} {
+                fn get(self) -> u256 uses (counter: Counter) { counter.value }
+            }
+        }
+    }
+}
+
+struct Counter { other: bool }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_effect_keeps_provider_type_and_binding() {
+    let value = with (author::Counter = author::Counter { value: 7 }) {
+        Target { value: 1 }.get()
+    }
+    assert!(value == 7)
+}

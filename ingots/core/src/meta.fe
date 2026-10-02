@@ -9,6 +9,20 @@ impl Copy for Record {}
 impl Copy for Field {}
 impl Copy for FieldType {}
 
+/// Fe syntax held as a compile-time value, built by `quote { .. }`. `K` is its
+/// kind: `Expr`, `Item` or `Where`. A code value has no runtime
+/// representation, and nothing inspects it; generation copies it into
+/// ordinary checked code.
+pub struct Code<K> { seal: bool }
+impl<K> Copy for Code<K> {}
+
+/// An expression fragment.
+pub struct Expr {}
+/// A list of items: functions, constants and impls.
+pub struct Item {}
+/// A list of where predicates.
+pub struct Where {}
+
 /// A Fe-authored query family applies this trait to each reflected field type.
 /// The implementation's ordinary prerequisites must hold before evaluation.
 pub trait FieldQuery<R> {
@@ -30,6 +44,12 @@ extern {
 }
 
 extern {
+    /// The empty fragment of kind `K`, the seed of a fold over items or where
+    /// predicates.
+    pub const fn empty<K>() -> Code<K>
+}
+
+extern {
     /// Count the fields of a nongeneric record from its defining module.
     ///
     /// This owner-scoped operation includes private fields. Aliases retain the
@@ -37,94 +57,8 @@ extern {
     pub const fn record_field_count<T>() -> u256
 }
 
-/// Structural declaration syntax. Reflected leaves keep their owner identity;
-/// constructing a value does not authorize its emission or certify its types.
-/// Bool, U64, U256 and BytePointer name built-in types, even when the target
-/// module defines an alias with the same spelling.
-pub enum DeclarationType {
-    Unit,
-    Bool,
-    U64,
-    U256,
-    Record(Record),
-    Field(FieldType),
-    BytePointer,
-    Named(String<31>),
-}
-impl Copy for DeclarationType {}
-
 pub enum DeclarationName {
     Literal(String<31>),
     FieldPrefix(String<31>, Field),
 }
 impl Copy for DeclarationName {}
-
-/// References use parameter order or earlier expression indices. Ordinary Fe
-/// checking determines operation types, ownership, and arithmetic behavior.
-pub enum BodyExpr {
-    Parameter(usize),
-    Field(usize, Field),
-    Bool(bool),
-    U256(u256),
-    Add(usize, usize),
-    Call(FunctionCall),
-    Unit,
-    /// Unused capacity. Every following slot must also be End. References and
-    /// the result cannot refer to these slots.
-    End,
-}
-impl Copy for BodyExpr {}
-
-/// Explicit paths start with `ingot`, `core`, or `std`. Their root is bound to
-/// that ingot before the generated declaration is checked, so a target module
-/// cannot redirect them with a local name. `ingot` means the provider's ingot.
-/// Ordinary visibility and requirements apply.
-/// Optional argument slots must form a prefix, with no holes.
-pub struct FunctionCall {
-    pub path: String<31>,
-    pub types: [Option<DeclarationType>; 2],
-    pub arguments: [Option<CallArgument>; 4],
-}
-impl Copy for FunctionCall {}
-
-pub struct CallArgument {
-    pub label: Option<String<31>>,
-    pub expression: usize,
-}
-impl Copy for CallArgument {}
-
-/// A complete function, including its signature, checked during ordinary
-/// compilation after source-invoked providers produce all declarations.
-pub struct FunctionDefinition<const P: usize, const N: usize> {
-    pub name: DeclarationName,
-    pub public: bool,
-    pub const_function: bool,
-    pub parameters: [DeclarationType; P],
-    pub return_type: DeclarationType,
-    pub expressions: [BodyExpr; N],
-    pub result: usize,
-}
-impl<const P: usize, const N: usize> Copy for FunctionDefinition<P, N> {}
-
-pub enum AssociatedConstant<const N: usize> {
-    Bool(DeclarationName, bool),
-    U256(DeclarationName, u256),
-    /// An associated constant whose value is checked after generation. The
-    /// expression references have the same rules as a generated function body.
-    Expression(DeclarationName, DeclarationType, [BodyExpr; N], usize),
-}
-impl<const N: usize> Copy for AssociatedConstant<N> {}
-
-/// An implementation for the authorized record. N bounds both constant
-/// expressions and the optional method body. The method's first parameter
-/// must be Record(owner) and denotes `own self`. Trait methods must set
-/// `public` to false. Ordinary checking establishes the trait contract and
-/// coherence, including unused members.
-pub struct RecordImplementation<const P: usize, const N: usize> {
-    pub owner: Record,
-    pub trait_path: String<31>,
-    pub types: [Option<DeclarationType>; 2],
-    pub constants: [Option<AssociatedConstant<N>>; 2],
-    pub method: Option<FunctionDefinition<P, N>>,
-}
-impl<const P: usize, const N: usize> Copy for RecordImplementation<P, N> {}

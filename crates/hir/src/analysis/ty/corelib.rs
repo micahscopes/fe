@@ -830,6 +830,7 @@ pub fn intrinsic_contract<'db>(
             "core::meta::field_type",
             "core::meta::type_is",
             "core::meta::query_field",
+            "core::meta::empty",
             "core::meta::record_field_count",
         ]
         .iter()

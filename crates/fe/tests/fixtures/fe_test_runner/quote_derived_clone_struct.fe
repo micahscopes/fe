@@ -1,0 +1,32 @@
+trait Clone {
+    fn clone(self) -> Self
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn clone_struct(record: Record) -> Code<Item> {
+        let x = field(record, 0)
+        let y = field(record, 1)
+        quote {
+            impl ingot::Clone for ${record} {
+                fn clone(self) -> Self {
+                    Self { ${x}: self.${x}, ${y}: self.${y} }
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::clone_struct)]
+struct Point { x: u256, y: u256 }
+
+fn dup<T: Clone>(_ value: T) -> T { value.clone() }
+
+#[test]
+fn generated_clone_copies_both_fields() {
+    let p = Point { x: 7, y: 9 }
+    let q = dup(p)
+    assert!(q.x == 7)
+    assert!(q.y == 9)
+}

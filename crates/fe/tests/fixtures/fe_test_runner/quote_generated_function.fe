@@ -1,0 +1,17 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn answer() -> u256 { 43 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn generated_function_runs() {
+    assert!(answer() == 43)
+}

@@ -1,0 +1,534 @@
+---
+source: crates/parser/tests/syntax_node.rs
+expression: node
+input_file: test_files/syntax_node/exprs/quote.fe
+---
+Root@0..572
+  QuoteExpr@0..14
+    Ident@0..5 "quote"
+    WhiteSpace@5..6 " "
+    BlockExpr@6..14
+      LBrace@6..7 "{"
+      WhiteSpace@7..8 " "
+      ExprStmt@8..12
+        LitExpr@8..12
+          Lit@8..12
+            TrueKw@8..12 "true"
+      WhiteSpace@12..13 " "
+      RBrace@13..14 "}"
+  Newline@14..15 "\n"
+  QuoteExpr@15..63
+    Ident@15..20 "quote"
+    QuoteOpenList@20..27
+      LParen@20..21 "("
+      Ident@21..26 "other"
+      RParen@26..27 ")"
+    WhiteSpace@27..28 " "
+    BlockExpr@28..63
+      LBrace@28..29 "{"
+      WhiteSpace@29..30 " "
+      ExprStmt@30..61
+        BinExpr@30..61
+          FieldExpr@30..43
+            PathExpr@30..34
+              Path@30..34
+                PathSegment@30..34
+                  SelfKw@30..34 "self"
+            Dot@34..35 "."
+            QuoteHole@35..43
+              Dollar@35..36 "$"
+              LBrace@36..37 "{"
+              PathExpr@37..42
+                Path@37..42
+                  PathSegment@37..42
+                    Ident@37..42 "field"
+              RBrace@42..43 "}"
+          WhiteSpace@43..44 " "
+          Eq2@44..46 "=="
+          WhiteSpace@46..47 " "
+          FieldExpr@47..61
+            PathExpr@47..52
+              Path@47..52
+                PathSegment@47..52
+                  Ident@47..52 "other"
+            Dot@52..53 "."
+            QuoteHole@53..61
+              Dollar@53..54 "$"
+              LBrace@54..55 "{"
+              PathExpr@55..60
+                Path@55..60
+                  PathSegment@55..60
+                    Ident@55..60 "field"
+              RBrace@60..61 "}"
+      WhiteSpace@61..62 " "
+      RBrace@62..63 "}"
+  Newline@63..64 "\n"
+  QuoteExpr@64..126
+    Ident@64..69 "quote"
+    WhiteSpace@69..70 " "
+    QuoteItemList@70..126
+      LBrace@70..71 "{"
+      WhiteSpace@71..72 " "
+      Item@72..124
+        Func@72..124
+          FnKw@72..74 "fn"
+          WhiteSpace@74..75 " "
+          FuncSignature@75..106
+            Ident@75..79 "same"
+            FuncParamList@79..98
+              LParen@79..80 "("
+              FnParam@80..84
+                SelfKw@80..84 "self"
+              Comma@84..85 ","
+              WhiteSpace@85..86 " "
+              FnParam@86..97
+                Ident@86..91 "other"
+                Colon@91..92 ":"
+                WhiteSpace@92..93 " "
+                PathType@93..97
+                  Path@93..97
+                    PathSegment@93..97
+                      SelfTypeKw@93..97 "Self"
+              RParen@97..98 ")"
+            WhiteSpace@98..99 " "
+            Arrow@99..101 "->"
+            WhiteSpace@101..102 " "
+            PathType@102..106
+              Path@102..106
+                PathSegment@102..106
+                  Ident@102..106 "bool"
+          WhiteSpace@106..107 " "
+          BlockExpr@107..124
+            LBrace@107..108 "{"
+            WhiteSpace@108..109 " "
+            ExprStmt@109..122
+              BinExpr@109..122
+                PathExpr@109..113
+                  Path@109..113
+                    PathSegment@109..113
+                      SelfKw@109..113 "self"
+                WhiteSpace@113..114 " "
+                Eq2@114..116 "=="
+                WhiteSpace@116..117 " "
+                PathExpr@117..122
+                  Path@117..122
+                    PathSegment@117..122
+                      Ident@117..122 "other"
+            WhiteSpace@122..123 " "
+            RBrace@123..124 "}"
+      WhiteSpace@124..125 " "
+      RBrace@125..126 "}"
+  Newline@126..127 "\n"
+  QuoteExpr@127..186
+    Ident@127..132 "quote"
+    WhiteSpace@132..133 " "
+    BlockExpr@133..186
+      LBrace@133..134 "{"
+      WhiteSpace@134..135 " "
+      ExprStmt@135..184
+        BinExpr@135..184
+          QuoteHoleExpr@135..142
+            Dollar@135..136 "$"
+            LBrace@136..137 "{"
+            PathExpr@137..141
+              Path@137..141
+                PathSegment@137..141
+                  Ident@137..141 "head"
+            RBrace@141..142 "}"
+          WhiteSpace@142..143 " "
+          Plus@143..144 "+"
+          WhiteSpace@144..145 " "
+          CallExpr@145..184
+            PathExpr@145..182
+              Path@145..182
+                PathSegment@145..182
+                  Ident@145..164 "abi_field_head_size"
+                  GenericArgList@164..182
+                    Lt@164..165 "<"
+                    TypeGenericArg@165..181
+                      QuoteHoleType@165..181
+                        Dollar@165..166 "$"
+                        LBrace@166..167 "{"
+                        CallExpr@167..180
+                          PathExpr@167..177
+                            Path@167..177
+                              PathSegment@167..177
+                                Ident@167..177 "field_type"
+                          CallArgList@177..180
+                            LParen@177..178 "("
+                            CallArg@178..179
+                              PathExpr@178..179
+                                Path@178..179
+                                  PathSegment@178..179
+                                    Ident@178..179 "f"
+                            RParen@179..180 ")"
+                        RBrace@180..181 "}"
+                    Gt@181..182 ">"
+            CallArgList@182..184
+              LParen@182..183 "("
+              RParen@183..184 ")"
+      WhiteSpace@184..185 " "
+      RBrace@185..186 "}"
+  Newline@186..187 "\n"
+  QuoteExpr@187..300
+    Ident@187..192 "quote"
+    WhiteSpace@192..193 " "
+    QuoteItemList@193..300
+      LBrace@193..194 "{"
+      Newline@194..195 "\n"
+      WhiteSpace@195..199 "    "
+      QuoteHole@199..207
+        Dollar@199..200 "$"
+        LBrace@200..201 "{"
+        PathExpr@201..206
+          Path@201..206
+            PathSegment@201..206
+              Ident@201..206 "items"
+        RBrace@206..207 "}"
+      Newline@207..208 "\n"
+      WhiteSpace@208..212 "    "
+      Item@212..270
+        Func@212..270
+          PubKw@212..215 "pub"
+          WhiteSpace@215..216 " "
+          FnKw@216..218 "fn"
+          WhiteSpace@218..219 " "
+          FuncSignature@219..255
+            QuoteHole@219..226
+              Dollar@219..220 "$"
+              LBrace@220..221 "{"
+              PathExpr@221..225
+                Path@221..225
+                  PathSegment@221..225
+                    Ident@221..225 "name"
+              RBrace@225..226 "}"
+            FuncParamList@226..246
+              LParen@226..227 "("
+              FnParam@227..245
+                Underscore@227..228 "_"
+                WhiteSpace@228..229 " "
+                Ident@229..234 "value"
+                Colon@234..235 ":"
+                WhiteSpace@235..236 " "
+                QuoteHoleType@236..245
+                  Dollar@236..237 "$"
+                  LBrace@237..238 "{"
+                  PathExpr@238..244
+                    Path@238..244
+                      PathSegment@238..244
+                        Ident@238..244 "record"
+                  RBrace@244..245 "}"
+              RParen@245..246 ")"
+            WhiteSpace@246..247 " "
+            Arrow@247..249 "->"
+            WhiteSpace@249..250 " "
+            QuoteHoleType@250..255
+              Dollar@250..251 "$"
+              LBrace@251..252 "{"
+              PathExpr@252..254
+                Path@252..254
+                  PathSegment@252..254
+                    Ident@252..254 "ty"
+              RBrace@254..255 "}"
+          WhiteSpace@255..256 " "
+          BlockExpr@256..270
+            LBrace@256..257 "{"
+            WhiteSpace@257..258 " "
+            ExprStmt@258..268
+              FieldExpr@258..268
+                PathExpr@258..263
+                  Path@258..263
+                    PathSegment@258..263
+                      Ident@258..263 "value"
+                Dot@263..264 "."
+                QuoteHole@264..268
+                  Dollar@264..265 "$"
+                  LBrace@265..266 "{"
+                  PathExpr@266..267
+                    Path@266..267
+                      PathSegment@266..267
+                        Ident@266..267 "f"
+                  RBrace@267..268 "}"
+            WhiteSpace@268..269 " "
+            RBrace@269..270 "}"
+      Newline@270..271 "\n"
+      WhiteSpace@271..275 "    "
+      Item@275..298
+        Const@275..298
+          ConstKw@275..280 "const"
+          WhiteSpace@280..281 " "
+          QuoteHole@281..288
+            Dollar@281..282 "$"
+            LBrace@282..283 "{"
+            PathExpr@283..287
+              Path@283..287
+                PathSegment@283..287
+                  Ident@283..287 "name"
+            RBrace@287..288 "}"
+          Colon@288..289 ":"
+          WhiteSpace@289..290 " "
+          PathType@290..294
+            Path@290..294
+              PathSegment@290..294
+                Ident@290..294 "u256"
+          WhiteSpace@294..295 " "
+          Eq@295..296 "="
+          WhiteSpace@296..297 " "
+          LitExpr@297..298
+            Lit@297..298
+              Int@297..298 "1"
+      Newline@298..299 "\n"
+      RBrace@299..300 "}"
+  Newline@300..301 "\n"
+  QuoteExpr@301..399
+    Ident@301..306 "quote"
+    WhiteSpace@306..307 " "
+    QuoteItemList@307..399
+      LBrace@307..308 "{"
+      WhiteSpace@308..309 " "
+      Item@309..397
+        ImplTrait@309..397
+          ImplKw@309..313 "impl"
+          WhiteSpace@313..314 " "
+          TraitRef@314..316
+            Path@314..316
+              PathSegment@314..316
+                Ident@314..316 "Eq"
+          WhiteSpace@316..317 " "
+          ForKw@317..320 "for"
+          WhiteSpace@320..321 " "
+          QuoteHoleType@321..330
+            Dollar@321..322 "$"
+            LBrace@322..323 "{"
+            PathExpr@323..329
+              Path@323..329
+                PathSegment@323..329
+                  Ident@323..329 "record"
+            RBrace@329..330 "}"
+          WhiteSpace@330..331 " "
+          WhereClause@331..346
+            WhereKw@331..336 "where"
+            WhiteSpace@336..337 " "
+            QuoteHole@337..346
+              Dollar@337..338 "$"
+              LBrace@338..339 "{"
+              PathExpr@339..345
+                Path@339..345
+                  PathSegment@339..345
+                    Ident@339..345 "bounds"
+              RBrace@345..346 "}"
+          WhiteSpace@346..347 " "
+          TraitItemList@347..397
+            LBrace@347..348 "{"
+            WhiteSpace@348..349 " "
+            Func@349..395
+              FnKw@349..351 "fn"
+              WhiteSpace@351..352 " "
+              FuncSignature@352..383
+                Ident@352..354 "eq"
+                FuncParamList@354..375
+                  LParen@354..355 "("
+                  FnParam@355..359
+                    SelfKw@355..359 "self"
+                  Comma@359..360 ","
+                  WhiteSpace@360..361 " "
+                  FnParam@361..374
+                    Underscore@361..362 "_"
+                    WhiteSpace@362..363 " "
+                    Ident@363..368 "other"
+                    Colon@368..369 ":"
+                    WhiteSpace@369..370 " "
+                    PathType@370..374
+                      Path@370..374
+                        PathSegment@370..374
+                          SelfTypeKw@370..374 "Self"
+                  RParen@374..375 ")"
+                WhiteSpace@375..376 " "
+                Arrow@376..378 "->"
+                WhiteSpace@378..379 " "
+                PathType@379..383
+                  Path@379..383
+                    PathSegment@379..383
+                      Ident@379..383 "bool"
+              WhiteSpace@383..384 " "
+              BlockExpr@384..395
+                LBrace@384..385 "{"
+                WhiteSpace@385..386 " "
+                ExprStmt@386..393
+                  QuoteHoleExpr@386..393
+                    Dollar@386..387 "$"
+                    LBrace@387..388 "{"
+                    PathExpr@388..392
+                      Path@388..392
+                        PathSegment@388..392
+                          Ident@388..392 "body"
+                    RBrace@392..393 "}"
+                WhiteSpace@393..394 " "
+                RBrace@394..395 "}"
+            WhiteSpace@395..396 " "
+            RBrace@396..397 "}"
+      WhiteSpace@397..398 " "
+      RBrace@398..399 "}"
+  Newline@399..400 "\n"
+  QuoteExpr@400..439
+    Ident@400..405 "quote"
+    WhiteSpace@405..406 " "
+    QuoteItemList@406..439
+      LBrace@406..407 "{"
+      WhiteSpace@407..408 " "
+      Item@408..437
+        Impl@408..437
+          ImplKw@408..412 "impl"
+          WhiteSpace@412..413 " "
+          QuoteHoleType@413..422
+            Dollar@413..414 "$"
+            LBrace@414..415 "{"
+            PathExpr@415..421
+              Path@415..421
+                PathSegment@415..421
+                  Ident@415..421 "record"
+            RBrace@421..422 "}"
+          WhiteSpace@422..423 " "
+          ImplItemList@423..437
+            LBrace@423..424 "{"
+            WhiteSpace@424..425 " "
+            QuoteHole@425..435
+              Dollar@425..426 "$"
+              LBrace@426..427 "{"
+              PathExpr@427..434
+                Path@427..434
+                  PathSegment@427..434
+                    Ident@427..434 "methods"
+              RBrace@434..435 "}"
+            WhiteSpace@435..436 " "
+            RBrace@436..437 "}"
+      WhiteSpace@437..438 " "
+      RBrace@438..439 "}"
+  Newline@439..440 "\n"
+  QuoteExpr@440..476
+    Ident@440..445 "quote"
+    WhiteSpace@445..446 " "
+    QuoteWhere@446..476
+      LBrace@446..447 "{"
+      WhiteSpace@447..448 " "
+      WhereClause@448..474
+        WhereKw@448..453 "where"
+        WhiteSpace@453..454 " "
+        QuoteHole@454..463
+          Dollar@454..455 "$"
+          LBrace@455..456 "{"
+          PathExpr@456..462
+            Path@456..462
+              PathSegment@456..462
+                Ident@456..462 "bounds"
+          RBrace@462..463 "}"
+        Comma@463..464 ","
+        WhiteSpace@464..465 " "
+        WherePredicate@465..474
+          QuoteHoleType@465..470
+            Dollar@465..466 "$"
+            LBrace@466..467 "{"
+            PathExpr@467..469
+              Path@467..469
+                PathSegment@467..469
+                  Ident@467..469 "ty"
+            RBrace@469..470 "}"
+          TypeBoundList@470..474
+            Colon@470..471 ":"
+            WhiteSpace@471..472 " "
+            TypeBound@472..474
+              TraitRef@472..474
+                Path@472..474
+                  PathSegment@472..474
+                    Ident@472..474 "Eq"
+      WhiteSpace@474..475 " "
+      RBrace@475..476 "}"
+  Newline@476..477 "\n"
+  QuoteExpr@477..531
+    Ident@477..482 "quote"
+    WhiteSpace@482..483 " "
+    BlockExpr@483..531
+      LBrace@483..484 "{"
+      Newline@484..485 "\n"
+      WhiteSpace@485..489 "    "
+      ExprStmt@489..496
+        CallExpr@489..496
+          PathExpr@489..494
+            Path@489..494
+              PathSegment@489..494
+                Ident@489..494 "setup"
+          CallArgList@494..496
+            LParen@494..495 "("
+            RParen@495..496 ")"
+      Newline@496..497 "\n"
+      WhiteSpace@497..501 "    "
+      Item@501..529
+        Func@501..529
+          FnKw@501..503 "fn"
+          WhiteSpace@503..504 " "
+          FuncSignature@504..520
+            Ident@504..510 "helper"
+            FuncParamList@510..512
+              LParen@510..511 "("
+              RParen@511..512 ")"
+            WhiteSpace@512..513 " "
+            Arrow@513..515 "->"
+            WhiteSpace@515..516 " "
+            PathType@516..520
+              Path@516..520
+                PathSegment@516..520
+                  Ident@516..520 "bool"
+          WhiteSpace@520..521 " "
+          BlockExpr@521..529
+            LBrace@521..522 "{"
+            WhiteSpace@522..523 " "
+            ExprStmt@523..527
+              LitExpr@523..527
+                Lit@523..527
+                  TrueKw@523..527 "true"
+            WhiteSpace@527..528 " "
+            RBrace@528..529 "}"
+      Newline@529..530 "\n"
+      RBrace@530..531 "}"
+  Newline@531..532 "\n"
+  QuoteExpr@532..571
+    Ident@532..537 "quote"
+    WhiteSpace@537..538 " "
+    BlockExpr@538..571
+      LBrace@538..539 "{"
+      WhiteSpace@539..540 " "
+      ExprStmt@540..569
+        MatchExpr@540..569
+          MatchKw@540..545 "match"
+          WhiteSpace@545..546 " "
+          PathExpr@546..550
+            Path@546..550
+              PathSegment@546..550
+                SelfKw@546..550 "self"
+          WhiteSpace@550..551 " "
+          MatchArmList@551..569
+            LBrace@551..552 "{"
+            WhiteSpace@552..553 " "
+            MatchArm@553..567
+              PathTuplePat@553..559
+                Path@553..556
+                  PathSegment@553..556
+                    Ident@553..556 "Foo"
+                TuplePatElemList@556..559
+                  LParen@556..557 "("
+                  PathPat@557..558
+                    Path@557..558
+                      PathSegment@557..558
+                        Ident@557..558 "a"
+                  RParen@558..559 ")"
+              WhiteSpace@559..560 " "
+              FatArrow@560..562 "=>"
+              WhiteSpace@562..563 " "
+              LitExpr@563..567
+                Lit@563..567
+                  TrueKw@563..567 "true"
+            WhiteSpace@567..568 " "
+            RBrace@568..569 "}"
+      WhiteSpace@569..570 " "
+      RBrace@570..571 "}"
+  Newline@571..572 "\n"

@@ -1,8 +1,7 @@
 mod authors {
     use core::abi::{AbiSize, AbiRecordLayout, abi_record_layout, abi_field_head_size}
-    use core::meta::{Record, FieldType, FieldQuery, query_field, field_count, field, field_type,
-        DeclarationName, DeclarationType, BodyExpr, FunctionDefinition,
-        FunctionCall, CallArgument, AssociatedConstant, RecordImplementation}
+    use core::meta::{Code, Item, empty, Record, FieldType, FieldQuery, query_field, field_count, field, field_type,
+        DeclarationName}
 
     struct Head<T> {}
     impl<T: AbiSize> FieldQuery<u256> for Head<T> {
@@ -28,100 +27,61 @@ mod authors {
         }
         abi_record_layout(sizes)
     }
-    pub const fn size(_ record: Record) -> RecordImplementation<0, 65> {
+    pub const fn size(_ record: Record) -> Code<Item> {
         let mut is_dynamic = false
-        let mut expressions: [BodyExpr; 65] = [BodyExpr::End; 65]
-        expressions[0] = BodyExpr::U256(0)
         let mut i: usize = 0
         while i < field_count(record) {
             let f = field(record, i)
             is_dynamic = is_dynamic || dynamic(field_type(f))
-            let call = FunctionCall {
-                path: "core::abi::abi_field_head_size",
-                types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None],
-                arguments: [Option::None; 4],
-            }
-            let node = 1 + i * 2
-            expressions[node] = BodyExpr::Call(call)
-            expressions[node + 1] = BodyExpr::Add(node - 1, node)
             i += 1
         }
-        let types: [Option<DeclarationType>; 2] = [Option::None; 2]
-        let method: Option<FunctionDefinition<0, 65>> = Option::None
-        RecordImplementation {
-            owner: record,
-            trait_path: "core::abi::AbiSize",
-            types,
-            constants: [
-                Option::Some(AssociatedConstant::Expression(
-                    DeclarationName::Literal("HEAD_SIZE"), DeclarationType::U256,
-                    expressions, field_count(record) * 2,
-                )),
-                Option::Some(AssociatedConstant::Bool(DeclarationName::Literal("IS_DYNAMIC"), is_dynamic)),
-            ],
-            method,
+        let head_size = layout(record).head_size
+        quote {
+            impl core::abi::AbiSize for ${record} {
+                const HEAD_SIZE: u256 = ${head_size}
+                const IS_DYNAMIC: bool = ${is_dynamic}
+            }
         }
     }
-    pub const fn offsets(_ record: Record) -> [Option<FunctionDefinition<0, 1>>; 32] {
+    pub const fn offsets(_ record: Record) -> Code<Item> {
         let plan = layout(record)
-        let mut definitions: [Option<FunctionDefinition<0, 1>>; 32] = [Option::None; 32]
+        let mut items = empty<Item>()
         let mut i: usize = 0
         while i < field_count(record) {
-            definitions[i] = Option::Some(FunctionDefinition {
-                name: DeclarationName::FieldPrefix("offset_", field(record, i)),
-                public: true,
-                const_function: true,
-                parameters: [],
-                return_type: DeclarationType::U256,
-                expressions: [BodyExpr::U256(plan.offsets[i])],
-                result: 0,
-            })
+            let name = DeclarationName::FieldPrefix("offset_", field(record, i))
+            let offset = plan.offsets[i]
+            items = quote {
+                ${items}
+                pub const fn ${name}() -> u256 { ${offset} }
+            }
             i += 1
         }
-        definitions
+        items
     }
-    pub const fn encoder(_ record: Record) -> RecordImplementation<2, 100> {
+    fn encode_sol<T>(_ value: own T, ptr: *u8, head_pos: u256, tail: u256) -> u256
+        where T: core::abi::Encode<std::abi::Sol> + AbiSize
+    {
+        core::abi::encode_field_at<std::abi::Sol, T>(value, ptr, head_pos: head_pos, tail)
+    }
+    pub const fn encoder(_ record: Record) -> Code<Item> {
         let plan = layout(record)
-        let no_label: Option<String<31>> = Option::None
-        let constants: [Option<AssociatedConstant<100>>; 2] = [Option::None; 2]
-        let mut expressions: [BodyExpr; 100] = [BodyExpr::End; 100]
-        expressions[0] = BodyExpr::Parameter(0)
-        expressions[1] = BodyExpr::Parameter(1)
-        expressions[2] = BodyExpr::U256(plan.head_size)
-        expressions[3] = BodyExpr::Unit
+        let head_size = plan.head_size
+        let mut body: Code<core::meta::Expr> = quote { }
         let mut i: usize = 0
         while i < field_count(record) {
             let f = field(record, i)
             assert!(!dynamic(field_type(f)))
-            let base = 4 + i * 3
-            expressions[base] = BodyExpr::Field(0, f)
-            expressions[base + 1] = BodyExpr::U256(plan.offsets[i])
-            expressions[base + 2] = BodyExpr::Call(FunctionCall {
-                path: "core::abi::encode_field_at",
-                types: [Option::Some(DeclarationType::Named("std::abi::Sol")), Option::Some(DeclarationType::Field(field_type(f)))],
-                arguments: [
-                    Option::Some(CallArgument { label: no_label, expression: base }),
-                    Option::Some(CallArgument { label: no_label, expression: 1 }),
-                    Option::Some(CallArgument { label: Option::Some("head_pos"), expression: base + 1 }),
-                    Option::Some(CallArgument { label: no_label, expression: 2 }),
-                ],
-            })
+            let offset = plan.offsets[i]
+            body = quote(ptr) {
+                ${body}
+                ingot::authors::encode_sol(self.${f}, ptr, head_pos: ${offset}, tail: ${head_size})
+            }
             i += 1
         }
-        RecordImplementation {
-            owner: record,
-            trait_path: "core::abi::Encode",
-            types: [Option::Some(DeclarationType::Named("std::abi::Sol")), Option::None],
-            constants,
-            method: Option::Some(FunctionDefinition {
-                name: DeclarationName::Literal("encode"),
-                public: false,
-                const_function: false,
-                parameters: [DeclarationType::Record(record), DeclarationType::BytePointer],
-                return_type: DeclarationType::Unit,
-                expressions,
-                result: 3,
-            }),
+        quote {
+            impl core::abi::Encode<std::abi::Sol> for ${record} {
+                fn encode(own self, _ ptr: *u8) -> () { ${body} }
+            }
         }
     }
 }

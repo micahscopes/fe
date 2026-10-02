@@ -1,0 +1,65 @@
+use core::meta::{Code, DeclarationName, Expr, Item, Record, Where, empty, field, field_type}
+
+// Each hole position accepts a fixed set of values. A wrong value is an
+// error at the hole, found when the provider is checked, before it runs.
+const fn accepted(_ record: Record) -> Code<Item> {
+    let f = field(record, 0)
+    let value = quote { 1 }
+    let n: u256 = 2
+    let bounds = empty<Where>()
+    let items = empty<Item>()
+    quote {
+        ${items}
+        pub fn ${DeclarationName::FieldPrefix("get_", f)}(_ value: ${record}) -> ${field_type(f)} where ${bounds} {
+            value.${f}
+        }
+        const ${f}: u256 = ${value} + ${n}
+        const LABEL: String<4> = ${"text"}
+    }
+}
+
+const fn expression_hole(_ record: Record) -> Code<Expr> {
+    let f = field(record, 0)
+    quote { ${f} }
+}
+
+const fn member_hole() -> Code<Expr> {
+    quote { self.${true} }
+}
+
+const fn type_hole() -> Code<Expr> {
+    let body = quote { 1 }
+    quote { 1 as ${body} }
+}
+
+const fn name_hole() -> Code<Item> {
+    quote { fn ${true}() {} }
+}
+
+const fn items_hole() -> Code<Item> {
+    let body = quote { true }
+    quote {
+        ${body}
+        fn f() {}
+    }
+}
+
+const fn where_hole() -> Code<Where> {
+    let items = empty<Item>()
+    quote { where ${items} }
+}
+
+// A body made only of splices takes their kind, so they must agree.
+const fn mixed_splices() -> Code<Item> {
+    let items = empty<Item>()
+    let bounds = empty<Where>()
+    quote {
+        ${items}
+        ${bounds}
+    }
+}
+
+// The kind is part of the type.
+const fn wrong_return() -> Code<Expr> {
+    quote { fn f() {} }
+}

@@ -1,0 +1,23 @@
+trait Positive {
+    fn value<const N: usize>(self) -> usize where N > 0
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Positive for ${record} {
+                fn value<const N: usize>(self) -> usize where N > 0 { N }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_const_where_checks_method_argument() {
+    assert!(Target { value: 1 }.value<3>() == 3)
+}

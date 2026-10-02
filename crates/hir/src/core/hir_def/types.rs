@@ -75,6 +75,7 @@ impl<'db> TypeId<'db> {
                 format!("[{elem_ty}; {len_str}]")
             }
             TypeKind::Never => "!".into(),
+            TypeKind::Hole(n) => format!("${{{n}}}"),
         }
     }
 }
@@ -107,6 +108,9 @@ pub enum TypeKind<'db> {
     /// The first `TypeId` is the element type, the second `Body` is the length.
     Array(Partial<TypeId<'db>>, Partial<Body<'db>>),
     Never,
+    /// `${t}`: slot `n` of the enclosing quote. Appears only in quote
+    /// templates.
+    Hole(u32),
 }
 
 #[salsa::interned]

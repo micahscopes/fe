@@ -1,0 +1,17 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            pub fn get(input: ${record}) -> u256 { 42 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target<const N: usize> where N > 0 { value: [u256; N] }
+
+#[test]
+fn quoted_const_generic_record_runs() {
+    assert!(get(input: Target<3> { value: [1, 2, 3] }) == 42)
+}

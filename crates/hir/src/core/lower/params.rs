@@ -259,7 +259,7 @@ impl<'db> FuncParam<'db> {
 }
 
 impl<'db> WherePredicate<'db> {
-    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::WherePredicate) -> Self {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::WherePredicate) -> Self {
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
         let bounds = ast
             .bounds()

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     HirDb,
-    core::meta::FrozenOwner,
+    core::meta::{FrozenItemLocator, FrozenOwner},
     hir_def::{PathId, TraitRefId},
     lower,
     span::{
@@ -879,6 +879,10 @@ impl<'db> Struct<'db> {
         self.fields(db)
     }
 
+    pub fn hir_generic_params(self, db: &'db dyn HirDb) -> GenericParamListId<'db> {
+        self.generic_params(db)
+    }
+
     pub fn is_must_use(self, db: &'db dyn HirDb) -> bool {
         self.attributes(db).is_must_use(db)
     }
@@ -1203,6 +1207,10 @@ impl<'db> Impl<'db> {
         LazyImplSpan::new(self)
     }
 
+    pub fn hir_type_ref(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.type_ref(db)
+    }
+
     /// Returns the raw associated const definitions from the HIR.
     pub fn hir_consts(self, db: &'db dyn HirDb) -> &'db [AssocConstDef<'db>] {
         self.consts(db)
@@ -1367,6 +1375,10 @@ impl<'db> ImplTrait<'db> {
     /// Returns the trait reference for this impl.
     pub fn hir_trait_ref(self, db: &'db dyn HirDb) -> Partial<TraitRefId<'db>> {
         self.trait_ref(db)
+    }
+
+    pub fn hir_type_ref(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.type_ref(db)
     }
 
     /// Returns the raw associated const definitions from the HIR.
@@ -1851,7 +1863,7 @@ impl<'db> TrackedItemId<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GeneratedSiteKey {
     pub target: FrozenOwner,
-    pub provider: FrozenOwner,
+    pub provider: FrozenItemLocator,
     pub attribute_index: usize,
     pub ordinal: usize,
 }
@@ -1885,6 +1897,8 @@ pub enum TrackedItemVariant<'db> {
     NamelessBody,
     StaticAssertCondition,
     WhereConstPredicate(u32),
+    /// The `n`th quote in its owner body.
+    QuoteTemplate(u32),
     StaticAssertComparisonLhs,
     StaticAssertComparisonRhs,
 }

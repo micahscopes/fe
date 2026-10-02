@@ -175,6 +175,13 @@ impl<'db> NStatementKind<'db> {
                             .map(|arg| OperationAccess::operand(db, body, *arg)),
                     );
                 }
+                NExpr::Quote { holes } => {
+                    accesses.extend(
+                        holes
+                            .iter()
+                            .map(|arg| OperationAccess::operand(db, body, *arg)),
+                    );
+                }
                 NExpr::CodeRegionRef { .. }
                 | NExpr::Const(_)
                 | NExpr::CodeRegionOffset { .. }

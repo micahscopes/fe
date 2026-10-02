@@ -236,6 +236,7 @@ fn field_index<'db>(
             idx
         }
         FieldIndex::Ident(ident) => RecordLike::Type(base_ty).record_field_idx(db, ident)?,
+        FieldIndex::Hole(_) => return None,
     };
     u16::try_from(idx).ok()
 }

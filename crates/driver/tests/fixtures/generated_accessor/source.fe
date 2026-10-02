@@ -1,0 +1,21 @@
+mod authors {
+    use core::meta::{Code, Item, Record, field, field_type, DeclarationName}
+
+    pub const fn accessor(_ record: Record) -> Code<Item> {
+        let f = field(record, 2)
+        let name = DeclarationName::FieldPrefix("get_", f)
+        let ty = field_type(f)
+        quote { pub const fn ${name}(_ value: ${record}) -> ${ty} { value.${f} } }
+    }
+}
+
+mod owner {
+    #[generate(ingot::authors::accessor)]
+    pub struct Packet { nonce: u256, ready: bool, code: u64 }
+    pub const fn sample() -> Packet { Packet { nonce: 42, ready: true, code: 258 } }
+}
+
+mod other {
+    #[generate(ingot::authors::accessor)]
+    pub struct Packet { nonce: u256, ready: bool, code: u64 }
+}

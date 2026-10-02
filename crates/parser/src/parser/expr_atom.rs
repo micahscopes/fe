@@ -8,6 +8,7 @@ use super::{
     ErrProof, Parser, Recovery, define_scope,
     expr::{parse_condition_expr, parse_expr, parse_expr_no_struct},
     item::ItemScope,
+    param::{ItemBlock, parse_where_clause_opt},
     parse_list, parse_pat,
     stmt::parse_stmt,
     token_stream::TokenStream,
@@ -21,7 +22,7 @@ use crate::{
 pub(super) fn is_expr_atom_head(kind: SyntaxKind) -> bool {
     use SyntaxKind::*;
     match kind {
-        IfKw | MatchKw | LBrace | LParen | LBracket => true,
+        IfKw | MatchKw | LBrace | LParen | LBracket | Dollar => true,
         kind if lit::is_lit(kind) => true,
         kind if path::is_path_segment(kind) => true,
         _ => false,
@@ -59,9 +60,28 @@ pub(super) fn parse_expr_atom<S: TokenStream>(
             if is_with {
                 parser.parse_cp(WithExprScope::default(), None)
             } else {
-                parser.parse_cp(PathExprScope::new(allow_record_init), None)
+                let is_quote = allow_record_init
+                    && parser
+                        .current_token()
+                        .is_some_and(|token| token.text() == "quote")
+                    && (parser.peek_n_non_trivia(2).as_slice()
+                        == [SyntaxKind::Ident, SyntaxKind::LBrace]
+                        || parser.peek_n_non_trivia(2).as_slice()
+                            == [SyntaxKind::Ident, SyntaxKind::LParen]
+                            && parser.dry_run(|p| {
+                                p.bump_expected(SyntaxKind::Ident);
+                                p.parse_ok(QuoteOpenListScope::default())
+                                    .is_ok_and(identity)
+                                    && p.current_kind() == Some(SyntaxKind::LBrace)
+                            }));
+                if is_quote {
+                    parser.parse_cp(QuoteExprScope::default(), None)
+                } else {
+                    parser.parse_cp(PathExprScope::new(allow_record_init), None)
+                }
             }
         }
+        Some(Dollar) => parser.parse_cp(QuoteHoleExprScope::default(), None),
         Some(LBrace) => parser.parse_cp(BlockExprScope::default(), None),
         Some(LParen) => parser.parse_cp(ParenScope::default(), None),
         Some(LBracket) => parser.parse_cp(ArrayScope::default(), None),
@@ -229,6 +249,212 @@ impl super::Parse for WithParamScope {
     }
 }
 
+define_scope! { QuoteExprScope, QuoteExpr }
+impl super::Parse for QuoteExprScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        if parser.quote_scope_depth() > 1 {
+            parser.error_msg_on_current_token(
+                "`quote` inside a quote body is not supported; build the inner fragment in a separate `let` and splice it with `${...}`",
+            );
+        }
+        parser.bump_expected(SyntaxKind::Ident);
+        if parser.current_kind() == Some(SyntaxKind::LParen) {
+            parser.parse(QuoteOpenListScope::default())?;
+        }
+        if parser.current_kind() != Some(SyntaxKind::LBrace) {
+            return parser.error_and_recover("`quote` requires a body `{ ... }`");
+        }
+        match quote_body_kind(parser) {
+            QuoteBodyKind::Items => parser.parse(QuoteItemListScope::default()),
+            QuoteBodyKind::Where => parser.parse(QuoteWhereScope::default()),
+            QuoteBodyKind::Expr => parser.parse(BlockExprScope::default()),
+        }
+    }
+}
+
+/// What a quote body holds, decided by its first token that is not a splice.
+enum QuoteBodyKind {
+    Expr,
+    Items,
+    Where,
+}
+
+fn quote_body_kind<S: TokenStream>(parser: &mut Parser<S>) -> QuoteBodyKind {
+    let newline_as_trivia = parser.set_newline_as_trivia(false);
+    let kind = parser.dry_run(|p| {
+        p.bump_expected(SyntaxKind::LBrace);
+        loop {
+            match p.current_kind() {
+                Some(SyntaxKind::Newline) => p.bump(),
+                Some(SyntaxKind::Dollar) => {
+                    p.bump();
+                    if p.current_kind() != Some(SyntaxKind::LBrace) {
+                        return QuoteBodyKind::Expr;
+                    }
+                    // Skip the splice's balanced braces.
+                    let mut depth = 0usize;
+                    loop {
+                        match p.current_kind() {
+                            Some(SyntaxKind::LBrace) => depth += 1,
+                            Some(SyntaxKind::RBrace) => depth -= 1,
+                            None => return QuoteBodyKind::Expr,
+                            _ => {}
+                        }
+                        p.bump();
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                Some(SyntaxKind::WhereKw) => return QuoteBodyKind::Where,
+                Some(kind) if kind.is_item_head() || kind == SyntaxKind::Pound => {
+                    return QuoteBodyKind::Items;
+                }
+                _ => return QuoteBodyKind::Expr,
+            }
+        }
+    });
+    parser.set_newline_as_trivia(newline_as_trivia);
+    kind
+}
+
+define_scope! { QuoteOpenListScope, QuoteOpenList, (RParen, Comma) }
+impl super::Parse for QuoteOpenListScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_list(
+            parser,
+            false,
+            SyntaxKind::QuoteOpenList,
+            (SyntaxKind::LParen, SyntaxKind::RParen),
+            |parser| {
+                if parser.current_kind() == Some(SyntaxKind::Ident) {
+                    parser.bump();
+                    Ok(())
+                } else {
+                    parser.error_and_recover("expected an open name")
+                }
+            },
+        )
+    }
+}
+
+define_scope! { QuoteItemListScope, QuoteItemList, (RBrace) }
+impl super::Parse for QuoteItemListScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.bump_expected(SyntaxKind::LBrace);
+        loop {
+            parser.set_newline_as_trivia(true);
+            if matches!(parser.current_kind(), Some(SyntaxKind::RBrace) | None) {
+                break;
+            }
+            if parser.current_kind() == Some(SyntaxKind::Dollar) {
+                parser.parse(QuoteHoleScope::default())?;
+            } else {
+                parser.parse(ItemScope::default())?;
+            }
+            parser.set_newline_as_trivia(false);
+            parser.expect(&[SyntaxKind::Newline, SyntaxKind::RBrace], None)?;
+            parser.bump_if(SyntaxKind::Newline);
+        }
+        parser.bump_or_recover(SyntaxKind::RBrace, "expected `}` to close the quote")
+    }
+}
+
+define_scope! { QuoteWhereScope, QuoteWhere, (RBrace) }
+impl super::Parse for QuoteWhereScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.bump_expected(SyntaxKind::LBrace);
+        parser.set_newline_as_trivia(true);
+        parse_where_clause_opt(parser, ItemBlock::Absent)?;
+        parser.set_newline_as_trivia(true);
+        parser.bump_or_recover(SyntaxKind::RBrace, "expected `}` to close the quote")
+    }
+}
+
+/// Parses `${ expr }` after checking that it stands inside a quote and not
+/// inside another splice.
+fn parse_hole_body<S: TokenStream>(
+    parser: &mut Parser<S>,
+    parent: SyntaxKind,
+) -> Result<(), Recovery<ErrProof>> {
+    if parser.quote_scope_depth() == 0 {
+        parser.error_msg_on_current_token(
+            "`${...}` splice holes are only allowed inside a `quote` body",
+        );
+    } else if parser.quote_hole_depth() > 1 {
+        parser.error_msg_on_current_token(
+            "splice holes do not nest; compute the value in a `let` and splice it once",
+        );
+    }
+    parser.bump_expected(SyntaxKind::Dollar);
+    if parser.current_kind() != Some(SyntaxKind::LBrace) {
+        return parser.error_and_recover("`$` must be followed by `{` to form a splice hole");
+    }
+    parser.bump_expected(SyntaxKind::LBrace);
+    let newline_as_trivia = parser.set_newline_as_trivia(true);
+    let parsed = parse_expr(parser);
+    parser.set_newline_as_trivia(newline_as_trivia);
+    parsed?;
+    if parser.find(
+        SyntaxKind::RBrace,
+        ExpectedKind::ClosingBracket {
+            bracket: SyntaxKind::RBrace,
+            parent,
+        },
+    )? {
+        parser.bump();
+    }
+    Ok(())
+}
+
+define_scope! {
+    /// A splice in expression position.
+    pub(super) QuoteHoleExprScope,
+    QuoteHoleExpr
+}
+impl super::Parse for QuoteHoleExprScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_hole_body(parser, SyntaxKind::QuoteHoleExpr)
+    }
+}
+
+define_scope! {
+    /// A splice in type position.
+    pub(crate) QuoteHoleTypeScope,
+    QuoteHoleType
+}
+impl super::Parse for QuoteHoleTypeScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_hole_body(parser, SyntaxKind::QuoteHoleType)
+    }
+}
+
+define_scope! {
+    /// A splice for a member, a declared name, items or where predicates.
+    /// Its parent node says which.
+    pub(crate) QuoteHoleScope,
+    QuoteHole
+}
+impl super::Parse for QuoteHoleScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_hole_body(parser, SyntaxKind::QuoteHole)
+    }
+}
+
 define_scope! { MatchExprScope, MatchExpr }
 impl super::Parse for MatchExprScope {
     type Error = Recovery<ErrProof>;
@@ -364,13 +590,53 @@ impl super::Parse for RecordFieldListScope {
 }
 
 define_scope! { RecordFieldScope, RecordField }
+fn quote_field_label_ahead<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    if !parser.at_quote_hole() {
+        return false;
+    }
+    let mut count = 8;
+    loop {
+        let tokens = parser.peek_n_non_trivia(count);
+        if tokens.get(0) != Some(&SyntaxKind::Dollar) || tokens.get(1) != Some(&SyntaxKind::LBrace)
+        {
+            return false;
+        }
+        let mut depth = 0;
+        for (index, kind) in tokens.iter().enumerate().skip(1) {
+            match kind {
+                SyntaxKind::LBrace => depth += 1,
+                SyntaxKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(next) = tokens.get(index + 1) {
+                            return *next == SyntaxKind::Colon;
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if tokens.len() < count {
+            return false;
+        }
+        let Some(next) = count.checked_mul(2) else {
+            return false;
+        };
+        count = next;
+    }
+}
+
 impl super::Parse for RecordFieldScope {
     type Error = Recovery<ErrProof>;
 
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parser.set_newline_as_trivia(false);
 
-        if matches!(
+        if quote_field_label_ahead(parser) {
+            parser.parse(QuoteHoleScope::default())?;
+            parser.bump_expected(SyntaxKind::Colon);
+        } else if matches!(
             parser.peek_two(),
             (Some(SyntaxKind::Ident), Some(SyntaxKind::Colon))
         ) {

@@ -1,0 +1,11 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_expr_fragment_open_parameter.fe
+---
+=== STDOUT ===
+PASS  [<time>] open_parameter_is_bound
+
+test result: ok. 1 passed; 0 failed
+
+=== EXIT CODE: 0 ===

@@ -1,0 +1,21 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let n: u256 = 42
+        let flag = true
+        quote {
+            pub fn answer() -> u256 {
+                if ${flag} { ${n} + 1 } else { 0 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn scalar_splices_run() {
+    assert!(answer() == 43)
+}

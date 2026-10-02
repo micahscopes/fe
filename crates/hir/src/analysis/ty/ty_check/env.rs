@@ -87,6 +87,7 @@ pub(crate) struct TyCheckEnv<'db> {
     semantic_expr_lowering: SecondaryMap<ExprId, Option<SemanticExprLowering<'db>>>,
     record_init_lowering: SecondaryMap<ExprId, Option<super::RecordInitLowering<'db>>>,
     resolved_field_index: SecondaryMap<ExprId, Option<u16>>,
+    quotes: rustc_hash::FxHashMap<ExprId, super::CheckedQuote<'db>>,
 
     deferred: Vec<DeferredTask<'db>>,
 
@@ -167,6 +168,7 @@ impl<'db> TyCheckEnv<'db> {
             semantic_expr_lowering: SecondaryMap::new(),
             record_init_lowering: SecondaryMap::new(),
             resolved_field_index: SecondaryMap::new(),
+            quotes: Default::default(),
             deferred: Vec::new(),
             effect_env: keyed_effect_env::EffectEnv::new(),
             effect_bounds: ThinVec::new(),
@@ -531,6 +533,10 @@ impl<'db> TyCheckEnv<'db> {
         {
             panic!("resolved field index is already registered for the given expr")
         }
+    }
+
+    pub(super) fn register_quote(&mut self, expr: ExprId, quote: super::CheckedQuote<'db>) {
+        self.quotes.insert(expr, quote);
     }
 
     pub(super) fn register_semantic_call(&mut self, expr: ExprId, mut callable: Callable<'db>) {
@@ -1173,6 +1179,7 @@ impl<'db> TyCheckEnv<'db> {
             semantic_expr_lowering: self.semantic_expr_lowering,
             record_init_lowering: self.record_init_lowering,
             resolved_field_index: self.resolved_field_index,
+            quotes: self.quotes,
             call_effect_args: self.call_effect_args,
             return_borrow_provider: None,
             param_bindings: self.param_bindings,

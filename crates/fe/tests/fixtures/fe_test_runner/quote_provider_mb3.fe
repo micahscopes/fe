@@ -1,0 +1,77 @@
+struct Gauge { raw: u256 }
+
+impl Gauge {
+    fn lte(self, _ other: Gauge) -> bool { self.raw <= other.raw }
+}
+
+trait Within {
+    fn within(self, _ limit: Self) -> bool
+}
+
+trait Audited {
+    fn audited(self) -> bool
+}
+
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field, field_count}
+
+    pub const fn within(record: Record) -> Code<Item> {
+        let mut body: Code<Expr> = quote { true }
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let selected = field(record, i)
+            body = quote(limit) {
+                ${body} && self.${selected}.lte(limit.${selected})
+            }
+            i += 1
+        }
+        quote {
+            impl ingot::Within for ${record} {
+                fn within(self, _ limit: Self) -> bool { ${body} }
+            }
+        }
+    }
+
+    pub const fn audited(record: Record) -> Code<Item> {
+        let flag = true
+        quote {
+            impl ingot::Audited for ${record} {
+                fn audited(self) -> bool { ${flag} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::within)]
+struct Box2 { w: Gauge, h: Gauge }
+
+#[generate(ingot::author::audited)]
+struct Marker {}
+
+fn gauge(_ raw: u256) -> Gauge { Gauge { raw } }
+
+#[test]
+fn within_all_fields_under_limit() {
+    let small = Box2 { w: gauge(2), h: gauge(3) }
+    let big = Box2 { w: gauge(10), h: gauge(10) }
+    assert!(small.within(big))
+}
+
+#[test]
+fn within_rejects_first_field() {
+    let wide = Box2 { w: gauge(11), h: gauge(1) }
+    let limit = Box2 { w: gauge(10), h: gauge(10) }
+    assert!(!wide.within(limit))
+}
+
+#[test]
+fn within_rejects_second_field() {
+    let tall = Box2 { w: gauge(1), h: gauge(11) }
+    let limit = Box2 { w: gauge(10), h: gauge(10) }
+    assert!(!tall.within(limit))
+}
+
+#[test]
+fn lifted_bool_hole_runs() {
+    assert!(Marker {}.audited())
+}

@@ -1302,7 +1302,8 @@ impl<'db> Borrowck<'db> {
                     empty
                 }
             }
-            NExpr::CodeRegionRef { .. }
+            NExpr::Quote { .. }
+            | NExpr::CodeRegionRef { .. }
             | NExpr::Unary { .. }
             | NExpr::Binary { .. }
             | NExpr::ScalarCast { .. }

@@ -1,26 +1,16 @@
-use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr,
-    FunctionDefinition, RecordImplementation, field, field_type}
+use core::meta::{Code, Item, Record, field, field_type}
 
 trait Value<T> {
     fn value(own self) -> T
 }
 
-const fn derive_value(_ record: Record) -> RecordImplementation<1, 2> {
+const fn derive_value(record: Record) -> Code<Item> {
     let f = field(record, 0)
-    RecordImplementation {
-        owner: record,
-        trait_path: "ingot::Value",
-        types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None],
-        constants: [Option::None; 2],
-        method: Option::Some(FunctionDefinition {
-            name: DeclarationName::Literal("value"),
-            public: false,
-            const_function: false,
-            parameters: [DeclarationType::Record(record)],
-            return_type: DeclarationType::Field(field_type(f)),
-            expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)],
-            result: 1,
-        }),
+    let ty = field_type(f)
+    quote {
+        impl ingot::Value<${ty}> for ${record} {
+            fn value(own self) -> ${ty} { self.${f} }
+        }
     }
 }
 

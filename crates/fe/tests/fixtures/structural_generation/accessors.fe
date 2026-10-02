@@ -1,6 +1,6 @@
 
 mod authors {
-    use core::meta::{Record, FieldType, field_count, field, field_type, type_is, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+    use core::meta::{Code, Item, empty, Record, FieldType, field_count, field, field_type, type_is, DeclarationName}
     trait Select: Copy { const fn include(self, _ ty: FieldType) -> bool }
     struct All {}
     struct Flags {}
@@ -8,30 +8,27 @@ mod authors {
     impl Copy for Flags {}
     impl Select for All { const fn include(self, _ ty: FieldType) -> bool { true } }
     impl Select for Flags { const fn include(self, _ ty: FieldType) -> bool { type_is<bool>(ty) } }
-    const fn generate(_ record: Record) -> [Option<FunctionDefinition<1, 2>>; 32] uses (policy: Select) {
-        let mut definitions: [Option<FunctionDefinition<1, 2>>; 32] = [Option::None; 32]
+    const fn generate(_ record: Record) -> Code<Item> uses (policy: Select) {
+        let mut items = empty<Item>()
         let mut i: usize = 0
         while i < field_count(record) {
             let f = field(record, i)
             if policy.include(field_type(f)) {
-                definitions[i] = Option::Some(FunctionDefinition {
-                    name: DeclarationName::FieldPrefix("get_", f),
-                    public: true,
-                    const_function: false,
-                    parameters: [DeclarationType::Record(record)],
-                    return_type: DeclarationType::Field(field_type(f)),
-                    expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)],
-                    result: 1,
-                })
+                let name = DeclarationName::FieldPrefix("get_", f)
+                let ty = field_type(f)
+                items = quote {
+                    ${items}
+                    pub fn ${name}(_ value: ${record}) -> ${ty} { value.${f} }
+                }
             }
             i += 1
         }
-        definitions
+        items
     }
-    pub const fn all(_ record: Record) -> [Option<FunctionDefinition<1, 2>>; 32] {
+    pub const fn all(_ record: Record) -> Code<Item> {
         with (Select = All {}) { generate(record) }
     }
-    pub const fn flags(_ record: Record) -> [Option<FunctionDefinition<1, 2>>; 32] {
+    pub const fn flags(_ record: Record) -> Code<Item> {
         with (Select = Flags {}) { generate(record) }
     }
 }

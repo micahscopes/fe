@@ -1,0 +1,2 @@
+#[generate(policy::quote_private_signature)]
+pub struct Exposed {}

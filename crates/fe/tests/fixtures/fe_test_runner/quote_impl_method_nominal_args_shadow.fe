@@ -1,0 +1,39 @@
+trait Wrap {
+    fn wrap<Payload>(self, value: ingot::author::Envelope<Payload>) -> ingot::author::Envelope<Payload>
+    fn wrap_pair<Payload>(self, value: ingot::author::Envelope<(Payload, Payload)>) -> ingot::author::Envelope<(Payload, Payload)>
+    fn wrap_tag(self, value: ingot::author::Envelope<ingot::author::Tag>) -> ingot::author::Envelope<ingot::author::Tag>
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Envelope<Payload> { pub value: Payload }
+    pub struct Tag { pub value: u256 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Wrap for ${record} {
+                fn wrap<Payload>(self, value: Envelope<Payload>) -> Envelope<Payload> { value }
+                fn wrap_pair<Payload>(self, value: Envelope<(Payload, Payload)>) -> Envelope<(Payload, Payload)> { value }
+                fn wrap_tag(self, value: Envelope<Tag>) -> Envelope<Tag> { value }
+            }
+        }
+    }
+}
+
+struct Envelope<Payload> { other: Payload }
+struct Tag { other: bool }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_nominal_arguments_keep_selected_types() {
+    let number = Target { value: 1 }.wrap<u256>(value: author::Envelope<u256> { value: 7 })
+    assert!(number.value == 7)
+    let pair = Target { value: 1 }.wrap_pair<u256>(value: author::Envelope<(u256, u256)> { value: (3, 5) })
+    assert!(pair.value.0 == 3)
+    assert!(pair.value.1 == 5)
+    let tag = Target { value: 1 }.wrap_tag(value: author::Envelope<author::Tag> { value: author::Tag { value: 11 } })
+    assert!(tag.value.value == 11)
+}

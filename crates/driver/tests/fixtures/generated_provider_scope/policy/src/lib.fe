@@ -1,27 +1,57 @@
-use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition, FunctionCall, CallArgument}
+use core::meta::{Code, Item, Record}
 
 pub const fn bump(_ value: u256) -> u256 { value + 1 }
 
-pub const fn make(_ record: Record) -> FunctionDefinition<1, 2> {
-    FunctionDefinition {
-        name: DeclarationName::Literal("apply"),
-        public: true,
-        const_function: true,
-        parameters: [DeclarationType::U256],
-        return_type: DeclarationType::U256,
-        expressions: [
-            BodyExpr::Parameter(0),
-            BodyExpr::Call(FunctionCall {
-                path: "ingot::bump",
-                types: [Option::None, Option::None],
-                arguments: [
-                    Option::Some(CallArgument { label: Option::None, expression: 0 }),
-                    Option::None,
-                    Option::None,
-                    Option::None,
-                ],
-            }),
-        ],
-        result: 1,
+pub const fn quote_make(_ record: Record) -> Code<Item> {
+    quote { pub const fn quoted() -> u256 { bump(42) } }
+}
+
+pub trait ScratchProbe {
+    const fn scratch(self) -> u256
+}
+
+pub trait Reveal<T> {
+    const fn reveal(self) -> T
+}
+
+pub mod scratch {
+    use core::meta::{Code, Item, Record}
+
+    struct Scratch { value: u256 }
+
+    const fn make() -> Scratch { Scratch { value: 42 } }
+    const fn scratch_step(value: Scratch) -> u256 { value.value + 1 }
+
+    pub const fn quote_scratch(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::ScratchProbe for ${record} {
+                const fn scratch(self) -> u256 {
+                    let value: Scratch = make()
+                    scratch_step(value)
+                }
+            }
+        }
+    }
+
+    pub const fn quote_private_signature(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Reveal<Scratch> for ${record} {
+                const fn reveal(self) -> Scratch { make() }
+            }
+        }
+    }
+}
+
+pub const fn quote_scratch(record: Record) -> Code<Item> {
+    scratch::quote_scratch(record)
+}
+
+pub const fn quote_private_signature(record: Record) -> Code<Item> {
+    scratch::quote_private_signature(record)
+}
+
+pub const fn make(_ record: Record) -> Code<Item> {
+    quote {
+        pub const fn apply(_ value: u256) -> u256 { bump(value) }
     }
 }

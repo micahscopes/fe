@@ -1,0 +1,22 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_impl_self_path_pending.fe
+---
+=== STDERR ===
+error[18-0002]: invalid generated declaration: quoted Self path needs checked transplantation
+   ┌─ quote_impl_self_path_pending.fe:9:9
+   │
+ 9 │ ╭         quote {
+10 │ │             impl ingot::Read for ${record} {
+11 │ │                 fn get(self) -> u256 { Self::K }
+12 │ │             }
+13 │ │         }
+   │ ╰─────────^ invalid generated declaration: quoted Self path needs checked transplantation
+   · │
+17 │   #[generate(ingot::author::emit)]
+   │   -------------------------------- generated here
+
+
+
+=== EXIT CODE: 1 ===

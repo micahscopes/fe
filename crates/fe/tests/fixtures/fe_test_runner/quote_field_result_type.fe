@@ -1,0 +1,19 @@
+mod author {
+    use core::meta::{Code, Item, Record, field, field_type}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let selected = field(record, 0)
+        let result = field_type(selected)
+        quote {
+            pub fn read(input: ${record}) -> ${result} { input.${selected} }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { enabled: bool }
+
+#[test]
+fn quoted_result_uses_selected_field_type() {
+    assert!(read(input: Target { enabled: true }))
+}

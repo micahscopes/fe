@@ -270,6 +270,7 @@ fn collect_local_roots(body: &SemanticBody<'_>) -> LocalRoots {
                         SExpr::AggregateMake { fields, .. } | SExpr::EnumMake { fields, .. } => {
                             fields.iter().map(|field| field.value).collect()
                         }
+                        SExpr::Quote { holes, .. } => holes.iter().map(|hole| hole.value).collect(),
                         SExpr::Call {
                             args, effect_args, ..
                         } => {

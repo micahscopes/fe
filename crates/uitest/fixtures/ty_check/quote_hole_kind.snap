@@ -1,0 +1,55 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/quote_hole_kind.fe
+---
+error[8-0000]: type mismatch
+   ┌─ quote_hole_kind.fe:64:5
+   │
+64 │     quote { fn f() {} }
+   │     ^^^^^^^^^^^^^^^^^^^ expected `Code<Expr>`, but `Code<Item>` is given
+
+error[8-0104]: this splice cannot stand for an expression
+   ┌─ quote_hole_kind.fe:23:15
+   │
+23 │     quote { ${f} }
+   │               ^ expected `Code<Expr>`, `bool`, an integer or a string, found `Field`
+
+error[8-0104]: this splice cannot stand for a member
+   ┌─ quote_hole_kind.fe:27:20
+   │
+27 │     quote { self.${true} }
+   │                    ^^^^ expected a `Field`, found `bool`
+
+error[8-0104]: this splice cannot stand for a type
+   ┌─ quote_hole_kind.fe:32:20
+   │
+32 │     quote { 1 as ${body} }
+   │                    ^^^^ expected a `FieldType` or a `Record`, found `Code<Expr>`
+
+error[8-0104]: this splice cannot stand for a declared name
+   ┌─ quote_hole_kind.fe:36:18
+   │
+36 │     quote { fn ${true}() {} }
+   │                  ^^^^ expected a `DeclarationName` or a `Field`, found `bool`
+
+error[8-0104]: this splice cannot stand for items
+   ┌─ quote_hole_kind.fe:42:11
+   │
+42 │         ${body}
+   │           ^^^^ expected `Code<Item>`, found `Code<Expr>`
+
+error[8-0104]: this splice cannot stand for where predicates
+   ┌─ quote_hole_kind.fe:49:21
+   │
+49 │     quote { where ${items} }
+   │                     ^^^^^ expected `Code<Where>`, found `Code<Item>`
+
+error[8-0105]: the splices of this quote have different kinds
+   ┌─ quote_hole_kind.fe:56:5
+   │
+56 │ ╭     quote {
+57 │ │         ${items}
+58 │ │         ${bounds}
+59 │ │     }
+   │ ╰─────^ a body made only of splices takes their kind, so they must agree

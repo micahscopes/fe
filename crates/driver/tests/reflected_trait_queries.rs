@@ -266,6 +266,8 @@ fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls(fixture: F
         );
     // These two edits deliberately change policy facts only. They check dependency
     // invalidation, not the runtime correctness of the edited codec's byte layout.
+    // The quoted size implementation reads the same Fe-authored layout as offsets,
+    // so changing the head policy changes both reported values.
     let provider = base.replace("abi_field_head_size<T>()", "abi_field_head_size<T>() + 32");
     let supporting = base.replace("const HEAD_SIZE: u256 = 64", "const HEAD_SIZE: u256 = 96");
     let mut warm = DriverDataBase::default();
@@ -278,7 +280,7 @@ fn nested_edits_and_restoration_match_fresh_facts_and_generated_calls(fixture: F
         (base.clone(), "(128, 96)"),
         (record, "(160, 96)"),
         (base.clone(), "(128, 96)"),
-        (provider, "(128, 160)"),
+        (provider, "(224, 160)"),
         (base.clone(), "(128, 96)"),
         (supporting, "(160, 128)"),
         (base, "(128, 96)"),

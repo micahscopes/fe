@@ -374,6 +374,11 @@ pub enum NExpr<'db> {
     CodeRegionRef {
         region: SemanticCodeRegionRef<'db>,
     },
+    /// A checked compile-time quote. Its splices are ordinary value uses;
+    /// CTFE reads the template from the raw semantic body.
+    Quote {
+        holes: Box<[NOperand]>,
+    },
     Const(SConst<'db>),
     Unary {
         op: UnOp,
@@ -449,6 +454,7 @@ impl<'db> NExpr<'db> {
             | Self::MakeHandle { fields, .. } => {
                 fields.iter().copied().for_each(f);
             }
+            Self::Quote { holes } => holes.iter().copied().for_each(f),
             Self::Call {
                 args,
                 effect_args,
@@ -493,6 +499,7 @@ impl<'db> NExpr<'db> {
             | Self::ProjectValue { .. }
             | Self::StructuralRepack { .. }
             | Self::CodeRegionRef { .. }
+            | Self::Quote { .. }
             | Self::Const(_)
             | Self::Unary { .. }
             | Self::Binary { .. }

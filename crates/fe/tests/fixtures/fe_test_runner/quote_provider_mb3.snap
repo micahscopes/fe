@@ -1,0 +1,13 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_provider_mb3.fe
+---
+=== STDOUT ===
+PASS  [<time>] within_all_fields_under_limit
+PASS  [<time>] within_rejects_second_field
+PASS  [<time>] lifted_bool_hole_runs
+
+test result: ok. 3 passed; 0 failed
+
+=== EXIT CODE: 0 ===

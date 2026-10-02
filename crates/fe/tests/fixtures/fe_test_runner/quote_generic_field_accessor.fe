@@ -1,0 +1,19 @@
+mod author {
+    use core::meta::{Code, Item, Record, field, field_type}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let selected = field(record, 0)
+        let result = field_type(selected)
+        quote {
+            pub fn read(input: ${record}) -> ${result} { input.${selected} }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target<Payload: Copy> { value: Payload }
+
+#[test]
+fn quoted_generic_accessor_keeps_target_bound() {
+    assert!(read(input: Target<u256> { value: 42 }) == 42)
+}

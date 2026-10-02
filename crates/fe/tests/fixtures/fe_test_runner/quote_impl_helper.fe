@@ -1,0 +1,27 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    trait Helper {
+        const fn make() -> Code<Item>
+    }
+
+    struct Tag {}
+
+    impl Helper for Tag {
+        const fn make() -> Code<Item> {
+            quote {
+                pub fn answer() -> u256 { 43 }
+            }
+        }
+    }
+
+    pub const fn emit(_ record: Record) -> Code<Item> { Tag::make() }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn quote_from_impl_method_runs() {
+    assert!(answer() == 43)
+}

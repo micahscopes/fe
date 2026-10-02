@@ -1,0 +1,24 @@
+trait Read {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let selected = field(record, 0)
+        quote {
+            impl ingot::Read for ${record} {
+                fn get(self) -> u256 { self.${selected} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_impl_method_reads_field() {
+    assert!(Target { value: 42 }.get() == 42)
+}

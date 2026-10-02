@@ -260,7 +260,7 @@ impl DiagnosticsCollection<'_> {
     }
 
     pub fn has_errors(&self, db: &DriverDataBase) -> bool {
-        self.finalize(db)
+        self.complete_diags(db)
             .iter()
             .any(|d| d.severity == Severity::Error)
     }
@@ -270,7 +270,7 @@ impl DiagnosticsCollection<'_> {
         let mut buffer = writer.buffer();
         let config = term::Config::default();
 
-        for diag in self.finalize(db) {
+        for diag in self.complete_diags(db) {
             term::emit(&mut buffer, &config, &CsDbWrapper(db), &diag.to_cs(db)).unwrap();
         }
 
@@ -285,14 +285,14 @@ impl DiagnosticsCollection<'_> {
         let mut buffer = writer.buffer();
         let config = term::Config::default();
 
-        for diag in self.finalize(db) {
+        for diag in self.complete_diags(db) {
             term::emit(&mut buffer, &config, &CsDbWrapper(db), &diag.to_cs(db)).unwrap();
         }
 
         trim_trailing_line_whitespace(std::str::from_utf8(buffer.as_slice()).unwrap())
     }
 
-    fn finalize(&self, db: &DriverDataBase) -> Vec<CompleteDiagnostic> {
+    pub fn complete_diags(&self, db: &DriverDataBase) -> Vec<CompleteDiagnostic> {
         let mut diags: Vec<_> = self.0.iter().map(|d| d.as_ref().to_complete(db)).collect();
         sort_and_coalesce_complete_diagnostics(&mut diags);
         diags

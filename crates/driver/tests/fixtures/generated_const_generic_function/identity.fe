@@ -1,14 +1,8 @@
-use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+use core::meta::{Code, Item, Record}
 
-const fn make(record: Record) -> FunctionDefinition<1, 2> {
-    FunctionDefinition {
-        name: DeclarationName::Literal("pass"),
-        public: false,
-        const_function: true,
-        parameters: [DeclarationType::Record(record)],
-        return_type: DeclarationType::Record(record),
-        expressions: [BodyExpr::Parameter(0), BodyExpr::End],
-        result: 0,
+const fn make(record: Record) -> Code<Item> {
+    quote {
+        const fn pass(_ value: ${record}) -> ${record} { value }
     }
 }
 

@@ -1,0 +1,37 @@
+trait Readers {
+    fn first(self) -> u256
+    fn second(self, delta: u256) -> u256
+}
+
+fn bump(value: u256) -> u256 { value + 1 }
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let left = field(record, 0)
+        let right = field(record, 1)
+        quote {
+            impl ingot::Readers for ${record} {
+                fn first(self) -> u256 {
+                    let value = self.${left}
+                    ingot::bump(value)
+                }
+
+                fn second(self, delta: u256) -> u256 {
+                    let value = self.${right}
+                    ingot::bump(value: value + delta)
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { a: u256, b: u256 }
+
+#[test]
+fn quoted_impl_two_methods_keep_their_bindings() {
+    assert!(Target { a: 40, b: 50 }.first() == 41)
+    assert!(Target { a: 40, b: 50 }.second(delta: 5) == 56)
+}

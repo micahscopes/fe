@@ -1,5 +1,23 @@
-<fixture>: error[8-0000]: type mismatch
-   ┌─ invalid_unused_expression.fe:19:1
+error[8-0000]: type mismatch
+   ┌─ invalid_unused_expression.fe:4:5
    │
-19 │ #[generate(make)]
-   │ ^^^^^^^^^^^^^^^^^ expected `u256`, but `bool` is given
+ 4 │ ╭     quote {
+ 5 │ │         pub const fn apply(_ value: u256) -> u256 {
+ 6 │ │             if false { let unused: u256 = true }
+ 7 │ │             value
+ 8 │ │         }
+ 9 │ │     }
+   │ ╰─────^ expected `u256`, but `bool` is given
+   · │
+12 │   #[generate(make)]
+   │   ----------------- generated here
+   │
+   = generated item:
+     pub const fn apply(_ value: u256) -> u256 {
+         {
+             if false {
+                 let <quote-local-0-0>: u256 = true
+             }
+             value
+         }
+     }

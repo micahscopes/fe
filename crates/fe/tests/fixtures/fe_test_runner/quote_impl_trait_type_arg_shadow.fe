@@ -1,0 +1,28 @@
+trait Labeled<T> {
+    const LABEL: usize
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+    use ingot::Labeled
+
+    pub struct Tag { pub value: u256 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl Labeled<Tag> for ${record} {
+                const LABEL: usize = 7
+            }
+        }
+    }
+}
+
+struct Tag { other: bool }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_trait_argument_keeps_provider_type() {
+    assert!(<Target as Labeled<author::Tag>>::LABEL == 7)
+}

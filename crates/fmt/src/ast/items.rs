@@ -153,7 +153,7 @@ fn where_doc<'a, N: ast::WhereClauseOwner + AstNode>(
     let alloc = &ctx.alloc;
 
     if let Some(where_clause) = node.where_clause() {
-        if where_clause.iter().next().is_none() && !has_comment_tokens(where_clause.syntax()) {
+        if where_clause_is_empty(&where_clause) {
             return alloc.nil();
         }
 
@@ -169,10 +169,19 @@ fn where_doc<'a, N: ast::WhereClauseOwner + AstNode>(
     }
 }
 
+fn where_clause_is_empty(clause: &ast::WhereClause) -> bool {
+    clause.iter().next().is_none()
+        && !clause
+            .syntax()
+            .children()
+            .any(|node| ast::QuoteHole::cast(node).is_some())
+        && !has_comment_tokens(clause.syntax())
+}
+
 /// Format a block of items `{ ... }`, preserving whether there was a blank line
 /// between entries in the source (2+ newlines => one blank line; otherwise none).
 /// Takes a syntax node and a function to cast child nodes to the item type.
-fn block_items_doc<'a, T: ToDoc>(
+pub(super) fn block_items_doc<'a, T: ToDoc>(
     syntax: &parser::SyntaxNode,
     cast_fn: impl Fn(parser::SyntaxNode) -> Option<T>,
     ctx: &'a RewriteContext<'a>,
@@ -386,9 +395,10 @@ fn func_sig_to_doc<'a>(
 
     let alloc = &ctx.alloc;
 
-    let name = match sig.name() {
-        Some(n) => alloc.text(ctx.token(&n)),
-        None => return alloc.text("fn"),
+    let name = match (sig.name(), sig.name_hole()) {
+        (Some(n), _) => alloc.text(ctx.token(&n)),
+        (None, Some(hole)) => hole.to_doc(ctx),
+        (None, None) => return alloc.text("fn"),
     };
 
     let generics = generics_doc(sig, ctx);
@@ -580,7 +590,7 @@ fn where_doc_forced<'a, N: ast::WhereClauseOwner + AstNode>(
     let alloc = &ctx.alloc;
 
     if let Some(where_clause) = node.where_clause() {
-        if where_clause.iter().next().is_none() && !has_comment_tokens(where_clause.syntax()) {
+        if where_clause_is_empty(&where_clause) {
             return alloc.nil();
         }
 
@@ -1173,7 +1183,38 @@ impl ToDoc for ast::Trait {
 
 impl ToDoc for ast::TraitItemList {
     fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
-        block_items_doc(self.syntax(), ast::TraitItem::cast, ctx)
+        block_items_doc(
+            self.syntax(),
+            |node| MemberDoc::cast(node, ast::TraitItem::cast),
+            ctx,
+        )
+    }
+}
+
+/// A member of an impl or trait block, or an items splice inside a quotation.
+enum MemberDoc<T> {
+    Member(T),
+    Hole(ast::QuoteHole),
+}
+
+impl<T> MemberDoc<T> {
+    fn cast(
+        node: parser::SyntaxNode,
+        cast: impl Fn(parser::SyntaxNode) -> Option<T>,
+    ) -> Option<Self> {
+        if let Some(hole) = ast::QuoteHole::cast(node.clone()) {
+            return Some(Self::Hole(hole));
+        }
+        cast(node).map(Self::Member)
+    }
+}
+
+impl<T: ToDoc> ToDoc for MemberDoc<T> {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        match self {
+            Self::Member(member) => member.to_doc(ctx),
+            Self::Hole(hole) => hole.to_doc(ctx),
+        }
     }
 }
 
@@ -1229,7 +1270,9 @@ impl ToDoc for ast::TraitConstItem {
 
         let name = self
             .name()
-            .map_or_else(|| alloc.nil(), |n| alloc.text(ctx.token(&n)));
+            .map(|n| alloc.text(ctx.token(&n)))
+            .or_else(|| self.name_hole().map(|hole| hole.to_doc(ctx)))
+            .unwrap_or_else(|| alloc.nil());
 
         let ty_doc = self
             .ty()
@@ -1281,7 +1324,11 @@ impl ToDoc for ast::Impl {
 
 impl ToDoc for ast::ImplItemList {
     fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
-        block_items_doc(self.syntax(), ast::ImplItem::cast, ctx)
+        block_items_doc(
+            self.syntax(),
+            |node| MemberDoc::cast(node, ast::ImplItem::cast),
+            ctx,
+        )
     }
 }
 
@@ -1345,7 +1392,9 @@ impl ToDoc for ast::Const {
 
         let name = self
             .name()
-            .map_or_else(|| alloc.nil(), |n| alloc.text(ctx.token(&n)));
+            .map(|n| alloc.text(ctx.token(&n)))
+            .or_else(|| self.name_hole().map(|hole| hole.to_doc(ctx)))
+            .unwrap_or_else(|| alloc.nil());
 
         let ty_doc = self
             .ty()

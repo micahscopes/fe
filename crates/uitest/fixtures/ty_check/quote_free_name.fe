@@ -1,0 +1,32 @@
+use core::meta::{Code, Expr, Item}
+
+fn helper() -> u256 { 1 }
+
+// Names in a quote resolve where the quote is written. Binders inside the
+// fragment, open names, `self` and `Self` need no resolution; any other name
+// must resolve in the provider's scope, and provider values must be spliced.
+const fn resolved() -> Code<Item> {
+    quote(other) {
+        fn f<T>(self, _ x: u256, _ t: T) -> u256 {
+            let y: u256 = helper() + x
+            y + other + Self::K
+        }
+    }
+}
+
+const fn unresolved() -> Code<Expr> {
+    quote { missing + 1 }
+}
+
+const fn unresolved_type() -> Code<Expr> {
+    quote { 1 as Missing }
+}
+
+const fn provider_local(_ n: u256) -> Code<Expr> {
+    let local: u256 = 1
+    quote { local + n }
+}
+
+const fn provider_generic<T>() -> Code<Expr> {
+    quote { helper() as T }
+}

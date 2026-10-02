@@ -56,6 +56,98 @@ fn evaluate_named(db: &DriverDataBase, url: &Url, name: &str) -> String {
 }
 
 #[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_provider_root.fe"
+)]
+fn quoted_root_identity_matches_checked_output(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
+    let mut authored = DriverDataBase::default();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), fixture.content().to_string());
+    let mut output = fe_driver::elaboration::prepare(&authored)
+        .expect("authored quote elaborates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).expect("fixture file");
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+
+    let input = hir::HirDb::generated_module(&output, &url).expect("frozen request");
+    let mut requests = input.requests(&output).clone();
+    let [request] = requests.as_mut_slice() else {
+        panic!("expected one generation request")
+    };
+    let hir::core::meta::FrozenMetaValue::Code(code) = &mut request.value else {
+        panic!("expected quoted code")
+    };
+    let [root] = code.nodes[code.root].rooted_funcs.as_mut_slice() else {
+        panic!("expected one rooted function")
+    };
+    let authored_path = root.owner.named_path().expect("authored function path");
+    let sibling_path = authored_path
+        .strip_suffix("::author::bump")
+        .expect("fixture names author::bump");
+    root.owner = hir::core::meta::FrozenItemLocator::Named(hir::core::meta::FrozenOwner {
+        file: url.clone(),
+        path: format!("{sibling_path}::bump"),
+    });
+    input.set_requests(&mut output).to(requests);
+
+    let file = output.workspace().get(&output, &url).expect("fixture file");
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0].message,
+        "quoted rooted function changed meaning in output"
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_marker_impl.fe"
+)]
+fn quoted_trait_identity_matches_checked_output(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
+    let mut authored = DriverDataBase::default();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), fixture.content().to_string());
+    let mut output = fe_driver::elaboration::prepare(&authored)
+        .expect("authored quote elaborates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).expect("fixture file");
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+
+    let input = hir::HirDb::generated_module(&output, &url).expect("frozen request");
+    let mut requests = input.requests(&output).clone();
+    let [request] = requests.as_mut_slice() else {
+        panic!("expected one generation request")
+    };
+    let hir::core::meta::FrozenMetaValue::Code(code) = &mut request.value else {
+        panic!("expected quoted code")
+    };
+    let [root] = code.nodes[code.root].rooted_traits.as_mut_slice() else {
+        panic!("expected one rooted trait")
+    };
+    assert!(root.owner.path.ends_with("::Tag"));
+    root.owner.path = root.owner.path.replace("::Tag", "::Other");
+    input.set_requests(&mut output).to(requests);
+
+    let file = output.workspace().get(&output, &url).expect("fixture file");
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0].message,
+        "quoted rooted trait changed meaning in output"
+    );
+}
+
+#[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/elaboration_meta_identity",
     glob: "*.fe"
 )]
@@ -68,19 +160,11 @@ fn core_meta_reordering_preserves_generated_meaning(fixture: Fixture<&str>) {
         .find(|(url, _)| url.path().ends_with("/meta.fe"))
         .map(|(url, file)| (url.clone(), file.text(&db).clone()))
         .expect("builtin core meta file");
-    let fields = "    pub public: bool,\n    pub const_function: bool,";
-    let fields_reordered = "    pub const_function: bool,\n    pub public: bool,";
-    let variants = "    U64,\n    U256,";
-    let variants_reordered = "    U256,\n    U64,";
-    let body_variants = "    Bool(bool),\n    U256(u256),";
-    let body_variants_reordered = "    U256(u256),\n    Bool(bool),";
-    assert_eq!(original.matches(fields).count(), 1);
-    assert_eq!(original.matches(variants).count(), 1);
-    assert_eq!(original.matches(body_variants).count(), 1);
-    let reordered = original
-        .replace(fields, fields_reordered)
-        .replace(variants, variants_reordered)
-        .replace(body_variants, body_variants_reordered);
+    let declaration_names = "    Literal(String<31>),\n    FieldPrefix(String<31>, Field),";
+    let declaration_names_reordered =
+        "    FieldPrefix(String<31>, Field),\n    Literal(String<31>),";
+    assert_eq!(original.matches(declaration_names).count(), 1);
+    let reordered = original.replace(declaration_names, declaration_names_reordered);
     db.workspace().update(&mut db, meta_url, reordered);
     let source_url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
     db.workspace()
@@ -97,18 +181,37 @@ fn core_meta_reordering_preserves_generated_meaning(fixture: Fixture<&str>) {
         request.target_span_start,
         fixture.content().find("#[generate(").unwrap()
     );
-    assert!(request.provider.path.ends_with("author::make"));
-    let hir::core::meta::FrozenMetaValue::Record { item, fields } = &request.value else {
-        panic!("expected a frozen function definition")
-    };
-    assert_eq!(*item, hir::core::meta::MetaItem::FunctionDefinition);
-    assert_eq!(
-        fields.get("const_function"),
-        Some(&hir::core::meta::FrozenMetaValue::Scalar {
-            value: hir::analysis::semantic::SemConstScalar::Bool(true),
-            primitive: Some(hir::analysis::ty::ty_def::PrimTy::Bool),
-        })
+    assert!(
+        request
+            .provider
+            .named_path()
+            .is_some_and(|path| path.ends_with("author::make"))
     );
+    let hir::core::meta::FrozenMetaValue::Code(code) = &request.value else {
+        panic!("expected frozen quotation")
+    };
+    let [
+        hir::core::meta::FrozenCodeHole::Value(name, _),
+        hir::core::meta::FrozenCodeHole::Value(result, _),
+    ] = code.nodes[code.root].holes.as_slice()
+    else {
+        panic!("expected the quoted name and result")
+    };
+    assert!(matches!(
+        name.as_ref(),
+        hir::core::meta::FrozenMetaValue::Variant {
+            item: hir::core::meta::MetaItem::DeclarationName,
+            case: hir::core::meta::FrozenMetaVariantCase::DeclarationNameLiteral,
+            ..
+        }
+    ));
+    assert!(matches!(
+        result.as_ref(),
+        hir::core::meta::FrozenMetaValue::Scalar {
+            value: hir::analysis::semantic::SemConstScalar::Int { .. },
+            ..
+        }
+    ));
     let source = output
         .workspace()
         .get(&output, &source_url)
@@ -180,8 +283,8 @@ fn core_meta_reordering_preserves_generated_meaning(fixture: Fixture<&str>) {
 fn generated_identity_survives_provider_output_edits(fixture: Fixture<&str>) {
     let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
     let source = fixture.content().replace("\r\n", "\n");
-    assert_eq!(source.matches("BodyExpr::U256(42)").count(), 1);
-    let edited = source.replace("BodyExpr::U256(42)", "BodyExpr::U256(43)");
+    assert_eq!(source.matches("let result: u256 = 42").count(), 1);
+    let edited = source.replace("let result: u256 = 42", "let result: u256 = 43");
     let mut warm = DriverDataBase::default();
     let observe = |db: &DriverDataBase| {
         let file = db.workspace().get(db, &url).expect("fixture file");
@@ -228,8 +331,8 @@ fn generated_identity_survives_provider_output_edits(fixture: Fixture<&str>) {
 fn generated_impl_identity_survives_provider_output_edits(fixture: Fixture<&str>) {
     let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
     let source = fixture.content().replace("\r\n", "\n");
-    assert_eq!(source.matches("BodyExpr::U256(42)").count(), 1);
-    let edited = source.replace("BodyExpr::U256(42)", "BodyExpr::U256(43)");
+    assert_eq!(source.matches("let head_size: u256 = 42").count(), 1);
+    let edited = source.replace("let head_size: u256 = 42", "let head_size: u256 = 43");
     let observe = |db: &DriverDataBase| {
         let file = db.workspace().get(db, &url).expect("fixture file");
         let [implementation] = db.top_mod(file).all_impl_traits(db).as_slice() else {
@@ -285,13 +388,13 @@ fn const_generic_generated_function_keeps_its_arguments(fixture: Fixture<&str>) 
         .map(|function| function.pretty_print(&output))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(printed.contains("fn pass<const N: usize>"), "{printed}");
+    assert!(printed.contains("fn pass<const "), "{printed}");
     assert_eq!(evaluate_named(&output, &url, "answer"), "42");
 }
 
 #[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_const_expression",
-    glob: "*.fe"
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_generic_head_size.fe"
 )]
 fn generated_const_expression_keeps_generic_field_sizes(fixture: Fixture<&str>) {
     let mut db = DriverDataBase::default();
@@ -309,33 +412,16 @@ fn generated_const_expression_keeps_generic_field_sizes(fixture: Fixture<&str>) 
         .map(|body| body.pretty_print(&output))
         .collect::<Vec<_>>()
         .join("\n");
+    assert_eq!(
+        generated.matches("abi_field_head_size<").count(),
+        2,
+        "{generated}"
+    );
     assert!(
-        generated.contains("abi_field_head_size<T>()"),
+        generated.contains("abi_field_head_size<u256>()"),
         "{generated}"
     );
     assert_eq!(evaluate_named(&output, &url, "answer"), "160");
-}
-
-#[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_const_expression_invalid",
-    glob: "*.fe"
-)]
-fn generated_const_expression_checks_unused_nodes(fixture: Fixture<&str>) {
-    let mut db = DriverDataBase::default();
-    let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
-    db.workspace()
-        .update(&mut db, url, fixture.content().to_string());
-    let error = match fe_driver::elaboration::prepare(&db) {
-        Ok(_) => panic!("unused invalid expression was admitted"),
-        Err(error) => error,
-    };
-    let (line, column) = error.position(&db).expect("generation site position");
-    let snapshot = std::path::Path::new(fixture.path()).with_extension("snap");
-    let expected = std::fs::read_to_string(snapshot).expect("fixture diagnostic snapshot");
-    assert_eq!(
-        format!("{line}:{column}: {}", error.message),
-        expected.trim_end()
-    );
 }
 
 #[test]
@@ -842,32 +928,7 @@ struct Packet {{ value: Word }}
     }
 }
 
-const ACCESSOR_SOURCE: &str = r#"
-mod authors {
-    use core::meta::{Record, field, field_type, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
-    pub const fn accessor(_ record: Record) -> FunctionDefinition<1, 2> {
-        let f = field(record, 2)
-        FunctionDefinition {
-            name: DeclarationName::FieldPrefix("get_", f),
-            public: true,
-            const_function: true,
-            parameters: [DeclarationType::Record(record)],
-            return_type: DeclarationType::Field(field_type(f)),
-            expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)],
-            result: 1,
-        }
-    }
-}
-mod owner {
-    #[generate(ingot::authors::accessor)]
-    pub struct Packet { nonce: u256, ready: bool, code: u64 }
-    pub const fn sample() -> Packet { Packet { nonce: 42, ready: true, code: 258 } }
-}
-mod other {
-    #[generate(ingot::authors::accessor)]
-    pub struct Packet { nonce: u256, ready: bool, code: u64 }
-}
-"#;
+const ACCESSOR_SOURCE: &str = include_str!("fixtures/generated_accessor/source.fe");
 
 fn function_definitions<'db>(
     db: &'db DriverDataBase,
@@ -972,12 +1033,18 @@ fn good() {
     assert!(diagnostics.format_diags(&db).contains("Copy"));
 }
 
-#[test]
-fn project_preparation_admits_all_invocations_before_checking_authored_consumers() {
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_accessor",
+    glob: "source.fe"
+)]
+fn project_preparation_admits_all_invocations_before_checking_authored_consumers(
+    fixture: Fixture<&str>,
+) {
     let mut db = DriverDataBase::default();
     let url: Url = "file:///integrated_accessors.fe".parse().unwrap();
     let source = format!(
-        "{ACCESSOR_SOURCE}\nconst fn answer() -> u64 {{ owner::get_code(owner::sample()) }}\nfn other_answer(_ value: other::Packet) -> u64 {{ other::get_code(value) }}"
+        "{}\nconst fn answer() -> u64 {{ owner::get_code(owner::sample()) }}\nfn other_answer(_ value: other::Packet) -> u64 {{ other::get_code(value) }}",
+        fixture.content()
     );
     put(&mut db, url.as_str(), &source);
     let output = fe_driver::elaboration::prepare(&db).unwrap().unwrap();
@@ -1025,10 +1092,7 @@ fn project_preparation_admits_all_invocations_before_checking_authored_consumers
     put(
         &mut db,
         url.as_str(),
-        &source.replace(
-            "return_type: DeclarationType::Field(field_type(f))",
-            "return_type: DeclarationType::Bool",
-        ),
+        &source.replace("-> ${ty} { value.${f} }", "-> bool { value.${f} }"),
     );
     assert!(fe_driver::elaboration::prepare(&db).is_err());
     assert_eq!(
@@ -1056,10 +1120,7 @@ fn project_preparation_rejects_unchecked_entry_premises_and_untaken_invalid_sour
             "pub const fn accessor",
             "trait Need {}\npub const fn accessor",
         )
-        .replace(
-            "-> FunctionDefinition<1, 2> {",
-            "-> FunctionDefinition<1, 2> where u256: Need {",
-        );
+        .replace("-> Code<Item> {", "-> Code<Item> where u256: Need {");
     put(&mut db, url.as_str(), &constrained);
     let error = match fe_driver::elaboration::prepare(&db) {
         Err(error) => error,
@@ -1116,26 +1177,14 @@ fn selected_generation_skips_unrelated_ingots_but_includes_dependencies() {
 }
 
 fn calling_accessor_source() -> String {
-    let source = ACCESSOR_SOURCE
-        .replace("BodyExpr, FunctionDefinition", "BodyExpr, FunctionDefinition, FunctionCall, CallArgument")
-        .replace("FunctionDefinition<1, 2>", "FunctionDefinition<1, 3>")
-        .replace(
-            "expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)]",
-            r#"expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f),
-                BodyExpr::Call(FunctionCall {
-                    path: "ingot::support::keep",
-                    types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None],
-                    arguments: [Option::Some(CallArgument { label: Option::Some("value"), expression: 1 }), Option::None, Option::None, Option::None],
-                })]"#,
-        )
-        .replace("result: 1", "result: 2");
+    let source = ACCESSOR_SOURCE.replace(
+        "{ value.${f} }",
+        "{ ingot::support::keep(value: value.${f}) }",
+    );
+    let support = include_str!("fixtures/generated_accessor/support.fe");
     format!(
-        r#"{source}
-mod support {{
-    pub trait Allowed {{}}
-    impl Allowed for u64 {{}}
-    pub const fn keep<T: Allowed + Copy>(value: T) -> T {{ value }}
-}}
+        r#"{support}
+{source}
 const fn answer() -> u64 {{ owner::get_code(owner::sample()) }}
 "#
     )
@@ -1170,71 +1219,17 @@ fn generated_calls_check_complete_requirements_and_track_supporting_impl_edits()
 }
 
 #[test]
-fn generated_call_syntax_rejects_injection_holes_and_forward_references() {
+fn quoted_call_syntax_rejects_bad_paths_names_and_arguments() {
     let source = calling_accessor_source();
     for invalid in [
         source.replace("ingot::support::keep", "ingot::keep() {}"),
-        source.replace("expression: 1", "expression: 2"),
-        source.replace(
-            "Option::Some(\"value\")",
-            "Option::Some(\"value: 0, injected\")",
-        ),
-        source.replace(
-            "types: [Option::Some(DeclarationType::Field(field_type(f))), Option::None]",
-            "types: [Option::None, Option::Some(DeclarationType::Field(field_type(f)))]",
-        ),
+        source.replace("value.${f})", "missing)"),
+        source.replace("value: value.${f}", "wrong: value.${f}"),
     ] {
         let mut db = DriverDataBase::default();
         put(&mut db, "file:///project/src/lib.fe", &invalid);
         assert!(fe_driver::elaboration::prepare(&db).is_err());
     }
-}
-
-#[test]
-fn generated_calls_admit_existing_abi_codec_with_named_types_and_pointer_arguments() {
-    let source = ACCESSOR_SOURCE
-        .replace("let f = field(record, 2)", "let f = field(record, 2)\nlet no_label: Option<String<31>> = Option::None")
-        .replace("BodyExpr, FunctionDefinition", "BodyExpr, FunctionDefinition, FunctionCall, CallArgument")
-        .replace("FunctionDefinition<1, 2>", "FunctionDefinition<2, 6>")
-        .replace("const_function: true", "const_function: false")
-        .replace("parameters: [DeclarationType::Record(record)]", "parameters: [DeclarationType::Record(record), DeclarationType::BytePointer]")
-        .replace("return_type: DeclarationType::Field(field_type(f))", "return_type: DeclarationType::U256")
-        .replace(
-            "expressions: [BodyExpr::Parameter(0), BodyExpr::Field(0, f)]",
-            r#"expressions: [
-                BodyExpr::Parameter(0), BodyExpr::Parameter(1), BodyExpr::Field(0, f),
-                BodyExpr::U256(0), BodyExpr::U256(32),
-                BodyExpr::Call(FunctionCall {
-                    path: "core::abi::encode_field_at",
-                    types: [Option::Some(DeclarationType::Named("std::abi::Sol")), Option::Some(DeclarationType::Field(field_type(f)))],
-                    arguments: [
-                        Option::Some(CallArgument { label: no_label, expression: 2 }),
-                        Option::Some(CallArgument { label: no_label, expression: 1 }),
-                        Option::Some(CallArgument { label: Option::Some("head_pos"), expression: 3 }),
-                        Option::Some(CallArgument { label: no_label, expression: 4 }),
-                    ],
-                }),
-            ]"#,
-        )
-        .replace("result: 1", "result: 5");
-    let mut db = DriverDataBase::default();
-    put(&mut db, "file:///codec.fe", &source);
-    let output = fe_driver::elaboration::prepare(&db).unwrap().unwrap();
-    let file = output
-        .workspace()
-        .get(&output, &"file:///codec.fe".parse().unwrap())
-        .unwrap();
-    let printed = output
-        .top_mod(file)
-        .all_funcs(&output)
-        .iter()
-        .map(|function| function.pretty_print(&output))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        printed.contains("core::abi::encode_field_at<std::abi::Sol, u64>"),
-        "{printed}"
-    );
 }
 
 const ABI_SOURCE: &str = include_str!("../../fe/tests/fixtures/structural_generation/abi.fe");
@@ -1278,7 +1273,7 @@ fn fe_authored_abi_implementations_admit_fixed_records_and_consumers() {
     assert_eq!(
         traits
             .lines()
-            .filter(|name| *name == "core::abi::AbiSize")
+            .filter(|name| *name == "ingot::AbiSize")
             .count(),
         4,
         "{traits}"
@@ -1286,17 +1281,12 @@ fn fe_authored_abi_implementations_admit_fixed_records_and_consumers() {
     assert_eq!(
         traits
             .lines()
-            .filter(|name| *name == "core::abi::Encode<std::abi::Sol>")
+            .filter(|name| *name == "ingot::Encode<ingot::Sol>")
             .count(),
         4
     );
     assert_eq!(methods.matches("fn encode(own self").count(), 4);
-    assert_eq!(
-        methods
-            .matches("core::abi::encode_field_at<std::abi::Sol,")
-            .count(),
-        7
-    );
+    assert_eq!(methods.matches("ingot::authors::encode_sol").count(), 7);
     assert_eq!(db.workspace().get(&db, &url).unwrap().text(&db), ABI_SOURCE);
 }
 
@@ -1304,29 +1294,30 @@ fn fe_authored_abi_implementations_admit_fixed_records_and_consumers() {
 fn generated_implementations_check_trait_contracts_and_coherence() {
     for (case, source) in [
         ABI_SOURCE.replace(
-            "DeclarationName::Literal(\"IS_DYNAMIC\")",
-            "DeclarationName::Literal(\"MISSING\")",
+            "const IS_DYNAMIC: bool = ${is_dynamic}",
+            "const MISSING: bool = ${is_dynamic}",
         ),
         ABI_SOURCE.replace(
             "#[generate(ingot::authors::size)]",
             "#[generate(ingot::authors::size)]\n#[generate(ingot::authors::size)]",
         ),
         ABI_SOURCE.replace(
-            "parameters: [DeclarationType::Record(record), DeclarationType::BytePointer]",
-            "parameters: [DeclarationType::Bool, DeclarationType::BytePointer]",
+            "fn encode(own self, _ ptr: *u8) -> ()",
+            "fn encode(own self, _ ptr: bool) -> ()",
         ),
         ABI_SOURCE.replace(
-            "return_type: DeclarationType::Unit",
-            "return_type: DeclarationType::U256",
+            "fn encode(own self, _ ptr: *u8) -> ()",
+            "fn encode(own self, _ ptr: *u8) -> u256",
         ),
         ABI_SOURCE.replace(
-            "expressions[3] = BodyExpr::Unit",
-            "expressions[3] = BodyExpr::End",
+            "fn encode(own self, _ ptr: *u8) -> () { ${body} }",
+            "fn encode(own self, _ ptr: *u8) -> () { 7 }",
         ),
     ]
     .into_iter()
     .enumerate()
     {
+        assert_ne!(source, ABI_SOURCE, "case {case} did not alter the fixture");
         let mut db = DriverDataBase::default();
         put(&mut db, "file:///abi.fe", &source);
         assert!(
@@ -1438,7 +1429,7 @@ fn generated_abi_impl_ids(
             let name = trait_ref.pretty_print(db);
             matches!(
                 name.as_str(),
-                "core::abi::AbiSize" | "core::abi::Encode<std::abi::Sol>"
+                "ingot::AbiSize" | "ingot::Encode<ingot::Sol>"
             )
             .then(|| (name, implementation.as_id()))
         })
@@ -1464,12 +1455,7 @@ fn structural_abi_fixed_scaling_series_and_declared_field_limit() {
             .map(|method| method.pretty_print(&output))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(
-            methods
-                .matches("core::abi::encode_field_at<std::abi::Sol,")
-                .count(),
-            count
-        );
+        assert_eq!(methods.matches("ingot::authors::encode_sol").count(), count);
         assert_eq!(
             output
                 .top_mod(file)
@@ -1487,7 +1473,7 @@ fn structural_abi_fixed_scaling_series_and_declared_field_limit() {
             count
         );
         assert!(
-            methods.contains("fn encode(own self, _ __meta_arg_1: *u8)"),
+            methods.contains("fn encode(own self, _ ptr: *u8) -> ()"),
             "{methods}"
         );
         if count == 3 {
@@ -1520,7 +1506,7 @@ fn structural_abi_fixed_scaling_series_and_declared_field_limit() {
 }
 
 #[test]
-fn structural_generation_reports_evaluation_exhaustion_and_declared_output_limits() {
+fn structural_generation_reports_evaluation_exhaustion_and_transplant_limit() {
     for (source, expected) in [
         (
             ACCESSOR_SOURCE.replace(
@@ -1537,8 +1523,9 @@ fn structural_generation_reports_evaluation_exhaustion_and_declared_output_limit
             "StepLimitExceeded",
         ),
         (
-            ACCESSOR_SOURCE.replace("FunctionDefinition<1, 2>", "FunctionDefinition<1, 513>"),
-            "body expressions limit exceeded: 513 > 512",
+            include_str!("../../fe/tests/fixtures/fe_test_runner/quote_transplant_limit.fe")
+                .to_owned(),
+            "quoted function exceeds",
         ),
     ] {
         let mut db = DriverDataBase::default();
@@ -1559,23 +1546,25 @@ fn abi_record_field_type_and_provider_edits_match_fresh_generated_output() {
     let mut db = DriverDataBase::default();
     let url: Url = "file:///edits.fe".parse().unwrap();
     let base = scaled_abi_source(3);
-    for (source, fields, marker) in [
-        (base.clone(), 3, "self.f1"),
-        (scaled_abi_source(1), 1, "self.f0"),
+    for (source, fields, marker, first_offset) in [
+        (base.clone(), 3, "self.f1", "0"),
+        (scaled_abi_source(1), 1, "self.f0", "0"),
         (
             base.replace("f1: u256", "renamed: bool"),
             3,
-            "encode_field_at<std::abi::Sol, bool>",
+            "self.renamed",
+            "0",
         ),
         (
             base.replace(
-                "BodyExpr::U256(plan.offsets[i])",
-                "BodyExpr::U256(plan.offsets[i] + 1)",
+                "let offset = plan.offsets[i]\n            items =",
+                "let offset = plan.offsets[i] + 1\n            items =",
             ),
             3,
-            "let __meta_node_5 = 1 as u256",
+            "offset_f0",
+            "1",
         ),
-        (base, 3, "self.f1"),
+        (base, 3, "self.f1", "0"),
     ] {
         put(&mut db, url.as_str(), &source);
         let mut fresh = DriverDataBase::default();
@@ -1607,6 +1596,7 @@ fn abi_record_field_type_and_provider_edits_match_fresh_generated_output() {
             .join("\n");
         assert_eq!(printed, fresh_printed);
         assert!(printed.contains(marker), "missing {marker}: {printed}");
+        assert_eq!(evaluate_named(&output, &url, "offset_f0"), first_offset);
         assert_eq!(
             output
                 .top_mod(file)
@@ -1624,9 +1614,7 @@ fn abi_record_field_type_and_provider_edits_match_fresh_generated_output() {
             fields
         );
         assert_eq!(
-            printed
-                .matches("core::abi::encode_field_at<std::abi::Sol,")
-                .count(),
+            printed.matches("ingot::authors::encode_sol").count(),
             fields
         );
     }
@@ -1649,28 +1637,6 @@ fn generation_rejects_output_collisions_and_observation_of_its_own_output() {
         };
         assert!(error.message.contains("get_code"), "{error:?}");
     }
-}
-
-#[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_limits",
-    glob: "*.fe"
-)]
-fn generated_declaration_limits_report_named_positions(fixture: Fixture<&str>) {
-    let mut db = DriverDataBase::default();
-    let url = Url::from_file_path(fixture.path()).expect("fixture path is absolute");
-    db.workspace()
-        .update(&mut db, url, fixture.content().to_string());
-    let error = match fe_driver::elaboration::prepare(&db) {
-        Err(error) => error,
-        Ok(_) => panic!("invalid generated description was admitted"),
-    };
-    let (line, column) = error.position(&db).expect("generation site position");
-    let snapshot = std::path::Path::new(fixture.path()).with_extension("snap");
-    let expected = std::fs::read_to_string(snapshot).expect("fixture diagnostic snapshot");
-    assert_eq!(
-        format!("{line}:{column}: {}", error.message),
-        expected.trim_end()
-    );
 }
 
 #[dir_test(
@@ -1708,17 +1674,9 @@ fn generated_generic_implementation_preserves_owner_binders_and_conditions() {
     );
     let output = fe_driver::elaboration::prepare(&db).unwrap().unwrap();
     let file = output.workspace().get(&output, &url).unwrap();
-    let implementation = output
-        .top_mod(file)
-        .all_impl_traits(&output)
-        .iter()
-        .find(|implementation| {
-            implementation
-                .hir_trait_ref(&output)
-                .to_opt()
-                .is_some_and(|trait_ref| trait_ref.pretty_print(&output) == "ingot::Value<T>")
-        })
-        .expect("generated Value implementation");
+    let [implementation] = output.top_mod(file).all_impl_traits(&output).as_slice() else {
+        panic!("expected one generated Value implementation")
+    };
     let parameters = hir::hir_def::GenericParamOwner::ImplTrait(*implementation)
         .params(&output)
         .map(|parameter| {
@@ -1731,13 +1689,21 @@ fn generated_generic_implementation_preserves_owner_binders_and_conditions() {
                 .clone()
         })
         .collect::<Vec<_>>();
-    assert_eq!(parameters, ["T", "N"]);
+    assert_eq!(parameters.len(), 2);
+    assert_ne!(parameters[0], parameters[1]);
+    let trait_ref = implementation.hir_trait_ref(&output).to_opt().unwrap();
+    let trait_ref = trait_ref.pretty_print(&output);
+    assert!(trait_ref.starts_with("ingot::Value<"), "{trait_ref}");
+    assert!(trait_ref.contains(&parameters[0]), "{trait_ref}");
     let methods = implementation
         .methods(&output)
         .map(|method| method.pretty_print(&output))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(methods.contains("fn value(own self) -> T"), "{methods}");
+    assert!(
+        methods.contains(&format!("fn value(own self) -> {}", parameters[0])),
+        "{methods}"
+    );
 }
 
 #[test]
@@ -1753,17 +1719,10 @@ fn generic_generated_owner_conditions_survive_edits_and_restoration() {
         let inspect = |db: &DriverDataBase| match fe_driver::elaboration::prepare(db) {
             Ok(Some(output)) => {
                 let file = output.workspace().get(&output, &url).unwrap();
-                let implementation =
-                    output
-                        .top_mod(file)
-                        .all_impl_traits(&output)
-                        .iter()
-                        .find(|implementation| {
-                            implementation.hir_trait_ref(&output).to_opt().is_some_and(
-                                |trait_ref| trait_ref.pretty_print(&output) == "ingot::Value<T>",
-                            )
-                        })
-                        .expect("generated Value implementation");
+                let [implementation] = output.top_mod(file).all_impl_traits(&output).as_slice()
+                else {
+                    panic!("expected one generated Value implementation")
+                };
                 Ok(implementation
                     .methods(&output)
                     .map(|method| method.pretty_print(&output))

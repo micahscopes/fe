@@ -1,0 +1,18 @@
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let selected = field(record, 0)
+        quote {
+            pub fn get(input: ${record}) -> u256 { input.${selected} }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_accessor_reads_the_selected_field() {
+    assert!(get(input: Target { value: 42 }) == 42)
+}

@@ -1,0 +1,15 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_impl_assoc_type_mismatch.fe
+---
+=== STDERR ===
+file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_impl_assoc_type_mismatch.fe: error[8-0000]: type mismatch
+   ┌─ quote_impl_assoc_type_mismatch.fe:20:30
+   │
+20 │ fn answer() -> Target::Out { 43 as u256 }
+   │                              ^^^^^^^^^^ expected `bool`, but `u256` is given
+
+
+
+=== EXIT CODE: 1 ===

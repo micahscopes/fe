@@ -630,7 +630,7 @@ impl<'a, 'db> BodyEnv<'a, 'db> {
                     self.body.owner().key(self.db),
                 ),
             },
-            NExpr::CodeRegionRef { .. } => return None,
+            NExpr::CodeRegionRef { .. } | NExpr::Quote { .. } => return None,
             NExpr::ArrayRepeat { ty, value } => {
                 let Some(ExprStaticFacts::AggregateMake(facts)) = expr_facts else {
                     panic!(
@@ -1232,6 +1232,7 @@ impl<'db> ExprStaticFactsBuilder<'_, 'db> {
             NExpr::Forward { .. }
             | NExpr::ProjectValue { .. }
             | NExpr::StructuralRepack { .. }
+            | NExpr::Quote { .. }
             | NExpr::CodeRegionRef { .. } => return None,
             NExpr::Const(const_) => ExprStaticFacts::Const(match const_ {
                 SConst::Value(value) => runtime_const_value_class(
@@ -2676,6 +2677,7 @@ fn normalized_value_runtime_class<'db>(
         NExpr::MakeView { place, .. } => env.normalized_view_class(carriers, place),
         NExpr::Borrow { place, .. } => env.normalized_place_address_class(carriers, place),
         NExpr::CodeRegionRef { .. }
+        | NExpr::Quote { .. }
         | NExpr::Const(_)
         | NExpr::Unary { .. }
         | NExpr::Binary { .. }

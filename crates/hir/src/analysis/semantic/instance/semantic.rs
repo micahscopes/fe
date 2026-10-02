@@ -335,6 +335,7 @@ fn call_like_receiver_expr<'db>(expr_data: &Expr<'db>) -> Option<ExprId> {
         | Expr::If(..)
         | Expr::Match(..)
         | Expr::With(..) => None,
+        Expr::Quote(_) | Expr::Hole(_) => None,
     }
 }
 

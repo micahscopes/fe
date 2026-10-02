@@ -29,6 +29,7 @@ use super::ir::VariantIndex;
 pub enum StructuralHandle<'db> {
     /// Checked trait evidence shares opaque CTFE transport, not reflection authority.
     Evidence(crate::analysis::semantic::SelectedApplication<'db>),
+    Code(QuotedCode<'db>),
     Record(crate::hir_def::Struct<'db>),
     Field {
         owner: crate::hir_def::Struct<'db>,
@@ -38,6 +39,25 @@ pub enum StructuralHandle<'db> {
         owner: crate::hir_def::Struct<'db>,
         index: usize,
     },
+}
+
+/// A code value: a quote's template together with the values its splices had
+/// when the quote was built. Composition is lazy: a spliced code value is kept
+/// as a hole value, never expanded here. It exists only at compile time.
+#[salsa::interned]
+#[derive(Debug)]
+pub struct QuotedCode<'db> {
+    /// The quote, or `None` for the empty fragment `empty<K>()`.
+    pub site: Option<QuoteSite<'db>>,
+    #[return_ref]
+    pub holes: Vec<SemConstId<'db>>,
+}
+
+/// A quote expression in its owner body; the quote names its template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct QuoteSite<'db> {
+    pub owner: crate::hir_def::Body<'db>,
+    pub expr: crate::hir_def::ExprId,
 }
 
 #[salsa::interned]
@@ -50,6 +70,10 @@ pub struct SemConstId<'db> {
 impl<'db> SemConstId<'db> {
     pub fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
         match self.value(db) {
+            SemConstValue::Structural {
+                handle: StructuralHandle::Code(..),
+                ..
+            } => "<code value>".to_owned(),
             SemConstValue::Structural { .. } => "<structural handle>".to_owned(),
             SemConstValue::Unit => "()".to_string(),
             SemConstValue::Scalar { value, .. } => match value {

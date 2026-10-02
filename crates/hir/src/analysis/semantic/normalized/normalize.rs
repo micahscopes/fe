@@ -711,6 +711,13 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
             SExpr::CodeRegionRef { region } => NExpr::CodeRegionRef {
                 region: region.clone(),
             },
+            SExpr::Quote { holes, .. } => NExpr::Quote {
+                holes: holes
+                    .iter()
+                    .map(|hole| self.read_operand(block, origin, *hole, None))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+            },
             SExpr::Const(value) => {
                 self.normalize_constant(block, origin, dst, dst_ty, value.clone())?
             }
@@ -2403,6 +2410,7 @@ fn for_each_address_required_local(expr: &SExpr<'_>, mut f: impl FnMut(SLocalId)
         | SExpr::UseValue(_)
         | SExpr::ReadPlace { .. }
         | SExpr::CodeRegionRef { .. }
+        | SExpr::Quote { .. }
         | SExpr::Const(_)
         | SExpr::Unary { .. }
         | SExpr::Binary { .. }
@@ -2979,6 +2987,7 @@ fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
         SExpr::AggregateMake { fields, .. } | SExpr::EnumMake { fields, .. } => {
             locals.extend(fields.iter().map(|field| field.value));
         }
+        SExpr::Quote { holes, .. } => locals.extend(holes.iter().map(|hole| hole.value)),
         SExpr::Field { base, .. } => locals.push(base.value),
         SExpr::Index { base, index } => {
             locals.push(base.value);

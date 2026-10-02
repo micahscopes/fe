@@ -27,7 +27,7 @@ pub use abi_field::{
 };
 pub use abi_struct::{AbiStructDiagnostic, AbiStructDiagnosticKind};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
-pub use generated::generated_hir_errors;
+pub use generated::{generated_hir_errors, generated_quote_hygiene_errors};
 pub use item::{FieldModifierError, FieldModifierErrorKind, MsgDiagnostic, MsgDiagnosticKind};
 pub use parse::parse_file_impl;
 
@@ -49,6 +49,7 @@ mod params;
 mod pat;
 mod path;
 mod payable;
+mod quote;
 mod scope_builder;
 mod stmt;
 mod types;
@@ -238,6 +239,8 @@ pub(super) struct FileLowerCtxt<'db> {
     next_impl_idx: u32,
     next_impl_trait_idx: u32,
     next_static_assert_idx: u32,
+    /// The splices of the quote template being lowered, if any.
+    quote_holes: Option<Vec<quote::PendingQuoteHole>>,
 }
 
 impl<'db> FileLowerCtxt<'db> {
@@ -247,6 +250,7 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_idx: 0,
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
+            quote_holes: None,
         }
     }
 
@@ -256,6 +260,7 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_idx: 0,
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
+            quote_holes: None,
         }
     }
 

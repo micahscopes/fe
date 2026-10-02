@@ -59,6 +59,12 @@ an imported alias of the core marker retains the kind meaning. This corrects
 a spelling-based bug also present in mb2. Other names used in kind positions
 receive a diagnostic rather than silently becoming an unconstrained kind.
 
+## Historical generated descriptor checkpoint
+
+The following records the pre-quotation carrier. The current output is checked
+`Code<Item>` quotation; the `BodyExpr` descriptor graph and its decoder have
+been removed. The provider entry remains nongeneric.
+
 `#[generate]` requires a nongeneric provider entry, but the target record may
 have generic parameters and requirements. Its generated functions have a
 bounded expression vocabulary with `Add` as the only

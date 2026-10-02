@@ -1393,7 +1393,7 @@ pub fn walk_expr<'db, V>(
                     );
                 }
 
-                Partial::Absent => {}
+                Partial::Present(FieldIndex::Hole(_)) | Partial::Absent => {}
             }
         }
 
@@ -1458,6 +1458,13 @@ pub fn walk_expr<'db, V>(
             }
             visit_node_in_body!(visitor, ctxt, body_expr, expr);
         }
+        // The template is not visited: it is not checked where it is written.
+        Expr::Quote(quote) => {
+            for hole in &quote.holes {
+                visit_node_in_body!(visitor, ctxt, &hole.expr, expr);
+            }
+        }
+        Expr::Hole(_) => {}
     }
 }
 
@@ -2090,7 +2097,7 @@ pub fn walk_type<'db, V>(
             },
         ),
 
-        TypeKind::Never => {}
+        TypeKind::Never | TypeKind::Hole(_) => {}
     }
 }
 

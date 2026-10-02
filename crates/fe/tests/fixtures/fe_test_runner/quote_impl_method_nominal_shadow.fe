@@ -1,0 +1,34 @@
+trait Forward {
+    fn forward(self, value: ingot::author::Tag) -> ingot::author::Tag
+    fn choose(self, value: ingot::author::Choice) -> ingot::author::Choice
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Tag { pub value: u256 }
+    pub enum Choice { Yes, No }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Forward for ${record} {
+                fn forward(self, value: Tag) -> Tag { value }
+                fn choose(self, value: Choice) -> Choice { value }
+            }
+        }
+    }
+}
+
+struct Tag { other: bool }
+enum Choice { Other }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_nominal_signature_keeps_provider_type() {
+    let value = Target { value: 1 }.forward(value: author::Tag { value: 7 })
+    assert!(value.value == 7)
+    let choice = Target { value: 1 }.choose(value: author::Choice::Yes)
+    assert!(match choice { author::Choice::Yes => true, _ => false })
+}

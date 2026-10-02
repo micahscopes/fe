@@ -834,6 +834,8 @@ impl<'db> Expr<'db> {
                 };
                 format!("with ({bindings_str}) {body_str}")
             }
+            Expr::Quote(_) => "quote { .. }".to_string(),
+            Expr::Hole(slot) => format!("${{{slot}}}"),
         }
     }
 }
@@ -892,6 +894,7 @@ impl<'db> FieldIndex<'db> {
         match self {
             FieldIndex::Ident(ident) => ident.data(db).to_string(),
             FieldIndex::Index(idx) => idx.data(db).to_string(),
+            FieldIndex::Hole(slot) => format!("${{{slot}}}"),
         }
     }
 }

@@ -1,0 +1,5 @@
+mod support {
+    pub trait Allowed {}
+    impl Allowed for u64 {}
+    pub const fn keep<T: Allowed + Copy>(value: T) -> T { value }
+}

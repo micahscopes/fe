@@ -1,0 +1,35 @@
+trait Pair {
+    fn pair<Payload>(self, value: own (Payload, u256)) -> (Payload, u256)
+    fn nested<Payload>(self, value: own ((Payload, Payload), bool)) -> ((Payload, Payload), bool)
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Pair for ${record} {
+                fn pair<Payload>(self, value: own (Payload, u256)) -> (Payload, u256) {
+                    value
+                }
+                fn nested<Payload>(self, value: own ((Payload, Payload), bool)) -> ((Payload, Payload), bool) {
+                    value
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_method_tuple_retains_generic_element() {
+    let result = Target { value: 1 }.pair<bool>(value: (true, 7))
+    assert!(result.0)
+    assert!(result.1 == 7)
+    let nested = Target { value: 1 }.nested<bool>(value: ((true, false), true))
+    assert!(nested.0.0)
+    assert!(!nested.0.1)
+    assert!(nested.1)
+}

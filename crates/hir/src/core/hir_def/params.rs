@@ -304,7 +304,7 @@ impl<'db> FuncParam<'db> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub struct WherePredicate<'db> {
     pub ty: Partial<TypeId<'db>>,
     pub bounds: Vec<TypeBound<'db>>,

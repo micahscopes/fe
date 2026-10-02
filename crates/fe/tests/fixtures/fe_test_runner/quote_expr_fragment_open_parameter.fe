@@ -1,0 +1,18 @@
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let value: Code<Expr> = quote(input) { input + 1 }
+        quote {
+            pub fn answer(input: u256) -> u256 { ${value} }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn open_parameter_is_bound() {
+    assert!(answer(input: 4) == 5)
+}

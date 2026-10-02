@@ -1,0 +1,17 @@
+quote { true }
+quote(other) { self.${field} == other.${field} }
+quote { fn same(self, other: Self) -> bool { self == other } }
+quote { ${head} + abi_field_head_size<${field_type(f)}>() }
+quote {
+    ${items}
+    pub fn ${name}(_ value: ${record}) -> ${ty} { value.${f} }
+    const ${name}: u256 = 1
+}
+quote { impl Eq for ${record} where ${bounds} { fn eq(self, _ other: Self) -> bool { ${body} } } }
+quote { impl ${record} { ${methods} } }
+quote { where ${bounds}, ${ty}: Eq }
+quote {
+    setup()
+    fn helper() -> bool { true }
+}
+quote { match self { Foo(a) => true } }

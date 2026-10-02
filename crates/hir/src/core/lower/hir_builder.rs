@@ -1,6 +1,7 @@
-use std::rc::Rc;
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use common::ingot::IngotKind;
+use num_bigint::Sign;
 use parser::ast;
 use parser::ast::prelude::AstNode;
 use parser::{SyntaxKind, SyntaxNode};
@@ -8,15 +9,20 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     HirDb,
+    analysis::{semantic::SemConstScalar, ty::ty_def::PrimTy as SemPrimTy},
+    core::meta::{FrozenCode, FrozenCodeHole, FrozenMetaValue},
     hir_def::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
-        ConstGenericArg, ConstGenericArgValue, EffectParamListId, Expr, ExprId, FieldDefListId,
-        FieldIndex, Func, FuncModifiers, FuncParam, FuncParamListId, FuncParamMode, FuncParamName,
-        GenericArg, GenericArgListId, GenericParam, GenericParamListId, GenericParamOwner, IdentId,
-        ImplTrait, IntegerId, ItemKind, LitKind, Mod, NormalAttr, Partial, Pat, PatId, PathId,
-        PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId, TrackedItemVariant, TraitRefId,
-        TypeBound, TypeGenericArg, TypeGenericParam, TypeId, TypeKind, TypeMode, Visibility,
-        WhereClauseId, WhereClauseOwner, expr::CallArg,
+        Cond, CondId, ConstGenericArg, ConstGenericArgValue, EffectParamListId, Expr, ExprId,
+        FieldDefListId, FieldIndex, Func, FuncModifiers, FuncParam, FuncParamListId, FuncParamMode,
+        FuncParamName, GenericArg, GenericArgListId, GenericParam, GenericParamListId,
+        GenericParamOwner, IdentId, ImplTrait, IntegerId, ItemKind, LitKind, Mod, NormalAttr,
+        Partial, Pat, PatId, PathId, PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId,
+        TrackedItemVariant, TraitRefId, TypeBound, TypeGenericArg, TypeGenericParam, TypeId,
+        TypeKind, TypeMode, Visibility, WhereClauseId, WhereClauseOwner, WherePredicate,
+        expr::CallArg,
+        prim_ty::{IntTy, PrimTy as HirPrimTy, UintTy},
+        scope_graph::ScopeId,
     },
     span::{DesugaredOrigin, HirOrigin},
 };
@@ -522,48 +528,134 @@ where
         Ok(self.ctxt.leave_item_scope(impl_trait))
     }
 
-    pub(super) fn owner_generic_params_without_defaults(
-        &self,
+    pub(super) fn quoted_owner_where_clause(
+        &mut self,
         owner: Struct<'db>,
-    ) -> GenericParamListId<'db> {
-        let mut params = GenericParamOwner::Struct(owner)
-            .params_list(self.db())
-            .data(self.db())
-            .clone();
-        for param in &mut params {
-            match param {
-                GenericParam::Type(value) => value.default_ty = None,
-                GenericParam::Const(value) => value.default = None,
-            }
-        }
-        GenericParamListId::new(self.db(), params)
-    }
-
-    pub(super) fn owner_where_clause(&mut self, owner: Struct<'db>) -> WhereClauseId<'db> {
+        names: &[IdentId<'db>],
+    ) -> Result<WhereClauseId<'db>, String> {
         let db = self.db();
+        let params = GenericParamOwner::Struct(owner).params_list(db);
+        if params.data(db).len() != names.len() {
+            return Err("quoted target parameter count changed".to_owned());
+        }
+        let renames = params
+            .data(db)
+            .iter()
+            .zip(names)
+            .map(|(param, name)| {
+                Ok((
+                    param
+                        .name()
+                        .to_opt()
+                        .ok_or_else(|| "quoted target parameter has no name".to_owned())?,
+                    *name,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, String>>()?;
         let source = WhereClauseOwner::Struct(owner).where_clause(db);
+        let predicates = source
+            .type_predicates(db)
+            .map(|(_, predicate)| {
+                let ty = predicate
+                    .ty
+                    .to_opt()
+                    .ok_or_else(|| "quoted target where type is missing".to_owned())?;
+                let TypeKind::Path(Partial::Present(path)) = ty.data(db) else {
+                    return Err("quoted target where type needs checked reification".to_owned());
+                };
+                if path.parent(db).is_some() || !path.generic_args(db).is_empty(db) {
+                    return Err("quoted target where type needs checked reification".to_owned());
+                }
+                let original = path
+                    .ident(db)
+                    .to_opt()
+                    .ok_or_else(|| "quoted target where binder is missing".to_owned())?;
+                let name = renames
+                    .get(&original)
+                    .ok_or_else(|| "quoted target where type is not an owner binder".to_owned())?;
+                for bound in &predicate.bounds {
+                    let TypeBound::Trait(trait_ref) = bound else {
+                        continue;
+                    };
+                    let trait_path = trait_ref
+                        .path(db)
+                        .to_opt()
+                        .ok_or_else(|| "quoted target where bound is missing".to_owned())?;
+                    if trait_path
+                        .root_ident(db)
+                        .is_some_and(|root| renames.contains_key(&root))
+                        || trait_path.strip_generic_args(db) != trait_path
+                    {
+                        return Err(
+                            "quoted target where bound needs checked reification".to_owned()
+                        );
+                    }
+                }
+                Ok(WherePredicate {
+                    ty: Partial::Present(TypeId::new(
+                        db,
+                        TypeKind::Path(Partial::Present(PathId::from_ident(db, *name))),
+                    )),
+                    bounds: predicate.bounds.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut const_predicates = Vec::new();
         for (index, predicate) in source.const_predicates(db).iter().enumerate() {
-            // The checked nodes are reusable, but their body scope must be
-            // under the generated declaration's own generic binders.
+            let index = u32::try_from(index)
+                .map_err(|_| "quoted target const predicate count exceeds u32".to_owned())?;
+            if !predicate.stmts(db).is_empty()
+                || !predicate.pats(db).is_empty()
+                || !predicate.conds(db).is_empty()
+            {
+                return Err("quoted target const predicate needs checked reification".to_owned());
+            }
             let id = self
                 .ctxt
-                .joined_id(TrackedItemVariant::WhereConstPredicate(index as u32));
+                .joined_id(TrackedItemVariant::WhereConstPredicate(index));
             let mut body = BodyCtxt::new(self.ctxt, id);
             body.stmts = predicate.stmts(db).clone();
             body.exprs = predicate.exprs(db).clone();
             body.conds = predicate.conds(db).clone();
             body.pats = predicate.pats(db).clone();
             body.source_map = predicate.source_map(db).clone();
+            for (_, expr) in body.exprs.iter_mut() {
+                match expr {
+                    Partial::Present(Expr::Path(Partial::Present(path))) => {
+                        if path.parent(db).is_some() || !path.generic_args(db).is_empty(db) {
+                            return Err(
+                                "quoted target const path needs checked reification".to_owned()
+                            );
+                        }
+                        let original = path
+                            .ident(db)
+                            .to_opt()
+                            .ok_or_else(|| "quoted target const binder is missing".to_owned())?;
+                        let name = renames.get(&original).ok_or_else(|| {
+                            "quoted target const path needs checked reification".to_owned()
+                        })?;
+                        *path = PathId::from_ident(db, *name);
+                    }
+                    Partial::Present(Expr::Lit(_) | Expr::Bin(..) | Expr::Un(..)) => {}
+                    _ => {
+                        return Err(
+                            "quoted target const predicate needs checked reification".to_owned()
+                        );
+                    }
+                }
+            }
             const_predicates.push(body.build(None, predicate.expr(db), BodyKind::Anonymous));
         }
+        let mut generated_types = predicates.into_iter();
         let mut generated = const_predicates.into_iter();
         let predicates = source
             .predicates(db)
             .iter()
             .map(|predicate| match predicate {
-                crate::hir_def::WhereClausePredicate::Type(predicate) => {
-                    crate::hir_def::WhereClausePredicate::Type(predicate.clone())
+                crate::hir_def::WhereClausePredicate::Type(_) => {
+                    crate::hir_def::WhereClausePredicate::Type(
+                        generated_types.next().expect("generated type predicate"),
+                    )
                 }
                 crate::hir_def::WhereClausePredicate::Const(_) => {
                     crate::hir_def::WhereClausePredicate::Const(
@@ -572,12 +664,13 @@ where
                 }
             })
             .collect::<Vec<_>>();
-        WhereClauseId::new(db, predicates)
+        Ok(WhereClauseId::new(db, predicates))
     }
 
-    pub(super) fn generated_record_type(
+    pub(super) fn generated_record_type_with_names(
         &mut self,
         owner: Struct<'db>,
+        names: &[IdentId<'db>],
     ) -> Result<TypeId<'db>, String> {
         let db = self.db();
         let name = owner
@@ -585,29 +678,28 @@ where
             .to_opt()
             .ok_or_else(|| "authorized record name is missing".to_owned())?;
         let params = GenericParamOwner::Struct(owner).params_list(db);
+        if params.data(db).len() != names.len() {
+            return Err("record generic parameter count changed".to_owned());
+        }
         let mut args = Vec::new();
-        for param in params.data(db) {
-            let param_name = param
-                .name()
-                .to_opt()
-                .ok_or_else(|| "record generic parameter name is missing".to_owned())?;
+        for (param, param_name) in params.data(db).iter().zip(names) {
             let argument = match param {
                 GenericParam::Type(_) => GenericArg::Type(TypeGenericArg {
                     ty: Partial::Present(TypeId::new(
                         db,
-                        TypeKind::Path(Partial::Present(PathId::from_ident(db, param_name))),
+                        TypeKind::Path(Partial::Present(PathId::from_ident(db, *param_name))),
                     )),
                 }),
                 GenericParam::Const(_) => {
                     self.ctxt
                         .enter_id_namespace(TrackedItemVariant::Const(Partial::Present(
-                            param_name,
+                            *param_name,
                         )));
                     let id = self.ctxt.joined_id(TrackedItemVariant::NamelessBody);
                     let origin = self.origin();
                     let mut body = BodyCtxt::new(self.ctxt, id);
                     let expr = body.push_expr(
-                        Expr::Path(Partial::Present(PathId::from_ident(db, param_name))),
+                        Expr::Path(Partial::Present(PathId::from_ident(db, *param_name))),
                         origin,
                     );
                     let body = body.build(None, expr, BodyKind::Anonymous);
@@ -688,6 +780,52 @@ where
         );
         build_body(&mut body)?;
         Ok(body.finish())
+    }
+
+    pub(super) fn generated_quote_const_predicate(
+        &mut self,
+        index: u32,
+        template: Body<'db>,
+        root: ExprId,
+        provider_scope: ScopeId<'db>,
+        holes: &[FrozenCodeHole],
+        rooted_funcs: &[(ExprId, PathId<'db>)],
+        generic_uses: &[(ExprId, IdentId<'db>)],
+    ) -> Result<(Body<'db>, Vec<ExprId>, Vec<ExprId>), String> {
+        let db = self.db();
+        let mut body = BodyBuilder::new(
+            self.ctxt,
+            self.roots,
+            self.desugared.clone(),
+            self.reserved.clone(),
+            TrackedItemVariant::WhereConstPredicate(index),
+        );
+        let mut map = QuoteCopyMap::new(db, holes, rooted_funcs, &[], &[], generic_uses, &[])?;
+        let root = body.copy_quote_expr(template, root, &mut map)?;
+        for site in &map.method_calls {
+            body.body.quote_method_scopes.push((*site, provider_scope));
+        }
+        let copied = |sites: Vec<ExprId>| {
+            sites
+                .into_iter()
+                .map(|site| {
+                    map.exprs
+                        .get(&site)
+                        .copied()
+                        .ok_or_else(|| "quoted const predicate name was not copied".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let rooted = copied(rooted_funcs.iter().map(|(site, _)| *site).collect())?;
+        body.body
+            .quote_path_scopes
+            .extend(rooted.iter().map(|site| (*site, provider_scope)));
+        let generics = copied(generic_uses.iter().map(|(site, _)| *site).collect())?;
+        Ok((
+            body.body.build(None, root, BodyKind::Anonymous),
+            rooted,
+            generics,
+        ))
     }
 
     pub(super) fn new_impl_trait(
@@ -874,10 +1012,702 @@ pub(super) struct DecodeInputBindings<'db> {
     pub(super) input_len_ident: IdentId<'db>,
 }
 
+struct QuoteCopyMap<'a, 'db> {
+    holes: &'a [FrozenCodeHole],
+    code: Option<&'a FrozenCode>,
+    fragments: Option<&'a [Option<QuoteExprSource<'db>>]>,
+    fragment_depth: usize,
+    budget: Rc<Cell<usize>>,
+    open_bindings: Vec<(IdentId<'db>, usize)>,
+    allow_self: bool,
+    self_record_inits: Vec<ExprId>,
+    paths: HashMap<ExprId, PathId<'db>>,
+    members: HashMap<u32, IdentId<'db>>,
+    local_binders: HashMap<PatId, IdentId<'db>>,
+    local_types: HashMap<StmtId, TypeId<'db>>,
+    exprs: HashMap<ExprId, ExprId>,
+    stmts: HashMap<StmtId, StmtId>,
+    conds: HashMap<CondId, CondId>,
+    pats: HashMap<PatId, PatId>,
+    method_calls: Vec<ExprId>,
+    fragment_method_calls: Vec<(ExprId, ScopeId<'db>)>,
+    fragment_rooted_paths: Vec<(ExprId, Func<'db>, ScopeId<'db>)>,
+    fragment_params: Vec<(ExprId, usize)>,
+}
+
+pub(super) struct QuoteExprSource<'db> {
+    pub(super) template: Body<'db>,
+    pub(super) root: ExprId,
+    pub(super) open_names: Vec<IdentId<'db>>,
+    pub(super) member_holes: Vec<(u32, IdentId<'db>)>,
+    pub(super) rooted_funcs: Vec<(ExprId, PathId<'db>, Func<'db>)>,
+    pub(super) provider_scope: ScopeId<'db>,
+    pub(super) has_block_items: bool,
+}
+
+pub(super) struct QuoteCopySummary<'db> {
+    pub(super) rooted_paths: Vec<ExprId>,
+    pub(super) qualified_paths: Vec<ExprId>,
+    pub(super) locals: Vec<(PatId, Vec<ExprId>)>,
+    pub(super) params: Vec<ExprId>,
+    pub(super) generics: Vec<ExprId>,
+    pub(super) method_calls: Vec<ExprId>,
+    pub(super) fragment_method_calls: Vec<(ExprId, ScopeId<'db>)>,
+    pub(super) fragment_rooted_paths: Vec<(ExprId, Func<'db>)>,
+    pub(super) fragment_params: Vec<(ExprId, usize)>,
+}
+
+impl<'a, 'db> QuoteCopyMap<'a, 'db> {
+    const MAX_TRANSPLANTED_NODES: usize = 1_000;
+
+    fn charge_node(&mut self) -> Result<(), String> {
+        let used = self.budget.get();
+        if used >= Self::MAX_TRANSPLANTED_NODES {
+            return Err(format!(
+                "quoted function exceeds {} transplanted HIR nodes",
+                Self::MAX_TRANSPLANTED_NODES
+            ));
+        }
+        self.budget.set(used + 1);
+        Ok(())
+    }
+
+    fn new(
+        db: &'db dyn HirDb,
+        holes: &'a [FrozenCodeHole],
+        rooted_funcs: &[(ExprId, PathId<'db>)],
+        locals: &[(PatId, IdentId<'db>, Vec<ExprId>)],
+        param_uses: &[(ExprId, IdentId<'db>)],
+        generic_uses: &[(ExprId, IdentId<'db>)],
+        member_holes: &[(u32, IdentId<'db>)],
+    ) -> Result<Self, String> {
+        let mut paths = HashMap::new();
+        let mut local_binders = HashMap::new();
+        for (site, path) in rooted_funcs {
+            if paths.insert(*site, *path).is_some() {
+                return Err("quoted path is classified twice".into());
+            }
+        }
+        for (binder, name, uses) in locals {
+            if local_binders.insert(*binder, *name).is_some() {
+                return Err("quoted binder is classified twice".into());
+            }
+            for site in uses {
+                if paths.insert(*site, PathId::from_ident(db, *name)).is_some() {
+                    return Err("quoted path is classified twice".into());
+                }
+            }
+        }
+        for (site, name) in param_uses {
+            if paths.insert(*site, PathId::from_ident(db, *name)).is_some() {
+                return Err("quoted path is classified twice".into());
+            }
+        }
+        for (site, name) in generic_uses {
+            if paths.insert(*site, PathId::from_ident(db, *name)).is_some() {
+                return Err("quoted path is classified twice".into());
+            }
+        }
+        let mut members = HashMap::new();
+        for (slot, name) in member_holes {
+            if members.insert(*slot, *name).is_some() {
+                return Err("quoted member hole is classified twice".into());
+            }
+        }
+        Ok(Self {
+            holes,
+            code: None,
+            fragments: None,
+            fragment_depth: 0,
+            budget: Rc::new(Cell::new(0)),
+            open_bindings: Vec::new(),
+            allow_self: false,
+            self_record_inits: Vec::new(),
+            paths,
+            members,
+            local_binders,
+            local_types: HashMap::new(),
+            exprs: HashMap::new(),
+            stmts: HashMap::new(),
+            conds: HashMap::new(),
+            pats: HashMap::new(),
+            method_calls: Vec::new(),
+            fragment_method_calls: Vec::new(),
+            fragment_rooted_paths: Vec::new(),
+            fragment_params: Vec::new(),
+        })
+    }
+}
+
+pub(super) fn quote_hir_primitive(primitive: SemPrimTy) -> Option<HirPrimTy> {
+    Some(match primitive {
+        SemPrimTy::Bool => HirPrimTy::Bool,
+        SemPrimTy::U8 => HirPrimTy::Uint(UintTy::U8),
+        SemPrimTy::U16 => HirPrimTy::Uint(UintTy::U16),
+        SemPrimTy::U32 => HirPrimTy::Uint(UintTy::U32),
+        SemPrimTy::U64 => HirPrimTy::Uint(UintTy::U64),
+        SemPrimTy::U128 => HirPrimTy::Uint(UintTy::U128),
+        SemPrimTy::U256 => HirPrimTy::Uint(UintTy::U256),
+        SemPrimTy::Usize => HirPrimTy::Uint(UintTy::Usize),
+        SemPrimTy::I8 => HirPrimTy::Int(IntTy::I8),
+        SemPrimTy::I16 => HirPrimTy::Int(IntTy::I16),
+        SemPrimTy::I32 => HirPrimTy::Int(IntTy::I32),
+        SemPrimTy::I64 => HirPrimTy::Int(IntTy::I64),
+        SemPrimTy::I128 => HirPrimTy::Int(IntTy::I128),
+        SemPrimTy::I256 => HirPrimTy::Int(IntTy::I256),
+        SemPrimTy::Isize => HirPrimTy::Int(IntTy::Isize),
+        _ => return None,
+    })
+}
+
 impl<'ctxt, 'db, O> BodyBuilder<'ctxt, 'db, O>
 where
     O: Clone + Into<DesugaredOrigin>,
 {
+    /// Copy only reachable quote nodes into the generated function's arena.
+    /// The template may contain other items and placeholder nodes, none of
+    /// which may enter this function. New nodes receive generation origins.
+    pub(super) fn adopt_closed_quote_body(
+        &mut self,
+        template: Body<'db>,
+        root: ExprId,
+        provider_scope: ScopeId<'db>,
+        holes: &[FrozenCodeHole],
+        fragments: Option<(&FrozenCode, &[Option<QuoteExprSource<'db>>])>,
+        open_bindings: &[(IdentId<'db>, usize)],
+        allow_self: bool,
+        rooted_funcs: &[(ExprId, PathId<'db>)],
+        qualified_paths: &[(ExprId, PathId<'db>)],
+        self_record_inits: &[ExprId],
+        locals: &[(PatId, IdentId<'db>, Vec<ExprId>)],
+        local_types: &[(StmtId, TypeId<'db>)],
+        param_uses: &[(ExprId, IdentId<'db>)],
+        generic_uses: &[(ExprId, IdentId<'db>)],
+        member_holes: &[(u32, IdentId<'db>)],
+    ) -> Result<QuoteCopySummary<'db>, String> {
+        let mut all_paths = rooted_funcs.to_vec();
+        all_paths.extend_from_slice(qualified_paths);
+        let mut map = QuoteCopyMap::new(
+            self.db(),
+            holes,
+            &all_paths,
+            locals,
+            param_uses,
+            generic_uses,
+            member_holes,
+        )?;
+        if let Some((code, sources)) = fragments {
+            map.code = Some(code);
+            map.fragments = Some(sources);
+        }
+        map.open_bindings = open_bindings.to_vec();
+        map.allow_self = allow_self;
+        map.self_record_inits = self_record_inits.to_vec();
+        for (stmt, ty) in local_types {
+            if map.local_types.insert(*stmt, *ty).is_some() {
+                return Err("quoted local type is classified twice".into());
+            }
+        }
+        let root = self.copy_quote_expr(template, root, &mut map)?;
+        self.emit_expr_stmt(root);
+        for site in &map.method_calls {
+            self.body.quote_method_scopes.push((*site, provider_scope));
+        }
+        self.body
+            .quote_method_scopes
+            .extend(map.fragment_method_calls.iter().copied());
+        self.body.quote_path_scopes.extend(
+            map.fragment_rooted_paths
+                .iter()
+                .map(|(site, _, scope)| (*site, *scope)),
+        );
+        let rooted_paths = rooted_funcs
+            .iter()
+            .map(|(site, _)| {
+                map.exprs
+                    .get(site)
+                    .copied()
+                    .ok_or_else(|| "quoted rooted path was not copied".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.body
+            .quote_path_scopes
+            .extend(rooted_paths.iter().map(|site| (*site, provider_scope)));
+        let locals = locals
+            .iter()
+            .map(|(binder, _, uses)| {
+                let binder = map
+                    .pats
+                    .get(binder)
+                    .copied()
+                    .ok_or_else(|| "quoted local binder was not copied".to_owned())?;
+                let uses = uses
+                    .iter()
+                    .map(|site| {
+                        map.exprs
+                            .get(site)
+                            .copied()
+                            .ok_or_else(|| "quoted local use was not copied".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((binder, uses))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let qualified_paths = qualified_paths
+            .iter()
+            .map(|(site, _)| {
+                map.exprs
+                    .get(site)
+                    .copied()
+                    .ok_or_else(|| "quoted qualified constant was not copied".to_owned())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.body
+            .quote_path_scopes
+            .extend(qualified_paths.iter().map(|site| (*site, provider_scope)));
+        let params = param_uses
+            .iter()
+            .map(|(site, _)| {
+                map.exprs
+                    .get(site)
+                    .copied()
+                    .ok_or_else(|| "quoted parameter path was not copied".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let generics = generic_uses
+            .iter()
+            .map(|(site, _)| {
+                map.exprs
+                    .get(site)
+                    .copied()
+                    .ok_or_else(|| "quoted generic path was not copied".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(QuoteCopySummary {
+            rooted_paths,
+            qualified_paths,
+            locals,
+            params,
+            generics,
+            method_calls: map.method_calls,
+            fragment_method_calls: map.fragment_method_calls,
+            fragment_rooted_paths: map
+                .fragment_rooted_paths
+                .into_iter()
+                .map(|(site, expected, _)| (site, expected))
+                .collect(),
+            fragment_params: map.fragment_params,
+        })
+    }
+
+    fn quote_scalar_expr(&mut self, hole: &FrozenCodeHole) -> Result<ExprId, String> {
+        let FrozenCodeHole::Value(value, _) = hole else {
+            return Err("quoted code splice requires fragment transplantation".into());
+        };
+        let FrozenMetaValue::Scalar { value, primitive } = value.as_ref() else {
+            return Err("quoted splice must be a scalar value".into());
+        };
+        let primitive = primitive
+            .and_then(quote_hir_primitive)
+            .ok_or_else(|| "quoted scalar has no supported primitive type".to_owned())?;
+        let db = self.db();
+        let literal = match value {
+            SemConstScalar::Bool(value) if primitive == HirPrimTy::Bool => LitKind::Bool(*value),
+            SemConstScalar::Int { value } if primitive != HirPrimTy::Bool => {
+                if value.sign() == Sign::Minus {
+                    return Err("negative quoted scalar requires signed literal lowering".into());
+                }
+                LitKind::Int(IntegerId::new(db, value.magnitude().clone()))
+            }
+            _ => return Err("quoted scalar does not match its primitive type".into()),
+        };
+        let literal = self.push_expr(Expr::Lit(literal));
+        if primitive == HirPrimTy::Bool {
+            Ok(literal)
+        } else {
+            let ty = TypeId::new(db, TypeKind::Primitive(primitive));
+            Ok(self.push_expr(Expr::Cast(literal, Partial::Present(ty))))
+        }
+    }
+
+    fn copy_quote_expr(
+        &mut self,
+        template: Body<'db>,
+        old: ExprId,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<ExprId, String> {
+        if let Some(id) = map.exprs.get(&old) {
+            return Ok(*id);
+        }
+        map.charge_node()?;
+        let db = self.db();
+        let Partial::Present(expr) = &template.exprs(db)[old] else {
+            return Err("quoted function contains an invalid expression".into());
+        };
+        if let Expr::Hole(slot) = expr {
+            let hole = map
+                .holes
+                .get(*slot as usize)
+                .ok_or_else(|| "quoted splice slot is missing".to_owned())?;
+            let id = match hole {
+                FrozenCodeHole::Code(child) => self.copy_quote_fragment(*child, map)?,
+                FrozenCodeHole::Value(..) => self.quote_scalar_expr(hole)?,
+            };
+            map.exprs.insert(old, id);
+            return Ok(id);
+        }
+        let expr = match expr {
+            Expr::Lit(value) => Expr::Lit(*value),
+            Expr::Path(Partial::Present(source)) => {
+                let path = map.paths.get(&old).ok_or_else(|| {
+                    "quoted function path has no checked root or binder".to_owned()
+                })?;
+                if source.strip_generic_args(db) != *source && path.strip_generic_args(db) == *path
+                {
+                    return Err("quoted function path needs generic argument rewriting".into());
+                }
+                Expr::Path(Partial::Present(*path))
+            }
+            Expr::RecordInit(Partial::Present(path), fields) => {
+                if !map.allow_self || !map.self_record_inits.contains(&old) || !path.is_self_ty(db)
+                {
+                    return Err("quoted record construction needs checked Self rewriting".into());
+                }
+                let fields = fields
+                    .iter()
+                    .map(|field| {
+                        map.charge_node()?;
+                        let label = match field.label_hole {
+                            Some(slot) => Some(*map.members.get(&slot).ok_or_else(|| {
+                                "quoted field label has no checked field".to_owned()
+                            })?),
+                            None => field.label,
+                        };
+                        Ok(crate::hir_def::Field {
+                            label,
+                            label_hole: None,
+                            expr: self.copy_quote_expr(template, field.expr, map)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Expr::RecordInit(
+                    Partial::Present(PathId::self_ty(db, GenericArgListId::none(db))),
+                    fields,
+                )
+            }
+            Expr::Call(callee, args) => Expr::Call(
+                self.copy_quote_expr(template, *callee, map)?,
+                args.iter()
+                    .map(|arg| {
+                        // Keep a shorthand label before a hygienic binder rename changes its name.
+                        Ok(CallArg {
+                            label: arg.label_eagerly(db, template),
+                            expr: self.copy_quote_expr(template, arg.expr, map)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            ),
+            Expr::MethodCall(receiver, Partial::Present(name), generic_args, args) => {
+                if generic_args.is_given(db) {
+                    return Err(
+                        "quoted method call needs checked generic argument rewriting".into(),
+                    );
+                }
+                Expr::MethodCall(
+                    self.copy_quote_expr(template, *receiver, map)?,
+                    Partial::Present(*name),
+                    GenericArgListId::none(db),
+                    args.iter()
+                        .map(|arg| {
+                            Ok(CallArg {
+                                label: arg.label_eagerly(db, template),
+                                expr: self.copy_quote_expr(template, arg.expr, map)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                )
+            }
+            Expr::Field(receiver, Partial::Present(FieldIndex::Hole(slot))) => {
+                let receiver = self.copy_quote_expr(template, *receiver, map)?;
+                let name = map
+                    .members
+                    .get(slot)
+                    .ok_or_else(|| "quoted member hole has no checked field".to_owned())?;
+                Expr::Field(receiver, Partial::Present(FieldIndex::Ident(*name)))
+            }
+            Expr::Field(
+                receiver,
+                Partial::Present(index @ (FieldIndex::Ident(_) | FieldIndex::Index(_))),
+            ) => Expr::Field(
+                self.copy_quote_expr(template, *receiver, map)?,
+                Partial::Present(*index),
+            ),
+            Expr::Bin(lhs, rhs, op) => Expr::Bin(
+                self.copy_quote_expr(template, *lhs, map)?,
+                self.copy_quote_expr(template, *rhs, map)?,
+                *op,
+            ),
+            Expr::AugAssign(lhs, rhs, op) => Expr::AugAssign(
+                self.copy_quote_expr(template, *lhs, map)?,
+                self.copy_quote_expr(template, *rhs, map)?,
+                *op,
+            ),
+            Expr::If(cond, then, otherwise) => Expr::If(
+                self.copy_quote_cond(template, *cond, map)?,
+                self.copy_quote_expr(template, *then, map)?,
+                otherwise
+                    .map(|value| self.copy_quote_expr(template, value, map))
+                    .transpose()?,
+            ),
+            Expr::Block(stmts) => {
+                self.body.f_ctxt.enter_block_scope();
+                let stmts = stmts
+                    .iter()
+                    .map(|stmt| self.copy_quote_stmt(template, *stmt, map))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Expr::Block(stmts)
+            }
+            _ => return Err("quoted function body requires a splice or name rewrite".into()),
+        };
+        let is_block = matches!(expr, Expr::Block(_));
+        let is_method_call = matches!(expr, Expr::MethodCall(..));
+        let id = self.push_expr(expr);
+        if is_method_call {
+            map.method_calls.push(id);
+        }
+        if is_block {
+            self.body.f_ctxt.leave_block_scope(id);
+        }
+        map.exprs.insert(old, id);
+        Ok(id)
+    }
+
+    fn copy_quote_fragment(
+        &mut self,
+        child: usize,
+        parent: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<ExprId, String> {
+        if parent.fragment_depth >= 64 {
+            return Err("quoted expression fragments exceed nesting limit".into());
+        }
+        let code = parent
+            .code
+            .ok_or_else(|| "quoted code splice requires fragment transplantation".to_owned())?;
+        let sources = parent
+            .fragments
+            .ok_or_else(|| "quoted code splice has no checked source".to_owned())?;
+        let node = code
+            .nodes
+            .get(child)
+            .ok_or_else(|| "quoted code splice has no frozen node".to_owned())?;
+        let source = sources
+            .get(child)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| "quoted expression splice needs expression code".to_owned())?;
+        if source.has_block_items
+            || node
+                .rooted_funcs
+                .iter()
+                .any(|root| root.func.is_some() || root.assoc_const.is_some())
+            || !node.rooted_traits.is_empty()
+            || !node.locals.is_empty()
+            || !node.param_uses.is_empty()
+            || !node.effect_uses.is_empty()
+            || !node.generic_uses.is_empty()
+            || !node.self_uses.is_empty()
+        {
+            return Err("quoted expression fragment needs checked name transplantation".into());
+        }
+        let mut param_uses = Vec::new();
+        let mut bound_sites = Vec::new();
+        for use_ in &node.open_uses {
+            let open_name = source
+                .open_names
+                .get(use_.index as usize)
+                .ok_or_else(|| "quoted open name has no declaration".to_owned())?;
+            let (name, index) = parent
+                .open_bindings
+                .iter()
+                .find(|(name, _)| name == open_name)
+                .ok_or_else(|| "quoted open name has no destination parameter".to_owned())?;
+            param_uses.push((use_.site, *name));
+            bound_sites.push((use_.site, *index));
+        }
+        if !node.free_self_uses.is_empty() && !parent.allow_self {
+            return Err("quoted self needs a destination method".into());
+        }
+        for site in &node.free_self_uses {
+            param_uses.push((*site, IdentId::make_self(self.db())));
+            bound_sites.push((*site, 0));
+        }
+        let rooted_paths = source
+            .rooted_funcs
+            .iter()
+            .map(|(site, path, _)| (*site, *path))
+            .collect::<Vec<_>>();
+        let mut map = QuoteCopyMap::new(
+            self.db(),
+            &node.holes,
+            &rooted_paths,
+            &[],
+            &param_uses,
+            &[],
+            &source.member_holes,
+        )?;
+        map.code = Some(code);
+        map.fragments = Some(sources);
+        map.fragment_depth = parent.fragment_depth + 1;
+        map.budget = parent.budget.clone();
+        map.open_bindings = parent.open_bindings.clone();
+        map.allow_self = parent.allow_self;
+        let copied = self.copy_quote_expr(source.template, source.root, &mut map)?;
+        for (site, index) in bound_sites {
+            let copied_site = map
+                .exprs
+                .get(&site)
+                .copied()
+                .ok_or_else(|| "quoted open name was not copied".to_owned())?;
+            parent.fragment_params.push((copied_site, index));
+        }
+        parent.fragment_params.extend(map.fragment_params);
+        parent.fragment_method_calls.extend(
+            map.method_calls
+                .into_iter()
+                .map(|site| (site, source.provider_scope)),
+        );
+        parent
+            .fragment_method_calls
+            .extend(map.fragment_method_calls);
+        for (site, _, expected) in &source.rooted_funcs {
+            let copied_site = map
+                .exprs
+                .get(site)
+                .copied()
+                .ok_or_else(|| "quoted rooted function was not copied".to_owned())?;
+            parent
+                .fragment_rooted_paths
+                .push((copied_site, *expected, source.provider_scope));
+        }
+        parent
+            .fragment_rooted_paths
+            .extend(map.fragment_rooted_paths);
+        Ok(copied)
+    }
+
+    fn copy_quote_cond(
+        &mut self,
+        template: Body<'db>,
+        old: CondId,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<CondId, String> {
+        if let Some(id) = map.conds.get(&old) {
+            return Ok(*id);
+        }
+        map.charge_node()?;
+        let Partial::Present(cond) = &template.conds(self.db())[old] else {
+            return Err("quoted function contains an invalid condition".into());
+        };
+        let cond = match cond {
+            Cond::Expr(value) => Cond::Expr(self.copy_quote_expr(template, *value, map)?),
+            Cond::Bin(lhs, rhs, op) => Cond::Bin(
+                self.copy_quote_cond(template, *lhs, map)?,
+                self.copy_quote_cond(template, *rhs, map)?,
+                *op,
+            ),
+            Cond::Let(..) => {
+                return Err("quoted let condition needs pattern transplantation".into());
+            }
+        };
+        let id = self.body.push_cond(cond);
+        map.conds.insert(old, id);
+        Ok(id)
+    }
+
+    fn copy_quote_stmt(
+        &mut self,
+        template: Body<'db>,
+        old: StmtId,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<StmtId, String> {
+        if let Some(id) = map.stmts.get(&old) {
+            return Ok(*id);
+        }
+        map.charge_node()?;
+        let db = self.db();
+        let Partial::Present(stmt) = &template.stmts(db)[old] else {
+            return Err("quoted function contains an invalid statement".into());
+        };
+        let stmt = match stmt {
+            Stmt::Let(pat, ty, init) => {
+                let ty = ty
+                    .map(|_| {
+                        map.local_types
+                            .get(&old)
+                            .copied()
+                            .ok_or_else(|| "quoted let type has no checked root".to_owned())
+                    })
+                    .transpose()?;
+                let init = init
+                    .map(|value| self.copy_quote_expr(template, value, map))
+                    .transpose()?;
+                Stmt::Let(self.copy_quote_pat(template, *pat, map)?, ty, init)
+            }
+            Stmt::Expr(value) => Stmt::Expr(self.copy_quote_expr(template, *value, map)?),
+            Stmt::Return(value) => Stmt::Return(
+                value
+                    .map(|value| self.copy_quote_expr(template, value, map))
+                    .transpose()?,
+            ),
+            Stmt::While(cond, body) => Stmt::While(
+                self.copy_quote_cond(template, *cond, map)?,
+                self.copy_quote_expr(template, *body, map)?,
+            ),
+            _ => return Err("quoted function contains an unsupported statement".into()),
+        };
+        let id = self.push_stmt_raw(stmt);
+        map.stmts.insert(old, id);
+        Ok(id)
+    }
+
+    fn copy_quote_pat(
+        &mut self,
+        template: Body<'db>,
+        old: PatId,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<PatId, String> {
+        if let Some(id) = map.pats.get(&old) {
+            return Ok(*id);
+        }
+        map.charge_node()?;
+        let db = self.db();
+        let Partial::Present(pat) = &template.pats(db)[old] else {
+            return Err("quoted function contains an invalid pattern".into());
+        };
+        let pat = match pat {
+            Pat::Path(Partial::Present(path), mutable) => {
+                if path.as_ident(db).is_none() {
+                    return Err("quoted pattern needs a checked binder".into());
+                }
+                let name = map
+                    .local_binders
+                    .get(&old)
+                    .ok_or_else(|| "quoted pattern is not a checked binder".to_owned())?;
+                Pat::Path(Partial::Present(PathId::from_ident(db, *name)), *mutable)
+            }
+            Pat::Tuple(parts) => Pat::Tuple(
+                parts
+                    .iter()
+                    .map(|part| self.copy_quote_pat(template, *part, map))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Pat::WildCard => Pat::WildCard,
+            _ => return Err("quoted pattern needs classification before transplantation".into()),
+        };
+        let id = self.push_pat(pat);
+        map.pats.insert(old, id);
+        Ok(id)
+    }
+
     fn new(
         ctxt: &'ctxt mut FileLowerCtxt<'db>,
         roots: LibRoots<'db>,
@@ -1360,6 +2190,7 @@ where
             .copied()
             .map(|field_name| crate::hir_def::Field {
                 label: Some(field_name),
+                label_hole: None,
                 expr: self.ident_expr(field_name),
             })
             .collect();

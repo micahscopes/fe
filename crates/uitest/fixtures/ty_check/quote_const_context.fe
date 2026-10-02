@@ -1,0 +1,13 @@
+use core::meta::{Code, Expr}
+
+// A quote builds a compile-time code value, so it may appear in any const
+// context: const functions and const items, but not runtime functions.
+fn runtime() {
+    let _code = quote { true }
+}
+
+const SEED: Code<Expr> = quote { 1 }
+
+const fn provider() -> Code<Expr> {
+    quote { ${SEED} + 1 }
+}

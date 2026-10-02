@@ -1,0 +1,17 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn flag() -> bool { true }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn quoted_bool_result_runs() {
+    assert!(flag())
+}

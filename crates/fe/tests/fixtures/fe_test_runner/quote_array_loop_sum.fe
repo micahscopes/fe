@@ -1,0 +1,33 @@
+trait Sum {
+    fn sum(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let values = field(record, 0)
+        quote {
+            impl ingot::Sum for ${record} {
+                fn sum(self) -> u256 {
+                    let mut i = 0
+                    let mut total = 0
+                    while i < 64 {
+                        total += self.${values}[i]
+                        i += 1
+                    }
+                    total
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Values { values: [u256; 64] }
+
+#[test]
+fn quoted_array_loop_runs() {
+    let value = Values { values: [3; 64] }
+    assert!(value.sum() == 192)
+}

@@ -1,0 +1,19 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn bump(_ value: u256) -> u256 { value + 1 }
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn answer() -> u256 { bump(42) } }
+    }
+}
+
+pub const fn bump(_ value: u256) -> u256 { value + 100 }
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn provider_function_is_rooted() {
+    assert!(answer() == 43)
+}

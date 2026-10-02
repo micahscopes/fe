@@ -1,32 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
-use dir_test::{Fixture, dir_test};
-
 const SOURCE: &str = include_str!("fixtures/structural_generation/accessors.fe");
 const ABI_SOURCE: &str = include_str!("fixtures/structural_generation/abi.fe");
-
-#[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/generated_const_expression_invalid",
-    glob: "*.fe"
-)]
-fn invalid_generated_constant_reports_its_generation_site(fixture: Fixture<&str>) {
-    let output = Command::new(env!("CARGO_BIN_EXE_fe"))
-        .args(["check", fixture.path(), "--standalone"])
-        .env("NO_COLOR", "1")
-        .output()
-        .unwrap();
-    let diagnostic = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected = fs::read_to_string(Path::new(fixture.path()).with_extension("snap")).unwrap();
-    assert!(!output.status.success(), "{diagnostic}");
-    assert!(
-        diagnostic.trim_end().ends_with(expected.trim_end()),
-        "{diagnostic}"
-    );
-}
 
 fn succeeds(root: &Path, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_fe"))
@@ -128,10 +103,8 @@ fn exercise_project(source: &str, contract: &str, tests: &[&str]) {
 #[test]
 fn normal_check_rejects_invalid_generated_output_without_rewriting_source() {
     let root = tempfile::tempdir().unwrap();
-    let source = SOURCE.replace(
-        "return_type: DeclarationType::Field(field_type(f))",
-        "return_type: DeclarationType::Bool",
-    );
+    let source = SOURCE.replace("-> ${ty} { value.${f} }", "-> bool { value.${f} }");
+    assert_ne!(source, SOURCE, "invalid fixture did not change the quote");
     let file = root.path().join("invalid.fe");
     fs::write(&file, &source).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_fe"))

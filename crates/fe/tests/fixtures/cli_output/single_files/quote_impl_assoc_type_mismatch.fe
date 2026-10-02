@@ -1,0 +1,20 @@
+trait Family {
+    type Out
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Family for ${record} {
+                type Out = bool
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn answer() -> Target::Out { 43 as u256 }

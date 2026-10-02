@@ -1,0 +1,16 @@
+const fn make() {
+    let simple=quote{true}
+    let body=quote(other) { self.${field}==other.${field} }
+    let method=quote { fn same<T>(self, other: Self) -> bool { ${body} } }
+    let commented=quote {
+        // retained
+        true
+    }
+    let items=quote {
+        ${items}
+        pub fn ${name}(_ value:${record})->${ty} { value.${f} }
+        const ${name}:u256=${value}
+    }
+    let implementation=quote { impl Eq for ${record} where ${bounds} { ${methods} } }
+    let bounds=quote { where ${bounds},${ty}: Eq }
+}

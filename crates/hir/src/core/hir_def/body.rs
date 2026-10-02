@@ -40,6 +40,12 @@ pub struct Body<'db> {
     pub conds: NodeStore<CondId, Partial<Cond>>,
     #[return_ref]
     pub pats: NodeStore<PatId, Partial<Pat<'db>>>,
+    /// Trait lookup scopes captured by method calls copied from checked quotes.
+    #[return_ref]
+    pub quote_method_scopes: Vec<(ExprId, ScopeId<'db>)>,
+    /// Definition scopes for paths rooted when their quotes were checked.
+    #[return_ref]
+    pub quote_path_scopes: Vec<(ExprId, ScopeId<'db>)>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -97,6 +103,8 @@ impl<'db> Body<'db> {
 pub enum BodyKind {
     FuncBody,
     Anonymous,
+    /// Quoted syntax; see [`super::Quote`]. It is never checked in place.
+    QuoteTemplate,
 }
 
 #[derive(Debug, Hash, Clone)]

@@ -1,0 +1,11 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_impl_method_nominal_args_shadow.fe
+---
+=== STDOUT ===
+PASS  [<time>] quoted_nominal_arguments_keep_selected_types
+
+test result: ok. 1 passed; 0 failed
+
+=== EXIT CODE: 0 ===

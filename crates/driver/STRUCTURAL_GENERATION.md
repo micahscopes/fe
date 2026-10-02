@@ -1,6 +1,13 @@
 # Public structural generation release contract
 
-This records the bounded first structural metaprogramming milestone.
+This records the bounded first structural metaprogramming milestone as it stood
+on September 21, 2026. The current generation output is checked `Code<Item>`
+quotation. The `FunctionDefinition`, `RecordImplementation`, and `BodyExpr`
+descriptor graph described below has been removed. The ABI and accessor
+applications still run through normal check, build, and O0/O2 tests with the
+same fixed output oracles. See [the carrier](GENERATION_CARRIER.md) for the
+current boundary.
+
 The subsequent [reflected-trait extension](REFLECTED_TRAIT_QUERIES.md) adds checked
 trait queries and concrete nominal field codecs; its verification is recorded
 separately below that contract. The two fixed
@@ -9,7 +16,7 @@ applications are `crates/fe/tests/fixtures/structural_generation/abi.fe` and
 `fe build`, and `fe test`, without a separate generation command or
 application-specific Rust. The legacy scalar-generation experiment is separate.
 
-## Admitted interface
+## Historical admitted interface
 
 - A record invokes a reusable const provider through
   `#[generate(path)]`. Ordinary resolution and visibility select the provider.

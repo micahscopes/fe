@@ -3,8 +3,7 @@ use parser::ast::{self, prelude::*};
 use super::body::BodyCtxt;
 use crate::{
     hir_def::{
-        Body, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, Pat, PathId, Stmt, TypeId,
-        expr::*,
+        Body, GenericArgListId, IdentId, IntegerId, LitKind, Pat, PathId, Stmt, TypeId, expr::*,
     },
     span::HirOrigin,
 };
@@ -34,7 +33,7 @@ impl<'db> Expr<'db> {
                 let expr_id = ctxt.push_expr(Self::Block(stmts), HirOrigin::raw(&ast));
 
                 for item in block.items() {
-                    ItemKind::lower_ast(ctxt.f_ctxt, item);
+                    ctxt.lower_block_item(expr_id, item);
                 }
 
                 ctxt.f_ctxt.leave_block_scope(expr_id);
@@ -128,7 +127,11 @@ impl<'db> Expr<'db> {
 
             ast::ExprKind::Field(field) => {
                 let receiver = Self::push_to_body_opt(ctxt, field.receiver());
-                let field = if let Some(name) = field.field_name() {
+                let field = if let Some(hole) = field.field_hole() {
+                    super::quote::lower_member_hole(ctxt, &hole)
+                        .map(FieldIndex::Hole)
+                        .into()
+                } else if let Some(name) = field.field_name() {
                     Some(FieldIndex::Ident(IdentId::lower_token(ctxt.f_ctxt, name))).into()
                 } else if let Some(num) = field.field_index() {
                     Some(FieldIndex::Index(IntegerId::lower_ast(ctxt.f_ctxt, num))).into()
@@ -222,6 +225,19 @@ impl<'db> Expr<'db> {
             ast::ExprKind::Paren(paren) => {
                 return Self::push_to_body_opt(ctxt, paren.expr());
             }
+
+            ast::ExprKind::Quote(quote) => {
+                // A nested quote was reported by the parser.
+                if ctxt.f_ctxt.in_quote_template() {
+                    return ctxt.push_invalid_expr(HirOrigin::raw(&ast));
+                }
+                Self::Quote(Box::new(super::quote::lower_quote(ctxt, &quote)))
+            }
+
+            ast::ExprKind::QuoteHole(hole) => match super::quote::lower_expr_hole(ctxt, &hole) {
+                Some(slot) => Self::Hole(slot),
+                None => return ctxt.push_invalid_expr(HirOrigin::raw(&ast)),
+            },
 
             ast::ExprKind::Assign(assign) => {
                 let lhs = Self::push_to_body_opt(ctxt, assign.lhs_expr());
@@ -411,7 +427,14 @@ impl<'db> Field<'db> {
         let label = ast
             .label()
             .map(|label| IdentId::lower_token(ctxt.f_ctxt, label));
+        let label_hole = ast
+            .label_hole()
+            .and_then(|hole| super::quote::lower_field_label_hole(ctxt, &hole));
         let expr = Expr::push_to_body_opt(ctxt, ast.expr());
-        Self { label, expr }
+        Self {
+            label,
+            label_hole,
+            expr,
+        }
     }
 }

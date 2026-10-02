@@ -1692,6 +1692,18 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 let fields = self.eval_value_args(frame_idx, &fields, origin)?;
                 Ok(self.make_aggregate_value(result_ty, fields))
             }
+            SExpr::Quote { site, holes } => {
+                // Each splice is evaluated here, once; the template is never
+                // evaluated. A blocked splice stops the whole computation.
+                let holes = self.eval_value_args(frame_idx, &holes, origin)?;
+                let holes = holes.iter().map(|hole| hole.materialize(self.db)).collect();
+                Ok(CtfeValue::Value(self.code_value(
+                    result_ty,
+                    Some(site),
+                    holes,
+                    origin,
+                )?))
+            }
             SExpr::ArrayRepeat { ty, value } => {
                 let CtfeValue::Value(value) = self.read_operand(frame_idx, value, origin)? else {
                     return Err(CtfeError::InvalidBorrow { origin }.into());
@@ -1930,10 +1942,19 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             && let Some(name) = func.name(self.db).to_opt()
             && matches!(
                 name.data(self.db).as_str(),
-                "field_count" | "field" | "field_type" | "type_is" | "query_field"
+                "field_count" | "field" | "field_type" | "type_is" | "query_field" | "empty"
             )
         {
             let operation = name.data(self.db).as_str();
+            if operation == "empty"
+                && crate::analysis::ty::corelib::lib_func_matches(
+                    self.db,
+                    func,
+                    "core::meta::empty",
+                )
+            {
+                return Ok(self.code_value(result_ty, None, Vec::new(), origin)?);
+            }
             if crate::analysis::ty::corelib::lib_func_matches(
                 self.db,
                 func,
@@ -2214,6 +2235,33 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         );
         let verified = VerifiedConstValueId::from_complete_execution(db, value).map_err(invalid)?;
         Ok(CtfeConstValue::concrete(db, verified))
+    }
+
+    /// A code value of type `ty` (`Code<K>`): a quote with its splices'
+    /// values, or the empty fragment.
+    fn code_value(
+        &self,
+        ty: TyId<'db>,
+        site: Option<crate::analysis::semantic::QuoteSite<'db>>,
+        holes: Vec<SemConstId<'db>>,
+        origin: SemOrigin<'db>,
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        let code = crate::analysis::semantic::QuotedCode::new(self.db, site, holes);
+        let value = SemConstId::new(
+            self.db,
+            SemConstValue::Structural {
+                ty,
+                handle: StructuralHandle::Code(code),
+            },
+        );
+        let verified =
+            VerifiedConstValueId::from_complete_execution(self.db, value).map_err(|message| {
+                CtfeError::InvalidOperation {
+                    origin,
+                    message: message.to_owned(),
+                }
+            })?;
+        Ok(CtfeConstValue::concrete(self.db, verified))
     }
 
     fn eval_structural_intrinsic(

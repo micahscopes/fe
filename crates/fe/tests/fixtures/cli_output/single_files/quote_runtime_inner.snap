@@ -1,0 +1,16 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_runtime_inner.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_runtime_inner.fe
+
+error[8-0110]: a function that builds code cannot be called at runtime
+  ┌─ quote_runtime_inner.fe:9:5
+  │
+9 │     builds_code(n: n)
+  │     ^^^^^^^^^^^^^^^^^ evaluate this call in a const context
+
+
+=== EXIT CODE: 1 ===

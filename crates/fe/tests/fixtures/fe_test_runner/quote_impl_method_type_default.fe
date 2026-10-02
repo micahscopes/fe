@@ -1,0 +1,30 @@
+trait Defaults {
+    fn choose<Payload = ingot::author::Tag>(self) -> usize
+    fn dependent<First, Payload = First>(self) -> usize
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Tag { pub value: u256 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Defaults for ${record} {
+                fn choose<Payload = Tag>(self) -> usize { 7 }
+                fn dependent<First, Payload = First>(self) -> usize { 9 }
+            }
+        }
+    }
+}
+
+struct Tag { other: bool }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_method_uses_provider_type_default() {
+    assert!(Target { value: 1 }.choose<ingot::author::Tag>() == 7)
+    assert!(Target { value: 1 }.dependent<u256, u256>() == 9)
+}

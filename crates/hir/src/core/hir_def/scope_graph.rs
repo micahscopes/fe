@@ -487,6 +487,7 @@ impl<'db> ScopeId<'db> {
             ScopeId::Item(ItemKind::Body(body)) => match body.body_kind(db) {
                 BodyKind::FuncBody => "{fn_body}".to_string(),
                 BodyKind::Anonymous => "{anonymous_body}".to_string(),
+                BodyKind::QuoteTemplate => "{quote_template}".to_string(),
             },
             _ => self.name(db)?.data(db).clone(),
         };

@@ -1,0 +1,52 @@
+use core::meta::{Code, Expr, Item, Where, empty}
+
+trait Marker {}
+impl Marker for u256 {}
+
+const SEED: Code<Expr> = quote { 1 }
+
+// A fold: each step splices the previous fragment and lifts a value.
+const fn conjunction(_ n: usize) -> Code<Expr> {
+    let mut body: Code<Expr> = quote { true }
+    let mut i: usize = 0
+    while i < n {
+        body = quote(other) { ${body} && other == ${i} + ${SEED} }
+        i += 1
+    }
+    body
+}
+
+// Item lists and where predicates fold from an empty seed.
+const fn getters(_ n: usize) -> Code<Item> {
+    let mut items = empty<Item>()
+    let mut i: usize = 0
+    while i < n {
+        items = quote {
+            ${items}
+            pub fn get() -> usize { ${i} }
+        }
+        i += 1
+    }
+    items
+}
+
+const fn bounds() -> Code<Where> {
+    let bounds = empty<Where>()
+    quote { where ${bounds}, u256: Marker }
+}
+
+const fn builds() -> bool {
+    let _expr = conjunction(3)
+    let _items = getters(2)
+    let _bounds = bounds()
+    true
+}
+
+static_assert(builds())
+
+const BUILDS: bool = builds()
+
+#[test]
+fn code_values_build() {
+    assert!(BUILDS)
+}

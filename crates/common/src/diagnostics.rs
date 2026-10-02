@@ -281,6 +281,7 @@ pub enum DiagnosticPass {
     Mir,
     SemanticBorrowck,
     SemanticLayoutEvidence,
+    Generation,
 
     ExternalAnalysis(ExternalAnalysisKey),
 }
@@ -304,6 +305,7 @@ impl DiagnosticPass {
             Self::Mir => 11,
             Self::SemanticBorrowck => 16,
             Self::SemanticLayoutEvidence => 17,
+            Self::Generation => 18,
 
             Self::ExternalAnalysis(_) => u16::MAX,
         }
@@ -338,6 +340,7 @@ mod tests {
             Mir,
             SemanticBorrowck,
             SemanticLayoutEvidence,
+            Generation,
         ];
         // Exhaustive, so that a new pass is also added to `passes`.
         for pass in &passes {
@@ -358,6 +361,7 @@ mod tests {
                 | Mir
                 | SemanticBorrowck
                 | SemanticLayoutEvidence
+                | Generation
                 | ExternalAnalysis(_) => {}
             }
         }

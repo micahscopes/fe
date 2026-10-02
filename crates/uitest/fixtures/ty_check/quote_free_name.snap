@@ -1,0 +1,34 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/quote_free_name.fe
+---
+error[8-0106]: `missing` is not found where the quote is written
+   ┌─ quote_free_name.fe:18:13
+   │
+18 │     quote { missing + 1 }
+   │             ^^^^^^^ import `missing`, or declare it open with `quote(missing)` so the destination binds it
+
+error[8-0106]: `Missing` is not found where the quote is written
+   ┌─ quote_free_name.fe:22:13
+   │
+22 │     quote { 1 as Missing }
+   │             ^^^^^^^^^^^^ import `Missing`, or declare it open with `quote(Missing)` so the destination binds it
+
+error[8-0107]: `local` is a value of the provider, not code
+   ┌─ quote_free_name.fe:27:13
+   │
+27 │     quote { local + n }
+   │             ^^^^^ splice its value with `${local}`
+
+error[8-0107]: `n` is a value of the provider, not code
+   ┌─ quote_free_name.fe:27:21
+   │
+27 │     quote { local + n }
+   │                     ^ splice its value with `${n}`
+
+error[8-0108]: a quote cannot mention the provider's generic parameter `T`
+   ┌─ quote_free_name.fe:31:13
+   │
+31 │     quote { helper() as T }
+   │             ^^^^^^^^^^^^^ the provider's generic parameters have no meaning where the code lands; splice a `FieldType` instead

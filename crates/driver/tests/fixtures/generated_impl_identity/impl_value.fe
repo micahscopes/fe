@@ -1,24 +1,13 @@
 mod author {
-    use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr,
-        FunctionDefinition, AssociatedConstant, RecordImplementation}
+    use core::meta::{Code, Item, Record}
 
-    pub const fn make(_ record: Record) -> RecordImplementation<0, 1> {
-        let types: [Option<DeclarationType>; 2] = [Option::None; 2]
-        let method: Option<FunctionDefinition<0, 1>> = Option::None
-        RecordImplementation {
-            owner: record,
-            trait_path: "core::abi::AbiSize",
-            types,
-            constants: [
-                Option::Some(AssociatedConstant::Expression(
-                    DeclarationName::Literal("HEAD_SIZE"), DeclarationType::U256,
-                    [BodyExpr::U256(42)], 0,
-                )),
-                Option::Some(AssociatedConstant::Bool(
-                    DeclarationName::Literal("IS_DYNAMIC"), false,
-                )),
-            ],
-            method,
+    pub const fn make(record: Record) -> Code<Item> {
+        let head_size: u256 = 42
+        quote {
+            impl core::abi::AbiSize for ${record} {
+                const HEAD_SIZE: u256 = ${head_size}
+                const IS_DYNAMIC: bool = false
+            }
         }
     }
 }

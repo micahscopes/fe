@@ -484,6 +484,9 @@ impl<'db> TyChecker<'db> {
                 ));
                 ExprProp::invalid(self.db)
             }
+            Expr::Quote(quote) => self.check_quote(expr, quote),
+            // Holes stand only in templates, which are not checked in place.
+            Expr::Hole(_) => ExprProp::invalid(self.db),
             Expr::MethodCall(..) => self.check_method_call(expr, expr_data),
             Expr::Path(..) => self.check_path(expr, expr_data),
             Expr::RecordInit(..) => self.check_record_init(expr, expr_data, expected),
@@ -509,6 +512,12 @@ impl<'db> TyChecker<'db> {
         }
         let typeable = Typeable::Expr(expr, actual.clone());
         actual.ty = self.unify_ty(typeable, actual.ty, expected);
+        if !actual.ty.has_invalid(self.db)
+            && !self.in_const_context()
+            && self.is_code_type(actual.ty)
+        {
+            self.push_diag(BodyDiag::CodeValueAtRuntime(expr.span(self.body()).into()));
+        }
         actual
     }
 
@@ -1754,6 +1763,10 @@ impl<'db> TyChecker<'db> {
         callable.process_constraints(self, expr, call_span.callee().into());
 
         let normalized_ret_ty = self.normalize_callable_return(&callable);
+        if !self.in_const_context() && self.callable_contains_quote(callable.callable_def()) {
+            self.push_diag(BodyDiag::QuoteCallAtRuntime(expr.span(self.body()).into()));
+            return ExprProp::invalid(self.db);
+        }
         if !self.check_obligation_introduction(expr, &callable) {
             return ExprProp::invalid(self.db);
         }
@@ -3611,6 +3624,12 @@ impl<'db> TyChecker<'db> {
 
         let receiver_tys = self.method_receiver_tys(*receiver, &receiver_prop);
         let method_assumptions = self.env.method_lookup_assumptions();
+        let lookup_scope = self
+            .body()
+            .quote_method_scopes(self.db)
+            .iter()
+            .find_map(|(site, scope)| (*site == expr).then_some(*scope))
+            .unwrap_or(self.env.scope());
 
         let mut selected_receiver_ty = receiver_tys[0];
         let mut canonical_r_ty = Canonicalized::new(self.db, selected_receiver_ty);
@@ -3618,7 +3637,7 @@ impl<'db> TyChecker<'db> {
             self.db,
             &canonical_r_ty,
             method_name,
-            self.env.scope(),
+            lookup_scope,
             method_assumptions,
             None,
         );
@@ -3632,7 +3651,7 @@ impl<'db> TyChecker<'db> {
                     self.db,
                     &fallback_canonical,
                     method_name,
-                    self.env.scope(),
+                    lookup_scope,
                     method_assumptions,
                     None,
                 );
@@ -3804,6 +3823,10 @@ impl<'db> TyChecker<'db> {
         callable.process_constraints(self, expr, call_span.method_name().into());
 
         let normalized_ret_ty = self.normalize_callable_return(&callable);
+        if !self.in_const_context() && self.callable_contains_quote(callable.callable_def()) {
+            self.push_diag(BodyDiag::QuoteCallAtRuntime(expr.span(self.body()).into()));
+            return ExprProp::invalid(self.db);
+        }
         if !self.check_obligation_introduction(expr, &callable) {
             return ExprProp::invalid(self.db);
         }
@@ -3857,16 +3880,23 @@ impl<'db> TyChecker<'db> {
             callable.unify_generic_args(tc, generic_args, anchor, generic_args_span.clone())
         };
 
-        let res = if path.is_bare_ident(self.db) {
+        let quote_scope = self
+            .body()
+            .quote_path_scopes(self.db)
+            .iter()
+            .find(|(site, _)| *site == expr)
+            .map(|(_, scope)| *scope);
+        let res = if path.is_bare_ident(self.db) && quote_scope.is_none() {
             let ident_span: DynLazySpan<'db> = path_expr_span.clone().into();
             resolve_ident_expr(self.db, &self.env, path, ident_span, &minter)
         } else {
-            match self.resolve_path(
+            match self.resolve_path_in_scope(
                 path,
                 true,
                 path_span.clone(),
                 path_expr_span.clone().into(),
                 &minter,
+                quote_scope.unwrap_or(self.env.scope()),
             ) {
                 Ok(r) => ResolvedPathInBody::Reso(r),
                 Err(err) => {
@@ -4525,6 +4555,8 @@ impl<'db> TyChecker<'db> {
                         return ExprProp::new(ty, is_mut);
                     }
                 }
+                // A spliced field never resolves where its template is written.
+                FieldIndex::Hole(_) => {}
             }
         }
 
@@ -6021,7 +6053,7 @@ fn body_diag_from_method_selection_err<'db>(
     }
 }
 
-fn resolve_ident_expr<'db>(
+pub(super) fn resolve_ident_expr<'db>(
     db: &'db dyn HirAnalysisDb,
     env: &TyCheckEnv<'db>,
     path: PathId<'db>,

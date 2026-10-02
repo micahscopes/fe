@@ -3989,6 +3989,10 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                         index.data(db),
                         given_ty.pretty_print(db)
                     ),
+                    FieldIndex::Hole(_) => format!(
+                        "a spliced field is not found in `{}`",
+                        given_ty.pretty_print(db)
+                    ),
                 };
 
                 primary_diag(
@@ -4039,6 +4043,40 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary.resolve(db),
                 error_code,
             ),
+            Self::QuoteOutsideConstContext(primary) => primary_diag(Severity::Error, "`quote` is only allowed in a const context".to_string(), "a quote builds a compile-time code value; use it in a `const fn` or a `const` item".to_string(), primary.resolve(db), error_code),
+            Self::CodeValueAtRuntime(primary) => primary_diag(Severity::Error, "a code value cannot be used at runtime".to_string(), "use this value in a `const fn`, a `const` item, or a generator"
+                        .to_string(), primary.resolve(db), error_code),
+            Self::QuoteCallAtRuntime(primary) => primary_diag(Severity::Error, "a function that builds code cannot be called at runtime".to_string(), "evaluate this call in a const context".to_string(), primary.resolve(db), error_code),
+            Self::QuoteHoleValue {
+                primary,
+                position,
+                found,
+            } => {
+                use crate::hir_def::QuoteHolePosition as P;
+                let (place, accepts) = match position {
+                    P::Expr => (
+                        "an expression",
+                        "`Code<Expr>`, `bool`, an integer or a string",
+                    ),
+                    P::Member => ("a member", "a `Field`"),
+                    P::FieldLabel => ("a record field label", "a `Field`"),
+                    P::Type => ("a type", "a `FieldType` or a `Record`"),
+                    P::Name => ("a declared name", "a `DeclarationName` or a `Field`"),
+                    P::Items => ("items", "`Code<Item>`"),
+                    P::Where => ("where predicates", "`Code<Where>`"),
+                };
+                primary_diag(Severity::Error, format!("this splice cannot stand for {place}"), format!(
+                            "expected {accepts}, found `{}`",
+                            found.pretty_print(db)
+                        ), primary.resolve(db), error_code)
+            }
+            Self::QuoteSpliceKinds(primary) => primary_diag(Severity::Error, "the splices of this quote have different kinds".to_string(), "a body made only of splices takes their kind, so they must agree"
+                        .to_string(), primary.resolve(db), error_code),
+            Self::QuoteUnresolvedName { primary, name } => primary_diag(Severity::Error, format!("`{name}` is not found where the quote is written"), format!(
+                        "import `{name}`, or declare it open with `quote({name})` so the destination binds it"
+                    ), primary.resolve(db), error_code),
+            Self::QuoteProviderLocal { primary, name } => primary_diag(Severity::Error, format!("`{}` is a value of the provider, not code", name.data(db)), format!("splice its value with `${{{}}}`", name.data(db)), primary.resolve(db), error_code),
+            Self::QuoteProviderGeneric { primary, name } => primary_diag(Severity::Error, format!("a quote cannot mention the provider's generic parameter `{name}`"), "the provider's generic parameters have no meaning where the code lands; splice a `FieldType` instead".to_string(), primary.resolve(db), error_code),
             Self::UnsupportedUnaryPlus(primary) => primary_diag(
                 Severity::Error,
                 "unary `+` is not supported",

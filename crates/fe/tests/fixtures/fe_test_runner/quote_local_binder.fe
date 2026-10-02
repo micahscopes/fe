@@ -1,0 +1,30 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn answer() -> u256 {
+                let marker = 42
+                let inner = {
+                    let marker = 100
+                    marker
+                }
+                marker + inner - 99
+            }
+        }
+    }
+}
+
+mod target {
+    const marker: u256 = 99
+
+    #[generate(ingot::author::emit)]
+    struct Target {}
+
+    pub fn check() -> bool { answer() == 43 }
+}
+
+#[test]
+fn quoted_local_is_not_a_target_constant() {
+    assert!(target::check())
+}

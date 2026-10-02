@@ -1,0 +1,39 @@
+trait Get {
+    fn get(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub trait Check {
+        fn check(self) -> u256
+    }
+
+    impl Check for u256 {
+        fn check(self) -> u256 { 7 }
+    }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Get for ${record} {
+                fn get(self) -> u256 { self.value.check() }
+            }
+        }
+    }
+}
+
+trait Check {
+    fn check(self) -> u256
+}
+
+impl Check for u256 {
+    fn check(self) -> u256 { 99 }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_method_call_keeps_provider_trait() {
+    assert!(Target { value: 1 }.get() == 7)
+}

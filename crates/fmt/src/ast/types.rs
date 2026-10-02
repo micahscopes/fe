@@ -579,16 +579,20 @@ impl ToDoc for ast::ConstGenericParam {
 }
 
 fn where_predicate_doc<'a>(
-    predicate: ast::WhereClausePredicate,
+    node: parser::SyntaxNode,
     ctx: &'a RewriteContext<'a>,
-) -> Doc<'a> {
-    match predicate.kind() {
+) -> Option<Doc<'a>> {
+    if let Some(hole) = ast::QuoteHole::cast(node.clone()) {
+        return Some(hole.to_doc(ctx));
+    }
+    let predicate = ast::WhereClausePredicate::cast(node)?;
+    Some(match predicate.kind() {
         ast::WherePredicateKind::Type(predicate) => predicate.to_doc(ctx),
         ast::WherePredicateKind::Const(predicate) => match predicate.expr() {
             Some(expr) => expr.to_doc(ctx),
             None => ctx.alloc.nil(),
         },
-    }
+    })
 }
 
 /// Whether the clause ends with a braced condition and a `,`. That comma is
@@ -625,8 +629,9 @@ impl ToDoc for ast::WhereClause {
 
         if !has_comment_tokens(self.syntax()) {
             let predicates: Vec<_> = self
-                .iter()
-                .map(|predicate| where_predicate_doc(predicate, ctx))
+                .syntax()
+                .children()
+                .filter_map(|node| where_predicate_doc(node, ctx))
                 .collect();
             if predicates.is_empty() {
                 return alloc.nil();
@@ -655,11 +660,11 @@ impl ToDoc for ast::WhereClause {
         for child in self.syntax().children_with_tokens() {
             match child {
                 NodeOrToken::Node(node) => {
-                    let Some(predicate) = ast::WhereClausePredicate::cast(node) else {
+                    let Some(doc) = where_predicate_doc(node, ctx) else {
                         continue;
                     };
                     entries.push(Entry {
-                        doc: where_predicate_doc(predicate, ctx),
+                        doc,
                         blank_line_before: pending_newlines >= 2,
                         is_predicate: true,
                     });
@@ -856,6 +861,7 @@ impl ToDoc for ast::Type {
             TypeKind::Tuple(tuple) => tuple.to_doc(ctx),
             TypeKind::Array(array) => array.to_doc(ctx),
             TypeKind::Never(never) => never.to_doc(ctx),
+            TypeKind::Hole(hole) => hole.to_doc(ctx),
         }
     }
 }
@@ -1233,6 +1239,8 @@ impl ToDoc for ast::Expr {
             ExprKind::If(if_expr) => if_expr.to_doc(ctx),
             ExprKind::Match(match_expr) => match_expr.to_doc(ctx),
             ExprKind::With(with_expr) => with_expr.to_doc(ctx),
+            ExprKind::Quote(quote) => quote.to_doc(ctx),
+            ExprKind::QuoteHole(hole) => hole.to_doc(ctx),
             ExprKind::Paren(paren) => paren.to_doc(ctx),
             ExprKind::Assign(assign) => assign.to_doc(ctx),
             ExprKind::AugAssign(aug_assign) => aug_assign.to_doc(ctx),

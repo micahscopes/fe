@@ -80,6 +80,9 @@ module.exports = grammar({
     [$.path_segment, $.attribute],
     // recv arm pattern name can be identifier or path
     [$.recv_arm_pattern, $.path_segment],
+    // A splice in a where clause, a type, or an expression.
+    [$.where_clause, $._expression],
+    [$._type, $._expression],
   ],
 
   rules: {
@@ -155,7 +158,7 @@ module.exports = grammar({
       optional($.attribute_list),
       optional($.visibility),
       'const',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       ':',
       field('type', $._type),
       '=',
@@ -177,7 +180,7 @@ module.exports = grammar({
       optional('unsafe'),
       optional('const'),
       'fn',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       optional($.generic_param_list),
       $.parameter_list,
       optional(seq('->', field('return_type', $._type))),
@@ -414,6 +417,7 @@ module.exports = grammar({
         $.function_definition,
         $.trait_type_item,
         $.trait_const_item,
+        $.quote_splice,
       )),
       '}',
     ),
@@ -429,7 +433,7 @@ module.exports = grammar({
     trait_const_item: $ => seq(
       optional($.attribute_list),
       'const',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       ':',
       field('type', $._type),
       optional(seq('=', field('value', $._expression))),
@@ -441,7 +445,7 @@ module.exports = grammar({
       optional($.attribute_list),
       optional($.visibility),
       'const',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       ':',
       field('type', $._type),
       optional(seq('=', field('value', $._expression))),
@@ -471,7 +475,7 @@ module.exports = grammar({
 
     impl_item_list: $ => seq(
       '{',
-      repeat(choice($.function_definition, $.impl_const_item)),
+      repeat(choice($.function_definition, $.impl_const_item, $.quote_splice)),
       '}',
     ),
 
@@ -576,7 +580,7 @@ module.exports = grammar({
 
     where_clause: $ => seq(
       'where',
-      sep1(choice($.where_predicate, $.where_const_predicate), ','),
+      sep1(choice($.where_predicate, $.where_const_predicate, $.quote_splice), ','),
       optional(','),
     ),
 
@@ -601,6 +605,7 @@ module.exports = grammar({
       $.self_type,
       $.never_type,
       $.qualified_path_type,
+      $.quote_splice,
     ),
 
     // Mode-prefixed type: ref Foo, mut Foo, own Foo
@@ -675,6 +680,8 @@ module.exports = grammar({
       $.if_expression,
       $.match_expression,
       $.with_expression,
+      $.quote_expression,
+      $.quote_splice,
       $.block,
       $.assignment_expression,
       $.augmented_assignment_expression,
@@ -881,7 +888,7 @@ module.exports = grammar({
     field_expression: $ => prec.left(PREC.POSTFIX, seq(
       field('value', $._expression),
       '.',
-      field('field', choice($.identifier, $.integer_literal)),
+      field('field', choice($.identifier, $.integer_literal, $.quote_splice)),
     )),
 
     index_expression: $ => prec(PREC.POSTFIX, seq(
@@ -1123,6 +1130,19 @@ module.exports = grammar({
       field('params', $.with_param_list),
       field('body', $.block),
     ),
+
+    // The body holds an expression, items, or where predicates.
+    quote_expression: $ => seq(
+      'quote',
+      optional($.quote_open_list),
+      field('body', choice($.block, $.quote_where)),
+    ),
+
+    quote_where: $ => seq('{', $.where_clause, '}'),
+
+    quote_open_list: $ => seq('(', sepTrailing($.identifier, ','), ')'),
+
+    quote_splice: $ => seq('$', '{', field('value', $._expression), '}'),
 
     with_param_list: $ => seq(
       '(',

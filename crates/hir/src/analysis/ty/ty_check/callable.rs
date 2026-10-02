@@ -1053,6 +1053,7 @@ fn place_expr_hint<'db>(
             match field_idx {
                 FieldIndex::Ident(ident) => Some(format!("{base}.{}", ident.data(db))),
                 FieldIndex::Index(index) => Some(format!("{base}.{}", index.data(db))),
+                FieldIndex::Hole(_) => None,
             }
         }
         Partial::Present(Expr::Bin(base, index, BinOp::Index)) => {

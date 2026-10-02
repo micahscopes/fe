@@ -1,0 +1,34 @@
+trait Reads {
+    fn get(self) -> u256 uses (tick: author::Tick)
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub trait Tick { fn read(self) -> u256 }
+    pub struct Counter { pub value: u256 }
+    impl Tick for Counter { fn read(self) -> u256 { self.value } }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Reads for ${record} {
+                fn get(self) -> u256 uses (tick: Tick) { tick.read() }
+            }
+        }
+    }
+}
+
+trait Tick { fn read(self) -> u256 }
+struct Counter { other: bool }
+impl Tick for Counter { fn read(self) -> u256 { 0 } }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_trait_effect_keeps_provider_trait() {
+    let value = with (author::Tick = author::Counter { value: 7 }) {
+        Target { value: 1 }.get()
+    }
+    assert!(value == 7)
+}

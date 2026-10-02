@@ -1,0 +1,24 @@
+trait Number {
+    const VALUE: u256
+}
+
+mod author {
+    use core::meta::{Code, DeclarationName, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let name = DeclarationName::Literal("VALUE")
+        quote {
+            impl ingot::Number for ${record} {
+                const ${name}: u256 = 7
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn quoted_constant_name_runs() {
+    assert!(Target::VALUE == 7)
+}

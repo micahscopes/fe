@@ -1,0 +1,15 @@
+use core::meta::{Code, Expr}
+
+const fn builds_code(n: u256) -> bool {
+    let _code: Code<Expr> = quote { ${10 / n} }
+    true
+}
+
+const fn forwards(n: u256) -> bool {
+    builds_code(n: n)
+}
+
+#[test]
+fn runtime_call() {
+    assert!(forwards(n: 0))
+}

@@ -1,0 +1,22 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn apply(value: u256, enabled: bool) -> u256 {
+                if enabled { value + 1 } else { 0 }
+            }
+        }
+    }
+}
+
+const value: u256 = 100
+const enabled: bool = false
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+#[test]
+fn quoted_parameter_keeps_its_label_and_binding() {
+    assert!(apply(value: 42, enabled: true) == 43)
+}

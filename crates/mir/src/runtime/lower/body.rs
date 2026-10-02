@@ -35,6 +35,7 @@ use hir::analysis::{
         ty_def::{TyData, TyId},
     },
 };
+use hir::core::meta::MetaItem;
 use hir::hir_def::{
     ArithBinOp, BinOp, CompBinOp, Expr, Func, IdentId, Partial, UnOp, attr::ArithmeticMode,
     scope_graph::ScopeId,
@@ -190,6 +191,17 @@ pub(super) fn check_runtime_body_supported<'db>(
     key: SemanticInstanceKey<'db>,
     body: &RuntimeSemanticBody<'db>,
 ) -> Result<(), LowerError> {
+    if let Some(code) = MetaItem::Code.resolve(db, key.owner(db).scope())
+        && body
+            .normalized
+            .values
+            .iter()
+            .any(|value| value.ty.base_ty(db) == code)
+    {
+        return Err(LowerError::Unsupported(
+            "a function that builds code requires compile-time evaluation".into(),
+        ));
+    }
     let evidence = layout_evidence_body(db, body.owner())
         .map_err(|error| layout_evidence_failure(key, &error))?;
     for block in &body.normalized.blocks {
@@ -476,6 +488,7 @@ fn expr_requires_runtime_eval_when_erased(expr: &NExpr<'_>) -> bool {
         }
         | NExpr::Call { .. } => true,
         NExpr::Forward { .. }
+        | NExpr::Quote { .. }
         | NExpr::ProjectValue { .. }
         | NExpr::StructuralRepack { .. }
         | NExpr::CodeRegionRef { .. }
@@ -1207,6 +1220,7 @@ impl<'db> RmirEmitter<'db> {
                         )
                 }
                 NExpr::ProjectValue { .. }
+                | NExpr::Quote { .. }
                 | NExpr::CodeRegionRef { .. }
                 | NExpr::Const(_)
                 | NExpr::Unary { .. }
@@ -1361,6 +1375,9 @@ impl<'db> RmirEmitter<'db> {
         };
 
         match expr {
+            NExpr::Quote { .. } => {
+                unreachable!("compile-time quote reached runtime lowering")
+            }
             NExpr::Forward { src } | NExpr::StructuralRepack { value: src, .. } => {
                 let value = self.lower_semantic_operand_for_class(bb, *src, &dst_class);
                 let value = self.coerce_value_if_needed(bb, value, &dst_class);
@@ -5417,6 +5434,7 @@ impl<'db> RmirEmitter<'db> {
                 place == dst_place
             }
             NExpr::StructuralRepack { .. }
+            | NExpr::Quote { .. }
             | NExpr::CodeRegionRef { .. }
             | NExpr::Const(_)
             | NExpr::Unary { .. }

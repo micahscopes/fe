@@ -543,6 +543,11 @@ pub enum SExpr<'db> {
     CodeRegionLen {
         target: SemanticCodeRegionTarget<'db>,
     },
+    /// Builds a code value from the quote at `site` and its splices' values.
+    Quote {
+        site: super::QuoteSite<'db>,
+        holes: Box<[SOperand]>,
+    },
     Call {
         call_site: CallSiteId,
         callee: SemanticCalleeRef<'db>,

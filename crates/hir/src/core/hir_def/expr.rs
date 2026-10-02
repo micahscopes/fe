@@ -1,7 +1,8 @@
 use cranelift_entity::entity_impl;
 
 use super::{
-    Body, GenericArgListId, IdentId, IntegerId, LitKind, Partial, PatId, PathId, StmtId, TypeId,
+    Body, GenericArgListId, IdentId, IntegerId, LitKind, Partial, PatId, PathId, Quote, StmtId,
+    TypeId,
 };
 use crate::{HirDb, span::expr::LazyExprSpan};
 
@@ -55,6 +56,13 @@ pub enum Expr<'db> {
 
     /// `with (K = v, ..) { body }`
     With(Vec<WithBinding<'db>>, ExprId),
+
+    /// `quote { .. }`: a compile-time code value built from a template and
+    /// its splices.
+    Quote(Box<Quote<'db>>),
+
+    /// Slot `n` of the enclosing quote. Appears only in quote templates.
+    Hole(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
@@ -99,6 +107,9 @@ pub enum FieldIndex<'db> {
     /// The field is indexed by its integer.
     /// `field.0`.
     Index(IntegerId<'db>),
+    /// `field.${f}`: slot `n` of the enclosing quote. Appears only in quote
+    /// templates.
+    Hole(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
@@ -226,6 +237,8 @@ impl<'db> CallArg<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub struct Field<'db> {
     pub label: Option<IdentId<'db>>,
+    /// A quoted label to replace with a checked target field at generation.
+    pub label_hole: Option<u32>,
     pub expr: ExprId,
 }
 

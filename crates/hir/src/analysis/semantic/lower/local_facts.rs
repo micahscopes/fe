@@ -126,6 +126,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 }
             }
             SExpr::CodeRegionRef { .. }
+            | SExpr::Quote { .. }
             | SExpr::Const(_)
             | SExpr::Unary { .. }
             | SExpr::Binary { .. }
@@ -165,6 +166,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             | SExpr::ArrayRepeat { .. }
             | SExpr::AggregateMake { .. }
             | SExpr::CodeRegionRef { .. }
+            | SExpr::Quote { .. }
             | SExpr::Const(_)
             | SExpr::Unary { .. }
             | SExpr::Binary { .. }
@@ -254,6 +256,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 dedup_layout_backing_sources(sources)
             }
             SExpr::CodeRegionRef { .. }
+            | SExpr::Quote { .. }
             | SExpr::Const(_)
             | SExpr::Unary { .. }
             | SExpr::Binary { .. }

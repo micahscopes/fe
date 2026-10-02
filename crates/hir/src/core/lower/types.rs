@@ -46,6 +46,12 @@ impl<'db> TypeId<'db> {
             }
 
             ast::TypeKind::Never(_) => TypeKind::Never,
+
+            ast::TypeKind::Hole(hole) => match super::quote::lower_type_hole(ctxt, &hole) {
+                Some(slot) => TypeKind::Hole(slot),
+                // Outside a quote the parser has reported the splice.
+                None => TypeKind::Path(Partial::Absent),
+            },
         };
 
         TypeId::new(ctxt.db(), kind)

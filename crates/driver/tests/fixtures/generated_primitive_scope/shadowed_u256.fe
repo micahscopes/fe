@@ -1,14 +1,8 @@
-use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+use core::meta::{Code, Item, Record}
 
-const fn make(_ record: Record) -> FunctionDefinition<0, 1> {
-    FunctionDefinition {
-        name: DeclarationName::Literal("seven"),
-        public: true,
-        const_function: true,
-        parameters: [],
-        return_type: DeclarationType::U256,
-        expressions: [BodyExpr::U256(7)],
-        result: 0,
+const fn make(_ record: Record) -> Code<Item> {
+    quote {
+        pub const fn seven() -> u256 { 7 }
     }
 }
 

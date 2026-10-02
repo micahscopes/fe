@@ -272,6 +272,12 @@ impl<'db> ConstFnChecker<'db, '_> {
                 self.check_call_target(expr);
             }
             Expr::UnsupportedMacroCall => {}
+            // Splices run when the quote is built; the template is not run.
+            Expr::Quote(quote) => quote
+                .holes
+                .iter()
+                .for_each(|hole| self.check_expr(hole.expr)),
+            Expr::Hole(_) => {}
             Expr::Assert(args) => args.iter().for_each(|arg| self.check_expr(arg.expr)),
             Expr::MethodCall(receiver, _name, _generic_args, args) => {
                 self.check_expr(*receiver);

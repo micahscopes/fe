@@ -1,0 +1,20 @@
+trait Number {
+    const VALUE: u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Number for ${record} {
+                const VALUE: u256 = ${true}
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn read() -> u256 { Target::VALUE }

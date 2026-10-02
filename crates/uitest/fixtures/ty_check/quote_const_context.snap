@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/quote_const_context.fe
+---
+error[8-0103]: `quote` is only allowed in a const context
+  ┌─ quote_const_context.fe:6:17
+  │
+6 │     let _code = quote { true }
+  │                 ^^^^^^^^^^^^^^ a quote builds a compile-time code value; use it in a `const fn` or a `const` item

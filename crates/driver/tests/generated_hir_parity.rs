@@ -44,6 +44,9 @@ fn expression(db: &DriverDataBase, body: Body<'_>, id: ExprId) -> String {
             let field = match field {
                 FieldIndex::Ident(name) => name.data(db).clone(),
                 FieldIndex::Index(index) => index.data(db).to_string(),
+                FieldIndex::Hole(slot) => {
+                    panic!("generated HIR still contains quote field hole {slot}")
+                }
             };
             format!("Field({}, {:?})", expression(db, body, *base), field)
         }
@@ -95,12 +98,37 @@ fn normalized_function(db: &DriverDataBase, function: Func<'_>) -> (String, Stri
     )
 }
 
+/// Generated binders deliberately use names that source code cannot spell.
+/// Give them stable source spellings only for this print-and-reparse oracle.
+fn replayable_names(source: &str) -> String {
+    let mut replayable = String::with_capacity(source.len());
+    let mut remaining = source;
+    while let Some(start) = remaining.find("<quote-") {
+        replayable.push_str(&remaining[..start]);
+        let Some(end) = remaining[start + 1..].find('>') else {
+            replayable.push_str(&remaining[start..]);
+            return replayable;
+        };
+        let name = &remaining[start + 1..start + 1 + end];
+        replayable.push_str("__fe_");
+        replayable.push_str(&name.replace('-', "_"));
+        remaining = &remaining[start + 2 + end..];
+    }
+    replayable.push_str(remaining);
+    replayable
+}
+
 fn normalized_item(db: &DriverDataBase, item: ItemKind<'_>) -> String {
-    match item {
+    let normalized = match item {
         ItemKind::Func(function) => format!("Function({:?})", normalized_function(db, function)),
         ItemKind::ImplTrait(implementation) => {
             let printed = implementation.pretty_print(db);
-            let header = printed.split_once(" {\n").expect("printed impl header").0;
+            let header = printed
+                .split_once(" {\n")
+                .expect("printed impl header")
+                .0
+                .replace("< ", "<")
+                .replace(" >", ">");
             let constants = implementation
                 .hir_consts(db)
                 .iter()
@@ -118,7 +146,8 @@ fn normalized_item(db: &DriverDataBase, item: ItemKind<'_>) -> String {
             format!("Impl({header:?}, {constants:?}, {methods:?})")
         }
         other => panic!("unexpected generated item: {other:?}"),
-    }
+    };
+    replayable_names(&normalized)
 }
 
 fn is_top_level_generated_item(db: &DriverDataBase, item: ItemKind<'_>) -> bool {
@@ -184,7 +213,11 @@ fn assert_parity(fixture: Fixture<&str>) {
         else {
             continue;
         };
-        generated.push((item, target.end, item.pretty_print(&output)));
+        generated.push((
+            item,
+            target.end,
+            replayable_names(&item.pretty_print(&output)),
+        ));
     }
     assert!(
         !generated.is_empty(),

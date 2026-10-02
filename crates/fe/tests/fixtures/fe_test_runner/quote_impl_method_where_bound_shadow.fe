@@ -1,0 +1,29 @@
+trait Dispatcher {
+    fn keep<T>(self, value: T) -> T where T: author::Mark
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub trait Mark {}
+    impl Mark for u256 {}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Dispatcher for ${record} {
+                fn keep<T>(self, value: T) -> T where T: Mark { value }
+            }
+        }
+    }
+}
+
+trait Mark {}
+impl Mark for bool {}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_where_bound_keeps_provider_trait() {
+    assert!(Target { value: 1 }.keep<u256>(value: 7) == 7)
+}

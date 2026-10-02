@@ -1,0 +1,27 @@
+trait Checked {
+    fn value<const N: usize>(self) -> usize where author::positive(value: N)
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn positive(value: usize) -> bool { value > 0 }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Checked for ${record} {
+                fn value<const N: usize>(self) -> usize where positive(value: N) { N }
+            }
+        }
+    }
+}
+
+const fn positive(_ value: usize) -> bool { false }
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_const_where_keeps_provider_helper() {
+    assert!(Target { value: 1 }.value<3>() == 3)
+}

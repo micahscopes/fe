@@ -1,0 +1,25 @@
+trait ReadValue {
+    fn get_value(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, DeclarationName, Item, Record, field}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let selected = field(record, 0)
+        let name = DeclarationName::FieldPrefix("get_", selected)
+        quote {
+            impl ingot::ReadValue for ${record} {
+                fn ${name}(self) -> u256 { self.${selected} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_method_name_comes_from_field() {
+    assert!(Target { value: 42 }.get_value() == 42)
+}

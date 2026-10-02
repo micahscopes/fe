@@ -1,0 +1,11 @@
+mod private {
+    trait HasK {
+        const K: u256
+    }
+
+    impl HasK for u256 {
+        const K: u256 = 7
+    }
+}
+
+fn answer() -> u256 { <u256 as private::HasK>::K }

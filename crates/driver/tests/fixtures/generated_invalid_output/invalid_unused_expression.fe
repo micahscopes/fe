@@ -1,18 +1,11 @@
-use core::meta::{Record, DeclarationName, DeclarationType, BodyExpr, FunctionDefinition}
+use core::meta::{Code, Item, Record}
 
-const fn make(_ record: Record) -> FunctionDefinition<1, 3> {
-    FunctionDefinition {
-        name: DeclarationName::Literal("apply"),
-        public: true,
-        const_function: true,
-        parameters: [DeclarationType::U256],
-        return_type: DeclarationType::U256,
-        expressions: [
-            BodyExpr::Parameter(0),
-            BodyExpr::Bool(true),
-            BodyExpr::Add(0, 1),
-        ],
-        result: 0,
+const fn make(_ record: Record) -> Code<Item> {
+    quote {
+        pub const fn apply(_ value: u256) -> u256 {
+            if false { let unused: u256 = true }
+            value
+        }
     }
 }
 

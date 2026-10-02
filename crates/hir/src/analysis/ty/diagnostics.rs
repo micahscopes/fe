@@ -630,6 +630,35 @@ pub enum BodyDiag<'db> {
     },
     UnsupportedUnaryPlus(DynLazySpan<'db>),
     UnsupportedMacroCall(DynLazySpan<'db>),
+    /// `quote` outside a const function or const item.
+    QuoteOutsideConstContext(DynLazySpan<'db>),
+    /// A compile-time code value used in a runtime body.
+    CodeValueAtRuntime(DynLazySpan<'db>),
+    /// A runtime call to a function whose body contains a quote.
+    QuoteCallAtRuntime(DynLazySpan<'db>),
+    /// A splice whose value the hole's position does not accept.
+    QuoteHoleValue {
+        primary: DynLazySpan<'db>,
+        position: crate::hir_def::QuoteHolePosition,
+        found: TyId<'db>,
+    },
+    /// The splices of a splice-only quote body have different kinds.
+    QuoteSpliceKinds(DynLazySpan<'db>),
+    /// A name in a quote that nothing binds.
+    QuoteUnresolvedName {
+        primary: DynLazySpan<'db>,
+        name: String,
+    },
+    /// A quote mentions a provider local instead of splicing its value.
+    QuoteProviderLocal {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+    },
+    /// A quote mentions a generic parameter of its provider.
+    QuoteProviderGeneric {
+        primary: DynLazySpan<'db>,
+        name: String,
+    },
     IntLiteralOutOfRange {
         primary: DynLazySpan<'db>,
         literal: String,
@@ -1083,6 +1112,14 @@ impl<'db> BodyDiag<'db> {
             Self::OpsTraitNotImplemented { .. } => 16,
             Self::UnsupportedUnaryPlus(..) => 52,
             Self::UnsupportedMacroCall(..) => 89,
+            Self::QuoteOutsideConstContext(..) => 103,
+            Self::CodeValueAtRuntime(..) => 109,
+            Self::QuoteCallAtRuntime(..) => 110,
+            Self::QuoteHoleValue { .. } => 104,
+            Self::QuoteSpliceKinds(..) => 105,
+            Self::QuoteUnresolvedName { .. } => 106,
+            Self::QuoteProviderLocal { .. } => 107,
+            Self::QuoteProviderGeneric { .. } => 108,
             Self::IntLiteralOutOfRange { .. } => 74,
             Self::BorrowFromNonPlace { .. } => 65,
             Self::CannotBorrowMut { .. } => 66,

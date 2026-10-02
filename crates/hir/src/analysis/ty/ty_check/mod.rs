@@ -11,6 +11,7 @@ mod expr;
 mod owner;
 mod pat;
 mod path;
+mod quote;
 mod stmt;
 
 pub(crate) use self::contract::eval_msg_variant_selector;
@@ -21,6 +22,9 @@ pub use self::contract::{
     resolve_variant_bare, resolve_variant_in_msg,
 };
 pub use self::path::RecordLike;
+pub use self::quote::{
+    CheckedQuote, QuoteBinder, QuoteNameClass, QuoteNameSite, QuoteNameUse, QuoteSignatureSite,
+};
 use crate::analysis::name_resolution::ResolvedVariant;
 pub use crate::analysis::ty::ProviderAddressSpace;
 use crate::analysis::ty::corelib::resolve_lib_type_path;
@@ -41,7 +45,7 @@ use crate::{
         BinOp, Body, CondId, Const, Contract, ContractRecvArm, Expr, ExprId, Func, GenericParam,
         GenericParamOwner, LitKind, ManualContractRootAttr, Partial, Pat, PatId, PathId,
         StaticAssert, StaticAssertComparison, Stmt, StmtId, StringId, TypeId as HirTyId,
-        WhereClauseOwner,
+        WhereClauseOwner, scope_graph::ScopeId,
     },
     span::{
         DynLazySpan, expr::LazyExprSpan, pat::LazyPatSpan, path::LazyPathSpan, types::LazyTySpan,
@@ -1382,7 +1386,7 @@ fn const_body_ctfe_diags_with_context<'db>(
                 {
                     diags.push(diag.into());
                 }
-            } else {
+            } else if !is_code_value(db, value) {
                 let key = SemanticInstanceKey::new(
                     db,
                     owner,
@@ -1592,6 +1596,18 @@ fn blocked_const_detail<'db>(
     (primary, dependency)
 }
 
+/// A code value exists only at compile time, so a const item holding one is
+/// not reified for runtime; a runtime use of it is refused where it is used.
+fn is_code_value<'db>(db: &'db dyn HirAnalysisDb, value: SemConstId<'db>) -> bool {
+    matches!(
+        value.value(db),
+        SemConstValue::Structural {
+            handle: crate::analysis::semantic::StructuralHandle::Code(_),
+            ..
+        }
+    )
+}
+
 fn push_const_eval_diag<'db>(
     diags: &mut Vec<FuncBodyDiag<'db>>,
     body: Body<'db>,
@@ -1659,6 +1675,7 @@ fn typed_body_for_bodyless_func<'db>(
         semantic_expr_lowering: SecondaryMap::new(),
         record_init_lowering: SecondaryMap::new(),
         resolved_field_index: SecondaryMap::new(),
+        quotes: FxHashMap::default(),
         call_effect_args: SecondaryMap::new(),
         return_borrow_provider: None,
         param_bindings,
@@ -3790,7 +3807,25 @@ impl<'db> TyChecker<'db> {
         site: DynLazySpan<'db>,
         minter: &LoweringContext<'db>,
     ) -> Result<PathRes<'db>, PathResError<'db>> {
-        let scope = self.env.scope();
+        self.resolve_path_in_scope(
+            path,
+            resolve_tail_as_value,
+            span,
+            site,
+            minter,
+            self.env.scope(),
+        )
+    }
+
+    fn resolve_path_in_scope(
+        &mut self,
+        path: PathId<'db>,
+        resolve_tail_as_value: bool,
+        span: LazyPathSpan<'db>,
+        site: DynLazySpan<'db>,
+        minter: &LoweringContext<'db>,
+        scope: ScopeId<'db>,
+    ) -> Result<PathRes<'db>, PathResError<'db>> {
         let mut invisible = None;
         let mut applications = Vec::new();
         let mut observe_segment = |path: PathId<'db>, reso: &PathRes<'db>| {
@@ -3820,10 +3855,21 @@ impl<'db> TyChecker<'db> {
         };
 
         if let Some((path, deriv_span)) = invisible {
-            let span = span.clone().segment(path.segment_index(self.db)).ident();
-            let ident = path.ident(self.db);
-            let diag = PathResDiag::Invisible(span.into(), ident.unwrap(), deriv_span);
-            self.diags.push(diag.into());
+            let segment = span.clone().segment(path.segment_index(self.db));
+            let (span, ident): (DynLazySpan<'db>, _) = match path.kind(self.db) {
+                crate::hir_def::PathKind::QualifiedType { trait_, .. } => (
+                    segment.qualified_type().trait_qualifier().name().into(),
+                    trait_
+                        .path(self.db)
+                        .to_opt()
+                        .and_then(|path| path.ident(self.db).to_opt()),
+                ),
+                _ => (segment.ident().into(), path.ident(self.db).to_opt()),
+            };
+            if let Some(ident) = ident {
+                let diag = PathResDiag::Invisible(span, ident, deriv_span);
+                self.diags.push(diag.into());
+            }
         }
 
         res
@@ -4089,6 +4135,7 @@ mod typed_body_tables {
         pub(super) semantic_expr_lowering: SecondaryMap<ExprId, Option<SemanticExprLowering<'db>>>,
         pub(super) record_init_lowering: SecondaryMap<ExprId, Option<RecordInitLowering<'db>>>,
         pub(super) resolved_field_index: SecondaryMap<ExprId, Option<u16>>,
+        pub(super) quotes: FxHashMap<ExprId, CheckedQuote<'db>>,
         pub(super) call_effect_args: SecondaryMap<ExprId, Option<Vec<ResolvedEffectArg<'db>>>>,
         pub(super) return_borrow_provider: Option<ProviderAddressSpace>,
         /// Bindings for function parameters (indexed by param position)
@@ -4643,7 +4690,10 @@ impl<'db> TypedBody<'db> {
             {
                 missing_plan()
             }
-            Expr::UnsupportedMacroCall => Some(SmirLoweringIssue::InvalidExpr(expr)),
+            Expr::UnsupportedMacroCall | Expr::Hole(_) => {
+                Some(SmirLoweringIssue::InvalidExpr(expr))
+            }
+            Expr::Quote(_) if expr_ty.has_invalid(db) => Some(SmirLoweringIssue::InvalidExpr(expr)),
             Expr::Assert(_) | Expr::Cast(..) if expr_ty.has_invalid(db) => {
                 Some(SmirLoweringIssue::InvalidExpr(expr))
             }
@@ -4828,6 +4878,11 @@ impl<'db> TypedBody<'db> {
 
     pub fn resolved_field_index(&self, expr: ExprId) -> Option<u16> {
         self.tables.resolved_field_index[expr]
+    }
+
+    /// The checked form of the quote at `expr`, read by generation.
+    pub fn checked_quote(&self, expr: ExprId) -> Option<&CheckedQuote<'db>> {
+        self.tables.quotes.get(&expr)
     }
 
     // Final typed pattern/binding view. This can intentionally differ from
@@ -5893,7 +5948,19 @@ impl<'db> TypedBody<'db> {
                     seen,
                 );
             }
-            Expr::Lit(_) | Expr::Path(_) | Expr::UnsupportedMacroCall => {}
+            Expr::Lit(_) | Expr::Path(_) | Expr::UnsupportedMacroCall | Expr::Hole(_) => {}
+            Expr::Quote(quote) => {
+                for hole in &quote.holes {
+                    self.collect_explicit_return_param_sources_in_expr(
+                        db,
+                        body,
+                        hole.expr,
+                        out,
+                        saw_non_param,
+                        seen,
+                    );
+                }
+            }
         }
     }
 
@@ -6140,6 +6207,7 @@ impl<'db> TypedBody<'db> {
             semantic_expr_lowering: SecondaryMap::new(),
             record_init_lowering: SecondaryMap::new(),
             resolved_field_index: SecondaryMap::new(),
+            quotes: FxHashMap::default(),
             call_effect_args: SecondaryMap::new(),
             return_borrow_provider: None,
             param_bindings: Vec::new(),

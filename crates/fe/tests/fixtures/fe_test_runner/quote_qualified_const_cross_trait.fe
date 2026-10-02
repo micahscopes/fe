@@ -1,0 +1,40 @@
+trait HasK {
+    const K: u256
+}
+
+impl HasK for u256 {
+    const K: u256 = 43
+}
+
+trait GetK {
+    fn get_k(self) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    trait HasK {
+        const K: u256
+    }
+
+    impl HasK for u256 {
+        const K: u256 = 7
+    }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::GetK for ${record} {
+                fn get_k(self) -> u256 { <u256 as HasK>::K }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Token {}
+
+#[test]
+fn qualified_const_keeps_provider_trait() {
+    assert!(Token {}.get_k() == 7)
+    assert!(<u256 as HasK>::K == 43)
+}

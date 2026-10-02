@@ -1,7 +1,18 @@
 # Source-invoked structural generation
 
-The [generated HIR carrier](GENERATION_CARRIER.md) specifies the next staging
-boundary before replacing the current source-insertion path.
+Current `#[generate]` providers return checked `Code<Item>` quotes. The compiler
+freezes the checked quote and builds ordinary HIR in an output view. The
+accessor and ABI examples in `crates/fe/tests/fixtures/structural_generation`
+use this path. The old `FunctionDefinition` and `RecordImplementation`
+descriptor graph is no longer accepted. See the
+[current carrier](GENERATION_CARRIER.md).
+
+The next section records the original September 21 structural release, before
+quotation replaced its output format. Its descriptor limits and examples are
+historical; later sections describe subsequent work.
+
+The [generated HIR carrier](GENERATION_CARRIER.md) records the staging boundary
+that replaced source insertion.
 
 The reflected-trait extension is described in [REFLECTED_TRAIT_QUERIES.md](REFLECTED_TRAIT_QUERIES.md).
 It replaces the ABI provider's primitive dispatch with ordinary `FieldQuery<R>`
@@ -372,7 +383,7 @@ or grant reflection/builder capabilities or cross-stage evidence transport.
 See `tests/const_trait_evidence.rs` and the executable
 `crates/fe/tests/fixtures/fe_test/const_trait_evidence.fe` example.
 
-# Structural elaboration integration (under construction)
+# Historical structural elaboration integration
 
 The `elaboration` module resolves explicit record invocations and provides an
 independent input view. Its compiler-issued `core::meta::Record` arguments let

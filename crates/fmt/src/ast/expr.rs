@@ -191,6 +191,8 @@ enum ChainSegment {
     },
     /// `.field`
     Field { name: String },
+    /// `.${f}` inside a quotation
+    FieldHole { hole: ast::QuoteHole },
 }
 
 /// Collects chain segments from an expression, returning (root, segments).
@@ -217,11 +219,15 @@ fn collect_chain(expr: &ast::Expr) -> (ast::Expr, Vec<ChainSegment>) {
                 }
             }
             ExprKind::Field(field) => {
-                let name = field
-                    .name_or_index()
-                    .map(|n| n.text().to_string())
-                    .unwrap_or_default();
-                segments.push(ChainSegment::Field { name });
+                if let Some(hole) = field.field_hole() {
+                    segments.push(ChainSegment::FieldHole { hole });
+                } else {
+                    let name = field
+                        .name_or_index()
+                        .map(|n| n.text().to_string())
+                        .unwrap_or_default();
+                    segments.push(ChainSegment::Field { name });
+                }
                 match field.receiver() {
                     Some(r) => current = r,
                     None => break,
@@ -259,6 +265,7 @@ fn segment_to_doc<'a>(seg: &ChainSegment, ctx: &'a RewriteContext<'a>) -> Doc<'a
                 .append(args_doc)
         }
         ChainSegment::Field { name } => alloc.text(".").append(alloc.text(name.clone())),
+        ChainSegment::FieldHole { hole } => alloc.text(".").append(hole.to_doc(ctx)),
     }
 }
 
@@ -845,7 +852,12 @@ impl ToDoc for ast::FieldExpr {
             ctx,
             self.syntax(),
             indent,
-            |node| ast::Expr::cast(node).map(|expr| TokenPiece::new(expr.to_doc(ctx))),
+            |node| {
+                if let Some(hole) = ast::QuoteHole::cast(node.clone()) {
+                    return Some(TokenPiece::new(hole.to_doc(ctx)));
+                }
+                ast::Expr::cast(node).map(|expr| TokenPiece::new(expr.to_doc(ctx)))
+            },
             |token| match token.kind() {
                 SyntaxKind::Dot => Some(TokenPiece::new(alloc.text("."))),
                 SyntaxKind::Ident | SyntaxKind::Int => {
@@ -1291,6 +1303,142 @@ impl ToDoc for ast::WithExpr {
                 _ => None,
             },
         )
+    }
+}
+
+impl ToDoc for ast::QuoteExpr {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        // A comment cannot stand between `quote` and its body: the body must
+        // follow on the same line.
+        let alloc = &ctx.alloc;
+        let mut doc = alloc.text("quote");
+        if let Some(open) = self.open_names() {
+            doc = doc.append(open.to_doc(ctx));
+        }
+        let body = self
+            .body()
+            .map(|body| body.to_doc(ctx))
+            .or_else(|| self.items().map(|items| items.to_doc(ctx)))
+            .or_else(|| self.where_predicates().map(|where_| where_.to_doc(ctx)));
+        match body {
+            Some(body) => doc.append(alloc.text(" ")).append(body),
+            None => doc,
+        }
+    }
+}
+
+impl ToDoc for ast::QuoteOpenList {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        let alloc = &ctx.alloc;
+        if has_comment_tokens(self.syntax()) {
+            return token_doc(
+                ctx,
+                self.syntax(),
+                ctx.config.indent_width as isize,
+                |_| None,
+                |token| match token.kind() {
+                    SyntaxKind::Comma => Some(TokenPiece::new(alloc.text(",")).space_after()),
+                    _ => None,
+                },
+            );
+        }
+        alloc
+            .text("(")
+            .append(alloc.intersperse(
+                self.names().map(|name| alloc.text(ctx.token(&name))),
+                alloc.text(", "),
+            ))
+            .append(alloc.text(")"))
+    }
+}
+
+impl ToDoc for ast::QuoteItemList {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        super::items::block_items_doc(self.syntax(), QuoteItemDoc::cast, ctx)
+    }
+}
+
+/// An entry of a quoted item list: an item or an items splice.
+struct QuoteItemDoc(ast::QuoteItemEntry);
+
+impl QuoteItemDoc {
+    fn cast(node: parser::SyntaxNode) -> Option<Self> {
+        if let Some(hole) = ast::QuoteHole::cast(node.clone()) {
+            return Some(Self(ast::QuoteItemEntry::Hole(hole)));
+        }
+        ast::Item::cast(node).map(|item| Self(ast::QuoteItemEntry::Item(item)))
+    }
+}
+
+impl ToDoc for QuoteItemDoc {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        match &self.0 {
+            ast::QuoteItemEntry::Item(item) => item.to_doc(ctx),
+            ast::QuoteItemEntry::Hole(hole) => hole.to_doc(ctx),
+        }
+    }
+}
+
+impl ToDoc for ast::QuoteWhere {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        let alloc = &ctx.alloc;
+        let clause = self
+            .where_clause()
+            .map(|clause| clause.to_doc(ctx))
+            .unwrap_or_else(|| alloc.nil());
+        alloc
+            .text("{ ")
+            .append(clause)
+            .append(alloc.text(" }"))
+            .group()
+    }
+}
+
+/// `${ e }` in any position.
+fn quote_hole_doc<'a>(
+    syntax: &parser::SyntaxNode,
+    expr: Option<ast::Expr>,
+    ctx: &'a RewriteContext<'a>,
+) -> Doc<'a> {
+    let alloc = &ctx.alloc;
+    if has_comment_tokens(syntax) {
+        return token_doc(
+            ctx,
+            syntax,
+            ctx.config.indent_width as isize,
+            |node| ast::Expr::cast(node).map(|expr| TokenPiece::new(expr.to_doc(ctx))),
+            |token| match token.kind() {
+                SyntaxKind::Dollar => Some(TokenPiece::new(alloc.text("$"))),
+                SyntaxKind::LBrace => Some(TokenPiece::new(alloc.text("{"))),
+                SyntaxKind::RBrace => Some(TokenPiece::new(alloc.text("}")).no_nest()),
+                _ => None,
+            },
+        );
+    }
+    alloc
+        .text("${")
+        .append(
+            expr.map(|expr| expr.to_doc(ctx))
+                .unwrap_or_else(|| alloc.nil()),
+        )
+        .append(alloc.text("}"))
+}
+
+impl ToDoc for ast::QuoteHoleExpr {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        quote_hole_doc(self.syntax(), self.expr(), ctx)
+    }
+}
+
+impl ToDoc for ast::QuoteHole {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        quote_hole_doc(self.syntax(), self.expr(), ctx)
+    }
+}
+
+impl ToDoc for ast::QuoteHoleType {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        quote_hole_doc(self.syntax(), self.expr(), ctx)
     }
 }
 

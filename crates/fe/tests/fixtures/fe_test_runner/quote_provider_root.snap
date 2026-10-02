@@ -1,0 +1,11 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_provider_root.fe
+---
+=== STDOUT ===
+PASS  [<time>] provider_function_is_rooted
+
+test result: ok. 1 passed; 0 failed
+
+=== EXIT CODE: 0 ===

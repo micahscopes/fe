@@ -1,0 +1,13 @@
+mod author {
+    use core::meta::{Code, DeclarationName, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let name = DeclarationName::Literal("bad-name")
+        quote {
+            pub fn ${name}() -> u256 { 1 }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}

@@ -202,6 +202,30 @@ impl<S: TokenStream> Parser<S> {
             .is_some_and(|scope| scopes.contains(&scope.scope.syntax_kind()))
     }
 
+    pub(super) fn quote_scope_depth(&self) -> usize {
+        self.parents
+            .iter()
+            .filter(|entry| entry.scope.syntax_kind() == SyntaxKind::QuoteExpr)
+            .count()
+    }
+
+    /// Whether a `$` here starts a splice in a slot that only quotes have.
+    pub(super) fn at_quote_hole(&mut self) -> bool {
+        self.current_kind() == Some(SyntaxKind::Dollar) && self.quote_scope_depth() > 0
+    }
+
+    pub(super) fn quote_hole_depth(&self) -> usize {
+        self.parents
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.scope.syntax_kind(),
+                    SyntaxKind::QuoteHoleExpr | SyntaxKind::QuoteHoleType | SyntaxKind::QuoteHole
+                )
+            })
+            .count()
+    }
+
     pub fn expect_and_pop_recovery_stack(&mut self) -> Result<(), Recovery<ErrProof>> {
         let current = self.current_kind();
         let r = if current.is_some() && self.scope_aux_recovery().contains(&current.unwrap()) {

@@ -1,0 +1,20 @@
+trait Tag {}
+trait Other {}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote { impl ingot::Tag for ${record} {} }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}
+
+fn requires_tag<T: Tag>() -> bool { true }
+
+#[test]
+fn quoted_impl_establishes_trait() {
+    assert!(requires_tag<Target>())
+}

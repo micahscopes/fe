@@ -1,0 +1,11 @@
+use core::meta::{Code, Expr}
+
+// Code values exist only at compile time; a runtime function cannot hold one.
+const fn make() -> Code<Expr> {
+    quote { true }
+}
+
+pub fn leak() -> bool {
+    let _code = make()
+    true
+}

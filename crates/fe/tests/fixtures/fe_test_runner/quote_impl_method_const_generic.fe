@@ -1,0 +1,26 @@
+trait Width {
+    fn width<const N: usize>(self) -> usize
+    fn height<const N: usize>(self) -> usize
+}
+
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Width for ${record} {
+                fn width<const N: usize>(self) -> usize { N }
+                fn height<const N: usize>(self) -> usize { N + 1 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target { value: u256 }
+
+#[test]
+fn quoted_method_const_generic_reaches_body() {
+    assert(Target { value: 1 }.width<3>() == 3)
+    assert(Target { value: 1 }.height<4>() == 5)
+}

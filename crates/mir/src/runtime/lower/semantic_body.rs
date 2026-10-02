@@ -230,6 +230,7 @@ impl<'db> RuntimeSemanticBody<'db> {
             NExpr::Forward { .. }
             | NExpr::ProjectValue { .. }
             | NExpr::StructuralRepack { .. }
+            | NExpr::Quote { .. }
             | NExpr::CodeRegionRef { .. }
             | NExpr::Const(_)
             | NExpr::Unary { .. }

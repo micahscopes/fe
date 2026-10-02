@@ -14,6 +14,7 @@ ast_node! {
     | SK::TupleType
     | SK::ArrayType
     | SK::NeverType
+    | SK::QuoteHoleType
 }
 impl Type {
     pub fn kind(&self) -> TypeKind {
@@ -24,6 +25,7 @@ impl Type {
             SK::TupleType => TypeKind::Tuple(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::ArrayType => TypeKind::Array(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::NeverType => TypeKind::Never(AstNode::cast(self.syntax().clone()).unwrap()),
+            SK::QuoteHoleType => TypeKind::Hole(AstNode::cast(self.syntax().clone()).unwrap()),
             _ => unreachable!(),
         }
     }
@@ -162,6 +164,19 @@ pub enum TypeKind {
     Tuple(TupleType),
     Array(ArrayType),
     Never(NeverType),
+    /// `${ty}` inside a quotation.
+    Hole(QuoteHoleType),
+}
+
+ast_node! {
+    /// `${ty}` in type position inside a quotation.
+    pub struct QuoteHoleType,
+    SK::QuoteHoleType,
+}
+impl QuoteHoleType {
+    pub fn expr(&self) -> Option<super::Expr> {
+        support::child(self.syntax())
+    }
 }
 
 #[cfg(test)]

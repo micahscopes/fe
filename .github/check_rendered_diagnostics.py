@@ -1,4 +1,4 @@
-"""Reject repeated error codes at the same primary highlight in UI snapshots."""
+"""Reject repeated error codes at the same primary highlight in snapshots."""
 
 from pathlib import Path
 import re
@@ -6,7 +6,10 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "crates/uitest/fixtures"
+FIXTURES = (
+    ROOT / "crates/uitest/fixtures",
+    ROOT / "crates/fe/tests/fixtures",
+)
 HEADER = re.compile(r"^(error|warning)\[([^]]+)\]:", re.MULTILINE)
 LOCATION = re.compile(r"^\s*┌─ (.+:\d+:\d+)", re.MULTILINE)
 SOURCE_LINE = re.compile(r"^\s*(\d+)\s+│")
@@ -53,8 +56,9 @@ def violations(source: str) -> list[str]:
 
 def main() -> int:
     errors = []
-    for path in FIXTURES.rglob("*.snap"):
-        errors.extend(f"{path.relative_to(ROOT)}: {item}" for item in violations(path.read_text()))
+    for fixtures in FIXTURES:
+        for path in fixtures.rglob("*.snap"):
+            errors.extend(f"{path.relative_to(ROOT)}: {item}" for item in violations(path.read_text()))
 
     sample = """error[6-0003]: first
   ┌─ example.fe:1:1
@@ -73,7 +77,7 @@ error[6-0003]: second
     if errors:
         print("repeated rendered diagnostics:\n" + "\n".join(errors), file=sys.stderr)
         return 1
-    print("rendered diagnostics: unique code and primary highlight")
+    print("no repeated diagnostic in a snapshot")
     return 0
 
 
