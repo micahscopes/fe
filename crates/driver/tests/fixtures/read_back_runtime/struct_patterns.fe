@@ -1,0 +1,28 @@
+use core::meta::{Code, Expr, Item, Record}
+use core::abi::ByteInput
+use std::evm::CallData
+
+const fn read_back_match_sum(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_match_sum(_ value: Point) -> u256 { ${body} } }
+}
+
+const fn read_back_let_sum(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_let_sum(_ value: Point) -> u256 { ${body} } }
+}
+
+mod destination {
+    pub struct Point { pub y: u256, pub x: u256 }
+    #[generate(ingot::read_back_match_sum)]
+    struct MatchTarget {}
+    #[generate(ingot::read_back_let_sum)]
+    struct LetTarget {}
+}
+
+#[test]
+fn copied_values() {
+    let seed = CallData::new().word_at(0)
+    assert!(destination::copied_match_sum(Point { x: seed + 3, y: 4 }) == match_sum(Point { x: seed + 3, y: 4 }))
+    assert!(destination::copied_let_sum(Point { x: seed + 3, y: 4 }) == let_sum(Point { x: seed + 3, y: 4 }))
+}

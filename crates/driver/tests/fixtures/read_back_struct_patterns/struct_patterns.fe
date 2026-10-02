@@ -1,0 +1,19 @@
+pub struct Point { pub x: u256, pub y: u256 }
+
+pub fn match_sum(_ point: Point) -> u256 {
+    match point {
+        Point { x, y } => x * 10 + y
+    }
+}
+
+pub fn let_sum(_ point: Point) -> u256 {
+    let Point { x, y } = point
+    let rebuilt = Point { x, y }
+    rebuilt.x * 10 + rebuilt.y
+}
+
+#[test]
+fn authored_values() {
+    assert!(match_sum(Point { x: 3, y: 4 }) == 34)
+    assert!(let_sum(Point { x: 3, y: 4 }) == 34)
+}

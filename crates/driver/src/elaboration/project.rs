@@ -63,6 +63,41 @@ fn source_span(db: &DriverDataBase, url: &Url, range: &std::ops::Range<usize>) -
     ))
 }
 
+fn evaluation_operation_diagnostic<'db>(
+    db: &'db DriverDataBase,
+    mut owner: BodyOwner<'db>,
+    failure: &hir::analysis::semantic::ctfe::EvalFailure<'db>,
+) -> Option<(String, QuoteLocation)> {
+    use hir::analysis::semantic::{
+        SemOrigin,
+        ctfe::{CtfeError, EvalFailure},
+    };
+    let EvalFailure::Ctfe(error) = failure else {
+        return None;
+    };
+    let mut error = error;
+    while let CtfeError::CalleeError { callee, source, .. } = error {
+        owner = callee.key(db).owner(db);
+        error = source;
+    }
+    let CtfeError::InvalidOperation { origin, message } = error else {
+        return None;
+    };
+    let body = owner.body(db)?;
+    let span = match origin {
+        SemOrigin::Expr(expr) => expr.span(body).resolve(db)?,
+        SemOrigin::Stmt(stmt) => stmt.span(body).resolve(db)?,
+        SemOrigin::Body(_) | SemOrigin::Synthetic => return None,
+    };
+    Some((
+        message.clone(),
+        QuoteLocation {
+            url: span.file.url(db)?,
+            range: span.range.into(),
+        },
+    ))
+}
+
 impl ElaborationError {
     pub fn position(&self, db: &DriverDataBase) -> Option<(usize, usize)> {
         let source = db.workspace().get(db, &self.url)?.text(db);
@@ -387,13 +422,19 @@ fn prepare_selected<'db>(
             error_at(format!("invalid generation invocation: {:?}", e.kind), span)
         })?;
         for request in requests {
-            let site = request
-                .owner
-                .span()
-                .attributes()
-                .attr(request.attribute_index)
-                .resolve(db)
-                .map(|span| span.range.into());
+            let site = match request.owner {
+                hir::analysis::ty::adt_def::AdtRef::Struct(owner) => owner
+                    .span()
+                    .attributes()
+                    .attr(request.attribute_index)
+                    .resolve(db),
+                hir::analysis::ty::adt_def::AdtRef::Enum(owner) => owner
+                    .span()
+                    .attributes()
+                    .attr(request.attribute_index)
+                    .resolve(db),
+            }
+            .map(|span| span.range.into());
             let error = |message: String| error_at(message, site.clone());
             let input = request
                 .record_input(db)
@@ -456,6 +497,13 @@ fn prepare_selected<'db>(
                     )));
                 }
                 EvalOutcome::Failed(failure) => {
+                    if let Some((message, location)) =
+                        evaluation_operation_diagnostic(db, BodyOwner::Func(*provider), &failure)
+                    {
+                        let mut diagnostic = error(message);
+                        diagnostic.quote = Some(location);
+                        return Err(diagnostic);
+                    }
                     return Err(error(format!("generation evaluation failed: {failure:?}")));
                 }
             };
@@ -495,6 +543,7 @@ fn prepare_selected<'db>(
             });
             let span = request
                 .owner
+                .as_item()
                 .span()
                 .resolve(db)
                 .ok_or_else(|| error("generation owner has no source span".into()))?;

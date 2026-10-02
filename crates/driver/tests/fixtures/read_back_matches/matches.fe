@@ -1,0 +1,55 @@
+pub fn pick(_ flag: bool, _ x: u256) -> u256 {
+    match flag {
+        true => x
+        false => 0
+    }
+}
+
+pub fn tuple_match(_ flag: bool, _ x: u256) -> u256 {
+    match (flag, x) {
+        (true, n) => n + 1
+        (false, _) => 0
+    }
+}
+
+pub fn nested_match(_ flag: bool, _ x: u256) -> u256 {
+    match flag {
+        true => match x {
+            0 => 9
+            n => n + 3
+        }
+        false => match x {
+            0 => 8
+            n => n + 4
+        }
+    }
+}
+
+pub fn rest_match(_ x: u256) -> u256 {
+    match (x, 2 as u256, 3 as u256, 4 as u256) {
+        (head, .., tail) => head + tail
+    }
+}
+
+pub fn or_match(_ x: u256) -> u256 {
+    match x {
+        0 | 1 => 10
+        n => n + 2
+    }
+}
+
+#[test]
+fn authored_values() {
+    assert!(pick(true, 4) == 4)
+    assert!(pick(false, 4) == 0)
+    assert!(tuple_match(true, 4) == 5)
+    assert!(tuple_match(false, 4) == 0)
+    assert!(nested_match(true, 0) == 9)
+    assert!(nested_match(false, 0) == 8)
+    assert!(nested_match(true, 4) == 7)
+    assert!(nested_match(false, 4) == 8)
+    assert!(rest_match(5) == 9)
+    assert!(or_match(0) == 10)
+    assert!(or_match(1) == 10)
+    assert!(or_match(5) == 7)
+}

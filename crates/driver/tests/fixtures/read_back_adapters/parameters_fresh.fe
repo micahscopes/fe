@@ -1,0 +1,9 @@
+use core::meta::{Code, Expr, Item, Record}
+
+const fn read_back_ordered(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_ordered(_ lhs: u256, _ rhs: u256) -> u256 { ${body} } }
+}
+
+#[generate(ingot::read_back_ordered)]
+struct GeneratedTarget {}

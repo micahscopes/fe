@@ -1,0 +1,63 @@
+// Target: Q6. Concrete enum patterns retain the provider's enum identity.
+// Oracle: a destination enum with the same name has a different variant order;
+// the generated function must agree with the authored function over all variants.
+pub enum Shape {
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+    Empty,
+}
+
+fn area(_ shape: Shape) -> u256 {
+    match shape {
+        Shape::Circle(radius) => radius * radius
+        Shape::Rect { w, h } => w * h
+        Shape::Empty => 0
+    }
+}
+
+mod author {
+    use ingot::Shape
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn generated_area(_ shape: Shape) -> u256 {
+                match shape {
+                    Shape::Circle(radius) => radius * radius
+                    Shape::Rect { w, h } => w * h
+                    Shape::Empty => 0
+                }
+            }
+            pub fn generated_scale(_ shape: Shape) -> Shape {
+                match shape {
+                    Shape::Circle(radius) => Shape::Circle(radius * 2)
+                    Shape::Rect { w, h } => Shape::Rect { w: w * 2, h: h * 2 }
+                    Shape::Empty => Shape::Empty
+                }
+            }
+        }
+    }
+}
+
+mod destination {
+    pub enum Shape {
+        Empty,
+        Rect { w: u256, h: u256 },
+        Circle(u256),
+    }
+
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+
+#[test]
+fn generated_enum_patterns_keep_their_owner() {
+    assert!(destination::generated_area(Shape::Circle(3)) == 9)
+    assert!(destination::generated_area(Shape::Circle(3)) == area(Shape::Circle(3)))
+    assert!(destination::generated_area(Shape::Rect { w: 2, h: 5 }) == 10)
+    assert!(destination::generated_area(Shape::Rect { w: 2, h: 5 }) == area(Shape::Rect { w: 2, h: 5 }))
+    assert!(destination::generated_area(Shape::Empty) == area(Shape::Empty))
+    assert!(area(destination::generated_scale(Shape::Circle(3))) == 36)
+    assert!(area(destination::generated_scale(Shape::Rect { w: 2, h: 5 })) == 40)
+    assert!(area(destination::generated_scale(Shape::Empty)) == 0)
+}

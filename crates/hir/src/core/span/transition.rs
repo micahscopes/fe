@@ -567,16 +567,8 @@ impl DesugaredOrigin {
             Self::AbiStruct(super::AbiStructDesugared { abi_struct }) => {
                 abi_struct.to_node(&root).syntax().text_range()
             }
-            Self::Generation(super::GenerationDesugared {
-                target,
-                attribute_index,
-            }) => {
-                let target = target.to_node(&root);
-                target
-                    .attr_list()
-                    .and_then(|attrs| attrs.into_iter().nth(attribute_index))
-                    .map(|attr| attr.syntax().text_range())
-                    .unwrap_or_else(|| target.syntax().text_range())
+            Self::Generation(super::GenerationDesugared { attribute }) => {
+                attribute.to_node(&root).syntax().text_range()
             }
         };
 

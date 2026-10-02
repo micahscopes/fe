@@ -1,0 +1,39 @@
+// Q6: checked struct match and let patterns preserve owner and field labels.
+pub struct Point { pub x: u256, pub y: u256 }
+
+mod author {
+    use ingot::Point
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn generated_point(_ x: u256, _ y: u256) -> Point {
+                Point { x, y }
+            }
+            pub fn generated_sum(_ p: Point) -> u256 {
+                match p {
+                    Point { x, y } => x * 10 + y
+                }
+            }
+            pub fn generated_let(_ p: Point) -> u256 {
+                let Point { x, y } = p
+                x * 10 + y
+            }
+        }
+    }
+}
+
+mod destination {
+    pub struct Point { pub y: u256, pub x: u256 }
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+
+#[test]
+fn struct_record_pattern() {
+    let point = destination::generated_point(3, 4)
+    assert!(point.x == 3)
+    assert!(point.y == 4)
+    assert!(destination::generated_sum(point) == 34)
+    assert!(destination::generated_sum(Point { x: 3, y: 4 }) == 34)
+    assert!(destination::generated_let(Point { x: 3, y: 4 }) == 34)
+}

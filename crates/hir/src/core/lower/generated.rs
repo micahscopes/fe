@@ -29,7 +29,8 @@ use crate::{
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenGeneration, FrozenHandleKind,
         FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase, FrozenOwner,
-        FrozenQuoteFieldType, FrozenQuoteFunction, FrozenQuoteNominal, FrozenQuoteQualifiedConst,
+        FrozenQuoteConstructor, FrozenQuoteConstructorSite, FrozenQuoteFieldType,
+        FrozenQuoteFunction, FrozenQuoteNominal, FrozenQuoteQualifiedConst,
         FrozenQuoteSignatureType, FrozenQuoteTrait, FrozenQuoteWherePredicate,
         FrozenTemplateSource, MetaItem,
     },
@@ -37,9 +38,9 @@ use crate::{
         AssocConstDef, Body, CallableDef, EffectParamListId, Expr, ExprId, Func, FuncParamListId,
         GenericArg, GenericArgListId, GenericParam, GenericParamListId, GenericParamOwner, IdentId,
         ItemKind, Partial, PatId, PathId, PathKind, Quote, QuoteAssocType, QuoteConst,
-        QuoteFragment, QuoteHolePosition, QuoteItem, QuoteName, Struct, TopLevelMod,
-        TrackedItemVariant, Trait, TraitRefId, TupleTypeId, TypeBound, TypeGenericArg, TypeId,
-        TypeKind, Visibility, WhereClauseId, WhereClauseOwner, WherePredicate,
+        QuoteFragment, QuoteHolePosition, QuoteItem, QuoteName, TopLevelMod, TrackedItemVariant,
+        Trait, TraitRefId, TupleTypeId, TypeBound, TypeGenericArg, TypeId, TypeKind, Visibility,
+        WhereClauseId, WhereClauseOwner, WherePredicate,
         scope_graph::{EdgeKind, Scope, ScopeGraph, ScopeId},
     },
     span::{GenerationDesugared, HirOrigin},
@@ -302,16 +303,15 @@ fn quoted_type_hole<'db>(
             item: MetaItem::FieldType,
             ..
         } => {
-            let index = target.field_index(value, true)?;
+            let (variant_index, index) = target.field_coordinate(value, true)?;
             if !generic_names.is_empty() {
                 return field_type
                     .as_ref()
                     .ok_or_else(|| invalid("quoted generic field type needs checked reification"))
                     .and_then(|frozen| quoted_field_type(db, frozen, generic_names));
             }
-            target.owner.hir_fields(db).data(db)[index]
-                .type_ref
-                .to_opt()
+            target
+                .field_hir_type(variant_index, index)
                 .ok_or_else(|| invalid("quoted field type is missing"))
         }
         _ => Err(invalid("quoted type lacks target authority")),
@@ -320,10 +320,14 @@ fn quoted_type_hole<'db>(
 
 fn quoted_record_generics<'db>(
     db: &'db dyn HirDb,
-    owner: Struct<'db>,
+    owner: crate::analysis::ty::adt_def::AdtRef<'db>,
     const_types: &[Option<SemPrimTy>],
 ) -> Result<(GenericParamListId<'db>, Vec<IdentId<'db>>), String> {
-    let source = GenericParamOwner::Struct(owner).params_list(db);
+    let source = match owner {
+        crate::analysis::ty::adt_def::AdtRef::Struct(owner) => GenericParamOwner::Struct(owner),
+        crate::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
+    }
+    .params_list(db);
     if source.data(db).len() != const_types.len() {
         return Err(invalid(
             "quoted target parameter count changed after freezing",
@@ -683,6 +687,7 @@ pub(crate) enum QuoteHygiene<'db> {
     Function {
         func: Func<'db>,
         rooted: Vec<(ExprId, Func<'db>)>,
+        variants: Vec<(FrozenQuoteConstructorSite, QuoteConstructorIdentity<'db>)>,
         qualified_consts: Vec<(ExprId, Trait<'db>)>,
         const_predicates: Vec<QuoteConstHygiene<'db>>,
         nominal_types: Vec<(TypeId<'db>, crate::analysis::ty::adt_def::AdtRef<'db>)>,
@@ -841,7 +846,53 @@ fn quoted_expr_sources<'db>(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+pub(super) struct QuoteConstructorIdentity<'db> {
+    pub(super) owner: crate::analysis::ty::adt_def::AdtRef<'db>,
+    pub(super) variant_index: Option<u16>,
+}
+
+fn reify_quote_constructor<'db>(
+    db: &'db dyn HirDb,
+    root: &FrozenQuoteConstructor,
+) -> Result<(PathId<'db>, QuoteConstructorIdentity<'db>), String> {
+    use crate::analysis::ty::adt_def::AdtRef;
+    let owner = locate_authored_nominal(db, &root.owner)
+        .ok_or_else(|| invalid("quoted constructor owner is absent from authored HIR"))?;
+    let mut path = bound_quote_item_path(db, &root.owner.ingot, &root.owner.path)?;
+    match (owner, root.variant_index) {
+        (AdtRef::Struct(_), None) => {}
+        (AdtRef::Enum(owner), Some(index)) => {
+            if usize::from(index) >= owner.len_variants(db) {
+                return Err(invalid("quoted variant index is outside its authored enum"));
+            }
+            let variant = crate::hir_def::EnumVariant::new(owner, usize::from(index));
+            let name = variant
+                .name(db)
+                .ok_or_else(|| invalid("quoted variant has no authored name"))?;
+            path = path.push_str(db, name);
+        }
+        _ => {
+            return Err(invalid(
+                "quoted constructor kind disagrees with its nominal owner",
+            ));
+        }
+    }
+    Ok((
+        path,
+        QuoteConstructorIdentity {
+            owner,
+            variant_index: root.variant_index,
+        },
+    ))
+}
+
 pub(super) struct QuoteExprTypes<'db> {
+    pub(super) variants: Vec<(
+        FrozenQuoteConstructorSite,
+        PathId<'db>,
+        QuoteConstructorIdentity<'db>,
+    )>,
     pub(super) rooted_paths: Vec<(ExprId, PathId<'db>)>,
     pub(super) cast_types: Vec<(ExprId, TypeId<'db>)>,
     pub(super) local_types: Vec<(crate::hir_def::StmtId, TypeId<'db>)>,
@@ -919,7 +970,15 @@ pub(super) fn reify_quote_expr_types<'db>(
             Ok((*site, TypeId::new(db, TypeKind::Primitive(primitive))))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let variants = node
+        .rooted_constructors
+        .iter()
+        .map(|root| {
+            reify_quote_constructor(db, root).map(|(path, variant)| (root.site, path, variant))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(QuoteExprTypes {
+        variants,
         rooted_paths,
         cast_types,
         local_types,
@@ -1406,6 +1465,18 @@ fn emit_quoted_function<'db>(
             )
         })
         .collect();
+    let variants = node
+        .rooted_constructors
+        .iter()
+        .filter(|root| root.func == Some(func_index))
+        .map(|root| {
+            reify_quote_constructor(db, root).map(|(path, variant)| (root.site, path, variant))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let constructor_paths = variants
+        .iter()
+        .map(|(site, path, _)| (*site, *path))
+        .collect::<Vec<_>>();
     let local_types = node
         .local_types
         .iter()
@@ -1567,6 +1638,7 @@ fn emit_quoted_function<'db>(
                 is_method,
                 &rooted_funcs,
                 &qualified_paths,
+                &constructor_paths,
                 &self_record_inits,
                 &locals,
                 &local_types,
@@ -1624,9 +1696,16 @@ fn emit_quoted_function<'db>(
         .zip(generic_uses.into_iter().map(|(_, name)| name))
         .collect();
     generics.extend(copied.fragment_generics);
+    let mut checked_variants = copied
+        .constructor_sites
+        .into_iter()
+        .zip(variants.into_iter().map(|(_, _, variant)| variant))
+        .collect::<Vec<_>>();
+    checked_variants.extend(copied.fragment_constructors);
     Ok(QuoteHygiene::Function {
         func,
         rooted,
+        variants: checked_variants,
         qualified_consts,
         const_predicates: const_hygiene,
         nominal_types: resolved_nominal_types,
@@ -2022,6 +2101,7 @@ fn quoted_impl_const<'db>(
                 &[],
                 &[],
                 &[],
+                &[],
             )?);
             Ok::<_, String>(())
         })?;
@@ -2214,33 +2294,87 @@ fn identifier(name: &str) -> bool {
 
 struct TargetContext<'a, 'db> {
     db: &'db dyn HirDb,
-    owner: Struct<'db>,
+    owner: crate::analysis::ty::adt_def::AdtRef<'db>,
     target: &'a FrozenOwner,
 }
 
 impl<'a, 'db> TargetContext<'a, 'db> {
-    fn field_index(&self, value: &FrozenMetaValue, type_handle: bool) -> Result<usize, String> {
-        let kind = match value {
+    fn field_hir_type(&self, variant_index: Option<u16>, index: usize) -> Option<TypeId<'db>> {
+        use crate::{analysis::ty::adt_def::AdtRef, hir_def::VariantKind};
+        match (self.owner, variant_index) {
+            (AdtRef::Struct(owner), None) => owner
+                .hir_fields(self.db)
+                .data(self.db)
+                .get(index)?
+                .type_ref
+                .to_opt(),
+            (AdtRef::Enum(owner), Some(variant_index)) => {
+                if usize::from(variant_index) >= owner.len_variants(self.db) {
+                    return None;
+                }
+                match crate::hir_def::EnumVariant::new(owner, usize::from(variant_index))
+                    .kind(self.db)
+                {
+                    VariantKind::Unit => None,
+                    VariantKind::Tuple(fields) => fields.data(self.db).get(index)?.to_opt(),
+                    VariantKind::Record(fields) => {
+                        fields.data(self.db).get(index)?.type_ref.to_opt()
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn field_coordinate(
+        &self,
+        value: &FrozenMetaValue,
+        type_handle: bool,
+    ) -> Result<(Option<u16>, usize), String> {
+        let coordinate = match value {
             FrozenMetaValue::Structural {
                 item: MetaItem::FieldType,
                 owner,
-                kind: FrozenHandleKind::FieldType(index),
-            } if type_handle && owner == self.target => *index,
+                kind:
+                    FrozenHandleKind::FieldType {
+                        variant_index,
+                        index,
+                    },
+            } if type_handle && owner == self.target => (*variant_index, *index),
             FrozenMetaValue::Structural {
                 item: MetaItem::Field,
                 owner,
-                kind: FrozenHandleKind::Field(index),
-            } if !type_handle && owner == self.target => *index,
+                kind:
+                    FrozenHandleKind::Field {
+                        variant_index,
+                        index,
+                    },
+            } if !type_handle && owner == self.target => (*variant_index, *index),
             _ => return Err(invalid("expected an authorized field handle")),
         };
-        if kind >= self.owner.hir_fields(self.db).data(self.db).len() {
-            return Err(invalid("field handle is out of bounds"));
+        if self.field_hir_type(coordinate.0, coordinate.1).is_none() {
+            return Err(invalid(
+                "field handle has an invalid owner, variant or field coordinate",
+            ));
         }
-        Ok(kind)
+        Ok(coordinate)
+    }
+
+    fn field_index(&self, value: &FrozenMetaValue, type_handle: bool) -> Result<usize, String> {
+        let (variant_index, index) = self.field_coordinate(value, type_handle)?;
+        if variant_index.is_some() {
+            return Err(invalid(
+                "variant field access requires a matching pattern binder",
+            ));
+        }
+        Ok(index)
     }
 
     fn field_name(&self, index: usize) -> Result<IdentId<'db>, String> {
-        self.owner.hir_fields(self.db).data(self.db)[index]
+        let crate::analysis::ty::adt_def::AdtRef::Struct(owner) = self.owner else {
+            return Err(invalid("field name requires a selected field list"));
+        };
+        owner.hir_fields(self.db).data(self.db)[index]
             .name
             .to_opt()
             .ok_or_else(|| invalid("generation field name is missing"))
@@ -2282,20 +2416,32 @@ pub(crate) fn request_fragment<'db>(
     let target = base
         .items_dfs(db)
         .find_map(|item| {
-            let ItemKind::Struct(struct_) = item else {
-                return None;
-            };
-            if authored_path(db, base, struct_.scope())? != request.target.path {
+            let owner = crate::analysis::ty::adt_def::AdtRef::try_from_item(item)?;
+            if authored_path(db, base, owner.scope())? != request.target.path {
                 return None;
             }
-            let HirOrigin::Raw(ptr) = struct_.origin(db) else {
-                return None;
+            let node = match owner {
+                crate::analysis::ty::adt_def::AdtRef::Struct(owner) => {
+                    let HirOrigin::Raw(ptr) = owner.origin(db) else {
+                        return None;
+                    };
+                    ptr.syntax_node_ptr().try_to_node(&root)?
+                }
+                crate::analysis::ty::adt_def::AdtRef::Enum(owner) => {
+                    let HirOrigin::Raw(ptr) = owner.origin(db) else {
+                        return None;
+                    };
+                    ptr.syntax_node_ptr().try_to_node(&root)?
+                }
             };
-            let ast = ptr
-                .syntax_node_ptr()
-                .try_to_node(&root)
-                .and_then(ast::Struct::cast)?;
-            Some((struct_, ast))
+            let attrs = match owner {
+                crate::analysis::ty::adt_def::AdtRef::Struct(_) => {
+                    ast::Struct::cast(node)?.attr_list()
+                }
+                crate::analysis::ty::adt_def::AdtRef::Enum(_) => ast::Enum::cast(node)?.attr_list(),
+            }?;
+            let attribute = attrs.into_iter().nth(request.attribute_index)?;
+            Some((owner, attribute))
         })
         .ok_or_else(|| invalid("generated target is absent from authored HIR"))?;
     let parent = base
@@ -2304,8 +2450,7 @@ pub(crate) fn request_fragment<'db>(
         .find_map(|edge| matches!(edge.kind, EdgeKind::Lex(_)).then_some(edge.dest))
         .ok_or_else(|| invalid("generated target has no lexical parent"))?;
     let origin = GenerationDesugared {
-        target: parser::ast::AstPtr::new(&target.1),
-        attribute_index: request.attribute_index,
+        attribute: parser::ast::AstPtr::new(&target.1),
     };
     let target_context = TargetContext {
         db,
@@ -2458,6 +2603,7 @@ pub fn generated_quote_hygiene_errors<'db>(
         let QuoteHygiene::Function {
             func,
             rooted,
+            variants,
             qualified_consts,
             const_predicates,
             nominal_types,
@@ -2552,6 +2698,82 @@ pub fn generated_quote_hygiene_errors<'db>(
             continue;
         };
         let (_, typed) = check_func_body(db, *func);
+        for (site, expected) in variants {
+            let actual = match site {
+                FrozenQuoteConstructorSite::Pat(site) => {
+                    typed.pattern_root(*site).and_then(|root| {
+                        match typed.pattern_store().node(root).kind() {
+                            crate::analysis::ty::pattern_ir::ValidatedPatKind::Constructor {
+                                ctor:
+                                    crate::analysis::ty::pattern_ir::ConstructorKind::Variant(
+                                        variant,
+                                        _,
+                                    ),
+                                ..
+                            } => Some(QuoteConstructorIdentity {
+                                owner: crate::analysis::ty::adt_def::AdtRef::Enum(variant.enum_),
+                                variant_index: Some(variant.idx),
+                            }),
+                            crate::analysis::ty::pattern_ir::ValidatedPatKind::Constructor {
+                                ctor: crate::analysis::ty::pattern_ir::ConstructorKind::Type(ty),
+                                ..
+                            } => {
+                                if let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(db).data(db) {
+                                    Some(QuoteConstructorIdentity {
+                                        owner: adt.adt_ref(db),
+                                        variant_index: None,
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    })
+                }
+                FrozenQuoteConstructorSite::Expr(site) => {
+                    let path = match &body.exprs(db)[*site] {
+                        Partial::Present(Expr::Path(path) | Expr::RecordInit(path, _)) => {
+                            path.to_opt()
+                        }
+                        _ => None,
+                    };
+                    path.and_then(|path| {
+                        match resolve_path(
+                            db,
+                            path,
+                            func.scope(),
+                            PredicateListId::empty_list(db),
+                            true,
+                        ) {
+                            Ok(PathRes::EnumVariant(variant)) => Some(QuoteConstructorIdentity {
+                                owner: crate::analysis::ty::adt_def::AdtRef::Enum(
+                                    variant.variant.enum_,
+                                ),
+                                variant_index: Some(variant.variant.idx),
+                            }),
+                            Ok(PathRes::Ty(ty)) => {
+                                if let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(db).data(db) {
+                                    Some(QuoteConstructorIdentity {
+                                        owner: adt.adt_ref(db),
+                                        variant_index: None,
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    })
+                }
+            };
+            if actual != Some(*expected) {
+                errors.push(GeneratedHirError {
+                    message: invalid("quoted constructor changed owner or variant index"),
+                    site_span: site_span.clone(),
+                });
+            }
+        }
         push_quoted_type_hygiene_errors(
             db,
             func.scope(),

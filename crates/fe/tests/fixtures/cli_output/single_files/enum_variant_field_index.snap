@@ -1,0 +1,18 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/enum_variant_field_index.fe
+---
+=== STDERR ===
+error[18-0001]: record field index is out of bounds
+  ┌─ enum_variant_field_index.fe:4:46
+  │
+4 │         let value = type_is<bool>(field_type(field(variant(record, 0), 99)))
+  │                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ record field index is out of bounds
+  ·
+9 │ #[generate(ingot::author::emit)]
+  │ -------------------------------- generated here
+
+
+
+=== EXIT CODE: 1 ===

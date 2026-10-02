@@ -1,0 +1,10 @@
+mod author {
+    use core::meta::{Code, Item, Record, variant, variant_count, field, field_count, field_type, type_is}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let value = type_is<bool>(field_type(field(record, 0)))
+        quote { fn reflected() -> bool { ${value} } }
+    }
+}
+
+#[generate(ingot::author::emit)]
+enum Shape { Payload(bool), Empty }

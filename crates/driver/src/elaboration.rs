@@ -18,7 +18,7 @@ use hir::{
         ty::{adt_def::AdtRef, trait_resolution::PredicateListId, ty_def::TyId},
     },
     core::meta::MetaItem,
-    hir_def::{IdentId, ItemKind, Struct, attr::Attr},
+    hir_def::{IdentId, ItemKind, attr::Attr},
 };
 
 use crate::DriverDataBase;
@@ -26,7 +26,7 @@ use crate::DriverDataBase;
 /// These identities belong to the input database, not to a later output view.
 #[derive(Debug)]
 pub struct Invocation<'db> {
-    pub owner: Struct<'db>,
+    pub owner: AdtRef<'db>,
     pub provider: TyId<'db>,
     pub attribute_index: usize,
 }
@@ -36,7 +36,7 @@ pub struct Invocation<'db> {
 /// In particular, ordinary requirement checking must still precede execution.
 pub struct RecordInput<'db> {
     db: &'db DriverDataBase,
-    owner: Struct<'db>,
+    owner: AdtRef<'db>,
     fields: Vec<FieldInput<'db>>,
 }
 
@@ -50,13 +50,14 @@ pub struct FieldInput<'db> {
 /// or an index alone. No Salsa identity here may be moved to an output database.
 pub struct FieldDescriptor<'db> {
     db: &'db DriverDataBase,
-    owner: Struct<'db>,
+    owner: AdtRef<'db>,
     index: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RecordInputError {
     InvalidField(usize),
+    InvalidVariantField(usize, usize),
     WrongOwner,
 }
 
@@ -65,9 +66,17 @@ impl<'db> Invocation<'db> {
         &self,
         db: &'db DriverDataBase,
     ) -> Result<RecordInput<'db>, RecordInputError> {
-        let adt = AdtRef::Struct(self.owner).as_adt(db);
+        let adt = self.owner.as_adt(db);
         let mut fields = Vec::new();
-        for (index, field) in self.owner.hir_fields(db).data(db).iter().enumerate() {
+        let struct_fields = match self.owner {
+            AdtRef::Struct(owner) => Some(owner.hir_fields(db)),
+            AdtRef::Enum(_) => None,
+        };
+        for (index, field) in struct_fields
+            .iter()
+            .flat_map(|fields| fields.data(db))
+            .enumerate()
+        {
             let name = field
                 .name
                 .to_opt()
@@ -77,6 +86,16 @@ impl<'db> Invocation<'db> {
                 return Err(RecordInputError::InvalidField(index));
             }
             fields.push(FieldInput { name, ty });
+        }
+        if matches!(self.owner, AdtRef::Enum(_)) {
+            for (variant_index, shape) in adt.fields(db).iter().enumerate() {
+                for index in 0..shape.num_types() {
+                    let ty = shape.ty(db, index).instantiate_identity();
+                    if ty.has_invalid(db) || ty.has_var(db) {
+                        return Err(RecordInputError::InvalidVariantField(variant_index, index));
+                    }
+                }
+            }
         }
         Ok(RecordInput {
             db,
@@ -172,7 +191,7 @@ pub fn invocations<'db>(
                 item,
                 attribute_index,
             };
-            let ItemKind::Struct(owner) = item else {
+            let Some(owner) = AdtRef::try_from_item(item) else {
                 return Err(error(InvocationErrorKind::Target));
             };
             if attribute.has_value || !attribute.has_args || attribute.args.len() != 1 {

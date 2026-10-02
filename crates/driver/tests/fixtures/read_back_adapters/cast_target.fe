@@ -1,0 +1,2 @@
+#[generate(ingot::author::emit)]
+struct GeneratedTarget {}

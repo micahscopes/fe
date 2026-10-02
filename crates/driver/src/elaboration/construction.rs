@@ -20,12 +20,12 @@ use hir::{
     },
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenHandleKind, FrozenItemLocator,
-        FrozenMetaValue, FrozenMetaVariantCase, FrozenOwner, FrozenQuoteEffectUse,
-        FrozenQuoteFieldType, FrozenQuoteFunction, FrozenQuoteFunctionTypes, FrozenQuoteGenericUse,
-        FrozenQuoteLocal, FrozenQuoteLocalType, FrozenQuoteNominal, FrozenQuoteOpenUse,
-        FrozenQuoteParamUse, FrozenQuoteQualifiedConst, FrozenQuoteSelfUse,
-        FrozenQuoteSignatureType, FrozenQuoteTrait, FrozenQuoteWherePredicate, FrozenTemplateKey,
-        FrozenTemplateSource, MetaItem,
+        FrozenMetaValue, FrozenMetaVariantCase, FrozenOwner, FrozenQuoteConstructor,
+        FrozenQuoteConstructorSite, FrozenQuoteEffectUse, FrozenQuoteFieldType,
+        FrozenQuoteFunction, FrozenQuoteFunctionTypes, FrozenQuoteGenericUse, FrozenQuoteLocal,
+        FrozenQuoteLocalType, FrozenQuoteNominal, FrozenQuoteOpenUse, FrozenQuoteParamUse,
+        FrozenQuoteQualifiedConst, FrozenQuoteSelfUse, FrozenQuoteSignatureType, FrozenQuoteTrait,
+        FrozenQuoteWherePredicate, FrozenTemplateKey, FrozenTemplateSource, MetaItem,
     },
     hir_def::{
         CallableDef, Expr, Func, GenericArg, GenericParam, Partial, PathKind, QuoteFragment,
@@ -91,7 +91,17 @@ fn frozen_quote_nominal<'db>(
     db: &'db DriverDataBase,
     adt: AdtDef<'db>,
 ) -> Result<FrozenQuoteNominal, ConstructionError> {
-    let scope = adt.scope(db);
+    frozen_quote_nominal_ref(db, adt.adt_ref(db))
+}
+
+pub(super) fn frozen_quote_nominal_ref<'db>(
+    db: &'db DriverDataBase,
+    adt: AdtRef<'db>,
+) -> Result<FrozenQuoteNominal, ConstructionError> {
+    let scope = match adt {
+        AdtRef::Struct(item) => item.scope(),
+        AdtRef::Enum(item) => item.scope(),
+    };
     let full_path = scope
         .pretty_path(db)
         .ok_or(protocol("quoted nominal type path is missing"))?;
@@ -106,7 +116,7 @@ fn frozen_quote_nominal<'db>(
             "quoted nominal type is outside its defining module",
         ))?
         .to_owned();
-    let file = match adt.adt_ref(db) {
+    let file = match adt {
         AdtRef::Struct(item) => item.span().resolve(db),
         AdtRef::Enum(item) => item.span().resolve(db),
     }
@@ -358,6 +368,7 @@ impl<'db> RecordInput<'db> {
     pub(crate) fn frozen_owner(&self) -> Result<FrozenOwner, ConstructionError> {
         let file = self
             .owner
+            .as_item()
             .span()
             .resolve(self.db)
             .and_then(|span| span.file.url(self.db))
@@ -373,8 +384,11 @@ impl<'db> RecordInput<'db> {
     pub(crate) fn frozen_const_param_types(
         &self,
     ) -> Result<Vec<Option<SemPrimTy>>, ConstructionError> {
-        self.owner
-            .hir_generic_params(self.db)
+        let params = match self.owner {
+            AdtRef::Struct(owner) => owner.hir_generic_params(self.db),
+            AdtRef::Enum(owner) => owner.hir_generic_params(self.db),
+        };
+        params
             .data(self.db)
             .iter()
             .map(|param| match param {
@@ -399,6 +413,18 @@ impl<'db> RecordInput<'db> {
                 }
             })
             .collect()
+    }
+
+    fn reflected_field_type(&self, variant_index: Option<u16>, index: usize) -> Option<TyId<'db>> {
+        match (self.owner, variant_index) {
+            (AdtRef::Struct(_), None) | (AdtRef::Enum(_), Some(_)) => {}
+            _ => return None,
+        }
+        let adt = self.owner.as_adt(self.db);
+        let shape = adt
+            .fields(self.db)
+            .get(usize::from(variant_index.unwrap_or(0)))?;
+        (index < shape.num_types()).then(|| shape.ty(self.db, index).instantiate_identity())
     }
 
     fn meta_item(&self, ty: TyId<'db>) -> Option<MetaItem> {
@@ -447,24 +473,37 @@ impl<'db> RecordInput<'db> {
                 })
             }
             SemConstValue::Structural { ty, handle } => {
-                let (item, kind, actual_owner) = match handle {
+                let (item, kind, actual_owner) = match *handle {
                     StructuralHandle::Record(actual_owner) => {
                         (MetaItem::Record, FrozenHandleKind::Record, actual_owner)
                     }
+                    StructuralHandle::Variant(variant) => (
+                        MetaItem::Record,
+                        FrozenHandleKind::Variant(variant.idx),
+                        AdtRef::Enum(variant.enum_),
+                    ),
                     StructuralHandle::Field {
                         owner: actual_owner,
+                        variant_index,
                         index,
                     } => (
                         MetaItem::Field,
-                        FrozenHandleKind::Field(*index),
+                        FrozenHandleKind::Field {
+                            variant_index,
+                            index,
+                        },
                         actual_owner,
                     ),
                     StructuralHandle::FieldType {
                         owner: actual_owner,
+                        variant_index,
                         index,
                     } => (
                         MetaItem::FieldType,
-                        FrozenHandleKind::FieldType(*index),
+                        FrozenHandleKind::FieldType {
+                            variant_index,
+                            index,
+                        },
                         actual_owner,
                     ),
                     StructuralHandle::Evidence(_) => return Err(ConstructionError::Authority),
@@ -474,16 +513,33 @@ impl<'db> RecordInput<'db> {
                             return Err(ConstructionError::Authority);
                         }
                         return self
-                            .freeze_code(*code, owner, nodes)
+                            .freeze_code(code, owner, nodes)
                             .map(FrozenMetaValue::Code);
                     }
                 };
-                if *actual_owner != self.owner || !self.designated(*ty, item) {
+                if actual_owner != self.owner || !self.designated(*ty, item) {
                     return Err(ConstructionError::Authority);
                 }
-                if matches!(kind, FrozenHandleKind::Field(index) | FrozenHandleKind::FieldType(index) if index >= self.fields.len())
-                {
-                    return Err(ConstructionError::Authority);
+                match kind {
+                    FrozenHandleKind::Field {
+                        variant_index,
+                        index,
+                    }
+                    | FrozenHandleKind::FieldType {
+                        variant_index,
+                        index,
+                    } if self.reflected_field_type(variant_index, index).is_none() => {
+                        return Err(ConstructionError::Authority);
+                    }
+                    FrozenHandleKind::Variant(index) => {
+                        let AdtRef::Enum(owner) = self.owner else {
+                            return Err(ConstructionError::Authority);
+                        };
+                        if usize::from(index) >= owner.len_variants(self.db) {
+                            return Err(ConstructionError::Authority);
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(FrozenMetaValue::Structural {
                     item,
@@ -653,6 +709,7 @@ impl<'db> RecordInput<'db> {
         seen.insert(code, index);
         nodes.push(FrozenCodeNode::empty(None));
         let mut rooted_funcs = Vec::new();
+        let mut rooted_constructors = Vec::new();
         let mut rooted_traits = Vec::new();
         let mut qualified_consts = Vec::new();
         let mut impl_trait_type_arguments = None;
@@ -1066,6 +1123,43 @@ impl<'db> RecordInput<'db> {
                 }
             }
             for (name_index, name) in checked.names.iter().enumerate() {
+                if let QuoteNameClass::Rooted(PathRes::Ty(ty)) = &name.class
+                    && let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(self.db).data(self.db)
+                    && matches!(adt.adt_ref(self.db), AdtRef::Struct(_))
+                {
+                    let site = match name.site {
+                        QuoteNameSite::Pat(pat) => Some(FrozenQuoteConstructorSite::Pat(pat)),
+                        QuoteNameSite::Expr(expr) => Some(FrozenQuoteConstructorSite::Expr(expr)),
+                        QuoteNameSite::Type(_) => None,
+                    };
+                    if let Some(site) = site {
+                        rooted_constructors.push(FrozenQuoteConstructor {
+                            func: name.func,
+                            site,
+                            owner: frozen_quote_nominal(self.db, *adt)?,
+                            variant_index: None,
+                        });
+                    }
+                }
+
+                if let QuoteNameClass::Rooted(PathRes::EnumVariant(variant)) = &name.class {
+                    let site = match name.site {
+                        QuoteNameSite::Expr(site) => Some(FrozenQuoteConstructorSite::Expr(site)),
+                        QuoteNameSite::Pat(site) => Some(FrozenQuoteConstructorSite::Pat(site)),
+                        QuoteNameSite::Type(_) => None,
+                    };
+                    if let Some(site) = site {
+                        rooted_constructors.push(FrozenQuoteConstructor {
+                            func: name.func,
+                            site,
+                            owner: frozen_quote_nominal_ref(
+                                self.db,
+                                AdtRef::Enum(variant.variant.enum_),
+                            )?,
+                            variant_index: Some(variant.variant.idx),
+                        });
+                    }
+                }
                 if matches!(name.signature, Some(QuoteSignatureSite::WhereConst { .. }))
                     && matches!(
                         &name.class,
@@ -1465,13 +1559,13 @@ impl<'db> RecordInput<'db> {
                             handle:
                                 StructuralHandle::FieldType {
                                     owner: field_owner,
+                                    variant_index,
                                     index,
                                 },
                             ..
                         } if *field_owner == self.owner => self
-                            .fields
-                            .get(*index)
-                            .and_then(|field| self.freeze_field_type(field.ty, 0)),
+                            .reflected_field_type(*variant_index, *index)
+                            .and_then(|ty| self.freeze_field_type(ty, 0)),
                         _ => None,
                     };
                     FrozenCodeHole::Value(
@@ -1486,6 +1580,7 @@ impl<'db> RecordInput<'db> {
             template,
             holes,
             rooted_funcs,
+            rooted_constructors,
             selected_methods: Vec::new(),
             rooted_traits,
             qualified_consts,

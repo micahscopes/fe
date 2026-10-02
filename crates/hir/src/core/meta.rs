@@ -142,6 +142,8 @@ pub struct FrozenCodeNode {
     pub holes: Vec<FrozenCodeHole>,
     /// Authored expression paths that were resolved before generation.
     pub rooted_funcs: Vec<FrozenQuoteFunction>,
+    /// Nominal constructors resolved where the template is authored.
+    pub rooted_constructors: Vec<FrozenQuoteConstructor>,
     /// Method declarations selected while checking a read-back body.
     pub selected_methods: Vec<(ExprId, FrozenItemLocator)>,
     /// Authored trait paths, keyed by the type-site order in the quote.
@@ -185,6 +187,7 @@ impl FrozenCodeNode {
             template,
             holes: Vec::new(),
             rooted_funcs: Vec::new(),
+            rooted_constructors: Vec::new(),
             selected_methods: Vec::new(),
             rooted_traits: Vec::new(),
             qualified_consts: Vec::new(),
@@ -212,6 +215,21 @@ pub struct FrozenQuoteLocal {
     pub func: u32,
     pub binder: PatId,
     pub uses: Vec<ExprId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum FrozenQuoteConstructorSite {
+    Expr(ExprId),
+    Pat(PatId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrozenQuoteConstructor {
+    pub func: Option<u32>,
+    pub site: FrozenQuoteConstructorSite,
+    pub owner: FrozenQuoteNominal,
+    /// `None` denotes the struct itself; `Some` indexes the authored enum.
+    pub variant_index: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -367,8 +385,15 @@ pub enum FrozenQuoteFieldType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenHandleKind {
     Record,
-    Field(usize),
-    FieldType(usize),
+    Variant(u16),
+    Field {
+        variant_index: Option<u16>,
+        index: usize,
+    },
+    FieldType {
+        variant_index: Option<u16>,
+        index: usize,
+    },
 }
 
 /// Owned transport for an already checked `core::meta` result.

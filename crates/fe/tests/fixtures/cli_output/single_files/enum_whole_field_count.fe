@@ -1,0 +1,13 @@
+mod author {
+    use core::meta::{Code, Item, Record, field_count}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let n = field_count(record)
+        quote { fn reflected() -> usize { ${n} } }
+    }
+}
+
+#[generate(ingot::author::emit)]
+enum Shape { Unit, Payload(u256) }
+
+#[test]
+fn t() { assert!(reflected() == 0) }

@@ -34,13 +34,16 @@ pub enum StructuralHandle<'db> {
         code: QuotedCode<'db>,
         site: CodeNodeSite,
     },
-    Record(crate::hir_def::Struct<'db>),
+    Record(crate::analysis::ty::adt_def::AdtRef<'db>),
+    Variant(crate::hir_def::EnumVariant<'db>),
     Field {
-        owner: crate::hir_def::Struct<'db>,
+        owner: crate::analysis::ty::adt_def::AdtRef<'db>,
+        variant_index: Option<u16>,
         index: usize,
     },
     FieldType {
-        owner: crate::hir_def::Struct<'db>,
+        owner: crate::analysis::ty::adt_def::AdtRef<'db>,
+        variant_index: Option<u16>,
         index: usize,
     },
 }

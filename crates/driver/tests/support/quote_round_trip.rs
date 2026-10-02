@@ -14,15 +14,15 @@ use hir::{
     analysis::semantic::SemConstScalar,
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenGeneration, FrozenHandleKind,
-        FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase, FrozenQuoteFieldType,
-        FrozenQuoteSignatureType, FrozenTemplateSource, MetaItem,
+        FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase, FrozenQuoteConstructorSite,
+        FrozenQuoteFieldType, FrozenQuoteSignatureType, FrozenTemplateSource, MetaItem,
     },
     hir_def::{
         Body, Cond, CondId, Expr, ExprId, FieldIndex, Func, GenericParamOwner, IdentId, ItemKind,
         LitKind, Partial, Pat, PatId, Quote, QuoteFragment, QuoteFunc, QuoteItem, QuoteName, Stmt,
-        StmtId, Struct, TypeKind,
+        StmtId, TypeKind,
     },
-    span::{DesugaredOrigin, HirOrigin},
+    span::{DesugaredOrigin, HirOrigin, LazySpan},
 };
 use url::Url;
 
@@ -87,7 +87,7 @@ struct Comparison<'a, 'db> {
     output: &'db DriverDataBase,
     request: &'a FrozenGeneration,
     code: &'a FrozenCode,
-    target: Struct<'db>,
+    target: hir::analysis::ty::adt_def::AdtRef<'db>,
     body: Body<'db>,
     actual: &'a FrozenCodeNode,
     parameters: Vec<Option<IdentId<'db>>>,
@@ -120,14 +120,21 @@ impl<'a, 'db> Comparison<'a, 'db> {
     fn field_name(&self, value: &FrozenMetaValue) -> String {
         let FrozenMetaValue::Structural {
             owner,
-            kind: FrozenHandleKind::Field(index),
+            kind:
+                FrozenHandleKind::Field {
+                    variant_index: None,
+                    index,
+                },
             item: MetaItem::Field,
         } = value
         else {
             panic!("expected field handle: {value:?}");
         };
         assert_eq!(owner, &self.request.target, "field authority");
-        self.target.hir_fields(self.authored).data(self.authored)[*index]
+        let hir::analysis::ty::adt_def::AdtRef::Struct(target) = self.target else {
+            panic!("field name requires a selected field list");
+        };
+        target.hir_fields(self.authored).data(self.authored)[*index]
             .name
             .unwrap_ref()
             .data(self.authored)
@@ -155,9 +162,14 @@ impl<'a, 'db> Comparison<'a, 'db> {
         if self.is_method {
             0
         } else {
-            GenericParamOwner::Struct(self.target)
-                .params(self.authored)
-                .count() as u32
+            match self.target {
+                hir::analysis::ty::adt_def::AdtRef::Struct(owner) => {
+                    GenericParamOwner::Struct(owner)
+                }
+                hir::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
+            }
+            .params(self.authored)
+            .count() as u32
         }
     }
 
@@ -293,17 +305,60 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     .ends_with(&format!("::{}", self.request.target.path)),
             "target nominal identity"
         );
-        let count = GenericParamOwner::Struct(self.target)
-            .params(self.authored)
-            .count();
+        let count = match self.target {
+            hir::analysis::ty::adt_def::AdtRef::Struct(owner) => GenericParamOwner::Struct(owner),
+            hir::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
+        }
+        .params(self.authored)
+        .count();
         assert_eq!(count, arguments.len());
         for (index, actual) in arguments.iter().enumerate() {
             self.field_type(&FrozenQuoteFieldType::TargetParam(index), actual);
         }
     }
 
+    fn variant(
+        &self,
+        frame: &Frame<'db>,
+        expected: FrozenQuoteConstructorSite,
+        actual: FrozenQuoteConstructorSite,
+    ) {
+        let expected = self.code.nodes[frame.node]
+            .rooted_constructors
+            .iter()
+            .find(|root| {
+                root.site == expected && (root.func.is_none() || root.func == Some(frame.function))
+            })
+            .expect("captured enum variant");
+        let actual = self
+            .actual
+            .rooted_constructors
+            .iter()
+            .find(|root| root.site == actual)
+            .expect("checked output enum variant");
+        assert_eq!(
+            expected.owner.owner, actual.owner.owner,
+            "selected constructor owner identity"
+        );
+        assert_eq!(
+            expected.variant_index, actual.variant_index,
+            "selected variant index"
+        );
+    }
+
     fn path(&self, frame: &Frame<'db>, expected: ExprId, actual: ExprId) {
         let node = &self.code.nodes[frame.node];
+        if node.rooted_constructors.iter().any(|root| {
+            root.site == FrozenQuoteConstructorSite::Expr(expected)
+                && (root.func.is_none() || root.func == Some(frame.function))
+        }) {
+            self.variant(
+                frame,
+                FrozenQuoteConstructorSite::Expr(expected),
+                FrozenQuoteConstructorSite::Expr(actual),
+            );
+            return;
+        }
         if let Some(use_) = node
             .param_uses
             .iter()
@@ -603,26 +658,41 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 }
             }
             (Expr::RecordInit(_, fields), Expr::RecordInit(_, actual_fields)) => {
-                let (_, actual_type) = self
-                    .actual
-                    .record_types
+                if self.code.nodes[frame.node]
+                    .rooted_constructors
                     .iter()
-                    .find(|(site, _)| *site == actual)
-                    .expect("checked constructor type");
-                let node = &self.code.nodes[frame.node];
-                if node
-                    .self_record_inits
-                    .iter()
-                    .any(|use_| use_.site == expected && use_.func == frame.function)
+                    .any(|root| {
+                        root.site == FrozenQuoteConstructorSite::Expr(expected)
+                            && (root.func.is_none() || root.func == Some(frame.function))
+                    })
                 {
-                    self.self_type(actual_type);
+                    self.variant(
+                        frame,
+                        FrozenQuoteConstructorSite::Expr(expected),
+                        FrozenQuoteConstructorSite::Expr(actual),
+                    );
                 } else {
-                    let (_, expected_type) = node
+                    let (_, actual_type) = self
+                        .actual
                         .record_types
                         .iter()
-                        .find(|(site, _)| *site == expected)
-                        .expect("captured constructor type");
-                    self.type_argument(frame, expected_type, actual_type);
+                        .find(|(site, _)| *site == actual)
+                        .expect("checked constructor type");
+                    let node = &self.code.nodes[frame.node];
+                    if node
+                        .self_record_inits
+                        .iter()
+                        .any(|use_| use_.site == expected && use_.func == frame.function)
+                    {
+                        self.self_type(actual_type);
+                    } else {
+                        let (_, expected_type) = node
+                            .record_types
+                            .iter()
+                            .find(|(site, _)| *site == expected)
+                            .expect("captured constructor type");
+                        self.type_argument(frame, expected_type, actual_type);
+                    }
                 }
                 assert_eq!(fields.len(), actual_fields.len());
                 for (field, actual) in fields.iter().zip(actual_fields) {
@@ -650,6 +720,17 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     (Some(value), Some(actual)) => self.expr(frame, *value, *actual),
                     (None, None) => {}
                     _ => panic!("if alternatives changed"),
+                }
+            }
+            (
+                Expr::Match(scrutinee, Partial::Present(arms)),
+                Expr::Match(actual_scrutinee, Partial::Present(actual_arms)),
+            ) => {
+                self.expr(frame, *scrutinee, *actual_scrutinee);
+                assert_eq!(arms.len(), actual_arms.len());
+                for (arm, actual) in arms.iter().zip(actual_arms) {
+                    self.pat(frame, arm.pat, actual.pat);
+                    self.expr(frame, arm.body, actual.body);
                 }
             }
             (Expr::Block(stmts), Expr::Block(actual)) => {
@@ -736,6 +817,52 @@ impl<'a, 'db> Comparison<'a, 'db> {
             frame.body.pats(self.authored)[expected].unwrap_ref(),
             self.body.pats(self.output)[actual].unwrap_ref(),
         ) {
+            (Pat::Path(_, mutable), Pat::Path(_, actual_mutable))
+                if self.code.nodes[frame.node]
+                    .rooted_constructors
+                    .iter()
+                    .any(|root| {
+                        root.site == FrozenQuoteConstructorSite::Pat(expected)
+                            && (root.func.is_none() || root.func == Some(frame.function))
+                    }) =>
+            {
+                assert_eq!(mutable, actual_mutable);
+                self.variant(
+                    frame,
+                    FrozenQuoteConstructorSite::Pat(expected),
+                    FrozenQuoteConstructorSite::Pat(actual),
+                );
+            }
+            (Pat::PathTuple(_, parts), Pat::PathTuple(_, actual_parts)) => {
+                self.variant(
+                    frame,
+                    FrozenQuoteConstructorSite::Pat(expected),
+                    FrozenQuoteConstructorSite::Pat(actual),
+                );
+                assert_eq!(parts.len(), actual_parts.len());
+                for (part, actual) in parts.iter().zip(actual_parts) {
+                    self.pat(frame, *part, *actual);
+                }
+            }
+            (Pat::Record(_, fields), Pat::Record(_, actual_fields)) => {
+                self.variant(
+                    frame,
+                    FrozenQuoteConstructorSite::Pat(expected),
+                    FrozenQuoteConstructorSite::Pat(actual),
+                );
+                assert_eq!(fields.len(), actual_fields.len());
+                for (field, actual) in fields.iter().zip(actual_fields) {
+                    assert_eq!(
+                        field
+                            .label(self.authored, frame.body)
+                            .map(|name| name.data(self.authored)),
+                        actual
+                            .label(self.output, self.body)
+                            .map(|name| name.data(self.output))
+                    );
+                    self.pat(frame, field.pat, actual.pat);
+                }
+            }
             (Pat::Path(_, mutable), Pat::Path(_, actual_mutable)) => {
                 assert_eq!(mutable, actual_mutable);
                 assert!(
@@ -761,7 +888,17 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     self.pat(frame, *part, *actual);
                 }
             }
-            (Pat::WildCard, Pat::WildCard) => {}
+            (Pat::WildCard, Pat::WildCard) | (Pat::Rest, Pat::Rest) => {}
+            (Pat::Lit(Partial::Present(literal)), Pat::Lit(Partial::Present(actual))) => {
+                assert_eq!(
+                    literal.pretty_print(self.authored),
+                    actual.pretty_print(self.output)
+                );
+            }
+            (Pat::Or(lhs, rhs), Pat::Or(actual_lhs, actual_rhs)) => {
+                self.pat(frame, *lhs, *actual_lhs);
+                self.pat(frame, *rhs, *actual_rhs);
+            }
             other => panic!("pattern changed or uncovered form: {other:?}"),
         }
     }
@@ -784,7 +921,7 @@ fn text(value: &FrozenMetaValue) -> String {
 
 fn name<'db>(
     db: &'db DriverDataBase,
-    target: Struct<'db>,
+    target: hir::analysis::ty::adt_def::AdtRef<'db>,
     request: &FrozenGeneration,
     node: &FrozenCodeNode,
     name: QuoteName<'db>,
@@ -798,13 +935,20 @@ fn name<'db>(
             let field = |value: &FrozenMetaValue| {
                 let FrozenMetaValue::Structural {
                     owner,
-                    kind: FrozenHandleKind::Field(index),
+                    kind:
+                        FrozenHandleKind::Field {
+                            variant_index: None,
+                            index,
+                        },
                     item: MetaItem::Field,
                 } = value
                 else {
                     panic!("field name")
                 };
                 assert_eq!(owner, &request.target);
+                let hir::analysis::ty::adt_def::AdtRef::Struct(target) = target else {
+                    panic!("field name requires a selected field list");
+                };
                 target.hir_fields(db).data(db)[*index]
                     .name
                     .unwrap_ref()
@@ -876,17 +1020,29 @@ pub fn assert_round_trip_against<'db>(
             .all_items(authored)
             .iter()
             .filter_map(|item| {
-                let ItemKind::Struct(target) = item else {
-                    return None;
-                };
+                let target = hir::analysis::ty::adt_def::AdtRef::try_from_item(*item)?;
                 let path = target.scope().pretty_path(authored)?;
                 (path == request.target.path
                     || path.ends_with(&format!("::{}", request.target.path)))
-                .then_some(*target)
+                .then_some(target)
             })
             .collect::<Vec<_>>();
         assert_eq!(targets.len(), 1, "unique frozen target");
         let target = targets[0];
+        let attribute_range = match target {
+            hir::analysis::ty::adt_def::AdtRef::Struct(target) => target
+                .span()
+                .attributes()
+                .attr(request.attribute_index)
+                .resolve(authored),
+            hir::analysis::ty::adt_def::AdtRef::Enum(target) => target
+                .span()
+                .attributes()
+                .attr(request.attribute_index)
+                .resolve(authored),
+        }
+        .expect("authored generation attribute")
+        .range;
         let mut functions = Vec::new();
         collect_functions(authored, code, code.root, &mut functions);
         for (node_index, function_index, quoted, is_method) in functions {
@@ -906,9 +1062,7 @@ pub fn assert_round_trip_against<'db>(
                     else {
                         return false;
                     };
-                    usize::from(origin.target.syntax_node_ptr().text_range().start())
-                        == request.target_span_start
-                        && origin.attribute_index == request.attribute_index
+                    origin.attribute.syntax_node_ptr().text_range() == attribute_range
                         && func.name(output).unwrap_ref().data(output) == &expected_name
                 })
                 .collect::<Vec<_>>();

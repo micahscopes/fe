@@ -1,0 +1,20 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/enum_forged_record.fe
+---
+=== STDERR ===
+file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_forged_record.fe: error[2-0003]: `seal` is not visible
+  ┌─ enum_forged_record.fe:4:44
+  │
+4 │         let value = variant_count(Record { seal: false })
+  │                                            ^^^^^^^^^^^ `seal` is not visible
+  │
+  ┌─ src/meta.fe:5:21
+  │
+5 │ pub struct Record { seal: bool }
+  │                     ---- `seal` is defined here
+
+
+
+=== EXIT CODE: 1 ===

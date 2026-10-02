@@ -13,7 +13,10 @@ use crate::{
         semantic::SemConstScalar,
         ty::{adt_def::AdtRef, ty_def::PrimTy as SemPrimTy},
     },
-    core::meta::{FrozenCode, FrozenCodeHole, FrozenMetaValue, FrozenTemplateSource},
+    core::meta::{
+        FrozenCode, FrozenCodeHole, FrozenMetaValue, FrozenQuoteConstructorSite,
+        FrozenTemplateSource,
+    },
     hir_def::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
         Cond, CondId, ConstGenericArg, ConstGenericArgValue, EffectParamListId, Expr, ExprId,
@@ -663,11 +666,15 @@ where
 
     pub(super) fn quoted_owner_where_clause(
         &mut self,
-        owner: Struct<'db>,
+        owner: crate::analysis::ty::adt_def::AdtRef<'db>,
         names: &[IdentId<'db>],
     ) -> Result<WhereClauseId<'db>, String> {
         let db = self.db();
-        let params = GenericParamOwner::Struct(owner).params_list(db);
+        let params = match owner {
+            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => GenericParamOwner::Struct(owner),
+            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
+        }
+        .params_list(db);
         if params.data(db).len() != names.len() {
             return Err("quoted target parameter count changed".to_owned());
         }
@@ -685,7 +692,11 @@ where
                 ))
             })
             .collect::<Result<HashMap<_, _>, String>>()?;
-        let source = WhereClauseOwner::Struct(owner).where_clause(db);
+        let source = match owner {
+            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => WhereClauseOwner::Struct(owner),
+            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => WhereClauseOwner::Enum(owner),
+        }
+        .where_clause(db);
         let predicates = source
             .type_predicates(db)
             .map(|(_, predicate)| {
@@ -789,15 +800,20 @@ where
 
     pub(super) fn generated_record_type_with_names(
         &mut self,
-        owner: Struct<'db>,
+        owner: crate::analysis::ty::adt_def::AdtRef<'db>,
         names: &[IdentId<'db>],
     ) -> Result<TypeId<'db>, String> {
         let db = self.db();
-        let name = owner
-            .name(db)
-            .to_opt()
-            .ok_or_else(|| "authorized record name is missing".to_owned())?;
-        let params = GenericParamOwner::Struct(owner).params_list(db);
+        let name = match owner {
+            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => owner.name(db).to_opt(),
+            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => owner.name(db).to_opt(),
+        }
+        .ok_or_else(|| "authorized record name is missing".to_owned())?;
+        let params = match owner {
+            crate::analysis::ty::adt_def::AdtRef::Struct(owner) => GenericParamOwner::Struct(owner),
+            crate::analysis::ty::adt_def::AdtRef::Enum(owner) => GenericParamOwner::Enum(owner),
+        }
+        .params_list(db);
         if params.data(db).len() != names.len() {
             return Err("record generic parameter count changed".to_owned());
         }
@@ -1143,6 +1159,7 @@ struct QuoteCopyMap<'a, 'db> {
     generic_bindings: Vec<IdentId<'db>>,
     allow_self: bool,
     self_record_inits: Vec<ExprId>,
+    constructor_paths: HashMap<FrozenQuoteConstructorSite, PathId<'db>>,
     paths: HashMap<ExprId, PathId<'db>>,
     members: HashMap<u32, IdentId<'db>>,
     local_binders: HashMap<PatId, IdentId<'db>>,
@@ -1156,6 +1173,10 @@ struct QuoteCopyMap<'a, 'db> {
     method_calls: Vec<ExprId>,
     fragment_method_calls: Vec<QuoteMethodCall<'db>>,
     fragment_rooted_paths: Vec<(ExprId, Func<'db>, ScopeId<'db>)>,
+    fragment_constructors: Vec<(
+        FrozenQuoteConstructorSite,
+        super::generated::QuoteConstructorIdentity<'db>,
+    )>,
     fragment_nominal_types: Vec<(TypeId<'db>, AdtRef<'db>)>,
     fragment_params: Vec<(ExprId, usize)>,
     fragment_generics: Vec<(ExprId, IdentId<'db>)>,
@@ -1183,6 +1204,7 @@ pub(crate) struct QuoteMethodCall<'db> {
 }
 
 pub(super) struct QuoteCopySummary<'db> {
+    pub(super) constructor_sites: Vec<FrozenQuoteConstructorSite>,
     pub(super) rooted_paths: Vec<ExprId>,
     pub(super) qualified_paths: Vec<ExprId>,
     pub(super) locals: Vec<(PatId, Vec<ExprId>)>,
@@ -1191,6 +1213,10 @@ pub(super) struct QuoteCopySummary<'db> {
     pub(super) method_calls: Vec<ExprId>,
     pub(super) fragment_method_calls: Vec<QuoteMethodCall<'db>>,
     pub(super) fragment_rooted_paths: Vec<(ExprId, Func<'db>)>,
+    pub(super) fragment_constructors: Vec<(
+        FrozenQuoteConstructorSite,
+        super::generated::QuoteConstructorIdentity<'db>,
+    )>,
     pub(super) fragment_nominal_types: Vec<(TypeId<'db>, AdtRef<'db>)>,
     pub(super) fragment_params: Vec<(ExprId, usize)>,
     pub(super) fragment_generics: Vec<(ExprId, IdentId<'db>)>,
@@ -1270,6 +1296,7 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
             local_binders,
             local_types: HashMap::new(),
             cast_types: HashMap::new(),
+            constructor_paths: HashMap::new(),
             record_paths: HashMap::new(),
             exprs: HashMap::new(),
             stmts: HashMap::new(),
@@ -1278,6 +1305,7 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
             method_calls: Vec::new(),
             fragment_method_calls: Vec::new(),
             fragment_rooted_paths: Vec::new(),
+            fragment_constructors: Vec::new(),
             fragment_nominal_types: Vec::new(),
             fragment_params: Vec::new(),
             fragment_generics: Vec::new(),
@@ -1327,6 +1355,7 @@ where
         allow_self: bool,
         rooted_funcs: &[(ExprId, PathId<'db>)],
         qualified_paths: &[(ExprId, PathId<'db>)],
+        constructor_paths: &[(FrozenQuoteConstructorSite, PathId<'db>)],
         self_record_inits: &[ExprId],
         locals: &[(PatId, IdentId<'db>, Vec<ExprId>)],
         local_types: &[(StmtId, TypeId<'db>)],
@@ -1352,6 +1381,16 @@ where
         map.open_bindings = open_bindings.to_vec();
         map.owner_generic_bindings = owner_generic_bindings.to_vec();
         map.generic_bindings = generic_bindings.to_vec();
+        map.constructor_paths = constructor_paths.iter().copied().collect();
+        if map.constructor_paths.len() != constructor_paths.len() {
+            return Err("quoted variant site is classified twice".into());
+        }
+        for (site, path) in constructor_paths {
+            if let FrozenQuoteConstructorSite::Expr(site) = site {
+                map.paths.insert(*site, *path);
+                map.record_paths.entry(*site).or_insert(*path);
+            }
+        }
         map.allow_self = allow_self;
         map.self_record_inits = self_record_inits.to_vec();
         for (stmt, ty) in local_types {
@@ -1441,7 +1480,24 @@ where
                     .ok_or_else(|| "quoted generic path was not copied".to_owned())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let constructor_sites = constructor_paths
+            .iter()
+            .map(|(site, _)| match site {
+                FrozenQuoteConstructorSite::Expr(site) => map
+                    .exprs
+                    .get(site)
+                    .copied()
+                    .map(FrozenQuoteConstructorSite::Expr),
+                FrozenQuoteConstructorSite::Pat(site) => map
+                    .pats
+                    .get(site)
+                    .copied()
+                    .map(FrozenQuoteConstructorSite::Pat),
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "quoted variant site was not copied".to_owned())?;
         Ok(QuoteCopySummary {
+            constructor_sites,
             rooted_paths,
             qualified_paths,
             locals,
@@ -1461,6 +1517,7 @@ where
                 .into_iter()
                 .map(|(site, expected, _)| (site, expected))
                 .collect(),
+            fragment_constructors: map.fragment_constructors,
             fragment_nominal_types: map.fragment_nominal_types,
         })
     }
@@ -1542,7 +1599,7 @@ where
                 {
                     PathId::self_ty(db, GenericArgListId::none(db))
                 } else {
-                    return Err("quoted record construction needs checked Self rewriting".into());
+                    return Err("quoted record construction has no checked nominal owner".into());
                 };
                 let fields = fields
                     .iter()
@@ -1657,6 +1714,20 @@ where
                 otherwise
                     .map(|value| self.copy_quote_expr(template, value, map))
                     .transpose()?,
+            ),
+            Expr::Match(scrutinee, Partial::Present(arms)) => Expr::Match(
+                self.copy_quote_expr(template, *scrutinee, map)?,
+                Partial::Present(
+                    arms.iter()
+                        .map(|arm| {
+                            map.charge_node()?;
+                            Ok(crate::hir_def::MatchArm {
+                                pat: self.copy_quote_pat(template, arm.pat, map)?,
+                                body: self.copy_quote_expr(template, arm.body, map)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                ),
             ),
             Expr::Block(stmts) => {
                 self.body.f_ctxt.enter_block_scope();
@@ -1818,6 +1889,15 @@ where
         map.cast_types = types.cast_types.into_iter().collect();
         map.local_types = types.local_types.into_iter().collect();
         map.record_paths = types.record_paths.into_iter().collect();
+        for (site, path, _) in &types.variants {
+            if map.constructor_paths.insert(*site, *path).is_some() {
+                return Err("quoted fragment variant is classified twice".into());
+            }
+            if let FrozenQuoteConstructorSite::Expr(site) = site {
+                map.paths.insert(*site, *path);
+                map.record_paths.entry(*site).or_insert(*path);
+            }
+        }
         let copied = self.copy_quote_expr(source.template, source.root, &mut map)?;
         for (site, index) in bound_sites {
             let copied_site = map
@@ -1887,6 +1967,25 @@ where
         parent
             .fragment_rooted_paths
             .extend(map.fragment_rooted_paths);
+        for (site, _, variant) in types.variants {
+            let copied_site = match site {
+                FrozenQuoteConstructorSite::Expr(site) => map
+                    .exprs
+                    .get(&site)
+                    .copied()
+                    .map(FrozenQuoteConstructorSite::Expr),
+                FrozenQuoteConstructorSite::Pat(site) => map
+                    .pats
+                    .get(&site)
+                    .copied()
+                    .map(FrozenQuoteConstructorSite::Pat),
+            }
+            .ok_or_else(|| "quoted fragment variant was not copied".to_owned())?;
+            parent.fragment_constructors.push((copied_site, variant));
+        }
+        parent
+            .fragment_constructors
+            .extend(map.fragment_constructors);
         parent.fragment_nominal_types.extend(types.nominal_types);
         parent
             .fragment_nominal_types
@@ -1994,6 +2093,47 @@ where
             return Err("quoted function contains an invalid pattern".into());
         };
         let pat = match pat {
+            Pat::Path(Partial::Present(_), mutable)
+                if map
+                    .constructor_paths
+                    .contains_key(&FrozenQuoteConstructorSite::Pat(old)) =>
+            {
+                Pat::Path(
+                    Partial::Present(map.constructor_paths[&FrozenQuoteConstructorSite::Pat(old)]),
+                    *mutable,
+                )
+            }
+            Pat::PathTuple(_, parts) => {
+                let path = *map
+                    .constructor_paths
+                    .get(&FrozenQuoteConstructorSite::Pat(old))
+                    .ok_or_else(|| {
+                        "quoted tuple pattern has no checked nominal constructor".to_owned()
+                    })?;
+                Pat::PathTuple(
+                    Partial::Present(path),
+                    parts
+                        .iter()
+                        .map(|part| self.copy_quote_pat(template, *part, map))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+            Pat::Record(_, fields) => {
+                let path = *map
+                    .constructor_paths
+                    .get(&FrozenQuoteConstructorSite::Pat(old))
+                    .ok_or_else(|| {
+                        "quoted record pattern has no checked nominal constructor".to_owned()
+                    })?;
+                let mut fields = fields.clone();
+                for field in &mut fields {
+                    if let Some(label) = field.label(db, template) {
+                        field.label = Partial::Present(label);
+                    }
+                    field.pat = self.copy_quote_pat(template, field.pat, map)?;
+                }
+                Pat::Record(Partial::Present(path), fields)
+            }
             Pat::Path(Partial::Present(path), mutable) => {
                 if path.as_ident(db).is_none() {
                     return Err("quoted pattern needs a checked binder".into());
@@ -2011,6 +2151,12 @@ where
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Pat::WildCard => Pat::WildCard,
+            Pat::Rest => Pat::Rest,
+            Pat::Lit(Partial::Present(literal)) => Pat::Lit(Partial::Present(*literal)),
+            Pat::Or(lhs, rhs) => Pat::Or(
+                self.copy_quote_pat(template, *lhs, map)?,
+                self.copy_quote_pat(template, *rhs, map)?,
+            ),
             _ => return Err("quoted pattern needs classification before transplantation".into()),
         };
         let id = self.push_pat(pat);

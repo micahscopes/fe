@@ -1,0 +1,18 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/enum_whole_field_count_helper.fe
+---
+=== STDERR ===
+error[18-0001]: `field_count` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
+   ┌─ enum_whole_field_count_helper.fe:4:9
+   │
+ 4 │         field_count(record)
+   │         ^^^^^^^^^^^^^^^^^^^ `field_count` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
+   ·
+12 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here
+
+
+
+=== EXIT CODE: 1 ===

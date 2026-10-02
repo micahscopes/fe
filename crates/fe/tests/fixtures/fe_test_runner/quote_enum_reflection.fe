@@ -1,0 +1,64 @@
+// Q6: owner-authorized enum reflection across unit, tuple and record variants.
+// Counts must come from the generation target, despite the provider's own Shape.
+mod author {
+    use core::meta::{Code, Item, Record, FieldQuery, query_field, field, field_count, field_type, type_is, variant, variant_count}
+
+    enum Shape { Other }
+    struct BoolQuery<T> {}
+    impl FieldQuery<u256> for BoolQuery<bool> {
+        const fn evaluate() -> u256 { 17 }
+    }
+
+    pub const fn reflect_generic(record: Record) -> Code<Item> {
+        let payload_type = field_type(field(variant(record, 0), 0))
+        quote {
+            fn reflected_generic_identity(_ value: ${payload_type}) -> ${payload_type} { value }
+        }
+    }
+
+    pub const fn reflect(record: Record) -> Code<Item> {
+        let n = variant_count(record)
+        let a = field_count(variant(record, 0))
+        let b = field_count(variant(record, 1))
+        let c = field_count(variant(record, 2))
+        let payload_is_bool = type_is<bool>(field_type(field(variant(record, 0), 2)))
+        let payload_is_u256 = type_is<u256>(field_type(field(variant(record, 0), 2)))
+        let payload_type = field_type(field(variant(record, 2), 1))
+        let payload_query = query_field<BoolQuery, u256>(payload_type)
+        quote {
+            fn reflected_payload_query() -> u256 { ${payload_query} }
+            fn reflected_payload_identity(_ value: ${payload_type}) -> ${payload_type} { value }
+            fn reflected_payload_is_u256() -> bool { ${payload_is_u256} }
+            fn reflected_variant_count() -> usize { ${n} }
+            fn reflected_first_fields() -> usize { ${a} }
+            fn reflected_second_fields() -> usize { ${b} }
+            fn reflected_third_fields() -> usize { ${c} }
+            fn reflected_payload_is_bool() -> bool { ${payload_is_bool} }
+        }
+    }
+}
+
+#[generate(ingot::author::reflect)]
+enum Shape {
+    Rect { x: u256, y: u256, visible: bool },
+    Empty,
+    Pair(u64, bool),
+}
+
+#[generate(ingot::author::reflect_generic)]
+enum Envelope<T> { Payload(T), Empty }
+
+#[test]
+fn reflected_enum_shape() {
+    assert!(reflected_generic_identity<u256>(7) == 7)
+    assert!(reflected_generic_identity<bool>(true))
+    assert!(reflected_payload_query() == 17)
+    assert!(reflected_variant_count() == 3)
+    assert!(reflected_first_fields() == 3)
+    assert!(reflected_second_fields() == 0)
+    assert!(reflected_third_fields() == 2)
+    assert!(reflected_payload_is_bool())
+    assert!(!reflected_payload_is_u256())
+    assert!(reflected_payload_identity(true))
+    assert!(!reflected_payload_identity(false))
+}

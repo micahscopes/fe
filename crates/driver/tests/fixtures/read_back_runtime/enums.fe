@@ -1,0 +1,37 @@
+use core::meta::{Code, Expr, Item, Record}
+use core::abi::ByteInput
+use std::evm::CallData
+
+const fn read_back_score(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_score(_ value: Shape) -> u256 { ${body} } }
+}
+
+const fn read_back_scale(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { Shape::Empty }
+    quote { pub fn copied_scale(_ value: Shape) -> Shape { ${body} } }
+}
+
+mod destination {
+    pub enum Shape {
+        Empty,
+        Rect { w: u256, h: u256 },
+        Circle(u256),
+    }
+
+    #[generate(ingot::read_back_score)]
+    struct ScoreTarget {}
+    #[generate(ingot::read_back_scale)]
+    struct ScaleTarget {}
+}
+
+#[test]
+fn copied_values() {
+    let seed = CallData::new().word_at(0)
+    assert!(destination::copied_score(Shape::Circle(seed + 3)) == score(Shape::Circle(seed + 3)))
+    assert!(destination::copied_score(Shape::Rect { w: seed + 2, h: 5 }) == score(Shape::Rect { w: seed + 2, h: 5 }))
+    assert!(destination::copied_score(Shape::Empty) == score(Shape::Empty))
+    assert!(score(destination::copied_scale(Shape::Circle(seed + 3))) == score(scale(Shape::Circle(seed + 3))))
+    assert!(score(destination::copied_scale(Shape::Rect { w: seed + 2, h: 5 })) == score(scale(Shape::Rect { w: seed + 2, h: 5 })))
+    assert!(score(destination::copied_scale(Shape::Empty)) == score(scale(Shape::Empty)))
+}

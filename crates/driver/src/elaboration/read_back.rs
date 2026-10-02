@@ -10,9 +10,10 @@ use hir::{
         ty_def::{TyBase, TyData},
     },
     core::meta::{
-        FrozenCode, FrozenCodeNode, FrozenQuoteFunction, FrozenQuoteGenericUse, FrozenQuoteLocal,
-        FrozenQuoteLocalType, FrozenQuoteOpenUse, FrozenQuoteQualifiedConst, FrozenTemplateKey,
-        FrozenTemplateSource, MetaItem,
+        FrozenCode, FrozenCodeNode, FrozenQuoteConstructor, FrozenQuoteConstructorSite,
+        FrozenQuoteFunction, FrozenQuoteGenericUse, FrozenQuoteLocal, FrozenQuoteLocalType,
+        FrozenQuoteOpenUse, FrozenQuoteQualifiedConst, FrozenTemplateKey, FrozenTemplateSource,
+        MetaItem,
     },
     hir_def::{
         CallableDef, Expr, Func, GenericArg, GenericParamOwner, Partial, Stmt, scope_graph::ScopeId,
@@ -20,7 +21,9 @@ use hir::{
     span::LazySpan,
 };
 
-use super::construction::{freeze_checked_quote_type, frozen_quote_trait};
+use super::construction::{
+    freeze_checked_quote_type, frozen_quote_nominal_ref, frozen_quote_trait,
+};
 use crate::DriverDataBase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +94,52 @@ pub fn read_back<'db>(
     };
     let mut node = FrozenCodeNode::empty(Some(template));
     let mut local_uses = HashMap::new();
+    let freeze_variant = |site, variant: hir::hir_def::EnumVariant<'db>| {
+        Ok::<_, ReadBackError>(FrozenQuoteConstructor {
+            func: Some(0),
+            site,
+            owner: frozen_quote_nominal_ref(
+                db,
+                hir::analysis::ty::adt_def::AdtRef::Enum(variant.enum_),
+            )
+            .map_err(|_| ReadBackError::MissingOwner)?,
+            variant_index: Some(variant.idx),
+        })
+    };
+    for (pat, _) in body.pats(db).iter() {
+        if let Some(root) = typed.pattern_root(pat)
+            && let hir::analysis::ty::pattern_ir::ValidatedPatKind::Constructor {
+                ctor: hir::analysis::ty::pattern_ir::ConstructorKind::Variant(variant, _),
+                ..
+            } = typed.pattern_store().node(root).kind()
+        {
+            node.rooted_constructors.push(freeze_variant(
+                FrozenQuoteConstructorSite::Pat(pat),
+                *variant,
+            )?);
+        }
+    }
+    for (pat, _) in body.pats(db).iter() {
+        if let Some(root) = typed.pattern_root(pat)
+            && let hir::analysis::ty::pattern_ir::ValidatedPatKind::Constructor {
+                ctor: hir::analysis::ty::pattern_ir::ConstructorKind::Type(ty),
+                ..
+            } = typed.pattern_store().node(root).kind()
+            && let TyData::TyBase(TyBase::Adt(adt)) = ty.base_ty(db).data(db)
+            && matches!(
+                adt.adt_ref(db),
+                hir::analysis::ty::adt_def::AdtRef::Struct(_)
+            )
+        {
+            node.rooted_constructors.push(FrozenQuoteConstructor {
+                func: Some(0),
+                site: FrozenQuoteConstructorSite::Pat(pat),
+                owner: frozen_quote_nominal_ref(db, adt.adt_ref(db))
+                    .map_err(|_| ReadBackError::MissingOwner)?,
+                variant_index: None,
+            });
+        }
+    }
     let mut classified_paths = HashSet::new();
     for (pat, _) in body.pats(db).iter() {
         if typed.pat_binding(pat).is_some() {
@@ -118,7 +167,13 @@ pub fn read_back<'db>(
             }
             Some(LocalBinding::EffectParam { .. }) => return Err(ReadBackError::Effectful),
             None => {
-                if let Some(ValuePathRef::TypeConst(ty)) = typed.value_path_ref(expr)
+                if let Some(ValuePathRef::UnitVariant(variant)) = typed.value_path_ref(expr) {
+                    node.rooted_constructors.push(freeze_variant(
+                        FrozenQuoteConstructorSite::Expr(expr),
+                        variant.variant,
+                    )?);
+                    classified_paths.insert(expr);
+                } else if let Some(ValuePathRef::TypeConst(ty)) = typed.value_path_ref(expr)
                     && let TyData::ConstTy(const_ty) = ty.data(db)
                     && let ConstTyData::TyParam(param, _) = const_ty.data(db)
                     && let Some(ScopeId::GenericParam(owner, index)) = param.declaration_scope(db)
@@ -190,6 +245,14 @@ pub fn read_back<'db>(
         let callable = typed
             .callable_expr(expr)
             .ok_or(ReadBackError::UnsupportedCall)?;
+        if let CallableDef::VariantCtor(variant) = callable.callable_def {
+            node.rooted_constructors.push(freeze_variant(
+                FrozenQuoteConstructorSite::Expr(*callee),
+                variant,
+            )?);
+            classified_paths.insert(*callee);
+            continue;
+        }
         let CallableDef::Func(selected) = callable.callable_def else {
             return Err(ReadBackError::UnsupportedCall);
         };
@@ -275,8 +338,28 @@ pub fn read_back<'db>(
                 ));
             }
             Partial::Present(Expr::RecordInit(..)) => {
+                if let Some(RecordInitLowering::EnumVariant(variant)) =
+                    typed.record_init_lowering(expr)
+                {
+                    node.rooted_constructors.push(freeze_variant(
+                        FrozenQuoteConstructorSite::Expr(expr),
+                        variant.variant,
+                    )?);
+                    continue;
+                }
                 if typed.record_init_lowering(expr) != Some(RecordInitLowering::Struct) {
                     return Err(ReadBackError::UnsupportedName);
+                }
+                if let TyData::TyBase(TyBase::Adt(adt)) =
+                    typed.expr_ty(db, expr).base_ty(db).data(db)
+                {
+                    node.rooted_constructors.push(FrozenQuoteConstructor {
+                        func: Some(0),
+                        site: FrozenQuoteConstructorSite::Expr(expr),
+                        owner: frozen_quote_nominal_ref(db, adt.adt_ref(db))
+                            .map_err(|_| ReadBackError::MissingOwner)?,
+                        variant_index: None,
+                    });
                 }
                 let ty = freeze_checked_quote_type(db, typed.expr_ty(db, expr), func)
                     .map_err(|_| ReadBackError::MissingOwner)?

@@ -1,0 +1,27 @@
+// Q6: issued enum owners share generation and generic transport with structs.
+trait Tagged { fn tag(self) -> u256 }
+
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Tagged for ${record} {
+                fn tag(self) -> u256 { 13 }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+enum Shape { Unit, Payload(u256) }
+
+#[generate(ingot::author::emit)]
+enum Envelope<T> { Payload(T), Empty }
+
+#[test]
+fn generated_enum_targets() {
+    assert!(Shape::Unit.tag() == 13)
+    assert!(Shape::Payload(3).tag() == 13)
+    assert!(Envelope<u256>::Payload(7).tag() == 13)
+    assert!(Envelope<bool>::Empty.tag() == 13)
+}

@@ -789,7 +789,7 @@ struct Wrapped { nonce: nominal::Word }
             ),
             vec![input],
         ));
-        let expected = match request.owner.name(&db).to_opt().unwrap().data(&db).as_str() {
+        let expected = match request.owner.name(&db).unwrap().data(&db).as_str() {
             "Packet" => "123",
             "Reordered" => "321",
             "Empty" => "0",
@@ -843,7 +843,7 @@ struct One { value: bool }
     let requests = invocations(&db, file).unwrap();
     let input = requests
         .iter()
-        .find(|r| r.owner.name(&db).to_opt().unwrap().data(&db) == "Empty")
+        .find(|r| r.owner.name(&db).unwrap().data(&db) == "Empty")
         .unwrap()
         .record_input(&db)
         .unwrap()
@@ -872,7 +872,7 @@ struct One { value: bool }
     }
     let one = requests
         .iter()
-        .find(|r| r.owner.name(&db).to_opt().unwrap().data(&db) == "One")
+        .find(|r| r.owner.name(&db).unwrap().data(&db) == "One")
         .unwrap()
         .record_input(&db)
         .unwrap()

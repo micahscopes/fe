@@ -1,0 +1,13 @@
+mod author {
+    use core::meta::{Code, Item, Record, field_count}
+    const fn count_payload(record: Record) -> usize {
+        field_count(record)
+    }
+    pub const fn emit(record: Record) -> Code<Item> {
+        let n = count_payload(record)
+        quote { fn reflected() -> usize { ${n} } }
+    }
+}
+
+#[generate(ingot::author::emit)]
+enum Shape { Unit, Payload(u256) }

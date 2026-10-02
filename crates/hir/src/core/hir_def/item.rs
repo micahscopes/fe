@@ -1089,6 +1089,10 @@ pub struct Enum<'db> {
 }
 
 impl<'db> Enum<'db> {
+    pub fn hir_generic_params(self, db: &'db dyn HirDb) -> GenericParamListId<'db> {
+        self.generic_params(db)
+    }
+
     pub fn span(self) -> LazyEnumSpan<'db> {
         LazyEnumSpan::new(self)
     }

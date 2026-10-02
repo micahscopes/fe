@@ -1,6 +1,6 @@
 use ingot::{Copy, Option}
 
-/// An owner-authorized record input to a structural const provider.
+/// An owner-authorized structural input or selected enum payload.
 /// These handles are issued by elaboration, not constructed by Fe code.
 pub struct Record { seal: bool }
 pub struct Field { seal: bool }
@@ -30,8 +30,14 @@ pub trait FieldQuery<R> {
 }
 
 extern {
-    /// Reflection is evaluated only on compiler-issued inputs. These values
-    /// cannot be serialized into runtime constants.
+    /// Count variants of a whole compiler-issued enum input. Structs and
+    /// already selected payloads reject.
+    pub const fn variant_count(_ record: Record) -> usize
+    /// Select a variant payload in declaration order. It uses the same field
+    /// operations as a struct and retains its enum owner and variant index.
+    pub const fn variant(_ record: Record, _ index: usize) -> Record
+    /// Reflection accepts only compiler-issued struct inputs or selected enum
+    /// payloads. Whole enums reject until a payload is selected.
     pub const fn field_count(_ record: Record) -> usize
     pub const fn field(_ record: Record, _ index: usize) -> Field
     pub const fn field_type(_ field: Field) -> FieldType

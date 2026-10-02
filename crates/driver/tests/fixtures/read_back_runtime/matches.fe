@@ -1,0 +1,56 @@
+use core::meta::{Code, Expr, Item, Record}
+use core::abi::ByteInput
+use std::evm::CallData
+
+const fn read_back_pick(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_pick(_ enabled: bool, _ value: u256) -> u256 { ${body} } }
+}
+
+const fn read_back_tuple_match(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_tuple_match(_ enabled: bool, _ value: u256) -> u256 { ${body} } }
+}
+
+const fn read_back_nested_match(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_nested_match(_ enabled: bool, _ value: u256) -> u256 { ${body} } }
+}
+
+const fn read_back_rest_match(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_rest_match(_ value: u256) -> u256 { ${body} } }
+}
+
+const fn read_back_or_match(_ r: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { 0 }
+    quote { pub fn copied_or_match(_ value: u256) -> u256 { ${body} } }
+}
+
+#[generate(ingot::read_back_pick)]
+struct PickTarget {}
+#[generate(ingot::read_back_tuple_match)]
+struct TupleTarget {}
+#[generate(ingot::read_back_nested_match)]
+struct NestedTarget {}
+#[generate(ingot::read_back_rest_match)]
+struct RestTarget {}
+#[generate(ingot::read_back_or_match)]
+struct OrTarget {}
+
+#[test]
+fn copied_values() {
+    let seed = CallData::new().word_at(0)
+    assert!(copied_pick(true, seed + 4) == pick(true, seed + 4))
+    assert!(copied_pick(false, seed + 4) == pick(false, seed + 4))
+    assert!(copied_tuple_match(true, seed + 4) == tuple_match(true, seed + 4))
+    assert!(copied_tuple_match(false, seed + 4) == tuple_match(false, seed + 4))
+    assert!(copied_nested_match(true, 0) == nested_match(true, 0))
+    assert!(copied_nested_match(false, 0) == nested_match(false, 0))
+    assert!(copied_nested_match(true, seed + 4) == nested_match(true, seed + 4))
+    assert!(copied_nested_match(false, seed + 4) == nested_match(false, seed + 4))
+    assert!(copied_rest_match(seed + 5) == rest_match(seed + 5))
+    assert!(copied_or_match(0) == or_match(0))
+    assert!(copied_or_match(1) == or_match(1))
+    assert!(copied_or_match(seed + 5) == or_match(seed + 5))
+}

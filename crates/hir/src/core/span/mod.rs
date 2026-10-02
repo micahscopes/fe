@@ -264,8 +264,7 @@ pub enum DesugaredOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenerationDesugared {
-    pub target: AstPtr<ast::Struct>,
-    pub attribute_index: usize,
+    pub attribute: AstPtr<ast::Attr>,
 }
 
 /// Tracks the origin of HIR nodes desugared from a `msg` block.

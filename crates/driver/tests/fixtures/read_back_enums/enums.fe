@@ -1,0 +1,31 @@
+pub enum Shape {
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+    Empty,
+}
+
+pub fn score(_ shape: Shape) -> u256 {
+    match shape {
+        Shape::Circle(radius) => radius * radius
+        Shape::Rect { w, h } => w * h
+        Shape::Empty => 0
+    }
+}
+
+pub fn scale(_ shape: Shape) -> Shape {
+    match shape {
+        Shape::Circle(radius) => Shape::Circle(radius * 2)
+        Shape::Rect { w, h } => Shape::Rect { w: w * 2, h: h * 2 }
+        Shape::Empty => Shape::Empty
+    }
+}
+
+#[test]
+fn authored_values() {
+    assert!(score(Shape::Circle(3)) == 9)
+    assert!(score(Shape::Rect { w: 2, h: 5 }) == 10)
+    assert!(score(Shape::Empty) == 0)
+    assert!(score(scale(Shape::Circle(3))) == 36)
+    assert!(score(scale(Shape::Rect { w: 2, h: 5 })) == 40)
+    assert!(score(scale(Shape::Empty)) == 0)
+}

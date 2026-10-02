@@ -532,6 +532,16 @@ fn checked_body_shape<'db>(
                 expr(db, body, *then, node, binders),
                 otherwise.map(|value| expr(db, body, value, node, binders))
             ),
+            Expr::Match(scrutinee, Partial::Present(arms)) => format!(
+                "match({},{:?})",
+                expr(db, body, *scrutinee, node, binders),
+                arms.iter()
+                    .map(|arm| (
+                        pat(db, body, arm.pat, node, binders),
+                        expr(db, body, arm.body, node, binders)
+                    ))
+                    .collect::<Vec<_>>()
+            ),
             Expr::Block(statements) => format!(
                 "block({:?})",
                 statements
@@ -629,6 +639,15 @@ fn checked_body_shape<'db>(
                     .collect::<Vec<_>>()
             ),
             Pat::WildCard => "wildcard".into(),
+            Pat::Rest => "rest".into(),
+            Pat::Lit(Partial::Present(literal)) => {
+                format!("patternlit({})", literal.pretty_print(db))
+            }
+            Pat::Or(lhs, rhs) => format!(
+                "orpat({},{})",
+                pat(db, body, *lhs, node, binders),
+                pat(db, body, *rhs, node, binders)
+            ),
             other => panic!("body shape does not yet cover {other:?}"),
         }
     }
@@ -650,33 +669,18 @@ fn checked_body_shape<'db>(
     glob: "read_back_pure.fe",
 )]
 fn checked_body_fragment_round_trips_through_generation(fixture: Fixture<&str>) {
-    let url = Url::from_file_path(fixture.path()).expect("fixture URL");
-    let provider = r#"
-mod author {
-    use core::meta::{Code, Expr, Item, Record}
-
-    pub const fn emit(_ record: Record) -> Code<Item> {
-        let value: Code<Expr> = quote(a) { a }
-        quote { pub fn copied(_ a: u256) -> u256 { ${value} } }
-    }
-}
-
-#[generate(ingot::author::emit)]
-struct GeneratedTarget {}
-"#;
-    let mut authored = DriverDataBase::default();
-    authored.workspace().update(
-        &mut authored,
-        url.clone(),
-        format!("{}\n{provider}", fixture.content()),
-    );
-    let original = read_back(&authored, named_function(&authored, &url, "lets"))
-        .expect("authored let body reads back");
-    let mut output = fe_driver::elaboration::prepare(&authored)
-        .expect("generation succeeds")
-        .expect("generation request exists");
-    inject_read_back_body(&mut output, &url, &original);
-    let reflected = checked_copied_body(&output, &url, "lets");
+    let copied = transplanted_fixture(&fixture, "read_back_runtime/read_back_pure.fe");
+    let original = &copied
+        .bodies
+        .iter()
+        .find(|(name, _)| name == "lets")
+        .unwrap()
+        .1;
+    let reflected = read_back(
+        &copied.output,
+        read_back_support::named_function(&copied.output, &copied.url, "copied_lets"),
+    )
+    .expect("copied let body reads back");
     let before = &original.nodes[original.root];
     let after = &reflected.nodes[reflected.root];
     assert_eq!(before.open_uses.len(), after.open_uses.len());
@@ -702,16 +706,17 @@ struct GeneratedTarget {}
 fn pure_first_order_bodies_round_trip(fixture: Fixture<&str>) {
     assert_structural_round_trips(
         fixture,
+        "read_back_runtime/read_back_pure.fe",
         &[
-            ("literal", "", "u256"),
-            ("params", "_ a: u256, _ b: u256", "u256"),
-            ("unary_ops", "_ a: bool, _ n: i32", "i32"),
-            ("cast", "_ a: u8", "u256"),
-            ("call", "_ a: u256", "u256"),
-            ("method_and_field", "_ p: ingot::Pt", "u256"),
-            ("tuple", "_ a: u256", "u256"),
-            ("record", "_ a: u256", "u256"),
-            ("block_and_if", "_ a: u256", "u256"),
+            "literal",
+            "params",
+            "unary_ops",
+            "cast",
+            "call",
+            "method_and_field",
+            "tuple",
+            "record",
+            "block_and_if",
         ],
     );
 }
@@ -723,12 +728,8 @@ fn pure_first_order_bodies_round_trip(fixture: Fixture<&str>) {
 fn structured_loops_round_trip(fixture: Fixture<&str>) {
     assert_structural_round_trips(
         fixture,
-        &[
-            ("assignment", "_ k: u256", "u256"),
-            ("nested_while", "_ k: u256", "u256"),
-            ("early_exits", "_ k: u256", "u256"),
-            ("array_for", "_ k: u256", "u256"),
-        ],
+        "read_back_runtime/read_back_loops.fe",
+        &["assignment", "nested_while", "early_exits", "array_for"],
     );
 }
 
@@ -739,7 +740,8 @@ fn structured_loops_round_trip(fixture: Fixture<&str>) {
 fn checked_parameter_identity_survives_reordered_names(fixture: Fixture<&str>) {
     assert_structural_round_trips(
         fixture,
-        &[("ordered", "_ second: u256, _ first: u256", "u256")],
+        "read_back_adapters/parameters_reordered.fe",
+        &["ordered"],
     );
 }
 
@@ -748,7 +750,11 @@ fn checked_parameter_identity_survives_reordered_names(fixture: Fixture<&str>) {
     glob: "*.fe",
 )]
 fn checked_parameter_identity_survives_new_names(fixture: Fixture<&str>) {
-    assert_structural_round_trips(fixture, &[("ordered", "_ lhs: u256, _ rhs: u256", "u256")]);
+    assert_structural_round_trips(
+        fixture,
+        "read_back_adapters/parameters_fresh.fe",
+        &["ordered"],
+    );
 }
 
 #[dir_test(
@@ -773,42 +779,37 @@ fn missing_checked_parameter_is_rejected(fixture: Fixture<&str>) {
     );
 }
 
-fn assert_structural_round_trips(fixture: Fixture<&str>, cases: &[(&str, &str, &str)]) {
-    let url = Url::from_file_path(fixture.path()).expect("fixture URL");
-    for &(name, params, result) in cases {
-        let provider = format!(
-            r#"
-mod author {{
-    use core::meta::{{Code, Expr, Item, Record}}
+fn transplanted_fixture(
+    fixture: &Fixture<&str>,
+    adapter: &str,
+) -> read_back_support::TransplantedFixture {
+    let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(adapter);
+    read_back_support::transplant_fixture(fixture.path(), fixture.content(), &adapter)
+}
 
-    pub const fn emit(_ record: Record) -> Code<Item> {{
-        let value: Code<Expr> = quote {{ 0 }}
-        quote {{ pub fn copied({params}) -> {result} {{ ${{value}} }} }}
-    }}
-}}
-
-#[generate(ingot::author::emit)]
-struct GeneratedTarget {{}}
-"#
+fn assert_structural_round_trips(fixture: Fixture<&str>, adapter: &str, cases: &[&str]) {
+    let copied = transplanted_fixture(&fixture, adapter);
+    for &name in cases {
+        let original = &copied
+            .bodies
+            .iter()
+            .find(|(body, _)| body == name)
+            .unwrap()
+            .1;
+        let source = read_back_support::named_function(&copied.authored, &copied.url, name);
+        let destination = read_back_support::named_function(
+            &copied.output,
+            &copied.url,
+            &format!("copied_{name}"),
         );
-        let mut authored = DriverDataBase::default();
-        authored.workspace().update(
-            &mut authored,
-            url.clone(),
-            format!("{}\n{provider}", fixture.content()),
-        );
-        let original = read_back(&authored, named_function(&authored, &url, name))
-            .unwrap_or_else(|error| panic!("{name} did not read back: {error:?}"));
-        let mut output = fe_driver::elaboration::prepare(&authored)
-            .expect("generation succeeds")
-            .expect("generation request exists");
-        inject_read_back_body(&mut output, &url, &original);
-        let reflected = checked_copied_body(&output, &url, name);
+        let reflected = read_back(&copied.output, destination).expect("copied body reads back");
         let before = &original.nodes[original.root];
         let after = &reflected.nodes[reflected.root];
         assert_eq!(
-            checked_body_shape(&authored, named_function(&authored, &url, name), before),
-            checked_body_shape(&output, named_function(&output, &url, "copied"), after),
+            checked_body_shape(&copied.authored, source, before),
+            checked_body_shape(&copied.output, destination, after),
             "{name}"
         );
         assert_eq!(before.open_uses.len(), after.open_uses.len(), "{name}");
@@ -886,33 +887,18 @@ struct GeneratedTarget {{}}
     glob: "read_back_binders_roots.fe",
 )]
 fn checked_root_survives_conflicting_destination_name(fixture: Fixture<&str>) {
-    let url = Url::from_file_path(fixture.path()).expect("fixture URL");
-    let source = fixture.content().replace(
-        "mod dest {\n",
-        "mod dest {\n    #[generate(ingot::author::emit)]\n    struct GeneratedTarget {}\n",
-    );
-    assert_ne!(source, *fixture.content(), "destination module is missing");
-    let provider = r#"
-mod author {
-    use core::meta::{Code, Expr, Item, Record}
-
-    pub const fn emit(_ record: Record) -> Code<Item> {
-        let value: Code<Expr> = quote(a) { a }
-        quote { pub fn copied(_ a: u256) -> u256 { ${value} } }
-    }
-}
-"#;
-    let mut authored = DriverDataBase::default();
-    authored
-        .workspace()
-        .update(&mut authored, url.clone(), format!("{source}\n{provider}"));
-    let original = read_back(&authored, named_function(&authored, &url, "rooted"))
-        .expect("authored rooted call reads back");
-    let mut output = fe_driver::elaboration::prepare(&authored)
-        .expect("generation succeeds")
-        .expect("generation request exists");
-    inject_read_back_body(&mut output, &url, &original);
-    let reflected = checked_copied_body(&output, &url, "rooted");
+    let copied = transplanted_fixture(&fixture, "read_back_runtime/read_back_binders_roots.fe");
+    let original = &copied
+        .bodies
+        .iter()
+        .find(|(name, _)| name == "rooted")
+        .unwrap()
+        .1;
+    let reflected = read_back(
+        &copied.output,
+        read_back_support::named_function(&copied.output, &copied.url, "copied_rooted"),
+    )
+    .expect("copied rooted call reads back");
     let roots = &reflected.nodes[reflected.root].rooted_funcs;
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].path, "lib::helper");
@@ -1180,19 +1166,13 @@ fn shadowing_destination(fixture: &Fixture<&str>) -> (DriverDataBase, Url) {
     let url = Url::from_file_path(fixture.path()).expect("fixture URL");
     let source = fixture.content().replace(
         "mod dest {\n",
-        "mod dest {\n    #[generate(ingot::author::emit)]\n    struct GeneratedTarget {}\n",
+        &format!(
+            "mod dest {{\n{}",
+            include_str!("fixtures/read_back_adapters/cast_target.fe")
+        ),
     );
     assert_ne!(source, *fixture.content(), "destination module is missing");
-    let provider = r#"
-mod author {
-    use core::meta::{Code, Expr, Item, Record}
-
-    pub const fn emit(_ record: Record) -> Code<Item> {
-        let value: Code<Expr> = quote { 0 }
-        quote { pub fn copied(_ a: u8) -> u256 { ${value} } }
-    }
-}
-"#;
+    let provider = include_str!("fixtures/read_back_adapters/cast_provider.fe");
     let mut authored = DriverDataBase::default();
     authored
         .workspace()
@@ -1270,6 +1250,245 @@ fn assert_read_back_round_trip(fixture: Fixture<&str>) {
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back", glob: "*.fe")]
 fn read_back_round_trip(fixture: Fixture<&str>) {
     assert_read_back_round_trip(fixture);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_matches", glob: "*.fe")]
+fn ordinary_match_bodies_round_trip(fixture: Fixture<&str>) {
+    assert_read_back_round_trip(fixture);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_enums", glob: "*.fe")]
+fn enum_bodies_round_trip(fixture: Fixture<&str>) {
+    let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/read_back_runtime/enums.fe");
+    let copied = read_back_support::transplant_fixture(fixture.path(), fixture.content(), &adapter);
+    assert_eq!(copied.bodies.len(), 2);
+    quote_round_trip::assert_round_trip(&copied.authored, &copied.output, &copied.url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_struct_patterns", glob: "*.fe")]
+fn struct_pattern_bodies_round_trip(fixture: Fixture<&str>) {
+    let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/read_back_runtime/struct_patterns.fe");
+    let copied = read_back_support::transplant_fixture(fixture.path(), fixture.content(), &adapter);
+    assert_eq!(copied.bodies.len(), 2);
+    quote_round_trip::assert_round_trip(&copied.authored, &copied.output, &copied.url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_match_body.fe",
+)]
+fn ordinary_quoted_match_is_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("match quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_checked_roots.fe",
+)]
+fn quoted_enum_patterns_preserve_checked_owners(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum quote generates without changing pattern owners")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_target.fe",
+)]
+fn quoted_enum_targets_are_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum target quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_reflection.fe",
+)]
+fn quoted_enum_reflection_is_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum reflection quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_struct_checked_roots.fe",
+)]
+fn quoted_struct_patterns_preserve_checked_owners(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("struct pattern quote generates")
+        .unwrap();
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_struct_checked_roots.fe",
+)]
+fn struct_comparison_rejects_changed_owner(fixture: Fixture<&str>) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored).expect("struct quote generates").unwrap();
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    for pattern in [true, false] {
+        let mut expected = input.requests(&output).clone();
+        let FrozenMetaValue::Code(code) = &mut expected[0].value else {
+            panic!("struct quote uses code");
+        };
+        let root = code
+            .nodes
+            .iter_mut()
+            .flat_map(|node| &mut node.rooted_constructors)
+            .find(|root| {
+                root.variant_index.is_none()
+                    && matches!(
+                        root.site,
+                        hir::core::meta::FrozenQuoteConstructorSite::Pat(_)
+                    ) == pattern
+            })
+            .expect("checked struct root");
+        let (module, _) = root
+            .owner
+            .owner
+            .path
+            .rsplit_once("::")
+            .expect("nominal owner path");
+        root.owner.owner.path = format!("{module}::destination::Point");
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            quote_round_trip::assert_round_trip_against(&authored, &output, &url, &expected);
+        }))
+        .expect_err("different nominal owner must not compare equal");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("selected constructor owner identity"),
+            "wrong failure: {message}"
+        );
+    }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_checked_roots.fe",
+)]
+fn enum_comparison_rejects_changed_owner_and_index(fixture: Fixture<&str>) {
+    use hir::core::meta::FrozenQuoteConstructorSite;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored).expect("enum quote generates").unwrap();
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    for pattern in [true, false] {
+        for change_owner in [true, false] {
+            let mut expected = input.requests(&output).clone();
+            let FrozenMetaValue::Code(code) = &mut expected[0].value else {
+                panic!("enum quote uses the code carrier");
+            };
+            let root = code
+                .nodes
+                .iter_mut()
+                .flat_map(|node| &mut node.rooted_constructors)
+                .find(|root| matches!(root.site, FrozenQuoteConstructorSite::Pat(_)) == pattern)
+                .expect("both pattern and constructor enum roots");
+            let diagnostic = if change_owner {
+                root.owner.owner.path.push_str("::destination");
+                "selected constructor owner identity"
+            } else {
+                root.variant_index = Some((root.variant_index.unwrap() + 1) % 3);
+                "selected variant index"
+            };
+            let failure = catch_unwind(AssertUnwindSafe(|| {
+                quote_round_trip::assert_round_trip_against(&authored, &output, &url, &expected);
+            }))
+            .expect_err("comparison must reject changed enum identity");
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+            assert!(
+                message.contains(diagnostic),
+                "wrong comparison failure: {message}"
+            );
+        }
+    }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_checked_roots.fe",
+)]
+fn forged_enum_roots_are_rejected(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    for missing_owner in [true, false] {
+        let mut output = prepare(&authored).expect("enum quote generates").unwrap();
+        let input = HirDb::generated_module(&output, &url).unwrap();
+        let mut requests = input.requests(&output).clone();
+        let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+            panic!("enum quote uses code");
+        };
+        let root = code
+            .nodes
+            .iter_mut()
+            .flat_map(|node| &mut node.rooted_constructors)
+            .next()
+            .expect("retained enum roots");
+        let diagnostic = if missing_owner {
+            root.owner.owner.path.push_str("::Missing");
+            "quoted constructor owner is absent"
+        } else {
+            root.variant_index = Some(u16::MAX);
+            "quoted variant index is outside"
+        };
+        input.set_requests(&mut output).to(requests);
+        let file = output.workspace().get(&output, &url).unwrap();
+        let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains(diagnostic)),
+            "forged root must return a generation diagnostic: {errors:?}"
+        );
+    }
 }
 
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_bound_constants", glob: "*.fe")]

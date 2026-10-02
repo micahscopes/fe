@@ -1,0 +1,41 @@
+mod author {
+    use core::meta::{Code, Item, Record, field, field_count, field_type, type_is, variant, variant_count}
+
+    // One helper for struct fields and variant payloads alike.
+    const fn bool_fields(_ r: Record) -> usize {
+        let mut n: usize = 0
+        let mut i: usize = 0
+        while i < field_count(r) {
+            if type_is<bool>(field_type(field(r, i))) { n = n + 1 }
+            i = i + 1
+        }
+        n
+    }
+
+    pub const fn on_enum(record: Record) -> Code<Item> {
+        let mut total: usize = 0
+        let mut v: usize = 0
+        while v < variant_count(record) {
+            total = total + bool_fields(variant(record, v))
+            v = v + 1
+        }
+        quote { fn enum_bools() -> usize { ${total} } }
+    }
+
+    pub const fn on_struct(record: Record) -> Code<Item> {
+        let n = bool_fields(record)
+        quote { fn struct_bools() -> usize { ${n} } }
+    }
+}
+
+#[generate(ingot::author::on_enum)]
+enum Flags { A(bool, u256, bool), B, C { on: bool, n: u8 } }
+
+#[generate(ingot::author::on_struct)]
+struct S { a: bool, b: u256, c: bool, d: bool }
+
+#[test]
+fn shared_helper() {
+    assert!(enum_bools() == 3)
+    assert!(struct_bools() == 3)
+}

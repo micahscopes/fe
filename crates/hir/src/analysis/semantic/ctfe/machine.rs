@@ -1943,6 +1943,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             && matches!(
                 name.data(self.db).as_str(),
                 "field_count"
+                    | "variant_count"
+                    | "variant"
                     | "field"
                     | "field_type"
                     | "type_is"
@@ -2046,13 +2048,13 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
     fn eval_field_query(
         &mut self,
         invocation: SemanticInstance<'db>,
-        owner: crate::hir_def::Struct<'db>,
+        owner: crate::analysis::ty::adt_def::AdtRef<'db>,
+        variant_index: Option<u16>,
         index: usize,
         result_ty: TyId<'db>,
         origin: SemOrigin<'db>,
     ) -> EvalResult<'db, CtfeConstValue<'db>> {
         use crate::analysis::ty::{
-            adt_def::AdtRef,
             corelib::resolve_core_trait,
             trait_def::{OrdinaryEvidenceError, TraitInstId, resolve_ordinary_impl_evidence},
             trait_resolution::{PredicateListId, TraitSolveCx},
@@ -2063,11 +2065,15 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             origin,
             message: format!("reflected field query: {message}"),
         };
-        let adt = AdtRef::Struct(owner).as_adt(db);
-        if !adt.params(db).is_empty() || index >= adt.fields(db)[0].num_types() {
+        let adt = owner.as_adt(db);
+        let shape = adt
+            .fields(db)
+            .get(usize::from(variant_index.unwrap_or(0)))
+            .ok_or_else(|| invalid("invalid variant coordinate"))?;
+        if !adt.params(db).is_empty() || index >= shape.num_types() {
             return Err(invalid("invalid record field").into());
         }
-        let field_ty = adt.fields(db)[0].ty(db, index).instantiate_identity();
+        let field_ty = shape.ty(db, index).instantiate_identity();
         let arguments = invocation.key(db).subst(db).generic_args(db);
         let [family, expected] = arguments else {
             return Err(invalid("expected a unary query family and result type").into());
@@ -2607,18 +2613,34 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let SemConstValue::Structural { handle, .. } = first.value(self.db) else {
             return Err(invalid().into());
         };
-        let output = match (operation, *handle, args.len()) {
-            ("query_field", StructuralHandle::FieldType { owner, index }, 1) => {
-                return self.eval_field_query(instance, owner, index, result_ty, origin);
+        let handle = *handle;
+        let field_list = match handle {
+            StructuralHandle::Record(owner @ crate::analysis::ty::adt_def::AdtRef::Struct(_)) => {
+                Some((owner, None))
             }
-            ("field_count", StructuralHandle::Record(owner), 1) => {
+            StructuralHandle::Variant(variant) => Some((
+                crate::analysis::ty::adt_def::AdtRef::Enum(variant.enum_),
+                Some(variant.idx),
+            )),
+            _ => None,
+        };
+        let output = match (operation, handle, args.len()) {
+            (
+                "variant_count",
+                StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),
+                1,
+            ) => {
                 return Ok(CtfeConstValue::int(
                     self.db,
                     result_ty,
-                    BigInt::from(owner.hir_fields(self.db).data(self.db).len()),
+                    owner.len_variants(self.db).into(),
                 ));
             }
-            ("field", StructuralHandle::Record(owner), 2) => {
+            (
+                "variant",
+                StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),
+                2,
+            ) => {
                 let SemConstValue::Scalar {
                     value: SemConstScalar::Int { value },
                     ..
@@ -2627,26 +2649,123 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     return Err(invalid().into());
                 };
                 let index = value.to_usize().ok_or_else(invalid)?;
-                if index >= owner.hir_fields(self.db).data(self.db).len() {
+                if index >= owner.len_variants(self.db) {
                     return Err(CtfeError::InvalidOperation {
                         origin,
-                        message: "record field index is out of bounds".to_owned(),
+                        message: "variant index is out of bounds".into(),
                     }
                     .into());
                 }
-                StructuralHandle::Field { owner, index }
+                StructuralHandle::Variant(crate::hir_def::EnumVariant::new(owner, index))
             }
-            ("field_type", StructuralHandle::Field { owner, index }, 1) => {
-                StructuralHandle::FieldType { owner, index }
+            ("variant" | "variant_count", _, _) => {
+                return Err(CtfeError::InvalidOperation {
+                    origin,
+                    message: format!(
+                        "`{operation}` needs a whole enum input; a struct or selected payload has no variants"
+                    ),
+                }.into());
             }
-            ("type_is", StructuralHandle::FieldType { owner, index }, 1) => {
-                let adt = crate::analysis::ty::adt_def::AdtRef::Struct(owner).as_adt(self.db);
-                if !adt.params(self.db).is_empty() || index >= adt.fields(self.db)[0].num_types() {
+            (
+                "field_count" | "field",
+                StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),
+                _,
+            ) => {
+                let name = owner
+                    .name(self.db)
+                    .to_opt()
+                    .map(|name| name.data(self.db).as_str())
+                    .unwrap_or("this target");
+                return Err(CtfeError::InvalidOperation {
+                    origin,
+                    message: format!(
+                        "`{operation}` needs a struct or a selected variant; `{name}` is an enum, so select a payload with `variant(record, i)`"
+                    ),
+                }.into());
+            }
+            (
+                "query_field",
+                StructuralHandle::FieldType {
+                    owner,
+                    variant_index,
+                    index,
+                },
+                1,
+            ) => {
+                return self.eval_field_query(
+                    instance,
+                    owner,
+                    variant_index,
+                    index,
+                    result_ty,
+                    origin,
+                );
+            }
+            ("field_count", _, 1) if field_list.is_some() => {
+                let (owner, variant_index) = field_list.unwrap();
+                let count = owner.as_adt(self.db).fields(self.db)
+                    [usize::from(variant_index.unwrap_or(0))]
+                .num_types();
+                return Ok(CtfeConstValue::int(self.db, result_ty, count.into()));
+            }
+            ("field", _, 2) if field_list.is_some() => {
+                let (owner, variant_index) = field_list.unwrap();
+                let SemConstValue::Scalar {
+                    value: SemConstScalar::Int { value },
+                    ..
+                } = args[1].materialize(self.db).value(self.db)
+                else {
+                    return Err(invalid().into());
+                };
+                let index = value.to_usize().ok_or_else(invalid)?;
+                if index
+                    >= owner.as_adt(self.db).fields(self.db)
+                        [usize::from(variant_index.unwrap_or(0))]
+                    .num_types()
+                {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "record field index is out of bounds".into(),
+                    }
+                    .into());
+                }
+                StructuralHandle::Field {
+                    owner,
+                    variant_index,
+                    index,
+                }
+            }
+            (
+                "field_type",
+                StructuralHandle::Field {
+                    owner,
+                    variant_index,
+                    index,
+                },
+                1,
+            ) => StructuralHandle::FieldType {
+                owner,
+                variant_index,
+                index,
+            },
+            (
+                "type_is",
+                StructuralHandle::FieldType {
+                    owner,
+                    variant_index,
+                    index,
+                },
+                1,
+            ) => {
+                let adt = owner.as_adt(self.db);
+                let shape = adt
+                    .fields(self.db)
+                    .get(usize::from(variant_index.unwrap_or(0)))
+                    .ok_or_else(invalid)?;
+                if !adt.params(self.db).is_empty() || index >= shape.num_types() {
                     return Err(invalid().into());
                 }
-                let field_ty = adt.fields(self.db)[0]
-                    .ty(self.db, index)
-                    .instantiate_identity();
+                let field_ty = shape.ty(self.db, index).instantiate_identity();
                 let key = instance.key(self.db);
                 let candidate = *key
                     .subst(self.db)

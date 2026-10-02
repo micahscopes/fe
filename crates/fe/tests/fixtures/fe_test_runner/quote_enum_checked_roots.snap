@@ -1,0 +1,11 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_enum_checked_roots.fe
+---
+=== STDOUT ===
+PASS  [<time>] generated_enum_patterns_keep_their_owner
+
+test result: ok. 1 passed; 0 failed
+
+=== EXIT CODE: 0 ===
