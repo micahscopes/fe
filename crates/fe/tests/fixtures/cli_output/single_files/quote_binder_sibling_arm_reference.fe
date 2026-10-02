@@ -1,0 +1,19 @@
+// RD79 rejection: Reject a binder reference in a sibling arm where its group is not bound.
+mod author {
+    use core::meta::{Code, Item, Record, binders, field, variant}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let rect = variant(record, 0)
+        let pair = variant(record, 2)
+        let lr = binders(rect, 0)
+        let rr = binders(rect, 0)
+        let lp = binders(pair, 1)
+        let w = field(rect, 0)
+        quote {
+            fn generated(_ left: ${record}, _ right: ${record}) -> bool {
+                match left { ${lr} => true, _ => ${lr.at(w)} == 0 }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+enum Shape { Rect { w: u256 }, Empty, Pair(u256) }

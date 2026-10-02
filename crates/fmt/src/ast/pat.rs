@@ -14,6 +14,7 @@ use super::types::{
 impl ToDoc for ast::Pat {
     fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
         match self.kind() {
+            PatKind::Hole(hole) => super::expr::quote_hole_doc(hole.syntax(), hole.expr(), ctx),
             PatKind::WildCard(wildcard) => wildcard.to_doc(ctx),
             PatKind::Rest(rest) => rest.to_doc(ctx),
             PatKind::Lit(lit) => lit.to_doc(ctx),

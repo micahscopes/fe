@@ -54,10 +54,23 @@ pub enum StructuralHandle<'db> {
 #[salsa::interned]
 #[derive(Debug)]
 pub struct QuotedCode<'db> {
-    /// The template's origin, or `None` for the empty fragment `empty<K>()`.
-    pub site: Option<QuoteSite<'db>>,
+    pub source: CodeSource<'db>,
     #[return_ref]
     pub holes: Vec<SemConstId<'db>>,
+}
+
+/// The authority from which a code fragment is emitted. Keep this explicit so
+/// compiler-issued fragments cannot be confused with an empty quotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum CodeSource<'db> {
+    Empty,
+    Template(QuoteSite<'db>),
+    /// `None` is the whole pattern; `Some` is a reference to one payload binder.
+    VariantBinding {
+        variant: crate::hir_def::EnumVariant<'db>,
+        group: usize,
+        field: Option<usize>,
+    },
 }
 
 /// A quote expression or checked root in its original owner body.

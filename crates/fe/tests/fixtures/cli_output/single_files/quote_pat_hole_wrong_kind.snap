@@ -1,0 +1,15 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_pat_hole_wrong_kind.fe
+---
+=== STDERR ===
+file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_pat_hole_wrong_kind.fe: error[8-0104]: this splice cannot stand for a pattern
+   ┌─ quote_pat_hole_wrong_kind.fe:17:15
+   │
+17 │             ${f} => true // <- here
+   │               ^ expected `Code<Pat>`, found `Field`
+
+
+
+=== EXIT CODE: 1 ===

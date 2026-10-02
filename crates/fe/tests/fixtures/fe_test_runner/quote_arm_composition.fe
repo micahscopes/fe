@@ -1,0 +1,171 @@
+// Q6: a 70-arm fold uses empty and splice-only Code<Arm> composition.
+trait Tagged { fn ordinal(self) -> usize }
+mod author {
+    use core::meta::{Arm, Code, Item, Record, binders, empty, variant, variant_count}
+    pub const fn ordinal(record: Record) -> Code<Item> {
+        let mut arms = empty<Arm>()
+        let mut i: usize = 0
+        while i < variant_count(record) {
+            let group = binders(variant(record, i), 0)
+            let one: Code<Arm> = quote { ${group} => ${i} }
+            let nothing = empty<Arm>()
+            arms = quote {
+                ${arms}
+                ${nothing}
+                ${one}
+            }
+            i += 1
+        }
+        quote {
+            impl ingot::Tagged for ${record} {
+                fn ordinal(self) -> usize { match self { ${arms} } }
+            }
+        }
+    }
+}
+#[generate(ingot::author::ordinal)]
+enum Many {
+    V0,
+    V1,
+    V2,
+    V3,
+    V4,
+    V5,
+    V6,
+    V7,
+    V8,
+    V9,
+    V10,
+    V11,
+    V12,
+    V13,
+    V14,
+    V15,
+    V16,
+    V17,
+    V18,
+    V19,
+    V20,
+    V21,
+    V22,
+    V23,
+    V24,
+    V25,
+    V26,
+    V27,
+    V28,
+    V29,
+    V30,
+    V31,
+    V32,
+    V33,
+    V34,
+    V35,
+    V36,
+    V37,
+    V38,
+    V39,
+    V40,
+    V41,
+    V42,
+    V43,
+    V44,
+    V45,
+    V46,
+    V47,
+    V48,
+    V49,
+    V50,
+    V51,
+    V52,
+    V53,
+    V54,
+    V55,
+    V56,
+    V57,
+    V58,
+    V59,
+    V60,
+    V61,
+    V62,
+    V63,
+    V64,
+    V65,
+    V66,
+    V67,
+    V68,
+    V69,
+}
+#[test]
+fn every_arm_retains_order() {
+    assert!(Many::V0.ordinal() == 0)
+    assert!(Many::V1.ordinal() == 1)
+    assert!(Many::V2.ordinal() == 2)
+    assert!(Many::V3.ordinal() == 3)
+    assert!(Many::V4.ordinal() == 4)
+    assert!(Many::V5.ordinal() == 5)
+    assert!(Many::V6.ordinal() == 6)
+    assert!(Many::V7.ordinal() == 7)
+    assert!(Many::V8.ordinal() == 8)
+    assert!(Many::V9.ordinal() == 9)
+    assert!(Many::V10.ordinal() == 10)
+    assert!(Many::V11.ordinal() == 11)
+    assert!(Many::V12.ordinal() == 12)
+    assert!(Many::V13.ordinal() == 13)
+    assert!(Many::V14.ordinal() == 14)
+    assert!(Many::V15.ordinal() == 15)
+    assert!(Many::V16.ordinal() == 16)
+    assert!(Many::V17.ordinal() == 17)
+    assert!(Many::V18.ordinal() == 18)
+    assert!(Many::V19.ordinal() == 19)
+    assert!(Many::V20.ordinal() == 20)
+    assert!(Many::V21.ordinal() == 21)
+    assert!(Many::V22.ordinal() == 22)
+    assert!(Many::V23.ordinal() == 23)
+    assert!(Many::V24.ordinal() == 24)
+    assert!(Many::V25.ordinal() == 25)
+    assert!(Many::V26.ordinal() == 26)
+    assert!(Many::V27.ordinal() == 27)
+    assert!(Many::V28.ordinal() == 28)
+    assert!(Many::V29.ordinal() == 29)
+    assert!(Many::V30.ordinal() == 30)
+    assert!(Many::V31.ordinal() == 31)
+    assert!(Many::V32.ordinal() == 32)
+    assert!(Many::V33.ordinal() == 33)
+    assert!(Many::V34.ordinal() == 34)
+    assert!(Many::V35.ordinal() == 35)
+    assert!(Many::V36.ordinal() == 36)
+    assert!(Many::V37.ordinal() == 37)
+    assert!(Many::V38.ordinal() == 38)
+    assert!(Many::V39.ordinal() == 39)
+    assert!(Many::V40.ordinal() == 40)
+    assert!(Many::V41.ordinal() == 41)
+    assert!(Many::V42.ordinal() == 42)
+    assert!(Many::V43.ordinal() == 43)
+    assert!(Many::V44.ordinal() == 44)
+    assert!(Many::V45.ordinal() == 45)
+    assert!(Many::V46.ordinal() == 46)
+    assert!(Many::V47.ordinal() == 47)
+    assert!(Many::V48.ordinal() == 48)
+    assert!(Many::V49.ordinal() == 49)
+    assert!(Many::V50.ordinal() == 50)
+    assert!(Many::V51.ordinal() == 51)
+    assert!(Many::V52.ordinal() == 52)
+    assert!(Many::V53.ordinal() == 53)
+    assert!(Many::V54.ordinal() == 54)
+    assert!(Many::V55.ordinal() == 55)
+    assert!(Many::V56.ordinal() == 56)
+    assert!(Many::V57.ordinal() == 57)
+    assert!(Many::V58.ordinal() == 58)
+    assert!(Many::V59.ordinal() == 59)
+    assert!(Many::V60.ordinal() == 60)
+    assert!(Many::V61.ordinal() == 61)
+    assert!(Many::V62.ordinal() == 62)
+    assert!(Many::V63.ordinal() == 63)
+    assert!(Many::V64.ordinal() == 64)
+    assert!(Many::V65.ordinal() == 65)
+    assert!(Many::V66.ordinal() == 66)
+    assert!(Many::V67.ordinal() == 67)
+    assert!(Many::V68.ordinal() == 68)
+    assert!(Many::V69.ordinal() == 69)
+}

@@ -6,7 +6,7 @@ use parser::ast::{self, prelude::*};
 use super::{
     FileLowerCtxt, base_scope_graph_impl,
     hir_builder::{
-        GeneratedFunctionSpec, GeneratedImplSpec, HirBuilder, QuoteExprSource, QuoteMethodCall,
+        GeneratedFunctionSpec, GeneratedImplSpec, HirBuilder, QuoteFragmentSource, QuoteMethodCall,
         quote_hir_primitive, rebind_owner_bound,
     },
     top_mod_ast,
@@ -45,6 +45,35 @@ use crate::{
     },
     span::{GenerationDesugared, HirOrigin},
 };
+
+/// A construction failure retains the authored template node that caused it.
+#[derive(Debug)]
+pub(super) struct QuoteConstructionError {
+    message: String,
+    source: Option<crate::core::meta::FrozenQuoteSpan>,
+}
+
+impl QuoteConstructionError {
+    pub(super) fn at(mut self, source: Option<crate::core::meta::FrozenQuoteSpan>) -> Self {
+        if self.source.is_none() {
+            self.source = source;
+        }
+        self
+    }
+}
+impl From<String> for QuoteConstructionError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            source: None,
+        }
+    }
+}
+impl From<&str> for QuoteConstructionError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
 
 fn invalid(message: &'static str) -> String {
     message.to_owned()
@@ -532,15 +561,31 @@ fn quoted_signature_type_with_owner<'db>(
     generic_names: &[IdentId<'db>],
     nominal_types: &mut Vec<(TypeId<'db>, QuoteSignatureRoot)>,
 ) -> Result<TypeId<'db>, String> {
+    quoted_signature_type_with_holes(
+        db,
+        frozen,
+        owner_names,
+        generic_names,
+        nominal_types,
+        &mut |_| Err(invalid("quoted type splice needs a checked target context")),
+    )
+}
+
+fn quoted_signature_type_with_holes<'db>(
+    db: &'db dyn HirDb,
+    frozen: &FrozenQuoteSignatureType,
+    owner_names: &[IdentId<'db>],
+    generic_names: &[IdentId<'db>],
+    nominal_types: &mut Vec<(TypeId<'db>, QuoteSignatureRoot)>,
+    hole: &mut impl FnMut(u32) -> Result<TypeId<'db>, String>,
+) -> Result<TypeId<'db>, String> {
     match frozen {
         FrozenQuoteSignatureType::Primitive(primitive) => {
             let primitive = quote_hir_primitive(*primitive)
                 .ok_or_else(|| invalid("quoted primitive signature type is unsupported"))?;
             Ok(TypeId::new(db, TypeKind::Primitive(primitive)))
         }
-        FrozenQuoteSignatureType::Hole(_) => {
-            Err(invalid("quoted type splice needs a checked target context"))
-        }
+        FrozenQuoteSignatureType::Hole(slot) => hole(*slot),
         FrozenQuoteSignatureType::SelfType => Ok(TypeId::new(
             db,
             TypeKind::Path(Partial::Present(PathId::from_ident(
@@ -579,6 +624,7 @@ fn quoted_signature_type_with_owner<'db>(
                 owner_names,
                 generic_names,
                 nominal_types,
+                hole,
             )?;
             nominal_types.push((ty, QuoteSignatureRoot::Nominal(root.clone())));
             Ok(ty)
@@ -596,6 +642,7 @@ fn quoted_signature_type_with_owner<'db>(
                 owner_names,
                 generic_names,
                 nominal_types,
+                hole,
             )?;
             nominal_types.push((ty, QuoteSignatureRoot::Trait(root.clone())));
             Ok(ty)
@@ -604,23 +651,25 @@ fn quoted_signature_type_with_owner<'db>(
             db,
             TypeKind::Mode(
                 *mode,
-                Partial::Present(quoted_signature_type_with_owner(
+                Partial::Present(quoted_signature_type_with_holes(
                     db,
                     inner,
                     owner_names,
                     generic_names,
                     nominal_types,
+                    hole,
                 )?),
             ),
         )),
         FrozenQuoteSignatureType::Ptr(inner) => Ok(TypeId::new(
             db,
-            TypeKind::Ptr(Partial::Present(quoted_signature_type_with_owner(
+            TypeKind::Ptr(Partial::Present(quoted_signature_type_with_holes(
                 db,
                 inner,
                 owner_names,
                 generic_names,
                 nominal_types,
+                hole,
             )?)),
         )),
         FrozenQuoteSignatureType::Tuple(elements) => Ok(TypeId::new(
@@ -630,12 +679,13 @@ fn quoted_signature_type_with_owner<'db>(
                 elements
                     .iter()
                     .map(|element| {
-                        quoted_signature_type_with_owner(
+                        quoted_signature_type_with_holes(
                             db,
                             element,
                             owner_names,
                             generic_names,
                             nominal_types,
+                            hole,
                         )
                         .map(Partial::Present)
                     })
@@ -654,6 +704,7 @@ fn quoted_rooted_type<'db>(
     owner_names: &[IdentId<'db>],
     generic_names: &[IdentId<'db>],
     roots: &mut Vec<(TypeId<'db>, QuoteSignatureRoot)>,
+    hole: &mut impl FnMut(u32) -> Result<TypeId<'db>, String>,
 ) -> Result<TypeId<'db>, String> {
     if arguments_given || !arguments.is_empty() {
         let PathKind::Ident { ident, .. } = path.kind(db) else {
@@ -662,12 +713,19 @@ fn quoted_rooted_type<'db>(
         let args = arguments
             .iter()
             .map(|argument| {
-                quoted_signature_type_with_owner(db, argument, owner_names, generic_names, roots)
-                    .map(|ty| {
-                        GenericArg::Type(TypeGenericArg {
-                            ty: Partial::Present(ty),
-                        })
+                quoted_signature_type_with_holes(
+                    db,
+                    argument,
+                    owner_names,
+                    generic_names,
+                    roots,
+                    hole,
+                )
+                .map(|ty| {
+                    GenericArg::Type(TypeGenericArg {
+                        ty: Partial::Present(ty),
                     })
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         path = PathId::new(
@@ -719,11 +777,11 @@ pub(crate) struct QuoteConstHygiene<'db> {
     generics: Vec<(ExprId, IdentId<'db>)>,
 }
 
-fn quoted_expr_sources<'db>(
+fn quoted_fragment_sources<'db>(
     db: &'db dyn HirDb,
     code: &FrozenCode,
     target: &TargetContext<'_, 'db>,
-) -> Result<Vec<Option<QuoteExprSource<'db>>>, String> {
+) -> Result<Vec<Option<QuoteFragmentSource<'db>>>, String> {
     code.nodes
         .iter()
         .map(|node| {
@@ -744,7 +802,7 @@ fn quoted_expr_sources<'db>(
                     let Partial::Present(Expr::Quote(quote)) = &body.exprs(db)[key.expr] else {
                         return Err(invalid("quote site no longer names a quote"));
                     };
-                    if !matches!(quote.fragment, QuoteFragment::Expr) {
+                    if !matches!(quote.fragment, QuoteFragment::Expr | QuoteFragment::Arms(_)) {
                         return Ok(None);
                     }
                     if quote.holes.len() != node.holes.len() {
@@ -770,7 +828,15 @@ fn quoted_expr_sources<'db>(
                     }
                     (
                         quote.template,
-                        quote.template.expr(db),
+                        match &quote.fragment {
+                            QuoteFragment::Arms(arms) => {
+                                super::hir_builder::QuoteFragmentRoot::Arms(arms.clone())
+                            }
+                            _ => super::hir_builder::QuoteFragmentRoot::Expr {
+                                root: quote.template.expr(db),
+                                splices: quote.splice_only_body(db),
+                            },
+                        },
                         quote.open.clone(),
                         member_holes,
                         !quote.block_items.is_empty(),
@@ -789,7 +855,16 @@ fn quoted_expr_sources<'db>(
                             })
                         })
                         .collect();
-                    (body, key.expr, open_names, Vec::new(), false)
+                    (
+                        body,
+                        super::hir_builder::QuoteFragmentRoot::Expr {
+                            root: key.expr,
+                            splices: None,
+                        },
+                        open_names,
+                        Vec::new(),
+                        false,
+                    )
                 }
             };
             let rooted_funcs = node
@@ -831,7 +906,7 @@ fn quoted_expr_sources<'db>(
                     locate_authored_function(db, base, locator).map(|method| (*site, method))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            Ok(Some(QuoteExprSource {
+            Ok(Some(QuoteFragmentSource {
                 template,
                 root,
                 open_names,
@@ -856,11 +931,19 @@ fn reify_quote_constructor<'db>(
     db: &'db dyn HirDb,
     root: &FrozenQuoteConstructor,
 ) -> Result<(PathId<'db>, QuoteConstructorIdentity<'db>), String> {
+    reify_quote_nominal_constructor(db, &root.owner, root.variant_index)
+}
+
+pub(super) fn reify_quote_nominal_constructor<'db>(
+    db: &'db dyn HirDb,
+    root: &FrozenQuoteNominal,
+    variant_index: Option<u16>,
+) -> Result<(PathId<'db>, QuoteConstructorIdentity<'db>), String> {
     use crate::analysis::ty::adt_def::AdtRef;
-    let owner = locate_authored_nominal(db, &root.owner)
+    let owner = locate_authored_nominal(db, root)
         .ok_or_else(|| invalid("quoted constructor owner is absent from authored HIR"))?;
-    let mut path = bound_quote_item_path(db, &root.owner.ingot, &root.owner.path)?;
-    match (owner, root.variant_index) {
+    let mut path = bound_quote_item_path(db, &root.ingot, &root.path)?;
+    match (owner, variant_index) {
         (AdtRef::Struct(_), None) => {}
         (AdtRef::Enum(owner), Some(index)) => {
             if usize::from(index) >= owner.len_variants(db) {
@@ -882,7 +965,7 @@ fn reify_quote_constructor<'db>(
         path,
         QuoteConstructorIdentity {
             owner,
-            variant_index: root.variant_index,
+            variant_index: variant_index,
         },
     ))
 }
@@ -902,10 +985,10 @@ pub(super) struct QuoteExprTypes<'db> {
 
 /// Reify the frozen fragment's types only after its destination binder frame
 /// is known. Item signatures and body fragments share the same type reifier.
-pub(super) fn reify_quote_expr_types<'db>(
+pub(super) fn reify_quote_fragment_types<'db>(
     db: &'db dyn HirDb,
     node: &FrozenCodeNode,
-    source: &QuoteExprSource<'db>,
+    source: &QuoteFragmentSource<'db>,
     owner_names: &[IdentId<'db>],
     function_names: &[IdentId<'db>],
 ) -> Result<QuoteExprTypes<'db>, String> {
@@ -993,11 +1076,11 @@ fn emit_closed_quoted_items<'db>(
     request: &FrozenGeneration,
     origin: GenerationDesugared,
     target: &TargetContext<'_, 'db>,
-) -> Result<Vec<QuoteHygiene<'db>>, String> {
+) -> Result<Vec<QuoteHygiene<'db>>, QuoteConstructionError> {
     let FrozenMetaValue::Code(code) = &request.value else {
-        return Err(invalid("expected a quoted generation result"));
+        return Err(invalid("expected a quoted generation result").into());
     };
-    let expr_sources = quoted_expr_sources(db, code, target)?;
+    let fragment_sources = quoted_fragment_sources(db, code, target)?;
     let mut hygiene = Vec::new();
     let mut ordinal = 0;
     emit_quoted_item_node(
@@ -1007,7 +1090,7 @@ fn emit_closed_quoted_items<'db>(
         &origin,
         target,
         code,
-        &expr_sources,
+        &fragment_sources,
         code.root,
         &mut ordinal,
         &mut hygiene,
@@ -1023,18 +1106,21 @@ fn emit_quoted_item_node<'db>(
     origin: &GenerationDesugared,
     target: &TargetContext<'_, 'db>,
     code: &FrozenCode,
-    expr_sources: &[Option<QuoteExprSource<'db>>],
+    fragment_sources: &[Option<QuoteFragmentSource<'db>>],
     code_root: usize,
     ordinal: &mut usize,
     hygiene: &mut Vec<QuoteHygiene<'db>>,
-) -> Result<(), String> {
+) -> Result<(), QuoteConstructionError> {
     let node = code
         .nodes
         .get(code_root)
         .ok_or_else(|| invalid("quoted code root is missing"))?;
     let Some(key) = &node.template else {
+        if node.variant_binding.is_some() {
+            return Err(invalid("compiler-issued binder code cannot stand for items").into());
+        }
         if !node.holes.is_empty() {
-            return Err(invalid("empty item code has splices"));
+            return Err(invalid("empty item code has splices").into());
         }
         return Ok(());
     };
@@ -1048,13 +1134,13 @@ fn emit_quoted_item_node<'db>(
         .body(db)
         .ok_or_else(|| invalid("quote owner body is missing"))?;
     let Partial::Present(Expr::Quote(quote)) = &body.exprs(db)[key.expr] else {
-        return Err(invalid("quote site no longer names a quote"));
+        return Err(invalid("quote site no longer names a quote").into());
     };
     if quote.holes.len() != node.holes.len() {
-        return Err(invalid("quoted splice count changed after freezing"));
+        return Err(invalid("quoted splice count changed after freezing").into());
     }
     let QuoteFragment::Items(items) = &quote.fragment else {
-        return Err(invalid("generation requires item code"));
+        return Err(invalid("generation requires item code").into());
     };
     let mut func_index = 0;
     for item in items {
@@ -1062,10 +1148,10 @@ fn emit_quoted_item_node<'db>(
             if quote.holes.get(*slot as usize).map(|hole| hole.position)
                 != Some(QuoteHolePosition::Items)
             {
-                return Err(invalid("quoted item splice position changed"));
+                return Err(invalid("quoted item splice position changed").into());
             }
-            let Some(FrozenCodeHole::Code(child)) = node.holes.get(*slot as usize) else {
-                return Err(invalid("quoted item splice is not item code"));
+            let Some(FrozenCodeHole::Code(child, ..)) = node.holes.get(*slot as usize) else {
+                return Err(invalid("quoted item splice is not item code").into());
             };
             emit_quoted_item_node(
                 db,
@@ -1074,7 +1160,7 @@ fn emit_quoted_item_node<'db>(
                 origin,
                 target,
                 code,
-                expr_sources,
+                fragment_sources,
                 *child,
                 ordinal,
                 hygiene,
@@ -1107,7 +1193,7 @@ fn emit_quoted_item_node<'db>(
                     quote,
                     node,
                     code,
-                    expr_sources,
+                    fragment_sources,
                     code_root,
                     function,
                     func_index,
@@ -1126,12 +1212,12 @@ fn emit_quoted_item_node<'db>(
                 quote,
                 node,
                 code,
-                expr_sources,
+                fragment_sources,
                 code_root,
                 item,
                 owner.scope(),
             ),
-            _ => Err(invalid("quoted item list needs checked transplantation")),
+            _ => Err(invalid("quoted item list needs checked transplantation").into()),
         };
         ctxt.leave_id_namespace();
         hygiene.extend(emitted?);
@@ -1150,7 +1236,7 @@ fn emit_quoted_function<'db>(
     quote: &Quote<'db>,
     node: &FrozenCodeNode,
     code: &FrozenCode,
-    expr_sources: &[Option<QuoteExprSource<'db>>],
+    fragment_sources: &[Option<QuoteFragmentSource<'db>>],
     code_root: usize,
     function: &crate::hir_def::QuoteFunc<'db>,
     func_index: u32,
@@ -1158,22 +1244,20 @@ fn emit_quoted_function<'db>(
     generic_names: &[IdentId<'db>],
     is_method: bool,
     provider_scope: ScopeId<'db>,
-) -> Result<QuoteHygiene<'db>, String> {
+) -> Result<QuoteHygiene<'db>, QuoteConstructionError> {
     let function_types = node
         .function_types
         .get(func_index as usize)
         .ok_or_else(|| invalid("quoted function has no checked signature"))?;
     let name = quoted_name(function.name, node, target)?;
     let Partial::Present(params) = function.params else {
-        return Err(invalid("quoted function parameters are missing"));
+        return Err(invalid("quoted function parameters are missing").into());
     };
     if !function.attrs.data(db).is_empty()
         || function.modifiers.is_unsafe
         || function.modifiers.is_extern
     {
-        return Err(invalid(
-            "quoted function header needs name and type rewriting",
-        ));
+        return Err(invalid("quoted function header needs name and type rewriting").into());
     }
     let mut nominal_types = Vec::new();
     let (generic_params, function_generic_names) = quoted_function_generics(
@@ -1188,7 +1272,7 @@ fn emit_quoted_function<'db>(
         &mut nominal_types,
     )?;
     if function.effects.data(db).len() != function_types.effects.len() {
-        return Err(invalid("quoted method effects changed after freezing"));
+        return Err(invalid("quoted method effects changed after freezing").into());
     }
     let mut effect_names = Vec::new();
     let effects = EffectParamListId::new(
@@ -1214,12 +1298,10 @@ fn emit_quoted_function<'db>(
                 copied.key_ty = Partial::Present(ty);
                 Ok(copied)
             })
-            .collect::<Result<Vec<_>, String>>()?,
+            .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
     );
     if function.where_clause.predicates.len() != function_types.where_predicates.len() {
-        return Err(invalid(
-            "quoted method where predicates changed after freezing",
-        ));
+        return Err(invalid("quoted method where predicates changed after freezing").into());
     }
     let mut where_bounds = Vec::new();
     let mut const_where = Vec::new();
@@ -1236,7 +1318,7 @@ fn emit_quoted_function<'db>(
                 FrozenQuoteWherePredicate::Bound { ty, trait_sites },
             ) => {
                 if predicate.ty.to_opt().is_none() || predicate.bounds.len() != trait_sites.len() {
-                    return Err(invalid("quoted method where bound changed after freezing"));
+                    return Err(invalid("quoted method where bound changed after freezing").into());
                 }
                 let ty =
                     quoted_signature_type(db, ty, &function_generic_names, &mut nominal_types)?;
@@ -1256,9 +1338,7 @@ fn emit_quoted_function<'db>(
                 FrozenQuoteWherePredicate::Const,
             ) => const_where.push((index as u32, *expr)),
             _ => {
-                return Err(invalid(
-                    "quoted method where predicate changed after freezing",
-                ));
+                return Err(invalid("quoted method where predicate changed after freezing").into());
             }
         }
     }
@@ -1272,7 +1352,7 @@ fn emit_quoted_function<'db>(
                 .ok_or_else(|| invalid("quoted generic use has no parameter"))?;
             Ok((use_.site, *name))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
     let function_param_uses = node
         .param_uses
         .iter()
@@ -1290,7 +1370,7 @@ fn emit_quoted_function<'db>(
                 .ok_or_else(|| invalid("quoted parameter use has no name"))?;
             Ok((use_.site, name))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
     let mut param_indices = function_param_uses
         .iter()
         .map(|use_| use_.index as usize)
@@ -1308,7 +1388,7 @@ fn emit_quoted_function<'db>(
         );
         param_indices.extend(std::iter::repeat_n(0, function_self_uses.len()));
     } else if !function_self_uses.is_empty() {
-        return Err(invalid("quoted self name requires a method"));
+        return Err(invalid("quoted self name requires a method").into());
     }
     let body_param_count = param_uses.len();
     let effect_uses = node
@@ -1331,12 +1411,10 @@ fn emit_quoted_function<'db>(
                     .ok_or_else(|| invalid("quoted effect use has no bound name"))?;
                 Ok((use_.site, name))
             })
-            .collect::<Result<Vec<_>, String>>()?,
+            .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
     );
     if function_types.params.len() != params.data(db).len() {
-        return Err(invalid(
-            "quoted parameter type count changed after freezing",
-        ));
+        return Err(invalid("quoted parameter type count changed after freezing").into());
     }
     let params = FuncParamListId::new(
         db,
@@ -1349,29 +1427,26 @@ fn emit_quoted_function<'db>(
                     if is_method {
                         return Ok(param.clone());
                     }
-                    return Err(invalid("quoted self parameter needs a method"));
+                    return Err(invalid("quoted self parameter needs a method").into());
                 }
-                let Partial::Present(source_ty) = param.ty else {
-                    return Err(invalid("quoted parameter type is missing"));
+                let Partial::Present(_) = param.ty else {
+                    return Err(invalid("quoted parameter type is missing").into());
                 };
-                let ty = match source_ty.data(db) {
-                    TypeKind::Hole(slot) => {
-                        quoted_type_hole(builder, quote, node, *slot, target, generic_names)?
-                    }
-                    _ => quoted_signature_type(
-                        db,
-                        primitive
-                            .as_ref()
-                            .ok_or_else(|| invalid("quoted parameter needs checked rewriting"))?,
-                        &function_generic_names,
-                        &mut nominal_types,
-                    )?,
-                };
+                let ty = quoted_signature_type_with_holes(
+                    db,
+                    primitive
+                        .as_ref()
+                        .ok_or_else(|| invalid("quoted parameter needs checked rewriting"))?,
+                    &[],
+                    &function_generic_names,
+                    &mut nominal_types,
+                    &mut |slot| quoted_type_hole(builder, quote, node, slot, target, generic_names),
+                )?;
                 let mut copied = param.clone();
                 copied.ty = Partial::Present(ty);
                 Ok(copied)
             })
-            .collect::<Result<Vec<_>, String>>()?,
+            .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
     );
     let open_bindings = params
         .data(db)
@@ -1393,7 +1468,7 @@ fn emit_quoted_function<'db>(
                 &mut nominal_types,
             )?,
         },
-        None => return Err(invalid("quoted function result type is missing")),
+        None => return Err(invalid("quoted function result type is missing").into()),
     };
     let root = function
         .body
@@ -1418,7 +1493,7 @@ fn emit_quoted_function<'db>(
                 )?,
             ))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
     let qualified_consts = node
         .qualified_consts
         .iter()
@@ -1428,7 +1503,7 @@ fn emit_quoted_function<'db>(
                 bound_quote_qualified_const_path(db, quote.template, node, qualified)?;
             Ok((qualified.site, path, expected))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
     let qualified_paths = qualified_consts
         .iter()
         .map(|(site, path, _)| (*site, *path))
@@ -1495,7 +1570,7 @@ fn emit_quoted_function<'db>(
             continue;
         }
         let Some(FrozenCodeHole::Value(value, _)) = node.holes.get(index) else {
-            return Err(invalid("quoted member hole is missing"));
+            return Err(invalid("quoted member hole is missing").into());
         };
         let field = target.field_index(value, false)?;
         member_holes.push((
@@ -1559,7 +1634,7 @@ fn emit_quoted_function<'db>(
                                 )?,
                             ))
                         })
-                        .collect::<Result<Vec<_>, String>>()?;
+                        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
                     let expected_roots = rooted
                         .iter()
                         .map(|root| {
@@ -1584,7 +1659,7 @@ fn emit_quoted_function<'db>(
                                 .ok_or_else(|| invalid("quoted generic use has no parameter"))?;
                             Ok((use_.site, *name))
                         })
-                        .collect::<Result<Vec<_>, String>>()?;
+                        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
                     let (body, rooted_sites, generic_sites) = builder
                         .generated_quote_const_predicate(
                             u32::try_from(owner_const_count)
@@ -1610,7 +1685,7 @@ fn emit_quoted_function<'db>(
                     });
                     Ok(body)
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
             let mut predicates = owner_where.predicates(db).clone();
             predicates.extend(
                 where_bounds
@@ -1623,7 +1698,7 @@ fn emit_quoted_function<'db>(
                     .map(crate::hir_def::WhereClausePredicate::Const),
             );
             spec.where_clause = WhereClauseId::new(db, predicates);
-            Ok::<_, String>((spec, (quote.template, root)))
+            Ok::<_, QuoteConstructionError>((spec, (quote.template, root)))
         },
         |body, (template, root)| {
             copied = Some(body.adopt_closed_quote_body(
@@ -1631,7 +1706,7 @@ fn emit_quoted_function<'db>(
                 root,
                 provider_scope,
                 &node.holes,
-                Some((code, expr_sources)),
+                Some((code, fragment_sources)),
                 &open_bindings,
                 generic_names,
                 &function_generic_names,
@@ -1721,6 +1796,141 @@ fn emit_quoted_function<'db>(
     })
 }
 
+fn quoted_impl_where_bounds<'db>(
+    db: &'db dyn HirDb,
+    builder: &mut HirBuilder<'_, 'db, GenerationDesugared>,
+    code: &FrozenCode,
+    root: usize,
+    target: &TargetContext<'_, 'db>,
+    names: &[IdentId<'db>],
+    nominal: &mut Vec<(TypeId<'db>, QuoteSignatureRoot)>,
+) -> Result<Vec<WherePredicate<'db>>, QuoteConstructionError> {
+    let mut work = vec![(root, None, None)];
+    let mut bounds = Vec::new();
+    let mut visited = 0usize;
+    while let Some((index, predicate_index, edge)) = work.pop() {
+        visited += 1;
+        if visited > super::hir_builder::MAX_QUOTED_NODES {
+            return Err(QuoteConstructionError::from(format!(
+                "quoted where composition exceeds {} nodes",
+                super::hir_builder::MAX_QUOTED_NODES
+            ))
+            .at(edge));
+        }
+        (|| -> Result<(), QuoteConstructionError> {
+            let node = code
+                .nodes
+                .get(index)
+                .ok_or_else(|| invalid("quoted where graph edge is missing"))?;
+            if node == &FrozenCodeNode::empty(None) {
+                return Ok(());
+            }
+            let key = node
+                .template
+                .as_ref()
+                .ok_or_else(|| invalid("quoted where fragment has no template"))?;
+            if key.source != FrozenTemplateSource::Quote {
+                return Err(invalid("quoted where fragment is not a quote").into());
+            }
+            let file = db
+                .workspace()
+                .get(db, key.owner.file())
+                .ok_or_else(|| invalid("quoted where owner file is missing"))?;
+            let base = base_scope_graph_impl(db, super::map_file_to_mod_impl(db, file));
+            let owner = locate_authored_function(db, base, &key.owner)?;
+            let body = owner
+                .body(db)
+                .ok_or_else(|| invalid("quoted where owner body is missing"))?;
+            let Partial::Present(Expr::Quote(quote)) = &body.exprs(db)[key.expr] else {
+                return Err(invalid("quoted where site changed").into());
+            };
+            if quote.holes.len() != node.holes.len() {
+                return Err(invalid("quoted where holes changed after freezing").into());
+            }
+            let clause = match &quote.fragment {
+                QuoteFragment::Where(clause) => Some(clause),
+                QuoteFragment::Items(items) if index == root => match items.as_slice() {
+                    [QuoteItem::Impl(item)] => Some(&item.where_clause),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(clause) = clause {
+                if clause.predicates.len() != node.where_predicates.len() {
+                    return Err(invalid("quoted where predicates changed after freezing").into());
+                }
+                let Some(predicate_index) = predicate_index else {
+                    work.extend(
+                        (0..clause.predicates.len())
+                            .rev()
+                            .map(|predicate| (index, Some(predicate), edge.clone())),
+                    );
+                    return Ok(());
+                };
+                match (
+                    &clause.predicates[predicate_index],
+                    &node.where_predicates[predicate_index],
+                ) {
+                    (crate::hir_def::QuoteWherePredicate::Hole(slot), None) => {
+                        let Some(FrozenCodeHole::Code(child, source)) =
+                            node.holes.get(*slot as usize)
+                        else {
+                            return Err(invalid("quoted where hole is not code").into());
+                        };
+                        work.push((*child, None, source.clone().or_else(|| edge.clone())));
+                    }
+                    (
+                        crate::hir_def::QuoteWherePredicate::Bound(source),
+                        Some(FrozenQuoteWherePredicate::Bound { ty, trait_sites }),
+                    ) => {
+                        if source.bounds.len() != trait_sites.len() {
+                            return Err(invalid("quoted where bound changed after freezing").into());
+                        }
+                        let ty = quoted_signature_type_with_holes(
+                            db,
+                            ty,
+                            names,
+                            &[],
+                            nominal,
+                            &mut |slot| quoted_type_hole(builder, quote, node, slot, target, names),
+                        )?;
+                        let predicates = source
+                            .bounds
+                            .iter()
+                            .zip(trait_sites)
+                            .map(|(bound, site)| {
+                                quoted_trait_bound(db, bound, *site, &node.rooted_traits)
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        bounds.push(WherePredicate {
+                            ty: Partial::Present(ty),
+                            bounds: predicates,
+                        });
+                    }
+                    _ => {
+                        return Err(
+                            invalid("quoted where predicate needs checked reification").into()
+                        );
+                    }
+                }
+            } else if let Some(slots) = quote.splice_only_body(db) {
+                for slot in slots.into_iter().rev() {
+                    let Some(FrozenCodeHole::Code(child, source)) = node.holes.get(slot as usize)
+                    else {
+                        return Err(invalid("quoted where composition hole is not code").into());
+                    };
+                    work.push((*child, None, source.clone().or_else(|| edge.clone())));
+                }
+            } else {
+                return Err(invalid("quoted where fragment has the wrong kind").into());
+            }
+            Ok(())
+        })()
+        .map_err(|error| error.at(edge))?;
+    }
+    Ok(bounds)
+}
+
 fn emit_closed_quoted_impl<'db>(
     db: &'db dyn HirDb,
     ctxt: &mut FileLowerCtxt<'db>,
@@ -1730,22 +1940,21 @@ fn emit_closed_quoted_impl<'db>(
     quote: &Quote<'db>,
     node: &FrozenCodeNode,
     code: &FrozenCode,
-    expr_sources: &[Option<QuoteExprSource<'db>>],
+    fragment_sources: &[Option<QuoteFragmentSource<'db>>],
     code_root: usize,
     item: &QuoteItem<'db>,
     provider_scope: ScopeId<'db>,
-) -> Result<Vec<QuoteHygiene<'db>>, String> {
+) -> Result<Vec<QuoteHygiene<'db>>, QuoteConstructionError> {
     let QuoteItem::Impl(quoted) = item else {
-        return Err(invalid(
-            "quoted generation currently requires a function or trait impl",
-        ));
+        return Err(
+            invalid("quoted generation currently requires a function or trait impl").into(),
+        );
     };
     if !quoted.generic_params.data(db).is_empty()
-        || !quoted.where_clause.predicates.is_empty()
         || !quoted.attrs.data(db).is_empty()
         || quoted.selection_name.is_some()
     {
-        return Err(invalid("quoted impl header needs checked transplantation"));
+        return Err(invalid("quoted impl header needs checked transplantation").into());
     }
     if quoted.items.iter().any(|item| {
         !matches!(
@@ -1753,7 +1962,7 @@ fn emit_closed_quoted_impl<'db>(
             QuoteItem::Const(_) | QuoteItem::Type(_) | QuoteItem::Func(_)
         )
     }) {
-        return Err(invalid("quoted impl member needs checked transplantation"));
+        return Err(invalid("quoted impl member needs checked transplantation").into());
     }
     let method_count = quoted
         .items
@@ -1761,7 +1970,7 @@ fn emit_closed_quoted_impl<'db>(
         .filter(|item| matches!(item, QuoteItem::Func(_)))
         .count();
     if node.function_types.len() != method_count {
-        return Err(invalid("quoted method signatures changed after freezing"));
+        return Err(invalid("quoted method signatures changed after freezing").into());
     }
     if method_count == 0
         && (node
@@ -1772,9 +1981,7 @@ fn emit_closed_quoted_impl<'db>(
             || !node.param_uses.is_empty()
             || !node.self_uses.is_empty())
     {
-        return Err(invalid(
-            "quoted impl member names need checked transplantation",
-        ));
+        return Err(invalid("quoted impl member names need checked transplantation").into());
     }
     let constant_count = quoted
         .items
@@ -1789,15 +1996,13 @@ fn emit_closed_quoted_impl<'db>(
     if node.assoc_const_primitives.len() != constant_count
         || node.assoc_type_values.len() != type_count
     {
-        return Err(invalid(
-            "quoted associated member types changed after freezing",
-        ));
+        return Err(invalid("quoted associated member types changed after freezing").into());
     }
     let Some(Partial::Present(trait_ref)) = quoted.trait_ref else {
-        return Err(invalid("quoted impl requires a trait"));
+        return Err(invalid("quoted impl requires a trait").into());
     };
     let Partial::Present(authored_trait_path) = trait_ref.path(db) else {
-        return Err(invalid("quoted impl trait path is missing"));
+        return Err(invalid("quoted impl trait path is missing").into());
     };
     for index in 0..authored_trait_path.len(db).saturating_sub(1) {
         let segment = authored_trait_path
@@ -1806,7 +2011,8 @@ fn emit_closed_quoted_impl<'db>(
         if segment.generic_args(db).is_given(db) {
             return Err(invalid(
                 "quoted impl trait arguments on an intermediate path need reification",
-            ));
+            )
+            .into());
         }
     }
     if authored_trait_path.generic_args(db).is_given(db) != node.impl_trait_type_arguments.is_some()
@@ -1815,24 +2021,20 @@ fn emit_closed_quoted_impl<'db>(
             .as_ref()
             .is_some_and(|args| args.len() != authored_trait_path.generic_args(db).data(db).len())
     {
-        return Err(invalid(
-            "quoted impl trait arguments changed after freezing",
-        ));
+        return Err(invalid("quoted impl trait arguments changed after freezing").into());
     }
     let mut roots = node.rooted_traits.iter().filter(|root| root.site == 0);
     let root = roots
         .next()
         .ok_or_else(|| invalid("quoted impl trait has no checked root"))?;
     if roots.next().is_some() {
-        return Err(invalid("quoted impl trait root is ambiguous"));
+        return Err(invalid("quoted impl trait root is ambiguous").into());
     }
     let Partial::Present(self_ty) = quoted.ty else {
-        return Err(invalid("quoted impl self type is missing"));
+        return Err(invalid("quoted impl self type is missing").into());
     };
     let TypeKind::Hole(slot) = self_ty.data(db) else {
-        return Err(invalid(
-            "quoted impl self type must splice the target record",
-        ));
+        return Err(invalid("quoted impl self type must splice the target record").into());
     };
     let (generic_params, generic_names) =
         quoted_record_generics(db, target.owner, &request.target_const_param_types)?;
@@ -1852,13 +2054,13 @@ fn emit_closed_quoted_impl<'db>(
                     }
                     _ => quoted_signature_type(db, argument, &[], &mut signature_roots)?,
                 };
-                Ok::<_, String>(GenericArg::Type(TypeGenericArg {
+                Ok::<_, QuoteConstructionError>(GenericArg::Type(TypeGenericArg {
                     ty: Partial::Present(ty),
                 }))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
         let PathKind::Ident { ident, .. } = path.kind(db) else {
-            return Err(invalid("quoted impl trait path has no final item"));
+            return Err(invalid("quoted impl trait path has no final item").into());
         };
         path = PathId::new(
             db,
@@ -1892,18 +2094,33 @@ fn emit_closed_quoted_impl<'db>(
                         &mut signature_roots,
                     )
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
+            let owner_where = builder.quoted_owner_where_clause(target.owner, &generic_names)?;
+            let mut predicates = owner_where.predicates(db).clone();
+            predicates.extend(
+                quoted_impl_where_bounds(
+                    db,
+                    builder,
+                    code,
+                    code_root,
+                    target,
+                    &generic_names,
+                    &mut signature_roots,
+                )?
+                .into_iter()
+                .map(crate::hir_def::WhereClausePredicate::Type),
+            );
             let spec = GeneratedImplSpec {
                 trait_ref: Partial::Present(TraitRefId::new(db, Partial::Present(path))),
                 ty: Partial::Present(self_ty),
                 selection_name: None,
                 attrs: builder.empty_attrs(),
                 generic_params,
-                where_clause: builder.quoted_owner_where_clause(target.owner, &generic_names)?,
+                where_clause: WhereClauseId::new(db, predicates),
                 types,
                 consts: vec![],
             };
-            Ok::<_, String>((spec, ()))
+            Ok::<_, QuoteConstructionError>((spec, ()))
         },
         |builder, ()| {
             for (index, method) in quoted
@@ -1924,7 +2141,7 @@ fn emit_closed_quoted_impl<'db>(
                     quote,
                     node,
                     code,
-                    expr_sources,
+                    fragment_sources,
                     code_root,
                     method,
                     u32::try_from(index).map_err(|_| invalid("quoted method count exceeds u32"))?,
@@ -1951,7 +2168,7 @@ fn emit_closed_quoted_impl<'db>(
                         quote,
                         node,
                         code,
-                        expr_sources,
+                        fragment_sources,
                         constant,
                         u32::try_from(index)
                             .map_err(|_| invalid("quoted associated constant count exceeds u32"))?,
@@ -1963,7 +2180,7 @@ fn emit_closed_quoted_impl<'db>(
                     const_hygiene.push((body, roots));
                     Ok(definition)
                 })
-                .collect::<Result<Vec<_>, String>>()
+                .collect::<Result<Vec<_>, QuoteConstructionError>>()
         },
     )?;
     signature_roots.extend(const_signature_roots);
@@ -2002,12 +2219,12 @@ fn quoted_impl_type<'db>(
     associated: &QuoteAssocType<'db>,
     frozen: Option<&FrozenQuoteSignatureType>,
     roots: &mut Vec<(TypeId<'db>, QuoteSignatureRoot)>,
-) -> Result<crate::hir_def::AssocTyDef<'db>, String> {
+) -> Result<crate::hir_def::AssocTyDef<'db>, QuoteConstructionError> {
     let Partial::Present(name) = associated.name else {
-        return Err(invalid("quoted associated type needs a literal name"));
+        return Err(invalid("quoted associated type needs a literal name").into());
     };
     if associated.ty.is_none() {
-        return Err(invalid("quoted associated type value is missing"));
+        return Err(invalid("quoted associated type value is missing").into());
     }
     let ty = quoted_signature_type(
         db,
@@ -2025,20 +2242,20 @@ fn quoted_impl_const<'db>(
     quote: &Quote<'db>,
     node: &FrozenCodeNode,
     code: &FrozenCode,
-    expr_sources: &[Option<QuoteExprSource<'db>>],
+    fragment_sources: &[Option<QuoteFragmentSource<'db>>],
     constant: &QuoteConst<'db>,
     const_index: u32,
     primitive: Option<SemPrimTy>,
     generic_names: &[IdentId<'db>],
     provider_scope: ScopeId<'db>,
     signature_roots: &mut Vec<(TypeId<'db>, QuoteSignatureRoot)>,
-) -> Result<(AssocConstDef<'db>, Body<'db>, Vec<(ExprId, Func<'db>)>), String> {
+) -> Result<(AssocConstDef<'db>, Body<'db>, Vec<(ExprId, Func<'db>)>), QuoteConstructionError> {
     let name = quoted_name(constant.name, node, target)?;
     if !constant.attrs.data(db).is_empty() || constant.vis != Visibility::Private {
-        return Err(invalid("quoted associated constant header needs rewriting"));
+        return Err(invalid("quoted associated constant header needs rewriting").into());
     }
     let Partial::Present(_) = constant.ty else {
-        return Err(invalid("quoted associated constant type is missing"));
+        return Err(invalid("quoted associated constant type is missing").into());
     };
     let ty = primitive
         .and_then(quote_hir_primitive)
@@ -2068,7 +2285,7 @@ fn quoted_impl_const<'db>(
             )?;
             Ok((root.site, path))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
     let expected_roots = roots
         .iter()
         .map(|root| {
@@ -2088,7 +2305,7 @@ fn quoted_impl_const<'db>(
                 root,
                 provider_scope,
                 &node.holes,
-                Some((code, expr_sources)),
+                Some((code, fragment_sources)),
                 &[],
                 &[],
                 &[],
@@ -2103,7 +2320,7 @@ fn quoted_impl_const<'db>(
                 &[],
                 &[],
             )?);
-            Ok::<_, String>(())
+            Ok::<_, QuoteConstructionError>(())
         })?;
     let rooted = copied
         .ok_or_else(|| invalid("quoted associated constant body was not copied"))?
@@ -2410,7 +2627,7 @@ pub(crate) fn request_fragment<'db>(
     db: &'db dyn HirDb,
     top_mod: TopLevelMod<'db>,
     request: &FrozenGeneration,
-) -> Result<(ScopeGraph<'db>, Vec<QuoteHygiene<'db>>), String> {
+) -> Result<(ScopeGraph<'db>, Vec<QuoteHygiene<'db>>), QuoteConstructionError> {
     let base = base_scope_graph_impl(db, top_mod);
     let root = top_mod_ast(db, top_mod).syntax().clone();
     let target = base
@@ -2486,6 +2703,7 @@ fn authored_path<'db>(
 pub struct GeneratedHirError {
     pub message: String,
     pub site_span: Option<std::ops::Range<usize>>,
+    pub quote_source: Option<crate::core::meta::FrozenQuoteSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
@@ -2523,7 +2741,8 @@ pub(crate) fn generated_functions_impl<'db>(
                     hygiene.extend(quote);
                 }
                 Err(error) => errors.push(GeneratedHirError {
-                    message: error,
+                    quote_source: error.source,
+                    message: error.message,
                     site_span: request.site_span.clone(),
                 }),
             }
@@ -2569,6 +2788,7 @@ fn push_quoted_type_hygiene_errors<'db>(
         };
         if !valid {
             errors.push(GeneratedHirError {
+                quote_source: None,
                 message: invalid("quoted nominal type changed meaning in output"),
                 site_span: site_span.clone(),
             });
@@ -2584,6 +2804,7 @@ fn push_quoted_type_hygiene_errors<'db>(
         };
         if !valid {
             errors.push(GeneratedHirError {
+                quote_source: None,
                 message: invalid("quoted trait type changed meaning in output"),
                 site_span: site_span.clone(),
             });
@@ -2648,6 +2869,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                 });
             if !valid {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted rooted trait changed meaning in output"),
                     site_span: site_span.clone(),
                 });
@@ -2672,6 +2894,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                     };
                     if !valid {
                         errors.push(GeneratedHirError {
+                            quote_source: None,
                             message: invalid(
                                 "quoted associated constant function changed meaning in output",
                             ),
@@ -2692,6 +2915,7 @@ pub fn generated_quote_hygiene_errors<'db>(
         };
         let Some(body) = func.body(db) else {
             errors.push(GeneratedHirError {
+                quote_source: None,
                 message: invalid("quoted function body disappeared before hygiene checking"),
                 site_span: site_span.clone(),
             });
@@ -2769,6 +2993,7 @@ pub fn generated_quote_hygiene_errors<'db>(
             };
             if actual != Some(*expected) {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted constructor changed owner or variant index"),
                     site_span: site_span.clone(),
                 });
@@ -2793,6 +3018,7 @@ pub fn generated_quote_hygiene_errors<'db>(
         {
             let Partial::Present(Expr::MethodCall(..)) = &body.exprs(db)[call.site] else {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted method call disappeared before hygiene checking"),
                     site_span: site_span.clone(),
                 });
@@ -2816,6 +3042,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                     .is_some_and(|selected| actual != Some(CallableDef::Func(selected)))
             {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted method call changed selection in output"),
                     site_span: site_span.clone(),
                 });
@@ -2842,6 +3069,7 @@ pub fn generated_quote_hygiene_errors<'db>(
             };
             if !valid {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted rooted function changed meaning in output"),
                     site_span: site_span.clone(),
                 });
@@ -2852,6 +3080,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                 Some(ConstRef::TraitConst(actual)) if actual.inst().key(db) == *expected);
             if !valid {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted qualified constant changed trait in output"),
                     site_span: site_span.clone(),
                 });
@@ -2866,6 +3095,7 @@ pub fn generated_quote_hygiene_errors<'db>(
             });
             if !binds || !uses_bind {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted local binder changed meaning in output"),
                     site_span: site_span.clone(),
                 });
@@ -2877,6 +3107,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                     if owner == *func && idx == *index);
             if !valid {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted parameter changed meaning in output"),
                     site_span: site_span.clone(),
                 });
@@ -2888,6 +3119,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                     if owner == *func && idx == *index);
             if !valid {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted effect binding changed meaning in output"),
                     site_span: site_span.clone(),
                 });
@@ -2901,6 +3133,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                             if param.owner == func.scope() && param.name == *expected)));
             if !valid {
                 errors.push(GeneratedHirError {
+                    quote_source: None,
                     message: invalid("quoted generic body use changed meaning in output"),
                     site_span: site_span.clone(),
                 });
@@ -2916,6 +3149,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                 .any(|(actual, frozen)| *actual != frozen.body)
         {
             errors.push(GeneratedHirError {
+                quote_source: None,
                 message: invalid("quoted const where body changed in output"),
                 site_span: site_span.clone(),
             });
@@ -2941,6 +3175,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                 };
                 if !valid {
                     errors.push(GeneratedHirError {
+                        quote_source: None,
                         message: invalid("quoted const where function changed meaning in output"),
                         site_span: site_span.clone(),
                     });
@@ -2966,6 +3201,7 @@ pub fn generated_quote_hygiene_errors<'db>(
                 };
                 if !valid {
                     errors.push(GeneratedHirError {
+                        quote_source: None,
                         message: invalid("quoted const where generic changed meaning in output"),
                         site_span: site_span.clone(),
                     });

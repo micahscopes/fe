@@ -644,6 +644,8 @@ pub enum BodyDiag<'db> {
     },
     /// The splices of a splice-only quote body have different kinds.
     QuoteSpliceKinds(DynLazySpan<'db>),
+    UnexpandedPatternHole(DynLazySpan<'db>),
+    UnexpandedArmHole(DynLazySpan<'db>),
     /// A name in a quote that nothing binds.
     QuoteUnresolvedName {
         primary: DynLazySpan<'db>,
@@ -1117,6 +1119,8 @@ impl<'db> BodyDiag<'db> {
             Self::QuoteCallAtRuntime(..) => 110,
             Self::QuoteHoleValue { .. } => 104,
             Self::QuoteSpliceKinds(..) => 105,
+            Self::UnexpandedPatternHole(..) => 111,
+            Self::UnexpandedArmHole(..) => 112,
             Self::QuoteUnresolvedName { .. } => 106,
             Self::QuoteProviderLocal { .. } => 107,
             Self::QuoteProviderGeneric { .. } => 108,

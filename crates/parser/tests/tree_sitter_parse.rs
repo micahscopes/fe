@@ -467,6 +467,37 @@ fn tree_sitter_parse_coverage() {
 }
 
 #[test]
+fn quotation_pattern_splices_parse_in_both_frontends() {
+    let mut parser = new_parser();
+    for source in [
+        "fn provider() { let code = quote(value) { match value { ${lhs} => true, _ => false } } }",
+        "fn provider() { let code = quote(value) { let ${lhs} = value\n true } }",
+        "fn provider() { let code = quote(value) { match value { (${lhs}, _) => true, _ => false } } }",
+    ] {
+        let (root, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let root = fe_parser::SyntaxNode::new_root(root);
+        assert!(
+            root.descendants()
+                .any(|node| node.kind() == fe_parser::SyntaxKind::QuoteHolePat)
+        );
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
+    for source in [
+        "fn ordinary(value: bool) { match value { ${lhs} => true } }",
+        "fn provider() { let code = quote(value) { match value { mut ${lhs} => true } } }",
+        "fn provider() { let code = quote(value) { match value { ${quote { true }} => true } } }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(
+            !errors.is_empty(),
+            "invalid pattern splice accepted: {source}"
+        );
+    }
+}
+
+#[test]
 fn tree_sitter_matches_string_escape_policy() {
     let mut parser = new_parser();
     for (literal, valid) in [
@@ -653,4 +684,125 @@ fn tree_sitter_agrees_on_where_clauses_and_function_bodies() {
         compared.into_iter().collect::<Vec<_>>(),
         ["enum", "function", "impl", "impl trait", "struct", "trait"],
     );
+}
+
+#[test]
+fn quotation_arm_fragments_parse_in_both_frontends() {
+    use fe_parser::{SyntaxKind, ast, ast::prelude::*};
+    let mut parser = new_parser();
+    for (source, is_arms, holes) in [
+        (
+            "fn provider() { let code = quote(other) { ${arms}\n ${lhs} => match other { ${rhs} => ${cmp}, _ => false }, } }",
+            true,
+            1,
+        ),
+        (
+            "fn provider() { let code = quote(value) { match value { ${arms}\n _ => false, } } }",
+            false,
+            1,
+        ),
+        (
+            "fn provider() { let code = quote { 0 | 1 => true, _ => false, } }",
+            true,
+            0,
+        ),
+        (
+            "fn provider() { let code = quote { Shape::Rect { w, h } => w == h, _ => false, } }",
+            true,
+            0,
+        ),
+        (
+            "fn provider() { let code = quote(value) { match value { true => 1, false => 0, } } }",
+            false,
+            0,
+        ),
+        ("fn provider() { let code = quote { ${arms} } }", false, 0),
+        (
+            "fn provider() { let code = quote { ${unit} | Shape::Empty => true, _ => false, } }",
+            true,
+            0,
+        ),
+    ] {
+        let (root, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let root = fe_parser::SyntaxNode::new_root(root);
+        let quote = root
+            .descendants()
+            .find_map(ast::QuoteExpr::cast)
+            .expect("quote");
+        assert_eq!(quote.arms().is_some(), is_arms, "{source}");
+        assert_eq!(
+            root.descendants()
+                .filter(|node| node.kind() == SyntaxKind::QuoteHoleArm)
+                .count(),
+            holes,
+            "{source}"
+        );
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
+    for source in [
+        "fn ordinary(value: bool) { match value { ${arms} } }",
+        "fn provider() { let code = quote { ${${arms}}\n _ => true, } }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(!errors.is_empty(), "invalid arm splice accepted: {source}");
+    }
+}
+
+#[test]
+fn both_parsers_require_commas_between_enum_variants() {
+    let mut parser = new_parser();
+    for (source, valid) in [
+        (
+            "enum Variant {\n Empty\n Pair(u256, bool)\n Record { other: u256 }\n}",
+            false,
+        ),
+        (
+            "enum Variant { Empty, Pair(u256, bool), Record { other: u256 }, }",
+            true,
+        ),
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert_eq!(
+            errors.is_empty(),
+            valid,
+            "compiler parser: {source}: {errors:?}"
+        );
+        let errors = parse_errors(&mut parser, source);
+        assert_eq!(
+            errors.is_empty(),
+            valid,
+            "editor parser: {source}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn type_functions_parse_in_both_frontends() {
+    let mut parser = new_parser();
+    for source in [
+        "recursive type fn Choose<const N: usize>() -> (*) { match N { 0 => u256\n _ => bool } }",
+        "pub recursive type fn Fixed<const N: usize>() -> (*) { match N { 0 => u256\n _ => u256 } }",
+        "recursive type fn Nest<const N: usize>() -> (*) { match N { 0 => u256\n _ => (Nest<{N - 1}>, bool) } }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
+    for source in [
+        "type fn () -> (*) { u256 }",
+        "recursive type fn Bad<const N: usize>() -> (*) { match N { true => u256 } }",
+        "recursive type fn Identity<T>() -> (*) { T }",
+        "type fn Identity<T>() -> (*) { T }",
+        "recursive type fn Missing<const N: usize>() -> (*) { match N { 0 => u256",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(!errors.is_empty(), "native parser accepted {source}");
+        assert!(
+            !parse_errors(&mut parser, source).is_empty(),
+            "tree-sitter accepted {source}"
+        );
+    }
 }

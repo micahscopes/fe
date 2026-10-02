@@ -827,6 +827,8 @@ pub fn intrinsic_contract<'db>(
             "core::obligations::prove",
             "core::meta::variant_count",
             "core::meta::variant",
+            "core::meta::binders",
+            "core::meta::binder_at",
             "core::meta::field_count",
             "core::meta::field",
             "core::meta::field_type",

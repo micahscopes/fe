@@ -446,7 +446,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         let value = self.owned_pattern_value(value, self.locals[value.index()].ty);
         let roots = arms
             .iter()
-            .map(|arm| self.typed_body.pattern_root(arm.pat))
+            .map(|arm| self.typed_body.pattern_root(arm.pat()))
             .collect::<Option<Vec<_>>>()
             .unwrap_or_else(|| panic!("decision-tree match lowering requires validated patterns"));
         let tree = build_decision_tree(self.db, self.typed_body.pattern_store(), &roots);
@@ -499,13 +499,13 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 } => {
                     self.bind_decision_tree_leaf(leaf, projections);
                     let arm = &arms[leaf.arm_index];
-                    let arm_value = self.lower_expr(arm.body);
+                    let arm_value = self.lower_expr(arm.body());
                     if self.is_terminated(self.current) {
                         false
                     } else {
                         self.push_synthetic_stmt(SStmtKind::Assign {
                             dst: result,
-                            expr: SExpr::Forward(SOperand::expr(arm_value, arm.body)),
+                            expr: SExpr::Forward(SOperand::expr(arm_value, arm.body())),
                         });
                         self.set_synthetic_terminator(self.current, STerminatorKind::Goto(join_bb));
                         true

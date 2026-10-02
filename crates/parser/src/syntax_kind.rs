@@ -325,6 +325,9 @@ pub enum SyntaxKind {
     QuoteHoleExpr,
     /// `${ty}` in type position inside a quotation.
     QuoteHoleType,
+    /// `${p}` in pattern position inside a quotation.
+    QuoteHolePat,
+    QuoteHoleArm,
     /// `${e}` for a member, a declared name, items or where predicates. The
     /// parent node says which.
     QuoteHole,
@@ -748,6 +751,8 @@ impl SyntaxKind {
             SyntaxKind::QuoteOpenList => "`quote` open name list",
             SyntaxKind::QuoteHoleExpr => "`${...}` splice hole",
             SyntaxKind::QuoteHoleType => "`${...}` type splice",
+            SyntaxKind::QuoteHoleArm => "`${...}` match-arm splice",
+            SyntaxKind::QuoteHolePat => "`${...}` pattern splice",
             SyntaxKind::QuoteHole => "`${...}` splice",
             SyntaxKind::QuoteItemList => "quoted items",
             SyntaxKind::QuoteWhere => "quoted where predicates",

@@ -1,4 +1,8 @@
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use common::ingot::IngotKind;
 use num_bigint::Sign;
@@ -15,7 +19,7 @@ use crate::{
     },
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenMetaValue, FrozenQuoteConstructorSite,
-        FrozenTemplateSource,
+        FrozenTemplateSource, FrozenVariantBinding,
     },
     hir_def::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
@@ -33,7 +37,7 @@ use crate::{
     span::{DesugaredOrigin, HirOrigin},
 };
 
-use super::{FileLowerCtxt, body::BodyCtxt};
+use super::{FileLowerCtxt, body::BodyCtxt, generated::QuoteConstructionError};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LibRoots<'db> {
@@ -927,7 +931,7 @@ where
         holes: &[FrozenCodeHole],
         rooted_funcs: &[(ExprId, PathId<'db>)],
         generic_uses: &[(ExprId, IdentId<'db>)],
-    ) -> Result<(Body<'db>, Vec<ExprId>, Vec<ExprId>), String> {
+    ) -> Result<(Body<'db>, Vec<ExprId>, Vec<ExprId>), QuoteConstructionError> {
         let db = self.db();
         let mut body = BodyBuilder::new(
             self.ctxt,
@@ -1150,8 +1154,11 @@ pub(super) struct DecodeInputBindings<'db> {
 
 struct QuoteCopyMap<'a, 'db> {
     holes: &'a [FrozenCodeHole],
+    groups: HashMap<FrozenVariantBinding, Vec<(IdentId<'db>, PatId)>>,
+    group_locals: Rc<RefCell<HashMap<PatId, Vec<ExprId>>>>,
+    group_names: Rc<Cell<usize>>,
     code: Option<&'a FrozenCode>,
-    fragments: Option<&'a [Option<QuoteExprSource<'db>>]>,
+    fragments: Option<&'a [Option<QuoteFragmentSource<'db>>]>,
     fragment_depth: usize,
     budget: Rc<Cell<usize>>,
     open_bindings: Vec<(IdentId<'db>, usize)>,
@@ -1183,9 +1190,30 @@ struct QuoteCopyMap<'a, 'db> {
     fragment_qualified_paths: Vec<(ExprId, Trait<'db>, ScopeId<'db>)>,
 }
 
-pub(super) struct QuoteExprSource<'db> {
+fn map_group_field<'db>(
+    map: &QuoteCopyMap<'_, 'db>,
+    group: &FrozenVariantBinding,
+    field: usize,
+) -> Result<(IdentId<'db>, PatId), String> {
+    map.groups
+        .get(group)
+        .ok_or("binder group is not bound in this scope")?
+        .get(field)
+        .copied()
+        .ok_or_else(|| "binder field index is out of bounds".into())
+}
+
+pub(super) enum QuoteFragmentRoot {
+    Expr {
+        root: ExprId,
+        splices: Option<Vec<u32>>,
+    },
+    Arms(Vec<crate::hir_def::MatchArm>),
+}
+
+pub(super) struct QuoteFragmentSource<'db> {
     pub(super) template: Body<'db>,
-    pub(super) root: ExprId,
+    pub(super) root: QuoteFragmentRoot,
     pub(super) open_names: Vec<IdentId<'db>>,
     pub(super) member_holes: Vec<(u32, IdentId<'db>)>,
     pub(super) rooted_funcs: Vec<(ExprId, PathId<'db>, Func<'db>)>,
@@ -1223,8 +1251,10 @@ pub(super) struct QuoteCopySummary<'db> {
     pub(super) fragment_qualified_paths: Vec<(ExprId, Trait<'db>)>,
 }
 
+pub(super) const MAX_QUOTED_NODES: usize = 1_000;
+
 impl<'a, 'db> QuoteCopyMap<'a, 'db> {
-    const MAX_TRANSPLANTED_NODES: usize = 1_000;
+    const MAX_TRANSPLANTED_NODES: usize = MAX_QUOTED_NODES;
 
     fn charge_node(&mut self) -> Result<(), String> {
         let used = self.budget.get();
@@ -1282,6 +1312,9 @@ impl<'a, 'db> QuoteCopyMap<'a, 'db> {
         }
         Ok(Self {
             holes,
+            groups: HashMap::new(),
+            group_locals: Rc::new(RefCell::new(HashMap::new())),
+            group_names: Rc::new(Cell::new(0)),
             code: None,
             fragments: None,
             fragment_depth: 0,
@@ -1348,7 +1381,7 @@ where
         root: ExprId,
         provider_scope: ScopeId<'db>,
         holes: &[FrozenCodeHole],
-        fragments: Option<(&FrozenCode, &[Option<QuoteExprSource<'db>>])>,
+        fragments: Option<(&FrozenCode, &[Option<QuoteFragmentSource<'db>>])>,
         open_bindings: &[(IdentId<'db>, usize)],
         owner_generic_bindings: &[IdentId<'db>],
         generic_bindings: &[IdentId<'db>],
@@ -1362,7 +1395,7 @@ where
         param_uses: &[(ExprId, IdentId<'db>)],
         generic_uses: &[(ExprId, IdentId<'db>)],
         member_holes: &[(u32, IdentId<'db>)],
-    ) -> Result<QuoteCopySummary<'db>, String> {
+    ) -> Result<QuoteCopySummary<'db>, QuoteConstructionError> {
         let mut all_paths = rooted_funcs.to_vec();
         all_paths.extend_from_slice(qualified_paths);
         let mut map = QuoteCopyMap::new(
@@ -1430,7 +1463,7 @@ where
         self.body
             .quote_path_scopes
             .extend(rooted_paths.iter().map(|site| (*site, provider_scope)));
-        let locals = locals
+        let mut locals = locals
             .iter()
             .map(|(binder, _, uses)| {
                 let binder = map
@@ -1449,7 +1482,7 @@ where
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((binder, uses))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
         let qualified_paths = qualified_paths
             .iter()
             .map(|(site, _)| {
@@ -1496,6 +1529,14 @@ where
             })
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| "quoted variant site was not copied".to_owned())?;
+        let mut group_locals = map
+            .group_locals
+            .borrow()
+            .iter()
+            .map(|(binder, uses)| (*binder, uses.clone()))
+            .collect::<Vec<_>>();
+        group_locals.sort_by_key(|(binder, _)| binder.as_u32());
+        locals.extend(group_locals);
         Ok(QuoteCopySummary {
             constructor_sites,
             rooted_paths,
@@ -1522,7 +1563,10 @@ where
         })
     }
 
-    fn quote_scalar_expr(&mut self, hole: &FrozenCodeHole) -> Result<ExprId, String> {
+    fn quote_scalar_expr(
+        &mut self,
+        hole: &FrozenCodeHole,
+    ) -> Result<ExprId, QuoteConstructionError> {
         let FrozenCodeHole::Value(value, _) = hole else {
             return Err("quoted code splice requires fragment transplantation".into());
         };
@@ -1557,7 +1601,26 @@ where
         template: Body<'db>,
         old: ExprId,
         map: &mut QuoteCopyMap<'_, 'db>,
-    ) -> Result<ExprId, String> {
+    ) -> Result<ExprId, QuoteConstructionError> {
+        self.copy_quote_expr_inner(template, old, map)
+            .map_err(|error| {
+                let source = match &template.exprs(self.db())[old] {
+                    Partial::Present(Expr::Hole(slot)) => match map.holes.get(*slot as usize) {
+                        Some(FrozenCodeHole::Code(_, source)) => source.clone(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                error.at(source)
+            })
+    }
+
+    fn copy_quote_expr_inner(
+        &mut self,
+        template: Body<'db>,
+        old: ExprId,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<ExprId, QuoteConstructionError> {
         if let Some(id) = map.exprs.get(&old) {
             return Ok(*id);
         }
@@ -1572,7 +1635,7 @@ where
                 .get(*slot as usize)
                 .ok_or_else(|| "quoted splice slot is missing".to_owned())?;
             let id = match hole {
-                FrozenCodeHole::Code(child) => self.copy_quote_fragment(*child, map)?,
+                FrozenCodeHole::Code(child, ..) => self.copy_quote_fragment(*child, map)?,
                 FrozenCodeHole::Value(..) => self.quote_scalar_expr(hole)?,
             };
             map.exprs.insert(old, id);
@@ -1617,7 +1680,7 @@ where
                             expr: self.copy_quote_expr(template, field.expr, map)?,
                         })
                     })
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
                 Expr::RecordInit(Partial::Present(path), fields)
             }
             Expr::Call(callee, args) => Expr::Call(
@@ -1630,7 +1693,7 @@ where
                             expr: self.copy_quote_expr(template, arg.expr, map)?,
                         })
                     })
-                    .collect::<Result<Vec<_>, String>>()?,
+                    .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
             ),
             Expr::MethodCall(receiver, Partial::Present(name), generic_args, args) => {
                 if generic_args.is_given(db) {
@@ -1649,7 +1712,7 @@ where
                                 expr: self.copy_quote_expr(template, arg.expr, map)?,
                             })
                         })
-                        .collect::<Result<Vec<_>, String>>()?,
+                        .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
                 )
             }
             Expr::Field(receiver, Partial::Present(FieldIndex::Hole(slot))) => {
@@ -1717,24 +1780,16 @@ where
             ),
             Expr::Match(scrutinee, Partial::Present(arms)) => Expr::Match(
                 self.copy_quote_expr(template, *scrutinee, map)?,
-                Partial::Present(
-                    arms.iter()
-                        .map(|arm| {
-                            map.charge_node()?;
-                            Ok(crate::hir_def::MatchArm {
-                                pat: self.copy_quote_pat(template, arm.pat, map)?,
-                                body: self.copy_quote_expr(template, arm.body, map)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, String>>()?,
-                ),
+                Partial::Present(self.copy_quote_arms(template, arms, map)?),
             ),
             Expr::Block(stmts) => {
+                let enclosing = map.groups.clone();
                 self.body.f_ctxt.enter_block_scope();
                 let stmts = stmts
                     .iter()
                     .map(|stmt| self.copy_quote_stmt(template, *stmt, map))
                     .collect::<Result<Vec<_>, _>>()?;
+                map.groups = enclosing;
                 Expr::Block(stmts)
             }
             _ => return Err("quoted function body requires a splice or name rewrite".into()),
@@ -1752,28 +1807,203 @@ where
         Ok(id)
     }
 
+    fn copy_quote_arm(
+        &mut self,
+        template: Body<'db>,
+        arm: &crate::hir_def::MatchArm,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<crate::hir_def::MatchArm, QuoteConstructionError> {
+        let Some((pat, body)) = arm.parts() else {
+            return Err("arm-list splice needs a fragment source".into());
+        };
+        map.charge_node()?;
+        let enclosing = map.groups.clone();
+        let result = (|| {
+            Ok(crate::hir_def::MatchArm::Arm {
+                pat: self.copy_quote_pat(template, pat, map)?,
+                body: self.copy_quote_expr(template, body, map)?,
+            })
+        })();
+        map.groups = enclosing;
+        result
+    }
+
+    fn copy_quote_arms(
+        &mut self,
+        template: Body<'db>,
+        arms: &[crate::hir_def::MatchArm],
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<Vec<crate::hir_def::MatchArm>, QuoteConstructionError> {
+        let mut copied = Vec::new();
+        for arm in arms {
+            match arm {
+                crate::hir_def::MatchArm::Arm { .. } => {
+                    copied.push(self.copy_quote_arm(template, arm, map)?)
+                }
+                crate::hir_def::MatchArm::Hole(slot) => {
+                    let Some(FrozenCodeHole::Code(child, source)) = map.holes.get(*slot as usize)
+                    else {
+                        return Err("arm-list splice needs Code<Arm>".into());
+                    };
+                    copied.extend(
+                        self.copy_quote_arm_fragment(*child, map)
+                            .map_err(|error| error.at(source.clone()))?,
+                    );
+                }
+            }
+        }
+        Ok(copied)
+    }
+
+    fn copy_quote_arm_fragment(
+        &mut self,
+        child: usize,
+        parent: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<Vec<crate::hir_def::MatchArm>, QuoteConstructionError> {
+        // Flatten concatenation iteratively. The existing node budget bounds
+        // graph traversal; expression nesting limits do not bound arm counts.
+        enum Work {
+            Fragment(usize, Option<crate::core::meta::FrozenQuoteSpan>),
+            Arm(crate::hir_def::MatchArm),
+        }
+        let code = parent.code.ok_or("arm splice has no frozen code")?;
+        let sources = parent
+            .fragments
+            .ok_or("arm splice has no checked sources")?;
+        let mut pending = vec![Work::Fragment(child, None)];
+        let mut copied = Vec::new();
+        while let Some(work) = pending.pop() {
+            let Work::Fragment(child, site) = work else {
+                if let Work::Arm(arm) = work {
+                    copied.push(arm);
+                }
+                continue;
+            };
+            let result = (|| {
+                parent.charge_node()?;
+                let node = code
+                    .nodes
+                    .get(child)
+                    .ok_or("arm splice has no frozen node")?;
+                if node == &crate::core::meta::FrozenCodeNode::empty(None) {
+                    return Ok(());
+                }
+                let source = sources
+                    .get(child)
+                    .and_then(Option::as_ref)
+                    .ok_or("arm splice needs a quoted arm list")?;
+                let arms = match &source.root {
+                    QuoteFragmentRoot::Arms(arms) => {
+                        self.copy_quote_fragment_with(child, parent, |this, source, map| {
+                            arms.iter()
+                                .map(|arm| match arm {
+                                    crate::hir_def::MatchArm::Hole(slot) => {
+                                        Ok(crate::hir_def::MatchArm::Hole(*slot))
+                                    }
+                                    _ => this.copy_quote_arm(source.template, arm, map),
+                                })
+                                .collect::<Result<Vec<_>, QuoteConstructionError>>()
+                        })?
+                    }
+                    QuoteFragmentRoot::Expr {
+                        splices: Some(slots),
+                        ..
+                    } => slots
+                        .iter()
+                        .copied()
+                        .map(crate::hir_def::MatchArm::Hole)
+                        .collect(),
+                    _ => return Err("arm splice needs Code<Arm>".into()),
+                };
+                for arm in arms.into_iter().rev() {
+                    match arm {
+                        crate::hir_def::MatchArm::Hole(slot) => {
+                            let Some(FrozenCodeHole::Code(next, source)) =
+                                node.holes.get(slot as usize)
+                            else {
+                                return Err("arm-list splice needs Code<Arm>".into());
+                            };
+                            pending.push(Work::Fragment(
+                                *next,
+                                source.clone().or_else(|| site.clone()),
+                            ));
+                        }
+                        _ => pending.push(Work::Arm(arm)),
+                    }
+                }
+                Ok(())
+            })();
+            result.map_err(|error: QuoteConstructionError| error.at(site))?;
+        }
+        Ok(copied)
+    }
+
     fn copy_quote_fragment(
         &mut self,
         child: usize,
         parent: &mut QuoteCopyMap<'_, 'db>,
-    ) -> Result<ExprId, String> {
+    ) -> Result<ExprId, QuoteConstructionError> {
         if parent.fragment_depth >= 64 {
             return Err("quoted expression fragments exceed nesting limit".into());
         }
         let code = parent
             .code
             .ok_or_else(|| "quoted code splice requires fragment transplantation".to_owned())?;
-        let sources = parent
-            .fragments
-            .ok_or_else(|| "quoted code splice has no checked source".to_owned())?;
         let node = code
             .nodes
             .get(child)
             .ok_or_else(|| "quoted code splice has no frozen node".to_owned())?;
+        if let Some(binding) = &node.variant_binding {
+            let field = binding
+                .field
+                .ok_or("pattern code cannot stand for an expression")?;
+            let mut group = binding.clone();
+            group.field = None;
+            let (name, binder) = map_group_field(parent, &group, field)?;
+            let expr = self.push_expr(Expr::Path(Partial::Present(PathId::from_ident(
+                self.db(),
+                name,
+            ))));
+            parent
+                .group_locals
+                .borrow_mut()
+                .get_mut(&binder)
+                .ok_or("binder group has no hygiene record")?
+                .push(expr);
+            return Ok(expr);
+        }
+        self.copy_quote_fragment_with(child, parent, |this, source, map| {
+            let QuoteFragmentRoot::Expr { root, .. } = &source.root else {
+                return Err("quoted expression splice needs expression code".into());
+            };
+            this.copy_quote_expr(source.template, *root, map)
+        })
+    }
+
+    fn copy_quote_fragment_with<T>(
+        &mut self,
+        child: usize,
+        parent: &mut QuoteCopyMap<'_, 'db>,
+        copy: impl FnOnce(
+            &mut Self,
+            &QuoteFragmentSource<'db>,
+            &mut QuoteCopyMap<'_, 'db>,
+        ) -> Result<T, QuoteConstructionError>,
+    ) -> Result<T, QuoteConstructionError> {
+        let code = parent
+            .code
+            .ok_or("quoted code splice requires fragment transplantation")?;
+        let sources = parent
+            .fragments
+            .ok_or("quoted code splice has no checked source")?;
+        let node = code
+            .nodes
+            .get(child)
+            .ok_or("quoted code splice has no frozen node")?;
         let source = sources
             .get(child)
             .and_then(Option::as_ref)
-            .ok_or_else(|| "quoted expression splice needs expression code".to_owned())?;
+            .ok_or("quoted splice has no checked fragment source")?;
         if source.has_block_items
             || node
                 .rooted_funcs
@@ -1802,7 +2032,9 @@ where
             .iter()
             .map(|use_| {
                 if !is_checked_body || use_.func != 0 || use_.where_predicate.is_some() {
-                    return Err("quoted fragment generic use needs a checked body".to_owned());
+                    return Err("quoted fragment generic use needs a checked body"
+                        .to_owned()
+                        .into());
                 }
                 let name = parent
                     .generic_bindings
@@ -1810,7 +2042,7 @@ where
                     .ok_or_else(|| "read-back generic has no destination binding".to_owned())?;
                 Ok((use_.site, *name))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
         for use_ in &node.open_uses {
             let open_name = source
                 .open_names
@@ -1843,7 +2075,7 @@ where
             param_uses.push((*site, IdentId::make_self(self.db())));
             bound_sites.push((*site, 0));
         }
-        let types = super::generated::reify_quote_expr_types(
+        let types = super::generated::reify_quote_fragment_types(
             self.db(),
             node,
             source,
@@ -1880,12 +2112,16 @@ where
         )?;
         map.code = Some(code);
         map.fragments = Some(sources);
-        map.fragment_depth = parent.fragment_depth + 1;
+        map.fragment_depth = parent.fragment_depth
+            + usize::from(matches!(source.root, QuoteFragmentRoot::Expr { .. }));
         map.budget = parent.budget.clone();
         map.open_bindings = parent.open_bindings.clone();
         map.owner_generic_bindings = parent.owner_generic_bindings.clone();
         map.generic_bindings = parent.generic_bindings.clone();
         map.allow_self = parent.allow_self;
+        map.groups = parent.groups.clone();
+        map.group_locals = parent.group_locals.clone();
+        map.group_names = parent.group_names.clone();
         map.cast_types = types.cast_types.into_iter().collect();
         map.local_types = types.local_types.into_iter().collect();
         map.record_paths = types.record_paths.into_iter().collect();
@@ -1898,7 +2134,7 @@ where
                 map.record_paths.entry(*site).or_insert(*path);
             }
         }
-        let copied = self.copy_quote_expr(source.template, source.root, &mut map)?;
+        let copied = copy(self, source, &mut map)?;
         for (site, index) in bound_sites {
             let copied_site = map
                 .exprs
@@ -1998,7 +2234,7 @@ where
         template: Body<'db>,
         old: CondId,
         map: &mut QuoteCopyMap<'_, 'db>,
-    ) -> Result<CondId, String> {
+    ) -> Result<CondId, QuoteConstructionError> {
         if let Some(id) = map.conds.get(&old) {
             return Ok(*id);
         }
@@ -2027,7 +2263,7 @@ where
         template: Body<'db>,
         old: StmtId,
         map: &mut QuoteCopyMap<'_, 'db>,
-    ) -> Result<StmtId, String> {
+    ) -> Result<StmtId, QuoteConstructionError> {
         if let Some(id) = map.stmts.get(&old) {
             return Ok(*id);
         }
@@ -2083,7 +2319,26 @@ where
         template: Body<'db>,
         old: PatId,
         map: &mut QuoteCopyMap<'_, 'db>,
-    ) -> Result<PatId, String> {
+    ) -> Result<PatId, QuoteConstructionError> {
+        self.copy_quote_pat_inner(template, old, map)
+            .map_err(|error| {
+                let source = match &template.pats(self.db())[old] {
+                    Partial::Present(Pat::Hole(slot)) => match map.holes.get(*slot as usize) {
+                        Some(FrozenCodeHole::Code(_, source)) => source.clone(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                error.at(source)
+            })
+    }
+
+    fn copy_quote_pat_inner(
+        &mut self,
+        template: Body<'db>,
+        old: PatId,
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<PatId, QuoteConstructionError> {
         if let Some(id) = map.pats.get(&old) {
             return Ok(*id);
         }
@@ -2092,6 +2347,83 @@ where
         let Partial::Present(pat) = &template.pats(db)[old] else {
             return Err("quoted function contains an invalid pattern".into());
         };
+        if let Pat::Hole(slot) = pat {
+            let FrozenCodeHole::Code(child, ..) = map
+                .holes
+                .get(*slot as usize)
+                .ok_or("pattern splice slot is missing")?
+            else {
+                return Err("pattern splice requires Code<Pat>".into());
+            };
+            let binding = map
+                .code
+                .and_then(|code| code.nodes.get(*child))
+                .and_then(|node| node.variant_binding.as_ref())
+                .ok_or("pattern splice needs a compiler-issued binder")?
+                .clone();
+            if binding.field.is_some() {
+                return Err("field reference code cannot stand for a pattern".into());
+            }
+            if map.groups.contains_key(&binding) {
+                return Err("binder group already bound in an enclosing pattern".into());
+            }
+            let (path, identity) = super::generated::reify_quote_nominal_constructor(
+                db,
+                &binding.owner,
+                Some(binding.variant_index),
+            )?;
+            let AdtRef::Enum(owner) = identity.owner else {
+                return Err("variant binder needs an enum owner".into());
+            };
+            let variant =
+                crate::hir_def::EnumVariant::new(owner, usize::from(binding.variant_index));
+            let labels = match variant.kind(db) {
+                crate::hir_def::VariantKind::Unit => Vec::new(),
+                crate::hir_def::VariantKind::Tuple(types) => vec![None; types.data(db).len()],
+                crate::hir_def::VariantKind::Record(fields) => fields
+                    .data(db)
+                    .iter()
+                    .map(|field| field.name.to_opt())
+                    .collect(),
+            };
+            let mut fields = Vec::new();
+            for _ in &labels {
+                map.charge_node()?;
+                let fresh = map.group_names.get();
+                map.group_names.set(fresh + 1);
+                let name = IdentId::new(db, format!("<quote-group-local-{fresh}>"));
+                let pat = self.push_pat(Pat::Path(
+                    Partial::Present(PathId::from_ident(db, name)),
+                    false,
+                ));
+                map.group_locals.borrow_mut().insert(pat, Vec::new());
+                fields.push((name, pat));
+            }
+            let pattern = match variant.kind(db) {
+                crate::hir_def::VariantKind::Unit => Pat::Path(Partial::Present(path), false),
+                crate::hir_def::VariantKind::Tuple(_) => Pat::PathTuple(
+                    Partial::Present(path),
+                    fields.iter().map(|(_, pat)| *pat).collect(),
+                ),
+                crate::hir_def::VariantKind::Record(_) => Pat::Record(
+                    Partial::Present(path),
+                    labels
+                        .into_iter()
+                        .zip(&fields)
+                        .map(|(label, (_, pat))| crate::hir_def::RecordPatField {
+                            label: Partial::from(label),
+                            pat: *pat,
+                        })
+                        .collect(),
+                ),
+            };
+            let id = self.push_pat(pattern);
+            map.groups.insert(binding, fields);
+            map.fragment_constructors
+                .push((FrozenQuoteConstructorSite::Pat(id), identity));
+            map.pats.insert(old, id);
+            return Ok(id);
+        }
         let pat = match pat {
             Pat::Path(Partial::Present(_), mutable)
                 if map

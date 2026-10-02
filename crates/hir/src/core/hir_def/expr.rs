@@ -113,9 +113,32 @@ pub enum FieldIndex<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub struct MatchArm {
-    pub pat: PatId,
-    pub body: ExprId,
+pub enum MatchArm {
+    Arm {
+        pat: PatId,
+        body: ExprId,
+    },
+    /// A slot in the enclosing quote, containing Code<Arm>.
+    Hole(u32),
+}
+
+impl MatchArm {
+    pub fn parts(&self) -> Option<(PatId, ExprId)> {
+        match self {
+            Self::Arm { pat, body } => Some((*pat, *body)),
+            Self::Hole(_) => None,
+        }
+    }
+
+    /// Ordinary checked arms have already had their splices expanded.
+    pub fn pat(&self) -> PatId {
+        self.parts().expect("unexpanded match-arm splice").0
+    }
+
+    /// Ordinary checked arms have already had their splices expanded.
+    pub fn body(&self) -> ExprId {
+        self.parts().expect("unexpanded match-arm splice").1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::From, salsa::Update)]

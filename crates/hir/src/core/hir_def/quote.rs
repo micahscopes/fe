@@ -33,6 +33,7 @@ impl<'db> Quote<'db> {
     /// splices, whose kind is the kind of its splices.
     pub fn syntactic_kind(&self, db: &'db dyn crate::HirDb) -> Option<QuoteKind> {
         match &self.fragment {
+            QuoteFragment::Arms(_) => Some(QuoteKind::Arm),
             QuoteFragment::Items(_) => Some(QuoteKind::Item),
             QuoteFragment::Where(_) => Some(QuoteKind::Where),
             QuoteFragment::Expr => (self.splice_only_body(db).is_none()).then_some(QuoteKind::Expr),
@@ -71,6 +72,8 @@ impl<'db> Quote<'db> {
 /// What a fragment is. It is part of the value's type, `Code<K>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum QuoteKind {
+    Pat,
+    Arm,
     Expr,
     Item,
     Where,
@@ -80,6 +83,7 @@ pub enum QuoteKind {
 pub enum QuoteFragment<'db> {
     /// The template's root expression.
     Expr,
+    Arms(Vec<super::MatchArm>),
     Items(Vec<QuoteItem<'db>>),
     Where(QuoteWhereClause<'db>),
 }
@@ -100,6 +104,8 @@ pub struct QuoteHole {
 /// Where a splice stands, which decides the values it accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum QuoteHolePosition {
+    /// `${p}` as a pattern.
+    Pat,
     /// `${e}` as an expression.
     Expr,
     /// `x.${f}`.
@@ -110,6 +116,8 @@ pub enum QuoteHolePosition {
     Type,
     /// `fn ${n}`, `const ${n}`.
     Name,
+    /// `${arms}` where match arms may stand.
+    Arms,
     /// `${items}` where an item may stand.
     Items,
     /// `where ${w}`.

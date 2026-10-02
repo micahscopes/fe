@@ -215,7 +215,7 @@ impl<'db> ConstFnChecker<'db, '_> {
         };
 
         match pat_data {
-            Pat::WildCard | Pat::Rest => {}
+            Pat::Hole(_) | Pat::WildCard | Pat::Rest => {}
             Pat::Lit(_) | Pat::Path(_, _) => {}
             Pat::Tuple(elems) | Pat::PathTuple(_, elems) => {
                 elems.iter().for_each(|elem| self.check_let_pat(*elem));
@@ -288,8 +288,10 @@ impl<'db> ConstFnChecker<'db, '_> {
                 self.check_expr(*scrutinee);
                 if let Some(arms) = arms.clone().to_opt() {
                     arms.iter().for_each(|arm| {
-                        self.check_match_pat(arm.pat);
-                        self.check_expr(arm.body);
+                        if let Some((pat, body)) = arm.parts() {
+                            self.check_match_pat(pat);
+                            self.check_expr(body);
+                        }
                     });
                 }
             }
@@ -338,7 +340,7 @@ impl<'db> ConstFnChecker<'db, '_> {
         };
 
         match pat_data {
-            Pat::WildCard | Pat::Rest => {}
+            Pat::Hole(_) | Pat::WildCard | Pat::Rest => {}
             Pat::Lit(_) | Pat::Path(_, _) => {}
             Pat::Tuple(elems) | Pat::PathTuple(_, elems) => {
                 elems.iter().for_each(|elem| self.check_match_pat(*elem));

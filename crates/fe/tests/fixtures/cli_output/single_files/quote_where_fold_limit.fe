@@ -1,0 +1,21 @@
+// Q6: the where-composition ceiling reports the authored splice edge.
+use core::ops::Eq
+mod author {
+    use core::ops::Eq
+    use core::meta::{Code, Item, Record, Where, empty}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let mut bounds = empty<Where>()
+        let mut i: usize = 0
+        while i < 600 {
+            bounds = quote { where ${bounds} }
+            i += 1
+        }
+        quote {
+            impl Eq for ${record} where ${bounds} {
+                fn eq(self, _ other: Self) -> bool { true }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Empty {}

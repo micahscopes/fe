@@ -708,6 +708,7 @@ impl<'db> RecordInput<'db> {
         let index = nodes.len();
         seen.insert(code, index);
         nodes.push(FrozenCodeNode::empty(None));
+        let mut hole_spans = vec![None; code.holes(self.db).len()];
         let mut rooted_funcs = Vec::new();
         let mut rooted_constructors = Vec::new();
         let mut rooted_traits = Vec::new();
@@ -723,9 +724,38 @@ impl<'db> RecordInput<'db> {
         let mut open_uses = Vec::new();
         let mut free_self_uses = Vec::new();
         let mut function_types = Vec::new();
+        let mut where_predicates = Vec::new();
         let mut assoc_const_primitives = Vec::new();
         let mut assoc_type_values = Vec::new();
-        let template = if let Some(site) = code.site(self.db) {
+        let site = match code.source(self.db) {
+            hir::analysis::semantic::CodeSource::Template(site) => Some(site),
+            hir::analysis::semantic::CodeSource::Empty => None,
+            hir::analysis::semantic::CodeSource::VariantBinding {
+                variant,
+                group,
+                field,
+            } => {
+                let adt = AdtRef::Enum(variant.enum_);
+                if adt != self.owner || !code.holes(self.db).is_empty() {
+                    return Err(ConstructionError::Authority);
+                }
+                let shape = adt.as_adt(self.db).fields(self.db);
+                let Some(shape) = shape.get(usize::from(variant.idx)) else {
+                    return Err(protocol("binder variant index is out of bounds"));
+                };
+                if field.is_some_and(|index| index >= shape.num_types()) {
+                    return Err(protocol("binder field index is out of bounds"));
+                }
+                nodes[index].variant_binding = Some(hir::core::meta::FrozenVariantBinding {
+                    owner: frozen_quote_nominal_ref(self.db, adt)?,
+                    variant_index: variant.idx,
+                    group,
+                    field,
+                });
+                return Ok(index);
+            }
+        };
+        let template = if let Some(site) = site {
             let func = site
                 .owner
                 .containing_func(self.db)
@@ -748,6 +778,79 @@ impl<'db> RecordInput<'db> {
             let Partial::Present(Expr::Quote(quote)) = &body.exprs(self.db)[site.expr] else {
                 return Err(protocol("quote site no longer names a quote"));
             };
+            // Non-body holes (including where/type positions) retain the
+            // authored operand span; body-hole maps below refine their edges.
+            for (slot, hole) in quote.holes.iter().enumerate() {
+                hole_spans[slot] = hole.expr.span(body).resolve(self.db).and_then(|span| {
+                    Some(hir::core::meta::FrozenQuoteSpan {
+                        file: span.file.url(self.db)?,
+                        range: span.range.into(),
+                    })
+                });
+            }
+            for (expr, value) in quote.template.exprs(self.db).iter() {
+                if let Partial::Present(Expr::Hole(slot)) = value
+                    && let Some(destination) = hole_spans.get_mut(*slot as usize)
+                {
+                    *destination = expr.span(quote.template).resolve(self.db).and_then(|span| {
+                        Some(hir::core::meta::FrozenQuoteSpan {
+                            file: span.file.url(self.db)?,
+                            range: span.range.into(),
+                        })
+                    });
+                }
+            }
+            for (pat, value) in quote.template.pats(self.db).iter() {
+                if let Partial::Present(hir::hir_def::Pat::Hole(slot)) = value
+                    && let Some(destination) = hole_spans.get_mut(*slot as usize)
+                {
+                    *destination = pat.span(quote.template).resolve(self.db).and_then(|span| {
+                        Some(hir::core::meta::FrozenQuoteSpan {
+                            file: span.file.url(self.db)?,
+                            range: span.range.into(),
+                        })
+                    });
+                }
+            }
+            if let QuoteFragment::Arms(arms) = &quote.fragment {
+                for (index, arm) in arms.iter().enumerate() {
+                    if let hir::hir_def::MatchArm::Hole(slot) = arm {
+                        let span = site
+                            .expr
+                            .span(body)
+                            .into_quote_expr()
+                            .arms()
+                            .arm(index)
+                            .resolve(self.db);
+                        hole_spans[*slot as usize] = span.and_then(|span| {
+                            Some(hir::core::meta::FrozenQuoteSpan {
+                                file: span.file.url(self.db)?,
+                                range: span.range.into(),
+                            })
+                        });
+                    }
+                }
+            }
+            for (expr, value) in quote.template.exprs(self.db).iter() {
+                if let Partial::Present(Expr::Match(_, Partial::Present(arms))) = value {
+                    for (index, arm) in arms.iter().enumerate() {
+                        if let hir::hir_def::MatchArm::Hole(slot) = arm {
+                            let span = expr
+                                .span(quote.template)
+                                .into_match_expr()
+                                .arms()
+                                .arm(index)
+                                .resolve(self.db);
+                            hole_spans[*slot as usize] = span.and_then(|span| {
+                                Some(hir::core::meta::FrozenQuoteSpan {
+                                    file: span.file.url(self.db)?,
+                                    range: span.range.into(),
+                                })
+                            });
+                        }
+                    }
+                }
+            }
             let checked_primitive = |ty| {
                 let resolved = lower_hir_ty(
                     self.db,
@@ -805,6 +908,64 @@ impl<'db> RecordInput<'db> {
                 let site = roots.next();
                 if roots.next().is_some() { None } else { site }
             };
+            let fragment_where = match &quote.fragment {
+                QuoteFragment::Where(clause) => Some(clause),
+                QuoteFragment::Items(items) => match items.as_slice() {
+                    [QuoteItem::Impl(item)] => Some(&item.where_clause),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(clause) = fragment_where {
+                where_predicates = clause
+                    .predicates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, predicate)| match predicate {
+                        QuoteWherePredicate::Hole(_) => Ok(None),
+                        QuoteWherePredicate::Const(_) => Err(protocol(
+                            "quoted fragment const predicate needs checked reification",
+                        )),
+                        QuoteWherePredicate::Bound(predicate) => {
+                            let ty = predicate
+                                .ty
+                                .to_opt()
+                                .ok_or(protocol("quoted where type is missing"))?;
+                            let signature = QuoteSignatureSite::FragmentWhereType {
+                                predicate: index as u32,
+                            };
+                            let mut names = checked.names.iter().filter(|name| {
+                                name.signature == Some(signature)
+                                    && matches!(name.site, QuoteNameSite::Type(_))
+                            });
+                            let ty = freeze_quote_signature_type(
+                                self.db,
+                                ty,
+                                &mut names,
+                                &[],
+                                u32::MAX,
+                                &checked_primitive,
+                            )?
+                            .ok_or(protocol("quoted where type needs checked reification"))?;
+                            if names.next().is_some() {
+                                return Err(protocol("quoted where type has extra checked names"));
+                            }
+                            let trait_sites = predicate
+                                .bounds
+                                .iter()
+                                .enumerate()
+                                .map(|(bound, _)| {
+                                    checked_trait_site(QuoteSignatureSite::FragmentWhereBound {
+                                        predicate: index as u32,
+                                        bound: bound as u32,
+                                    })
+                                })
+                                .collect();
+                            Ok(Some(FrozenQuoteWherePredicate::Bound { ty, trait_sites }))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, ConstructionError>>()?;
+            }
             let mut freeze_function = |item: &QuoteFunc<'db>, index: u32| {
                 let generic_item = *checked
                     .function_generic_items
@@ -1300,7 +1461,10 @@ impl<'db> RecordInput<'db> {
                         }
                         if let Some(func) = name.func {
                             self_uses.push(FrozenQuoteSelfUse { func, site: expr });
-                        } else if matches!(&quote.fragment, QuoteFragment::Expr) {
+                        } else if matches!(
+                            &quote.fragment,
+                            QuoteFragment::Expr | QuoteFragment::Arms(_)
+                        ) {
                             free_self_uses.push(expr);
                         } else {
                             return Err(protocol(
@@ -1310,7 +1474,10 @@ impl<'db> RecordInput<'db> {
                     }
                     (QuoteNameSite::Expr(expr), QuoteNameClass::Open(index))
                         if name.func.is_none()
-                            && matches!(&quote.fragment, QuoteFragment::Expr) =>
+                            && matches!(
+                                &quote.fragment,
+                                QuoteFragment::Expr | QuoteFragment::Arms(_)
+                            ) =>
                     {
                         open_uses.push(FrozenQuoteOpenUse {
                             site: expr,
@@ -1350,7 +1517,7 @@ impl<'db> RecordInput<'db> {
                         .to_owned();
                     if name.func.is_none()
                         && name.assoc_const.is_none()
-                        && !matches!(quote.fragment, QuoteFragment::Expr)
+                        && !matches!(quote.fragment, QuoteFragment::Expr | QuoteFragment::Arms(_))
                     {
                         return Err(protocol(
                             "quoted rooted function outside a function needs transplantation",
@@ -1378,7 +1545,9 @@ impl<'db> RecordInput<'db> {
                                         .nth(func_index as usize)
                                 }
                             }
-                            QuoteFragment::Expr | QuoteFragment::Where(_) => None,
+                            QuoteFragment::Expr
+                            | QuoteFragment::Arms(_)
+                            | QuoteFragment::Where(_) => None,
                         }
                         .ok_or(protocol("quoted function generic owner is missing"))?;
                         let generic_item = *checked
@@ -1542,7 +1711,7 @@ impl<'db> RecordInput<'db> {
             None
         };
         let mut holes = Vec::new();
-        for value in code.holes(self.db) {
+        for (slot, value) in code.holes(self.db).iter().enumerate() {
             let hole = match value.value(self.db) {
                 SemConstValue::Structural {
                     ty,
@@ -1551,7 +1720,10 @@ impl<'db> RecordInput<'db> {
                     if !self.designated(*ty, MetaItem::Code) {
                         return Err(ConstructionError::Authority);
                     }
-                    FrozenCodeHole::Code(self.freeze_code_node(*inner, owner, budget, nodes, seen)?)
+                    FrozenCodeHole::Code(
+                        self.freeze_code_node(*inner, owner, budget, nodes, seen)?,
+                        hole_spans[slot].clone(),
+                    )
                 }
                 _ => {
                     let field_type = match value.value(self.db) {
@@ -1578,6 +1750,7 @@ impl<'db> RecordInput<'db> {
         }
         nodes[index] = FrozenCodeNode {
             template,
+            variant_binding: None,
             holes,
             rooted_funcs,
             rooted_constructors,
@@ -1597,6 +1770,7 @@ impl<'db> RecordInput<'db> {
             open_uses,
             free_self_uses,
             function_types,
+            where_predicates,
             assoc_const_primitives,
             assoc_type_values,
         };

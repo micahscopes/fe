@@ -1,0 +1,15 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_arm_splice_wrong_shape.fe
+---
+=== STDERR ===
+file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_arm_splice_wrong_shape.fe: error[8-0104]: this splice cannot stand for match arms
+   ┌─ quote_arm_splice_wrong_shape.fe:16:55
+   │
+16 │                 fn tag(self) -> bool { match self { ${not_arms} } } // <- here
+   │                                                       ^^^^^^^^ expected `Code<Arm>`, found `Code<Expr>`
+
+
+
+=== EXIT CODE: 1 ===

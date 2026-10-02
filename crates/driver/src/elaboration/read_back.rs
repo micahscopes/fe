@@ -53,7 +53,7 @@ pub fn read_back_value<'db>(
         .ok_or(ReadBackError::MissingOwner)?;
     let code = QuotedCode::new(
         db,
-        Some(QuoteSite {
+        hir::analysis::semantic::CodeSource::Template(QuoteSite {
             owner: body,
             expr: body.expr(db),
             source: FrozenTemplateSource::CheckedBody,

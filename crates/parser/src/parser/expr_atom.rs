@@ -268,15 +268,17 @@ impl super::Parse for QuoteExprScope {
         }
         match quote_body_kind(parser) {
             QuoteBodyKind::Items => parser.parse(QuoteItemListScope::default()),
+            QuoteBodyKind::Arms => parser.parse(MatchArmListScope::default()),
             QuoteBodyKind::Where => parser.parse(QuoteWhereScope::default()),
             QuoteBodyKind::Expr => parser.parse(BlockExprScope::default()),
         }
     }
 }
 
-/// What a quote body holds, decided by its first token that is not a splice.
+/// What a quote body holds, decided by its item/where head or top-level arm arrow.
 enum QuoteBodyKind {
     Expr,
+    Arms,
     Items,
     Where,
 }
@@ -312,7 +314,26 @@ fn quote_body_kind<S: TokenStream>(parser: &mut Parser<S>) -> QuoteBodyKind {
                 Some(kind) if kind.is_item_head() || kind == SyntaxKind::Pound => {
                     return QuoteBodyKind::Items;
                 }
-                _ => return QuoteBodyKind::Expr,
+                _ => {
+                    // Only an arrow at this body's top level introduces arm syntax.
+                    // Arrows inside nested matches and record/tuple patterns do not.
+                    let mut depth = 0usize;
+                    loop {
+                        match p.current_kind() {
+                            Some(SyntaxKind::FatArrow) if depth == 0 => return QuoteBodyKind::Arms,
+                            Some(SyntaxKind::RBrace) if depth == 0 => return QuoteBodyKind::Expr,
+                            Some(
+                                SyntaxKind::LBrace | SyntaxKind::LParen | SyntaxKind::LBracket,
+                            ) => depth += 1,
+                            Some(
+                                SyntaxKind::RBrace | SyntaxKind::RParen | SyntaxKind::RBracket,
+                            ) => depth = depth.saturating_sub(1),
+                            None => return QuoteBodyKind::Expr,
+                            _ => {}
+                        }
+                        p.bump();
+                    }
+                }
             }
         }
     });
@@ -429,6 +450,18 @@ impl super::Parse for QuoteHoleExprScope {
 }
 
 define_scope! {
+    /// A splice in pattern position.
+    pub(crate) QuoteHolePatScope,
+    QuoteHolePat
+}
+impl super::Parse for QuoteHolePatScope {
+    type Error = Recovery<ErrProof>;
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_hole_body(parser, SyntaxKind::QuoteHolePat)
+    }
+}
+
+define_scope! {
     /// A splice in type position.
     pub(crate) QuoteHoleTypeScope,
     QuoteHoleType
@@ -453,6 +486,43 @@ impl super::Parse for QuoteHoleScope {
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parse_hole_body(parser, SyntaxKind::QuoteHole)
     }
+}
+
+define_scope! { QuoteHoleArmScope, QuoteHoleArm }
+impl super::Parse for QuoteHoleArmScope {
+    type Error = Recovery<ErrProof>;
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_hole_body(parser, SyntaxKind::QuoteHoleArm)
+    }
+}
+
+fn starts_arm_hole<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    if parser.current_kind() != Some(SyntaxKind::Dollar) {
+        return false;
+    }
+    parser.dry_run(|p| {
+        p.bump();
+        if p.current_kind() != Some(SyntaxKind::LBrace) {
+            return false;
+        }
+        let mut depth = 0usize;
+        loop {
+            match p.current_kind() {
+                Some(SyntaxKind::LBrace) => depth += 1,
+                Some(SyntaxKind::RBrace) => depth -= 1,
+                None => return false,
+                _ => {}
+            }
+            p.bump();
+            if depth == 0 {
+                break;
+            }
+        }
+        !matches!(
+            p.current_kind(),
+            Some(SyntaxKind::FatArrow | SyntaxKind::Pipe)
+        )
+    })
 }
 
 define_scope! { MatchExprScope, MatchExpr }
@@ -486,7 +556,11 @@ impl super::Parse for MatchArmListScope {
                 break;
             }
 
-            parser.parse(MatchArmScope::default())?;
+            if starts_arm_hole(parser) {
+                parser.parse(QuoteHoleArmScope::default())?;
+            } else {
+                parser.parse(MatchArmScope::default())?;
+            }
             parser.set_newline_as_trivia(false);
 
             parser.expect(

@@ -489,6 +489,7 @@ impl<'db> Pat<'db> {
     /// Pretty-prints a pattern.
     pub fn pretty_print(&self, db: &'db dyn HirDb, body: Body<'db>) -> String {
         match self {
+            Pat::Hole(slot) => format!("${{{slot}}}"),
             Pat::WildCard => "_".to_string(),
             Pat::Rest => "..".to_string(),
             Pat::Lit(lit) => {
@@ -779,8 +780,14 @@ impl<'db> Expr<'db> {
                 );
 
                 for arm in arms {
-                    let pat = unwrap_partial_ref(arm.pat.data(db, body), "MatchArm::pat");
-                    let arm_body = unwrap_partial_ref(arm.body.data(db, body), "MatchArm::body");
+                    if let crate::hir_def::MatchArm::Hole(slot) = arm {
+                        result.push_str(&indent_str(indent + 1));
+                        result.push_str(&format!("${{{slot}}},\n"));
+                        continue;
+                    }
+
+                    let pat = unwrap_partial_ref(arm.pat().data(db, body), "MatchArm::pat");
+                    let arm_body = unwrap_partial_ref(arm.body().data(db, body), "MatchArm::body");
 
                     result.push_str(&indent_str(indent + 1));
                     result.push_str(&pat.pretty_print(db, body));

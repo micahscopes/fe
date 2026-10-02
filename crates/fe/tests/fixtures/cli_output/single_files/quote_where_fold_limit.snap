@@ -1,0 +1,18 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/quote_where_fold_limit.fe
+---
+=== STDERR ===
+error[18-0004]: invalid generated declaration: quoted where composition exceeds 1000 nodes
+   ┌─ quote_where_fold_limit.fe:10:38
+   │
+10 │             bounds = quote { where ${bounds} }
+   │                                      ^^^^^^ invalid generated declaration: quoted where composition exceeds 1000 nodes
+   ·
+20 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here
+
+
+
+=== EXIT CODE: 1 ===

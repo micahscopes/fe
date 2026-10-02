@@ -1205,6 +1205,9 @@ impl ToDoc for ast::MatchArmList {
 
 impl ToDoc for ast::MatchArm {
     fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        if self.is_hole() {
+            return quote_hole_doc(self.syntax(), self.hole(), ctx);
+        }
         let alloc = &ctx.alloc;
 
         let pat = match self.pat() {
@@ -1318,6 +1321,7 @@ impl ToDoc for ast::QuoteExpr {
         let body = self
             .body()
             .map(|body| body.to_doc(ctx))
+            .or_else(|| self.arms().map(|arms| arms.to_doc(ctx)))
             .or_else(|| self.items().map(|items| items.to_doc(ctx)))
             .or_else(|| self.where_predicates().map(|where_| where_.to_doc(ctx)));
         match body {
@@ -1395,7 +1399,7 @@ impl ToDoc for ast::QuoteWhere {
 }
 
 /// `${ e }` in any position.
-fn quote_hole_doc<'a>(
+pub(super) fn quote_hole_doc<'a>(
     syntax: &parser::SyntaxNode,
     expr: Option<ast::Expr>,
     ctx: &'a RewriteContext<'a>,

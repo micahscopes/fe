@@ -492,9 +492,15 @@ fn verify_expr<'db>(
             let (base, args) = result_ty.decompose_ty_app(db);
             let code = MetaItem::Code.resolve(db, scope);
             let kind = args.first().copied();
-            let valid_kind = [MetaItem::Expr, MetaItem::Item, MetaItem::Where]
-                .into_iter()
-                .any(|item| item.resolve(db, scope) == kind);
+            let valid_kind = [
+                MetaItem::Expr,
+                MetaItem::Pat,
+                MetaItem::Arm,
+                MetaItem::Item,
+                MetaItem::Where,
+            ]
+            .into_iter()
+            .any(|item| item.resolve(db, scope) == kind);
             (const_owner && code == Some(base) && args.len() == 1 && valid_kind)
                 .then_some(())
                 .ok_or(NormalizedBodyVerifyError::ExpressionType)

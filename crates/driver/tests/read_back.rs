@@ -267,6 +267,46 @@ fn fixture_db(fixture: Fixture<&str>) -> (DriverDataBase, Url) {
     (db, url)
 }
 
+#[test]
+fn field_handles_cannot_be_spliced_as_patterns() {
+    let source = r#"
+mod author {
+    use core::meta::{Code, Item, Record, field, variant}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(variant(record, 0), 0)
+        quote {
+            fn generated(_ value: ${record}) -> bool {
+                match value { ${f} => true, _ => false }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+enum Coin { Heads(u256) }
+"#;
+    let mut db = DriverDataBase::default();
+    db.workspace().update(
+        &mut db,
+        Url::parse("file:///quote_pattern_wrong_kind.fe").unwrap(),
+        source.to_string(),
+    );
+    let error = match prepare(&db) {
+        Err(error) => error,
+        Ok(_) => panic!("a Field cannot supply a pattern fragment"),
+    };
+    let rendered = error
+        .rendered
+        .expect("provider checking renders its diagnostic");
+    assert!(
+        rendered.contains("this splice cannot stand for a pattern"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("expected `Code<Pat>`, found `Field`"),
+        "{rendered}"
+    );
+}
+
 fn named_function<'db>(db: &'db DriverDataBase, url: &Url, wanted: &str) -> Func<'db> {
     let file = db.workspace().get(db, url).expect("fixture file");
     db.top_mod(file)
@@ -353,7 +393,7 @@ fn inject_read_back_body(output: &mut DriverDataBase, url: &Url, original: &Froz
         panic!("expected item quote");
     };
     let child = match code.nodes[code.root].holes.as_slice() {
-        [FrozenCodeHole::Code(index)] => *index,
+        [FrozenCodeHole::Code(index, ..)] => *index,
         other => panic!("expected one expression fragment hole, got {other:?}"),
     };
     code.nodes[child] = original.nodes[original.root].clone();
@@ -537,8 +577,8 @@ fn checked_body_shape<'db>(
                 expr(db, body, *scrutinee, node, binders),
                 arms.iter()
                     .map(|arm| (
-                        pat(db, body, arm.pat, node, binders),
-                        expr(db, body, arm.body, node, binders)
+                        pat(db, body, arm.pat(), node, binders),
+                        expr(db, body, arm.body(), node, binders)
                     ))
                     .collect::<Vec<_>>()
             ),
@@ -1341,6 +1381,270 @@ fn quoted_enum_reflection_is_checked(fixture: Fixture<&str>) {
 
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_arm_composition.fe",
+)]
+fn quoted_long_arm_composition_is_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum binder quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_binder_hygiene.fe",
+)]
+fn quoted_enum_destination_constants_preserve_binders(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("hygienic enum quote generates")
+        .unwrap();
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_generic.fe",
+)]
+fn quoted_enum_payload_where_bounds_are_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum payload where bounds generate")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_generic.fe",
+)]
+fn enum_payload_where_comparison_rejects_changed_predicate(fixture: Fixture<&str>) {
+    use hir::core::meta::{FrozenQuoteFieldType, FrozenQuoteWherePredicate};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("payload bounds generate")
+        .unwrap();
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    for change in ["parameter", "trait", "missing"] {
+        let mut expected = input.requests(&output).clone();
+        let FrozenMetaValue::Code(code) = &mut expected[0].value else {
+            panic!("code result");
+        };
+        let index = code
+            .nodes
+            .iter()
+            .position(|node| {
+                node.where_predicates.iter().any(|predicate| {
+                    matches!(predicate, Some(FrozenQuoteWherePredicate::Bound { .. }))
+                })
+            })
+            .expect("payload predicate node");
+        let node = &mut code.nodes[index];
+        match change {
+            "parameter" => {
+                let slot = node
+                    .where_predicates
+                    .iter()
+                    .find_map(|predicate| match predicate {
+                        Some(FrozenQuoteWherePredicate::Bound {
+                            ty: FrozenQuoteSignatureType::Hole(slot),
+                            ..
+                        }) => Some(*slot),
+                        _ => None,
+                    })
+                    .expect("payload type hole");
+                let FrozenCodeHole::Value(_, Some(FrozenQuoteFieldType::TargetParam(parameter))) =
+                    &mut node.holes[slot as usize]
+                else {
+                    panic!("target parameter hole");
+                };
+                *parameter = 1;
+            }
+            "trait" => node.rooted_traits[0].owner.path.push_str("::wrong_trait"),
+            "missing" => *node = FrozenCodeNode::empty(None),
+            _ => unreachable!(),
+        }
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            quote_round_trip::assert_round_trip_against(&authored, &output, &url, &expected);
+        }))
+        .expect_err("changed predicate must not compare equal");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        let reason = match change {
+            "parameter" => "impl where payload parameter index",
+            "trait" => "impl where trait identity",
+            _ => "impl where predicate count",
+        };
+        assert!(message.contains(reason), "{change}: {message}");
+    }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_eq.fe",
+)]
+fn quoted_enum_arm_fold_is_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum binder quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_eq.fe",
+)]
+fn enum_arm_fold_comparison_rejects_missing_arm(fixture: Fixture<&str>) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored).expect("arm quote generates").unwrap();
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let mut expected = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut expected[0].value else {
+        panic!("arm fixture emits code");
+    };
+    let (index, previous) = code
+        .nodes
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, node)| {
+            let [
+                FrozenCodeHole::Code(previous, ..),
+                FrozenCodeHole::Code(lhs, ..),
+                ..,
+            ] = node.holes.as_slice()
+            else {
+                return None;
+            };
+            code.nodes[*lhs]
+                .variant_binding
+                .as_ref()
+                .filter(|binding| binding.field.is_none() && binding.variant_index == 3)
+                .map(|_| (index, *previous))
+        })
+        .expect("last folded arm");
+    code.nodes[index] = code.nodes[previous].clone();
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        quote_round_trip::assert_round_trip_against(&authored, &output, &url, &expected);
+    }))
+    .expect_err("omitted final arm must not compare equal");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(message.contains("arm list length changed"), "{message}");
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_generic_binders.fe",
+)]
+fn quoted_generic_enum_group_binders_are_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum binder quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_binders.fe",
+)]
+fn quoted_enum_group_binders_are_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("enum binder quote generates")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_binders.fe",
+)]
+fn enum_group_binders_comparison_rejects_changed_coordinates(fixture: Fixture<&str>) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored).expect("binder quote generates").unwrap();
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    for change in ["owner", "variant", "group", "field"] {
+        let mut expected = input.requests(&output).clone();
+        let FrozenMetaValue::Code(code) = &mut expected[0].value else {
+            panic!("binder fixture emits code");
+        };
+        let binding = code
+            .nodes
+            .iter_mut()
+            .filter_map(|node| node.variant_binding.as_mut())
+            .find(|binding| {
+                binding.variant_index == 0
+                    && binding.group == 0
+                    && binding.field.is_some() == matches!(change, "group" | "field")
+            })
+            .expect("selected compiler-issued coordinate");
+        match change {
+            "owner" => binding.owner.owner.path.push_str("::wrong_owner"),
+            "variant" => binding.variant_index = 2,
+            "group" => binding.group = 1,
+            "field" => binding.field = Some(1 - binding.field.unwrap()),
+            _ => unreachable!(),
+        }
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            quote_round_trip::assert_round_trip_against(&authored, &output, &url, &expected);
+        }))
+        .expect_err("changed binder coordinate must not compare equal");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        let reason = match change {
+            "owner" => "binder pattern owner identity",
+            "variant" => "binder variant index",
+            _ => "selected payload field must use its checked binder identity",
+        };
+        assert!(message.contains(reason), "{change}: {message}");
+    }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
     glob: "quote_struct_checked_roots.fe",
 )]
 fn quoted_struct_patterns_preserve_checked_owners(fixture: Fixture<&str>) {
@@ -1538,7 +1842,7 @@ fn symbolic_types_cannot_capture_a_missing_destination_binder(fixture: Fixture<&
             .holes
             .iter()
             .find_map(|hole| match hole {
-                FrozenCodeHole::Code(child) => Some(*child),
+                FrozenCodeHole::Code(child, ..) => Some(*child),
                 FrozenCodeHole::Value(_, _) => None,
             })
             .expect("body fragment");
@@ -1627,7 +1931,7 @@ fn missing_const_generic_destination_binding_rejects(fixture: Fixture<&str>) {
     let FrozenMetaValue::Code(code) = &mut request.value else {
         panic!("item quote");
     };
-    let FrozenCodeHole::Code(child) = code.nodes[code.root].holes[0] else {
+    let FrozenCodeHole::Code(child, ..) = code.nodes[code.root].holes[0] else {
         panic!("body fragment");
     };
     code.nodes[child].generic_uses[0].index = 2;
@@ -1664,7 +1968,7 @@ fn qualified_const_cannot_borrow_another_traits_authority(fixture: Fixture<&str>
     let FrozenMetaValue::Code(code) = &mut request.value else {
         panic!("item quote");
     };
-    let FrozenCodeHole::Code(child) = code.nodes[code.root].holes[0] else {
+    let FrozenCodeHole::Code(child, ..) = code.nodes[code.root].holes[0] else {
         panic!("body fragment");
     };
     code.nodes[child].rooted_traits[0].path = "HasValue".into();
@@ -1928,4 +2232,85 @@ fn assert_quote_comparison_detects_changed_body(fixture: Fixture<&str>) {
         .or_else(|| failure.downcast_ref::<&str>().copied())
         .expect("comparison assertion message");
     assert!(message.contains(mismatch), "wrong mismatch: {message}");
+}
+
+#[test]
+fn quoted_arm_lists_retain_holes_and_check_their_kind() {
+    use hir::hir_def::{MatchArm, QuoteFragment, QuoteHolePosition, QuoteKind};
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///quote_arm_transport.fe").unwrap();
+    db.workspace().update(
+        &mut db,
+        url.clone(),
+        r#"
+use core::meta::{Arm, Code, empty}
+pub const fn arms() -> Code<Arm> {
+    let prior = empty<Arm>()
+    quote { ${prior}
+        true => 1,
+        false => 0,
+    }
+}
+"#
+        .to_owned(),
+    );
+    let func = named_function(&db, &url, "arms");
+    let (diagnostics, _) = hir::analysis::ty::ty_check::check_func_body(&db, func);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let body = func.body(&db).unwrap();
+    let quote = body
+        .exprs(&db)
+        .iter()
+        .find_map(|(_, expr)| match expr {
+            Partial::Present(Expr::Quote(quote)) => Some(quote),
+            _ => None,
+        })
+        .expect("arm quote retained");
+    assert_eq!(quote.syntactic_kind(&db), Some(QuoteKind::Arm));
+    let QuoteFragment::Arms(arms) = &quote.fragment else {
+        panic!("arm fragment")
+    };
+    assert_eq!(arms.len(), 3);
+    assert!(matches!(arms[0], MatchArm::Hole(0)));
+    assert!(arms[1..].iter().all(|arm| arm.parts().is_some()));
+    assert_eq!(quote.holes.len(), 1);
+    assert_eq!(quote.holes[0].position, QuoteHolePosition::Arms);
+}
+
+#[test]
+fn expression_fragments_cannot_supply_match_arm_lists() {
+    let mut db = DriverDataBase::default();
+    db.workspace().update(
+        &mut db,
+        Url::parse("file:///quote_arm_wrong_kind.fe").unwrap(),
+        r#"
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let not_arms: Code<Expr> = quote { true }
+        quote {
+            fn generated(_ value: ${record}) -> bool {
+                match value { ${not_arms} }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+enum Coin { Heads, Tails }
+"#
+        .to_owned(),
+    );
+    let error = match prepare(&db) {
+        Err(error) => error,
+        Ok(_) => panic!("wrong arm kind accepted"),
+    };
+    let rendered = error.rendered.expect("rendered provider diagnostic");
+    assert!(
+        rendered.contains("this splice cannot stand for match arms"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("expected `Code<Arm>`, found `Code<Expr>`"),
+        "{rendered}"
+    );
 }

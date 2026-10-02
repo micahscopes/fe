@@ -5,6 +5,7 @@ use crate::{HirDb, span::pat::LazyPatSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum Pat<'db> {
+    Hole(u32),
     WildCard,
     Rest,
     Lit(Partial<LitKind<'db>>),

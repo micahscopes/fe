@@ -193,7 +193,7 @@ impl<'db> Visitor<'db> for DecisionTreeVisitor<'db, '_> {
             let typed_body = self.typed_body.as_ref().unwrap();
             let roots: Vec<_> = arms
                 .iter()
-                .filter_map(|arm| typed_body.pattern_root(arm.pat))
+                .filter_map(|arm| typed_body.pattern_root(arm.pat()))
                 .collect();
 
             let tree = build_decision_tree(self.db, typed_body.pattern_store(), &roots);

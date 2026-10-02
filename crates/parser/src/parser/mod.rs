@@ -220,7 +220,11 @@ impl<S: TokenStream> Parser<S> {
             .filter(|entry| {
                 matches!(
                     entry.scope.syntax_kind(),
-                    SyntaxKind::QuoteHoleExpr | SyntaxKind::QuoteHoleType | SyntaxKind::QuoteHole
+                    SyntaxKind::QuoteHoleExpr
+                        | SyntaxKind::QuoteHoleType
+                        | SyntaxKind::QuoteHolePat
+                        | SyntaxKind::QuoteHoleArm
+                        | SyntaxKind::QuoteHole
                 )
             })
             .count()

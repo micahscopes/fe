@@ -1,7 +1,7 @@
 // Target: Q6, translation of mb2 `cli_output/single_files/quote_arm_splice_wrong_shape.fe`. An expression fragment spliced where match arms go is a static kind error in the provider.
 // expect: rejected at line 16 (the `${not_arms}` hole), because it takes `Code<Arm>` and `not_arms` is `Code<Expr>`;
 //   reported by the provider's type check, before the provider runs (mb2 reported it at run time).
-// Placeholders: the `Arm` kind name, as in fe_test_runner/pending/quote_enum_eq.fe.
+// Code<Arm> is checked in the provider; expression fragments cannot supply match arms.
 trait Tagged {
     fn tag(self) -> bool
 }

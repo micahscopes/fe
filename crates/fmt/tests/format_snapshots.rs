@@ -1,5 +1,19 @@
 use dir_test::{Fixture, dir_test};
 use fe_fmt::{Config, format_str};
+
+#[test]
+fn pattern_splices_keep_comments_and_parse_after_formatting() {
+    let source = "fn provider() { let code = quote(value) { match value { ${ // payload\n lhs } => true, _ => false } } }";
+    let formatted = format_str(source, &Config::default()).expect("format pattern splice");
+    assert!(formatted.contains("// payload"), "{formatted}");
+    assert!(formatted.contains("lhs"), "{formatted}");
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::Recover);
+    assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+    assert_eq!(
+        format_str(&formatted, &Config::default()).unwrap(),
+        formatted
+    );
+}
 use parser::{RecoveryMode, SyntaxKind, SyntaxNode, parse_source_file};
 use test_utils::snap_test;
 
@@ -181,4 +195,22 @@ fn const_where_predicates_survive_formatting_in_source_order() {
         format_str(&formatted, &Config::default()).unwrap()
     );
     assert!(formatted.contains("// keep this condition"), "{formatted}");
+}
+
+#[test]
+fn arm_splices_keep_comments_and_parse_after_formatting() {
+    for source in [
+        "fn provider() { let code = quote(other) { ${ // prior arms\n arms }\n ${lhs} => match other { ${rhs} => ${cmp}, _ => false }, } }",
+        "fn provider() { let code = quote(value) { match value { ${ // prior arms\n arms }\n _ => false, } } }",
+    ] {
+        let formatted = format_str(source, &Config::default()).expect("format arm splice");
+        assert!(formatted.contains("// prior arms"), "{formatted}");
+        assert!(formatted.contains("arms"), "{formatted}");
+        let (_, errors) = parse_source_file(&formatted, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+        assert_eq!(
+            format_str(&formatted, &Config::default()).unwrap(),
+            formatted
+        );
+    }
 }

@@ -96,6 +96,13 @@ pub enum QuoteSignatureSite {
     AssocType {
         index: u32,
     },
+    FragmentWhereType {
+        predicate: u32,
+    },
+    FragmentWhereBound {
+        predicate: u32,
+        bound: u32,
+    },
     WhereType {
         func: u32,
         predicate: u32,
@@ -216,6 +223,12 @@ impl<'db> TyChecker<'db> {
                     return ExprProp::invalid(db);
                 }
                 match first {
+                    Some(QuoteKind::Arm) => {
+                        (QuoteKind::Arm, vec![QuoteHolePosition::Arms; holes.len()])
+                    }
+                    Some(QuoteKind::Pat) => {
+                        (QuoteKind::Pat, vec![QuoteHolePosition::Pat; holes.len()])
+                    }
                     Some(QuoteKind::Item) => {
                         (QuoteKind::Item, vec![QuoteHolePosition::Items; holes.len()])
                     }
@@ -304,6 +317,8 @@ impl<'db> TyChecker<'db> {
             return;
         }
         let accepted = match position {
+            QuoteHolePosition::Arms => meta.code_kind(db, ty) == Some(QuoteKind::Arm),
+            QuoteHolePosition::Pat => meta.code_kind(db, ty) == Some(QuoteKind::Pat),
             QuoteHolePosition::Expr => {
                 meta.code_kind(db, ty) == Some(QuoteKind::Expr)
                     || ty.is_bool(db)
@@ -324,6 +339,8 @@ impl<'db> TyChecker<'db> {
             // Nothing decided the splice's type; the position's main value
             // type decides it.
             let expected = match position {
+                QuoteHolePosition::Arms => meta.code(db, QuoteKind::Arm),
+                QuoteHolePosition::Pat => meta.code(db, QuoteKind::Pat),
                 QuoteHolePosition::Expr => meta.code(db, QuoteKind::Expr),
                 QuoteHolePosition::Member | QuoteHolePosition::FieldLabel => meta.field,
                 QuoteHolePosition::Type => meta.field_type,
@@ -346,6 +363,8 @@ impl<'db> TyChecker<'db> {
 struct QuoteTypes<'db> {
     code: TyId<'db>,
     expr: TyId<'db>,
+    pat: TyId<'db>,
+    arm: TyId<'db>,
     item: TyId<'db>,
     where_: TyId<'db>,
     record: TyId<'db>,
@@ -361,6 +380,8 @@ impl<'db> QuoteTypes<'db> {
         Some(Self {
             code: get(MetaItem::Code)?,
             expr: get(MetaItem::Expr)?,
+            pat: get(MetaItem::Pat)?,
+            arm: get(MetaItem::Arm)?,
             item: get(MetaItem::Item)?,
             where_: get(MetaItem::Where)?,
             record: get(MetaItem::Record)?,
@@ -373,6 +394,8 @@ impl<'db> QuoteTypes<'db> {
     fn code(&self, db: &'db dyn crate::analysis::HirAnalysisDb, kind: QuoteKind) -> TyId<'db> {
         let kind = match kind {
             QuoteKind::Expr => self.expr,
+            QuoteKind::Pat => self.pat,
+            QuoteKind::Arm => self.arm,
             QuoteKind::Item => self.item,
             QuoteKind::Where => self.where_,
         };
@@ -391,6 +414,8 @@ impl<'db> QuoteTypes<'db> {
         }
         match args {
             [kind] if *kind == self.expr => Some(QuoteKind::Expr),
+            [kind] if *kind == self.arm => Some(QuoteKind::Arm),
+            [kind] if *kind == self.pat => Some(QuoteKind::Pat),
             [kind] if *kind == self.item => Some(QuoteKind::Item),
             [kind] if *kind == self.where_ => Some(QuoteKind::Where),
             _ => None,
@@ -459,6 +484,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         let db = self.db();
         let quote = self.quote;
         match &quote.fragment {
+            crate::hir_def::QuoteFragment::Arms(arms) => self.walk_arms(arms),
             crate::hir_def::QuoteFragment::Expr => self.walk_expr(self.template.expr(db)),
             crate::hir_def::QuoteFragment::Items(items) => {
                 items.iter().for_each(|item| self.walk_item(item))
@@ -468,6 +494,17 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         for item in &quote.block_items {
             self.anchor = Some(item.block);
             self.walk_item(&item.item);
+        }
+    }
+
+    fn walk_arms(&mut self, arms: &[crate::hir_def::MatchArm]) {
+        for arm in arms {
+            if let Some((pat, body)) = arm.parts() {
+                self.values.push(FxHashMap::default());
+                self.walk_pat(pat);
+                self.walk_expr(body);
+                self.values.pop();
+            }
         }
     }
 
@@ -635,21 +672,30 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             match predicate {
                 QuoteWherePredicate::Bound(predicate) => {
                     let previous = self.signature_site;
-                    self.signature_site =
-                        self.active_func.map(|func| QuoteSignatureSite::WhereType {
+                    self.signature_site = self
+                        .active_func
+                        .map(|func| QuoteSignatureSite::WhereType {
                             func,
                             predicate: predicate_index as u32,
-                        });
+                        })
+                        .or(Some(QuoteSignatureSite::FragmentWhereType {
+                            predicate: predicate_index as u32,
+                        }));
                     self.walk_ty_opt(predicate.ty);
                     self.signature_site = previous;
                     for (bound_index, bound) in predicate.bounds.iter().enumerate() {
                         let previous = self.signature_site;
-                        self.signature_site =
-                            self.active_func.map(|func| QuoteSignatureSite::WhereBound {
+                        self.signature_site = self
+                            .active_func
+                            .map(|func| QuoteSignatureSite::WhereBound {
                                 func,
                                 predicate: predicate_index as u32,
                                 bound: bound_index as u32,
-                            });
+                            })
+                            .or(Some(QuoteSignatureSite::FragmentWhereBound {
+                                predicate: predicate_index as u32,
+                                bound: bound_index as u32,
+                            }));
                         self.walk_bound(bound);
                         self.signature_site = previous;
                     }
@@ -780,12 +826,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             Expr::Match(scrutinee, arms) => {
                 self.walk_expr(*scrutinee);
                 if let Partial::Present(arms) = arms {
-                    for arm in arms {
-                        self.values.push(FxHashMap::default());
-                        self.walk_pat(arm.pat);
-                        self.walk_expr(arm.body);
-                        self.values.pop();
-                    }
+                    self.walk_arms(arms);
                 }
             }
             Expr::With(bindings, body) => {
@@ -873,6 +914,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             return;
         };
         match data {
+            Pat::Hole(_) => {}
             Pat::WildCard | Pat::Rest | Pat::Lit(_) => {}
             Pat::Tuple(pats) => pats.iter().for_each(|pat| self.walk_pat(*pat)),
             Pat::Path(Partial::Present(path), _) => {

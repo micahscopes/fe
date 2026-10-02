@@ -5181,6 +5181,11 @@ impl<'db> TyChecker<'db> {
             return ExprProp::invalid(self.db);
         };
 
+        if arms.iter().any(|arm| arm.parts().is_none()) {
+            self.push_diag(BodyDiag::UnexpandedArmHole(expr.span(self.body()).into()));
+            return ExprProp::invalid(self.db);
+        }
+
         let mut match_ty = expected;
         let mut first_provider: Option<(DynLazySpan<'db>, super::ProviderAddressSpace)> = None;
         let mut provider_unknown = false;
@@ -5189,18 +5194,18 @@ impl<'db> TyChecker<'db> {
 
         for arm in arms.iter() {
             let pat_result =
-                self.check_pat_with_layout(arm.pat, scrutinee_pat_ty, pattern_layout.as_ref());
+                self.check_pat_with_layout(arm.pat(), scrutinee_pat_ty, pattern_layout.as_ref());
             if let super::PatternDestructureMode::Borrow(kind) = mode {
-                self.retype_pattern_bindings_for_borrow(arm.pat, kind);
+                self.retype_pattern_bindings_for_borrow(arm.pat(), kind);
             }
             arm_statuses.push(pat_result.analysis);
 
-            self.env.enter_scope(arm.body);
+            self.env.enter_scope(arm.body());
             self.env.flush_pending_bindings();
             let arm_prop = if result_discarded {
-                self.check_expr_with_discarded_result(arm.body, match_ty)
+                self.check_expr_with_discarded_result(arm.body(), match_ty)
             } else {
-                self.check_expr(arm.body, match_ty)
+                self.check_expr(arm.body(), match_ty)
             };
             match_ty = arm_prop.ty;
             self.env.leave_scope();
@@ -5212,12 +5217,12 @@ impl<'db> TyChecker<'db> {
                             .merge_concrete_borrow_providers(
                                 span.clone(),
                                 Some(previous),
-                                arm.body.span(self.body()).into(),
+                                arm.body().span(self.body()).into(),
                                 Some(provider),
                             )
                             .is_none();
                     } else {
-                        first_provider = Some((arm.body.span(self.body()).into(), provider));
+                        first_provider = Some((arm.body().span(self.body()).into(), provider));
                     }
                 } else {
                     provider_unknown = true;
@@ -5248,7 +5253,7 @@ impl<'db> TyChecker<'db> {
 
             for i in analysis.unreachable_arms {
                 let diag = BodyDiag::UnreachablePattern {
-                    primary: arms[i].pat.span(self.body()).into(),
+                    primary: arms[i].pat().span(self.body()).into(),
                 };
                 self.push_diag(diag);
             }

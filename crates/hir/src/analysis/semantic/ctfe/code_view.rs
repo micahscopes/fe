@@ -17,7 +17,15 @@ pub(super) fn checked_body<'db>(
     db: &'db dyn HirAnalysisDb,
     code: QuotedCode<'db>,
 ) -> Result<(Body<'db>, &'db TypedBody<'db>), &'static str> {
-    let site = code.site(db).ok_or("empty code has no checked body")?;
+    let site = match code.source(db) {
+        crate::analysis::semantic::CodeSource::Template(site) => site,
+        crate::analysis::semantic::CodeSource::Empty => {
+            return Err("empty code has no checked body");
+        }
+        crate::analysis::semantic::CodeSource::VariantBinding { .. } => {
+            return Err("compiler-issued binder code has no checked body");
+        }
+    };
     if site.source != FrozenTemplateSource::CheckedBody || !code.holes(db).is_empty() {
         return Err(
             "code inspection requires a checked body; untyped quote templates are unsupported",
@@ -82,9 +90,9 @@ impl Children<'_> {
             Self::Match(first, _) if index == 0 => Some(CodeNodeSite::Expr(*first)),
             Self::Match(_, arms) => arms.get((index - 1) / 2).map(|arm| {
                 if index % 2 == 1 {
-                    CodeNodeSite::Pat(arm.pat)
+                    CodeNodeSite::Pat(arm.pat())
                 } else {
-                    CodeNodeSite::Expr(arm.body)
+                    CodeNodeSite::Expr(arm.body())
                 }
             }),
         }
@@ -197,17 +205,21 @@ pub(super) fn describe<'db>(
                 }
                 desc
             }
-            Expr::Match(value, Partial::Present(arms)) => Description {
-                kind: "Match",
-                children: Children::Match(*value, arms),
-            },
+            Expr::Match(value, Partial::Present(arms))
+                if arms.iter().all(|arm| arm.parts().is_some()) =>
+            {
+                Description {
+                    kind: "Match",
+                    children: Children::Match(*value, arms),
+                }
+            }
             Expr::Assign(lhs, rhs) => fixed("Assign", &[E(*lhs), E(*rhs)]),
             Expr::AugAssign(lhs, rhs, _) => fixed("AugAssign", &[E(*lhs), E(*rhs)]),
             Expr::With(..)
             | Expr::Quote(_)
             | Expr::Hole(_)
             | Expr::UnsupportedMacroCall
-            | Expr::Match(_, Partial::Absent) => {
+            | Expr::Match(..) => {
                 return Err("unsupported checked expression in code inspection");
             }
         },
@@ -239,6 +251,7 @@ pub(super) fn describe<'db>(
             ),
         },
         P(id) => match present(body.pats(db).get(id).ok_or(missing)?)? {
+            Pat::Hole(_) => return Err("unexpanded pattern splice has no checked node"),
             Pat::WildCard => fixed("Wildcard", &[]),
             Pat::Rest => fixed("Rest", &[]),
             Pat::Path(..) if typed.pat_binding(id).is_some() => fixed("Binding", &[]),

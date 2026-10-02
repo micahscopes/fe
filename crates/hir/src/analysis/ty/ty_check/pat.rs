@@ -72,6 +72,17 @@ impl<'db> TyChecker<'db> {
         };
 
         match pat_data {
+            Pat::Hole(_) => {
+                self.push_diag(BodyDiag::UnexpandedPatternHole(
+                    pat.span(self.body()).into(),
+                ));
+                self.finish_pat_check(
+                    pat,
+                    expected,
+                    TyId::invalid(self.db, InvalidCause::Other),
+                    PatternAnalysisStatus::Invalid,
+                )
+            }
             Pat::WildCard => {
                 let ty_var = self.table.new_var(TyVarSort::General, &Kind::Star);
                 let analysis = self.ready_wildcard(expected, None);
@@ -297,7 +308,7 @@ impl<'db> TyChecker<'db> {
                 self.discard_local_bindings_in_pat(*lhs);
                 self.discard_local_bindings_in_pat(*rhs);
             }
-            Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
+            Pat::Hole(_) | Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
         }
     }
 

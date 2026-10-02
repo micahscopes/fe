@@ -10,11 +10,21 @@ impl Copy for Field {}
 impl Copy for FieldType {}
 
 /// Fe syntax held as a compile-time value, built by `quote { .. }`. `K` is its
-/// kind: `Expr`, `Item` or `Where`. A code value has no runtime
+/// kind: `Expr`, `Pat`, `Item` or `Where`. A code value has no runtime
 /// representation; generation copies it into ordinary checked code. A checked
 /// body supplied by the compiler also supports the read-only node view below.
 pub struct Code<K> { seal: bool }
 impl<K> Copy for Code<K> {}
+
+/// A pattern fragment, including compiler-issued variant binders.
+pub struct Pat {}
+/// A list of match arms, spliced into a quoted match.
+pub struct Arm {}
+
+impl Code<Pat> {
+    /// Reference a field bound by this pattern, within the arm that binds it.
+    pub const fn at(self, _ field: Field) -> Code<Expr> { binder_at(self, field) }
+}
 
 /// An expression fragment.
 pub struct Expr {}
@@ -30,6 +40,12 @@ pub trait FieldQuery<R> {
 }
 
 extern {
+    /// Make a variant pattern that binds its complete payload. The group index
+    /// distinguishes binder sets for the same variant (for example left and
+    /// right operands). The compiler rejects binding the same group within an
+    /// enclosing group scope and rejects field references outside its arm.
+    pub const fn binders(_ payload: Record, _ group: usize) -> Code<Pat>
+    const fn binder_at(_ pattern: Code<Pat>, _ field: Field) -> Code<Expr>
     /// Count variants of a whole compiler-issued enum input. Structs and
     /// already selected payloads reject.
     pub const fn variant_count(_ record: Record) -> usize
@@ -77,75 +93,75 @@ impl Copy for CodeNode {}
 /// Scalar classifications of existing nodes, with no children or constructors
 /// for building code. Children remain in the original code representation.
 pub enum CodeNodeKind {
-    Integer
-    Boolean
-    String
-    Block
-    Add
-    Sub
-    Mul
-    Div
-    Rem
-    Pow
-    LShift
-    RShift
-    BitAnd
-    BitOr
-    BitXor
-    Range
-    Eq
-    NotEq
-    Lt
-    LtEq
-    Gt
-    GtEq
-    And
-    Or
-    Index
-    Positive
-    Negative
-    Not
-    BitNot
-    Borrow
-    BorrowMut
-    Deref
-    Cast
-    Call
-    Assert
-    MethodCall
-    Parameter
-    Local
-    Function
-    ConstParameter
-    Constant
-    Record
-    Field
-    Tuple
-    Array
-    ArrayRepeat
-    If
-    Match
-    Assign
-    AugAssign
-    Let
-    For
-    While
-    Break
-    Continue
-    Return
-    Statement
-    Condition
-    ConditionLet
-    ConditionAnd
-    ConditionOr
-    Wildcard
-    Rest
-    Binding
-    PatternValue
-    PatternTuple
-    PatternVariant
-    PatternRecord
-    PatternOr
+    Integer,
+    Boolean,
+    String,
+    Block,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Pow,
+    LShift,
+    RShift,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Range,
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    And,
+    Or,
+    Index,
+    Positive,
+    Negative,
+    Not,
+    BitNot,
+    Borrow,
+    BorrowMut,
+    Deref,
+    Cast,
+    Call,
+    Assert,
+    MethodCall,
+    Parameter,
+    Local,
+    Function,
+    ConstParameter,
+    Constant,
+    Record,
+    Field,
+    Tuple,
+    Array,
+    ArrayRepeat,
+    If,
+    Match,
+    Assign,
+    AugAssign,
+    Let,
+    For,
+    While,
+    Break,
+    Continue,
+    Return,
+    Statement,
+    Condition,
+    ConditionLet,
+    ConditionAnd,
+    ConditionOr,
+    Wildcard,
+    Rest,
+    Binding,
+    PatternValue,
+    PatternTuple,
+    PatternVariant,
+    PatternRecord,
+    PatternOr,
 }
 impl Copy for CodeNodeKind {}
 

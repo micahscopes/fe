@@ -3403,7 +3403,7 @@ impl<'db> TyChecker<'db> {
                     return;
                 };
                 for arm in arms {
-                    self.record_implicit_move_for_owned_expr_inner(arm.body, expected_ty);
+                    self.record_implicit_move_for_owned_expr_inner(arm.body(), expected_ty);
                 }
             }
             _ => {
@@ -3616,7 +3616,7 @@ impl<'db> TyChecker<'db> {
             return false;
         };
         match pat_data {
-            Pat::WildCard | Pat::Rest | Pat::Lit(_) => false,
+            Pat::Hole(_) | Pat::WildCard | Pat::Rest | Pat::Lit(_) => false,
             Pat::Path(..) => self
                 .env
                 .pat_binding(pat)
@@ -3668,7 +3668,7 @@ impl<'db> TyChecker<'db> {
                 self.retype_pattern_bindings_for_borrow(*lhs, kind);
                 self.retype_pattern_bindings_for_borrow(*rhs, kind);
             }
-            Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
+            Pat::Hole(_) | Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
         }
     }
 
@@ -3708,7 +3708,7 @@ impl<'db> TyChecker<'db> {
                 self.seed_pat_bindings(*lhs);
                 self.seed_pat_bindings(*rhs);
             }
-            Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
+            Pat::Hole(_) | Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
         }
     }
 
@@ -4731,13 +4731,16 @@ impl<'db> TypedBody<'db> {
             Expr::Match(_, Partial::Present(arms)) => {
                 if arms.iter().any(|arm| {
                     matches!(
-                        self.pattern_status(arm.pat),
+                        self.pattern_status(arm.pat()),
                         PatternAnalysisStatus::Unsupported
                     )
                 }) {
                     Some(SmirLoweringIssue::IncompleteExpr(expr))
                 } else if arms.iter().any(|arm| {
-                    matches!(self.pattern_status(arm.pat), PatternAnalysisStatus::Invalid)
+                    matches!(
+                        self.pattern_status(arm.pat()),
+                        PatternAnalysisStatus::Invalid
+                    )
                 }) {
                     Some(SmirLoweringIssue::InvalidExpr(expr))
                 } else {
@@ -5260,7 +5263,7 @@ impl<'db> TypedBody<'db> {
                     for idx in self.forwarded_return_param_sources_from_expr(
                         db,
                         body,
-                        arm.body,
+                        arm.body(),
                         seen,
                         visited_locals,
                     )? {
@@ -5921,7 +5924,7 @@ impl<'db> TypedBody<'db> {
                         self.collect_explicit_return_param_sources_in_expr(
                             db,
                             body,
-                            arm.body,
+                            arm.body(),
                             out,
                             saw_non_param,
                             seen,
@@ -6020,7 +6023,7 @@ impl<'db> TypedBody<'db> {
                         self.collect_implicit_return_param_sources_from_expr(
                             db,
                             body,
-                            arm.body,
+                            arm.body(),
                             out,
                             saw_non_param,
                             seen,
@@ -6833,8 +6836,8 @@ fn target(choice: Choice) -> u256 {
 
         for (invalid, unsupported) in [(0, 1), (1, 0)] {
             let mut mixed = checked.clone();
-            mixed.tables_mut().pattern_status[arms[invalid].pat] = PatternAnalysisStatus::Invalid;
-            mixed.tables_mut().pattern_status[arms[unsupported].pat] =
+            mixed.tables_mut().pattern_status[arms[invalid].pat()] = PatternAnalysisStatus::Invalid;
+            mixed.tables_mut().pattern_status[arms[unsupported].pat()] =
                 PatternAnalysisStatus::Unsupported;
             assert_eq!(
                 mixed.smir_lowering_readiness(&db),

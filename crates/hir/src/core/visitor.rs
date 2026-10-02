@@ -1497,8 +1497,11 @@ pub fn walk_arm<'db, V>(
 ) where
     V: Visitor<'db> + ?Sized,
 {
-    visit_node_in_body!(visitor, ctxt, &arm.pat, pat);
-    visit_node_in_body!(visitor, ctxt, &arm.body, expr);
+    if arm.parts().is_none() {
+        return;
+    }
+    visit_node_in_body!(visitor, ctxt, &arm.pat(), pat);
+    visit_node_in_body!(visitor, ctxt, &arm.body(), expr);
 }
 
 pub fn walk_pat<'db, V>(visitor: &mut V, ctxt: &mut VisitorCtxt<'db, LazyPatSpan<'db>>, pat: PatId)
@@ -1510,6 +1513,7 @@ where
     };
 
     match data {
+        Pat::Hole(_) => {}
         Pat::Lit(lit) => {
             if let Some(lit) = lit.to_opt() {
                 ctxt.with_new_ctxt(

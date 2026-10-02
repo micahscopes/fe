@@ -1399,6 +1399,24 @@ pub struct ImplTrait<'db> {
     pub(crate) origin: HirOrigin<ast::ImplTrait>,
 }
 
+#[cfg(feature = "testutils")]
+impl<'db> ItemKind<'db> {
+    pub fn inspected_where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
+        GenericParamOwner::from_item_opt(self)
+            .expect("generic owner")
+            .where_clause_owner()
+            .expect("where owner")
+            .where_clause(db)
+    }
+}
+
+#[cfg(feature = "testutils")]
+impl<'db> ImplTrait<'db> {
+    pub fn inspected_where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
+        self.where_clause(db)
+    }
+}
+
 impl<'db> ImplTrait<'db> {
     pub fn span(self) -> LazyImplTraitSpan<'db> {
         LazyImplTraitSpan::new(self)

@@ -73,7 +73,7 @@ pub fn transplant_fixture(
             .holes
             .iter()
             .filter_map(|hole| match hole {
-                FrozenCodeHole::Code(child) => Some(*child),
+                FrozenCodeHole::Code(child, ..) => Some(*child),
                 FrozenCodeHole::Value(_, _) => None,
             });
         let child = children.next().expect("adapter has a body fragment");

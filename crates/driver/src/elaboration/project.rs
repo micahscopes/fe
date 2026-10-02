@@ -75,19 +75,40 @@ fn evaluation_operation_diagnostic<'db>(
     let EvalFailure::Ctfe(error) = failure else {
         return None;
     };
+    let origin_span = |owner: BodyOwner<'db>, origin: SemOrigin<'db>| {
+        let body = owner.body(db)?;
+        match origin {
+            SemOrigin::Expr(expr) => expr.span(body).resolve(db),
+            SemOrigin::Stmt(stmt) => stmt.span(body).resolve(db),
+            SemOrigin::Body(_) | SemOrigin::Synthetic => None,
+        }
+    };
+    let in_core = |owner: BodyOwner<'db>| {
+        owner.scope().top_mod(db).ingot(db).kind(db) == common::ingot::IngotKind::Core
+    };
     let mut error = error;
-    while let CtfeError::CalleeError { callee, source, .. } = error {
+    let mut caller_span = None;
+    while let CtfeError::CalleeError {
+        origin,
+        callee,
+        source,
+    } = error
+    {
+        if !in_core(owner) {
+            caller_span = origin_span(owner, *origin);
+        }
         owner = callee.key(db).owner(db);
         error = source;
     }
     let CtfeError::InvalidOperation { origin, message } = error else {
         return None;
     };
-    let body = owner.body(db)?;
-    let span = match origin {
-        SemOrigin::Expr(expr) => expr.span(body).resolve(db)?,
-        SemOrigin::Stmt(stmt) => stmt.span(body).resolve(db)?,
-        SemOrigin::Body(_) | SemOrigin::Synthetic => return None,
+    // Core wrappers implement structural operations; authors act on the call
+    // in their own provider. Ordinary helper failures retain their leaf span.
+    let span = if in_core(owner) {
+        caller_span.or_else(|| origin_span(owner, *origin))?
+    } else {
+        origin_span(owner, *origin)?
     };
     Some((
         message.clone(),
@@ -267,13 +288,37 @@ fn annotate_generated_diagnostics(
         }) else {
             continue;
         };
-        let Some(quote) = unique_quote_location(&request.value) else {
+        let unique = unique_quote_location(&request.value);
+        // Composed fragments have several quote sites. The emitted item's root
+        // still identifies its author without guessing which child caused the error.
+        let root = match &request.value {
+            FrozenMetaValue::Code(code) => code
+                .nodes
+                .get(code.root)
+                .and_then(|node| node.template.as_ref())
+                .and_then(|template| {
+                    template.span.as_ref().map(|range| QuoteLocation {
+                        url: template.owner.file().clone(),
+                        range: range.clone(),
+                    })
+                }),
+            _ => None,
+        };
+        let Some(quote) = unique.as_ref().or(root.as_ref()) else {
             continue;
         };
         let Some(quote_span) = source_span(db, &quote.url, &quote.range) else {
             continue;
         };
         annotated = true;
+        if unique.is_none() {
+            diagnostic.sub_diagnostics.push(SubDiagnostic::new(
+                LabelStyle::Secondary,
+                "generated from this quote".into(),
+                Some(quote_span),
+            ));
+            continue;
+        }
         for label in &mut diagnostic.sub_diagnostics {
             if label.style == LabelStyle::Primary && label.span.as_ref() == Some(&primary) {
                 label.span = Some(quote_span.clone());
@@ -318,7 +363,7 @@ fn description_units(value: &FrozenMetaValue) -> usize {
         FrozenMetaValue::Code(code) => code.nodes.iter().fold(0usize, |sum, node| {
             let holes = node.holes.iter().fold(0usize, |sum, hole| {
                 sum.saturating_add(match hole {
-                    hir::core::meta::FrozenCodeHole::Code(_) => 8,
+                    hir::core::meta::FrozenCodeHole::Code(_, ..) => 8,
                     hir::core::meta::FrozenCodeHole::Value(value, _) => description_units(value),
                 })
             });
@@ -580,10 +625,21 @@ fn prepare_selected<'db>(
             .expect("copied source file");
         if let Some(error) = hir::lower::generated_hir_errors(&output, output.top_mod(file)).first()
         {
-            let quote = frozen_requests
-                .iter()
-                .find(|request| request.target.file == url && request.site_span == error.site_span)
-                .and_then(|request| unique_quote_location(&request.value));
+            let quote = error
+                .quote_source
+                .as_ref()
+                .map(|span| QuoteLocation {
+                    url: span.file.clone(),
+                    range: span.range.clone(),
+                })
+                .or_else(|| {
+                    frozen_requests
+                        .iter()
+                        .find(|request| {
+                            request.target.file == url && request.site_span == error.site_span
+                        })
+                        .and_then(|request| unique_quote_location(&request.value))
+                });
             return Err(ElaborationError {
                 url: Box::new(url),
                 message: format!("invalid generated declaration: {}", error.message),

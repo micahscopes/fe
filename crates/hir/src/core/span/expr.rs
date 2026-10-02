@@ -61,6 +61,10 @@ impl<'db> LazyExprSpan<'db> {
         LazyFieldExprSpan(self.0)
     }
 
+    pub fn into_quote_expr(self) -> LazyQuoteExprSpan<'db> {
+        LazyQuoteExprSpan(self.0)
+    }
+
     pub fn into_match_expr(self) -> LazyMatchExprSpan<'db> {
         LazyMatchExprSpan(self.0)
     }
@@ -182,6 +186,14 @@ define_lazy_span_node!(
     ast::FieldExpr,
     @token {
         (accessor, name_or_index),
+    }
+);
+
+define_lazy_span_node!(
+    LazyQuoteExprSpan,
+    ast::QuoteExpr,
+    @node {
+        (arms, arms, LazyMatchArmListSpan),
     }
 );
 

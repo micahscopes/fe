@@ -1,0 +1,200 @@
+// Target: Q6 (QUOTATION_DESIGN slice Q6, RD79 (1)). A quoted enum equality over unit, tuple and record variants runs and agrees with a hand-written twin.
+// Oracle: values from mb2 `derived_eq_default_enum.fe` (VERIFIED by twins in PARITY_FIXTURE_AUDIT_2026-09-28) and twin `ShapeH`.
+// RD79 uses existing field_count/field queries on selected variant payloads.
+// Arm-list folding preserves variant order and compiler-issued payload binders.
+use core::ops::Eq
+
+mod author {
+    use core::ops::Eq
+    use core::meta::{Arm, Code, Expr, Item, Record, binders, empty, variant, variant_count, field, field_count}
+
+    pub const fn enum_eq(record: Record) -> Code<Item> {
+        let mut arms = empty<Arm>()
+        let mut i: usize = 0
+        while i < variant_count(record) {
+            let v = variant(record, i)
+            let lhs = binders(v, 0)
+            let rhs = binders(v, 1)
+            let mut cmp: Code<Expr> = quote { true }
+            let mut j: usize = 0
+            while j < field_count(v) {
+                let f = field(v, j)
+                cmp = quote { ${cmp} && ${lhs.at(f)} == ${rhs.at(f)} }
+                j += 1
+            }
+            arms = quote(other) {
+                ${arms}
+                ${lhs} => match other {
+                    ${rhs} => ${cmp}
+                    _ => false
+                }
+            }
+            i += 1
+        }
+        quote {
+            impl Eq for ${record} {
+                fn eq(self, _ other: Self) -> bool { match self { ${arms} } }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::enum_eq)]
+enum Direction {
+    North,
+    South,
+    East,
+    West,
+}
+
+#[generate(ingot::author::enum_eq)]
+enum Shape {
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+    Empty,
+    Pair { other: u256, x: u256 },
+}
+
+enum ShapeH {
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+    Empty,
+    Pair { other: u256, x: u256 },
+}
+
+impl Eq for ShapeH {
+    fn eq(self, _ other: Self) -> bool {
+        match self {
+            ShapeH::Circle(a) => match other {
+                ShapeH::Circle(b) => true && a == b
+                _ => false
+            }
+            ShapeH::Rect { w, h } => match other {
+                ShapeH::Rect { w: w2, h: h2 } => true && w == w2 && h == h2
+                _ => false
+            }
+            ShapeH::Pair { other: a, x } => match other {
+                ShapeH::Pair { other: b, x: y } => true && a == b && x == y
+                _ => false
+            }
+            ShapeH::Empty => match other {
+                ShapeH::Empty => true
+                _ => false
+            }
+        }
+    }
+}
+
+#[test]
+fn unit_variants() {
+    assert!(Direction::North == Direction::North)
+    assert!(Direction::North != Direction::South)
+    assert!(!Direction::East.eq(Direction::West))
+}
+
+#[test]
+fn payload_variants_match_twin() {
+    assert!(Shape::Circle(5) == Shape::Circle(5))
+    assert!(Shape::Circle(5) != Shape::Circle(6))
+    let r1 = Shape::Rect { w: 2, h: 3 }
+    let r2 = Shape::Rect { w: 2, h: 3 }
+    let r3 = Shape::Rect { w: 2, h: 4 }
+    assert!(r1 == r2)
+    let r4 = Shape::Rect { w: 2, h: 3 }
+    assert!(r4 != r3)
+    let probe_left_1 = Shape::Rect { w: 2, h: 3 }
+    let probe_right_1 = Shape::Rect { w: 9, h: 3 }
+    assert!(probe_left_1 != probe_right_1)
+    let probe_left_2 = Shape::Pair { other: 1, x: 2 }
+    let probe_right_2 = Shape::Pair { other: 1, x: 2 }
+    assert!(probe_left_2 == probe_right_2)
+    let probe_left_3 = Shape::Pair { other: 1, x: 2 }
+    let probe_right_3 = Shape::Pair { other: 1, x: 3 }
+    assert!(probe_left_3 != probe_right_3)
+    let probe_left_4 = Shape::Pair { other: 1, x: 2 }
+    let probe_right_4 = Shape::Pair { other: 9, x: 2 }
+    assert!(probe_left_4 != probe_right_4)
+    assert!(Shape::Circle(0) != Shape::Empty)
+    assert!(ShapeH::Circle(5) == ShapeH::Circle(5))
+    let h1 = ShapeH::Rect { w: 2, h: 3 }
+    let h2 = ShapeH::Rect { w: 2, h: 4 }
+    assert!(h1 != h2)
+    let probe_left_5 = ShapeH::Rect { w: 2, h: 3 }
+    let probe_right_5 = ShapeH::Rect { w: 9, h: 3 }
+    assert!(probe_left_5 != probe_right_5)
+    let probe_left_6 = ShapeH::Pair { other: 1, x: 2 }
+    let probe_right_6 = ShapeH::Pair { other: 1, x: 2 }
+    assert!(probe_left_6 == probe_right_6)
+    let probe_left_7 = ShapeH::Pair { other: 1, x: 2 }
+    let probe_right_7 = ShapeH::Pair { other: 1, x: 3 }
+    assert!(probe_left_7 != probe_right_7)
+    let probe_left_8 = ShapeH::Pair { other: 1, x: 2 }
+    let probe_right_8 = ShapeH::Pair { other: 9, x: 2 }
+    assert!(probe_left_8 != probe_right_8)
+    assert!(ShapeH::Circle(0) != ShapeH::Empty)
+}
+
+
+#[generate(ingot::author::enum_eq)]
+enum Envelope<T: Eq> {
+    Empty,
+    Payload(T),
+    Pair { other: T, x: T },
+}
+
+enum EnvelopeH<T: Eq> {
+    Empty,
+    Payload(T),
+    Pair { other: T, x: T },
+}
+
+impl<T: Eq> Eq for EnvelopeH<T> {
+    fn eq(self, _ other: Self) -> bool {
+        match self {
+            EnvelopeH::Empty => match other {
+                EnvelopeH::Empty => true
+                _ => false
+            }
+            EnvelopeH::Payload(left) => match other {
+                EnvelopeH::Payload(right) => left == right
+                _ => false
+            }
+            EnvelopeH::Pair { other: left, x } => match other {
+                EnvelopeH::Pair { other: right, x: y } => left == right && x == y
+                _ => false
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_equality_matches_twin() {
+    let empty: Envelope<u256> = Envelope::Empty
+    let payload: Envelope<u256> = Envelope::Payload(7)
+    assert!(empty != payload)
+    let equal_left: Envelope<u256> = Envelope::Payload(7)
+    let equal_right: Envelope<u256> = Envelope::Payload(7)
+    let unequal_left: Envelope<u256> = Envelope::Payload(7)
+    let unequal_right: Envelope<u256> = Envelope::Payload(8)
+    assert!(equal_left == equal_right)
+    assert!(unequal_left != unequal_right)
+    let same = Envelope::Pair { other: true, x: false }
+    let first = Envelope::Pair { other: false, x: false }
+    let second = Envelope::Pair { other: true, x: true }
+    assert!(same != first)
+    assert!(same != second)
+    let twin_empty: EnvelopeH<u256> = EnvelopeH::Empty
+    let twin_payload: EnvelopeH<u256> = EnvelopeH::Payload(7)
+    assert!(twin_empty != twin_payload)
+    let equal_left: EnvelopeH<u256> = EnvelopeH::Payload(7)
+    let equal_right: EnvelopeH<u256> = EnvelopeH::Payload(7)
+    let unequal_left: EnvelopeH<u256> = EnvelopeH::Payload(7)
+    let unequal_right: EnvelopeH<u256> = EnvelopeH::Payload(8)
+    assert!(equal_left == equal_right)
+    assert!(unequal_left != unequal_right)
+    let twin_same = EnvelopeH::Pair { other: true, x: false }
+    let twin_first = EnvelopeH::Pair { other: false, x: false }
+    let twin_second = EnvelopeH::Pair { other: true, x: true }
+    assert!(twin_same != twin_first)
+    assert!(twin_same != twin_second)
+}

@@ -1,0 +1,11 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_arm_composition.fe
+---
+=== STDOUT ===
+PASS  [<time>] every_arm_retains_order
+
+test result: ok. 1 passed; 0 failed
+
+=== EXIT CODE: 0 ===

@@ -1,0 +1,56 @@
+// Q6: compiler-issued payload binders retain target generics and avoid authored names.
+mod author {
+    use core::meta::{Code, Item, Record, binders, field, field_type, variant}
+
+    pub const fn payload(record: Record) -> Code<Item> {
+        let selected = variant(record, 0)
+        let group = binders(selected, 0)
+        let f = field(selected, 0)
+        let ty = field_type(f)
+        let value = quote { ${group.at(f)} }
+        quote {
+            fn payload_or(_ input: own ${record}, _ fallback: own ${ty}) -> ${ty} {
+                match input { ${group} => ${value}, _ => fallback }
+            }
+        }
+    }
+
+    pub const fn capture(record: Record) -> Code<Item> {
+        let selected = variant(record, 0)
+        let group = binders(selected, 0)
+        let w = field(selected, 0)
+        let h = field(selected, 1)
+        quote {
+            fn authored_names(_ input: ${record}, _ w: u256, _ h: u256) -> u256 {
+                let _0: u256 = 1000
+                match input {
+                    ${group} => ${group.at(w)} * 100 + ${group.at(h)} * 10 + w + h + _0,
+                    _ => 0,
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::payload)]
+enum Envelope<T> { Payload(T), Empty }
+
+#[generate(ingot::author::capture)]
+enum Shape { Rect { w: u256, h: u256 }, Empty }
+
+fn ordinary_payload_or<T>(_ input: own Envelope<T>, _ fallback: own T) -> T {
+    match input { Envelope::Payload(value) => value, _ => fallback }
+}
+
+#[test]
+fn generic_payloads_and_authored_names() {
+    assert(payload_or<u256>(Envelope::Payload(7), 99) == 7)
+    assert(payload_or<u256>(Envelope::Empty, 99) == 99)
+    assert(payload_or<bool>(Envelope::Payload(true), false))
+    assert(!payload_or<bool>(Envelope::Payload(false), true))
+    assert(payload_or<bool>(Envelope::Empty, true))
+    assert(ordinary_payload_or<u256>(Envelope::Payload(7), 99) == 7)
+    assert(ordinary_payload_or<bool>(Envelope::Empty, true))
+    assert(authored_names(Shape::Rect { w: 3, h: 4 }, 5, 6) == 1351)
+    assert(authored_names(Shape::Empty, 5, 6) == 0)
+}

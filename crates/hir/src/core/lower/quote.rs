@@ -61,6 +61,12 @@ pub(super) fn lower_quote<'db>(ctxt: &mut BodyCtxt<'_, 'db>, ast: &ast::QuoteExp
             .filter_map(|entry| lower_item_entry(&mut template, entry))
             .collect();
         (template.push_missing_expr(), QuoteFragment::Items(items))
+    } else if let Some(arms) = ast.arms() {
+        let arms = arms
+            .into_iter()
+            .map(|arm| crate::hir_def::MatchArm::lower_ast(&mut template, arm))
+            .collect();
+        (template.push_missing_expr(), QuoteFragment::Arms(arms))
     } else if let Some(predicates) = ast.where_predicates() {
         let clause = lower_where_clause(&mut template, predicates.where_clause());
         (template.push_missing_expr(), QuoteFragment::Where(clause))

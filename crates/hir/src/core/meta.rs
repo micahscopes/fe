@@ -25,19 +25,23 @@ pub enum MetaItem {
     CodeNode,
     /// The kinds of `Code<K>`.
     Expr,
+    Pat,
+    Arm,
     Item,
     Where,
     DeclarationName,
 }
 
 impl MetaItem {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Record,
         Self::Field,
         Self::FieldType,
         Self::Code,
         Self::CodeNode,
         Self::Expr,
+        Self::Pat,
+        Self::Arm,
         Self::Item,
         Self::Where,
         Self::DeclarationName,
@@ -51,6 +55,8 @@ impl MetaItem {
             Self::Code => "core::meta::Code",
             Self::CodeNode => "core::meta::CodeNode",
             Self::Expr => "core::meta::Expr",
+            Self::Arm => "core::meta::Arm",
+            Self::Pat => "core::meta::Pat",
             Self::Item => "core::meta::Item",
             Self::Where => "core::meta::Where",
             Self::DeclarationName => "core::meta::DeclarationName",
@@ -137,8 +143,9 @@ pub struct FrozenCode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenCodeNode {
-    /// `None` is the empty fragment produced by `empty<K>()`.
+    /// Absent for empty fragments and compiler-issued variant bindings.
     pub template: Option<FrozenTemplateKey>,
+    pub variant_binding: Option<FrozenVariantBinding>,
     pub holes: Vec<FrozenCodeHole>,
     /// Authored expression paths that were resolved before generation.
     pub rooted_funcs: Vec<FrozenQuoteFunction>,
@@ -175,6 +182,8 @@ pub struct FrozenCodeNode {
     pub free_self_uses: Vec<ExprId>,
     /// Checked function signatures in the quote's visiting order.
     pub function_types: Vec<FrozenQuoteFunctionTypes>,
+    /// Checked fragment/impl predicates; holes retain their graph edge in holes.
+    pub where_predicates: Vec<Option<FrozenQuoteWherePredicate>>,
     /// Checked primitive types of associated constants in the sole quoted impl.
     pub assoc_const_primitives: Vec<Option<PrimTy>>,
     /// Checked associated-type values in the sole quoted impl.
@@ -185,6 +194,7 @@ impl FrozenCodeNode {
     pub fn empty(template: Option<FrozenTemplateKey>) -> Self {
         Self {
             template,
+            variant_binding: None,
             holes: Vec::new(),
             rooted_funcs: Vec::new(),
             rooted_constructors: Vec::new(),
@@ -204,10 +214,20 @@ impl FrozenCodeNode {
             open_uses: Vec::new(),
             free_self_uses: Vec::new(),
             function_types: Vec::new(),
+            where_predicates: Vec::new(),
             assoc_const_primitives: Vec::new(),
             assoc_type_values: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrozenVariantBinding {
+    pub owner: FrozenQuoteNominal,
+    pub variant_index: u16,
+    pub group: usize,
+    /// Absent for the pattern, present for a reference to a bound payload field.
+    pub field: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -368,12 +388,18 @@ pub struct FrozenQuoteTrait {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenCodeHole {
-    Code(usize),
+    Code(usize, Option<FrozenQuoteSpan>),
     Value(Box<FrozenMetaValue>, Option<FrozenQuoteFieldType>),
 }
 
 /// Checked meaning of a field type used by a quote over a generic record.
 /// The output view rebinds target parameters by index, never by authored name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrozenQuoteSpan {
+    pub file: url::Url,
+    pub range: std::ops::Range<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenQuoteFieldType {
     TargetParam(usize),

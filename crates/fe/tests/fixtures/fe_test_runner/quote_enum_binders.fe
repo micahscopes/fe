@@ -1,0 +1,53 @@
+// RD79: group binder holes expand to ordinary unit, tuple and record patterns.
+// The provider's same-named enum deliberately has a different declaration order.
+mod author {
+    use core::meta::{Code, Item, Record, binders, field, variant}
+    enum Shape { Pair(u256, u256), Empty, Rect { h: u256, w: u256 } }
+
+    pub const fn emit(record: Record) -> Code<Item> {
+        let rect = variant(record, 0)
+        let empty = variant(record, 1)
+        let pair = variant(record, 2)
+        let lr = binders(rect, 0)
+        let rr = binders(rect, 1)
+        let le = binders(empty, 0)
+        let re = binders(empty, 1)
+        let lp = binders(pair, 0)
+        let rp = binders(pair, 1)
+        let w = field(rect, 0)
+        let h = field(rect, 1)
+        let a = field(pair, 0)
+        let b = field(pair, 1)
+        let rect_tail = quote { ${lr.at(h)} == ${rr.at(h)} }
+        let pair_eq = quote { ${lp.at(a)} == ${rp.at(a)} && ${lp.at(b)} == ${rp.at(b)} }
+        quote {
+            fn generated_equal(_ left: ${record}, _ right: ${record}) -> bool {
+                match left {
+                    ${lr} => match right {
+                        ${rr} => ${lr.at(w)} == ${rr.at(w)} && ${rect_tail},
+                        _ => false,
+                    },
+                    ${le} => match right { ${re} => true, _ => false },
+                    ${lp} => match right {
+                        ${rp} => ${pair_eq},
+                        _ => false,
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+enum Shape { Rect { w: u256, h: u256 }, Empty, Pair(u256, u256) }
+
+#[test]
+fn group_binders_keep_owner_variant_and_field_identity() {
+    assert(generated_equal(Shape::Rect { w: 3, h: 7 }, Shape::Rect { w: 3, h: 7 }))
+    assert(!generated_equal(Shape::Rect { w: 3, h: 7 }, Shape::Rect { w: 7, h: 3 }))
+    assert(generated_equal(Shape::Empty, Shape::Empty))
+    assert(generated_equal(Shape::Pair(4, 9), Shape::Pair(4, 9)))
+    assert(!generated_equal(Shape::Pair(4, 9), Shape::Pair(9, 4)))
+    assert(!generated_equal(Shape::Empty, Shape::Pair(4, 9)))
+    assert(!generated_equal(Shape::Rect { w: 3, h: 7 }, Shape::Empty))
+}

@@ -1,0 +1,13 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_enum_eq.fe
+---
+=== STDOUT ===
+PASS  [<time>] unit_variants
+PASS  [<time>] payload_variants_match_twin
+PASS  [<time>] generic_equality_matches_twin
+
+test result: ok. 3 passed; 0 failed
+
+=== EXIT CODE: 0 ===

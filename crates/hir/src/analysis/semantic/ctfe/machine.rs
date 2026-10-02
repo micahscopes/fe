@@ -1699,7 +1699,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 let holes = holes.iter().map(|hole| hole.materialize(self.db)).collect();
                 Ok(CtfeValue::Value(self.code_value(
                     result_ty,
-                    Some(site),
+                    crate::analysis::semantic::CodeSource::Template(site),
                     holes,
                     origin,
                 )?))
@@ -1945,6 +1945,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 "field_count"
                     | "variant_count"
                     | "variant"
+                    | "binders"
+                    | "binder_at"
                     | "field"
                     | "field_type"
                     | "type_is"
@@ -1973,7 +1975,12 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     "core::meta::empty",
                 )
             {
-                return Ok(self.code_value(result_ty, None, Vec::new(), origin)?);
+                return Ok(self.code_value(
+                    result_ty,
+                    crate::analysis::semantic::CodeSource::Empty,
+                    Vec::new(),
+                    origin,
+                )?);
             }
             if crate::analysis::ty::corelib::lib_func_matches(
                 self.db,
@@ -2286,11 +2293,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
     fn code_value(
         &self,
         ty: TyId<'db>,
-        site: Option<crate::analysis::semantic::QuoteSite<'db>>,
+        source: crate::analysis::semantic::CodeSource<'db>,
         holes: Vec<SemConstId<'db>>,
         origin: SemOrigin<'db>,
     ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
-        let code = crate::analysis::semantic::QuotedCode::new(self.db, site, holes);
+        let code = crate::analysis::semantic::QuotedCode::new(self.db, source, holes);
         let value = SemConstId::new(
             self.db,
             SemConstValue::Structural {
@@ -2610,10 +2617,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             message: "invalid structural reflection handle or operation".to_owned(),
         };
         let first = args.first().ok_or_else(invalid)?.materialize(self.db);
-        let SemConstValue::Structural { handle, .. } = first.value(self.db) else {
+        let &SemConstValue::Structural { handle, .. } = first.value(self.db) else {
             return Err(invalid().into());
         };
-        let handle = *handle;
         let field_list = match handle {
             StructuralHandle::Record(owner @ crate::analysis::ty::adt_def::AdtRef::Struct(_)) => {
                 Some((owner, None))
@@ -2625,6 +2631,96 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             _ => None,
         };
         let output = match (operation, handle, args.len()) {
+            ("binders", StructuralHandle::Variant(variant), 2) => {
+                if usize::from(variant.idx) >= variant.enum_.len_variants(self.db) {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "binder variant index is out of bounds".into(),
+                    }
+                    .into());
+                }
+                let SemConstValue::Scalar {
+                    value: SemConstScalar::Int { value },
+                    ..
+                } = args[1].materialize(self.db).value(self.db)
+                else {
+                    return Err(invalid().into());
+                };
+                let group = value.to_usize().ok_or_else(invalid)?;
+                return Ok(self.code_value(
+                    result_ty,
+                    crate::analysis::semantic::CodeSource::VariantBinding {
+                        variant,
+                        group,
+                        field: None,
+                    },
+                    Vec::new(),
+                    origin,
+                )?);
+            }
+            ("binders", _, _) => {
+                return Err(CtfeError::InvalidOperation {
+                    origin,
+                    message: "`binders` needs a selected variant payload".into(),
+                }
+                .into());
+            }
+            ("binder_at", StructuralHandle::Code(code), 2) => {
+                let crate::analysis::semantic::CodeSource::VariantBinding {
+                    variant,
+                    group,
+                    field: None,
+                } = code.source(self.db)
+                else {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "`.at` needs a compiler-issued variant binder pattern".into(),
+                    }
+                    .into());
+                };
+                let &SemConstValue::Structural {
+                    handle:
+                        StructuralHandle::Field {
+                            owner,
+                            variant_index,
+                            index,
+                        },
+                    ..
+                } = args[1].materialize(self.db).value(self.db)
+                else {
+                    return Err(invalid().into());
+                };
+                if owner != crate::analysis::ty::adt_def::AdtRef::Enum(variant.enum_)
+                    || variant_index != Some(variant.idx)
+                {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "`.at` field belongs to another owner or variant".into(),
+                    }
+                    .into());
+                }
+                let fields = owner.as_adt(self.db).fields(self.db);
+                if fields
+                    .get(usize::from(variant.idx))
+                    .is_none_or(|shape| index >= shape.num_types())
+                {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "binder field index is out of bounds".into(),
+                    }
+                    .into());
+                }
+                return Ok(self.code_value(
+                    result_ty,
+                    crate::analysis::semantic::CodeSource::VariantBinding {
+                        variant,
+                        group,
+                        field: Some(index),
+                    },
+                    Vec::new(),
+                    origin,
+                )?);
+            }
             (
                 "variant_count",
                 StructuralHandle::Record(crate::analysis::ty::adt_def::AdtRef::Enum(owner)),

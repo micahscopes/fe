@@ -117,7 +117,59 @@ fn shared_field_helpers_execute_at_o0_and_o2(fixture: Fixture<&str>) {
     execute_quoted_fixture(fixture);
 }
 
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_binders.fe",
+)]
+fn enum_group_binders_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_generic_binders.fe",
+)]
+fn generic_enum_binders_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_eq.fe",
+)]
+fn enum_arm_fold_executes_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture_with_count(fixture, 3);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_arm_composition.fe",
+)]
+fn long_arm_composition_executes_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_generic.fe",
+)]
+fn enum_payload_where_bounds_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture_with_count(fixture, 3);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_enum_binder_hygiene.fe",
+)]
+fn enum_destination_constants_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
 fn execute_quoted_fixture(fixture: Fixture<&str>) {
+    execute_quoted_fixture_with_count(fixture, 1);
+}
+
+fn execute_quoted_fixture_with_count(fixture: Fixture<&str>, expected_tests: usize) {
     let url = Url::from_file_path(fixture.path()).expect("fixture URL");
     let mut authored = DriverDataBase::default();
     authored
@@ -127,7 +179,7 @@ fn execute_quoted_fixture(fixture: Fixture<&str>) {
         .expect("quotation succeeds")
         .expect("quoted output");
     let file = output.workspace().get(&output, &url).unwrap();
-    execute_checked_module(&output, output.top_mod(file), 1);
+    execute_checked_module(&output, output.top_mod(file), expected_tests);
 }
 
 fn execute_copied_bodies(fixture: Fixture<&str>) {

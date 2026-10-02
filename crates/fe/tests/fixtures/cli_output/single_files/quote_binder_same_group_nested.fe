@@ -1,0 +1,22 @@
+// RD79 rejection: Reject binding the same group within an enclosing pattern.
+mod author {
+    use core::meta::{Code, Item, Record, binders, field, variant}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let rect = variant(record, 0)
+        let pair = variant(record, 2)
+        let lr = binders(rect, 0)
+        let rr = binders(rect, 0)
+        let lp = binders(pair, 1)
+        let w = field(rect, 0)
+        quote {
+            fn generated(_ left: ${record}, _ right: ${record}) -> bool {
+                match left {
+                    ${lr} => match right { ${rr} => ${lr.at(w)} == ${rr.at(w)}, _ => false },
+                    _ => false,
+                }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+enum Shape { Rect { w: u256 }, Empty, Pair(u256) }

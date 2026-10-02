@@ -4043,6 +4043,16 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary.resolve(db),
                 error_code,
             ),
+            Self::UnexpandedArmHole(primary) => primary_diag(
+                Severity::Error,
+                "an unexpanded arm splice cannot be checked as an ordinary match",
+                "expand this splice through quotation before checking the generated body",
+                primary.resolve(db), error_code),
+            Self::UnexpandedPatternHole(primary) => primary_diag(
+                Severity::Error,
+                "an unexpanded pattern splice cannot be checked as an ordinary pattern",
+                "expand this splice through quotation before checking the generated body",
+                primary.resolve(db), error_code),
             Self::QuoteOutsideConstContext(primary) => primary_diag(Severity::Error, "`quote` is only allowed in a const context".to_string(), "a quote builds a compile-time code value; use it in a `const fn` or a `const` item".to_string(), primary.resolve(db), error_code),
             Self::CodeValueAtRuntime(primary) => primary_diag(Severity::Error, "a code value cannot be used at runtime".to_string(), "use this value in a `const fn`, a `const` item, or a generator"
                         .to_string(), primary.resolve(db), error_code),
@@ -4054,6 +4064,8 @@ impl DiagnosticVoucher for BodyDiag<'_> {
             } => {
                 use crate::hir_def::QuoteHolePosition as P;
                 let (place, accepts) = match position {
+                    P::Arms => ("match arms", "`Code<Arm>`"),
+                    P::Pat => ("a pattern", "`Code<Pat>`"),
                     P::Expr => (
                         "an expression",
                         "`Code<Expr>`, `bool`, an integer or a string",

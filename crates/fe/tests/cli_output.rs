@@ -3108,6 +3108,7 @@ fn assert_hex_artifact(path: &std::path::Path) {
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/cli_output/single_files",
     glob: "*.fe",
 )]
+// Active cases include Q6 pattern kinds, exhaustiveness and where fold limits.
 fn test_cli_single_file(fixture: Fixture<&str>) {
     let (output, _) = run_fe_check(fixture.path());
     snap_test!(output, fixture.path());

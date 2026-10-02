@@ -437,6 +437,11 @@ impl QuoteExpr {
         support::child(self.syntax())
     }
 
+    /// The body of a match-arm quote.
+    pub fn arms(&self) -> Option<MatchArmList> {
+        support::child(self.syntax())
+    }
+
     /// The body of an item quote.
     pub fn items(&self) -> Option<QuoteItemList> {
         support::child(self.syntax())
@@ -660,9 +665,18 @@ ast_node! {
 }
 ast_node! {
     pub struct MatchArm,
-    SK::MatchArm
+    SK::MatchArm | SK::QuoteHoleArm
 }
 impl MatchArm {
+    pub fn hole(&self) -> Option<Expr> {
+        (self.syntax().kind() == SK::QuoteHoleArm)
+            .then(|| support::child(self.syntax()))
+            .flatten()
+    }
+
+    pub fn is_hole(&self) -> bool {
+        self.syntax().kind() == SK::QuoteHoleArm
+    }
     /// Returns the pattern of the match arm.
     pub fn pat(&self) -> Option<super::Pat> {
         support::child(self.syntax())

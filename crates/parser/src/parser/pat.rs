@@ -19,7 +19,7 @@ pub fn parse_pat<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recovery<
     let token = parser.current_token();
     if has_mut {
         match token.as_ref().map(|t| t.syntax_kind()) {
-            Some(Underscore | Dot2 | LParen) => {
+            Some(Underscore | Dot2 | LParen | Dollar) => {
                 parser.error_msg_on_current_token(&format!(
                     "`mut` is not allowed on `{}`",
                     token.unwrap().text()
@@ -44,6 +44,10 @@ pub fn parse_pat<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recovery<
         Some(Dot2) => parser
             .parse_cp(RestPatScope::default(), Some(checkpoint))
             .unwrap(),
+        Some(Dollar) => parser.parse_cp(
+            super::expr_atom::QuoteHolePatScope::default(),
+            Some(checkpoint),
+        )?,
         Some(LParen) => parser.parse_cp(TuplePatScope::default(), Some(checkpoint))?,
         Some(kind) if is_lit(kind) => parser
             .parse_cp(LitPatScope::default(), Some(checkpoint))

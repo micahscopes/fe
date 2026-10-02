@@ -50,6 +50,13 @@ module.exports = grammar({
     [$._expression, $._condition_atom_no_let, $._path],
     [$._expression, $._condition_atom_no_let, $._path, $.path_segment],
     [$.where_clause],
+    [$.block, $.match_arm_list],
+    [$._expression, $.match_arm_list],
+    [$._pattern, $._expression],
+    [$.literal_pattern, $.literal],
+    [$.record_field, $.record_pattern_field],
+    [$.tuple_expression, $.tuple_pattern],
+    [$._expression, $.identifier_pattern, $.path_segment],
     [$.qualified_path_type, $.qualified_path_expression],
     [$.tuple_type, $.tuple_expression],
     [$.where_const_predicate, $.path_segment],
@@ -110,6 +117,7 @@ module.exports = grammar({
       $.impl_block,
       $.impl_trait,
       $.type_alias,
+      $.type_function_definition,
       $.mod_definition,
       $.extern_block,
     ),
@@ -476,6 +484,20 @@ module.exports = grammar({
     impl_item_list: $ => seq(
       '{',
       repeat(choice($.function_definition, $.impl_const_item, $.quote_splice)),
+      '}',
+    ),
+
+    type_function_definition: $ => seq(
+      optional($.attribute_list), optional($.visibility), 'recursive',
+      'type', 'fn', field('name', $.identifier),
+      optional($.generic_param_list), $.parameter_list,
+      '->', field('return_kind', $.kind_bound),
+      optional($.where_clause), field('body', seq('{', $.type_function_match, '}')),
+    ),
+
+    type_function_match: $ => seq(
+      'match', field('subject', $.identifier), '{',
+      repeat(seq(choice($.integer_literal, '_'), '=>', $._type, optional(','))),
       '}',
     ),
 
@@ -1097,7 +1119,7 @@ module.exports = grammar({
 
     match_arm_list: $ => seq(
       '{',
-      repeat($.match_arm),
+      repeat(choice($.match_arm, seq($.quote_splice, choice(',', $._terminator)))),
       '}',
     ),
 
@@ -1135,7 +1157,7 @@ module.exports = grammar({
     quote_expression: $ => seq(
       'quote',
       optional($.quote_open_list),
-      field('body', choice($.block, $.quote_where)),
+      field('body', choice($.block, $.quote_where, $.match_arm_list)),
     ),
 
     quote_where: $ => seq('{', $.where_clause, '}'),
@@ -1250,6 +1272,7 @@ module.exports = grammar({
     // ==================== PATTERNS ====================
 
     _pattern: $ => choice(
+      $.quote_splice,
       $.wildcard_pattern,
       $.rest_pattern,
       $.literal_pattern,

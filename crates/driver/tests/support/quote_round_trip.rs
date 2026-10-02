@@ -15,7 +15,8 @@ use hir::{
     core::meta::{
         FrozenCode, FrozenCodeHole, FrozenCodeNode, FrozenGeneration, FrozenHandleKind,
         FrozenItemLocator, FrozenMetaValue, FrozenMetaVariantCase, FrozenQuoteConstructorSite,
-        FrozenQuoteFieldType, FrozenQuoteSignatureType, FrozenTemplateSource, MetaItem,
+        FrozenQuoteFieldType, FrozenQuoteSignatureType, FrozenTemplateSource, FrozenVariantBinding,
+        MetaItem,
     },
     hir_def::{
         Body, Cond, CondId, Expr, ExprId, FieldIndex, Func, GenericParamOwner, IdentId, ItemKind,
@@ -80,6 +81,7 @@ struct Frame<'db> {
     function: u32,
     open: Vec<IdentId<'db>>,
     locals: HashMap<PatId, PatId>,
+    groups: HashMap<FrozenVariantBinding, Vec<PatId>>,
 }
 
 struct Comparison<'a, 'db> {
@@ -114,6 +116,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
             function,
             open,
             locals: HashMap::new(),
+            groups: HashMap::new(),
         }
     }
 
@@ -514,6 +517,68 @@ impl<'a, 'db> Comparison<'a, 'db> {
         }
     }
 
+    fn arms(
+        &self,
+        frame: &mut Frame<'db>,
+        expected: &[hir::hir_def::MatchArm],
+        actual: &[hir::hir_def::MatchArm],
+    ) -> usize {
+        let mut consumed = 0;
+        for arm in expected {
+            match arm {
+                hir::hir_def::MatchArm::Hole(slot) => {
+                    let FrozenCodeHole::Code(child, ..) =
+                        self.code.nodes[frame.node].holes[*slot as usize]
+                    else {
+                        panic!("arm splice must contain code");
+                    };
+                    consumed += self.arm_fragment(frame, child, &actual[consumed..]);
+                }
+                hir::hir_def::MatchArm::Arm { pat, body } => {
+                    let actual = actual.get(consumed).expect("arm list lost an arm");
+                    let enclosing = frame.groups.clone();
+                    self.pat(frame, *pat, actual.pat());
+                    self.expr(frame, *body, actual.body());
+                    frame.groups = enclosing;
+                    consumed += 1;
+                }
+            }
+        }
+        consumed
+    }
+
+    fn arm_fragment(
+        &self,
+        parent: &Frame<'db>,
+        child: usize,
+        actual: &[hir::hir_def::MatchArm],
+    ) -> usize {
+        let node = &self.code.nodes[child];
+        if node == &FrozenCodeNode::empty(None) {
+            return 0;
+        }
+        let source = quote(self.authored, node).expect("arm fragment must be authored quotation");
+        let mut frame = self.frame(child, 0);
+        frame.groups = parent.groups.clone();
+        match &source.fragment {
+            QuoteFragment::Arms(arms) => self.arms(&mut frame, arms, actual),
+            QuoteFragment::Expr => {
+                let mut consumed = 0;
+                for slot in source
+                    .splice_only_body(self.authored)
+                    .expect("arm list composition contains only splices")
+                {
+                    let FrozenCodeHole::Code(next, ..) = node.holes[slot as usize] else {
+                        panic!("arm list composition is code")
+                    };
+                    consumed += self.arm_fragment(&frame, next, &actual[consumed..]);
+                }
+                consumed
+            }
+            _ => panic!("arm list requires arm fragments"),
+        }
+    }
+
     fn expr(&self, frame: &mut Frame<'db>, expected: ExprId, actual: ExprId) {
         let expected = unwrapped(self.authored, frame.body, expected);
         let actual = unwrapped(self.output, self.body, actual);
@@ -521,8 +586,19 @@ impl<'a, 'db> Comparison<'a, 'db> {
         let output = self.body.exprs(self.output)[actual].unwrap_ref();
         if let Expr::Hole(slot) = source {
             match &self.code.nodes[frame.node].holes[*slot as usize] {
-                FrozenCodeHole::Code(child) => {
+                FrozenCodeHole::Code(child, ..) => {
+                    if let Some(binding) = &self.code.nodes[*child].variant_binding {
+                        let field = binding.field.expect("expression code is a field reference");
+                        let mut group = binding.clone();
+                        group.field = None;
+                        let binder =
+                            frame.groups.get(&group).expect("binder group in scope")[field];
+                        assert!(self.actual.locals.iter().any(|local| local.binder == binder && local.uses.contains(&actual)),
+                            "selected payload field must use its checked binder identity");
+                        return;
+                    }
                     let mut child_frame = self.frame(*child, 0);
+                    child_frame.groups = frame.groups.clone();
                     let root = child_frame.body.expr(self.authored);
                     self.expr(&mut child_frame, root, actual);
                 }
@@ -727,11 +803,8 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 Expr::Match(actual_scrutinee, Partial::Present(actual_arms)),
             ) => {
                 self.expr(frame, *scrutinee, *actual_scrutinee);
-                assert_eq!(arms.len(), actual_arms.len());
-                for (arm, actual) in arms.iter().zip(actual_arms) {
-                    self.pat(frame, arm.pat, actual.pat);
-                    self.expr(frame, arm.body, actual.body);
-                }
+                let consumed = self.arms(frame, arms, actual_arms);
+                assert_eq!(consumed, actual_arms.len(), "arm list length changed");
             }
             (Expr::Block(stmts), Expr::Block(actual)) => {
                 assert_eq!(stmts.len(), actual.len());
@@ -813,6 +886,79 @@ impl<'a, 'db> Comparison<'a, 'db> {
     }
 
     fn pat(&self, frame: &mut Frame<'db>, expected: PatId, actual: PatId) {
+        if let Pat::Hole(slot) = frame.body.pats(self.authored)[expected].unwrap_ref() {
+            let FrozenCodeHole::Code(child, ..) = self.code.nodes[frame.node].holes[*slot as usize]
+            else {
+                panic!("pattern splice must be code");
+            };
+            let binding = self.code.nodes[child]
+                .variant_binding
+                .as_ref()
+                .expect("issued binder pattern");
+            assert!(binding.field.is_none());
+            let root = self
+                .actual
+                .rooted_constructors
+                .iter()
+                .find(|root| root.site == FrozenQuoteConstructorSite::Pat(actual))
+                .expect("checked generated pattern owner");
+            assert_eq!(
+                binding.owner.owner, root.owner.owner,
+                "binder pattern owner identity"
+            );
+            assert_eq!(
+                Some(binding.variant_index),
+                root.variant_index,
+                "binder variant index"
+            );
+            let hir::analysis::ty::adt_def::AdtRef::Enum(owner) = self.target else {
+                panic!("binder target is an enum");
+            };
+            let variant = hir::hir_def::EnumVariant::new(owner, usize::from(binding.variant_index));
+            let output = self.body.pats(self.output)[actual].unwrap_ref();
+            let fields = match (variant.kind(self.authored), output) {
+                (hir::hir_def::VariantKind::Unit, Pat::Path(_, false)) => Vec::new(),
+                (hir::hir_def::VariantKind::Tuple(types), Pat::PathTuple(_, fields)) => {
+                    assert_eq!(types.len(self.authored), fields.len());
+                    fields.clone()
+                }
+                (hir::hir_def::VariantKind::Record(source), Pat::Record(_, fields)) => {
+                    assert_eq!(source.data(self.authored).len(), fields.len());
+                    for (expected, actual_field) in source.data(self.authored).iter().zip(fields) {
+                        assert_eq!(
+                            expected.name.to_opt().map(|name| name.data(self.authored)),
+                            actual_field
+                                .label(self.output, self.body)
+                                .map(|name| name.data(self.output)),
+                            "payload field ordinal"
+                        );
+                    }
+                    fields.iter().map(|field| field.pat).collect()
+                }
+                other => panic!("binder payload shape changed: {other:?}"),
+            };
+            for field in &fields {
+                assert!(
+                    matches!(
+                        self.body.pats(self.output)[*field].unwrap_ref(),
+                        Pat::Path(_, false)
+                    ),
+                    "ordinary payload binder"
+                );
+                assert!(
+                    self.actual
+                        .locals
+                        .iter()
+                        .any(|local| local.binder == *field),
+                    "checked binding identity"
+                );
+            }
+            assert!(
+                frame.groups.insert(binding.clone(), fields).is_none(),
+                "group must be fresh within its arm"
+            );
+            return;
+        }
         match (
             frame.body.pats(self.authored)[expected].unwrap_ref(),
             self.body.pats(self.output)[actual].unwrap_ref(),
@@ -987,6 +1133,283 @@ pub fn assert_round_trip<'db>(
     assert_round_trip_against(authored, output, url, input.requests(output));
 }
 
+fn compare_impl_predicates<'db>(
+    authored: &'db DriverDataBase,
+    output: &'db DriverDataBase,
+    code: &FrozenCode,
+    root: usize,
+    function: Func<'db>,
+    target: hir::analysis::ty::adt_def::AdtRef<'db>,
+) {
+    use hir::analysis::{
+        name_resolution::{PathRes, resolve_path},
+        ty::{trait_resolution::PredicateListId, ty_def::TyData, ty_lower::lower_hir_ty},
+    };
+    use hir::core::meta::FrozenQuoteWherePredicate;
+    use hir::hir_def::{QuoteWherePredicate, TypeBound};
+    fn field_type<'db>(
+        db: &'db DriverDataBase,
+        expected: &FrozenQuoteFieldType,
+        actual: hir::analysis::ty::ty_def::TyId<'db>,
+    ) {
+        use hir::analysis::ty::ty_def::{PrimTy, TyBase};
+        match expected {
+            FrozenQuoteFieldType::TargetParam(index) => {
+                let TyData::TyParam(param) = actual.data(db) else {
+                    panic!("where payload parameter");
+                };
+                assert_eq!(param.idx, *index, "impl where payload parameter index");
+            }
+            FrozenQuoteFieldType::Primitive(primitive) => {
+                let TyData::TyBase(TyBase::Prim(actual)) = actual.data(db) else {
+                    panic!("where primitive type");
+                };
+                assert_eq!(primitive, actual, "impl where primitive identity");
+            }
+            FrozenQuoteFieldType::Tuple(parts) => {
+                let (base, args) = actual.decompose_ty_app(db);
+                assert!(
+                    matches!(base.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Tuple(count))) if *count == parts.len()),
+                    "impl where tuple identity"
+                );
+                assert_eq!(args.len(), parts.len(), "impl where tuple arguments");
+                for (part, argument) in parts.iter().zip(args) {
+                    field_type(db, part, *argument);
+                }
+            }
+            FrozenQuoteFieldType::Ptr(inner) => {
+                let (base, args) = actual.decompose_ty_app(db);
+                assert!(
+                    matches!(base.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Ptr))),
+                    "impl where pointer identity"
+                );
+                assert_eq!(args.len(), 1);
+                field_type(db, inner, args[0]);
+            }
+        }
+    }
+    fn collect<'db>(
+        db: &'db DriverDataBase,
+        code: &FrozenCode,
+        index: usize,
+        result: &mut Vec<(usize, usize)>,
+    ) {
+        let Some(source) = quote(db, &code.nodes[index]) else {
+            assert_eq!(code.nodes[index], FrozenCodeNode::empty(None));
+            return;
+        };
+        let clause = match &source.fragment {
+            QuoteFragment::Where(clause) => clause,
+            QuoteFragment::Items(items) => {
+                let [QuoteItem::Impl(item)] = items.as_slice() else {
+                    panic!("where owner is an impl");
+                };
+                &item.where_clause
+            }
+            QuoteFragment::Expr => {
+                for slot in source.splice_only_body(db).expect("where concatenation") {
+                    let FrozenCodeHole::Code(child, _) = code.nodes[index].holes[slot as usize]
+                    else {
+                        panic!("where child is code");
+                    };
+                    collect(db, code, child, result);
+                }
+                return;
+            }
+            _ => panic!("where fragment kind"),
+        };
+        for (predicate, source) in clause.predicates.iter().enumerate() {
+            match source {
+                QuoteWherePredicate::Hole(slot) => {
+                    let FrozenCodeHole::Code(child, _) = code.nodes[index].holes[*slot as usize]
+                    else {
+                        panic!("where hole is code");
+                    };
+                    collect(db, code, child, result);
+                }
+                QuoteWherePredicate::Bound(_) => result.push((index, predicate)),
+                _ => panic!("uncovered where predicate"),
+            }
+        }
+    }
+    let source = quote(authored, &code.nodes[root]).expect("impl quote");
+    let QuoteFragment::Items(items) = &source.fragment else {
+        return;
+    };
+    let [QuoteItem::Impl(item)] = items.as_slice() else {
+        return;
+    };
+    if item.where_clause.predicates.is_empty() {
+        return;
+    }
+    let ItemKind::ImplTrait(actual) = function.scope().parent(output).unwrap().to_item().unwrap()
+    else {
+        panic!("method impl owner");
+    };
+    let mut expected = Vec::new();
+    collect(authored, code, root, &mut expected);
+    let predicates: Vec<_> = actual
+        .inspected_where_clause(output)
+        .type_predicates(output)
+        .map(|(_, predicate)| predicate)
+        .collect();
+    let target_item = match target {
+        hir::analysis::ty::adt_def::AdtRef::Struct(owner) => ItemKind::Struct(owner),
+        hir::analysis::ty::adt_def::AdtRef::Enum(owner) => ItemKind::Enum(owner),
+    };
+    let owner: Vec<_> = target_item
+        .inspected_where_clause(authored)
+        .type_predicates(authored)
+        .map(|(_, predicate)| predicate)
+        .collect();
+    assert_eq!(
+        predicates.len(),
+        owner.len() + expected.len(),
+        "impl where predicate count"
+    );
+    for (source, emitted) in owner.iter().zip(predicates.iter()) {
+        let source_ty = lower_hir_ty(
+            authored,
+            source.ty.unwrap(),
+            target.scope(),
+            PredicateListId::empty_list(authored),
+        );
+        let emitted_ty = lower_hir_ty(
+            output,
+            emitted.ty.unwrap(),
+            actual.scope(),
+            PredicateListId::empty_list(output),
+        );
+        let (TyData::TyParam(source_param), TyData::TyParam(emitted_param)) =
+            (source_ty.data(authored), emitted_ty.data(output))
+        else {
+            panic!("owner where parameter");
+        };
+        assert_eq!(
+            source_param.idx, emitted_param.idx,
+            "owner where parameter identity"
+        );
+        assert_eq!(
+            source.bounds.len(),
+            emitted.bounds.len(),
+            "owner where trait count"
+        );
+        for (source, emitted) in source.bounds.iter().zip(&emitted.bounds) {
+            let (TypeBound::Trait(source), TypeBound::Trait(emitted)) = (source, emitted) else {
+                panic!("owner trait bound");
+            };
+            let PathRes::Trait(source) = resolve_path(
+                authored,
+                source.path(authored).unwrap(),
+                target.scope(),
+                PredicateListId::empty_list(authored),
+                false,
+            )
+            .expect("owner source trait") else {
+                panic!("owner source trait identity");
+            };
+            let PathRes::Trait(emitted) = resolve_path(
+                output,
+                emitted.path(output).unwrap(),
+                actual.scope(),
+                PredicateListId::empty_list(output),
+                false,
+            )
+            .expect("owner emitted trait") else {
+                panic!("owner emitted trait identity");
+            };
+            assert_eq!(
+                source.key(authored).scope().pretty_path(authored),
+                emitted.key(output).scope().pretty_path(output),
+                "owner where trait identity"
+            );
+            assert_eq!(
+                source
+                    .key(authored)
+                    .span()
+                    .resolve(authored)
+                    .unwrap()
+                    .file
+                    .url(authored),
+                emitted
+                    .key(output)
+                    .span()
+                    .resolve(output)
+                    .unwrap()
+                    .file
+                    .url(output),
+                "owner where trait file"
+            );
+        }
+    }
+    let assumptions = PredicateListId::empty_list(output);
+    for ((node, index), actual_bound) in expected.iter().zip(&predicates[owner.len()..]) {
+        let frozen = &code.nodes[*node];
+        let Some(FrozenQuoteWherePredicate::Bound { ty, trait_sites }) =
+            &frozen.where_predicates[*index]
+        else {
+            panic!("checked where bound");
+        };
+        let actual_ty = lower_hir_ty(
+            output,
+            actual_bound.ty.unwrap(),
+            actual.scope(),
+            assumptions,
+        );
+        match ty {
+            FrozenQuoteSignatureType::Hole(slot) => {
+                let FrozenCodeHole::Value(_, Some(field)) = &frozen.holes[*slot as usize] else {
+                    panic!("where field type");
+                };
+                field_type(output, field, actual_ty);
+            }
+            _ => panic!("uncovered impl where type"),
+        }
+        assert_eq!(
+            actual_bound.bounds.len(),
+            trait_sites.len(),
+            "impl where trait count"
+        );
+        for (bound, site) in actual_bound.bounds.iter().zip(trait_sites) {
+            let TypeBound::Trait(bound) = bound else {
+                panic!("where trait bound");
+            };
+            let PathRes::Trait(resolved) = resolve_path(
+                output,
+                bound.path(output).unwrap(),
+                actual.scope(),
+                assumptions,
+                false,
+            )
+            .expect("resolved where trait") else {
+                panic!("where trait identity");
+            };
+            let trait_ = resolved.key(output);
+            let expected = frozen
+                .rooted_traits
+                .iter()
+                .find(|root| Some(root.site) == *site)
+                .expect("frozen where trait root");
+            assert_eq!(
+                trait_.scope().pretty_path(output).unwrap(),
+                expected.owner.path,
+                "impl where trait identity"
+            );
+            assert_eq!(
+                trait_
+                    .span()
+                    .resolve(output)
+                    .unwrap()
+                    .file
+                    .url(output)
+                    .unwrap(),
+                expected.owner.file,
+                "impl where trait file"
+            );
+        }
+    }
+}
+
 pub fn assert_round_trip_against<'db>(
     authored: &'db DriverDataBase,
     output: &'db DriverDataBase,
@@ -1072,6 +1495,9 @@ pub fn assert_round_trip_against<'db>(
                 "unique generated function {expected_name}"
             );
             let function = candidates[0];
+            if is_method {
+                compare_impl_predicates(authored, output, code, node_index, function, target);
+            }
             assert!(
                 compared.insert(function),
                 "every generated body compared once"
@@ -1134,14 +1560,16 @@ fn collect_functions<'db>(
         QuoteFragment::Items(items) => items,
         QuoteFragment::Expr => {
             for slot in quote.splice_only_body(db).expect("item-only fragment") {
-                let FrozenCodeHole::Code(child) = code.nodes[index].holes[slot as usize] else {
+                let FrozenCodeHole::Code(child, ..) = code.nodes[index].holes[slot as usize] else {
                     panic!("item splice is code");
                 };
                 collect_functions(db, code, child, functions);
             }
             return;
         }
-        QuoteFragment::Where(_) => panic!("item corpus cannot emit a where fragment"),
+        QuoteFragment::Arms(_) | QuoteFragment::Where(_) => {
+            panic!("item corpus needs item fragments")
+        }
     };
     let mut function = 0;
     for item in items {
@@ -1167,7 +1595,8 @@ fn collect_functions<'db>(
                 }
             }
             QuoteItem::Hole(slot) => {
-                let FrozenCodeHole::Code(child) = code.nodes[index].holes[*slot as usize] else {
+                let FrozenCodeHole::Code(child, ..) = code.nodes[index].holes[*slot as usize]
+                else {
                     panic!("item splice is code");
                 };
                 collect_functions(db, code, child, functions);
