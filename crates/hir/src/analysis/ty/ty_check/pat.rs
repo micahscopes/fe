@@ -73,9 +73,10 @@ impl<'db> TyChecker<'db> {
 
         match pat_data {
             Pat::Hole(_) => {
-                self.push_diag(BodyDiag::UnexpandedPatternHole(
-                    pat.span(self.body()).into(),
-                ));
+                self.push_diag(BodyDiag::UnexpandedSplice {
+                    primary: pat.span(self.body()).into(),
+                    kind: crate::hir_def::QuoteKind::Pat,
+                });
                 self.finish_pat_check(
                     pat,
                     expected,
@@ -433,12 +434,18 @@ impl<'db> TyChecker<'db> {
             body: self.body(),
             site: BodyHoleSite::Pat(pat),
         });
-        let res = self.resolve_path(
+        let scope = self
+            .body()
+            .quote_pattern_scope(self.db, pat)
+            .unwrap_or(self.env.scope());
+        let res = self.resolve_path_with_visibility(
             *path,
             true,
             span.clone().path(),
             span.clone().into(),
             &minter,
+            self.env.scope(),
+            scope,
         );
 
         // Bare identifiers that don't resolve to a type/variant are local bindings,
@@ -816,12 +823,18 @@ impl<'db> TyChecker<'db> {
             body: self.body(),
             site: BodyHoleSite::Pat(pat),
         });
-        match self.resolve_path(
+        let scope = self
+            .body()
+            .quote_pattern_scope(self.db, pat)
+            .unwrap_or(self.env.scope());
+        match self.resolve_path_with_visibility(
             path,
             true,
             span.clone().path(),
             span.clone().into(),
             &minter,
+            self.env.scope(),
+            scope,
         ) {
             Ok(res) => match res {
                 PathRes::Ty(ty)
@@ -999,13 +1012,20 @@ impl<'db> TyChecker<'db> {
             body: self.body(),
             site: BodyHoleSite::Pat(pat),
         });
-        let (actual, analysis) = match self.resolve_path(
+        let scope = self
+            .body()
+            .quote_pattern_scope(self.db, pat)
+            .unwrap_or(self.env.scope());
+        let resolved = self.resolve_path_with_visibility(
             *path,
             true,
             span.clone().path(),
             span.clone().into(),
             &minter,
-        ) {
+            self.env.scope(),
+            scope,
+        );
+        let (actual, analysis) = match resolved {
             Ok(reso) => match reso {
                 PathRes::Ty(ty) | PathRes::TyAlias(_, ty)
                     if RecordLike::from_ty(ty).is_record(self.db) =>
@@ -1190,8 +1210,22 @@ impl<'db> TyChecker<'db> {
             RecordLike::EnumVariant(variant) => Some(variant.variant.idx),
         };
 
-        let pat_span = pat.span(self.body()).into_record_pat();
-        let mut rec_checker = RecordInitChecker::new(self, &record_like);
+        let (source_body, source) = self
+            .body()
+            .quote_authority(self.db, pat.into())
+            .and_then(|authority| authority.source)
+            .and_then(|(body, site)| match site {
+                crate::hir_def::QuoteScopeSite::Pat(pat) => Some((body, pat)),
+                _ => None,
+            })
+            .unwrap_or((self.body(), pat));
+        let pat_span = source.span(source_body).into_record_pat();
+        let authority = self
+            .body()
+            .quote_authority(self.db, pat.into())
+            .cloned()
+            .unwrap_or_else(|| self.env.scope().into());
+        let mut rec_checker = RecordInitChecker::new(self, &record_like, authority);
 
         for (i, field_pat) in fields.iter().enumerate() {
             if field_pat.pat.is_rest(hir_db, rec_checker.tc.body()) {

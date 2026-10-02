@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use common::InputDb;
 use fe_driver::{
     DriverDataBase,
-    elaboration::read_back::{ReadBackError, read_back},
+    elaboration::read_back::{ReadBackError, read_back, read_back_type},
 };
 use hir::{
     HirDb,
@@ -19,13 +19,49 @@ use hir::{
         MetaItem,
     },
     hir_def::{
-        Body, Cond, CondId, Expr, ExprId, FieldIndex, Func, GenericParamOwner, IdentId, ItemKind,
-        LitKind, Partial, Pat, PatId, Quote, QuoteFragment, QuoteFunc, QuoteItem, QuoteName, Stmt,
-        StmtId, TypeKind,
+        Body, Cond, CondId, Expr, ExprId, FieldIndex, FieldParent, Func, GenericParamOwner,
+        IdentId, ItemKind, LitKind, Partial, Pat, PatId, Quote, QuoteFragment, QuoteFunc,
+        QuoteItem, QuoteName, Stmt, StmtId, TypeKind, scope_graph::ScopeId,
     },
     span::{DesugaredOrigin, HirOrigin, LazySpan},
 };
 use url::Url;
+
+pub fn assert_field_grant<'db>(
+    authored: &'db DriverDataBase,
+    output: &'db DriverDataBase,
+    target: hir::analysis::ty::adt_def::AdtRef<'db>,
+    index: usize,
+    actual: ScopeId<'db>,
+) {
+    let ScopeId::Field(FieldParent::Struct(actual_owner), actual_index) = actual else {
+        panic!("issued field retains its declaring struct");
+    };
+    let hir::analysis::ty::adt_def::AdtRef::Struct(expected_owner) = target else {
+        panic!("field requires a struct target");
+    };
+    assert_eq!(index, usize::from(actual_index), "issued field index");
+    assert_eq!(
+        expected_owner.scope().pretty_path(authored),
+        actual_owner.scope().pretty_path(output),
+        "issued field owner identity"
+    );
+    assert_eq!(
+        expected_owner
+            .span()
+            .resolve(authored)
+            .unwrap()
+            .file
+            .url(authored),
+        actual_owner
+            .span()
+            .resolve(output)
+            .unwrap()
+            .file
+            .url(output),
+        "issued field owner file"
+    );
+}
 
 fn owner<'db>(db: &'db DriverDataBase, locator: &FrozenItemLocator) -> Func<'db> {
     let file = db
@@ -79,8 +115,10 @@ struct Frame<'db> {
     body: Body<'db>,
     owner: Func<'db>,
     function: u32,
+    local_function: Option<u32>,
     open: Vec<IdentId<'db>>,
     locals: HashMap<PatId, PatId>,
+    visible: Vec<(IdentId<'db>, PatId)>,
     groups: HashMap<FrozenVariantBinding, Vec<PatId>>,
 }
 
@@ -102,20 +140,26 @@ impl<'a, 'db> Comparison<'a, 'db> {
         let key = frozen.template.as_ref().expect("nonempty body fragment");
         let owner = owner(self.authored, &key.owner);
         let source = owner.body(self.authored).expect("source owner body");
-        let (body, open) = match key.source {
+        let (body, open, local_function) = match key.source {
             FrozenTemplateSource::Quote => {
                 let quote = quote(self.authored, frozen).expect("quote");
-                (quote.template, quote.open.clone())
+                (
+                    quote.template,
+                    quote.open.clone(),
+                    matches!(quote.fragment, QuoteFragment::Items(_)).then_some(function),
+                )
             }
-            FrozenTemplateSource::CheckedBody => (source, Vec::new()),
+            FrozenTemplateSource::CheckedBody => (source, Vec::new(), Some(function)),
         };
         Frame {
             node,
             body,
             owner,
             function,
+            local_function,
             open,
             locals: HashMap::new(),
+            visible: Vec::new(),
             groups: HashMap::new(),
         }
     }
@@ -149,6 +193,41 @@ impl<'a, 'db> Comparison<'a, 'db> {
             panic!("field splice is a value");
         };
         self.field_name(value)
+    }
+
+    fn field_authority(&self, node: usize, slot: u32, actual: ExprId) {
+        let FrozenCodeHole::Value(value, _) = &self.code.nodes[node].holes[slot as usize] else {
+            panic!("field splice is a value");
+        };
+        let FrozenMetaValue::Structural {
+            owner,
+            kind:
+                FrozenHandleKind::Field {
+                    variant_index: None,
+                    index,
+                },
+            item: MetaItem::Field,
+        } = value.as_ref()
+        else {
+            panic!("field splice retains its structural handle");
+        };
+        assert_eq!(owner, &self.request.target, "issued field owner");
+        let name = self.field_name(value);
+        let authority = self
+            .body
+            .quote_authority(self.output, actual.into())
+            .expect("retained field authority");
+        let grant = authority
+            .fields
+            .iter()
+            .find(|grant| {
+                grant
+                    .field
+                    .name(self.output)
+                    .is_some_and(|label| label.data(self.output) == &name)
+            })
+            .expect("retained issued field grant");
+        assert_field_grant(self.authored, self.output, self.target, *index, grant.field);
     }
 
     fn parameter(&self, actual: ExprId, expected: usize) {
@@ -261,6 +340,153 @@ impl<'a, 'db> Comparison<'a, 'db> {
         }
     }
 
+    fn header_type(
+        &self,
+        frame: &Frame<'db>,
+        checked_func: Func<'db>,
+        expected: &FrozenQuoteSignatureType,
+        ty: hir::analysis::ty::ty_def::TyId<'db>,
+    ) {
+        use FrozenQuoteSignatureType as T;
+        use hir::analysis::ty::{const_ty::ConstTyData, ty_def::TyData};
+        if let T::Mode(hir::hir_def::TypeMode::Own, inner) = expected {
+            return self.header_type(frame, checked_func, inner, ty);
+        }
+        if let T::SelfType = expected {
+            let template = quote(self.authored, &self.code.nodes[frame.node]).expect("impl quote");
+            let QuoteFragment::Items(items) = &template.fragment else {
+                panic!("Self header needs impl")
+            };
+            let [QuoteItem::Impl(implementation)] = items.as_slice() else {
+                panic!("Self header needs impl")
+            };
+            let TypeKind::Hole(slot) = implementation.ty.unwrap_ref().data(self.authored) else {
+                panic!("checked impl self type hole")
+            };
+            return self.header_type(frame, checked_func, &T::Hole(*slot), ty);
+        }
+        if let T::Hole(slot) = expected {
+            let FrozenCodeHole::Value(value, field_type) =
+                &self.code.nodes[frame.node].holes[*slot as usize]
+            else {
+                panic!("type splice")
+            };
+            if let FrozenMetaValue::Structural {
+                item: MetaItem::Record,
+                owner,
+                kind: FrozenHandleKind::Record,
+            } = value.as_ref()
+            {
+                assert_eq!(owner, &self.request.target, "signature record authority");
+                let (base, arguments) = ty.decompose_ty_app(self.output);
+                let mut actual = read_back_type(self.output, checked_func, base)
+                    .expect("signature nominal base");
+                let T::Nominal {
+                    arguments: actual_arguments,
+                    ..
+                } = &mut actual
+                else {
+                    panic!("signature record")
+                };
+                let source_owner = match self.target {
+                    hir::analysis::ty::adt_def::AdtRef::Struct(owner) => {
+                        GenericParamOwner::Struct(owner)
+                    }
+                    hir::analysis::ty::adt_def::AdtRef::Enum(owner) => {
+                        GenericParamOwner::Enum(owner)
+                    }
+                };
+                let source_parameters = source_owner.params(self.authored).collect::<Vec<_>>();
+                assert_eq!(
+                    arguments.len(),
+                    source_parameters.len(),
+                    "record signature argument count"
+                );
+                for (argument, source_parameter) in arguments.iter().zip(source_parameters) {
+                    assert_eq!(
+                        matches!(argument.data(self.output), TyData::ConstTy(_)),
+                        matches!(source_parameter.param, hir::hir_def::GenericParam::Const(_)),
+                        "record signature parameter kind"
+                    );
+                    let frozen = if let TyData::ConstTy(value) = argument.data(self.output)
+                        && let ConstTyData::TyParam(parameter, scalar_ty) = value.data(self.output)
+                    {
+                        let hir::hir_def::GenericParam::Const(source_parameter) =
+                            source_parameter.param
+                        else {
+                            panic!("const declaration kind")
+                        };
+                        let expected_scalar = hir::analysis::ty::ty_lower::lower_hir_ty(
+                            self.authored,
+                            *source_parameter.ty.unwrap_ref(),
+                            self.target.scope(),
+                            hir::core::semantic::param_env(self.authored, source_owner.into()),
+                        );
+                        assert_eq!(
+                            read_back_type(self.authored, frame.owner, expected_scalar)
+                                .expect("source const parameter type"),
+                            read_back_type(self.output, checked_func, *scalar_ty)
+                                .expect("destination const parameter type"),
+                            "const signature scalar type"
+                        );
+                        let Some(ScopeId::GenericParam(owner, index)) =
+                            parameter.declaration_scope(self.output)
+                        else {
+                            panic!("const declaration binder")
+                        };
+                        if owner == checked_func.into() {
+                            T::FunctionGeneric(u32::from(index))
+                        } else if checked_func.scope().parent_item(self.output) == Some(owner) {
+                            T::OwnerGeneric(u32::from(index))
+                        } else {
+                            panic!("const signature binder changed owner")
+                        }
+                    } else {
+                        read_back_type(self.output, checked_func, *argument)
+                            .expect("signature record argument")
+                    };
+                    actual_arguments.push(frozen);
+                }
+                return self.self_type(&actual);
+            }
+            if field_type.is_none()
+                && let FrozenMetaValue::Structural {
+                    item: MetaItem::FieldType,
+                    owner: selected_owner,
+                    kind:
+                        FrozenHandleKind::FieldType {
+                            variant_index,
+                            index,
+                        },
+                } = value.as_ref()
+            {
+                assert_eq!(
+                    selected_owner, &self.request.target,
+                    "signature field authority"
+                );
+                let fields = self.target.as_adt(self.authored).fields(self.authored);
+                let source_ty = fields[usize::from(variant_index.unwrap_or(0))]
+                    .ty(self.authored, *index)
+                    .instantiate_identity();
+                let source_owner = owner(
+                    self.authored,
+                    &self.code.nodes[frame.node]
+                        .template
+                        .as_ref()
+                        .expect("template")
+                        .owner,
+                );
+                let expected = read_back_type(self.authored, source_owner, source_ty)
+                    .expect("reflected nominal field type");
+                let actual = read_back_type(self.output, checked_func, ty)
+                    .expect("checked nominal field header");
+                return self.type_argument(frame, &expected, &actual);
+            }
+        }
+        let actual = read_back_type(self.output, checked_func, ty).expect("checked signature type");
+        self.type_argument(frame, expected, &actual);
+    }
+
     fn field_type(&self, expected: &FrozenQuoteFieldType, actual: &FrozenQuoteSignatureType) {
         use FrozenQuoteFieldType as F;
         use FrozenQuoteSignatureType as T;
@@ -347,6 +573,16 @@ impl<'a, 'db> Comparison<'a, 'db> {
             expected.variant_index, actual.variant_index,
             "selected variant index"
         );
+        if let Some(arguments) = &expected.type_arguments {
+            let actual_arguments = actual
+                .type_arguments
+                .as_ref()
+                .expect("checked constructor arguments");
+            assert_eq!(arguments.len(), actual_arguments.len());
+            for (expected, actual) in arguments.iter().zip(actual_arguments) {
+                self.type_argument(frame, expected, actual);
+            }
+        }
     }
 
     fn path(&self, frame: &Frame<'db>, expected: ExprId, actual: ExprId) {
@@ -377,16 +613,32 @@ impl<'a, 'db> Comparison<'a, 'db> {
             self.parameter(actual, 0);
         } else if let Some(use_) = node.open_uses.iter().find(|use_| use_.site == expected) {
             let key = node.template.as_ref().unwrap();
-            let index = if key.source == FrozenTemplateSource::CheckedBody {
-                use_.index as usize
+            if key.source == FrozenTemplateSource::CheckedBody {
+                self.parameter(actual, use_.index as usize);
             } else {
                 let name = frame.open[use_.index as usize];
-                self.parameters
+                if let Some((_, binder)) = frame
+                    .visible
                     .iter()
-                    .position(|param| param == &Some(name))
-                    .expect("explicit open name binds a destination parameter")
-            };
-            self.parameter(actual, index);
+                    .rev()
+                    .find(|(candidate, _)| *candidate == name)
+                {
+                    assert!(
+                        self.actual
+                            .locals
+                            .iter()
+                            .any(|local| local.binder == *binder && local.uses.contains(&actual)),
+                        "open name must capture the nearest visible local identity"
+                    );
+                } else {
+                    let index = self
+                        .parameters
+                        .iter()
+                        .position(|param| param == &Some(name))
+                        .expect("open name has an enclosing binder");
+                    self.parameter(actual, index);
+                }
+            }
         } else if let Some(use_) = node.generic_uses.iter().find(|use_| {
             use_.site == expected && use_.func == frame.function && use_.where_predicate.is_none()
         }) {
@@ -400,7 +652,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         } else if let Some(local) = node
             .locals
             .iter()
-            .find(|local| local.func == frame.function && local.uses.contains(&expected))
+            .find(|local| local.func == frame.local_function && local.uses.contains(&expected))
         {
             let binder = frame
                 .locals
@@ -537,9 +789,11 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 hir::hir_def::MatchArm::Arm { pat, body } => {
                     let actual = actual.get(consumed).expect("arm list lost an arm");
                     let enclosing = frame.groups.clone();
+                    let visible = frame.visible.len();
                     self.pat(frame, *pat, actual.pat());
                     self.expr(frame, *body, actual.body());
                     frame.groups = enclosing;
+                    frame.visible.truncate(visible);
                     consumed += 1;
                 }
             }
@@ -560,6 +814,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
         let source = quote(self.authored, node).expect("arm fragment must be authored quotation");
         let mut frame = self.frame(child, 0);
         frame.groups = parent.groups.clone();
+        frame.visible = parent.visible.clone();
         match &source.fragment {
             QuoteFragment::Arms(arms) => self.arms(&mut frame, arms, actual),
             QuoteFragment::Expr => {
@@ -599,6 +854,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     }
                     let mut child_frame = self.frame(*child, 0);
                     child_frame.groups = frame.groups.clone();
+                    child_frame.visible = frame.visible.clone();
                     let root = child_frame.body.expr(self.authored);
                     self.expr(&mut child_frame, root, actual);
                 }
@@ -631,7 +887,20 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 self.expr(frame, *value, *actual);
             }
             (Expr::Cast(value, Partial::Present(ty)), Expr::Cast(actual_value, _)) => {
-                let TypeKind::Primitive(primitive) = ty.data(self.authored) else {
+                use hir::analysis::ty::{
+                    trait_resolution::PredicateListId,
+                    ty_def::{TyBase, TyData},
+                    ty_lower::lower_hir_ty,
+                };
+                let expected = lower_hir_ty(
+                    self.authored,
+                    *ty,
+                    frame.owner.scope(),
+                    PredicateListId::empty_list(self.authored),
+                );
+                let TyData::TyBase(TyBase::Prim(primitive)) =
+                    expected.base_ty(self.authored).data(self.authored)
+                else {
                     panic!("cast requires a checked primitive")
                 };
                 let target = self
@@ -640,10 +909,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     .iter()
                     .find(|(site, _)| *site == actual)
                     .unwrap();
-                assert_eq!(
-                    primitive.name(self.authored).data(self.authored),
-                    &format!("{:?}", target.1).to_ascii_lowercase()
-                );
+                assert_eq!(*primitive, target.1, "cast retains authored primitive");
                 self.expr(frame, *value, *actual_value);
             }
             (Expr::Call(callee, args), Expr::Call(actual_callee, actual_args)) => {
@@ -687,11 +953,11 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 }
                 let (_, scope) = self
                     .body
-                    .quote_method_scopes(self.output)
+                    .quote_scopes(self.output)
                     .iter()
-                    .find(|(site, _)| *site == actual)
+                    .find(|(site, _)| *site == actual.into())
                     .expect("retained lexical method scope");
-                let ItemKind::Func(scope_owner) = scope.item() else {
+                let ItemKind::Func(scope_owner) = scope.scope.item() else {
                     panic!("method scope is the template owner")
                 };
                 assert_eq!(
@@ -716,7 +982,10 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 let expected = match field.unwrap_ref() {
                     FieldIndex::Ident(name) => name.data(self.authored).clone(),
                     FieldIndex::Index(index) => index.data(self.authored).to_string(),
-                    FieldIndex::Hole(slot) => self.field_hole(frame.node, *slot),
+                    FieldIndex::Hole(slot) => {
+                        self.field_authority(frame.node, *slot, actual);
+                        self.field_hole(frame.node, *slot)
+                    }
                 };
                 let actual = match actual_field.unwrap_ref() {
                     FieldIndex::Ident(name) => name.data(self.output).clone(),
@@ -771,7 +1040,10 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     }
                 }
                 assert_eq!(fields.len(), actual_fields.len());
-                for (field, actual) in fields.iter().zip(actual_fields) {
+                for (field, actual_field) in fields.iter().zip(actual_fields) {
+                    if let Some(slot) = field.label_hole {
+                        self.field_authority(frame.node, slot, actual);
+                    }
                     let expected = field
                         .label_hole
                         .map(|slot| self.field_hole(frame.node, slot))
@@ -782,11 +1054,11 @@ impl<'a, 'db> Comparison<'a, 'db> {
                         });
                     assert_eq!(
                         expected,
-                        actual
+                        actual_field
                             .label_eagerly(self.output, self.body)
                             .map(|name| name.data(self.output).clone())
                     );
-                    self.expr(frame, field.expr, actual.expr);
+                    self.expr(frame, field.expr, actual_field.expr);
                 }
             }
             (Expr::If(condition, then, otherwise), Expr::If(a, b, c)) => {
@@ -808,9 +1080,11 @@ impl<'a, 'db> Comparison<'a, 'db> {
             }
             (Expr::Block(stmts), Expr::Block(actual)) => {
                 assert_eq!(stmts.len(), actual.len());
+                let visible = frame.visible.len();
                 for (stmt, actual) in stmts.iter().zip(actual) {
                     self.stmt(frame, *stmt, *actual);
                 }
+                frame.visible.truncate(visible);
             }
             other => panic!("template/output expression mismatch or uncovered form: {other:?}"),
         }
@@ -842,7 +1116,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     let expected_type = &self.code.nodes[frame.node]
                         .local_types
                         .iter()
-                        .find(|local| local.stmt == expected && local.func == frame.function)
+                        .find(|local| local.stmt == expected && local.func == frame.local_function)
                         .expect("frozen annotation")
                         .ty;
                     let actual_type = &self
@@ -854,12 +1128,12 @@ impl<'a, 'db> Comparison<'a, 'db> {
                         .ty;
                     self.type_argument(frame, expected_type, actual_type);
                 }
-                self.pat(frame, *pat, *actual_pat);
                 match (value, actual_value) {
                     (Some(value), Some(actual)) => self.expr(frame, *value, *actual),
                     (None, None) => {}
                     _ => panic!("let initializer changed"),
                 }
+                self.pat(frame, *pat, *actual_pat);
             }
             (Stmt::Expr(expected), Stmt::Expr(actual)) => self.expr(frame, *expected, *actual),
             (Stmt::Return(expected), Stmt::Return(actual)) => match (expected, actual) {
@@ -877,8 +1151,10 @@ impl<'a, 'db> Comparison<'a, 'db> {
             ) => {
                 assert_eq!(unroll, actual_unroll);
                 self.expr(frame, *iterable, *actual_iterable);
+                let visible = frame.visible.len();
                 self.pat(frame, *pat, *actual_pat);
                 self.expr(frame, *block, *actual_block);
+                frame.visible.truncate(visible);
             }
             (Stmt::Break, Stmt::Break) | (Stmt::Continue, Stmt::Continue) => {}
             other => panic!("statement changed or uncovered form: {other:?}"),
@@ -1015,7 +1291,7 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     self.code.nodes[frame.node]
                         .locals
                         .iter()
-                        .any(|local| local.func == frame.function && local.binder == expected)
+                        .any(|local| local.func == frame.local_function && local.binder == expected)
                 );
                 assert!(
                     self.actual
@@ -1027,6 +1303,14 @@ impl<'a, 'db> Comparison<'a, 'db> {
                     frame.locals.insert(expected, actual).is_none(),
                     "unique source binder"
                 );
+                let Pat::Path(Partial::Present(path), _) =
+                    frame.body.pats(self.authored)[expected].unwrap_ref()
+                else {
+                    panic!("local binder is a path")
+                };
+                frame
+                    .visible
+                    .push((path.as_ident(self.authored).expect("binder name"), actual));
             }
             (Pat::Tuple(parts), Pat::Tuple(actual)) => {
                 assert_eq!(parts.len(), actual.len());
@@ -1188,8 +1472,8 @@ fn compare_impl_predicates<'db>(
             }
         }
     }
-    fn collect<'db>(
-        db: &'db DriverDataBase,
+    fn collect(
+        db: &DriverDataBase,
         code: &FrozenCode,
         index: usize,
         result: &mut Vec<(usize, usize)>,
@@ -1532,6 +1816,43 @@ pub fn assert_round_trip_against<'db>(
                 is_method,
             };
             let mut frame = comparison.frame(node_index, function_index);
+            if let Some(types) = code.nodes[node_index]
+                .function_types
+                .get(function_index as usize)
+            {
+                let parameters = function.params(output).collect::<Vec<_>>();
+                assert_eq!(
+                    types.params.len(),
+                    parameters.len(),
+                    "parameter header count"
+                );
+                for ((expected, parameter), authored_parameter) in types
+                    .params
+                    .iter()
+                    .zip(parameters)
+                    .zip(quoted.params.unwrap_ref().data(authored))
+                {
+                    assert_eq!(
+                        parameter.mode(output),
+                        authored_parameter.mode,
+                        "parameter mode"
+                    );
+                    if let Some(expected) = expected {
+                        let ty = parameter.ty(output);
+                        let ty = if parameter.mode(output)
+                            == hir::hir_def::params::FuncParamMode::View
+                        {
+                            ty.as_view(output).unwrap_or(ty)
+                        } else {
+                            ty
+                        };
+                        comparison.header_type(&frame, function, expected, ty);
+                    }
+                }
+                if let Some(expected) = &types.result {
+                    comparison.header_type(&frame, function, expected, function.return_ty(output));
+                }
+            }
             comparison.expr(
                 &mut frame,
                 quoted.body.expect("quoted function body"),

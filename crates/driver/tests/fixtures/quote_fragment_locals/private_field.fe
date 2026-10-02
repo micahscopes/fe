@@ -1,0 +1,18 @@
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub struct Counter<T> { value: T }
+    use Counter as Alias
+    fn make() -> Alias<u256> { Alias { value: 7 } }
+    pub fn twin() -> u256 { let c = make()
+        c.value }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let body: Code<Expr> = quote { let c = make()
+            c.value }
+        quote { pub fn read_private() -> u256 { ${body} } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+#[test]
+fn t() { assert!(read_private() == author::twin())
+    assert!(read_private() == 7) }

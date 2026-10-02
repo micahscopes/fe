@@ -1,0 +1,2023 @@
+pub trait Many {
+    type A0
+    type A1
+    type A2
+    type A3
+    type A4
+    type A5
+    type A6
+    type A7
+    type A8
+    type A9
+    type A10
+    type A11
+    type A12
+    type A13
+    type A14
+    type A15
+    type A16
+    type A17
+    type A18
+    type A19
+    type A20
+    type A21
+    type A22
+    type A23
+    type A24
+    type A25
+    type A26
+    type A27
+    type A28
+    type A29
+    type A30
+    type A31
+    type A32
+    type A33
+    type A34
+    type A35
+    type A36
+    type A37
+    type A38
+    type A39
+    type A40
+    type A41
+    type A42
+    type A43
+    type A44
+    type A45
+    type A46
+    type A47
+    type A48
+    type A49
+    type A50
+    type A51
+    type A52
+    type A53
+    type A54
+    type A55
+    type A56
+    type A57
+    type A58
+    type A59
+    type A60
+    type A61
+    type A62
+    type A63
+    type A64
+    type A65
+    type A66
+    type A67
+    type A68
+    type A69
+    type A70
+    type A71
+    type A72
+    type A73
+    type A74
+    type A75
+    type A76
+    type A77
+    type A78
+    type A79
+    type A80
+    type A81
+    type A82
+    type A83
+    type A84
+    type A85
+    type A86
+    type A87
+    type A88
+    type A89
+    type A90
+    type A91
+    type A92
+    type A93
+    type A94
+    type A95
+    type A96
+    type A97
+    type A98
+    type A99
+    type A100
+    type A101
+    type A102
+    type A103
+    type A104
+    type A105
+    type A106
+    type A107
+    type A108
+    type A109
+    type A110
+    type A111
+    type A112
+    type A113
+    type A114
+    type A115
+    type A116
+    type A117
+    type A118
+    type A119
+    type A120
+    type A121
+    type A122
+    type A123
+    type A124
+    type A125
+    type A126
+    type A127
+    type A128
+    type A129
+    type A130
+    type A131
+    type A132
+    type A133
+    type A134
+    type A135
+    type A136
+    type A137
+    type A138
+    type A139
+    type A140
+    type A141
+    type A142
+    type A143
+    type A144
+    type A145
+    type A146
+    type A147
+    type A148
+    type A149
+    type A150
+    type A151
+    type A152
+    type A153
+    type A154
+    type A155
+    type A156
+    type A157
+    type A158
+    type A159
+    type A160
+    type A161
+    type A162
+    type A163
+    type A164
+    type A165
+    type A166
+    type A167
+    type A168
+    type A169
+    type A170
+    type A171
+    type A172
+    type A173
+    type A174
+    type A175
+    type A176
+    type A177
+    type A178
+    type A179
+    type A180
+    type A181
+    type A182
+    type A183
+    type A184
+    type A185
+    type A186
+    type A187
+    type A188
+    type A189
+    type A190
+    type A191
+    type A192
+    type A193
+    type A194
+    type A195
+    type A196
+    type A197
+    type A198
+    type A199
+    type A200
+    type A201
+    type A202
+    type A203
+    type A204
+    type A205
+    type A206
+    type A207
+    type A208
+    type A209
+    type A210
+    type A211
+    type A212
+    type A213
+    type A214
+    type A215
+    type A216
+    type A217
+    type A218
+    type A219
+    type A220
+    type A221
+    type A222
+    type A223
+    type A224
+    type A225
+    type A226
+    type A227
+    type A228
+    type A229
+    type A230
+    type A231
+    type A232
+    type A233
+    type A234
+    type A235
+    type A236
+    type A237
+    type A238
+    type A239
+    type A240
+    type A241
+    type A242
+    type A243
+    type A244
+    type A245
+    type A246
+    type A247
+    type A248
+    type A249
+    type A250
+    type A251
+    type A252
+    type A253
+    type A254
+    type A255
+    type A256
+    type A257
+    type A258
+    type A259
+    type A260
+    type A261
+    type A262
+    type A263
+    type A264
+    type A265
+    type A266
+    type A267
+    type A268
+    type A269
+    type A270
+    type A271
+    type A272
+    type A273
+    type A274
+    type A275
+    type A276
+    type A277
+    type A278
+    type A279
+    type A280
+    type A281
+    type A282
+    type A283
+    type A284
+    type A285
+    type A286
+    type A287
+    type A288
+    type A289
+    type A290
+    type A291
+    type A292
+    type A293
+    type A294
+    type A295
+    type A296
+    type A297
+    type A298
+    type A299
+    type A300
+    type A301
+    type A302
+    type A303
+    type A304
+    type A305
+    type A306
+    type A307
+    type A308
+    type A309
+    type A310
+    type A311
+    type A312
+    type A313
+    type A314
+    type A315
+    type A316
+    type A317
+    type A318
+    type A319
+    type A320
+    type A321
+    type A322
+    type A323
+    type A324
+    type A325
+    type A326
+    type A327
+    type A328
+    type A329
+    type A330
+    type A331
+    type A332
+    type A333
+    type A334
+    type A335
+    type A336
+    type A337
+    type A338
+    type A339
+    type A340
+    type A341
+    type A342
+    type A343
+    type A344
+    type A345
+    type A346
+    type A347
+    type A348
+    type A349
+    type A350
+    type A351
+    type A352
+    type A353
+    type A354
+    type A355
+    type A356
+    type A357
+    type A358
+    type A359
+    type A360
+    type A361
+    type A362
+    type A363
+    type A364
+    type A365
+    type A366
+    type A367
+    type A368
+    type A369
+    type A370
+    type A371
+    type A372
+    type A373
+    type A374
+    type A375
+    type A376
+    type A377
+    type A378
+    type A379
+    type A380
+    type A381
+    type A382
+    type A383
+    type A384
+    type A385
+    type A386
+    type A387
+    type A388
+    type A389
+    type A390
+    type A391
+    type A392
+    type A393
+    type A394
+    type A395
+    type A396
+    type A397
+    type A398
+    type A399
+    type A400
+    type A401
+    type A402
+    type A403
+    type A404
+    type A405
+    type A406
+    type A407
+    type A408
+    type A409
+    type A410
+    type A411
+    type A412
+    type A413
+    type A414
+    type A415
+    type A416
+    type A417
+    type A418
+    type A419
+    type A420
+    type A421
+    type A422
+    type A423
+    type A424
+    type A425
+    type A426
+    type A427
+    type A428
+    type A429
+    type A430
+    type A431
+    type A432
+    type A433
+    type A434
+    type A435
+    type A436
+    type A437
+    type A438
+    type A439
+    type A440
+    type A441
+    type A442
+    type A443
+    type A444
+    type A445
+    type A446
+    type A447
+    type A448
+    type A449
+    type A450
+    type A451
+    type A452
+    type A453
+    type A454
+    type A455
+    type A456
+    type A457
+    type A458
+    type A459
+    type A460
+    type A461
+    type A462
+    type A463
+    type A464
+    type A465
+    type A466
+    type A467
+    type A468
+    type A469
+    type A470
+    type A471
+    type A472
+    type A473
+    type A474
+    type A475
+    type A476
+    type A477
+    type A478
+    type A479
+    type A480
+    type A481
+    type A482
+    type A483
+    type A484
+    type A485
+    type A486
+    type A487
+    type A488
+    type A489
+    type A490
+    type A491
+    type A492
+    type A493
+    type A494
+    type A495
+    type A496
+    type A497
+    type A498
+    type A499
+    type A500
+    type A501
+    type A502
+    type A503
+    type A504
+    type A505
+    type A506
+    type A507
+    type A508
+    type A509
+    type A510
+    type A511
+    type A512
+    type A513
+    type A514
+    type A515
+    type A516
+    type A517
+    type A518
+    type A519
+    type A520
+    type A521
+    type A522
+    type A523
+    type A524
+    type A525
+    type A526
+    type A527
+    type A528
+    type A529
+    type A530
+    type A531
+    type A532
+    type A533
+    type A534
+    type A535
+    type A536
+    type A537
+    type A538
+    type A539
+    type A540
+    type A541
+    type A542
+    type A543
+    type A544
+    type A545
+    type A546
+    type A547
+    type A548
+    type A549
+    type A550
+    type A551
+    type A552
+    type A553
+    type A554
+    type A555
+    type A556
+    type A557
+    type A558
+    type A559
+    type A560
+    type A561
+    type A562
+    type A563
+    type A564
+    type A565
+    type A566
+    type A567
+    type A568
+    type A569
+    type A570
+    type A571
+    type A572
+    type A573
+    type A574
+    type A575
+    type A576
+    type A577
+    type A578
+    type A579
+    type A580
+    type A581
+    type A582
+    type A583
+    type A584
+    type A585
+    type A586
+    type A587
+    type A588
+    type A589
+    type A590
+    type A591
+    type A592
+    type A593
+    type A594
+    type A595
+    type A596
+    type A597
+    type A598
+    type A599
+    type A600
+    type A601
+    type A602
+    type A603
+    type A604
+    type A605
+    type A606
+    type A607
+    type A608
+    type A609
+    type A610
+    type A611
+    type A612
+    type A613
+    type A614
+    type A615
+    type A616
+    type A617
+    type A618
+    type A619
+    type A620
+    type A621
+    type A622
+    type A623
+    type A624
+    type A625
+    type A626
+    type A627
+    type A628
+    type A629
+    type A630
+    type A631
+    type A632
+    type A633
+    type A634
+    type A635
+    type A636
+    type A637
+    type A638
+    type A639
+    type A640
+    type A641
+    type A642
+    type A643
+    type A644
+    type A645
+    type A646
+    type A647
+    type A648
+    type A649
+    type A650
+    type A651
+    type A652
+    type A653
+    type A654
+    type A655
+    type A656
+    type A657
+    type A658
+    type A659
+    type A660
+    type A661
+    type A662
+    type A663
+    type A664
+    type A665
+    type A666
+    type A667
+    type A668
+    type A669
+    type A670
+    type A671
+    type A672
+    type A673
+    type A674
+    type A675
+    type A676
+    type A677
+    type A678
+    type A679
+    type A680
+    type A681
+    type A682
+    type A683
+    type A684
+    type A685
+    type A686
+    type A687
+    type A688
+    type A689
+    type A690
+    type A691
+    type A692
+    type A693
+    type A694
+    type A695
+    type A696
+    type A697
+    type A698
+    type A699
+    type A700
+    type A701
+    type A702
+    type A703
+    type A704
+    type A705
+    type A706
+    type A707
+    type A708
+    type A709
+    type A710
+    type A711
+    type A712
+    type A713
+    type A714
+    type A715
+    type A716
+    type A717
+    type A718
+    type A719
+    type A720
+    type A721
+    type A722
+    type A723
+    type A724
+    type A725
+    type A726
+    type A727
+    type A728
+    type A729
+    type A730
+    type A731
+    type A732
+    type A733
+    type A734
+    type A735
+    type A736
+    type A737
+    type A738
+    type A739
+    type A740
+    type A741
+    type A742
+    type A743
+    type A744
+    type A745
+    type A746
+    type A747
+    type A748
+    type A749
+    type A750
+    type A751
+    type A752
+    type A753
+    type A754
+    type A755
+    type A756
+    type A757
+    type A758
+    type A759
+    type A760
+    type A761
+    type A762
+    type A763
+    type A764
+    type A765
+    type A766
+    type A767
+    type A768
+    type A769
+    type A770
+    type A771
+    type A772
+    type A773
+    type A774
+    type A775
+    type A776
+    type A777
+    type A778
+    type A779
+    type A780
+    type A781
+    type A782
+    type A783
+    type A784
+    type A785
+    type A786
+    type A787
+    type A788
+    type A789
+    type A790
+    type A791
+    type A792
+    type A793
+    type A794
+    type A795
+    type A796
+    type A797
+    type A798
+    type A799
+    type A800
+    type A801
+    type A802
+    type A803
+    type A804
+    type A805
+    type A806
+    type A807
+    type A808
+    type A809
+    type A810
+    type A811
+    type A812
+    type A813
+    type A814
+    type A815
+    type A816
+    type A817
+    type A818
+    type A819
+    type A820
+    type A821
+    type A822
+    type A823
+    type A824
+    type A825
+    type A826
+    type A827
+    type A828
+    type A829
+    type A830
+    type A831
+    type A832
+    type A833
+    type A834
+    type A835
+    type A836
+    type A837
+    type A838
+    type A839
+    type A840
+    type A841
+    type A842
+    type A843
+    type A844
+    type A845
+    type A846
+    type A847
+    type A848
+    type A849
+    type A850
+    type A851
+    type A852
+    type A853
+    type A854
+    type A855
+    type A856
+    type A857
+    type A858
+    type A859
+    type A860
+    type A861
+    type A862
+    type A863
+    type A864
+    type A865
+    type A866
+    type A867
+    type A868
+    type A869
+    type A870
+    type A871
+    type A872
+    type A873
+    type A874
+    type A875
+    type A876
+    type A877
+    type A878
+    type A879
+    type A880
+    type A881
+    type A882
+    type A883
+    type A884
+    type A885
+    type A886
+    type A887
+    type A888
+    type A889
+    type A890
+    type A891
+    type A892
+    type A893
+    type A894
+    type A895
+    type A896
+    type A897
+    type A898
+    type A899
+    type A900
+    type A901
+    type A902
+    type A903
+    type A904
+    type A905
+    type A906
+    type A907
+    type A908
+    type A909
+    type A910
+    type A911
+    type A912
+    type A913
+    type A914
+    type A915
+    type A916
+    type A917
+    type A918
+    type A919
+    type A920
+    type A921
+    type A922
+    type A923
+    type A924
+    type A925
+    type A926
+    type A927
+    type A928
+    type A929
+    type A930
+    type A931
+    type A932
+    type A933
+    type A934
+    type A935
+    type A936
+    type A937
+    type A938
+    type A939
+    type A940
+    type A941
+    type A942
+    type A943
+    type A944
+    type A945
+    type A946
+    type A947
+    type A948
+    type A949
+    type A950
+    type A951
+    type A952
+    type A953
+    type A954
+    type A955
+    type A956
+    type A957
+    type A958
+    type A959
+    type A960
+    type A961
+    type A962
+    type A963
+    type A964
+    type A965
+    type A966
+    type A967
+    type A968
+    type A969
+    type A970
+    type A971
+    type A972
+    type A973
+    type A974
+    type A975
+    type A976
+    type A977
+    type A978
+    type A979
+    type A980
+    type A981
+    type A982
+    type A983
+    type A984
+    type A985
+    type A986
+    type A987
+    type A988
+    type A989
+    type A990
+    type A991
+    type A992
+    type A993
+    type A994
+    type A995
+    type A996
+    type A997
+    type A998
+    type A999
+    type A1000
+}
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let mut items: Code<Item> = quote { impl ingot::Many for ${record} {
+            type A0 = u256
+            type A1 = u256
+            type A2 = u256
+            type A3 = u256
+            type A4 = u256
+            type A5 = u256
+            type A6 = u256
+            type A7 = u256
+            type A8 = u256
+            type A9 = u256
+            type A10 = u256
+            type A11 = u256
+            type A12 = u256
+            type A13 = u256
+            type A14 = u256
+            type A15 = u256
+            type A16 = u256
+            type A17 = u256
+            type A18 = u256
+            type A19 = u256
+            type A20 = u256
+            type A21 = u256
+            type A22 = u256
+            type A23 = u256
+            type A24 = u256
+            type A25 = u256
+            type A26 = u256
+            type A27 = u256
+            type A28 = u256
+            type A29 = u256
+            type A30 = u256
+            type A31 = u256
+            type A32 = u256
+            type A33 = u256
+            type A34 = u256
+            type A35 = u256
+            type A36 = u256
+            type A37 = u256
+            type A38 = u256
+            type A39 = u256
+            type A40 = u256
+            type A41 = u256
+            type A42 = u256
+            type A43 = u256
+            type A44 = u256
+            type A45 = u256
+            type A46 = u256
+            type A47 = u256
+            type A48 = u256
+            type A49 = u256
+            type A50 = u256
+            type A51 = u256
+            type A52 = u256
+            type A53 = u256
+            type A54 = u256
+            type A55 = u256
+            type A56 = u256
+            type A57 = u256
+            type A58 = u256
+            type A59 = u256
+            type A60 = u256
+            type A61 = u256
+            type A62 = u256
+            type A63 = u256
+            type A64 = u256
+            type A65 = u256
+            type A66 = u256
+            type A67 = u256
+            type A68 = u256
+            type A69 = u256
+            type A70 = u256
+            type A71 = u256
+            type A72 = u256
+            type A73 = u256
+            type A74 = u256
+            type A75 = u256
+            type A76 = u256
+            type A77 = u256
+            type A78 = u256
+            type A79 = u256
+            type A80 = u256
+            type A81 = u256
+            type A82 = u256
+            type A83 = u256
+            type A84 = u256
+            type A85 = u256
+            type A86 = u256
+            type A87 = u256
+            type A88 = u256
+            type A89 = u256
+            type A90 = u256
+            type A91 = u256
+            type A92 = u256
+            type A93 = u256
+            type A94 = u256
+            type A95 = u256
+            type A96 = u256
+            type A97 = u256
+            type A98 = u256
+            type A99 = u256
+            type A100 = u256
+            type A101 = u256
+            type A102 = u256
+            type A103 = u256
+            type A104 = u256
+            type A105 = u256
+            type A106 = u256
+            type A107 = u256
+            type A108 = u256
+            type A109 = u256
+            type A110 = u256
+            type A111 = u256
+            type A112 = u256
+            type A113 = u256
+            type A114 = u256
+            type A115 = u256
+            type A116 = u256
+            type A117 = u256
+            type A118 = u256
+            type A119 = u256
+            type A120 = u256
+            type A121 = u256
+            type A122 = u256
+            type A123 = u256
+            type A124 = u256
+            type A125 = u256
+            type A126 = u256
+            type A127 = u256
+            type A128 = u256
+            type A129 = u256
+            type A130 = u256
+            type A131 = u256
+            type A132 = u256
+            type A133 = u256
+            type A134 = u256
+            type A135 = u256
+            type A136 = u256
+            type A137 = u256
+            type A138 = u256
+            type A139 = u256
+            type A140 = u256
+            type A141 = u256
+            type A142 = u256
+            type A143 = u256
+            type A144 = u256
+            type A145 = u256
+            type A146 = u256
+            type A147 = u256
+            type A148 = u256
+            type A149 = u256
+            type A150 = u256
+            type A151 = u256
+            type A152 = u256
+            type A153 = u256
+            type A154 = u256
+            type A155 = u256
+            type A156 = u256
+            type A157 = u256
+            type A158 = u256
+            type A159 = u256
+            type A160 = u256
+            type A161 = u256
+            type A162 = u256
+            type A163 = u256
+            type A164 = u256
+            type A165 = u256
+            type A166 = u256
+            type A167 = u256
+            type A168 = u256
+            type A169 = u256
+            type A170 = u256
+            type A171 = u256
+            type A172 = u256
+            type A173 = u256
+            type A174 = u256
+            type A175 = u256
+            type A176 = u256
+            type A177 = u256
+            type A178 = u256
+            type A179 = u256
+            type A180 = u256
+            type A181 = u256
+            type A182 = u256
+            type A183 = u256
+            type A184 = u256
+            type A185 = u256
+            type A186 = u256
+            type A187 = u256
+            type A188 = u256
+            type A189 = u256
+            type A190 = u256
+            type A191 = u256
+            type A192 = u256
+            type A193 = u256
+            type A194 = u256
+            type A195 = u256
+            type A196 = u256
+            type A197 = u256
+            type A198 = u256
+            type A199 = u256
+            type A200 = u256
+            type A201 = u256
+            type A202 = u256
+            type A203 = u256
+            type A204 = u256
+            type A205 = u256
+            type A206 = u256
+            type A207 = u256
+            type A208 = u256
+            type A209 = u256
+            type A210 = u256
+            type A211 = u256
+            type A212 = u256
+            type A213 = u256
+            type A214 = u256
+            type A215 = u256
+            type A216 = u256
+            type A217 = u256
+            type A218 = u256
+            type A219 = u256
+            type A220 = u256
+            type A221 = u256
+            type A222 = u256
+            type A223 = u256
+            type A224 = u256
+            type A225 = u256
+            type A226 = u256
+            type A227 = u256
+            type A228 = u256
+            type A229 = u256
+            type A230 = u256
+            type A231 = u256
+            type A232 = u256
+            type A233 = u256
+            type A234 = u256
+            type A235 = u256
+            type A236 = u256
+            type A237 = u256
+            type A238 = u256
+            type A239 = u256
+            type A240 = u256
+            type A241 = u256
+            type A242 = u256
+            type A243 = u256
+            type A244 = u256
+            type A245 = u256
+            type A246 = u256
+            type A247 = u256
+            type A248 = u256
+            type A249 = u256
+            type A250 = u256
+            type A251 = u256
+            type A252 = u256
+            type A253 = u256
+            type A254 = u256
+            type A255 = u256
+            type A256 = u256
+            type A257 = u256
+            type A258 = u256
+            type A259 = u256
+            type A260 = u256
+            type A261 = u256
+            type A262 = u256
+            type A263 = u256
+            type A264 = u256
+            type A265 = u256
+            type A266 = u256
+            type A267 = u256
+            type A268 = u256
+            type A269 = u256
+            type A270 = u256
+            type A271 = u256
+            type A272 = u256
+            type A273 = u256
+            type A274 = u256
+            type A275 = u256
+            type A276 = u256
+            type A277 = u256
+            type A278 = u256
+            type A279 = u256
+            type A280 = u256
+            type A281 = u256
+            type A282 = u256
+            type A283 = u256
+            type A284 = u256
+            type A285 = u256
+            type A286 = u256
+            type A287 = u256
+            type A288 = u256
+            type A289 = u256
+            type A290 = u256
+            type A291 = u256
+            type A292 = u256
+            type A293 = u256
+            type A294 = u256
+            type A295 = u256
+            type A296 = u256
+            type A297 = u256
+            type A298 = u256
+            type A299 = u256
+            type A300 = u256
+            type A301 = u256
+            type A302 = u256
+            type A303 = u256
+            type A304 = u256
+            type A305 = u256
+            type A306 = u256
+            type A307 = u256
+            type A308 = u256
+            type A309 = u256
+            type A310 = u256
+            type A311 = u256
+            type A312 = u256
+            type A313 = u256
+            type A314 = u256
+            type A315 = u256
+            type A316 = u256
+            type A317 = u256
+            type A318 = u256
+            type A319 = u256
+            type A320 = u256
+            type A321 = u256
+            type A322 = u256
+            type A323 = u256
+            type A324 = u256
+            type A325 = u256
+            type A326 = u256
+            type A327 = u256
+            type A328 = u256
+            type A329 = u256
+            type A330 = u256
+            type A331 = u256
+            type A332 = u256
+            type A333 = u256
+            type A334 = u256
+            type A335 = u256
+            type A336 = u256
+            type A337 = u256
+            type A338 = u256
+            type A339 = u256
+            type A340 = u256
+            type A341 = u256
+            type A342 = u256
+            type A343 = u256
+            type A344 = u256
+            type A345 = u256
+            type A346 = u256
+            type A347 = u256
+            type A348 = u256
+            type A349 = u256
+            type A350 = u256
+            type A351 = u256
+            type A352 = u256
+            type A353 = u256
+            type A354 = u256
+            type A355 = u256
+            type A356 = u256
+            type A357 = u256
+            type A358 = u256
+            type A359 = u256
+            type A360 = u256
+            type A361 = u256
+            type A362 = u256
+            type A363 = u256
+            type A364 = u256
+            type A365 = u256
+            type A366 = u256
+            type A367 = u256
+            type A368 = u256
+            type A369 = u256
+            type A370 = u256
+            type A371 = u256
+            type A372 = u256
+            type A373 = u256
+            type A374 = u256
+            type A375 = u256
+            type A376 = u256
+            type A377 = u256
+            type A378 = u256
+            type A379 = u256
+            type A380 = u256
+            type A381 = u256
+            type A382 = u256
+            type A383 = u256
+            type A384 = u256
+            type A385 = u256
+            type A386 = u256
+            type A387 = u256
+            type A388 = u256
+            type A389 = u256
+            type A390 = u256
+            type A391 = u256
+            type A392 = u256
+            type A393 = u256
+            type A394 = u256
+            type A395 = u256
+            type A396 = u256
+            type A397 = u256
+            type A398 = u256
+            type A399 = u256
+            type A400 = u256
+            type A401 = u256
+            type A402 = u256
+            type A403 = u256
+            type A404 = u256
+            type A405 = u256
+            type A406 = u256
+            type A407 = u256
+            type A408 = u256
+            type A409 = u256
+            type A410 = u256
+            type A411 = u256
+            type A412 = u256
+            type A413 = u256
+            type A414 = u256
+            type A415 = u256
+            type A416 = u256
+            type A417 = u256
+            type A418 = u256
+            type A419 = u256
+            type A420 = u256
+            type A421 = u256
+            type A422 = u256
+            type A423 = u256
+            type A424 = u256
+            type A425 = u256
+            type A426 = u256
+            type A427 = u256
+            type A428 = u256
+            type A429 = u256
+            type A430 = u256
+            type A431 = u256
+            type A432 = u256
+            type A433 = u256
+            type A434 = u256
+            type A435 = u256
+            type A436 = u256
+            type A437 = u256
+            type A438 = u256
+            type A439 = u256
+            type A440 = u256
+            type A441 = u256
+            type A442 = u256
+            type A443 = u256
+            type A444 = u256
+            type A445 = u256
+            type A446 = u256
+            type A447 = u256
+            type A448 = u256
+            type A449 = u256
+            type A450 = u256
+            type A451 = u256
+            type A452 = u256
+            type A453 = u256
+            type A454 = u256
+            type A455 = u256
+            type A456 = u256
+            type A457 = u256
+            type A458 = u256
+            type A459 = u256
+            type A460 = u256
+            type A461 = u256
+            type A462 = u256
+            type A463 = u256
+            type A464 = u256
+            type A465 = u256
+            type A466 = u256
+            type A467 = u256
+            type A468 = u256
+            type A469 = u256
+            type A470 = u256
+            type A471 = u256
+            type A472 = u256
+            type A473 = u256
+            type A474 = u256
+            type A475 = u256
+            type A476 = u256
+            type A477 = u256
+            type A478 = u256
+            type A479 = u256
+            type A480 = u256
+            type A481 = u256
+            type A482 = u256
+            type A483 = u256
+            type A484 = u256
+            type A485 = u256
+            type A486 = u256
+            type A487 = u256
+            type A488 = u256
+            type A489 = u256
+            type A490 = u256
+            type A491 = u256
+            type A492 = u256
+            type A493 = u256
+            type A494 = u256
+            type A495 = u256
+            type A496 = u256
+            type A497 = u256
+            type A498 = u256
+            type A499 = u256
+            type A500 = u256
+            type A501 = u256
+            type A502 = u256
+            type A503 = u256
+            type A504 = u256
+            type A505 = u256
+            type A506 = u256
+            type A507 = u256
+            type A508 = u256
+            type A509 = u256
+            type A510 = u256
+            type A511 = u256
+            type A512 = u256
+            type A513 = u256
+            type A514 = u256
+            type A515 = u256
+            type A516 = u256
+            type A517 = u256
+            type A518 = u256
+            type A519 = u256
+            type A520 = u256
+            type A521 = u256
+            type A522 = u256
+            type A523 = u256
+            type A524 = u256
+            type A525 = u256
+            type A526 = u256
+            type A527 = u256
+            type A528 = u256
+            type A529 = u256
+            type A530 = u256
+            type A531 = u256
+            type A532 = u256
+            type A533 = u256
+            type A534 = u256
+            type A535 = u256
+            type A536 = u256
+            type A537 = u256
+            type A538 = u256
+            type A539 = u256
+            type A540 = u256
+            type A541 = u256
+            type A542 = u256
+            type A543 = u256
+            type A544 = u256
+            type A545 = u256
+            type A546 = u256
+            type A547 = u256
+            type A548 = u256
+            type A549 = u256
+            type A550 = u256
+            type A551 = u256
+            type A552 = u256
+            type A553 = u256
+            type A554 = u256
+            type A555 = u256
+            type A556 = u256
+            type A557 = u256
+            type A558 = u256
+            type A559 = u256
+            type A560 = u256
+            type A561 = u256
+            type A562 = u256
+            type A563 = u256
+            type A564 = u256
+            type A565 = u256
+            type A566 = u256
+            type A567 = u256
+            type A568 = u256
+            type A569 = u256
+            type A570 = u256
+            type A571 = u256
+            type A572 = u256
+            type A573 = u256
+            type A574 = u256
+            type A575 = u256
+            type A576 = u256
+            type A577 = u256
+            type A578 = u256
+            type A579 = u256
+            type A580 = u256
+            type A581 = u256
+            type A582 = u256
+            type A583 = u256
+            type A584 = u256
+            type A585 = u256
+            type A586 = u256
+            type A587 = u256
+            type A588 = u256
+            type A589 = u256
+            type A590 = u256
+            type A591 = u256
+            type A592 = u256
+            type A593 = u256
+            type A594 = u256
+            type A595 = u256
+            type A596 = u256
+            type A597 = u256
+            type A598 = u256
+            type A599 = u256
+            type A600 = u256
+            type A601 = u256
+            type A602 = u256
+            type A603 = u256
+            type A604 = u256
+            type A605 = u256
+            type A606 = u256
+            type A607 = u256
+            type A608 = u256
+            type A609 = u256
+            type A610 = u256
+            type A611 = u256
+            type A612 = u256
+            type A613 = u256
+            type A614 = u256
+            type A615 = u256
+            type A616 = u256
+            type A617 = u256
+            type A618 = u256
+            type A619 = u256
+            type A620 = u256
+            type A621 = u256
+            type A622 = u256
+            type A623 = u256
+            type A624 = u256
+            type A625 = u256
+            type A626 = u256
+            type A627 = u256
+            type A628 = u256
+            type A629 = u256
+            type A630 = u256
+            type A631 = u256
+            type A632 = u256
+            type A633 = u256
+            type A634 = u256
+            type A635 = u256
+            type A636 = u256
+            type A637 = u256
+            type A638 = u256
+            type A639 = u256
+            type A640 = u256
+            type A641 = u256
+            type A642 = u256
+            type A643 = u256
+            type A644 = u256
+            type A645 = u256
+            type A646 = u256
+            type A647 = u256
+            type A648 = u256
+            type A649 = u256
+            type A650 = u256
+            type A651 = u256
+            type A652 = u256
+            type A653 = u256
+            type A654 = u256
+            type A655 = u256
+            type A656 = u256
+            type A657 = u256
+            type A658 = u256
+            type A659 = u256
+            type A660 = u256
+            type A661 = u256
+            type A662 = u256
+            type A663 = u256
+            type A664 = u256
+            type A665 = u256
+            type A666 = u256
+            type A667 = u256
+            type A668 = u256
+            type A669 = u256
+            type A670 = u256
+            type A671 = u256
+            type A672 = u256
+            type A673 = u256
+            type A674 = u256
+            type A675 = u256
+            type A676 = u256
+            type A677 = u256
+            type A678 = u256
+            type A679 = u256
+            type A680 = u256
+            type A681 = u256
+            type A682 = u256
+            type A683 = u256
+            type A684 = u256
+            type A685 = u256
+            type A686 = u256
+            type A687 = u256
+            type A688 = u256
+            type A689 = u256
+            type A690 = u256
+            type A691 = u256
+            type A692 = u256
+            type A693 = u256
+            type A694 = u256
+            type A695 = u256
+            type A696 = u256
+            type A697 = u256
+            type A698 = u256
+            type A699 = u256
+            type A700 = u256
+            type A701 = u256
+            type A702 = u256
+            type A703 = u256
+            type A704 = u256
+            type A705 = u256
+            type A706 = u256
+            type A707 = u256
+            type A708 = u256
+            type A709 = u256
+            type A710 = u256
+            type A711 = u256
+            type A712 = u256
+            type A713 = u256
+            type A714 = u256
+            type A715 = u256
+            type A716 = u256
+            type A717 = u256
+            type A718 = u256
+            type A719 = u256
+            type A720 = u256
+            type A721 = u256
+            type A722 = u256
+            type A723 = u256
+            type A724 = u256
+            type A725 = u256
+            type A726 = u256
+            type A727 = u256
+            type A728 = u256
+            type A729 = u256
+            type A730 = u256
+            type A731 = u256
+            type A732 = u256
+            type A733 = u256
+            type A734 = u256
+            type A735 = u256
+            type A736 = u256
+            type A737 = u256
+            type A738 = u256
+            type A739 = u256
+            type A740 = u256
+            type A741 = u256
+            type A742 = u256
+            type A743 = u256
+            type A744 = u256
+            type A745 = u256
+            type A746 = u256
+            type A747 = u256
+            type A748 = u256
+            type A749 = u256
+            type A750 = u256
+            type A751 = u256
+            type A752 = u256
+            type A753 = u256
+            type A754 = u256
+            type A755 = u256
+            type A756 = u256
+            type A757 = u256
+            type A758 = u256
+            type A759 = u256
+            type A760 = u256
+            type A761 = u256
+            type A762 = u256
+            type A763 = u256
+            type A764 = u256
+            type A765 = u256
+            type A766 = u256
+            type A767 = u256
+            type A768 = u256
+            type A769 = u256
+            type A770 = u256
+            type A771 = u256
+            type A772 = u256
+            type A773 = u256
+            type A774 = u256
+            type A775 = u256
+            type A776 = u256
+            type A777 = u256
+            type A778 = u256
+            type A779 = u256
+            type A780 = u256
+            type A781 = u256
+            type A782 = u256
+            type A783 = u256
+            type A784 = u256
+            type A785 = u256
+            type A786 = u256
+            type A787 = u256
+            type A788 = u256
+            type A789 = u256
+            type A790 = u256
+            type A791 = u256
+            type A792 = u256
+            type A793 = u256
+            type A794 = u256
+            type A795 = u256
+            type A796 = u256
+            type A797 = u256
+            type A798 = u256
+            type A799 = u256
+            type A800 = u256
+            type A801 = u256
+            type A802 = u256
+            type A803 = u256
+            type A804 = u256
+            type A805 = u256
+            type A806 = u256
+            type A807 = u256
+            type A808 = u256
+            type A809 = u256
+            type A810 = u256
+            type A811 = u256
+            type A812 = u256
+            type A813 = u256
+            type A814 = u256
+            type A815 = u256
+            type A816 = u256
+            type A817 = u256
+            type A818 = u256
+            type A819 = u256
+            type A820 = u256
+            type A821 = u256
+            type A822 = u256
+            type A823 = u256
+            type A824 = u256
+            type A825 = u256
+            type A826 = u256
+            type A827 = u256
+            type A828 = u256
+            type A829 = u256
+            type A830 = u256
+            type A831 = u256
+            type A832 = u256
+            type A833 = u256
+            type A834 = u256
+            type A835 = u256
+            type A836 = u256
+            type A837 = u256
+            type A838 = u256
+            type A839 = u256
+            type A840 = u256
+            type A841 = u256
+            type A842 = u256
+            type A843 = u256
+            type A844 = u256
+            type A845 = u256
+            type A846 = u256
+            type A847 = u256
+            type A848 = u256
+            type A849 = u256
+            type A850 = u256
+            type A851 = u256
+            type A852 = u256
+            type A853 = u256
+            type A854 = u256
+            type A855 = u256
+            type A856 = u256
+            type A857 = u256
+            type A858 = u256
+            type A859 = u256
+            type A860 = u256
+            type A861 = u256
+            type A862 = u256
+            type A863 = u256
+            type A864 = u256
+            type A865 = u256
+            type A866 = u256
+            type A867 = u256
+            type A868 = u256
+            type A869 = u256
+            type A870 = u256
+            type A871 = u256
+            type A872 = u256
+            type A873 = u256
+            type A874 = u256
+            type A875 = u256
+            type A876 = u256
+            type A877 = u256
+            type A878 = u256
+            type A879 = u256
+            type A880 = u256
+            type A881 = u256
+            type A882 = u256
+            type A883 = u256
+            type A884 = u256
+            type A885 = u256
+            type A886 = u256
+            type A887 = u256
+            type A888 = u256
+            type A889 = u256
+            type A890 = u256
+            type A891 = u256
+            type A892 = u256
+            type A893 = u256
+            type A894 = u256
+            type A895 = u256
+            type A896 = u256
+            type A897 = u256
+            type A898 = u256
+            type A899 = u256
+            type A900 = u256
+            type A901 = u256
+            type A902 = u256
+            type A903 = u256
+            type A904 = u256
+            type A905 = u256
+            type A906 = u256
+            type A907 = u256
+            type A908 = u256
+            type A909 = u256
+            type A910 = u256
+            type A911 = u256
+            type A912 = u256
+            type A913 = u256
+            type A914 = u256
+            type A915 = u256
+            type A916 = u256
+            type A917 = u256
+            type A918 = u256
+            type A919 = u256
+            type A920 = u256
+            type A921 = u256
+            type A922 = u256
+            type A923 = u256
+            type A924 = u256
+            type A925 = u256
+            type A926 = u256
+            type A927 = u256
+            type A928 = u256
+            type A929 = u256
+            type A930 = u256
+            type A931 = u256
+            type A932 = u256
+            type A933 = u256
+            type A934 = u256
+            type A935 = u256
+            type A936 = u256
+            type A937 = u256
+            type A938 = u256
+            type A939 = u256
+            type A940 = u256
+            type A941 = u256
+            type A942 = u256
+            type A943 = u256
+            type A944 = u256
+            type A945 = u256
+            type A946 = u256
+            type A947 = u256
+            type A948 = u256
+            type A949 = u256
+            type A950 = u256
+            type A951 = u256
+            type A952 = u256
+            type A953 = u256
+            type A954 = u256
+            type A955 = u256
+            type A956 = u256
+            type A957 = u256
+            type A958 = u256
+            type A959 = u256
+            type A960 = u256
+            type A961 = u256
+            type A962 = u256
+            type A963 = u256
+            type A964 = u256
+            type A965 = u256
+            type A966 = u256
+            type A967 = u256
+            type A968 = u256
+            type A969 = u256
+            type A970 = u256
+            type A971 = u256
+            type A972 = u256
+            type A973 = u256
+            type A974 = u256
+            type A975 = u256
+            type A976 = u256
+            type A977 = u256
+            type A978 = u256
+            type A979 = u256
+            type A980 = u256
+            type A981 = u256
+            type A982 = u256
+            type A983 = u256
+            type A984 = u256
+            type A985 = u256
+            type A986 = u256
+            type A987 = u256
+            type A988 = u256
+            type A989 = u256
+            type A990 = u256
+            type A991 = u256
+            type A992 = u256
+            type A993 = u256
+            type A994 = u256
+            type A995 = u256
+            type A996 = u256
+            type A997 = u256
+            type A998 = u256
+            type A999 = u256
+            type A1000 = u256
+        } }
+        let mut i: usize = 0
+        while i < 8 {
+            items = quote {
+                ${items}
+                ${items}
+                fn limit_marker() -> u256 { 0 }
+            }
+            i += 1
+        }
+        items
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

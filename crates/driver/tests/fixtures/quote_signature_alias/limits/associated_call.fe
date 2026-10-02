@@ -1,0 +1,8 @@
+use core::meta::{Code, Item, Record}
+trait Size { const SIZE: u256 }
+const fn count<T>() -> u256 { 1 }
+const fn emit(record: Record) -> Code<Item> {
+    quote { impl Size for ${record} { const SIZE: u256 = count<u8>() } }
+}
+#[generate(emit)]
+struct Target {}

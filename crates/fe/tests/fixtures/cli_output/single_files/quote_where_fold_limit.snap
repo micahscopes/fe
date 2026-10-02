@@ -4,11 +4,11 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_where_fold_limit.fe
 ---
 === STDERR ===
-error[18-0004]: invalid generated declaration: quoted where composition exceeds 1000 nodes
+error[18-0004]: invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
    ┌─ quote_where_fold_limit.fe:10:38
    │
-10 │             bounds = quote { where ${bounds} }
-   │                                      ^^^^^^ invalid generated declaration: quoted where composition exceeds 1000 nodes
+10 │             bounds = quote { where ${bounds}, ${bounds} }
+   │                                      ^^^^^^ invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
    ·
 20 │ #[generate(ingot::author::emit)]
    │ -------------------------------- generated here

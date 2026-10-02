@@ -133,7 +133,7 @@ fn quoted_array_sum_retains_one_loop(fixture: Fixture<&str>) {
     let sum = output
         .top_mod(file)
         .all_impl_traits(&output)
-        .into_iter()
+        .iter()
         .flat_map(|implementation| implementation.methods(&output))
         .find(|function| {
             function

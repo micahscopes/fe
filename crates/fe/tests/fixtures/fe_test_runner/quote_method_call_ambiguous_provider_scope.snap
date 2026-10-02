@@ -5,21 +5,17 @@ input_file: tests/fixtures/fe_test_runner/quote_method_call_ambiguous_provider_s
 ---
 === STDOUT ===
 error[8-0026]: multiple trait candidates found
-   ┌─ quote_method_call_ambiguous_provider_scope.fe:17:9
+   ┌─ quote_method_call_ambiguous_provider_scope.fe:19:51
    │
-17 │ ╭         quote {
-18 │ │             impl ingot::Get for ${record} {
-19 │ │                 fn get(self) -> u256 { self.value.check() }
-20 │ │             }
-21 │ │         }
-   │ ╰─────────^ `check` is ambiguous
-   · │
-33 │   #[generate(ingot::author::emit)]
-   │   --------------------------------
-   │   │
-   │   candidate: `Check::check`
-   │   generated here
-   │   candidate: `Check::check`
+19 │                 fn get(self) -> u256 { self.value.check() }
+   │                                                   ^^^^^
+   │                                                   │
+   │                                                   `check` is ambiguous
+   │                                                   candidate: `Check::check`
+   │                                                   candidate: `Check::check`
+   ·
+33 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here
    │
    = generated item:
      impl ingot::Get for Target {

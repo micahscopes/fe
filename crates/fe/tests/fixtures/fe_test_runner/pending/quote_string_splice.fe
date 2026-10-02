@@ -1,0 +1,25 @@
+// Before RD86: authored string values splice as real Fe string literals.
+// Oracle: an ordinary typed string comparison with the same contents.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let message: String<8> = "hello"
+        quote {
+            fn generated_message_matches() -> bool {
+                let value: String<8> = ${message}
+                value == "hello"
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+fn ordinary_message_matches() -> bool {
+    let value: String<8> = "hello"
+    value == "hello"
+}
+#[test]
+fn string_splice_matches_twin() {
+    assert!(ordinary_message_matches())
+    assert!(generated_message_matches() == ordinary_message_matches())
+}

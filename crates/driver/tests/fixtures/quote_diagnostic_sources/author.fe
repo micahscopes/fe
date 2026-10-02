@@ -1,0 +1,10 @@
+use core::meta::{Arm, Code, Item, Record, binders, empty, variant}
+pub const fn first_only(record: Record) -> Code<Item> {
+    let first = binders(variant(record, 0), 0)
+    let arms: Code<Arm> = quote { ${first} => true }
+    quote {
+        impl ingot::Tagged for ${record} {
+            fn tag(self) -> bool { match self { ${arms} } }
+        }
+    }
+}

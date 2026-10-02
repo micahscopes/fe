@@ -1,0 +1,13 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn huge() -> u256 {
+            let values = [
+__VALUES__
+            ]
+            0
+        } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

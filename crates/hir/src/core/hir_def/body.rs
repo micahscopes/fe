@@ -20,6 +20,58 @@ use crate::{
     visitor::prelude::*,
 };
 
+/// The ordinary HIR node whose provider authority survives quotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+pub enum QuoteScopeSite {
+    Expr(ExprId),
+    Pat(PatId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+pub struct QuoteFieldGrant<'db> {
+    pub field: ScopeId<'db>,
+    pub source: Option<(Body<'db>, ExprId)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+pub struct QuoteScope<'db> {
+    pub scope: ScopeId<'db>,
+    pub source: Option<(Body<'db>, QuoteScopeSite)>,
+    /// Compiler-issued field scopes, retaining owner and declaration index.
+    pub fields: Vec<QuoteFieldGrant<'db>>,
+}
+impl<'db> QuoteScope<'db> {
+    pub fn field(
+        &self,
+        db: &'db dyn crate::HirDb,
+        label: super::IdentId<'db>,
+    ) -> Option<QuoteFieldGrant<'db>> {
+        self.fields
+            .iter()
+            .copied()
+            .find(|scope| scope.field.name(db) == Some(label))
+    }
+}
+impl<'db> From<ScopeId<'db>> for QuoteScope<'db> {
+    fn from(scope: ScopeId<'db>) -> Self {
+        Self {
+            scope,
+            source: None,
+            fields: Vec::new(),
+        }
+    }
+}
+impl From<ExprId> for QuoteScopeSite {
+    fn from(site: ExprId) -> Self {
+        Self::Expr(site)
+    }
+}
+impl From<PatId> for QuoteScopeSite {
+    fn from(site: PatId) -> Self {
+        Self::Pat(site)
+    }
+}
+
 #[salsa::tracked]
 #[derive(Debug)]
 pub struct Body<'db> {
@@ -40,12 +92,9 @@ pub struct Body<'db> {
     pub conds: NodeStore<CondId, Partial<Cond>>,
     #[return_ref]
     pub pats: NodeStore<PatId, Partial<Pat<'db>>>,
-    /// Trait lookup scopes captured by method calls copied from checked quotes.
+    /// Provider definition scopes retained by copied quotation expressions.
     #[return_ref]
-    pub quote_method_scopes: Vec<(ExprId, ScopeId<'db>)>,
-    /// Definition scopes for paths rooted when their quotes were checked.
-    #[return_ref]
-    pub quote_path_scopes: Vec<(ExprId, ScopeId<'db>)>,
+    pub quote_scopes: Vec<(QuoteScopeSite, QuoteScope<'db>)>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -55,6 +104,28 @@ pub struct Body<'db> {
 }
 
 impl<'db> Body<'db> {
+    pub fn quote_authority(
+        self,
+        db: &'db dyn crate::HirDb,
+        site: QuoteScopeSite,
+    ) -> Option<&'db QuoteScope<'db>> {
+        self.quote_scopes(db)
+            .iter()
+            .find_map(|(node, scope)| (*node == site).then_some(scope))
+    }
+    pub fn quote_scope(self, db: &'db dyn crate::HirDb, site: ExprId) -> Option<ScopeId<'db>> {
+        self.quote_authority(db, site.into())
+            .map(|authority| authority.scope)
+    }
+    pub fn quote_pattern_scope(
+        self,
+        db: &'db dyn crate::HirDb,
+        site: PatId,
+    ) -> Option<ScopeId<'db>> {
+        self.quote_authority(db, site.into())
+            .map(|authority| authority.scope)
+    }
+
     pub fn span(self) -> LazyBodySpan<'db> {
         LazyBodySpan::new(self)
     }

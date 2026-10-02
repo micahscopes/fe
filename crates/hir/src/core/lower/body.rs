@@ -4,7 +4,7 @@ use super::FileLowerCtxt;
 use crate::{
     hir_def::{
         Body, BodyKind, BodySourceMap, Cond, CondId, Expr, ExprId, NodeStore, Partial, Pat, PatId,
-        Stmt, StmtId, TrackedItemId, TrackedItemVariant, scope_graph::ScopeId,
+        QuoteScope, QuoteScopeSite, Stmt, StmtId, TrackedItemId, TrackedItemVariant,
     },
     span::HirOrigin,
 };
@@ -49,8 +49,7 @@ pub(super) struct BodyCtxt<'ctxt, 'db> {
     pub(super) exprs: NodeStore<ExprId, Partial<Expr<'db>>>,
     pub(super) conds: NodeStore<CondId, Partial<Cond>>,
     pub(super) pats: NodeStore<PatId, Partial<Pat<'db>>>,
-    pub(super) quote_method_scopes: Vec<(ExprId, ScopeId<'db>)>,
-    pub(super) quote_path_scopes: Vec<(ExprId, ScopeId<'db>)>,
+    pub(super) quote_scopes: Vec<(QuoteScopeSite, QuoteScope<'db>)>,
     pub(super) source_map: BodySourceMap,
     /// Items declared in blocks of a quote template; `None` outside one.
     pub(super) quote_block_items: Option<Vec<crate::hir_def::QuoteBlockItem<'db>>>,
@@ -122,8 +121,7 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
             exprs: NodeStore::new(),
             conds: NodeStore::new(),
             pats: NodeStore::new(),
-            quote_method_scopes: Vec::new(),
-            quote_path_scopes: Vec::new(),
+            quote_scopes: Vec::new(),
             source_map: BodySourceMap::default(),
             quote_block_items: None,
             next_quote: 0,
@@ -158,8 +156,7 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
             self.exprs,
             self.conds,
             self.pats,
-            self.quote_method_scopes,
-            self.quote_path_scopes,
+            self.quote_scopes,
             self.f_ctxt.top_mod(),
             self.source_map,
             origin,

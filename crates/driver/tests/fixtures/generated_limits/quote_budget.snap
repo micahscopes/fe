@@ -1,7 +1,12 @@
-error[18-0001]: invalid generated declaration: generated description units limit exceeded: 213024 > 65536
-   ┌─ quote_budget.fe:15:1
+error[18-0003]: invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+   ┌─ quote_budget.fe:7:17
    │
-15 │ #[generate(many)]
-   │ ^^^^^^^^^^^^^^^^^ invalid generated declaration: generated description units limit exceeded: 213024 > 65536
-
-
+ 7 │           items = quote {
+   │ ╭─────────────────^
+ 8 │ │             ${items}
+ 9 │ │             pub const fn ${name}() -> u256 { 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 }
+10 │ │         }
+   │ ╰─────────^ invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+   · │
+15 │   #[generate(many)]
+   │   ----------------- generated here

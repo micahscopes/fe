@@ -1,0 +1,14 @@
+// Authority: target Field index 1 (`b`) applied to Other whose index 1 is `pad` and which also has `b` at index 0.
+pub struct Other { pub b: u256, pub pad: u256 }
+mod author {
+    use core::meta::{Code, Item, Record, field}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(record, 1)
+        quote { pub fn gen(_ o: ingot::Other) -> u256 { let value = ingot::Other { ${f}: 3, pad: 4 }
+ value.b } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T { a: u256, b: u256 }
+#[test]
+fn t() { assert!(gen(Other { b: 3, pad: 4 }) == 3) }

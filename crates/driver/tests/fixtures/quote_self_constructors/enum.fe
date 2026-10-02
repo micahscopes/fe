@@ -1,0 +1,32 @@
+pub trait Rebuild {
+    fn score(self) -> u256
+    fn unit() -> Self
+    fn tuple(_ x: u256) -> Self
+    fn record(_ y: u256) -> Self
+}
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Rebuild for ${record} {
+                fn score(self) -> u256 {
+                    match self { Self::A => 1, Self::B(x) => x, Self::C { y } => y * 10 }
+                }
+                fn unit() -> Self { Self::A }
+                fn tuple(_ x: u256) -> Self { Self::B(x) }
+                fn record(_ y: u256) -> Self { Self::C { y } }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+pub enum E { A, B(u256), C { y: u256 } }
+#[test]
+fn values() {
+    assert!(E::A.score() == 1)
+    assert!(E::B(5).score() == 5)
+    assert!(E::C { y: 4 }.score() == 40)
+    assert!(E::unit().score() == 1)
+    assert!(E::tuple(7).score() == 7)
+    assert!(E::record(9).score() == 90)
+}

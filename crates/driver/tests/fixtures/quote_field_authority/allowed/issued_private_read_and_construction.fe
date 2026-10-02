@@ -1,0 +1,19 @@
+pub trait Build { fn build() -> Self
+    fn value(self) -> u256 }
+mod author {
+    use core::meta::{Code, Item, Record, field}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let x = field(record, 0)
+        let y = field(record, 1)
+        quote { impl ingot::Build for ${record} {
+            fn build() -> Self { Self { ${x}: 7, ${y}: 9 } }
+            fn value(self) -> u256 { self.${x} + self.${y} }
+        } }
+    }
+}
+mod dest {
+    #[generate(ingot::author::emit)]
+    pub struct T { x: u256, y: u256 }
+}
+#[test]
+fn t() { assert!(<dest::T as Build>::build().value() == 16) }

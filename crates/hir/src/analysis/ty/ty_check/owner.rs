@@ -129,6 +129,14 @@ impl<'db> BodyOwner<'db> {
             })
     }
 
+    pub fn is_const_context(self, db: &dyn HirAnalysisDb) -> bool {
+        match self {
+            Self::Func(func) => func.is_const(db),
+            Self::Const(_) | Self::AnonConstBody { .. } => true,
+            Self::ContractInit { .. } | Self::ContractRecvArm { .. } => false,
+        }
+    }
+
     pub fn arithmetic_mode(self, db: &'db dyn HirAnalysisDb) -> ArithmeticMode {
         if let Self::Func(func) = self {
             return func.arithmetic_mode(db);

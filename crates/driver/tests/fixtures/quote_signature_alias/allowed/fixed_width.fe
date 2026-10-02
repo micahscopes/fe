@@ -1,0 +1,27 @@
+pub enum Opt<T> { No, Yes(T) }
+mod author {
+    use core::meta::{Code, Item, Record}
+    type O8 = ingot::Opt<u8>
+    type Chained = O8
+    type Num = u8
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn signature_only(_ value: Num) -> Num { 0 }
+            pub fn make() -> Chained { O8::Yes(200) }
+            pub fn read(_ value: O8) -> Num {
+                match value { O8::Yes(v) => v, O8::No => 0 }
+            }
+        }
+    }
+}
+mod destination {
+    type Chained = ingot::Opt<u256>
+    type O8 = ingot::Opt<u256>
+    type Num = u256
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+#[test]
+fn values() { assert!(destination::read(destination::make()) == 200) }
+#[test(should_revert, panic = 0x11)]
+fn narrow_overflow() { let _ = destination::read(destination::make()) + 100 }

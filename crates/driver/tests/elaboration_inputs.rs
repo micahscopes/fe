@@ -99,7 +99,7 @@ fn quoted_root_identity_matches_checked_output(fixture: Fixture<&str>) {
     let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
     assert_eq!(errors.len(), 1);
     assert_eq!(
-        errors[0].message,
+        errors[0].failure.to_string(),
         "quoted rooted function changed meaning in output"
     );
 }
@@ -142,7 +142,7 @@ fn quoted_trait_identity_matches_checked_output(fixture: Fixture<&str>) {
     let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
     assert_eq!(errors.len(), 1);
     assert_eq!(
-        errors[0].message,
+        errors[0].failure.to_string(),
         "quoted rooted trait changed meaning in output"
     );
 }
@@ -611,6 +611,44 @@ fn malformed_and_inaccessible_invocations_do_not_become_grants() {
         let file = db.workspace().get(&db, &url).unwrap();
         let error = invocations(&db, file).unwrap_err();
         assert_eq!(error.kind, expected, "{source}");
+    }
+}
+
+#[test]
+fn generation_invocation_errors_explain_the_authored_request() {
+    let mut db = DriverDataBase::default();
+    let url = "file:///invocation_wording.fe";
+    for (source, expected) in [
+        (
+            "#[generate]\nstruct Packet {}",
+            "use #[generate(provider_path)] with exactly one provider path",
+        ),
+        (
+            "#[generate(missing)]\nstruct Packet {}",
+            "cannot resolve the generation provider path in this scope",
+        ),
+        (
+            "struct Author {}\n#[generate(Author)]\nstruct Packet {}",
+            "the generation provider path must name a function",
+        ),
+        (
+            "#[generate(author)]\nfn f() {}",
+            "#[generate] requires a struct or enum target",
+        ),
+        (
+            "mod hidden { const fn author() -> u256 { 1 } }\n#[generate(hidden::author)]\nstruct Packet {}",
+            "the generation provider is not visible from this scope",
+        ),
+    ] {
+        put(&mut db, url, source);
+        let error = fe_driver::elaboration::prepare(&db)
+            .err()
+            .expect("invalid request must be rejected");
+        assert_eq!(error.message(), expected, "{source}");
+        assert!(
+            error.span.is_some(),
+            "the authored request needs a location"
+        );
     }
 }
 
@@ -1163,7 +1201,7 @@ fn project_preparation_rejects_unchecked_entry_premises_and_untaken_invalid_sour
         Err(error) => error,
         Ok(_) => panic!("unchecked entry premise admitted"),
     };
-    assert!(error.message.contains("without entry requirements"));
+    assert!(error.message().contains("without entry requirements"));
     let invalid = ACCESSOR_SOURCE.replace(
         "let f = field(record, 2)",
         "if false { let invalid: bool = 1 }\nlet f = field(record, 2)",
@@ -1247,7 +1285,9 @@ fn generated_calls_check_complete_requirements_and_track_supporting_impl_edits()
         for view in [&db, &fresh] {
             match fe_driver::elaboration::prepare(view) {
                 Ok(Some(output)) if admitted => assert_eq!(answer(&output), "258"),
-                Err(error) if !admitted => assert!(error.message.contains("Allowed"), "{error:?}"),
+                Err(error) if !admitted => {
+                    assert!(error.message().contains("Allowed"), "{error:?}")
+                }
                 Err(error) => panic!("unexpected rejection: {error:?}"),
                 _ => panic!("unexpected admission state"),
             }
@@ -1310,7 +1350,7 @@ fn fe_authored_abi_implementations_admit_fixed_records_and_consumers() {
     assert_eq!(
         traits
             .lines()
-            .filter(|name| *name == "ingot::AbiSize")
+            .filter(|name| *name == "core::abi::AbiSize")
             .count(),
         4,
         "{traits}"
@@ -1318,7 +1358,7 @@ fn fe_authored_abi_implementations_admit_fixed_records_and_consumers() {
     assert_eq!(
         traits
             .lines()
-            .filter(|name| *name == "ingot::Encode<ingot::Sol>")
+            .filter(|name| *name == "core::abi::Encode<std::abi::sol::Sol>")
             .count(),
         4
     );
@@ -1418,7 +1458,7 @@ fn unused_generated_encoder_requires_each_codec_after_supporting_impl_edits() {
         for view in [&db, &fresh] {
             match fe_driver::elaboration::prepare(view) {
                 Ok(Some(_)) if admitted => {}
-                Err(error) if !admitted => assert!(error.message.contains("Encode"), "{error:?}"),
+                Err(error) if !admitted => assert!(error.message().contains("Encode"), "{error:?}"),
                 Err(error) => panic!("unexpected rejection: {error:?}"),
                 _ => panic!("unused encoder admitted without its field codec"),
             }
@@ -1466,7 +1506,7 @@ fn generated_abi_impl_ids(
             let name = trait_ref.pretty_print(db);
             matches!(
                 name.as_str(),
-                "ingot::AbiSize" | "ingot::Encode<ingot::Sol>"
+                "core::abi::AbiSize" | "core::abi::Encode<std::abi::sol::Sol>"
             )
             .then(|| (name, implementation.as_id()))
         })
@@ -1537,7 +1577,7 @@ fn structural_abi_fixed_scaling_series_and_declared_field_limit() {
         Ok(_) => panic!("provider field limit silently admitted"),
     };
     assert!(
-        error.message.contains("generation evaluation failed"),
+        error.message().contains("generation evaluation failed"),
         "{error:?}"
     );
 }
@@ -1550,19 +1590,22 @@ fn structural_generation_reports_evaluation_exhaustion_and_transplant_limit() {
                 "let f = field(record, 2)",
                 "let _again = accessor(record)\nlet f = field(record, 2)",
             ),
-            "RecursionLimitExceeded",
+            "evaluation recursion limit exceeded",
         ),
         (
             ACCESSOR_SOURCE.replace(
                 "let f = field(record, 2)",
                 "while true {}\nlet f = field(record, 2)",
             ),
-            "StepLimitExceeded",
+            "evaluation step limit exceeded",
         ),
         (
-            include_str!("../../fe/tests/fixtures/fe_test_runner/quote_transplant_limit.fe")
-                .to_owned(),
-            "quoted function exceeds",
+            include_str!("../../fe/tests/fixtures/fe_test_runner/quote_transplant_limit.fe.in")
+                .replace(
+                    "__STATEMENTS__\n",
+                    &"            let _ = true\n".repeat(3000),
+                ),
+            "quoted function node limit",
         ),
     ] {
         let mut db = DriverDataBase::default();
@@ -1572,7 +1615,7 @@ fn structural_generation_reports_evaluation_exhaustion_and_transplant_limit() {
             Ok(_) => panic!("exhaustion silently produced a result"),
         };
         assert!(
-            error.message.contains(expected),
+            error.message().contains(expected),
             "expected {expected}: {error:?}"
         );
     }
@@ -1672,7 +1715,7 @@ fn generation_rejects_output_collisions_and_observation_of_its_own_output() {
             Err(error) => error,
             Ok(_) => panic!("invalid visibility or collision admitted"),
         };
-        assert!(error.message.contains("get_code"), "{error:?}");
+        assert!(error.message().contains("get_code"), "{error:?}");
     }
 }
 
@@ -1685,7 +1728,6 @@ fn generated_quote_limits_report_named_positions(fixture: Fixture<&str>) {
     let content = fixture.content().to_string();
     let rendered = std::thread::Builder::new()
         .name("quoted generation budget".to_owned())
-        .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             let mut db = DriverDataBase::default();
             let url = Url::from_file_path(path).expect("fixture path is absolute");
@@ -1797,10 +1839,29 @@ fn generic_generated_owner_conditions_survive_edits_and_restoration() {
                     .join("\n"))
             }
             Ok(None) => panic!("missing generic generation request"),
-            Err(error) => Err(error.message),
+            Err(error) => Err(error.message()),
         };
         let result = inspect(&warm);
         assert_eq!(result, inspect(&fresh));
         assert_eq!(result.is_ok(), size > 0, "{result:?}");
     }
+}
+
+#[test]
+fn enum_invocation_failure_uses_the_authored_attribute_span() {
+    let source = "#[other]\n#[generate()]\nenum Packet { Empty }\n";
+    let mut db = DriverDataBase::default();
+    put(&mut db, "file:///enum_invocation_span.fe", source);
+    let error = fe_driver::elaboration::prepare(&db)
+        .err()
+        .expect("malformed enum invocation must be rejected");
+    let start = source.find("#[generate()]").unwrap();
+    assert_eq!(error.span, Some(start..start + "#[generate()]".len()));
+    assert_eq!(
+        error.kind,
+        fe_driver::elaboration::ElaborationErrorKind::Invocation(
+            fe_driver::elaboration::InvocationErrorKind::Form,
+        )
+    );
+    assert_eq!(error.code(), 1);
 }

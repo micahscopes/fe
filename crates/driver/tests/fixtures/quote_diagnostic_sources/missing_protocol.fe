@@ -1,0 +1,5 @@
+use core::meta::{Code, Expr}
+
+pub const fn author() -> Code<Expr> {
+    quote { 1 }
+}

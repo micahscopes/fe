@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/leak_other_private.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/leak_other_private.fe: error[8-0114]: field is not visible to the quote provider
+   ┌─ leak_other_private.fe:8:67
+   │
+ 8 │         quote { pub fn leak(_ w: ingot::dest::Wallet) -> u256 { w.balance } }
+   │                                                                   ^^^^^^^ `leak_other_private::dest::Wallet::balance` requires provider visibility or an issued Field handle
+   ·
+15 │     #[generate(ingot::author::emit)]
+   │     -------------------------------- generated here

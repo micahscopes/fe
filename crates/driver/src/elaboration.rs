@@ -7,7 +7,9 @@
 //! under construction; the source attribute is not yet a released feature.
 
 pub mod construction;
+mod errors;
 mod project;
+pub use errors::{ElaborationErrorKind, EvaluationFault, FreezingLimitKind, FreezingProtocolFault};
 pub mod read_back;
 pub use project::{ElaborationError, prepare, prepare_target};
 
@@ -54,11 +56,23 @@ pub struct FieldDescriptor<'db> {
     index: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordInputError {
     InvalidField(usize),
     InvalidVariantField(usize, usize),
     WrongOwner,
+}
+
+impl std::fmt::Display for RecordInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidField(index) => write!(f, "invalid field at index {index}"),
+            Self::InvalidVariantField(variant, field) => {
+                write!(f, "invalid field at index {field} of variant {variant}")
+            }
+            Self::WrongOwner => f.write_str("field descriptor belongs to another owner"),
+        }
+    }
 }
 
 impl<'db> Invocation<'db> {
@@ -146,13 +160,25 @@ impl<'db> RecordInput<'db> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvocationErrorKind {
     Target,
     Form,
     Resolution,
     Visibility,
     Provider,
+}
+
+impl InvocationErrorKind {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Target => "#[generate] requires a struct or enum target",
+            Self::Form => "use #[generate(provider_path)] with exactly one provider path",
+            Self::Resolution => "cannot resolve the generation provider path in this scope",
+            Self::Visibility => "the generation provider is not visible from this scope",
+            Self::Provider => "the generation provider path must name a function",
+        }
+    }
 }
 
 #[derive(Debug)]

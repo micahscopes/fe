@@ -1,0 +1,48 @@
+mod author {
+    use core::meta::{Arm, Code, Expr, Item, Record}
+    pub enum Signal { Unit, Tuple(u256), Record { pub value: u256 } }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let next: Code<Expr> = quote(value) { value + 1 }
+        let arms: Code<Arm> = quote {
+            Signal::Unit => 7,
+            Signal::Tuple(value) => {
+                let value: u256 = ${next}
+                let value = value + 10
+                value
+            },
+            Signal::Record { value } => {
+                let (left, right): (u256, u256) = (value, 2)
+                left * 10 + right
+            },
+        }
+        quote { pub fn generated(value: ingot::author::Signal) -> u256 {
+            match value { ${arms} }
+        } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+fn twin(value: author::Signal) -> u256 {
+    match value {
+        author::Signal::Unit => 7,
+        author::Signal::Tuple(value) => {
+            let value: u256 = value + 1
+            let value = value + 10
+            value
+        },
+        author::Signal::Record { value } => {
+            let (left, right): (u256, u256) = (value, 2)
+            left * 10 + right
+        },
+    }
+}
+#[test]
+fn local_identity() {
+    for seed in 0..8 {
+        let value = seed as u256
+        assert!(generated(value: author::Signal::Unit) == twin(value: author::Signal::Unit))
+        assert!(generated(value: author::Signal::Tuple(value)) == twin(value: author::Signal::Tuple(value)))
+        assert!(generated(value: author::Signal::Record { value }) == twin(value: author::Signal::Record { value }))
+    }
+    assert!(generated(value: author::Signal::Tuple(4)) == 15)
+}

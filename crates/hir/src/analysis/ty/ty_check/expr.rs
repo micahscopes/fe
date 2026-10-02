@@ -3626,9 +3626,7 @@ impl<'db> TyChecker<'db> {
         let method_assumptions = self.env.method_lookup_assumptions();
         let lookup_scope = self
             .body()
-            .quote_method_scopes(self.db)
-            .iter()
-            .find_map(|(site, scope)| (*site == expr).then_some(*scope))
+            .quote_scope(self.db, expr)
             .unwrap_or(self.env.scope());
 
         let mut selected_receiver_ty = receiver_tys[0];
@@ -3880,22 +3878,18 @@ impl<'db> TyChecker<'db> {
             callable.unify_generic_args(tc, generic_args, anchor, generic_args_span.clone())
         };
 
-        let quote_scope = self
-            .body()
-            .quote_path_scopes(self.db)
-            .iter()
-            .find(|(site, _)| *site == expr)
-            .map(|(_, scope)| *scope);
+        let quote_scope = self.body().quote_scope(self.db, expr);
         let res = if path.is_bare_ident(self.db) && quote_scope.is_none() {
             let ident_span: DynLazySpan<'db> = path_expr_span.clone().into();
             resolve_ident_expr(self.db, &self.env, path, ident_span, &minter)
         } else {
-            match self.resolve_path_in_scope(
+            match self.resolve_path_with_visibility(
                 path,
                 true,
                 path_span.clone(),
                 path_expr_span.clone().into(),
                 &minter,
+                self.env.scope(),
                 quote_scope.unwrap_or(self.env.scope()),
             ) {
                 Ok(r) => ResolvedPathInBody::Reso(r),
@@ -4334,18 +4328,42 @@ impl<'db> TyChecker<'db> {
             body: self.body(),
             site: BodyHoleSite::Expr(expr),
         });
-        let reso =
-            match self.resolve_path(*path, true, path_span.clone(), span.clone().into(), &minter) {
-                Ok(reso) => reso,
-                Err(err) => {
-                    if let Some(diag) =
-                        err.into_diag(self.db, *path, path_span, ExpectedPathKind::Record)
-                    {
-                        self.push_diag(diag);
-                    }
-                    return ExprProp::invalid(self.db);
+        // `Self` refers to the generated impl, while field visibility still
+        // uses the provider authority below. Issued fields also authorize their
+        // declaring record's path; their identities are checked by feed_label.
+        let scope = if path.is_self_ty(self.db) {
+            self.env.scope()
+        } else {
+            self.body()
+                .quote_authority(self.db, expr.into())
+                .map(|authority| {
+                    authority
+                        .fields
+                        .first()
+                        .map(|grant| grant.field)
+                        .unwrap_or(authority.scope)
+                })
+                .unwrap_or(self.env.scope())
+        };
+        let reso = match self.resolve_path_with_visibility(
+            *path,
+            true,
+            path_span.clone(),
+            span.clone().into(),
+            &minter,
+            self.env.scope(),
+            scope,
+        ) {
+            Ok(reso) => reso,
+            Err(err) => {
+                if let Some(diag) =
+                    err.into_diag(self.db, *path, path_span, ExpectedPathKind::Record)
+                {
+                    self.push_diag(diag);
                 }
-            };
+                return ExprProp::invalid(self.db);
+            }
+        };
 
         match reso {
             PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
@@ -4447,9 +4465,23 @@ impl<'db> TyChecker<'db> {
         let Partial::Present(Expr::RecordInit(_, fields)) = expr.data(hir_db, self.body()) else {
             unreachable!()
         };
-        let span = expr.span(self.body()).into_record_init_expr().fields();
+        let (source_body, source) = self
+            .body()
+            .quote_authority(self.db, expr.into())
+            .and_then(|authority| authority.source)
+            .and_then(|(body, site)| match site {
+                crate::hir_def::QuoteScopeSite::Expr(expr) => Some((body, expr)),
+                _ => None,
+            })
+            .unwrap_or((self.body(), expr));
+        let span = source.span(source_body).into_record_init_expr().fields();
 
-        let mut rec_checker = RecordInitChecker::new(self, record_like);
+        let authority = self
+            .body()
+            .quote_authority(self.db, expr.into())
+            .cloned()
+            .unwrap_or_else(|| self.env.scope().into());
+        let mut rec_checker = RecordInitChecker::new(self, record_like, authority);
 
         for (i, field) in fields.iter().enumerate() {
             let label = field.label_eagerly(rec_checker.tc.db, rec_checker.tc.body());
@@ -4508,18 +4540,68 @@ impl<'db> TyChecker<'db> {
                 FieldIndex::Ident(label) => {
                     let record_like = RecordLike::from_ty(resolved_field.base_ty);
                     if let Some(field_ty) = record_like.record_field_ty(self.db, *label) {
-                        if let Some(scope) = record_like.record_field_scope(self.db, *label)
-                            && !is_scope_visible_from(self.db, scope, self.env.scope())
-                        {
-                            // Check the visibility of the field.
-                            let diag = PathResDiag::Invisible(
-                                expr.span(self.body()).into_field_expr().accessor().into(),
-                                *label,
-                                scope.name_span(self.db),
-                            );
-
-                            self.push_diag(diag);
-                            return ExprProp::invalid(self.db);
+                        if let Some(scope) = record_like.record_field_scope(self.db, *label) {
+                            let issued = self
+                                .body()
+                                .quote_authority(self.db, expr.into())
+                                .and_then(|authority| authority.field(self.db, *label));
+                            if let Some(expected) = issued
+                                && expected.field != scope
+                            {
+                                self.push_diag(BodyDiag::QuoteFieldOwnerMismatch {
+                                    primary: expected
+                                        .source
+                                        .map(|(body, expr)| expr.span(body).into())
+                                        .unwrap_or_else(|| expr.span(self.body()).into()),
+                                    expected: expected.field,
+                                    actual: scope,
+                                    generated: self.body().expr(self.db).span(self.body()).into(),
+                                });
+                                return ExprProp::invalid(self.db);
+                            }
+                            if !issued.is_some_and(|grant| grant.field == scope)
+                                && !is_scope_visible_from(
+                                    self.db,
+                                    scope,
+                                    self.body()
+                                        .quote_scope(self.db, expr)
+                                        .unwrap_or(self.env.scope()),
+                                )
+                            {
+                                if let Some(authority) =
+                                    self.body().quote_authority(self.db, expr.into())
+                                {
+                                    let (source_body, source) = authority
+                                        .source
+                                        .and_then(|(body, site)| match site {
+                                            crate::hir_def::QuoteScopeSite::Expr(expr) => {
+                                                Some((body, expr))
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap_or((self.body(), expr));
+                                    self.push_diag(BodyDiag::QuoteFieldVisibility {
+                                        primary: source
+                                            .span(source_body)
+                                            .into_field_expr()
+                                            .accessor()
+                                            .into(),
+                                        field: scope,
+                                        generated: self
+                                            .body()
+                                            .expr(self.db)
+                                            .span(self.body())
+                                            .into(),
+                                    });
+                                } else {
+                                    self.push_diag(PathResDiag::Invisible(
+                                        expr.span(self.body()).into_field_expr().accessor().into(),
+                                        *label,
+                                        scope.name_span(self.db),
+                                    ));
+                                }
+                                return ExprProp::invalid(self.db);
+                            }
                         }
                         self.env
                             .register_resolved_field_index(expr, resolved_field.index);
@@ -5182,7 +5264,10 @@ impl<'db> TyChecker<'db> {
         };
 
         if arms.iter().any(|arm| arm.parts().is_none()) {
-            self.push_diag(BodyDiag::UnexpandedArmHole(expr.span(self.body()).into()));
+            self.push_diag(BodyDiag::UnexpandedSplice {
+                primary: expr.span(self.body()).into(),
+                kind: crate::hir_def::QuoteKind::Arm,
+            });
             return ExprProp::invalid(self.db);
         }
 

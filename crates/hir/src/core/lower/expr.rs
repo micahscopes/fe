@@ -407,10 +407,10 @@ impl UnOp {
 impl MatchArm {
     pub(super) fn lower_ast(ctxt: &mut BodyCtxt<'_, '_>, ast: ast::MatchArm) -> Self {
         if ast.is_hole() {
-            let Some(slot) = ctxt
-                .f_ctxt
-                .quote_hole(crate::hir_def::QuoteHolePosition::Arms, ast.hole())
-            else {
+            let Some(slot) = ctxt.f_ctxt.quote_hole(
+                crate::hir_def::QuoteHolePosition::Code(crate::hir_def::QuoteKind::Arm),
+                ast.hole(),
+            ) else {
                 // Recovery for a splice the parser diagnosed outside quotation.
                 return Self::Arm {
                     pat: ctxt.push_missing_pat(),

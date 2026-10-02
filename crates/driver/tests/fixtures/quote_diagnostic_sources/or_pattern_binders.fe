@@ -1,0 +1,19 @@
+// Or-pattern of two different variants' binder groups, then read a field of the first.
+// For E::B(7) the A binders are unbound. Correct: reject (binder sets differ across |).
+// Wrong: runs and returns garbage/0 for E::B.
+mod author {
+    use core::meta::{Code, Item, Record, binders, variant, field}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let a = binders(variant(record, 0), 0)
+        let b = binders(variant(record, 1), 0)
+        let fa = field(variant(record, 0), 0)
+        quote {
+            pub fn f(_ s: ${record}) -> u256 { match s { ${a} | ${b} => ${a.at(fa)} } }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+enum E { A(u256), B(u256) }
+#[test]
+fn t() { assert!(f(E::A(5)) == 5)
+ assert!(f(E::B(7)) == 7) }

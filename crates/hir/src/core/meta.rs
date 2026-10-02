@@ -33,6 +33,7 @@ pub enum MetaItem {
 }
 
 impl MetaItem {
+    /// Registry order matches the enum discriminants for indexed type tables.
     pub const ALL: [Self; 11] = [
         Self::Record,
         Self::Field,
@@ -190,7 +191,136 @@ pub struct FrozenCodeNode {
     pub assoc_type_values: Vec<Option<FrozenQuoteSignatureType>>,
 }
 
+pub fn frozen_path_nodes(path: &str) -> usize {
+    1usize.saturating_add(path.split("::").count())
+}
+
 impl FrozenCodeNode {
+    /// Paths prepared from captured roots, separate from indexing metadata.
+    pub fn rooted_path_nodes(&self, function: Option<u32>) -> usize {
+        let arguments = |args: &Option<Vec<FrozenQuoteSignatureType>>| {
+            args.as_ref().map_or(0, |args| 2 + args.len())
+        };
+        self.rooted_funcs
+            .iter()
+            .filter(|root| function.is_none() || root.func == function)
+            .map(|root| frozen_path_nodes(&root.path) + arguments(&root.type_arguments))
+            .sum::<usize>()
+            + if function.is_none() {
+                self.rooted_traits
+                    .iter()
+                    .map(|root| frozen_path_nodes(&root.path))
+                    .sum::<usize>()
+            } else {
+                0
+            }
+            + self
+                .rooted_constructors
+                .iter()
+                .filter(|root| function.is_none() || root.func == function)
+                .map(|root| {
+                    frozen_path_nodes(&root.owner.path)
+                        + usize::from(root.variant_index.is_some())
+                            * (1 + usize::from(root.self_target))
+                        + usize::from(root.self_target)
+                        + arguments(&root.type_arguments)
+                })
+                .sum::<usize>()
+    }
+
+    /// Retained indexing/binder metadata, excluding type-tree children and values.
+    /// Destructure exhaustively so adding a carrier field requires an accounting decision.
+    pub fn metadata_nodes(&self) -> usize {
+        let Self {
+            template: _,
+            variant_binding: _,
+            holes,
+            rooted_funcs,
+            rooted_constructors,
+            selected_methods,
+            rooted_traits,
+            qualified_consts,
+            impl_trait_type_arguments: _,
+            locals,
+            cast_primitives,
+            local_types,
+            record_types,
+            param_uses,
+            effect_uses,
+            generic_uses,
+            self_uses,
+            self_record_inits,
+            open_uses,
+            free_self_uses,
+            function_types,
+            where_predicates,
+            assoc_const_primitives,
+            assoc_type_values,
+        } = self;
+        let mut count = [
+            holes.len(),
+            rooted_funcs.len(),
+            rooted_constructors.len(),
+            selected_methods.len(),
+            rooted_traits.len(),
+            qualified_consts.len(),
+            locals.len(),
+            cast_primitives.len(),
+            local_types.len(),
+            record_types.len(),
+            param_uses.len(),
+            effect_uses.len(),
+            generic_uses.len(),
+            self_uses.len(),
+            self_record_inits.len(),
+            open_uses.len(),
+            free_self_uses.len(),
+            function_types.len(),
+            where_predicates.len(),
+            assoc_const_primitives.len(),
+            assoc_type_values.len(),
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        for local in locals {
+            count = count.saturating_add(local.uses.len());
+        }
+        for function in function_types {
+            let FrozenQuoteFunctionTypes {
+                params,
+                effects,
+                result: _,
+                generic_bound_sites,
+                generic_type_defaults,
+                generic_const_types,
+                where_predicates,
+            } = function;
+            for size in [
+                params.len(),
+                effects.len(),
+                generic_bound_sites.len(),
+                generic_type_defaults.len(),
+                generic_const_types.len(),
+                where_predicates.len(),
+            ] {
+                count = count.saturating_add(size);
+            }
+            for bounds in generic_bound_sites {
+                count = count.saturating_add(bounds.len());
+            }
+            for predicate in where_predicates {
+                if let FrozenQuoteWherePredicate::Bound { trait_sites, .. } = predicate {
+                    count = count.saturating_add(trait_sites.len());
+                }
+            }
+        }
+        for predicate in where_predicates.iter().flatten() {
+            if let FrozenQuoteWherePredicate::Bound { trait_sites, .. } = predicate {
+                count = count.saturating_add(trait_sites.len());
+            }
+        }
+        count
+    }
     pub fn empty(template: Option<FrozenTemplateKey>) -> Self {
         Self {
             template,
@@ -232,7 +362,8 @@ pub struct FrozenVariantBinding {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteLocal {
-    pub func: u32,
+    /// None for a standalone expression or arm fragment.
+    pub func: Option<u32>,
     pub binder: PatId,
     pub uses: Vec<ExprId>,
 }
@@ -250,11 +381,16 @@ pub struct FrozenQuoteConstructor {
     pub owner: FrozenQuoteNominal,
     /// `None` denotes the struct itself; `Some` indexes the authored enum.
     pub variant_index: Option<u16>,
+    /// Checked instantiation when the authored spelling fixes owner arguments.
+    pub type_arguments: Option<Vec<FrozenQuoteSignatureType>>,
+    /// Preserve the impl receiver binding instead of spelling its nominal path.
+    pub self_target: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenQuoteLocalType {
-    pub func: u32,
+    /// None for a standalone expression or arm fragment.
+    pub func: Option<u32>,
     pub stmt: StmtId,
     pub ty: FrozenQuoteSignatureType,
 }
@@ -350,6 +486,46 @@ pub enum FrozenQuoteSignatureType {
     Ptr(Box<FrozenQuoteSignatureType>),
     Tuple(Vec<FrozenQuoteSignatureType>),
     Never,
+}
+
+impl FrozenQuoteSignatureType {
+    /// HIR nodes emitted for this type, excluding recursively emitted children.
+    pub fn reification_nodes(&self) -> usize {
+        match self {
+            Self::Nominal {
+                root,
+                arguments,
+                arguments_given,
+            } => {
+                2 + frozen_path_nodes(&root.path)
+                    + arguments.len()
+                    + 2 * usize::from(*arguments_given || !arguments.is_empty())
+            }
+            Self::Trait {
+                root,
+                arguments,
+                arguments_given,
+            } => {
+                2 + frozen_path_nodes(&root.path)
+                    + arguments.len()
+                    + 2 * usize::from(*arguments_given || !arguments.is_empty())
+            }
+            Self::Tuple(_) => 2, // TypeId plus TupleTypeId.
+            Self::SelfType | Self::FunctionGeneric(_) | Self::OwnerGeneric(_) => 2,
+            _ => 1,
+        }
+    }
+
+    /// Direct type-syntax children, shared by construction budget walks.
+    pub fn children(&self) -> &[Self] {
+        match self {
+            Self::Nominal { arguments, .. }
+            | Self::Trait { arguments, .. }
+            | Self::Tuple(arguments) => arguments,
+            Self::Mode(_, inner) | Self::Ptr(inner) => std::slice::from_ref(inner.as_ref()),
+            _ => &[],
+        }
+    }
 }
 
 /// A nominal signature type selected while checking the quote's provider.

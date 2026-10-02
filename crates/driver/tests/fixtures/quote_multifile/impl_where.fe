@@ -1,0 +1,14 @@
+pub trait Mark {}
+impl Mark for u256 {}
+pub trait Tag {}
+mod author {
+ use core::meta::{Code, Item, Where, Record}
+ pub const fn emit(record: Record) -> Code<Item> {
+ let bounds: Code<Where> = quote { where u256: ingot::sub::Mark }
+ quote { impl ingot::Tag for ${record} where ${bounds} {} }
+ }
+}
+#[generate(ingot::author::emit)]
+pub struct Target {}
+fn need<X: Tag>() {}
+fn trigger() { need<Target>() }

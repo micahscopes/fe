@@ -1,16 +1,11 @@
 error[8-0000]: type mismatch
-   ┌─ invalid_unused_expression.fe:4:5
+   ┌─ invalid_unused_expression.fe:6:43
    │
- 4 │ ╭     quote {
- 5 │ │         pub const fn apply(_ value: u256) -> u256 {
- 6 │ │             if false { let unused: u256 = true }
- 7 │ │             value
- 8 │ │         }
- 9 │ │     }
-   │ ╰─────^ expected `u256`, but `bool` is given
-   · │
-12 │   #[generate(make)]
-   │   ----------------- generated here
+ 6 │             if false { let unused: u256 = true }
+   │                                           ^^^^ expected `u256`, but `bool` is given
+   ·
+12 │ #[generate(make)]
+   │ ----------------- generated here
    │
    = generated item:
      pub const fn apply(_ value: u256) -> u256 {

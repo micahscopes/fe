@@ -5,17 +5,13 @@ input_file: tests/fixtures/cli_output/single_files/quote_match_nonexhaustive.fe
 ---
 === STDERR ===
 error[8-0034]: non-exhaustive patterns: type `Mode` is not covered
-   ┌─ quote_match_nonexhaustive.fe:27:1
+   ┌─ quote_match_nonexhaustive.fe:21:40
    │
-19 │ ╭         quote {
-20 │ │             impl ingot::Tagged for ${record} {
-21 │ │                 fn tag(self) -> bool { match self { ${arms} } } // <- here
-22 │ │             }
-23 │ │         }
-   │ ╰─────────' generated from this quote
-   · │
-27 │   #[generate(ingot::author::first_only)]
-   │   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ match expression does not cover all possible values
+21 │                 fn tag(self) -> bool { match self { ${arms} } } // <- here
+   │                                        ^^^^^^^^^^^^^^^^^^^^^^ match expression does not cover all possible values
+   ·
+27 │ #[generate(ingot::author::first_only)]
+   │ -------------------------------------- generated here
    │
    = Not covered: `Mode::Off`
 

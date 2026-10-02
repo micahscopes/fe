@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/spelled_field.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/spelled_field.fe: error[8-0114]: field is not visible to the quote provider
+   ┌─ spelled_field.fe:7:79
+   │
+ 7 │         quote { impl ingot::Peek for ${record} { fn peek(self) -> u256 { self.secret } } }
+   │                                                                               ^^^^^^ `spelled_field::dest::Vault::secret` requires provider visibility or an issued Field handle
+   ·
+11 │     #[generate(ingot::author::emit)]
+   │     -------------------------------- generated here

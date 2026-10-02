@@ -3,7 +3,7 @@ trait Get {
 }
 
 mod author {
-    use core::meta::{Code, Item, Record}
+    use core::meta::{Code, Item, Record, field}
 
     pub trait Check {
         fn check(self) -> u256
@@ -14,9 +14,10 @@ mod author {
     }
 
     pub const fn emit(record: Record) -> Code<Item> {
+        let value = field(record, 0)
         quote {
             impl ingot::Get for ${record} {
-                fn get(self) -> u256 { self.value.check() }
+                fn get(self) -> u256 { self.${value}.check() }
             }
         }
     }

@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/field_on_other_nested.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/field_on_other_nested.fe: error[8-0113]: quoted field handle has a different owner
+   ┌─ field_on_other_nested.fe:10:85
+   │
+10 │         quote { impl ingot::Get for ${record} { fn get(self) -> u256 { self.${fi}.${fx} } } }
+   │                                                                                     ^^ issued for `field_on_other_nested::T::x`, but this receiver selects `field_on_other_nested::Inner::x`
+   ·
+13 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

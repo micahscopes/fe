@@ -31,5 +31,10 @@ fn construction_error_uses_generation_site(fixture: Fixture<&str>) {
         .first()
         .expect("construction error");
     assert_eq!(error.site_span.as_ref(), Some(&site));
-    assert_eq!(error.message, "expected a designated generation record");
+    assert_eq!(
+        error.failure,
+        hir::lower::GeneratedQuoteFailure::Construction(
+            hir::lower::QuoteConstructionFault::ExpectedAQuotedGenerationResult,
+        ),
+    );
 }

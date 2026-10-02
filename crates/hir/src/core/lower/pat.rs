@@ -10,10 +10,10 @@ impl<'db> Pat<'db> {
     pub(super) fn lower_ast(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::Pat) -> PatId {
         let pat = match &ast.kind() {
             ast::PatKind::Hole(hole) => {
-                let Some(slot) = ctxt
-                    .f_ctxt
-                    .quote_hole(crate::hir_def::QuoteHolePosition::Pat, hole.expr())
-                else {
+                let Some(slot) = ctxt.f_ctxt.quote_hole(
+                    crate::hir_def::QuoteHolePosition::Code(crate::hir_def::QuoteKind::Pat),
+                    hole.expr(),
+                ) else {
                     return ctxt.push_missing_pat();
                 };
                 Pat::Hole(slot)

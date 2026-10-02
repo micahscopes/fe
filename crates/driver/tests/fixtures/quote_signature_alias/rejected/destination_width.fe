@@ -1,0 +1,11 @@
+pub struct Box<T> { pub value: T }
+mod author {
+    use core::meta::{Code, Item, Record}
+    type B8 = ingot::Box<u8>
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn make() -> B8 { ingot::Box { value: 200 } } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+pub fn wrong() -> Box<u256> { make() }

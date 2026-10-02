@@ -1,7 +1,9 @@
 use std::collections::hash_map::Entry;
 
 use crate::{
-    hir_def::{FieldParent, IdentId, VariantKind as HirVariantKind, scope_graph::ScopeId},
+    hir_def::{
+        FieldParent, IdentId, QuoteScope, VariantKind as HirVariantKind, scope_graph::ScopeId,
+    },
     span::DynLazySpan,
 };
 use rustc_hash::FxHashMap;
@@ -45,6 +47,7 @@ pub(super) struct RecordInitChecker<'tc, 'db, 'a> {
     data: &'a RecordLike<'db>,
     already_given: FxHashMap<IdentId<'db>, DynLazySpan<'db>>,
     invalid_field_given: bool,
+    authority: QuoteScope<'db>,
 }
 
 impl<'tc, 'db, 'a> RecordInitChecker<'tc, 'db, 'a> {
@@ -52,7 +55,11 @@ impl<'tc, 'db, 'a> RecordInitChecker<'tc, 'db, 'a> {
     ///
     /// ## Panics
     /// Panics if the given `data` is not a record.
-    pub(super) fn new(tc: &'tc mut TyChecker<'db>, data: &'a RecordLike<'db>) -> Self {
+    pub(super) fn new(
+        tc: &'tc mut TyChecker<'db>,
+        data: &'a RecordLike<'db>,
+        authority: QuoteScope<'db>,
+    ) -> Self {
         assert!(data.is_record(tc.db));
 
         Self {
@@ -60,6 +67,7 @@ impl<'tc, 'db, 'a> RecordInitChecker<'tc, 'db, 'a> {
             data,
             already_given: FxHashMap::default(),
             invalid_field_given: false,
+            authority,
         }
     }
 
@@ -110,13 +118,41 @@ impl<'tc, 'db, 'a> RecordInitChecker<'tc, 'db, 'a> {
         };
 
         let field_scope = self.data.record_field_scope(self.tc.db, label).unwrap();
-        if is_scope_visible_from(self.tc.db, field_scope, self.tc.env.scope()) {
+        let issued = self.authority.field(self.tc.db, label);
+        if let Some(expected) = issued
+            && expected.field != field_scope
+        {
+            self.invalid_field_given = true;
+            return Err(BodyDiag::QuoteFieldOwnerMismatch {
+                primary: expected
+                    .source
+                    .map(|(body, expr)| expr.span(body).into())
+                    .unwrap_or(field_span),
+                expected: expected.field,
+                actual: field_scope,
+                generated: self.tc.body().expr(self.tc.db).span(self.tc.body()).into(),
+            }
+            .into());
+        }
+        if issued.is_some_and(|grant| grant.field == field_scope)
+            || is_scope_visible_from(self.tc.db, field_scope, self.authority.scope)
+        {
             Ok(ty)
         } else {
-            let diag = PathResDiag::Invisible(field_span, label, field_scope.name_span(self.tc.db));
-
             self.invalid_field_given = true;
-            Err(diag.into())
+            if self.authority.source.is_some() {
+                Err(BodyDiag::QuoteFieldVisibility {
+                    primary: field_span,
+                    field: field_scope,
+                    generated: self.tc.body().expr(self.tc.db).span(self.tc.body()).into(),
+                }
+                .into())
+            } else {
+                Err(
+                    PathResDiag::Invisible(field_span, label, field_scope.name_span(self.tc.db))
+                        .into(),
+                )
+            }
         }
     }
 

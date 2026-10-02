@@ -1,0 +1,9 @@
+use core::meta::{Code, Item, Record}
+type Huge = (__ELEMENTS__)
+const fn emit(_ record: Record) -> Code<Item> {
+    quote {
+__FUNCTIONS__
+    }
+}
+#[generate(emit)]
+struct Target {}

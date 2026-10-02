@@ -1,0 +1,17 @@
+// F2 recheck: left fold of 1000 expression fragments.
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let mut acc: Code<Expr> = quote { 0 }
+        let mut i: usize = 0
+        while i < 1000 {
+            acc = quote { ${acc} + 1 }
+            i += 1
+        }
+        quote { pub fn total() -> u256 { ${acc} } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+#[test]
+fn t() { assert!(total() == 1000) }

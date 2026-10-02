@@ -1,0 +1,19 @@
+// Open names: open name bound only by a local of the enclosing quote (design: nearest enclosing binder)
+pub fn bump(_ x: u256) -> u256 { x + 1000 }
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    fn bump(_ x: u256) -> u256 { x + 1 }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let f: Code<Expr> = quote(t) { t + 1 }
+        quote { pub const fn gen(a: u256) -> u256 {
+            let t: u256 = a * 10
+            ${f}
+        } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+pub const fn twin(a: u256) -> u256 { let t = a * 10
+    t + 1 }
+#[test]
+fn t() { assert!(gen(a: 2) == 21) }

@@ -1,0 +1,18 @@
+pub trait Sum { fn sum(self) -> u256 }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Sum for ${record} {
+                fn sum(self) -> u256 {
+                    let Self { x, y } = self
+                    x * 10 + y
+                }
+            }
+        }
+    }
+}
+mod owner {
+    #[generate(ingot::author::emit)]
+    pub struct P { x: u256, y: u256 }
+}

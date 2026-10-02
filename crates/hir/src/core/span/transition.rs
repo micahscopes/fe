@@ -148,11 +148,16 @@ pub(crate) enum ChainRoot<'db> {
 pub(crate) struct ResolvedOrigin {
     pub(crate) file: File,
     pub(crate) kind: ResolvedOriginKind,
+    generation: Option<(File, TextRange)>,
 }
 
 impl ResolvedOrigin {
     pub(crate) fn new(file: File, kind: ResolvedOriginKind) -> Self {
-        Self { file, kind }
+        Self {
+            file,
+            kind,
+            generation: None,
+        }
     }
 
     pub(crate) fn resolve<T>(
@@ -163,6 +168,22 @@ impl ResolvedOrigin {
     where
         T: AstNode<Language = FeLang>,
     {
+        if let HirOrigin::Desugared(DesugaredOrigin::Generation(generation)) = origin
+            && let Some((file, source)) = &generation.source
+        {
+            let source_mod = crate::lower::map_file_to_mod_impl(db, *file);
+            let source_root = top_mod_ast(db, source_mod).syntax().clone();
+            if let Some(node) = source.try_to_node(&source_root) {
+                let root = top_mod_ast(db, top_mod).syntax().clone();
+                if let Some(attribute) = generation.attribute.syntax_node_ptr().try_to_node(&root) {
+                    return Self {
+                        file: *file,
+                        kind: ResolvedOriginKind::Node(node),
+                        generation: Some((top_mod.file(db), attribute.text_range())),
+                    };
+                }
+            }
+        }
         let root = top_mod_ast(db, top_mod).syntax().clone();
         let kind = match origin {
             HirOrigin::Raw(ptr) => match ptr.syntax_node_ptr().try_to_node(&root) {
@@ -187,9 +208,12 @@ impl ResolvedOrigin {
         F: FnOnce(SyntaxNode) -> Option<NodeOrToken>,
     {
         let kind = match self.kind {
-            ResolvedOriginKind::Node(node) => match f(node) {
+            ResolvedOriginKind::Node(node) => match f(node.clone()) {
                 Some(NodeOrToken::Node(node)) => ResolvedOriginKind::Node(node),
                 Some(NodeOrToken::Token(token)) => ResolvedOriginKind::Token(token),
+                // Reified splice syntax may differ from its written hole.
+                // Retain the nearest authored node when a child has no source.
+                None if self.generation.is_some() => ResolvedOriginKind::Node(node),
                 None => ResolvedOriginKind::None,
             },
             kind => kind,
@@ -198,6 +222,7 @@ impl ResolvedOrigin {
         ResolvedOrigin {
             file: self.file,
             kind,
+            generation: self.generation,
         }
     }
 
@@ -213,6 +238,7 @@ impl ResolvedOrigin {
         ResolvedOrigin {
             file: self.file,
             kind,
+            generation: self.generation,
         }
     }
 }
@@ -276,7 +302,7 @@ impl LazySpan for SpanTransitionChain<'_> {
             resolved = f(resolved, *arg);
         }
 
-        Some(match resolved.kind {
+        let mut span = match resolved.kind {
             ResolvedOriginKind::Node(node) => {
                 Span::new(resolved.file, node.text_range(), SpanKind::Original)
             }
@@ -290,7 +316,11 @@ impl LazySpan for SpanTransitionChain<'_> {
                 desugared.resolve(db, root, resolved.file)
             }
             ResolvedOriginKind::None => return None,
-        })
+        };
+        if let Some((file, range)) = resolved.generation {
+            span.kind = SpanKind::Generation { file, range };
+        }
+        Some(span)
     }
 }
 
@@ -567,7 +597,7 @@ impl DesugaredOrigin {
             Self::AbiStruct(super::AbiStructDesugared { abi_struct }) => {
                 abi_struct.to_node(&root).syntax().text_range()
             }
-            Self::Generation(super::GenerationDesugared { attribute }) => {
+            Self::Generation(super::GenerationDesugared { attribute, .. }) => {
                 attribute.to_node(&root).syntax().text_range()
             }
         };

@@ -3273,6 +3273,25 @@ fn test_fe_test_runner(fixture: Fixture<&str>) {
     snap_test!(output, fixture.path());
 }
 
+#[test]
+fn quote_transplant_limit_from_template() {
+    let template = include_str!("fixtures/fe_test_runner/quote_transplant_limit.fe.in");
+    let source = template.replace(
+        "__STATEMENTS__\n",
+        &"            let _ = true\n".repeat(3000),
+    );
+    let temp = tempdir().expect("temporary fixture directory");
+    fs::write(temp.path().join("quote_transplant_limit.fe"), source).expect("write stress fixture");
+    let (output, exit) = run_fe_main_in_dir(
+        &["test", "--jobs", "1", "quote_transplant_limit.fe"],
+        temp.path(),
+    );
+    assert_eq!(exit, 1, "large body must produce a compile diagnostic");
+    let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fe_test_runner/quote_transplant_limit.fe");
+    snap_test!(output, snapshot_path.to_str().unwrap());
+}
+
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
     glob: "pending/*.fe",

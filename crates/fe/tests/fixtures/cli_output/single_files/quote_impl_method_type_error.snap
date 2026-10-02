@@ -5,17 +5,13 @@ input_file: tests/fixtures/cli_output/single_files/quote_impl_method_type_error.
 ---
 === STDERR ===
 error[8-0000]: type mismatch
-   ┌─ quote_impl_method_type_error.fe:10:9
+   ┌─ quote_impl_method_type_error.fe:12:40
    │
-10 │ ╭         quote {
-11 │ │             impl ingot::Read for ${record} {
-12 │ │                 fn get(self) -> u256 { self.${selected} }
-13 │ │             }
-14 │ │         }
-   │ ╰─────────^ expected `u256`, but `bool` is given
-   · │
-18 │   #[generate(ingot::author::emit)]
-   │   -------------------------------- generated here
+12 │                 fn get(self) -> u256 { self.${selected} }
+   │                                        ^^^^^^^^^^^^^^^^ expected `u256`, but `bool` is given
+   ·
+18 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here
    │
    = generated item:
      impl ingot::Read for Target {

@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: crates/driver/tests/fixtures/quote_diagnostic_sources/missing_protocol.fe
+---
+error[8-0115]: quotation requires `core::meta::Where`
+  ┌─ missing_protocol.fe:4:5
+  │
+4 │     quote { 1 }
+  │     ^^^^^^^^^^^ the designated quotation type is missing from the core library

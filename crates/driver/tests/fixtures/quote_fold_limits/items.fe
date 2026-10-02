@@ -1,0 +1,18 @@
+// Item-list fold of N functions through ${items}.
+mod author {
+    use core::meta::{Code, Item, Record, empty, DeclarationName}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let mut items = empty<Item>()
+        let mut i: usize = 0
+        while i < 5000 {
+            items = quote {
+                ${items}
+                fn helper() -> u256 { 1 }
+            }
+            i += 1
+        }
+        items
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

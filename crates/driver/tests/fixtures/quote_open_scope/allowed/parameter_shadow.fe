@@ -1,0 +1,24 @@
+// O1 recheck: open name `x` spliced where a local `x` shadows the parameter `x`.
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let frag: Code<Expr> = quote(x) { x }
+        quote {
+            pub const fn gen(x: u256) -> u256 {
+                let x: u256 = 1
+                ${frag}
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+pub const fn twin(x: u256) -> u256 {
+    let x = 1
+    x
+}
+#[test]
+fn t() {
+    assert!(twin(x: 2) == 1)
+    assert!(gen(x: 2) == 1)
+}

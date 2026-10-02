@@ -1,0 +1,15 @@
+// Visibility angle only (construction is Q6's area): build dest::Wallet with its private field by spelling.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn mint() -> ingot::dest::Wallet { ingot::dest::Wallet { balance: 1000000 } } }
+    }
+}
+mod dest {
+    pub struct Wallet { balance: u256 }
+    pub fn balance(_ w: Wallet) -> u256 { w.balance }
+    #[generate(ingot::author::emit)]
+    struct Probe {}
+}
+#[test]
+fn t() { assert!(dest::balance(dest::mint()) == 1000000) }

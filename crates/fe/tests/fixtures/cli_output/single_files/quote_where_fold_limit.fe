@@ -7,7 +7,7 @@ mod author {
         let mut bounds = empty<Where>()
         let mut i: usize = 0
         while i < 600 {
-            bounds = quote { where ${bounds} }
+            bounds = quote { where ${bounds}, ${bounds} }
             i += 1
         }
         quote {

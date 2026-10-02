@@ -644,8 +644,25 @@ pub enum BodyDiag<'db> {
     },
     /// The splices of a splice-only quote body have different kinds.
     QuoteSpliceKinds(DynLazySpan<'db>),
-    UnexpandedPatternHole(DynLazySpan<'db>),
-    UnexpandedArmHole(DynLazySpan<'db>),
+    UnexpandedSplice {
+        primary: DynLazySpan<'db>,
+        kind: crate::hir_def::QuoteKind,
+    },
+    MissingMetaItem {
+        primary: DynLazySpan<'db>,
+        item: crate::core::meta::MetaItem,
+    },
+    QuoteFieldOwnerMismatch {
+        primary: DynLazySpan<'db>,
+        expected: crate::hir_def::scope_graph::ScopeId<'db>,
+        actual: crate::hir_def::scope_graph::ScopeId<'db>,
+        generated: DynLazySpan<'db>,
+    },
+    QuoteFieldVisibility {
+        primary: DynLazySpan<'db>,
+        field: crate::hir_def::scope_graph::ScopeId<'db>,
+        generated: DynLazySpan<'db>,
+    },
     /// A name in a quote that nothing binds.
     QuoteUnresolvedName {
         primary: DynLazySpan<'db>,
@@ -1119,8 +1136,10 @@ impl<'db> BodyDiag<'db> {
             Self::QuoteCallAtRuntime(..) => 110,
             Self::QuoteHoleValue { .. } => 104,
             Self::QuoteSpliceKinds(..) => 105,
-            Self::UnexpandedPatternHole(..) => 111,
-            Self::UnexpandedArmHole(..) => 112,
+            Self::UnexpandedSplice { .. } => 111,
+            Self::MissingMetaItem { .. } => 115,
+            Self::QuoteFieldOwnerMismatch { .. } => 113,
+            Self::QuoteFieldVisibility { .. } => 114,
             Self::QuoteUnresolvedName { .. } => 106,
             Self::QuoteProviderLocal { .. } => 107,
             Self::QuoteProviderGeneric { .. } => 108,

@@ -1,0 +1,28 @@
+pub trait Empty {
+    fn empty(self) -> bool
+    fn make_empty() -> Self
+}
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Empty for ${record} {
+                fn empty(self) -> bool {
+                    match self { Self::None => true, Self::Some(_) => false }
+                }
+                fn make_empty() -> Self { Self::None }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+pub enum Generic<T> { None, Some(T) }
+#[test]
+fn values() {
+    let wide: Generic<u256> = Generic::make_empty()
+    let flag: Generic<bool> = Generic::make_empty()
+    assert!(wide.empty())
+    assert!(flag.empty())
+    assert!(!Generic::Some(7 as u256).empty())
+    assert!(!Generic::Some(true).empty())
+}

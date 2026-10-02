@@ -1,0 +1,16 @@
+use core::meta::{Code, Expr, Item, Record}
+const fn read_back_wrap(_ record: Record) -> Code<Item> {
+    let body: Code<Expr> = quote { Wrap::None }
+    quote { pub fn copied_wrap<V>(_ value: own V) -> Wrap<V> { ${body} } }
+}
+#[generate(ingot::read_back_wrap)]
+struct Target {}
+#[test]
+fn t() {
+    let original = wrap<u256>(9)
+    let copied = copied_wrap<u256>(9)
+    match (original, copied) {
+        (Wrap::Some(x), Wrap::Some(y)) => assert!(x == y),
+        _ => assert!(false),
+    }
+}

@@ -3827,6 +3827,38 @@ impl<'db> TyChecker<'db> {
         minter: &LoweringContext<'db>,
         scope: ScopeId<'db>,
     ) -> Result<PathRes<'db>, PathResError<'db>> {
+        self.resolve_path_with_visibility(
+            path,
+            resolve_tail_as_value,
+            span,
+            site,
+            minter,
+            scope,
+            scope,
+        )
+    }
+
+    /// Frozen item paths keep their identity, while generated type arguments
+    /// bind in the destination and visibility is admitted by the provider.
+    fn resolve_path_with_visibility(
+        &mut self,
+        path: PathId<'db>,
+        resolve_tail_as_value: bool,
+        span: LazyPathSpan<'db>,
+        site: DynLazySpan<'db>,
+        minter: &LoweringContext<'db>,
+        lookup_scope: ScopeId<'db>,
+        visibility_scope: ScopeId<'db>,
+    ) -> Result<PathRes<'db>, PathResError<'db>> {
+        let visibility_scope = if path
+            .segment(self.db, 0)
+            .and_then(|root| root.ident(self.db).to_opt())
+            .is_some_and(|name| name.is_self_ty(self.db))
+        {
+            lookup_scope
+        } else {
+            visibility_scope
+        };
         let mut invisible = None;
         let mut applications = Vec::new();
         let mut observe_segment = |path: PathId<'db>, reso: &PathRes<'db>| {
@@ -3834,7 +3866,7 @@ impl<'db> TyChecker<'db> {
             if invisible.is_some() {
                 return;
             }
-            if !reso.is_visible_from(self.db, scope) {
+            if !reso.is_visible_from(self.db, visibility_scope) {
                 invisible = Some((path, reso.name_span(self.db)));
             }
         };
@@ -3842,7 +3874,7 @@ impl<'db> TyChecker<'db> {
         let res = match resolve_path_with_observer_and_minter(
             self.db,
             path,
-            scope,
+            lookup_scope,
             self.env.method_lookup_assumptions(),
             resolve_tail_as_value,
             &mut observe_segment,

@@ -1,0 +1,22 @@
+// A provider-private struct constructed and destructured in a generated body.
+mod author {
+    use core::meta::{Code, Item, Record}
+    struct Hidden { a: u256, b: u256 }
+    pub fn twin(_ k: u256) -> u256 {
+        let h = Hidden { a: k, b: 2 }
+        let Hidden { a, b } = h
+        a * 10 + b
+    }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn f(_ k: u256) -> u256 { let h = Hidden { a: k, b: 2 }
+ let Hidden { a, b } = h
+ a * 10 + b } }
+    }
+}
+mod destination {
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+#[test]
+fn t() { assert!(destination::f(3) == 32)
+ assert!(destination::f(3) == author::twin(3)) }

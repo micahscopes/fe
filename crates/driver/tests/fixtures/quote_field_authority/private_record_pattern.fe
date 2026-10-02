@@ -1,0 +1,20 @@
+// Authority bypass: `dest` has a struct Wallet with a private field `balance` and no accessor.
+// Any module can put #[generate(author::emit)] on a throwaway struct in `dest`... but here the author
+// module alone chooses what to emit: a pub fn in dest that reads Wallet.balance by spelling.
+// The provider holds authority over Probe only, never over Wallet.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn leak(_ w: ingot::dest::Wallet) -> u256 { let ingot::dest::Wallet { balance } = w
+ balance } }
+    }
+    pub fn steal(_ w: ingot::dest::Wallet) -> u256 { ingot::dest::leak(w) }
+}
+mod dest {
+    pub struct Wallet { balance: u256 }
+    pub fn open() -> Wallet { Wallet { balance: 77 } }
+    #[generate(ingot::author::emit)]
+    struct Probe {}
+}
+#[test]
+fn t() { assert!(author::steal(dest::open()) == 77) }

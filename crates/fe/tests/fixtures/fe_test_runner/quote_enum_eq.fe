@@ -179,6 +179,8 @@ fn generic_equality_matches_twin() {
     assert!(equal_left == equal_right)
     assert!(unequal_left != unequal_right)
     let same = Envelope::Pair { other: true, x: false }
+    let same_again = Envelope::Pair { other: true, x: false }
+    assert!(same == same_again)
     let first = Envelope::Pair { other: false, x: false }
     let second = Envelope::Pair { other: true, x: true }
     assert!(same != first)
@@ -193,6 +195,8 @@ fn generic_equality_matches_twin() {
     assert!(equal_left == equal_right)
     assert!(unequal_left != unequal_right)
     let twin_same = EnvelopeH::Pair { other: true, x: false }
+    let twin_same_again = EnvelopeH::Pair { other: true, x: false }
+    assert!(twin_same == twin_same_again)
     let twin_first = EnvelopeH::Pair { other: false, x: false }
     let twin_second = EnvelopeH::Pair { other: true, x: true }
     assert!(twin_same != twin_first)

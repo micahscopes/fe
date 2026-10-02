@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_fold_limits/items.fe
+---
+error[18-0001]: invalid generated declaration: generated description units limit exceeded: 120024 > 65536
+   ┌─ items.fe:17:1
+   │
+17 │ #[generate(ingot::author::emit)]
+   │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ invalid generated declaration: generated description units limit exceeded: 120024 > 65536

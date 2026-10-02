@@ -1,19 +1,22 @@
 //! Compiler-owned read-back of a checked body into the frozen code carrier.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
 
 use hir::{
     analysis::semantic::{QuoteSite, QuotedCode, SemConstId, SemConstValue, StructuralHandle},
     analysis::ty::{
         const_ty::ConstTyData,
         ty_check::{ConstRef, LocalBinding, RecordInitLowering, ValuePathRef, check_func_body},
-        ty_def::{TyBase, TyData},
+        ty_def::{TyBase, TyData, TyId},
     },
     core::meta::{
         FrozenCode, FrozenCodeNode, FrozenQuoteConstructor, FrozenQuoteConstructorSite,
         FrozenQuoteFunction, FrozenQuoteGenericUse, FrozenQuoteLocal, FrozenQuoteLocalType,
-        FrozenQuoteOpenUse, FrozenQuoteQualifiedConst, FrozenTemplateKey, FrozenTemplateSource,
-        MetaItem,
+        FrozenQuoteOpenUse, FrozenQuoteQualifiedConst, FrozenQuoteSignatureType, FrozenTemplateKey,
+        FrozenTemplateSource, MetaItem,
     },
     hir_def::{
         CallableDef, Expr, Func, GenericArg, GenericParamOwner, Partial, Stmt, scope_graph::ScopeId,
@@ -22,11 +25,24 @@ use hir::{
 };
 
 use super::construction::{
-    freeze_checked_quote_type, frozen_quote_nominal_ref, frozen_quote_trait,
+    ConstructionError, charge_frozen_node, charge_frozen_type, freeze_checked_quote_type,
+    freeze_quote_constructor_arguments, frozen_quote_item_path, frozen_quote_nominal_ref,
+    frozen_quote_trait,
 };
 use crate::DriverDataBase;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Reflect a checked type in its function's declaration namespace.
+pub fn read_back_type<'db>(
+    db: &'db DriverDataBase,
+    func: Func<'db>,
+    ty: TyId<'db>,
+) -> Result<FrozenQuoteSignatureType, ReadBackError> {
+    freeze_checked_quote_type(db, ty, func)
+        .map_err(ReadBackError::from)?
+        .ok_or(ReadBackError::UnsupportedType)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadBackError {
     MissingBody,
     InvalidBody,
@@ -35,6 +51,28 @@ pub enum ReadBackError {
     UnsupportedCall,
     UnsupportedName,
     UnsupportedType,
+    Construction(Box<ConstructionError>),
+}
+
+impl From<ConstructionError> for ReadBackError {
+    fn from(error: ConstructionError) -> Self {
+        Self::Construction(Box::new(error))
+    }
+}
+impl std::fmt::Display for ReadBackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Construction(error) => return error.fmt(f),
+            Self::MissingBody => "checked function body is missing",
+            Self::InvalidBody => "checked function body is invalid",
+            Self::Effectful => "checked function has effects",
+            Self::MissingOwner => "checked item owner is missing",
+            Self::UnsupportedCall => "checked body contains an unsupported call",
+            Self::UnsupportedName => "checked body contains an unsupported name",
+            Self::UnsupportedType => "checked body contains an unsupported type",
+        };
+        f.write_str(message)
+    }
 }
 
 /// Supplies a checked body to an ordinary Fe const consumer as Code<Expr>.
@@ -43,8 +81,15 @@ pub fn read_back_value<'db>(
     db: &'db DriverDataBase,
     func: Func<'db>,
 ) -> Result<SemConstId<'db>, ReadBackError> {
-    read_back(db, func)?;
     let body = func.body(db).ok_or(ReadBackError::MissingBody)?;
+    if func.has_effects(db) {
+        return Err(ReadBackError::Effectful);
+    }
+    if !check_func_body(db, func).0.is_empty() {
+        return Err(ReadBackError::InvalidBody);
+    }
+    // Issuance keeps the checked source. Transport admission and metadata
+    // freezing happen once, under the consumer's shared description budget.
     let code_ty = MetaItem::Code
         .resolve(db, func.scope())
         .ok_or(ReadBackError::MissingOwner)?;
@@ -76,6 +121,31 @@ pub fn read_back<'db>(
     db: &'db DriverDataBase,
     func: Func<'db>,
 ) -> Result<FrozenCode, ReadBackError> {
+    read_back_with_budget(db, func, &Cell::new(0))
+}
+
+pub(super) fn read_back_with_budget<'db>(
+    db: &'db DriverDataBase,
+    func: Func<'db>,
+    budget: &Cell<usize>,
+) -> Result<FrozenCode, ReadBackError> {
+    let freeze_type = |ty| {
+        let frozen = freeze_checked_quote_type(db, ty, func).map_err(ReadBackError::from)?;
+        if let Some(ty) = &frozen {
+            charge_frozen_type(ty, budget).map_err(ReadBackError::from)?;
+        }
+        Ok::<_, ReadBackError>(frozen)
+    };
+    let freeze_arguments = |ty| {
+        let arguments =
+            freeze_quote_constructor_arguments(db, ty, func).map_err(ReadBackError::from)?;
+        if let Some(arguments) = &arguments {
+            for ty in arguments {
+                charge_frozen_type(ty, budget).map_err(ReadBackError::from)?;
+            }
+        }
+        Ok::<_, ReadBackError>(arguments)
+    };
     let body = func.body(db).ok_or(ReadBackError::MissingBody)?;
     if func.has_effects(db) {
         return Err(ReadBackError::Effectful);
@@ -83,6 +153,15 @@ pub fn read_back<'db>(
     let (diagnostics, typed) = check_func_body(db, func);
     if !diagnostics.is_empty() {
         return Err(ReadBackError::InvalidBody);
+    }
+    for _ in body.exprs(db).iter() {
+        charge_frozen_node(budget).map_err(ReadBackError::from)?;
+    }
+    for _ in body.pats(db).iter() {
+        charge_frozen_node(budget).map_err(ReadBackError::from)?;
+    }
+    for _ in body.stmts(db).iter() {
+        charge_frozen_node(budget).map_err(ReadBackError::from)?;
     }
     let owner = func.frozen_locator(db).ok_or(ReadBackError::MissingOwner)?;
     let root = body.expr(db);
@@ -94,7 +173,7 @@ pub fn read_back<'db>(
     };
     let mut node = FrozenCodeNode::empty(Some(template));
     let mut local_uses = HashMap::new();
-    let freeze_variant = |site, variant: hir::hir_def::EnumVariant<'db>| {
+    let freeze_variant = |site, ty, variant: hir::hir_def::EnumVariant<'db>| {
         Ok::<_, ReadBackError>(FrozenQuoteConstructor {
             func: Some(0),
             site,
@@ -102,19 +181,22 @@ pub fn read_back<'db>(
                 db,
                 hir::analysis::ty::adt_def::AdtRef::Enum(variant.enum_),
             )
-            .map_err(|_| ReadBackError::MissingOwner)?,
+            .map_err(ReadBackError::from)?,
             variant_index: Some(variant.idx),
+            self_target: false,
+            type_arguments: Some(freeze_arguments(ty)?.ok_or(ReadBackError::UnsupportedType)?),
         })
     };
     for (pat, _) in body.pats(db).iter() {
         if let Some(root) = typed.pattern_root(pat)
             && let hir::analysis::ty::pattern_ir::ValidatedPatKind::Constructor {
-                ctor: hir::analysis::ty::pattern_ir::ConstructorKind::Variant(variant, _),
+                ctor: hir::analysis::ty::pattern_ir::ConstructorKind::Variant(variant, ty),
                 ..
             } = typed.pattern_store().node(root).kind()
         {
             node.rooted_constructors.push(freeze_variant(
                 FrozenQuoteConstructorSite::Pat(pat),
+                *ty,
                 *variant,
             )?);
         }
@@ -135,8 +217,10 @@ pub fn read_back<'db>(
                 func: Some(0),
                 site: FrozenQuoteConstructorSite::Pat(pat),
                 owner: frozen_quote_nominal_ref(db, adt.adt_ref(db))
-                    .map_err(|_| ReadBackError::MissingOwner)?,
+                    .map_err(ReadBackError::from)?,
                 variant_index: None,
+                self_target: false,
+                type_arguments: Some(freeze_arguments(*ty)?.ok_or(ReadBackError::UnsupportedType)?),
             });
         }
     }
@@ -170,6 +254,7 @@ pub fn read_back<'db>(
                 if let Some(ValuePathRef::UnitVariant(variant)) = typed.value_path_ref(expr) {
                     node.rooted_constructors.push(freeze_variant(
                         FrozenQuoteConstructorSite::Expr(expr),
+                        typed.expr_ty(db, expr),
                         variant.variant,
                     )?);
                     classified_paths.insert(expr);
@@ -198,7 +283,7 @@ pub fn read_back<'db>(
                         .map_err(|_| ReadBackError::UnsupportedName)?;
                     node.rooted_traits.push(
                         frozen_quote_trait(db, inst.key(db), trait_site)
-                            .map_err(|_| ReadBackError::MissingOwner)?,
+                            .map_err(ReadBackError::from)?,
                     );
                     node.qualified_consts.push(FrozenQuoteQualifiedConst {
                         func: 0,
@@ -216,7 +301,7 @@ pub fn read_back<'db>(
         .iter()
         .filter_map(|(binder, _)| {
             local_uses.remove(&binder).map(|uses| FrozenQuoteLocal {
-                func: 0,
+                func: Some(0),
                 binder,
                 uses,
             })
@@ -228,11 +313,12 @@ pub fn read_back<'db>(
             continue;
         };
         let ty = typed.pat_ty(db, *pat);
-        let ty = freeze_checked_quote_type(db, ty, func)
-            .map_err(|_| ReadBackError::MissingOwner)?
-            .ok_or(ReadBackError::UnsupportedType)?;
-        node.local_types
-            .push(FrozenQuoteLocalType { func: 0, stmt, ty });
+        let ty = freeze_type(ty)?.ok_or(ReadBackError::UnsupportedType)?;
+        node.local_types.push(FrozenQuoteLocalType {
+            func: Some(0),
+            stmt,
+            ty,
+        });
     }
 
     for (expr, data) in body.exprs(db).iter() {
@@ -248,6 +334,7 @@ pub fn read_back<'db>(
         if let CallableDef::VariantCtor(variant) = callable.callable_def {
             node.rooted_constructors.push(freeze_variant(
                 FrozenQuoteConstructorSite::Expr(*callee),
+                typed.expr_ty(db, expr),
                 variant,
             )?);
             classified_paths.insert(*callee);
@@ -273,27 +360,14 @@ pub fn read_back<'db>(
                     .generic_args()
                     .iter()
                     .take(arguments.data(db).len())
-                    .map(|ty| {
-                        freeze_checked_quote_type(db, *ty, func)
-                            .map_err(|_| ReadBackError::MissingOwner)?
-                            .ok_or(ReadBackError::UnsupportedType)
-                    })
+                    .map(|ty| freeze_type(*ty)?.ok_or(ReadBackError::UnsupportedType))
                     .collect::<Result<Vec<_>, _>>()?,
             )
         } else {
             None
         };
         let scope = selected.scope();
-        let full_path = scope.pretty_path(db).ok_or(ReadBackError::MissingOwner)?;
-        let module = scope
-            .top_mod(db)
-            .scope()
-            .pretty_path(db)
-            .ok_or(ReadBackError::MissingOwner)?;
-        let path = full_path
-            .strip_prefix(&format!("{module}::"))
-            .ok_or(ReadBackError::MissingOwner)?
-            .to_owned();
+        let path = frozen_quote_item_path(db, scope).map_err(ReadBackError::from)?;
         node.rooted_funcs.push(FrozenQuoteFunction {
             func: None,
             assoc_const: None,
@@ -343,6 +417,7 @@ pub fn read_back<'db>(
                 {
                     node.rooted_constructors.push(freeze_variant(
                         FrozenQuoteConstructorSite::Expr(expr),
+                        typed.expr_ty(db, expr),
                         variant.variant,
                     )?);
                     continue;
@@ -357,17 +432,24 @@ pub fn read_back<'db>(
                         func: Some(0),
                         site: FrozenQuoteConstructorSite::Expr(expr),
                         owner: frozen_quote_nominal_ref(db, adt.adt_ref(db))
-                            .map_err(|_| ReadBackError::MissingOwner)?,
+                            .map_err(ReadBackError::from)?,
                         variant_index: None,
+                        self_target: false,
+                        type_arguments: Some(
+                            freeze_arguments(typed.expr_ty(db, expr))?
+                                .ok_or(ReadBackError::UnsupportedType)?,
+                        ),
                     });
                 }
-                let ty = freeze_checked_quote_type(db, typed.expr_ty(db, expr), func)
-                    .map_err(|_| ReadBackError::MissingOwner)?
-                    .ok_or(ReadBackError::UnsupportedType)?;
+                let ty =
+                    freeze_type(typed.expr_ty(db, expr))?.ok_or(ReadBackError::UnsupportedType)?;
                 node.record_types.push((expr, ty));
             }
             _ => {}
         }
+    }
+    for _ in 0..node.metadata_nodes() {
+        charge_frozen_node(budget).map_err(ReadBackError::from)?;
     }
     Ok(FrozenCode {
         root: 0,

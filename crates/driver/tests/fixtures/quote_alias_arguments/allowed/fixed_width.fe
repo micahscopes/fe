@@ -1,0 +1,41 @@
+pub enum Opt<T> { No, Yes(T) }
+type O8 = Opt<u8>
+mod author {
+    use core::meta::{Code, Item, Record}
+    use ingot::Opt
+    type O8 = ingot::Opt<u8>
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen() -> bool {
+                let e = O8::Yes(200)
+                match e { O8::Yes(v) => v == 200, O8::No => false }
+            }
+            pub fn gen_overflow() -> bool {
+                let e = O8::Yes(200)
+                match e { O8::Yes(v) => v + 100 > v, O8::No => false }
+            }
+            pub fn gen_empty() -> bool {
+                let e = O8::No
+                match e { O8::Yes(_) => false, O8::No => true }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+pub fn twin() -> bool {
+    let e = O8::Yes(200)
+    match e { O8::Yes(v) => v == 200, O8::No => false }
+}
+pub fn twin_overflow() -> bool {
+    let e = O8::Yes(200)
+    match e { O8::Yes(v) => v + 100 > v, O8::No => false }
+}
+#[test]
+fn same_value() { assert!(gen() && twin()) }
+#[test]
+fn empty_value() { assert!(gen_empty()) }
+#[test(should_revert, panic = 0x11)]
+fn generated_narrow_overflow() { let _ = gen_overflow() }
+#[test(should_revert, panic = 0x11)]
+fn ordinary_narrow_overflow() { let _ = twin_overflow() }

@@ -27,9 +27,10 @@ pub use abi_field::{
 };
 pub use abi_struct::{AbiStructDiagnostic, AbiStructDiagnosticKind};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
-pub use generated::{generated_hir_errors, generated_quote_hygiene_errors};
+pub use generated::{GeneratedQuoteFailure, generated_hir_errors, generated_quote_hygiene_errors};
 pub use item::{FieldModifierError, FieldModifierErrorKind, MsgDiagnostic, MsgDiagnosticKind};
 pub use parse::parse_file_impl;
+pub use quote_errors::{QuoteConstructionFault, QuoteHygieneFault};
 
 pub(crate) mod parse;
 
@@ -50,6 +51,7 @@ mod pat;
 mod path;
 mod payable;
 mod quote;
+mod quote_errors;
 mod scope_builder;
 mod stmt;
 mod types;
@@ -241,6 +243,7 @@ pub(super) struct FileLowerCtxt<'db> {
     next_static_assert_idx: u32,
     /// The splices of the quote template being lowered, if any.
     quote_holes: Option<Vec<quote::PendingQuoteHole>>,
+    quote_budget: hir_builder::QuoteBudget,
 }
 
 impl<'db> FileLowerCtxt<'db> {
@@ -251,6 +254,7 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
             quote_holes: None,
+            quote_budget: hir_builder::QuoteBudget::default(),
         }
     }
 
@@ -261,6 +265,7 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
             quote_holes: None,
+            quote_budget: hir_builder::QuoteBudget::default(),
         }
     }
 

@@ -1,0 +1,25 @@
+mod helper {
+    use core::meta::{Code, Expr}
+    enum Priv { B(u256) }
+    pub const fn fragment() -> Code<Expr> { quote { Priv::B(7) } }
+}
+mod author {
+    use core::meta::{Code, Item, Record}
+    enum Priv { B(u8) }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let value = ingot::helper::fragment()
+        quote {
+            pub fn f() -> u256 {
+                let p = ${value}
+                42
+            }
+        }
+    }
+}
+mod destination {
+    enum Priv { B(bool) }
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+#[test]
+fn t() { assert!(destination::f() == 42) }

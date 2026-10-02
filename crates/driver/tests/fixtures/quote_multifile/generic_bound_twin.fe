@@ -1,0 +1,7 @@
+pub trait Mark {}
+impl Mark for u256 {}
+pub trait Tag {}
+pub fn generated<U: ingot::sub::Mark>(_ value: U) -> u256 { 7 }
+pub struct Target {}
+fn need<X: Tag>() {}
+fn trigger() { generated(1 as u256) }

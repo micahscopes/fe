@@ -1,0 +1,12 @@
+// Self { .. } construction for a struct target is Q3; check Self::Variant { .. } record-variant construction.
+pub trait Mk { fn mk() -> Self }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote { impl ingot::Mk for ${record} { fn mk() -> Self { Self::R { y: 4 } } } }
+    }
+}
+#[generate(ingot::author::emit)]
+pub enum E { A, R { y: u256 } }
+#[test]
+fn t() { match E::mk() { E::R { y } => assert!(y == 4), E::A => assert!(false) } }

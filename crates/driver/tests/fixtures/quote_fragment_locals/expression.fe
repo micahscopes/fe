@@ -1,0 +1,57 @@
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub type Width = u8
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let next: Code<Expr> = quote(value) { value + 1 }
+        let body: Code<Expr> = quote(seed) {
+            let value: Width = seed
+            let value: Width = ${next}
+            let mut total: u256 = value as u256
+            for i in 0..3 { total += i as u256 }
+            match (total, value) {
+                (total, value) => { let value = value as u256
+                    total + value }
+            }
+        }
+        quote {
+            pub fn generated(seed: u8) -> u256 { ${body} }
+            pub fn repeated(seed: u8) -> u256 {
+                let first = ${body}
+                let seed: u8 = seed + 1
+                let second = ${body}
+                first * 1000 + second
+            }
+        }
+    }
+}
+// Destination look-alikes must not widen provider annotations.
+type Width = u256
+#[generate(ingot::author::emit)]
+struct Target {}
+fn twin(seed: u8) -> u256 {
+    let value: u8 = seed
+    let value: u8 = value + 1
+    let mut total: u256 = value as u256
+    for i in 0..3 { total += i as u256 }
+    match (total, value) {
+        (total, value) => { let value = value as u256
+            total + value }
+    }
+}
+fn repeated_twin(seed: u8) -> u256 {
+    let first = twin(seed: seed)
+    let seed: u8 = seed + 1
+    let second = twin(seed: seed)
+    first * 1000 + second
+}
+#[test]
+fn local_identity() {
+    let mut seed: u8 = 0
+    while seed < 200 {
+        assert!(generated(seed: seed) == twin(seed: seed))
+        assert!(repeated(seed: seed) == repeated_twin(seed: seed))
+        seed += 1
+    }
+    assert!(generated(seed: 4) == 13)
+    assert!(repeated(seed: 4) == 13015)
+}

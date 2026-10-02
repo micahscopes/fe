@@ -1,0 +1,23 @@
+pub enum Wrap { W(u256) }
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    use ingot::Wrap
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let frag: Code<Expr> = quote(x) { x + 1 }
+        quote { pub const fn gen(x: u256) -> u256 {
+            let first: u256 = match Wrap::W(10) { Wrap::W(x) => ${frag} }
+            first + ${frag}
+        } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+pub const fn twin(x: u256) -> u256 {
+    let first: u256 = match Wrap::W(10) { Wrap::W(x) => x + 1 }
+    first + x + 1
+}
+#[test]
+fn t() {
+    assert!(twin(x: 2) == 14)
+    assert!(gen(x: 2) == twin(x: 2))
+}

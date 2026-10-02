@@ -1,0 +1,14 @@
+pub trait Build { fn build() -> Self }
+mod author {
+    use core::meta::{Code, Item, Record, field}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let x = field(record, 0)
+        quote { impl ingot::Build for ${record} {
+            fn build() -> Self { Self { ${x}: 7, y: 9 } }
+        } }
+    }
+}
+mod dest {
+    #[generate(ingot::author::emit)]
+    pub struct T { x: u256, y: u256 }
+}

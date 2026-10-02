@@ -1,0 +1,30 @@
+// RD83: generated bodies may use provider-private items. A private enum in the provider module,
+// constructed and matched inside a generated body (signature uses only u256).
+mod author {
+    use core::meta::{Code, Item, Record}
+    enum Priv { A, B(u256), C { z: u256 } }
+    pub fn twin(_ k: u256) -> u256 {
+        let p = if k == 0 { Priv::A } else if k == 1 { Priv::B(7) } else { Priv::C { z: 9 } }
+        match p { Priv::A => 1, Priv::B(x) => x, Priv::C { z } => z * 10 }
+    }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn f(_ k: u256) -> u256 {
+                let p = if k == 0 { Priv::A } else if k == 1 { Priv::B(7) } else { Priv::C { z: 9 } }
+                match p { Priv::A => 1, Priv::B(x) => x, Priv::C { z } => z * 10 }
+            }
+        }
+    }
+}
+mod destination {
+    enum Priv { C { z: u256 }, B(u256), A }
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+#[test]
+fn t() { assert!(destination::f(0) == 1)
+ assert!(destination::f(1) == 7)
+ assert!(destination::f(2) == 90)
+ assert!(destination::f(0) == author::twin(0))
+ assert!(destination::f(1) == author::twin(1))
+ assert!(destination::f(2) == author::twin(2)) }

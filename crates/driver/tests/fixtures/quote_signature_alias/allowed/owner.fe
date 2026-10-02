@@ -1,0 +1,32 @@
+// Struct owner through alias and use-as, construction and patterns; destination fields reversed.
+pub struct Point { pub x: u256, pub y: u256 }
+mod author {
+    use core::meta::{Code, Item, Record}
+    type P = ingot::Point
+    use ingot::Point as Q
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn g_make(_ a: u256, _ b: u256) -> P { P { x: a, y: b } }
+            pub fn g_make2(_ a: u256, _ b: u256) -> Q { Q { x: a, y: b } }
+            pub fn g_diff(_ p: P) -> u256 { let Q { x, y } = p
+ x * 10 + y }
+            pub fn g_diff2(_ p: Q) -> u256 { match p { P { x, y } => x * 10 + y } }
+        }
+    }
+}
+mod destination {
+    pub struct Point { pub y: u256, pub x: u256 }
+    type P = Point
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+#[test]
+fn t() {
+    let p = destination::g_make(3, 4)
+    assert!(p.x == 3)
+    assert!(p.y == 4)
+    let q = destination::g_make2(3, 4)
+    assert!(q.x == 3)
+    assert!(destination::g_diff(Point { x: 3, y: 4 }) == 34)
+    assert!(destination::g_diff2(Point { x: 3, y: 4 }) == 34)
+}

@@ -218,7 +218,7 @@ fn unused_nested_encoder_requires_supporting_impls_after_edits_and_restoration()
             match (fe_driver::elaboration::prepare(db), failure) {
                 (Ok(Some(_)), None) => {}
                 (Err(error), Some(expected)) => {
-                    assert!(error.message.contains(expected), "{error:?}");
+                    assert!(error.message().contains(expected), "{error:?}");
                 }
                 (Err(error), None) => panic!("unexpected failure: {error:?}"),
                 _ => panic!("supporting implementation requirement was lost"),
@@ -402,7 +402,7 @@ fn unsupported_query_execution_and_dynamic_codec_are_rejected() {
             } else {
                 let error = result.err().expect("dynamic codec must be rejected");
                 assert!(
-                    error.message.contains("assertion") || error.message.contains("Assertion"),
+                    error.message().contains("assertion") || error.message().contains("Assertion"),
                     "{error:?}"
                 );
             }

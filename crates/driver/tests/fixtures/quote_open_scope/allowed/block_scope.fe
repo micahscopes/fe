@@ -1,0 +1,27 @@
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let frag: Code<Expr> = quote(x) { x + 1 }
+        quote { pub const fn gen(x: u256) -> u256 {
+                let x: u256 = 10
+                let y: u256 = { let x: u256 = 20
+                    ${frag} }
+                let z: u256 = { ${frag} }
+                y + z
+            } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+pub const fn twin(x: u256) -> u256 {
+    let x: u256 = 10
+                let y: u256 = { let x: u256 = 20
+                    x + 1 }
+                let z: u256 = { x + 1 }
+                y + z
+}
+#[test]
+fn t() {
+    assert!(twin(x: 2) == 32)
+    assert!(gen(x: 2) == twin(x: 2))
+}

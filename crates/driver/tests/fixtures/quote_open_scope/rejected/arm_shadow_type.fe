@@ -1,0 +1,27 @@
+// The arm-local `other: u256` shadows the destination enum parameter.
+// Capturing it must reject the nested enum pattern with an ordinary type error.
+pub enum Wrap { W(u256) }
+mod author {
+    use core::meta::{Code, Item, Record, Arm, binders, variant, field}
+    use ingot::Wrap
+    pub const fn emit(record: Record) -> Code<Item> {
+        let v = variant(record, 0)
+        let l = binders(v, 0)
+        let r = binders(v, 1)
+        let f = field(v, 0)
+        let arms: Code<Arm> = quote(other) { ${l} => match other { ${r} => ${l.at(f)} == ${r.at(f)}, _ => false } }
+        quote {
+            pub fn eq_wrapped(_ self_: ${record}, _ other: ${record}, _ w: Wrap) -> bool {
+                match w { Wrap::W(other) => match self_ { ${arms}, _ => false } }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+enum E { A(u256), B }
+#[test]
+fn t() {
+    // parameter `other` = A(9); arm binder `other` is a u256 from Wrap, so if the open name bound
+    // the arm binder the generated code would not type-check; it must not silently use the parameter.
+    assert!(!eq_wrapped(E::A(3), E::A(9), Wrap::W(3)))
+}

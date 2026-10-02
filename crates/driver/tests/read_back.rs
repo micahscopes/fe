@@ -295,7 +295,7 @@ enum Coin { Heads(u256) }
         Ok(_) => panic!("a Field cannot supply a pattern fragment"),
     };
     let rendered = error
-        .rendered
+        .rendered()
         .expect("provider checking renders its diagnostic");
     assert!(
         rendered.contains("this splice cannot stand for a pattern"),
@@ -813,7 +813,8 @@ fn missing_checked_parameter_is_rejected(fixture: Fixture<&str>) {
     let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
     assert!(
         errors.iter().any(|error| error
-            .message
+            .failure
+            .to_string()
             .contains("read-back parameter has no destination binding")),
         "missing parameter must reject during transplantation: {errors:?}"
     );
@@ -1086,9 +1087,10 @@ fn checked_method_owner_cannot_be_replaced_by_destination_trait(fixture: Fixture
     let file = output.workspace().get(&output, &url).expect("fixture file");
     let errors = hir::lower::generated_quote_hygiene_errors(&output, output.top_mod(file));
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("method call changed selection")),
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Hygiene(
+                hir::lower::QuoteHygieneFault::MethodCallChangedSelectionInOutput,
+            )),
         "forged method declaration must fail owner validation: {errors:?}"
     );
 }
@@ -1132,9 +1134,10 @@ fn call_type_argument_cannot_keep_another_nominal_owners_authority(fixture: Fixt
     let file = output.workspace().get(&output, &url).expect("fixture file");
     let errors = hir::lower::generated_quote_hygiene_errors(&output, output.top_mod(file));
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("nominal type changed meaning")),
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Hygiene(
+                hir::lower::QuoteHygieneFault::NominalTypeChangedMeaningInOutput,
+            )),
         "conflicting nominal argument must fail owner validation: {errors:?}"
     );
 }
@@ -1155,9 +1158,10 @@ fn missing_checked_method_selection_is_rejected(fixture: Fixture<&str>) {
     let file = output.workspace().get(&output, &url).expect("fixture file");
     let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("method has no checked selection")),
+        errors.iter().any(|error| error
+            .failure
+            .to_string()
+            .contains("method has no checked selection")),
         "missing method selection must fail closed: {errors:?}"
     );
 }
@@ -1242,9 +1246,10 @@ fn conflicting_record_path_cannot_keep_another_owners_authority(fixture: Fixture
     let module = output.top_mod(file);
     let errors = hir::lower::generated_quote_hygiene_errors(&output, module);
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("nominal type changed meaning")),
+        errors.iter().any(|error| error.failure
+            == hir::lower::GeneratedQuoteFailure::Hygiene(
+                hir::lower::QuoteHygieneFault::NominalTypeChangedMeaningInOutput,
+            )),
         "conflicting nominal root must fail owner validation: {errors:?}"
     );
 }
@@ -1392,6 +1397,19 @@ fn quoted_long_arm_composition_is_checked(fixture: Fixture<&str>) {
     let module = output.top_mod(file);
     assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
     assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "pending/quote_string_*.fe",
+)]
+#[dir_test_attr(#[ignore = "pre-RD86 string splice transport is pending"])]
+fn quoted_string_splices_are_checked(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("string splice generates")
+        .unwrap();
     quote_round_trip::assert_round_trip(&authored, &output, &url);
 }
 
@@ -1789,7 +1807,7 @@ fn forged_enum_roots_are_rejected(fixture: Fixture<&str>) {
         assert!(
             errors
                 .iter()
-                .any(|error| error.message.contains(diagnostic)),
+                .any(|error| error.failure.to_string().contains(diagnostic)),
             "forged root must return a generation diagnostic: {errors:?}"
         );
     }
@@ -1862,7 +1880,9 @@ fn symbolic_types_cannot_capture_a_missing_destination_binder(fixture: Fixture<&
             .unwrap();
         let errors = hir::lower::generated_hir_errors(&copied.output, copied.output.top_mod(file));
         assert!(
-            errors.iter().any(|error| error.message.contains(expected)),
+            errors
+                .iter()
+                .any(|error| error.failure.to_string().contains(expected)),
             "{provider}: {errors:?}"
         );
     }
@@ -1943,9 +1963,10 @@ fn missing_const_generic_destination_binding_rejects(fixture: Fixture<&str>) {
         .unwrap();
     let errors = hir::lower::generated_hir_errors(&copied.output, copied.output.top_mod(file));
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("generic has no destination binding")),
+        errors.iter().any(|error| error
+            .failure
+            .to_string()
+            .contains("generic has no destination binding")),
         "{errors:?}"
     );
 }
@@ -1981,9 +2002,10 @@ fn qualified_const_cannot_borrow_another_traits_authority(fixture: Fixture<&str>
     let errors =
         hir::lower::generated_quote_hygiene_errors(&copied.output, copied.output.top_mod(file));
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("qualified constant changed trait")),
+        errors.iter().any(|error| error
+            .failure
+            .to_string()
+            .contains("qualified constant changed trait")),
         "{errors:?}"
     );
 }
@@ -2014,9 +2036,9 @@ fn quotation_corpus_output(
                 .expect("rejected fixture names its diagnostic");
             let end = snapshot[start..].find(']').expect("diagnostic code ends") + start + 1;
             let actual = error
-                .rendered
+                .rendered()
                 .clone()
-                .unwrap_or_else(|| format!("error[18-{:04}]: {}", error.code, error.message));
+                .unwrap_or_else(|| format!("error[18-{:04}]: {}", error.code(), error.message()));
             assert!(
                 actual.contains(&snapshot[start..end]),
                 "wrong rejection: {actual}"
@@ -2124,6 +2146,79 @@ fn quote_comparison_detects_changed_function(fixture: Fixture<&str>) {
     assert_quote_comparison_detects_changed_body(fixture);
 }
 
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/fe_test_runner",
+    glob: "quote_derived_clone_struct.fe",
+)]
+fn quote_comparison_detects_changed_field_authority(fixture: Fixture<&str>) {
+    use hir::{
+        analysis::ty::adt_def::AdtRef,
+        hir_def::{FieldParent, ItemKind, scope_graph::ScopeId},
+    };
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (authored, output, url) = quotation_corpus_output(fixture).expect("checked quote");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let grants = output
+        .top_mod(file)
+        .all_funcs(&output)
+        .iter()
+        .filter_map(|function| function.body(&output))
+        .flat_map(|body| {
+            body.quote_scopes(&output)
+                .iter()
+                .flat_map(|(_, scope)| &scope.fields)
+        })
+        .collect::<Vec<_>>();
+    let ScopeId::Field(FieldParent::Struct(owner), index) =
+        grants.first().expect("issued grants").field
+    else {
+        panic!("struct grant");
+    };
+    // Same-named fields on a different owner must not satisfy the oracle.
+    let other = output
+        .top_mod(file)
+        .scope()
+        .children(&output)
+        .find_map(|scope| {
+            if let ScopeId::Item(ItemKind::Struct(other)) = scope
+                && other != owner
+            {
+                Some(other)
+            } else {
+                None
+            }
+        })
+        .expect("lookalike owner");
+    for (actual, mismatch) in [
+        (
+            ScopeId::Field(FieldParent::Struct(owner), index + 1),
+            "issued field index",
+        ),
+        (
+            ScopeId::Field(FieldParent::Struct(other), index),
+            "issued field owner identity",
+        ),
+    ] {
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            quote_round_trip::assert_field_grant(
+                &output,
+                &output,
+                AdtRef::Struct(owner),
+                usize::from(index),
+                actual,
+            );
+        }))
+        .expect_err("comparison rejects a changed grant coordinate");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains(mismatch), "{message}");
+    }
+}
+
 fn assert_quote_comparison_detects_changed_body(fixture: Fixture<&str>) {
     use hir::analysis::semantic::SemConstScalar;
     use hir::span::{DesugaredOrigin, HirOrigin};
@@ -2135,7 +2230,16 @@ fn assert_quote_comparison_detects_changed_body(fixture: Fixture<&str>) {
         .to_str()
         .unwrap()
         .to_owned();
-    let (authored, mut output, url) = quotation_corpus_output(fixture).expect("checked quote");
+    let (authored, mut output, url) = if case == "distinct_captures" {
+        let url = Url::from_file_path(fixture.path()).unwrap();
+        let authored = field_authority_fixture_db(fixture);
+        let output = prepare(&authored)
+            .expect("checked open captures")
+            .expect("generation");
+        (authored, output, url)
+    } else {
+        quotation_corpus_output(fixture).expect("checked quote")
+    };
     let input = HirDb::generated_module(&output, &url).expect("frozen generation");
     let expected = input.requests(&output).clone();
     let mut changed = expected.clone();
@@ -2145,6 +2249,24 @@ fn assert_quote_comparison_detects_changed_body(fixture: Fixture<&str>) {
     };
     let node = &mut code.nodes[code.root];
     let mismatch = match case.as_str() {
+        "distinct_captures" => {
+            let holes = node
+                .holes
+                .iter_mut()
+                .filter_map(|hole| {
+                    if let FrozenCodeHole::Code(child, _) = hole {
+                        Some(child)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut holes = holes.into_iter();
+            let first = holes.next().expect("first fragment");
+            let second = holes.next().expect("second fragment");
+            std::mem::swap(first, second);
+            "open name must capture the nearest visible local identity"
+        }
         "quote_scalar_splice" => {
             let integer = node
                 .holes
@@ -2274,7 +2396,10 @@ pub const fn arms() -> Code<Arm> {
     assert!(matches!(arms[0], MatchArm::Hole(0)));
     assert!(arms[1..].iter().all(|arm| arm.parts().is_some()));
     assert_eq!(quote.holes.len(), 1);
-    assert_eq!(quote.holes[0].position, QuoteHolePosition::Arms);
+    assert_eq!(
+        quote.holes[0].position,
+        QuoteHolePosition::Code(hir::hir_def::QuoteKind::Arm)
+    );
 }
 
 #[test]
@@ -2304,7 +2429,7 @@ enum Coin { Heads, Tails }
         Err(error) => error,
         Ok(_) => panic!("wrong arm kind accepted"),
     };
-    let rendered = error.rendered.expect("rendered provider diagnostic");
+    let rendered = error.rendered().expect("rendered provider diagnostic");
     assert!(
         rendered.contains("this splice cannot stand for match arms"),
         "{rendered}"
@@ -2312,5 +2437,1624 @@ enum Coin { Heads, Tails }
     assert!(
         rendered.contains("expected `Code<Arm>`, found `Code<Expr>`"),
         "{rendered}"
+    );
+}
+
+#[test]
+fn quoted_multifile_trait_keeps_its_module() {
+    for (generated, twin) in [
+        (
+            include_str!("fixtures/quote_multifile/impl_where.fe"),
+            include_str!("fixtures/quote_multifile/impl_where_twin.fe"),
+        ),
+        (
+            include_str!("fixtures/quote_multifile/generic_bound.fe"),
+            include_str!("fixtures/quote_multifile/generic_bound_twin.fe"),
+        ),
+        (
+            include_str!("fixtures/quote_multifile/method_where.fe"),
+            include_str!("fixtures/quote_multifile/method_where_twin.fe"),
+        ),
+    ] {
+        for (source, generated) in [(generated, true), (twin, false)] {
+            let mut authored = DriverDataBase::default();
+            for (path, source) in [
+                (
+                    "file:///project/fe.toml",
+                    "name = \"quote_multifile\"\nversion = \"0.1.0\"\n",
+                ),
+                ("file:///project/src/lib.fe", source),
+                (
+                    "file:///project/src/sub.fe",
+                    include_str!("fixtures/quote_multifile/sub.fe"),
+                ),
+            ] {
+                authored.workspace().update(
+                    &mut authored,
+                    Url::parse(path).unwrap(),
+                    source.to_string(),
+                );
+            }
+            let message = if generated {
+                match prepare(&authored) {
+                    Err(error) => error.message(),
+                    Ok(_) => panic!("sub::Mark must not bind root Mark"),
+                }
+            } else {
+                let url = Url::parse("file:///project/src/lib.fe").unwrap();
+                let file = authored.workspace().get(&authored, &url).unwrap();
+                let diagnostics = authored.run_on_ingot(authored.top_mod(file).ingot(&authored));
+                assert!(
+                    diagnostics.has_errors(&authored),
+                    "handwritten bound must fail"
+                );
+                diagnostics.format_diags(&authored)
+            };
+            assert!(message.contains("error[6-0003]"), "{message}");
+            assert!(message.contains("Mark"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn quoted_multifile_helper_keeps_nested_modules() {
+    use hir::analysis::{
+        semantic::{EvalOutcome, eval_body_owner_const_with_args},
+        ty::ty_check::BodyOwner,
+    };
+    for external in [false, true] {
+        let mut authored = DriverDataBase::default();
+        for (path, source) in [
+            (
+                "file:///project/fe.toml",
+                "name = \"quote_multifile\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "file:///project/src/lib.fe",
+                r#"
+#[generate(ingot::outer::author::emit)]
+pub struct Target {}
+const fn helper() -> u256 { 99 }
+"#,
+            ),
+            ("file:///project/src/outer.fe", ""),
+            (
+                "file:///project/src/outer/author.fe",
+                r#"
+use core::meta::{Code, Item, Record}
+pub struct Token {}
+use ingot::outer::author::{Token as Renamed, helper as selected}
+const fn helper(_ token: Token) -> u256 { 7 }
+pub const fn emit(_ record: Record) -> Code<Item> {
+    quote { pub const fn generated() -> u256 {
+        let token: Renamed = Token {}
+        selected(token)
+    } }
+}
+"#,
+            ),
+        ] {
+            let path = if external && path.contains("/src/outer") {
+                path.replace("/project/", "/policy/")
+            } else {
+                path.to_owned()
+            };
+            let source = if external && path.ends_with("/project/src/lib.fe") {
+                source.replace("ingot::outer::author::emit", "policy::outer::author::emit")
+            } else {
+                source.to_owned()
+            };
+            authored
+                .workspace()
+                .update(&mut authored, Url::parse(&path).unwrap(), source);
+        }
+        if external {
+            for (path, source) in [
+                (
+                    "file:///policy/fe.toml",
+                    "name = \"policy\"\nversion = \"0.1.0\"\n",
+                ),
+                ("file:///policy/src/lib.fe", ""),
+            ] {
+                authored.workspace().update(
+                    &mut authored,
+                    Url::parse(path).unwrap(),
+                    source.to_string(),
+                );
+            }
+            authored.dependency_graph().add_dependency(
+                &mut authored,
+                &Url::parse("file:///project/").unwrap(),
+                &Url::parse("file:///policy/").unwrap(),
+                "policy".into(),
+                common::dependencies::DependencyArguments::default(),
+            );
+        }
+        let output = prepare(&authored)
+            .expect("nested helper quote elaborates")
+            .expect("generation");
+        let url = Url::parse("file:///project/src/lib.fe").unwrap();
+        let function = named_function(&output, &url, "generated");
+        let value = eval_body_owner_const_with_args(
+            &output,
+            BodyOwner::Func(function),
+            GenericSubst::for_body_owner(&output, BodyOwner::Func(function), vec![]),
+            vec![],
+        );
+        let EvalOutcome::Ready(value) = value else {
+            panic!("generated helper evaluates: {value:?}")
+        };
+        assert_eq!(value.pretty_print(&output), "7");
+    }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_field_authority",
+    glob: "*.fe",
+)]
+fn quoted_fields_require_provider_authority(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let authored = field_authority_fixture_db(fixture);
+    let error = match prepare(&authored) {
+        Err(error) => error,
+        Ok(_) => {
+            panic!("generated fields must retain provider visibility and issued owner authority")
+        }
+    };
+    assert!(
+        error.message().contains("visible")
+            || error.message().contains("field") && error.message().contains("owner"),
+        "{}",
+        error.message()
+    );
+    let rendered = error
+        .rendered()
+        .expect("field authority error is rendered at its authored site");
+    assert!(rendered.contains("generated here"), "{rendered}");
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_field_authority/allowed",
+    glob: "*.fe",
+)]
+fn quoted_provider_private_fields_remain_accessible(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).expect("fixture path");
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("provider's own private field authority survives generation")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+fn field_authority_fixture_db(fixture: Fixture<&str>) -> DriverDataBase {
+    use hir::analysis::analysis_pass::{ModuleAnalysisPass, ParsingPass};
+    let (db, url) = fixture_db(fixture);
+    let file = db.workspace().get(&db, &url).unwrap();
+    let diagnostics = ParsingPass {}.run_on_module(&db, db.top_mod(file));
+    assert!(
+        diagnostics.is_empty(),
+        "{}",
+        db.format_complete_diagnostics(
+            &diagnostics
+                .iter()
+                .map(|diag| diag.to_complete(&db))
+                .collect::<Vec<_>>()
+        )
+    );
+    drop(diagnostics);
+    db
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_field_authority/unsupported",
+    glob: "*.fe",
+)]
+fn quoted_pattern_field_labels_are_not_yet_syntax(fixture: Fixture<&str>) {
+    use hir::analysis::analysis_pass::{ModuleAnalysisPass, ParsingPass};
+    let (db, url) = fixture_db(fixture);
+    let file = db.workspace().get(&db, &url).unwrap();
+    let diagnostics = ParsingPass {}.run_on_module(&db, db.top_mod(file));
+    assert!(
+        !diagnostics.is_empty(),
+        "field-label holes in record patterns require frontend support"
+    );
+    let rendered = db.format_complete_diagnostics(
+        &diagnostics
+            .iter()
+            .map(|diag| diag.to_complete(&db))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        rendered.contains("while parsing record pattern field list"),
+        "{rendered}"
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fold_limits",
+    glob: "*.fe",
+)]
+fn deep_quote_folds_report_limits_without_stack_overflow(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let authored = field_authority_fixture_db(fixture);
+    let error = match prepare(&authored) {
+        Err(error) => error,
+        Ok(_) => panic!("over-limit quote fold was admitted"),
+    };
+    let rendered = error.render(&authored);
+    assert!(rendered.contains("limit"), "{rendered}");
+    assert!(!rendered.contains("panicked"), "{rendered}");
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[test]
+fn quoted_fold_boundaries_remain_normal_compile_results() {
+    // Item folds just below the frozen-description cap must not reach a
+    // second unbounded recursion in item emission.
+    let items = include_str!("fixtures/quote_fold_limits/items.fe");
+    for count in [1000, 2000, 2700] {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///item_fold_boundary.fe").unwrap();
+        db.workspace()
+            .update(&mut db, url, items.replace("5000", &count.to_string()));
+        let error = match prepare(&db) {
+            Err(error) => error,
+            Ok(_) => panic!("repeated identical helper declarations require a diagnostic"),
+        };
+        assert!(error.render(&db).contains("error["));
+    }
+    let expression = include_str!("fixtures/quote_fold_limits/expression.fe");
+    for count in [16, 63] {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///expression_fold_boundary.fe").unwrap();
+        db.workspace()
+            .update(&mut db, url, expression.replace("1000", &count.to_string()));
+        prepare(&db)
+            .expect("expression fold below the nesting cap stays valid")
+            .expect("generation");
+    }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_request_budget",
+    glob: "*.fe",
+)]
+fn generation_request_has_one_node_budget(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let authored = field_authority_fixture_db(fixture);
+    let error = match prepare(&authored) {
+        Err(error) => error,
+        Ok(_) => panic!("over-budget generation request was admitted before publication"),
+    };
+    assert_eq!(
+        error.code(),
+        4,
+        "request budget is a typed output-construction failure"
+    );
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains("quotation request node limit"),
+        "{}",
+        error.message()
+    );
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[test]
+fn request_budget_counts_shared_edges_and_discards_partial_output() {
+    use hir::span::{DesugaredOrigin, HirOrigin};
+    let source = include_str!("fixtures/quote_request_budget/repeated_items_20.fe")
+        .replace("while i < 20", "while i < 1");
+    let mut authored = DriverDataBase::default();
+    let url = Url::parse("file:///request_budget_graph.fe").unwrap();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), source);
+    let mut output = prepare(&authored)
+        .expect("one item fits")
+        .expect("generation");
+    let input = HirDb::generated_module(&output, &url).expect("frozen request");
+    let mut requests = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("item code")
+    };
+    let template = code.nodes[code.root].clone();
+    assert_eq!(template.holes.len(), 2);
+    for _ in 0..40 {
+        let mut parent = template.clone();
+        for hole in &mut parent.holes {
+            let FrozenCodeHole::Code(child, _) = hole else {
+                panic!("item edge")
+            };
+            *child = code.root;
+        }
+        code.root = code.nodes.len();
+        code.nodes.push(parent);
+    }
+    input.set_requests(&mut output).to(requests);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    let errors = hir::lower::generated_hir_errors(&output, module);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0].failure,
+        hir::lower::GeneratedQuoteFailure::RequestNodeLimit {
+            actual: 65_537,
+            maximum: 65_536,
+        }
+    );
+    assert!(
+        module.all_funcs(&output).iter().all(|function| !matches!(
+            function.origin(&output),
+            HirOrigin::Desugared(DesugaredOrigin::Generation(_))
+        )),
+        "failed expansion must discard every partially emitted declaration"
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_request_budget/limitations",
+    glob: "*.fe",
+)]
+fn splice_only_empty_item_composition_fails_closed(fixture: Fixture<&str>) {
+    let authored = field_authority_fixture_db(fixture);
+    let error = match prepare(&authored) {
+        Err(error) => error,
+        Ok(_) => panic!("splice-only empty item syntax requires checked kind reification"),
+    };
+    assert!(
+        error.message().contains("generation requires item code"),
+        "{}",
+        error.message()
+    );
+}
+
+#[test]
+fn quotation_node_budget_is_separate_for_each_request() {
+    let mut source = String::from(
+        "mod author { use core::meta::{Code, Item, Record}\npub const fn emit(_ record: Record) -> Code<Item> { quote {\n",
+    );
+    let expression = std::iter::repeat_n("1", 200)
+        .collect::<Vec<_>>()
+        .join(" + ");
+    // Each request copies over 40,000 expression/statement nodes, so their
+    // combined work exceeds the request limit without any single body doing so.
+    for i in 0..100 {
+        source.push_str(&format!("pub fn f{i}() -> u256 {{ {expression} }}\n"));
+    }
+    source.push_str("} } }\nmod left {\n#[generate(ingot::author::emit)]\nstruct L {}\n}\nmod right {\n#[generate(ingot::author::emit)]\nstruct R {}\n}\n");
+    let mut authored = DriverDataBase::default();
+    let url = Url::parse("file:///separate_request_budgets.fe").unwrap();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), source);
+    let output = prepare(&authored)
+        .expect("two individually bounded requests fit")
+        .expect("generation");
+    let requests = HirDb::generated_module(&output, &url)
+        .unwrap()
+        .requests(&output);
+    assert_eq!(requests.len(), 2);
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_open_scope/allowed",
+    glob: "*.fe",
+)]
+fn quoted_open_names_bind_the_nearest_local(fixture: Fixture<&str>) {
+    use hir::analysis::{
+        semantic::{
+            EvalOutcome, SemConstId, SemConstScalar, SemConstValue, eval_body_owner_const_with_args,
+        },
+        ty::{ty_check::BodyOwner, ty_def::TyId},
+    };
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("nearest lexical binder, including match arms, elaborates")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    let generated = named_function(&output, &url, "gen");
+    let twin = named_function(&output, &url, "twin");
+    assert_eq!(generated.is_const(&output), twin.is_const(&output));
+    if !generated.is_const(&output) {
+        // Sequence iteration calls ordinary len/get methods. Its value oracle
+        // runs in quoted_open_captures_execute_at_o0_and_o2 instead of CTFE.
+        return;
+    }
+    let argument = SemConstId::new(
+        &output,
+        SemConstValue::Scalar {
+            ty: TyId::u256(&output),
+            value: SemConstScalar::Int { value: 2.into() },
+        },
+    );
+    let evaluate = |name| {
+        let outcome = eval_body_owner_const_with_args(
+            &output,
+            BodyOwner::Func(named_function(&output, &url, name)),
+            GenericSubst::for_body_owner(
+                &output,
+                BodyOwner::Func(named_function(&output, &url, name)),
+                vec![],
+            ),
+            vec![argument],
+        );
+        let EvalOutcome::Ready(value) = outcome else {
+            panic!("{name}: {outcome:?}")
+        };
+        value.pretty_print(&output)
+    };
+    assert_eq!(
+        evaluate("gen"),
+        evaluate("twin"),
+        "constant open capture must match its ordinary lexical twin"
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_open_scope/rejected",
+    glob: "*.fe",
+)]
+fn quoted_open_arm_names_do_not_skip_local_types(fixture: Fixture<&str>) {
+    let authored = field_authority_fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("nearest local type must reject this enum pattern");
+    };
+    assert_eq!(
+        error.code(),
+        5,
+        "ordinary checked-source diagnostic: {error:?}"
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_open_scope/allowed",
+    glob: "distinct_captures.fe",
+)]
+fn quoted_open_comparison_detects_changed_capture(fixture: Fixture<&str>) {
+    assert_quote_comparison_detects_changed_body(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fold_limits/allowed",
+    glob: "*.fe",
+)]
+fn realistic_quote_derives_fit_the_limits(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("realistic field-wise derives fit")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fold_limits/function",
+    glob: "*.fe.in",
+)]
+fn quoted_function_copy_has_its_own_node_limit(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().strip_suffix(".in").unwrap().to_owned();
+    let source = fixture
+        .content()
+        .replace("__VALUES__\n", &"                0,\n".repeat(8192));
+    let mut authored = DriverDataBase::default();
+    let url = Url::from_file_path(&snapshot_path).unwrap();
+    authored.workspace().update(&mut authored, url, source);
+    let Err(error) = prepare(&authored) else {
+        panic!("large body needs a function diagnostic");
+    };
+    assert_eq!(error.code(), 4);
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains("quoted function node limit exceeded: 8193 > 8192"),
+        "{rendered}"
+    );
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_alias_arguments/allowed", glob: "*.fe")]
+fn quoted_alias_constructor_preserves_arguments(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("alias arguments elaborate")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_alias_arguments/rejected", glob: "*.fe")]
+fn quoted_alias_constructor_rejects_destination_width(fixture: Fixture<&str>) {
+    let authored = field_authority_fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("Opt<u8> must not become Opt<u256>");
+    };
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains("Opt<u256>") && rendered.contains("Opt<u8>"),
+        "{rendered}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_alias_arguments/allowed", glob: "fixed_width.fe")]
+fn quoted_alias_comparison_rejects_changed_width(fixture: Fixture<&str>) {
+    assert_alias_comparison_rejects_changed_width(fixture, 9);
+}
+
+fn assert_alias_comparison_rejects_changed_width(fixture: Fixture<&str>, expected_count: usize) {
+    use hir::analysis::ty::ty_def::PrimTy;
+    use hir::core::meta::FrozenQuoteSignatureType;
+    assert_quote_comparison_rejects_widened_type(fixture, |code| {
+        let mut count = 0;
+        for node in &mut code.nodes {
+            for constructor in &mut node.rooted_constructors {
+                if let Some(arguments) = &mut constructor.type_arguments {
+                    assert_eq!(
+                        arguments,
+                        &[FrozenQuoteSignatureType::Primitive(PrimTy::U8)]
+                    );
+                    arguments[0] = FrozenQuoteSignatureType::Primitive(PrimTy::U256);
+                    count += 1;
+                }
+            }
+        }
+        assert_eq!(count, expected_count);
+    });
+}
+
+fn assert_quote_comparison_rejects_widened_type(
+    fixture: Fixture<&str>,
+    change: impl FnOnce(&mut hir::core::meta::FrozenCode),
+) {
+    assert_quote_comparison_rejects_mutation(fixture, |_, code| change(code), &["U8", "U256"]);
+}
+
+fn assert_quote_comparison_rejects_mutation(
+    fixture: Fixture<&str>,
+    change: impl FnOnce(&DriverDataBase, &mut hir::core::meta::FrozenCode),
+    mismatches: &[&str],
+) {
+    use salsa::Setter;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (authored, url) = fixture_db(fixture);
+    let mut output = prepare(&authored).unwrap().unwrap();
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let expected = input.requests(&output).clone();
+    let mut changed = expected.clone();
+    let FrozenMetaValue::Code(code) = &mut changed[0].value else {
+        panic!("code");
+    };
+    change(&authored, code);
+    input.set_requests(&mut output).to(changed);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    for function in module.all_funcs(&output) {
+        let (errors, _) = hir::analysis::ty::ty_check::check_func_body(&output, *function);
+        assert!(
+            errors.is_empty(),
+            "changed function {:?} is not well typed: {errors:?}",
+            function
+                .name(&output)
+                .to_opt()
+                .map(|name| name.data(&output))
+        );
+    }
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        quote_round_trip::assert_round_trip_against(&authored, &output, &url, &expected);
+    }))
+    .expect_err("independent comparison must reject a valid carrier mutation");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("comparison message");
+    assert!(
+        mismatches.iter().all(|mismatch| message.contains(mismatch)),
+        "wrong comparison failure: {message}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_private_nominals", glob: "*.fe")]
+fn quoted_provider_private_nominals_keep_author_scope(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("provider-private nominals elaborate")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_private_nominals/rejected", glob: "*.fe")]
+fn ordinary_constructor_paths_keep_destination_visibility(fixture: Fixture<&str>) {
+    use hir::analysis::diagnostics::DiagnosticVoucher;
+    let (db, url) = fixture_db(fixture);
+    let func = named_function(&db, &url, "unauthorized");
+    let (diagnostics, _) = hir::analysis::ty::ty_check::check_func_body(&db, func);
+    assert!(
+        !diagnostics.is_empty(),
+        "ordinary code must not acquire quote authority"
+    );
+    let rendered = db.format_complete_diagnostics(
+        &diagnostics
+            .iter()
+            .map(|d| d.to_complete(&db))
+            .collect::<Vec<_>>(),
+    );
+    assert!(rendered.contains("not visible"), "{rendered}");
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_private_nominals/readback", glob: "source.fe")]
+fn copied_constructor_arguments_keep_destination_generics(fixture: Fixture<&str>) {
+    let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/quote_private_nominals/readback/adapter.fe");
+    let copied = read_back_support::transplant_fixture(fixture.path(), fixture.content(), &adapter);
+    quote_round_trip::assert_round_trip(&copied.authored, &copied.output, &copied.url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_self_constructors", glob: "*.fe")]
+fn quoted_self_constructors_keep_impl_owner(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("Self constructor transport")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_self_constructors/rejected", glob: "*.fe")]
+fn quoted_self_preserves_field_visibility(fixture: Fixture<&str>) {
+    let authored = field_authority_fixture_db(fixture);
+    let error = prepare(&authored)
+        .err()
+        .expect("Self does not authorize private fields");
+    let rendered = error.rendered().expect("rendered field diagnostic");
+    assert!(rendered.contains("8-0114"), "{rendered}");
+    assert!(rendered.contains("not visible"), "{rendered}");
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_struct_alias/allowed", glob: "*.fe")]
+fn quoted_struct_aliases_keep_owner_and_arguments(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("struct alias transport")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_struct_alias/rejected", glob: "*.fe")]
+fn quoted_struct_aliases_reject_destination_width(fixture: Fixture<&str>) {
+    let authored = field_authority_fixture_db(fixture);
+    let error = prepare(&authored)
+        .err()
+        .expect("Box<u8> must not become Box<u256>");
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains("Box<u8>") && rendered.contains("Box<u256>"),
+        "{rendered}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_struct_alias/allowed", glob: "width.fe")]
+fn quoted_struct_alias_comparison_rejects_changed_width(fixture: Fixture<&str>) {
+    assert_alias_comparison_rejects_changed_width(fixture, 4);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_signature_alias/allowed", glob: "*.fe")]
+fn quoted_signature_aliases_expand_at_provider(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("signature aliases")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_signature_alias/allowed", glob: "fixed_width.fe")]
+fn quoted_signature_comparison_rejects_changed_width(fixture: Fixture<&str>) {
+    use hir::analysis::ty::ty_def::PrimTy;
+    use hir::core::meta::FrozenQuoteSignatureType;
+    assert_quote_comparison_rejects_widened_type(fixture, |code| {
+        let types = &mut code.nodes[code.root].function_types[0];
+        assert_eq!(
+            types.params,
+            vec![Some(FrozenQuoteSignatureType::Primitive(PrimTy::U8))]
+        );
+        assert_eq!(
+            types.result,
+            Some(FrozenQuoteSignatureType::Primitive(PrimTy::U8))
+        );
+        types.params[0] = Some(FrozenQuoteSignatureType::Primitive(PrimTy::U256));
+        types.result = Some(FrozenQuoteSignatureType::Primitive(PrimTy::U256));
+    });
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_signature_alias/rejected", glob: "*.fe")]
+fn quoted_signature_aliases_reject_destination_width(fixture: Fixture<&str>) {
+    use hir::analysis::diagnostics::DiagnosticVoucher;
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let rendered = match prepare(&authored) {
+        Err(error) => error.render(&authored),
+        Ok(Some(output)) => {
+            let wrong = named_function(&output, &url, "wrong");
+            let (errors, _) = hir::analysis::ty::ty_check::check_func_body(&output, wrong);
+            assert!(!errors.is_empty(), "Box<u8> must not become Box<u256>");
+            output.format_complete_diagnostics(
+                &errors
+                    .iter()
+                    .map(|error| error.to_complete(&output))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        Ok(None) => panic!("expected generation"),
+    };
+    assert!(
+        rendered.contains("8-0000")
+            && rendered.contains("Box<u8>")
+            && rendered.contains("Box<u256>"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn expanded_signature_types_share_the_freezing_budget() {
+    let template = include_str!("fixtures/quote_signature_alias/limits/expanded_types.fe.in");
+    for functions in [1, 32] {
+        let source = template
+            .replace("__ELEMENTS__", &vec!["u8"; 1024].join(", "))
+            .replace(
+                "__FUNCTIONS__",
+                &(0..functions)
+                    .map(|index| {
+                        format!(
+                            "        fn generated_{index}(_ value: own Huge) -> Huge {{ value }}\n"
+                        )
+                    })
+                    .collect::<String>(),
+            );
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///expanded_signature_types.fe").unwrap();
+        db.workspace().update(&mut db, url, source);
+        if functions == 1 {
+            prepare(&db)
+                .expect("a single expanded alias fits")
+                .expect("generation");
+        } else {
+            let Err(error) = prepare(&db) else {
+                panic!("expanded signature types bypassed the shared freezing budget");
+            };
+            assert_eq!(error.code(), 3);
+            let rendered = error.render(&db);
+            assert!(rendered.contains("frozen meta nodes limit"), "{rendered}");
+        }
+    }
+}
+
+#[test]
+fn checked_type_freezing_is_bounded_on_the_normal_stack() {
+    use fe_driver::elaboration::read_back::read_back_type;
+    use hir::analysis::ty::ty_def::{PrimTy, TyBase, TyData, TyId};
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///checked_type_freezing.fe").unwrap();
+    db.workspace()
+        .update(&mut db, url.clone(), "fn context() {}".to_owned());
+    let function = named_function(&db, &url, "context");
+    let tuple = TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Tuple(1))));
+    let mut ty = TyId::bool(&db);
+    for depth in 1..=300 {
+        ty = TyId::app(&db, tuple, ty);
+        if depth == 128 {
+            read_back_type(&db, function, ty).expect("ordinary nested type fits");
+        }
+    }
+    assert!(
+        read_back_type(&db, function, ty).is_err(),
+        "deep checked types need a normal construction error"
+    );
+    let pair = TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Tuple(2))));
+    let mut ty = TyId::bool(&db);
+    for _ in 0..16 {
+        ty = TyId::app(&db, TyId::app(&db, pair, ty), ty);
+    }
+    assert!(
+        read_back_type(&db, function, ty).is_err(),
+        "shared checked types still charge every frozen edge"
+    );
+}
+
+#[test]
+fn expanded_alias_types_fail_during_bounded_freezing() {
+    let template = include_str!("fixtures/quote_signature_alias/limits/expanded_types.fe.in");
+    let mut aliases = "type T0 = u8\n".to_owned();
+    for level in 1..=16 {
+        let previous = level - 1;
+        aliases.push_str(&format!("type T{level} = (T{previous}, T{previous})\n"));
+    }
+    aliases.push_str("type Huge = T16");
+    let source = template
+        .replace("type Huge = (__ELEMENTS__)", &aliases)
+        .replace(
+            "__FUNCTIONS__",
+            "fn generated(_ value: own Huge) -> Huge { value }",
+        );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///expanded_alias_type.fe").unwrap();
+    db.workspace().update(&mut db, url, source);
+    let Err(error) = prepare(&db) else {
+        panic!("exponentially shared alias must fail before freezing a large tree");
+    };
+    let rendered = error.render(&db);
+    assert!(
+        rendered.contains("quoted type nodes") && rendered.contains("65537 > 65536"),
+        "{rendered}"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_private_nominals/readback", glob: "source.fe")]
+fn copied_constructor_types_share_the_request_budget(fixture: Fixture<&str>) {
+    use hir::analysis::ty::ty_def::PrimTy;
+    use hir::core::meta::FrozenQuoteSignatureType as T;
+    let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/quote_private_nominals/readback/adapter.fe");
+    let mut copied =
+        read_back_support::transplant_fixture(fixture.path(), fixture.content(), &adapter);
+    let input = HirDb::generated_module(&copied.output, &copied.url).expect("generation");
+    let mut requests = input.requests(&copied.output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("code")
+    };
+    let [FrozenCodeHole::Code(child, _)] = code.nodes[code.root].holes.as_slice() else {
+        panic!("body fragment")
+    };
+    let child = *child;
+    let root = &mut code.nodes[child].rooted_constructors[0];
+    assert_eq!(
+        root.func,
+        Some(0),
+        "read-back keeps the source function index"
+    );
+    root.type_arguments = Some(vec![T::Tuple(vec![T::Primitive(PrimTy::Bool); 65_536])]);
+    input.set_requests(&mut copied.output).to(requests);
+    let file = copied
+        .output
+        .workspace()
+        .get(&copied.output, &copied.url)
+        .unwrap();
+    let errors = hir::lower::generated_hir_errors(&copied.output, copied.output.top_mod(file));
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0].failure,
+        hir::lower::GeneratedQuoteFailure::RequestNodeLimit {
+            actual: 65_537,
+            maximum: 65_536,
+        }
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_signature_alias/limits", glob: "associated_call.fe")]
+fn associated_constant_call_types_share_the_request_budget(fixture: Fixture<&str>) {
+    use hir::analysis::ty::ty_def::PrimTy;
+    let (authored, url) = fixture_db(fixture);
+    let mut output = prepare(&authored)
+        .expect("associated constant")
+        .expect("generation");
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let mut requests = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("code")
+    };
+    let root = code.nodes[code.root]
+        .rooted_funcs
+        .iter_mut()
+        .find(|root| root.assoc_const == Some(0))
+        .expect("constant call");
+    root.type_arguments = Some(vec![FrozenQuoteSignatureType::Tuple(vec![
+        FrozenQuoteSignatureType::Primitive(PrimTy::Bool); 65_536
+    ])]);
+    input.set_requests(&mut output).to(requests);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0].failure,
+        hir::lower::GeneratedQuoteFailure::RequestNodeLimit {
+            actual: 65_537,
+            maximum: 65_536,
+        }
+    );
+}
+
+#[test]
+fn reflected_field_types_share_the_freezing_budget() {
+    let template = include_str!("fixtures/quote_signature_alias/limits/reflected_type.fe.in");
+    for level in [4, 16] {
+        let mut aliases = "type D0<T> = T\n".to_owned();
+        for depth in 1..=level {
+            let previous = depth - 1;
+            aliases.push_str(&format!(
+                "type D{depth}<T> = (D{previous}<T>, D{previous}<T>)\n"
+            ));
+        }
+        let source = template
+            .replace("__ALIASES__", &aliases)
+            .replace("__LEVEL__", &level.to_string());
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///reflected_type_budget.fe").unwrap();
+        db.workspace().update(&mut db, url, source);
+        if level == 4 {
+            prepare(&db)
+                .expect("small reflected type")
+                .expect("generation");
+        } else {
+            let Err(error) = prepare(&db) else {
+                panic!("large reflected metadata was admitted")
+            };
+            assert_eq!(error.code(), 3);
+            let rendered = error.render(&db);
+            assert!(
+                rendered.contains("frozen meta nodes limit exceeded: 65537 > 65536"),
+                "{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reflected_type_holes_charge_each_emitted_expansion() {
+    use hir::core::meta::FrozenQuoteFieldType as F;
+    let template = include_str!("fixtures/quote_signature_alias/limits/reflected_type.fe.in");
+    let source = template
+        .replace("__ALIASES__", "type D0<T> = T")
+        .replace("__LEVEL__", "0");
+    let mut authored = DriverDataBase::default();
+    let url = Url::parse("file:///reflected_type_replay.fe").unwrap();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), source);
+    let mut output = prepare(&authored).expect("small type").expect("generation");
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let original = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &original[0].value else {
+        panic!("code")
+    };
+    let slots = code.nodes[code.root]
+        .holes
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, hole)| {
+            matches!(hole, FrozenCodeHole::Value(_, Some(F::TargetParam(0)))).then_some(slot)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(slots.len(), 3, "impl argument, parameter and result");
+    for slot in slots {
+        let mut changed = original.clone();
+        let FrozenMetaValue::Code(code) = &mut changed[0].value else {
+            panic!("code")
+        };
+        let FrozenCodeHole::Value(_, hint) = &mut code.nodes[code.root].holes[slot] else {
+            panic!("hint")
+        };
+        *hint = Some(F::Tuple(vec![F::TargetParam(0); 65_536]));
+        input.set_requests(&mut output).to(changed);
+        let file = output.workspace().get(&output, &url).unwrap();
+        let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+        assert_eq!(errors.len(), 1, "type-hole slot {slot}");
+        assert!(
+            matches!(errors[0].failure,
+            hir::lower::GeneratedQuoteFailure::RequestNodeLimit { actual, maximum: 65_536 }
+                if (65_537..=65_538).contains(&actual)),
+            "type-hole slot {slot}: {:?}",
+            errors[0].failure
+        );
+    }
+}
+
+#[test]
+fn shared_reflected_types_are_charged_on_item_replay() {
+    let template = include_str!("fixtures/quote_signature_alias/limits/reflected_type.fe.in");
+    let mut aliases = "type D0<T> = T\n".to_owned();
+    for level in 1..=12 {
+        let previous = level - 1;
+        aliases.push_str(&format!(
+            "type D{level}<T> = (D{previous}<T>, D{previous}<T>)\n"
+        ));
+    }
+    let single = template
+        .replace("__ALIASES__", &aliases)
+        .replace("__LEVEL__", "12");
+    let mut control = DriverDataBase::default();
+    let control_url = Url::parse("file:///single_reflected_type_chunk.fe").unwrap();
+    control
+        .workspace()
+        .update(&mut control, control_url, single.clone());
+    prepare(&control)
+        .expect("one reflected item fits")
+        .expect("generation");
+    let source = single
+        .replace("quote { impl", "let chunk = quote { impl")
+        .replace("    } }", "    } }\n    quote {\n        ${chunk}\n        ${chunk}\n        fn marker() {}\n    }");
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///shared_reflected_type_replay.fe").unwrap();
+    db.workspace().update(&mut db, url, source);
+    let Err(error) = prepare(&db) else {
+        panic!("replayed reflected types bypassed the request budget")
+    };
+    assert_eq!(
+        error.code(),
+        4,
+        "freezing fits; output replay needs the limit"
+    );
+    let rendered = error.render(&db);
+    assert!(
+        rendered.contains("quotation request node limit exceeded: 65537 > 65536"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn checked_body_metadata_has_one_aggregate_freezing_budget() {
+    let elements = std::iter::repeat_n("u8", 1024)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = std::iter::repeat_n("0", 1024)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let statements = (0..40)
+        .map(|index| format!("let _value{index}: Huge = identity<Huge>(value())\n"))
+        .collect::<String>();
+    let source = format!(
+        "type Huge = ({elements})\nfn value() -> Huge {{ ({values}) }}\nfn identity<T>(_ value: own T) -> T {{ value }}\nfn subject() -> u256 {{ {statements} 0 }}"
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///checked_body_metadata_budget.fe").unwrap();
+    db.workspace().update(&mut db, url.clone(), source);
+    let subject = named_function(&db, &url, "subject");
+    let result = read_back(&db, subject);
+    assert_eq!(
+        result,
+        Err(ReadBackError::Construction(Box::new(
+            fe_driver::elaboration::construction::ConstructionError::Limit {
+                name: fe_driver::elaboration::FreezingLimitKind::MetaNodes,
+                actual: 65537,
+                maximum: 65536,
+            },
+        ))),
+        "individually bounded types need one aggregate read-back limit"
+    );
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/read_back_view_transport", glob: "*.fe")]
+fn repeated_code_edges_share_the_freezing_budget(fixture: Fixture<&str>) {
+    use fe_driver::elaboration::{construction::ConstructionError, invocations};
+    use hir::analysis::semantic::{
+        CodeSource, QuotedCode, SemConstId, SemConstValue, StructuralHandle,
+    };
+    let (db, url) = fixture_db(fixture);
+    let subject = named_function(&db, &url, "subject");
+    let child = fe_driver::elaboration::read_back::read_back_value(&db, subject).unwrap();
+    let &SemConstValue::Structural { ty, .. } = child.value(&db) else {
+        panic!("code value")
+    };
+    let file = db.workspace().get(&db, &url).unwrap();
+    let invocation = invocations(&db, file).unwrap().pop().unwrap();
+    let input = invocation.record_input(&db).unwrap();
+    // Resource mutation: all edges point at one already issued child. This
+    // carrier is inspected only at freezing, not admitted as an output template.
+    for edges in [2, 65_536] {
+        let graph = QuotedCode::new(&db, CodeSource::Empty, vec![child; edges]);
+        let value = SemConstId::new(
+            &db,
+            SemConstValue::Structural {
+                ty,
+                handle: StructuralHandle::Code(graph),
+            },
+        );
+        let frozen = input.freeze_value(value);
+        if edges == 2 {
+            assert!(frozen.is_ok(), "small shared graph: {frozen:?}");
+        } else {
+            assert!(
+                matches!(
+                    frozen,
+                    Err(ConstructionError::Limit {
+                        name: fe_driver::elaboration::FreezingLimitKind::MetaNodes,
+                        actual: 65537,
+                        maximum: 65536,
+                    })
+                ),
+                "{frozen:?}"
+            );
+        }
+    }
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_open_scope/allowed", glob: "parameter_shadow.fe")]
+fn replay_preflights_nested_binder_metadata(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let mut output = prepare(&authored).unwrap().unwrap();
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let mut requests = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("code")
+    };
+    let node = &mut code.nodes[code.root];
+    let site = node.template.as_ref().unwrap().expr;
+    let local = node.locals.first_mut().expect("shadowing local");
+    // Resource mutation, not a valid binder-identity mutation. The guard must
+    // run before attempting to consume or clone the oversized use table.
+    local.uses = vec![site; 65_536];
+    input.set_requests(&mut output).to(requests);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+    assert_eq!(errors.len(), 1);
+    assert!(
+        matches!(errors[0].failure,
+        hir::lower::GeneratedQuoteFailure::RequestNodeLimit { actual, maximum: 65_536 }
+            if actual > 65_536),
+        "{:?}",
+        errors[0].failure
+    );
+}
+
+#[test]
+fn copied_kind_bounds_have_a_pre_recursion_limit() {
+    for depth in [128, 300] {
+        let kind = "* -> ".repeat(depth) + "*";
+        let source = format!(
+            "use core::meta::{{Code, Item, Record}}\nconst fn emit(_ record: Record) -> Code<Item> {{ quote {{ fn generated() -> u256 {{ 0 }} }} }}\n#[generate(emit)]\nstruct Target<F: {kind}> {{}}"
+        );
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///quoted_kind_bound_limit.fe").unwrap();
+        db.workspace().update(&mut db, url, source);
+        if depth == 128 {
+            prepare(&db)
+                .expect("ordinary kind bound fits")
+                .expect("generation");
+        } else {
+            let Err(error) = prepare(&db) else {
+                panic!("deep copied kind needs a quotation diagnostic")
+            };
+            assert_eq!(error.code(), 4);
+            let rendered = error.render(&db);
+            assert!(
+                rendered.contains("quoted type nesting limit exceeded: 257 > 256"),
+                "{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reflected_hints_share_the_enclosing_type_depth_limit() {
+    use hir::core::meta::{FrozenQuoteFieldType as F, FrozenQuoteSignatureType as T};
+    let source = include_str!("fixtures/quote_signature_alias/limits/reflected_type.fe.in")
+        .replace("__ALIASES__", "type D0<T> = T")
+        .replace("__LEVEL__", "0");
+    let mut authored = DriverDataBase::default();
+    let url = Url::parse("file:///combined_type_hint_depth.fe").unwrap();
+    authored
+        .workspace()
+        .update(&mut authored, url.clone(), source);
+    let mut output = prepare(&authored).unwrap().unwrap();
+    let input = HirDb::generated_module(&output, &url).unwrap();
+    let mut requests = input.requests(&output).clone();
+    let FrozenMetaValue::Code(code) = &mut requests[0].value else {
+        panic!("code")
+    };
+    let node = &mut code.nodes[code.root];
+    let argument = &mut node.impl_trait_type_arguments.as_mut().unwrap()[0];
+    let T::Hole(slot) = argument else {
+        panic!("field type hole")
+    };
+    let slot = *slot;
+    let mut nested = T::Hole(slot);
+    for _ in 0..200 {
+        nested = T::Ptr(Box::new(nested));
+    }
+    *argument = nested;
+    let FrozenCodeHole::Value(_, Some(hint)) = &mut node.holes[slot as usize] else {
+        panic!("hint")
+    };
+    let mut nested = F::TargetParam(0);
+    for _ in 0..100 {
+        nested = F::Ptr(Box::new(nested));
+    }
+    *hint = nested;
+    input.set_requests(&mut output).to(requests);
+    let file = output.workspace().get(&output, &url).unwrap();
+    let errors = hir::lower::generated_hir_errors(&output, output.top_mod(file));
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0].failure,
+        hir::lower::GeneratedQuoteFailure::TypeDepthLimit {
+            actual: 257,
+            maximum: 256
+        }
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fragment_locals",
+    glob: "*.fe",
+)]
+fn ordinary_fragment_locals_retain_checked_binders(fixture: Fixture<&str>) {
+    let (authored, url) = fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("ordinary fragment binders generate")
+        .expect("generation request");
+    let file = output.workspace().get(&output, &url).unwrap();
+    let module = output.top_mod(file);
+    assert!(hir::lower::generated_hir_errors(&output, module).is_empty());
+    assert!(hir::lower::generated_quote_hygiene_errors(&output, module).is_empty());
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fragment_locals",
+    glob: "arms.fe",
+)]
+fn fragment_local_comparison_rejects_changed_binder_identity(fixture: Fixture<&str>) {
+    assert_quote_comparison_rejects_mutation(
+        fixture,
+        |authored, code| {
+            let node = code
+                .nodes
+                .iter_mut()
+                .find(|node| node.locals.iter().any(|local| local.func.is_none()))
+                .expect("arm fragment locals");
+            let key = node.template.as_ref().unwrap();
+            let file = authored
+                .workspace()
+                .get(authored, key.owner.file())
+                .unwrap();
+            let owner = authored
+                .top_mod(file)
+                .all_funcs(authored)
+                .iter()
+                .copied()
+                .find(|func| func.frozen_locator(authored).as_ref() == Some(&key.owner))
+                .unwrap();
+            let body = owner.body(authored).unwrap();
+            let hir::hir_def::Expr::Quote(quote) = body.exprs(authored)[key.expr].unwrap_ref()
+            else {
+                panic!("authored arm quote")
+            };
+            let index = |name: &str| {
+                node.locals
+                    .iter()
+                    .position(|local| {
+                        let hir::hir_def::Pat::Path(hir::hir_def::Partial::Present(path), _) =
+                            quote.template.pats(authored)[local.binder].unwrap_ref()
+                        else {
+                            return false;
+                        };
+                        path.as_ident(authored)
+                            .is_some_and(|ident| ident.data(authored) == name)
+                    })
+                    .expect("named tuple binder")
+            };
+            let left = index("left");
+            let right = index("right");
+            assert_ne!(left, right);
+            assert_eq!(node.locals[left].uses.len(), 1);
+            assert_eq!(node.locals[right].uses.len(), 1);
+            let uses = node.locals[left].uses.clone();
+            node.locals[left].uses = node.locals[right].uses.clone();
+            node.locals[right].uses = uses;
+        },
+        &["local use retains its binder"],
+    );
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/cli_output/single_files",
+    glob: "quote_match_nonexhaustive.fe",
+)]
+fn generated_match_diagnostic_points_at_authored_match(fixture: Fixture<&str>) {
+    let source = fixture.content().to_owned();
+    let (authored, _) = fixture_db(fixture);
+    let error = match prepare(&authored) {
+        Err(error) => error,
+        Ok(_) => panic!("missing enum arm must be rejected"),
+    };
+    assert_eq!(error.code(), 5);
+    let line = source
+        .lines()
+        .position(|line| line.contains("match self"))
+        .unwrap()
+        + 1;
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains(&format!("quote_match_nonexhaustive.fe:{line}:")),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("8-0034") && rendered.contains("Mode::Off"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("generated here"), "{rendered}");
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_open_scope/rejected",
+    glob: "arm_shadow_type.fe",
+)]
+fn generated_arm_type_diagnostic_keeps_fragment_source(fixture: Fixture<&str>) {
+    let source = fixture.content().to_owned();
+    let snapshot_path = fixture.path().to_owned();
+    let (authored, _) = fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("arm-local u256 cannot match an enum pattern")
+    };
+    let line = source
+        .lines()
+        .position(|line| line.contains("match other"))
+        .unwrap()
+        + 1;
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains(&format!("arm_shadow_type.fe:{line}:")),
+        "{rendered}"
+    );
+    assert!(rendered.contains("generated here"), "{rendered}");
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[test]
+fn generated_match_diagnostic_keeps_provider_file() {
+    let lib = include_str!("fixtures/quote_diagnostic_sources/lib.fe");
+    let author = include_str!("fixtures/quote_diagnostic_sources/author.fe");
+    let mut authored = DriverDataBase::default();
+    for (path, source) in [
+        (
+            "file:///project/fe.toml",
+            "name = \"quote_diagnostic_sources\"\nversion = \"0.1.0\"\n",
+        ),
+        ("file:///project/src/lib.fe", lib),
+        ("file:///project/src/author.fe", author),
+    ] {
+        authored
+            .workspace()
+            .update(&mut authored, Url::parse(path).unwrap(), source.to_owned());
+    }
+    let Err(error) = prepare(&authored) else {
+        panic!("missing arm must be rejected")
+    };
+    assert_eq!(error.code(), 5, "{error:?}");
+    let line = author
+        .lines()
+        .position(|line| line.contains("match self"))
+        .unwrap()
+        + 1;
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains(&format!("author.fe:{line}:")),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("lib.fe") && rendered.contains("generated here"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("8-0034") && rendered.contains("Mode::Off"),
+        "{rendered}"
+    );
+    let snapshot_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/quote_diagnostic_sources/author.fe");
+    test_utils::snap_test!(rendered, snapshot_path.to_str().unwrap());
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_diagnostic_sources",
+    glob: "or_pattern_binders.fe",
+)]
+fn generated_or_pattern_diagnostic_names_authored_binders(fixture: Fixture<&str>) {
+    let source = fixture.content().to_owned();
+    let (mut authored, url) = fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("different variant binder groups cannot share an or-pattern")
+    };
+    assert_eq!(error.code(), 5);
+    let rendered = error.render(&authored);
+    let line = source
+        .lines()
+        .position(|line| line.contains("match s"))
+        .unwrap()
+        + 1;
+    assert!(
+        rendered.contains("the binders of `${a}` are not available here"),
+        "{rendered}"
+    );
+    let column = source
+        .lines()
+        .nth(line - 1)
+        .unwrap()
+        .find("${a.at(fa)}")
+        .unwrap()
+        + 1;
+    assert!(
+        rendered.contains(&format!("or_pattern_binders.fe:{line}:{column}")),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("undefined variable `<quote-group-local-"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("generated here"), "{rendered}");
+    assert!(rendered.contains("8-0076"), "{rendered}");
+
+    // Ordinary authored binders reject this same or-pattern shape.
+    authored.workspace().update(
+        &mut authored,
+        url.clone(),
+        "enum E { A(u256), B(u256) }\nfn f(_ s: E) -> u256 { match s { E::A(a) | E::B(b) => a } }"
+            .into(),
+    );
+    let file = authored.workspace().get(&authored, &url).unwrap();
+    let ordinary = authored.run_on_ingot(authored.top_mod(file).ingot(&authored));
+    assert!(ordinary.has_errors(&authored));
+    let rendered = ordinary.format_diags(&authored);
+    assert!(rendered.contains("8-0076"), "{rendered}");
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_diagnostic_sources",
+    glob: "missing_protocol.fe",
+)]
+fn missing_quotation_protocol_reports_the_quote(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let (mut db, url) = fixture_db(fixture);
+    let (core_url, text) = db
+        .workspace()
+        .all_files(&db)
+        .iter()
+        .find(|(_, file)| file.text(&db).contains("pub struct Where {}"))
+        .map(|(url, file)| (url.clone(), file.text(&db).clone()))
+        .expect("bundled quotation protocol");
+    db.workspace().update(
+        &mut db,
+        core_url,
+        text.replace("pub struct Where {}", "pub struct MissingWhere {}"),
+    );
+    let file = db.workspace().get(&db, &url).unwrap();
+    let diagnostics = db.run_on_ingot(db.top_mod(file).ingot(&db));
+    let rendered = diagnostics.format_diags(&db);
+    assert!(
+        rendered.contains("quotation requires `core::meta::Where`"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("missing_protocol.fe:4:"), "{rendered}");
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[test]
+fn every_missing_quotation_protocol_entry_is_diagnosed() {
+    use hir::core::meta::MetaItem;
+    for item in MetaItem::ALL {
+        let mut db = DriverDataBase::default();
+        let url: Url = "file:///missing_entry.fe".parse().unwrap();
+        db.workspace().update(
+            &mut db,
+            url.clone(),
+            "pub const fn author() -> u256 { let code = quote { 1 }\n0 }".into(),
+        );
+        let (core_url, text) = db
+            .workspace()
+            .all_files(&db)
+            .iter()
+            .find(|(_, file)| file.text(&db).contains("pub struct Where {}"))
+            .map(|(url, file)| (url.clone(), file.text(&db).clone()))
+            .unwrap();
+        let name = item.path().rsplit("::").next().unwrap();
+        let declaration = match item {
+            MetaItem::Code => "pub struct Code<".to_owned(),
+            MetaItem::DeclarationName => "pub enum DeclarationName ".to_owned(),
+            _ => format!("pub struct {name} "),
+        };
+        assert!(text.contains(&declaration));
+        let missing = declaration.replacen(name, &format!("Missing{name}"), 1);
+        let changed = text.replacen(&declaration, &missing, 1);
+        db.workspace()
+            .update(&mut db, core_url.clone(), changed.clone());
+        let file = db.workspace().get(&db, &url).unwrap();
+        let diagnostics = db.run_on_ingot(db.top_mod(file).ingot(&db));
+        let rendered = diagnostics.format_diags(&db);
+        drop(diagnostics);
+        assert!(
+            rendered.contains(&format!("quotation requires `{}`", item.path())),
+            "{item:?}: {rendered}"
+        );
+        assert!(rendered.contains("error[8-0115]"), "{rendered}");
+
+        // A lookalike in the author's scope cannot repair the core protocol.
+        db.workspace().update(&mut db, url.clone(), format!(
+            "pub struct {name} {{}}\npub const fn author() -> u256 {{ let code = quote {{ 1 }}\n0 }}"));
+        let rendered = db
+            .run_on_ingot(db.top_mod(file).ingot(&db))
+            .format_diags(&db);
+        assert!(
+            rendered.contains(&format!("quotation requires `{}`", item.path())),
+            "{rendered}"
+        );
+
+        // Check a concrete result type, even with the author's lookalike in scope.
+        db.workspace().update(&mut db, url.clone(), format!(
+            "pub struct {name} {{}}\npub const fn author() -> core::meta::Code<core::meta::Expr> {{ quote {{ 1 }} }}"));
+
+        // Ordinary exports and aliases of the actual core type retain its identity.
+        let alias = if item == MetaItem::Code {
+            "pub type Code<K> = MissingCode<K>".to_owned()
+        } else {
+            format!("pub type {name} = Missing{name}")
+        };
+        for repair in [
+            format!("pub use ingot::meta::Missing{name} as {name}"),
+            alias,
+        ] {
+            db.workspace()
+                .update(&mut db, core_url.clone(), format!("{changed}\n{repair}\n"));
+            let diagnostics = db.run_on_ingot(db.top_mod(file).ingot(&db));
+            assert!(
+                !diagnostics.has_errors(&db),
+                "{item:?}: {repair}: {}",
+                diagnostics.format_diags(&db)
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_type_read_back_preserves_the_underlying_depth_failure() {
+    let mut source = String::from("type D0 = u8\n");
+    for index in 1..=300 {
+        source.push_str(&format!("type D{index} = (D{}, u8)\n", index - 1));
+    }
+    source.push_str("fn subject(value: own D300) -> D300 { value }\n");
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///checked_type_read_back_depth.fe").unwrap();
+    db.workspace().update(&mut db, url.clone(), source);
+    let subject = named_function(&db, &url, "subject");
+    let error =
+        fe_driver::elaboration::read_back::read_back_type(&db, subject, subject.return_ty(&db))
+            .expect_err("expanded type needs a normal depth diagnostic");
+    assert_eq!(
+        error,
+        ReadBackError::Construction(Box::new(
+            fe_driver::elaboration::construction::ConstructionError::Limit {
+                name: fe_driver::elaboration::FreezingLimitKind::TypeDepth,
+                actual: 257,
+                maximum: 256,
+            },
+        ))
+    );
+}
+
+#[test]
+fn checked_body_issuance_defers_admission_and_preserves_unsupported_type_rejection() {
+    use fe_driver::elaboration::{construction::ConstructionError, invocations};
+    let source = format!(
+        "{}\nuse core::meta::{{Record, Code, Item}}\nconst fn author(_ record: Record) -> Code<Item> {{ quote {{ fn generated() -> u256 {{ 0 }} }} }}\n#[generate(author)]\nstruct Target {{}}\n",
+        include_str!("fixtures/read_back_cast/read_back_cast_shadow.fe"),
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///checked_body_issuance.fe").unwrap();
+    db.workspace().update(&mut db, url.clone(), source);
+    let subject = named_function(&db, &url, "unsupported_const_array");
+    assert_eq!(read_back(&db, subject), Err(ReadBackError::UnsupportedType));
+    let value = fe_driver::elaboration::read_back::read_back_value(&db, subject)
+        .expect("issuance retains checked source without freezing transport metadata");
+    let file = db.workspace().get(&db, &url).unwrap();
+    let requests = invocations(&db, file).unwrap();
+    let input = requests[0].record_input(&db).unwrap();
+    assert_eq!(
+        input.freeze_value(value),
+        Err(ConstructionError::ReadBack(ReadBackError::UnsupportedType)),
+        "transport must retain the native read-back rejection",
     );
 }

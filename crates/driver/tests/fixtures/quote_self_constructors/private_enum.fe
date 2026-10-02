@@ -1,0 +1,20 @@
+pub trait Score { fn score(self) -> u256 }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Score for ${record} {
+                fn score(self) -> u256 {
+                    match self { Self::A => 1, Self::B(x) => x }
+                }
+            }
+        }
+    }
+}
+mod owner {
+    #[generate(ingot::author::emit)]
+    enum E { A, B(u256) }
+    pub fn value() -> u256 { E::A.score() + E::B(5).score() }
+}
+#[test]
+fn values() { assert!(owner::value() == 6) }

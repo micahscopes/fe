@@ -8,9 +8,7 @@
 
 use rustc_hash::FxHashMap;
 
-use super::{
-    TyChecker, env::ExprProp, expr::resolve_ident_expr, owner::BodyOwner, path::ResolvedPathInBody,
-};
+use super::{TyChecker, env::ExprProp, expr::resolve_ident_expr, path::ResolvedPathInBody};
 use crate::{
     analysis::{
         name_resolution::{PathRes, resolve_path},
@@ -43,7 +41,7 @@ pub struct CheckedQuote<'db> {
     pub names: Vec<QuoteNameUse<'db>>,
     /// Generic item index for each quoted function, in function visiting order.
     pub function_generic_items: Vec<u32>,
-    /// Explicit local annotations in quoted function bodies.
+    /// Explicit local annotations in quoted functions and standalone fragments.
     pub local_types: Vec<QuoteLocalType<'db>>,
     /// Checked primitive types for associated constants in a quoted impl.
     pub assoc_const_primitives: Vec<Option<PrimTy>>,
@@ -51,7 +49,7 @@ pub struct CheckedQuote<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuoteLocalType<'db> {
-    pub func: u32,
+    pub func: Option<u32>,
     pub stmt: StmtId,
     pub ty: HirTyId<'db>,
 }
@@ -117,7 +115,7 @@ pub enum QuoteSignatureSite {
         predicate: u32,
     },
     LocalType {
-        func: u32,
+        func: Option<u32>,
         stmt: StmtId,
     },
     CallTypeArgument {
@@ -169,11 +167,7 @@ pub enum QuoteBinder {
 
 impl<'db> TyChecker<'db> {
     pub(super) fn in_const_context(&self) -> bool {
-        match self.env.owner() {
-            BodyOwner::Func(func) => func.is_const(self.db),
-            BodyOwner::Const(_) | BodyOwner::AnonConstBody { .. } => true,
-            BodyOwner::ContractInit { .. } | BodyOwner::ContractRecvArm { .. } => false,
-        }
+        self.env.owner().is_const_context(self.db)
     }
 
     pub(super) fn callable_contains_quote(&self, callable: CallableDef<'db>) -> bool {
@@ -208,8 +202,15 @@ impl<'db> TyChecker<'db> {
             })
             .collect();
 
-        let Some(meta) = QuoteTypes::resolve(self) else {
-            return ExprProp::invalid(db);
+        let meta = match QuoteTypes::resolve(self) {
+            Ok(meta) => meta,
+            Err(item) => {
+                self.push_diag(BodyDiag::MissingMetaItem {
+                    primary: quote_span,
+                    item,
+                });
+                return ExprProp::invalid(db);
+            }
         };
 
         let splices = quote.splice_only_body(db);
@@ -222,22 +223,8 @@ impl<'db> TyChecker<'db> {
                     self.push_diag(BodyDiag::QuoteSpliceKinds(quote_span.clone()));
                     return ExprProp::invalid(db);
                 }
-                match first {
-                    Some(QuoteKind::Arm) => {
-                        (QuoteKind::Arm, vec![QuoteHolePosition::Arms; holes.len()])
-                    }
-                    Some(QuoteKind::Pat) => {
-                        (QuoteKind::Pat, vec![QuoteHolePosition::Pat; holes.len()])
-                    }
-                    Some(QuoteKind::Item) => {
-                        (QuoteKind::Item, vec![QuoteHolePosition::Items; holes.len()])
-                    }
-                    Some(QuoteKind::Where) => (
-                        QuoteKind::Where,
-                        vec![QuoteHolePosition::Where; holes.len()],
-                    ),
-                    _ => (QuoteKind::Expr, vec![QuoteHolePosition::Expr; holes.len()]),
-                }
+                let kind = first.unwrap_or(QuoteKind::Expr);
+                (kind, vec![QuoteHolePosition::Code(kind); holes.len()])
             }
         };
 
@@ -317,19 +304,20 @@ impl<'db> TyChecker<'db> {
             return;
         }
         let accepted = match position {
-            QuoteHolePosition::Arms => meta.code_kind(db, ty) == Some(QuoteKind::Arm),
-            QuoteHolePosition::Pat => meta.code_kind(db, ty) == Some(QuoteKind::Pat),
-            QuoteHolePosition::Expr => {
-                meta.code_kind(db, ty) == Some(QuoteKind::Expr)
-                    || ty.is_bool(db)
-                    || ty.is_integral(db)
-                    || ty.is_string(db)
+            QuoteHolePosition::Code(kind) => {
+                meta.code_kind(db, ty) == Some(kind)
+                    || (kind == QuoteKind::Expr
+                        && (ty.is_bool(db) || ty.is_integral(db) || ty.is_string(db)))
             }
-            QuoteHolePosition::Member | QuoteHolePosition::FieldLabel => ty == meta.field,
-            QuoteHolePosition::Type => ty == meta.field_type || ty == meta.record,
-            QuoteHolePosition::Name => ty == meta.declaration_name || ty == meta.field,
-            QuoteHolePosition::Items => meta.code_kind(db, ty) == Some(QuoteKind::Item),
-            QuoteHolePosition::Where => meta.code_kind(db, ty) == Some(QuoteKind::Where),
+            QuoteHolePosition::Member | QuoteHolePosition::FieldLabel => {
+                ty == meta.get(MetaItem::Field)
+            }
+            QuoteHolePosition::Type => {
+                ty == meta.get(MetaItem::FieldType) || ty == meta.get(MetaItem::Record)
+            }
+            QuoteHolePosition::Name => {
+                ty == meta.get(MetaItem::DeclarationName) || ty == meta.get(MetaItem::Field)
+            }
         };
         if accepted {
             return;
@@ -339,14 +327,12 @@ impl<'db> TyChecker<'db> {
             // Nothing decided the splice's type; the position's main value
             // type decides it.
             let expected = match position {
-                QuoteHolePosition::Arms => meta.code(db, QuoteKind::Arm),
-                QuoteHolePosition::Pat => meta.code(db, QuoteKind::Pat),
-                QuoteHolePosition::Expr => meta.code(db, QuoteKind::Expr),
-                QuoteHolePosition::Member | QuoteHolePosition::FieldLabel => meta.field,
-                QuoteHolePosition::Type => meta.field_type,
-                QuoteHolePosition::Name => meta.declaration_name,
-                QuoteHolePosition::Items => meta.code(db, QuoteKind::Item),
-                QuoteHolePosition::Where => meta.code(db, QuoteKind::Where),
+                QuoteHolePosition::Code(kind) => meta.code(db, kind),
+                QuoteHolePosition::Member | QuoteHolePosition::FieldLabel => {
+                    meta.get(MetaItem::Field)
+                }
+                QuoteHolePosition::Type => meta.get(MetaItem::FieldType),
+                QuoteHolePosition::Name => meta.get(MetaItem::DeclarationName),
             };
             self.equate_ty(ty, expected, span);
             return;
@@ -360,46 +346,25 @@ impl<'db> TyChecker<'db> {
 }
 
 /// The designated `core::meta` types a quote's splices are checked against.
-struct QuoteTypes<'db> {
-    code: TyId<'db>,
-    expr: TyId<'db>,
-    pat: TyId<'db>,
-    arm: TyId<'db>,
-    item: TyId<'db>,
-    where_: TyId<'db>,
-    record: TyId<'db>,
-    field: TyId<'db>,
-    field_type: TyId<'db>,
-    declaration_name: TyId<'db>,
-}
+struct QuoteTypes<'db>([TyId<'db>; MetaItem::ALL.len()]);
 
 impl<'db> QuoteTypes<'db> {
-    fn resolve(tc: &TyChecker<'db>) -> Option<Self> {
-        let scope = tc.env.scope();
-        let get = |item: MetaItem| item.resolve(tc.db, scope);
-        Some(Self {
-            code: get(MetaItem::Code)?,
-            expr: get(MetaItem::Expr)?,
-            pat: get(MetaItem::Pat)?,
-            arm: get(MetaItem::Arm)?,
-            item: get(MetaItem::Item)?,
-            where_: get(MetaItem::Where)?,
-            record: get(MetaItem::Record)?,
-            field: get(MetaItem::Field)?,
-            field_type: get(MetaItem::FieldType)?,
-            declaration_name: get(MetaItem::DeclarationName)?,
-        })
+    fn resolve(tc: &TyChecker<'db>) -> Result<Self, MetaItem> {
+        let resolved = MetaItem::ALL.map(|item| item.resolve(tc.db, tc.env.scope()).ok_or(item));
+        for result in &resolved {
+            (*result)?;
+        }
+        Ok(Self(resolved.map(|result| {
+            result.expect("all designated items resolved")
+        })))
+    }
+
+    fn get(&self, item: MetaItem) -> TyId<'db> {
+        self.0[item as usize]
     }
 
     fn code(&self, db: &'db dyn crate::analysis::HirAnalysisDb, kind: QuoteKind) -> TyId<'db> {
-        let kind = match kind {
-            QuoteKind::Expr => self.expr,
-            QuoteKind::Pat => self.pat,
-            QuoteKind::Arm => self.arm,
-            QuoteKind::Item => self.item,
-            QuoteKind::Where => self.where_,
-        };
-        TyId::app(db, self.code, kind)
+        TyId::app(db, self.get(MetaItem::Code), self.get(kind.meta_item()))
     }
 
     /// `K` when `ty` is `Code<K>`.
@@ -409,17 +374,15 @@ impl<'db> QuoteTypes<'db> {
         ty: TyId<'db>,
     ) -> Option<QuoteKind> {
         let (base, args) = ty.decompose_ty_app(db);
-        if base != self.code {
+        if base != self.get(MetaItem::Code) {
             return None;
         }
-        match args {
-            [kind] if *kind == self.expr => Some(QuoteKind::Expr),
-            [kind] if *kind == self.arm => Some(QuoteKind::Arm),
-            [kind] if *kind == self.pat => Some(QuoteKind::Pat),
-            [kind] if *kind == self.item => Some(QuoteKind::Item),
-            [kind] if *kind == self.where_ => Some(QuoteKind::Where),
-            _ => None,
-        }
+        let [argument] = args else {
+            return None;
+        };
+        QuoteKind::ALL
+            .into_iter()
+            .find(|kind| self.get(kind.meta_item()) == *argument)
     }
 }
 
@@ -850,20 +813,17 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         match data {
             Stmt::Let(pat, ty, init) => {
                 if let Some(ty) = ty {
-                    if let Some(func) = self.active_func {
-                        self.local_types.push(QuoteLocalType {
-                            func,
-                            stmt,
-                            ty: *ty,
-                        });
-                        let previous = self
-                            .signature_site
-                            .replace(QuoteSignatureSite::LocalType { func, stmt });
-                        self.walk_ty(*ty);
-                        self.signature_site = previous;
-                    } else {
-                        self.walk_ty(*ty);
-                    }
+                    let func = self.active_func;
+                    self.local_types.push(QuoteLocalType {
+                        func,
+                        stmt,
+                        ty: *ty,
+                    });
+                    let previous = self
+                        .signature_site
+                        .replace(QuoteSignatureSite::LocalType { func, stmt });
+                    self.walk_ty(*ty);
+                    self.signature_site = previous;
                 }
                 if let Some(init) = init {
                     self.walk_expr(*init);

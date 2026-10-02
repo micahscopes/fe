@@ -94,10 +94,10 @@ fn provider_private_type_cannot_enter_generated_signature(fixture: Fixture<&str>
     let error = fe_driver::elaboration::prepare_target(&db, &project_url)
         .err()
         .expect("private type in generated signature must fail");
-    assert_eq!(error.code, 5, "{error:?}");
-    assert!(error.message.contains("Scratch"), "{error:?}");
+    assert_eq!(error.code(), 5, "{error:?}");
+    assert!(error.message().contains("Scratch"), "{error:?}");
     assert!(
-        error.message.contains("not visible") || error.message.contains("private"),
+        error.message().contains("not visible") || error.message().contains("private"),
         "{error:?}"
     );
 }

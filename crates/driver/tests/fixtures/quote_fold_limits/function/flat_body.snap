@@ -1,0 +1,19 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_fold_limits/function/flat_body.fe
+---
+error[18-0004]: invalid generated declaration: quoted function node limit exceeded: 8193 > 8192
+     ┌─ flat_body.fe:4:9
+     │
+   4 │ ╭         quote { pub fn huge() -> u256 {
+   5 │ │             let values = [
+   6 │ │                 0,
+   7 │ │                 0,
+     · │
+8199 │ │             0
+8200 │ │         } }
+     │ ╰───────────^ invalid generated declaration: quoted function node limit exceeded: 8193 > 8192
+     · │
+8203 │   #[generate(ingot::author::emit)]
+     │   -------------------------------- generated here

@@ -1,0 +1,18 @@
+// F3 recheck (RD83): body reads a private field of a provider-private-field struct.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub struct Counter { value: u256 }
+    fn make() -> Counter { Counter { value: 5 } }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn read_private() -> u256 {
+                let c = make()
+                c.value
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+#[test]
+fn t() { assert!(read_private() == 5) }

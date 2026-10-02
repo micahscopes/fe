@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_open_scope/rejected/arm_shadow_type.fe
+---
+error[8-0000]: type mismatch
+   ┌─ arm_shadow_type.fe:12:68
+   │
+12 │         let arms: Code<Arm> = quote(other) { ${l} => match other { ${r} => ${l.at(f)} == ${r.at(f)}, _ => false } }
+   │                                                                    ^^^^ expected `u256`, but `E` is given
+   ·
+20 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

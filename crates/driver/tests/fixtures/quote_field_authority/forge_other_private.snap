@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/forge_other_private.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/forge_other_private.fe: error[8-0114]: field is not visible to the quote provider
+   ┌─ forge_other_private.fe:5:78
+   │
+ 5 │         quote { pub fn mint() -> ingot::dest::Wallet { ingot::dest::Wallet { balance: 1000000 } } }
+   │                                                                              ^^^^^^^^^^^^^^^^ `forge_other_private::dest::Wallet::balance` requires provider visibility or an issued Field handle
+   ·
+11 │     #[generate(ingot::author::emit)]
+   │     -------------------------------- generated here

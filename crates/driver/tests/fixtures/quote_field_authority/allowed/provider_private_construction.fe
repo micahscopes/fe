@@ -1,0 +1,18 @@
+// RD83 provider-private items in bodies: construct provider-private struct and pass to private fn (expected 6)
+mod author {
+    use core::meta::{Code, Item, Record}
+    struct Priv { v: u256 }
+    pub struct Half { pub a: u256, b: u256 }
+    fn make() -> Priv { Priv { v: 5 } }
+    fn read(_ p: Priv) -> u256 { p.v }
+    mod hidden { pub fn deep() -> u256 { 9 } }
+    trait PrivTr { fn pt(self) -> u256 }
+    impl PrivTr for u256 { fn pt(self) -> u256 { self + 100 } }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote { pub fn gen() -> u256 { read(Priv { v: 6 }) } }
+    }
+}
+#[generate(ingot::author::emit)]
+pub struct T {}
+#[test]
+fn t() { assert!(gen() == 6) }

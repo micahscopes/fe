@@ -6,7 +6,7 @@ use super::{FileLowerCtxt, body::BodyCtxt};
 use crate::hir_def::{
     AttrListId, BodyKind, Expr, ExprId, FuncModifiers, FuncParamListId, GenericParamListId,
     IdentId, Quote, QuoteAssocType, QuoteBlockItem, QuoteConst, QuoteFragment, QuoteFunc,
-    QuoteHole, QuoteHolePosition, QuoteImpl, QuoteItem, QuoteName, QuoteWhereClause,
+    QuoteHole, QuoteHolePosition, QuoteImpl, QuoteItem, QuoteKind, QuoteName, QuoteWhereClause,
     QuoteWherePredicate, TrackedItemVariant, TraitRefId, TypeId, WherePredicate,
 };
 
@@ -127,7 +127,7 @@ fn lower_item_entry<'db>(
 }
 
 fn items_hole<'db>(ctxt: &mut FileLowerCtxt<'db>, hole: ast::QuoteHole) -> Option<QuoteItem<'db>> {
-    ctxt.quote_hole(QuoteHolePosition::Items, hole.expr())
+    ctxt.quote_hole(QuoteHolePosition::Code(QuoteKind::Item), hole.expr())
         .map(QuoteItem::Hole)
 }
 
@@ -293,7 +293,7 @@ fn lower_where_clause<'db>(
             } else {
                 let hole = ast::QuoteHole::cast(node)?;
                 ctxt.f_ctxt
-                    .quote_hole(QuoteHolePosition::Where, hole.expr())
+                    .quote_hole(QuoteHolePosition::Code(QuoteKind::Where), hole.expr())
                     .map(QuoteWherePredicate::Hole)
             }
         })
@@ -306,7 +306,8 @@ pub(super) fn lower_expr_hole(
     ctxt: &mut BodyCtxt<'_, '_>,
     hole: &ast::QuoteHoleExpr,
 ) -> Option<u32> {
-    ctxt.f_ctxt.quote_hole(QuoteHolePosition::Expr, hole.expr())
+    ctxt.f_ctxt
+        .quote_hole(QuoteHolePosition::Code(QuoteKind::Expr), hole.expr())
 }
 
 /// `x.${f}`.

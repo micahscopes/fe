@@ -1,0 +1,7 @@
+mod author {
+    enum Priv { A }
+}
+pub fn unauthorized() -> u256 {
+    let value = ingot::author::Priv::A
+    0
+}

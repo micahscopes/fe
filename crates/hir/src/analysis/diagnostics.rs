@@ -37,6 +37,33 @@ use std::cmp::Ordering;
 
 use common::file::File;
 
+// Issued field references have no authored variable declaration. Their existing
+// generated span retains the written binder-group splice instead.
+fn authored_quote_binder_message(db: &dyn SpannedHirAnalysisDb, span: &Span) -> Option<String> {
+    use parser::ast::{self, prelude::AstNode};
+    if !matches!(span.kind, SpanKind::Generation { .. }) {
+        return None;
+    }
+    let module = crate::lower::map_file_to_mod_impl(db, span.file);
+    let root = crate::lower::top_mod_ast(db, module);
+    let hole = root
+        .syntax()
+        .covering_element(span.range)
+        .into_node()
+        .and_then(ast::QuoteHoleExpr::cast)?;
+    let ast::ExprKind::MethodCall(call) = hole.expr()?.kind() else {
+        return None;
+    };
+    if call.method_name()?.text() != "at" {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    Some(format!(
+        "the binders of `${{{}}}` are not available here",
+        receiver.syntax().text()
+    ))
+}
+
 fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId<'db>) -> String {
     match ty.data(db) {
         TyData::TyVar(_) | TyData::TyParam(_) | TyData::TypeFamily { .. } => {
@@ -3162,13 +3189,17 @@ impl DiagnosticVoucher for BodyDiag<'_> {
 
             Self::UndefinedVariable(primary, ident, assoc_fn) => {
                 let ident = ident.data(db);
+                let span = primary.resolve(db);
+                let message = span.as_ref()
+                    .and_then(|span| authored_quote_binder_message(db, span))
+                    .unwrap_or_else(|| format!("undefined variable `{ident}`"));
                 CompleteDiagnostic {
                     severity: Severity::Error,
                     message: "undefined variable".to_string(),
                     sub_diagnostics: vec![SubDiagnostic {
                         style: LabelStyle::Primary,
-                        message: format!("undefined variable `{ident}`"),
-                        span: primary.resolve(db),
+                        message,
+                        span,
                     }],
                     notes: assoc_fn
                         .map(|(container, is_method)| {
@@ -4043,16 +4074,35 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary.resolve(db),
                 error_code,
             ),
-            Self::UnexpandedArmHole(primary) => primary_diag(
-                Severity::Error,
-                "an unexpanded arm splice cannot be checked as an ordinary match",
-                "expand this splice through quotation before checking the generated body",
-                primary.resolve(db), error_code),
-            Self::UnexpandedPatternHole(primary) => primary_diag(
-                Severity::Error,
-                "an unexpanded pattern splice cannot be checked as an ordinary pattern",
-                "expand this splice through quotation before checking the generated body",
-                primary.resolve(db), error_code),
+            Self::QuoteFieldOwnerMismatch { primary, expected, actual, generated } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "quoted field handle has a different owner".into(),
+                sub_diagnostics: vec![
+                    SubDiagnostic { style: LabelStyle::Primary, message: format!("issued for `{}`, but this receiver selects `{}`", expected.pretty_path(db).unwrap_or_default(), actual.pretty_path(db).unwrap_or_default()), span: primary.resolve(db) },
+                    SubDiagnostic { style: LabelStyle::Secondary, message: "generated here".into(), span: generated.resolve(db) },
+                ], notes: vec![], error_code,
+            },
+            Self::QuoteFieldVisibility { primary, field, generated } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "field is not visible to the quote provider".into(),
+                sub_diagnostics: vec![
+                    SubDiagnostic { style: LabelStyle::Primary, message: format!("`{}` requires provider visibility or an issued Field handle", field.pretty_path(db).unwrap_or_default()), span: primary.resolve(db) },
+                    SubDiagnostic { style: LabelStyle::Secondary, message: "generated here".into(), span: generated.resolve(db) },
+                ],
+                notes: vec![], error_code,
+            },
+            Self::UnexpandedSplice { primary, kind } => {
+                use crate::hir_def::QuoteKind;
+                let (kind, ordinary) = match kind {
+                    QuoteKind::Pat => ("pattern", "pattern"),
+                    QuoteKind::Arm => ("arm", "match"),
+                    QuoteKind::Expr => ("expression", "expression"),
+                    QuoteKind::Item => ("item", "item"),
+                    QuoteKind::Where => ("where", "where clause"),
+                };
+                primary_diag(Severity::Error, format!("an unexpanded {kind} splice cannot be checked as an ordinary {ordinary}"), "expand this splice through quotation before checking the generated body".to_string(), primary.resolve(db), error_code)
+            },
+            Self::MissingMetaItem { primary, item } => primary_diag(Severity::Error, format!("quotation requires `{}`", item.path()), "the designated quotation type is missing from the core library".to_string(), primary.resolve(db), error_code),
             Self::QuoteOutsideConstContext(primary) => primary_diag(Severity::Error, "`quote` is only allowed in a const context".to_string(), "a quote builds a compile-time code value; use it in a `const fn` or a `const` item".to_string(), primary.resolve(db), error_code),
             Self::CodeValueAtRuntime(primary) => primary_diag(Severity::Error, "a code value cannot be used at runtime".to_string(), "use this value in a `const fn`, a `const` item, or a generator"
                         .to_string(), primary.resolve(db), error_code),
@@ -4064,9 +4114,9 @@ impl DiagnosticVoucher for BodyDiag<'_> {
             } => {
                 use crate::hir_def::QuoteHolePosition as P;
                 let (place, accepts) = match position {
-                    P::Arms => ("match arms", "`Code<Arm>`"),
-                    P::Pat => ("a pattern", "`Code<Pat>`"),
-                    P::Expr => (
+                    P::Code(crate::hir_def::QuoteKind::Arm) => ("match arms", "`Code<Arm>`"),
+                    P::Code(crate::hir_def::QuoteKind::Pat) => ("a pattern", "`Code<Pat>`"),
+                    P::Code(crate::hir_def::QuoteKind::Expr) => (
                         "an expression",
                         "`Code<Expr>`, `bool`, an integer or a string",
                     ),
@@ -4074,8 +4124,8 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                     P::FieldLabel => ("a record field label", "a `Field`"),
                     P::Type => ("a type", "a `FieldType` or a `Record`"),
                     P::Name => ("a declared name", "a `DeclarationName` or a `Field`"),
-                    P::Items => ("items", "`Code<Item>`"),
-                    P::Where => ("where predicates", "`Code<Where>`"),
+                    P::Code(crate::hir_def::QuoteKind::Item) => ("items", "`Code<Item>`"),
+                    P::Code(crate::hir_def::QuoteKind::Where) => ("where predicates", "`Code<Where>`"),
                 };
                 primary_diag(Severity::Error, format!("this splice cannot stand for {place}"), format!(
                             "expected {accepts}, found `{}`",

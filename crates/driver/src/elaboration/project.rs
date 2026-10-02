@@ -21,31 +21,89 @@ use hir::{
             ty_def::{TyBase, TyData, TyId},
         },
     },
-    core::meta::{FrozenGeneration, FrozenItemLocator, FrozenMetaValue, FrozenOwner, MetaItem},
+    core::meta::{
+        FrozenGeneration, FrozenItemLocator, FrozenMetaValue, FrozenOwner, FrozenQuoteSpan,
+        MetaItem,
+    },
     hir_def::{CallableDef, Expr, HirIngot, ItemKind, Partial, WhereClauseOwner},
     span::{DesugaredOrigin, HirOrigin, LazySpan},
 };
 use parser::TextRange;
 use url::Url;
 
-use super::{RecordInput, construction::ConstructionError, invocations};
+use super::{ElaborationErrorKind, EvaluationFault, RecordInput, invocations};
 use crate::DriverDataBase;
 
 #[derive(Debug)]
 pub struct ElaborationError {
     pub url: Box<Url>,
-    pub message: String,
+    pub kind: ElaborationErrorKind,
     /// Byte range in the authored file, usually the `#[generate]` attribute.
     pub span: Option<std::ops::Range<usize>>,
-    pub quote: Option<QuoteLocation>,
-    pub code: u16,
-    pub rendered: Option<String>,
+    pub quote: Option<Box<FrozenQuoteSpan>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct QuoteLocation {
-    pub url: Url,
-    pub range: std::ops::Range<usize>,
+fn invocation_span(
+    db: &DriverDataBase,
+    item: ItemKind<'_>,
+    attribute_index: usize,
+) -> Option<std::ops::Range<usize>> {
+    match item {
+        ItemKind::Struct(owner) => owner.span().attributes().attr(attribute_index).resolve(db),
+        ItemKind::Enum(owner) => owner.span().attributes().attr(attribute_index).resolve(db),
+        item => item.span().resolve(db),
+    }
+    .map(|span| span.range.into())
+}
+
+fn evaluation_error(
+    db: &DriverDataBase,
+    failure: &hir::analysis::semantic::ctfe::EvalFailure<'_>,
+) -> ElaborationErrorKind {
+    use hir::analysis::semantic::ctfe::{CtfeError, EvalFailure};
+    let error = match failure {
+        EvalFailure::Invariant { message, .. } => {
+            return ElaborationErrorKind::EvaluationFailed {
+                fault: EvaluationFault::Invariant(message.clone()),
+                calls: Vec::new(),
+            };
+        }
+        EvalFailure::Ctfe(error) => error,
+    };
+    let mut root = error;
+    let mut calls = Vec::new();
+    let fault = loop {
+        break match root {
+            CtfeError::NotConstEvaluable { .. } => EvaluationFault::NotConstEvaluable,
+            CtfeError::AssertionFailed { message, .. } => {
+                EvaluationFault::AssertionFailed(message.clone())
+            }
+            CtfeError::InvalidOperation { message, .. } => {
+                EvaluationFault::InvalidOperation(message.clone())
+            }
+            CtfeError::InvalidBorrow { .. } => EvaluationFault::InvalidBorrow,
+            CtfeError::InvalidProviderUse { .. } => EvaluationFault::InvalidProviderUse,
+            CtfeError::NonConstCall { .. } => EvaluationFault::NonConstCall,
+            CtfeError::InvalidBody { .. } => EvaluationFault::InvalidBody,
+            CtfeError::DivisionByZero { .. } => EvaluationFault::DivisionByZero,
+            CtfeError::ArithmeticOverflow { .. } => EvaluationFault::ArithmeticOverflow,
+            CtfeError::NegativeExponent { .. } => EvaluationFault::NegativeExponent,
+            CtfeError::OutOfBounds { .. } => EvaluationFault::OutOfBounds,
+            CtfeError::VariantMismatch { .. } => EvaluationFault::VariantMismatch,
+            CtfeError::UninitializedLocal { .. } => EvaluationFault::UninitializedLocal,
+            CtfeError::StepLimitExceeded { .. } => EvaluationFault::StepLimitExceeded,
+            CtfeError::RecursionLimitExceeded { .. } => EvaluationFault::RecursionLimitExceeded,
+            CtfeError::RecursiveConst { .. } => EvaluationFault::RecursiveConst,
+            CtfeError::CalleeError { callee, source, .. } => {
+                if let Some(name) = callee.key(db).owner(db).scope().pretty_path(db) {
+                    calls.push(name);
+                }
+                root = source;
+                continue;
+            }
+        };
+    };
+    ElaborationErrorKind::EvaluationFailed { fault, calls }
 }
 
 fn source_span(db: &DriverDataBase, url: &Url, range: &std::ops::Range<usize>) -> Option<Span> {
@@ -67,7 +125,7 @@ fn evaluation_operation_diagnostic<'db>(
     db: &'db DriverDataBase,
     mut owner: BodyOwner<'db>,
     failure: &hir::analysis::semantic::ctfe::EvalFailure<'db>,
-) -> Option<(String, QuoteLocation)> {
+) -> Option<(String, FrozenQuoteSpan)> {
     use hir::analysis::semantic::{
         SemOrigin,
         ctfe::{CtfeError, EvalFailure},
@@ -112,14 +170,30 @@ fn evaluation_operation_diagnostic<'db>(
     };
     Some((
         message.clone(),
-        QuoteLocation {
-            url: span.file.url(db)?,
+        FrozenQuoteSpan {
+            file: span.file.url(db)?,
             range: span.range.into(),
         },
     ))
 }
 
 impl ElaborationError {
+    pub fn message(&self) -> String {
+        self.kind.to_string()
+    }
+    pub fn code(&self) -> u16 {
+        self.kind.code()
+    }
+    pub fn rendered(&self) -> Option<String> {
+        match &self.kind {
+            ElaborationErrorKind::ProviderDiagnostics(message) => {
+                Some(format!("{}: {message}", self.url))
+            }
+            ElaborationErrorKind::OutputDiagnostics(rendered) => Some(rendered.clone()),
+            _ => None,
+        }
+    }
+
     pub fn position(&self, db: &DriverDataBase) -> Option<(usize, usize)> {
         let source = db.workspace().get(db, &self.url)?.text(db);
         let prefix = source.get(..self.span.as_ref()?.start)?;
@@ -129,13 +203,14 @@ impl ElaborationError {
     }
 
     pub fn render(&self, db: &DriverDataBase) -> String {
-        if let Some(rendered) = &self.rendered {
-            return rendered.clone();
+        if let Some(rendered) = self.rendered() {
+            return rendered;
         }
+        let message = self.message();
         let quote = self
             .quote
             .as_ref()
-            .and_then(|quote| source_span(db, &quote.url, &quote.range));
+            .and_then(|quote| source_span(db, &quote.file, &quote.range));
         let invocation = self
             .span
             .as_ref()
@@ -143,7 +218,7 @@ impl ElaborationError {
         if let Some(primary) = quote.clone().or_else(|| invocation.clone()) {
             let mut labels = vec![SubDiagnostic::new(
                 LabelStyle::Primary,
-                self.message.clone(),
+                message.clone(),
                 Some(primary),
             )];
             if quote.is_some()
@@ -157,31 +232,41 @@ impl ElaborationError {
             }
             return db.format_complete_diagnostics(&[CompleteDiagnostic::new(
                 Severity::Error,
-                self.message.clone(),
+                message,
                 labels,
                 Vec::new(),
-                GlobalErrorCode::new(DiagnosticPass::Generation, self.code),
+                GlobalErrorCode::new(DiagnosticPass::Generation, self.code()),
             )]);
         }
         match self.position(db) {
             Some((line, column)) => {
-                format!("{}:{line}:{column}: {}", self.url, self.message)
+                format!("{}:{line}:{column}: {}", self.url, message)
             }
-            None => format!("{}: {}", self.url, self.message),
+            None => format!("{}: {}", self.url, message),
         }
     }
 }
 
-fn unique_quote_location(value: &FrozenMetaValue) -> Option<QuoteLocation> {
-    fn collect(value: &FrozenMetaValue, locations: &mut Vec<QuoteLocation>) {
+fn request_at<'a>(
+    requests: &'a [FrozenGeneration],
+    url: &Url,
+    range: Option<&std::ops::Range<usize>>,
+) -> Option<&'a FrozenGeneration> {
+    requests
+        .iter()
+        .find(|request| request.target.file == *url && request.site_span.as_ref() == range)
+}
+
+fn unique_quote_location(value: &FrozenMetaValue) -> Option<FrozenQuoteSpan> {
+    fn collect(value: &FrozenMetaValue, locations: &mut Vec<FrozenQuoteSpan>) {
         match value {
             FrozenMetaValue::Code(code) => {
                 for node in &code.nodes {
                     if let Some(template) = &node.template
                         && let Some(range) = &template.span
                     {
-                        locations.push(QuoteLocation {
-                            url: template.owner.file().clone(),
+                        locations.push(FrozenQuoteSpan {
+                            file: template.owner.file().clone(),
                             range: range.clone(),
                         });
                     }
@@ -215,22 +300,22 @@ fn unique_quote_location(value: &FrozenMetaValue) -> Option<QuoteLocation> {
     let first = locations.first()?.clone();
     locations
         .iter()
-        .all(|location| location.url == first.url && location.range == first.range)
+        .all(|location| location.file == first.file && location.range == first.range)
         .then_some(first)
 }
 
 fn provider_quote_location(
     db: &DriverDataBase,
     provider: hir::hir_def::Func<'_>,
-) -> Option<QuoteLocation> {
+) -> Option<FrozenQuoteSpan> {
     let body = provider.body(db)?;
     let mut locations = body.exprs(db).iter().filter_map(|(expr, data)| {
         matches!(data, Partial::Present(Expr::Quote(_)))
             .then(|| expr.span(body).resolve(db))
             .flatten()
             .and_then(|span| {
-                Some(QuoteLocation {
-                    url: span.file.url(db)?,
+                Some(FrozenQuoteSpan {
+                    file: span.file.url(db)?,
                     range: span.range.into(),
                 })
             })
@@ -279,13 +364,32 @@ fn annotate_generated_diagnostics(
         let Some(primary) = diagnostic.primary_span() else {
             continue;
         };
+        if let SpanKind::Generation { file, range } = primary.kind {
+            annotated = true;
+            diagnostic.sub_diagnostics.push(SubDiagnostic::new(
+                LabelStyle::Secondary,
+                "generated here".into(),
+                Some(Span::new(file, range, SpanKind::Original)),
+            ));
+            // Retain the existing generated-item note for a single quote.
+            let site_range: std::ops::Range<usize> = range.into();
+            if let Some(url) = file.url(db)
+                && requests.iter().any(|request| {
+                    request.target.file == url
+                        && request.site_span.as_ref() == Some(&site_range)
+                        && unique_quote_location(&request.value).is_some()
+                })
+                && let Some(item) = generated_item_at(db, &url, &site_range)
+            {
+                diagnostic.notes.push(format!("generated item:\n{item}"));
+            }
+            continue;
+        }
         let Some(url) = primary.file.url(db) else {
             continue;
         };
         let range: std::ops::Range<usize> = primary.range.into();
-        let Some(request) = requests.iter().find(|request| {
-            request.target.file == url && request.site_span.as_ref() == Some(&range)
-        }) else {
+        let Some(request) = request_at(requests, &url, Some(&range)) else {
             continue;
         };
         let unique = unique_quote_location(&request.value);
@@ -297,8 +401,8 @@ fn annotate_generated_diagnostics(
                 .get(code.root)
                 .and_then(|node| node.template.as_ref())
                 .and_then(|template| {
-                    template.span.as_ref().map(|range| QuoteLocation {
-                        url: template.owner.file().clone(),
+                    template.span.as_ref().map(|range| FrozenQuoteSpan {
+                        file: template.owner.file().clone(),
                         range: range.clone(),
                     })
                 }),
@@ -307,7 +411,7 @@ fn annotate_generated_diagnostics(
         let Some(quote) = unique.as_ref().or(root.as_ref()) else {
             continue;
         };
-        let Some(quote_span) = source_span(db, &quote.url, &quote.range) else {
+        let Some(quote_span) = source_span(db, &quote.file, &quote.range) else {
             continue;
         };
         annotated = true;
@@ -337,9 +441,11 @@ fn annotate_generated_diagnostics(
 }
 
 /// Only checked quoted items may cross the generation output boundary.
-fn check_output_shape<'db>(input: &RecordInput<'db>, ty: TyId<'db>) -> Result<(), String> {
+fn check_output_shape<'db>(
+    input: &RecordInput<'db>,
+    ty: TyId<'db>,
+) -> Result<(), ElaborationErrorKind> {
     let db = input.db;
-    let missing = || "generation result has an unsupported shape".to_owned();
     let (base, args) = ty.decompose_ty_app(db);
     if input
         .meta_type(MetaItem::Code)
@@ -351,7 +457,7 @@ fn check_output_shape<'db>(input: &RecordInput<'db>, ty: TyId<'db>) -> Result<()
     {
         return Ok(());
     }
-    Err(missing())
+    Err(ElaborationErrorKind::UnsupportedOutputShape)
 }
 
 /// One structural budget for the frozen provider result. Schema names and
@@ -363,7 +469,7 @@ fn description_units(value: &FrozenMetaValue) -> usize {
         FrozenMetaValue::Code(code) => code.nodes.iter().fold(0usize, |sum, node| {
             let holes = node.holes.iter().fold(0usize, |sum, hole| {
                 sum.saturating_add(match hole {
-                    hir::core::meta::FrozenCodeHole::Code(_, ..) => 8,
+                    hir::core::meta::FrozenCodeHole::Code(..) => 8,
                     hir::core::meta::FrozenCodeHole::Value(value, _) => description_units(value),
                 })
             });
@@ -409,11 +515,9 @@ pub fn prepare_target(
     }
     .ok_or_else(|| ElaborationError {
         url: Box::new(target.clone()),
-        message: "could not resolve generation target".into(),
+        kind: ElaborationErrorKind::MissingTarget,
         span: None,
         quote: None,
-        code: 1,
-        rendered: None,
     })?;
     let mut selected = HashSet::new();
     let mut pending = vec![root];
@@ -446,53 +550,31 @@ fn prepare_selected<'db>(
         if selected.is_some_and(|selected| !selected.contains(&db.top_mod(file).ingot(db))) {
             continue;
         }
-        let error_at = |message: String, span| ElaborationError {
+        let error_at = |kind: ElaborationErrorKind, span| ElaborationError {
             url: Box::new(url.clone()),
-            message,
+            kind,
             span,
             quote: None,
-            code: 1,
-            rendered: None,
         };
         let requests = invocations(db, file).map_err(|e| {
-            let span = match e.item {
-                ItemKind::Struct(owner) => owner
-                    .span()
-                    .attributes()
-                    .attr(e.attribute_index)
-                    .resolve(db),
-                item => item.span().resolve(db),
-            }
-            .map(|span| span.range.into());
-            error_at(format!("invalid generation invocation: {:?}", e.kind), span)
+            let span = invocation_span(db, e.item, e.attribute_index);
+            error_at(ElaborationErrorKind::Invocation(e.kind), span)
         })?;
         for request in requests {
-            let site = match request.owner {
-                hir::analysis::ty::adt_def::AdtRef::Struct(owner) => owner
-                    .span()
-                    .attributes()
-                    .attr(request.attribute_index)
-                    .resolve(db),
-                hir::analysis::ty::adt_def::AdtRef::Enum(owner) => owner
-                    .span()
-                    .attributes()
-                    .attr(request.attribute_index)
-                    .resolve(db),
-            }
-            .map(|span| span.range.into());
-            let error = |message: String| error_at(message, site.clone());
+            let site = invocation_span(db, request.owner.as_item(), request.attribute_index);
+            let error = |kind: ElaborationErrorKind| error_at(kind, site.clone());
             let input = request
                 .record_input(db)
-                .map_err(|e| error(format!("invalid generation input: {e:?}")))?;
+                .map_err(|e| error(ElaborationErrorKind::Input(e)))?;
             let TyData::TyBase(TyBase::Func(CallableDef::Func(provider))) =
                 request.provider.data(db)
             else {
-                return Err(error("generation requires a const function".into()));
+                return Err(error(ElaborationErrorKind::RequiresConstFunction));
             };
             let parameters: Vec<_> = provider.params(db).collect();
             let record_ty = MetaItem::Record
                 .resolve(db, provider.scope())
-                .ok_or_else(|| error("builtin Record is missing".into()))?;
+                .ok_or_else(|| error(ElaborationErrorKind::MissingRecord))?;
             let normalize =
                 |ty| normalize_ty(db, ty, provider.scope(), PredicateListId::empty_list(db));
             let argument_ty = parameters.first().map(|parameter| {
@@ -512,7 +594,7 @@ fn prepare_selected<'db>(
                 || parameters.len() != 1
                 || argument_ty != Some(record_ty)
             {
-                return Err(error("generation entry must be a safe nongeneric module const function taking Record, without entry requirements or effects; use ordinary checked helper calls and scoped witnesses inside it".into()));
+                return Err(error(ElaborationErrorKind::InvalidEntry));
             }
             check_output_shape(&input, normalize(provider.return_ty(db))).map_err(error)?;
             let diagnostics = &check_func_body(db, *provider).0;
@@ -522,13 +604,11 @@ fn prepare_selected<'db>(
                     .map(|d| d.to_complete(db))
                     .collect::<Vec<_>>();
                 let rendered = db.format_complete_diagnostics(&complete);
-                let mut diagnostic = error(rendered.clone());
-                diagnostic.rendered = Some(format!("{url}: {rendered}"));
-                return Err(diagnostic);
+                return Err(error(ElaborationErrorKind::ProviderDiagnostics(rendered)));
             }
             let argument = input
                 .const_argument()
-                .ok_or_else(|| error("could not issue record input".into()))?;
+                .ok_or_else(|| error(ElaborationErrorKind::IssueInput))?;
             let value = match eval_body_owner_const_with_args(
                 db,
                 BodyOwner::Func(*provider),
@@ -537,69 +617,64 @@ fn prepare_selected<'db>(
             ) {
                 EvalOutcome::Ready(value) => value,
                 EvalOutcome::Blocked(info) => {
-                    return Err(error(format!(
-                        "generation evaluation remained dependent: {info:?}"
-                    )));
+                    return Err(error(ElaborationErrorKind::EvaluationBlocked(info.demand)));
                 }
                 EvalOutcome::Failed(failure) => {
                     if let Some((message, location)) =
                         evaluation_operation_diagnostic(db, BodyOwner::Func(*provider), &failure)
                     {
-                        let mut diagnostic = error(message);
-                        diagnostic.quote = Some(location);
+                        let mut diagnostic = error(ElaborationErrorKind::Operation(message));
+                        diagnostic.quote = Some(Box::new(location));
                         return Err(diagnostic);
                     }
-                    return Err(error(format!("generation evaluation failed: {failure:?}")));
+                    return Err(error(evaluation_error(db, &failure)));
                 }
             };
             // Freeze the checked value before the output HIR query reads it.
             let frozen = input.freeze_value(value).map_err(|e| {
-                let mut diagnostic = error(format!("invalid generated declaration: {e}"));
-                diagnostic.code = if matches!(e, ConstructionError::Protocol(_)) {
-                    2
-                } else {
-                    3
-                };
-                diagnostic.quote = provider_quote_location(db, *provider);
+                let mut diagnostic = error(ElaborationErrorKind::Freezing(e));
+                diagnostic.quote = provider_quote_location(db, *provider).map(Box::new);
                 diagnostic
             })?;
             let units = description_units(&frozen);
             if units > 65536 {
-                return Err(error(format!(
-                    "invalid generated declaration: generated description units limit exceeded: {units} > 65536"
-                )));
+                return Err(error(ElaborationErrorKind::DescriptionLimit {
+                    actual: units,
+                    maximum: 65536,
+                }));
             }
             total_units = total_units.saturating_add(units);
             if total_units > 1048576 {
-                return Err(error(format!(
-                    "project generated description units limit exceeded: {total_units} > 1048576"
-                )));
+                return Err(error(ElaborationErrorKind::ProjectDescriptionLimit {
+                    actual: total_units,
+                    maximum: 1048576,
+                }));
             }
             let provider_identity = FrozenItemLocator::Named(FrozenOwner {
                 file: provider
                     .span()
                     .resolve(db)
                     .and_then(|span| span.file.url(db))
-                    .ok_or_else(|| error("generation provider file is missing".into()))?,
+                    .ok_or_else(|| error(ElaborationErrorKind::ProviderFileMissing))?,
                 path: provider
                     .scope()
                     .pretty_path(db)
-                    .ok_or_else(|| error("generation provider path is missing".into()))?,
+                    .ok_or_else(|| error(ElaborationErrorKind::ProviderPathMissing))?,
             });
             let span = request
                 .owner
                 .as_item()
                 .span()
                 .resolve(db)
-                .ok_or_else(|| error("generation owner has no source span".into()))?;
+                .ok_or_else(|| error(ElaborationErrorKind::OwnerSpanMissing))?;
             let range: std::ops::Range<usize> = span.range.into();
             frozen_requests.push(FrozenGeneration {
                 target: input
                     .frozen_owner()
-                    .map_err(|e| error(format!("invalid generation owner: {e}")))?,
+                    .map_err(|e| error(ElaborationErrorKind::Owner(e)))?,
                 target_const_param_types: input
                     .frozen_const_param_types()
-                    .map_err(|e| error(format!("invalid generation owner: {e}")))?,
+                    .map_err(|e| error(ElaborationErrorKind::Owner(e)))?,
                 target_span_start: range.start,
                 site_span: site,
                 provider: provider_identity,
@@ -625,28 +700,15 @@ fn prepare_selected<'db>(
             .expect("copied source file");
         if let Some(error) = hir::lower::generated_hir_errors(&output, output.top_mod(file)).first()
         {
-            let quote = error
-                .quote_source
-                .as_ref()
-                .map(|span| QuoteLocation {
-                    url: span.file.clone(),
-                    range: span.range.clone(),
-                })
-                .or_else(|| {
-                    frozen_requests
-                        .iter()
-                        .find(|request| {
-                            request.target.file == url && request.site_span == error.site_span
-                        })
-                        .and_then(|request| unique_quote_location(&request.value))
-                });
+            let quote = error.quote_source.clone().or_else(|| {
+                request_at(&frozen_requests, &url, error.site_span.as_ref())
+                    .and_then(|request| unique_quote_location(&request.value))
+            });
             return Err(ElaborationError {
                 url: Box::new(url),
-                message: format!("invalid generated declaration: {}", error.message),
+                kind: ElaborationErrorKind::Lowering(error.failure.clone()),
                 span: error.site_span.clone(),
-                quote,
-                code: 4,
-                rendered: None,
+                quote: quote.map(Box::new),
             });
         }
         if checked.insert(output.top_mod(file).ingot(&output))
@@ -663,27 +725,21 @@ fn prepare_selected<'db>(
             };
             return Err(ElaborationError {
                 url: Box::new(url),
-                message: rendered.clone(),
+                kind: ElaborationErrorKind::OutputDiagnostics(rendered),
                 span: None,
                 quote: None,
-                code: 5,
-                rendered: Some(rendered),
             });
         }
         if let Some(error) =
             hir::lower::generated_quote_hygiene_errors(&output, output.top_mod(file)).first()
         {
-            let quote = frozen_requests
-                .iter()
-                .find(|request| request.target.file == url && request.site_span == error.site_span)
+            let quote = request_at(&frozen_requests, &url, error.site_span.as_ref())
                 .and_then(|request| unique_quote_location(&request.value));
             return Err(ElaborationError {
                 url: Box::new(url),
-                message: format!("invalid generated declaration: {}", error.message),
+                kind: ElaborationErrorKind::Hygiene(error.failure.clone()),
                 span: error.site_span.clone(),
-                quote,
-                code: 6,
-                rendered: None,
+                quote: quote.map(Box::new),
             });
         }
     }

@@ -1,0 +1,17 @@
+// Self::Variant in a quoted trait impl for an enum target (the natural derive spelling).
+pub trait Code { fn code(self) -> u256 }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::Code for ${record} {
+                fn code(self) -> u256 { match self { Self::B(x) => x, Self::A => 1 } }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+pub enum E { A, B(u256) }
+#[test]
+fn t() { assert!(E::A.code() == 1)
+ assert!(E::B(5).code() == 5) }

@@ -228,6 +228,9 @@ impl Ord for Span {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpanKind {
+    /// Authored syntax copied by a generation request, retaining its call site.
+    Generation { file: File, range: TextRange },
+
     /// A node corresponding is originally written in the source code.
     Original,
 

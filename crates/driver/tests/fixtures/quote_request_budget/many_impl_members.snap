@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_request_budget/many_impl_members.fe
+---
+error[18-0004]: invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
+     ┌─ many_impl_members.fe:2014:19
+     │
+2014 │                 ${items}
+     │                   ^^^^^ invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
+     ·
+2022 │ #[generate(ingot::author::emit)]
+     │ -------------------------------- generated here

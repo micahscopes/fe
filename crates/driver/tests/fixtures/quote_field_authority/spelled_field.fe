@@ -1,0 +1,16 @@
+// A target field read by spelling (`self.secret`) instead of a Field handle; the target is in another
+// module and `secret` is private there. The provider never called `field`.
+pub trait Peek { fn peek(self) -> u256 }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        quote { impl ingot::Peek for ${record} { fn peek(self) -> u256 { self.secret } } }
+    }
+}
+mod dest {
+    #[generate(ingot::author::emit)]
+    pub struct Vault { secret: u256 }
+    pub fn make() -> Vault { Vault { secret: 42 } }
+}
+#[test]
+fn t() { assert!(dest::make().peek() == 42) }

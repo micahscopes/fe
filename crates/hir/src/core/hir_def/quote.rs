@@ -79,6 +79,21 @@ pub enum QuoteKind {
     Where,
 }
 
+impl QuoteKind {
+    pub const ALL: [Self; 5] = [Self::Pat, Self::Arm, Self::Expr, Self::Item, Self::Where];
+
+    pub fn meta_item(self) -> crate::core::meta::MetaItem {
+        use crate::core::meta::MetaItem;
+        match self {
+            Self::Pat => MetaItem::Pat,
+            Self::Arm => MetaItem::Arm,
+            Self::Expr => MetaItem::Expr,
+            Self::Item => MetaItem::Item,
+            Self::Where => MetaItem::Where,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum QuoteFragment<'db> {
     /// The template's root expression.
@@ -104,10 +119,8 @@ pub struct QuoteHole {
 /// Where a splice stands, which decides the values it accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum QuoteHolePosition {
-    /// `${p}` as a pattern.
-    Pat,
-    /// `${e}` as an expression.
-    Expr,
+    /// A code splice in the position corresponding to its fragment kind.
+    Code(QuoteKind),
     /// `x.${f}`.
     Member,
     /// `Record { ${f}: value }`.
@@ -116,12 +129,6 @@ pub enum QuoteHolePosition {
     Type,
     /// `fn ${n}`, `const ${n}`.
     Name,
-    /// `${arms}` where match arms may stand.
-    Arms,
-    /// `${items}` where an item may stand.
-    Items,
-    /// `where ${w}`.
-    Where,
 }
 
 /// A declared name, spelled or spliced.

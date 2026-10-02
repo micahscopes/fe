@@ -1,0 +1,12 @@
+use core::meta::{Code, Item, Record, field}
+pub struct Other { pub b: u256 }
+pub use Other as Renamed
+mod author {
+    use core::meta::{Code, Item, Record, field}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        quote { pub fn read(_ o: ingot::Renamed) -> u256 { o.${f} } }
+    }
+}
+#[generate(ingot::author::emit)]
+pub struct T { pub b: u256 }

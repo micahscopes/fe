@@ -1,0 +1,17 @@
+// Where-predicate fold of N copies of the same bound.
+trait Marker {}
+impl Marker for u256 {}
+mod author {
+    use core::meta::{Code, Item, Where, Record, empty}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let mut w = empty<Where>()
+        let mut i: usize = 0
+        while i < 5000 {
+            w = quote { where ${w}, u256: ingot::Marker }
+            i += 1
+        }
+        quote { impl ingot::Marker for ${record} where ${w} {} }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

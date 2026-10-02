@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/field_on_alias_other.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/field_on_alias_other.fe: error[8-0113]: quoted field handle has a different owner
+   ┌─ field_on_alias_other.fe:8:64
+   │
+ 8 │         quote { pub fn read(_ o: ingot::Renamed) -> u256 { o.${f} } }
+   │                                                                ^ issued for `field_on_alias_other::T::b`, but this receiver selects `field_on_alias_other::Other::b`
+   ·
+11 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

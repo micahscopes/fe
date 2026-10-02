@@ -265,6 +265,8 @@ pub enum DesugaredOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenerationDesugared {
     pub attribute: AstPtr<ast::Attr>,
+    /// Authored node copied into this expansion; item headers have no source.
+    pub source: Option<(common::file::File, SyntaxNodePtr)>,
 }
 
 /// Tracks the origin of HIR nodes desugared from a `msg` block.

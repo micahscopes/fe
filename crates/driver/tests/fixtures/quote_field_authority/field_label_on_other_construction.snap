@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/field_label_on_other_construction.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/field_label_on_other_construction.fe: error[8-0113]: quoted field handle has a different owner
+   ┌─ field_label_on_other_construction.fe:7:86
+   │
+ 7 │         quote { pub fn gen(_ o: ingot::Other) -> u256 { let value = ingot::Other { ${f}: 3, pad: 4 }
+   │                                                                                      ^ issued for `field_label_on_other_construction::T::b`, but this receiver selects `field_label_on_other_construction::Other::b`
+   ·
+11 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

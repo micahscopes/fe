@@ -5,17 +5,13 @@ input_file: tests/fixtures/cli_output/single_files/quote_impl_const_type_error.f
 ---
 === STDERR ===
 error[8-0000]: type mismatch
-   ┌─ quote_impl_const_type_error.fe:9:9
+   ┌─ quote_impl_const_type_error.fe:11:37
    │
- 9 │ ╭         quote {
-10 │ │             impl ingot::Number for ${record} {
-11 │ │                 const VALUE: u256 = ${true}
-12 │ │             }
-13 │ │         }
-   │ ╰─────────^ expected `u256`, but `bool` is given
-   · │
-17 │   #[generate(ingot::author::emit)]
-   │   -------------------------------- generated here
+11 │                 const VALUE: u256 = ${true}
+   │                                     ^^^^^^^ expected `u256`, but `bool` is given
+   ·
+17 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here
    │
    = generated item:
      impl ingot::Number for Target {

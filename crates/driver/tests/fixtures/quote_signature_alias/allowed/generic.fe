@@ -1,0 +1,45 @@
+pub struct Box<T> { pub value: T }
+pub struct Pair<L, R> { pub left: L, pub right: R }
+mod author {
+    use core::meta::{Code, Item, Record}
+    type Wrapped<T> = ingot::Box<T>
+    type Nested<T> = Wrapped<(T, u8)>
+    type Swapped<L, R> = ingot::Pair<R, L>
+    type Defaulted<T = u8> = Wrapped<T>
+    type Following<A, B = A> = ingot::Pair<A, B>
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn wrap<U>(_ value: own U) -> Wrapped<U> { ingot::Box { value } }
+            pub fn unwrap<U>(_ value: own Wrapped<U>) -> U { value.value }
+            pub fn nested<U>(_ value: own U) -> Nested<U> {
+                ingot::Box { value: (value, 200) }
+            }
+            pub fn defaulted() -> Defaulted { ingot::Box { value: 200 } }
+            pub fn following<U>(_ left: own U, _ right: own U) -> Following<U> {
+                ingot::Pair { left, right }
+            }
+            pub fn swap<A, B>(_ left: own A, _ right: own B) -> Swapped<A, B> {
+                ingot::Pair { left: right, right: left }
+            }
+        }
+    }
+}
+mod destination {
+    type Wrapped<T> = ingot::Pair<T, bool>
+    type Nested<T> = ingot::Box<(u256, T)>
+    type Swapped<L, R> = ingot::Pair<L, R>
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+#[test]
+fn values() {
+    assert!(destination::unwrap(destination::wrap(7 as u256)) == 7)
+    assert!(destination::unwrap(destination::wrap(true)))
+    let nested = destination::nested(true)
+    assert!(nested.value.0 && nested.value.1 == 200)
+    assert!(destination::defaulted().value == 200)
+    let following = destination::following(true, false)
+    assert!(following.left && !following.right)
+    let swapped = destination::swap(9 as u256, true)
+    assert!(swapped.left && swapped.right == 9)
+}

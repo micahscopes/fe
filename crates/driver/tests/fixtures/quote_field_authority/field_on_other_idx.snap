@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/field_on_other_idx.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/field_on_other_idx.fe: error[8-0113]: quoted field handle has a different owner
+   ┌─ field_on_other_idx.fe:7:61
+   │
+ 7 │         quote { pub fn gen(_ o: ingot::Other) -> u256 { o.${f} } }
+   │                                                             ^ issued for `field_on_other_idx::T::b`, but this receiver selects `field_on_other_idx::Other::b`
+   ·
+10 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

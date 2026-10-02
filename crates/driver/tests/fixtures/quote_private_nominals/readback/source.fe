@@ -1,0 +1,2 @@
+pub enum Wrap<T> { Some(T), None }
+pub fn wrap<T>(_ value: own T) -> Wrap<T> { Wrap::Some(value) }

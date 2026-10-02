@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_fold_limits/expression.fe
+---
+error[18-0004]: invalid generated declaration: quoted expression fragment nesting limit exceeded: 257 > 256
+   ┌─ expression.fe:8:27
+   │
+ 8 │             acc = quote { ${acc} + 1 }
+   │                           ^^^^^^ invalid generated declaration: quoted expression fragment nesting limit exceeded: 257 > 256
+   ·
+14 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

@@ -1,0 +1,18 @@
+pub enum Opt<T> { No, Yes(T) }
+mod author {
+    use core::meta::{Code, Item, Record}
+    use ingot::Opt
+    type O8 = ingot::Opt<u8>
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn generated() -> u256 {
+                let e: Opt<u256> = O8::Yes(200)
+                match e { Opt::Yes(v) => v, Opt::No => 0 }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}
+#[test]
+fn wrong_width() { assert!(generated() == 200) }

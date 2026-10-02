@@ -1,0 +1,39 @@
+pub struct Box<T> { pub value: T }
+type B8 = Box<u8>
+mod author {
+    use core::meta::{Code, Item, Record}
+    type B8 = ingot::Box<u8>
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen() -> bool {
+                let b = B8 { value: 200 }
+                let B8 { value } = b
+                value == 200
+            }
+            pub fn gen_overflow() -> bool {
+                let b = B8 { value: 200 }
+                match b { B8 { value } => value + 100 > value }
+            }
+        }
+    }
+}
+mod destination {
+    type B8 = ingot::Box<u256>
+    #[generate(ingot::author::emit)]
+    struct Target {}
+}
+pub fn twin() -> bool {
+    let b = B8 { value: 200 }
+    let B8 { value } = b
+    value == 200
+}
+pub fn twin_overflow() -> bool {
+    let b = B8 { value: 200 }
+    match b { B8 { value } => value + 100 > value }
+}
+#[test]
+fn same_value() { assert!(destination::gen() && twin()) }
+#[test(should_revert, panic = 0x11)]
+fn generated_narrow_overflow() { let _ = destination::gen_overflow() }
+#[test(should_revert, panic = 0x11)]
+fn ordinary_narrow_overflow() { let _ = twin_overflow() }

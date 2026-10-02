@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use codegen::{OptLevel, SonatinaTestOptions, emit_test_module_sonatina};
+use codegen::{ExpectedRevert, OptLevel, SonatinaTestOptions, emit_test_module_sonatina};
 use common::InputDb;
-use contract_harness::{ExecutionOptions, RuntimeInstance};
+use contract_harness::{ExecutionOptions, HarnessError, RuntimeInstance};
 use dir_test::{Fixture, dir_test};
 use driver::{
     DriverDataBase,
@@ -165,6 +165,15 @@ fn enum_destination_constants_execute_at_o0_and_o2(fixture: Fixture<&str>) {
     execute_quoted_fixture(fixture);
 }
 
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "pending/quote_string_*.fe",
+)]
+#[dir_test_attr(#[ignore = "pre-RD86 string splice transport is pending"])]
+fn string_splices_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
 fn execute_quoted_fixture(fixture: Fixture<&str>) {
     execute_quoted_fixture_with_count(fixture, 1);
 }
@@ -215,18 +224,112 @@ fn execute_checked_module<'db>(
             "all authored execution oracles are present"
         );
         for test in tests.tests {
-            assert!(test.expected_revert.is_none());
             let mut instance = RuntimeInstance::deploy(&hex::encode(test.bytecode))
                 .unwrap_or_else(|error| panic!("{level:?} {} deployment: {error}", test.hir_name));
             for seed in [0, 1, 6] {
                 let mut calldata = [0; 32];
                 calldata[31] = seed;
-                instance
-                    .call_raw(&calldata, ExecutionOptions::default())
-                    .unwrap_or_else(|error| {
-                        panic!("{level:?} {} seed {seed} execution: {error}", test.hir_name)
-                    });
+                let result = instance.call_raw(&calldata, ExecutionOptions::default());
+                match (&test.expected_revert, result) {
+                    (None, Ok(_)) => {}
+                    (Some(expected), Err(HarnessError::Revert(data))) => match expected {
+                        ExpectedRevert::Any => {}
+                        ExpectedRevert::Selector(selector) => assert!(
+                            data.0.starts_with(selector),
+                            "{level:?} {} wrong revert: {data}",
+                            test.hir_name
+                        ),
+                        ExpectedRevert::PanicCode(bytes) => {
+                            assert_eq!(&data.0, bytes, "{level:?} {} wrong panic", test.hir_name)
+                        }
+                    },
+                    (expected, result) => panic!(
+                        "{level:?} {} seed {seed}: expected {expected:?}, got {result:?}",
+                        test.hir_name
+                    ),
+                }
             }
         }
     }
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_field_authority/allowed",
+    glob: "*.fe",
+)]
+fn checked_field_authority_executes_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_open_scope/allowed",
+    glob: "*.fe",
+)]
+// Each fixture includes an ordinary twin and an independent expected value.
+fn quoted_open_captures_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_fold_limits/allowed",
+    glob: "*.fe",
+)]
+fn realistic_quote_derives_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_alias_arguments/allowed", glob: "*.fe")]
+fn quoted_alias_arguments_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture_with_count(fixture, 4);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_private_nominals", glob: "*.fe")]
+fn quoted_private_nominals_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_private_nominals/readback", glob: "source.fe")]
+fn copied_generic_constructors_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    let adapter = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../driver/tests/fixtures/quote_private_nominals/readback/adapter.fe");
+    let copied = read_back_support::transplant_fixture(fixture.path(), fixture.content(), &adapter);
+    let file = copied
+        .output
+        .workspace()
+        .get(&copied.output, &copied.url)
+        .unwrap();
+    execute_checked_module(&copied.output, copied.output.top_mod(file), 1);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_self_constructors", glob: "*.fe")]
+fn quoted_self_constructors_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_struct_alias/allowed", glob: "*.fe")]
+fn quoted_struct_aliases_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    let count = if fixture.path().ends_with("width.fe") {
+        3
+    } else {
+        1
+    };
+    execute_quoted_fixture_with_count(fixture, count);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_signature_alias/allowed", glob: "*.fe")]
+fn quoted_signature_aliases_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    let count = if fixture.path().ends_with("fixed_width.fe") {
+        2
+    } else {
+        1
+    };
+    execute_quoted_fixture_with_count(fixture, count);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/../driver/tests/fixtures/quote_fragment_locals",
+    glob: "*.fe",
+)]
+fn ordinary_fragment_locals_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture(fixture);
 }

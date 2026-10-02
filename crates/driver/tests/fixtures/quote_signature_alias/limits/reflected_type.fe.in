@@ -1,0 +1,11 @@
+use core::meta::{Code, Item, Record, field, field_type}
+trait Echo<U> { fn echo(_ value: own U) -> U }
+__ALIASES__
+const fn emit(record: Record) -> Code<Item> {
+    let ty = field_type(field(record, 0))
+    quote { impl Echo<${ty}> for ${record} {
+        fn echo(_ value: own ${ty}) -> ${ty} { value }
+    } }
+}
+#[generate(emit)]
+struct Target<T> { value: D__LEVEL__<T> }

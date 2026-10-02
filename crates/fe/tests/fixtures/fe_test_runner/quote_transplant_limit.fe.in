@@ -1,0 +1,15 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn many() -> u256 {
+__STATEMENTS__
+                42
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Target {}

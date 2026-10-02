@@ -21,6 +21,8 @@ mod author {
 #[generate(ingot::author::clone_struct)]
 struct Point { x: u256, y: u256 }
 
+struct OtherPoint { x: u256, y: u256 }
+
 fn dup<T: Clone>(_ value: T) -> T { value.clone() }
 
 #[test]

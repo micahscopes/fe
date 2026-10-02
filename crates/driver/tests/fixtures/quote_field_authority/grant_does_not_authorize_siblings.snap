@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_field_authority/grant_does_not_authorize_siblings.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_field_authority/grant_does_not_authorize_siblings.fe: error[8-0114]: field is not visible to the quote provider
+   ┌─ grant_does_not_authorize_siblings.fe:7:50
+   │
+ 7 │             fn build() -> Self { Self { ${x}: 7, y: 9 } }
+   │                                                  ^^^^ `grant_does_not_authorize_siblings::dest::T::y` requires provider visibility or an issued Field handle
+   ·
+12 │     #[generate(ingot::author::emit)]
+   │     -------------------------------- generated here

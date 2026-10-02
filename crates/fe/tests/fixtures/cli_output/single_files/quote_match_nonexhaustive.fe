@@ -1,6 +1,6 @@
 // Target: Q6, translation of mb2 `quote_match_nonexhaustive.fe`. A generated match that misses a variant is the ordinary exhaustiveness error in generated code.
-// expect: rejected with the ordinary non-exhaustive-match error naming `Mode::Off`; primary label at the generated item
-//   (`#[generate]`), secondary label at the match quote on line 21. mb2's provider-side check is not rebuilt (RD0).
+// expect: ordinary non-exhaustive-match error naming `Mode::Off`, with the authored match primary
+//   and `#[generate]` secondary. mb2's provider-side check is not rebuilt (RD0).
 // Uses active enum payload reflection and Arm-list splicing.
 trait Tagged {
     fn tag(self) -> bool

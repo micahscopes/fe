@@ -1,0 +1,16 @@
+// Authority: target Field `x` applied through a nested non-target struct inside a trait method on the target.
+// Target T { x: u256, inner: Inner }, Inner { x: u256 }. `self.inner.${fx}` reads Inner.x.
+pub trait Get { fn get(self) -> u256 }
+pub struct Inner { pub x: u256 }
+mod author {
+    use core::meta::{Code, Item, Record, field}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let fx = field(record, 0)
+        let fi = field(record, 1)
+        quote { impl ingot::Get for ${record} { fn get(self) -> u256 { self.${fi}.${fx} } } }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T { x: u256, inner: Inner }
+#[test]
+fn t() { assert!(T { x: 1, inner: Inner { x: 2 } }.get() == 2) }
