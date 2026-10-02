@@ -255,8 +255,10 @@ impl<'db> TyChecker<'db> {
                 value: SemConstScalar::Bool(flag),
                 ..
             } => Some(LitKind::Bool(*flag)),
-            SemConstValue::Unit
+            SemConstValue::Structural { .. }
+            | SemConstValue::Unit
             | SemConstValue::Description(..)
+            | SemConstValue::TypeLevel { .. }
             | SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }
             | SemConstValue::Array { .. }

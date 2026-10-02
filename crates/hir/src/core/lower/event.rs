@@ -11,7 +11,7 @@ use super::{
         AttrForm, AttrRule, AttrTarget, has_named_attr, lower_attrs_without_named,
         named_attr_specs, validate_attr_rules,
     },
-    hir_builder::{FuncBodySpec, HirBuilder},
+    hir_builder::{GeneratedFunctionSpec, HirBuilder},
     msg::lower_abi_record_impl,
 };
 use crate::{
@@ -442,15 +442,17 @@ fn lower_emit_method<'db>(
 
     // Unchecked like the tuple `payload_size` and `encode` it replaces: the
     // only arithmetic here sums in-memory payload sizes.
-    let spec = FuncBodySpec {
+    let spec = GeneratedFunctionSpec {
         name: emit_ident,
         attrs: builder.inline_always_unchecked_attrs(),
         generic_params,
+        where_clause: builder.empty_where_clause(),
         params,
+        effects: builder.empty_effect_params(),
         ret_ty: None,
         modifiers,
     };
-    builder.func_with_body_spec(spec, move |body| {
+    builder.generated_func_with_body(spec, move |body| {
         let data_buffer = match abi_record_trait {
             None => {
                 let empty_buffer = PathId::from_ident(db, roots.core)

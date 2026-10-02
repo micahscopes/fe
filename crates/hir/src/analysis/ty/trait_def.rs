@@ -465,6 +465,253 @@ fn instantiate_selected_impl<'db>(
     })
 }
 
+/// Why selected evidence construction or consumption cannot be certified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedEvidenceError {
+    /// The request, reconstructed application or consumer shape is unsupported.
+    Unsupported,
+    /// The selected candidate or a consumer obligation cannot prove its goal.
+    NotProven,
+    /// Search did not establish either success or saturated failure.
+    Incomplete,
+}
+
+/// Checked selected evidence within one immutably borrowed database.
+///
+/// This is not a declaration/coherence certificate or a public Fe value. The
+/// caller must use IDs from this database and ordinarily checked declarations.
+/// The handle grants no uniqueness or dispatch authority. Associated types are
+/// meaningful under the retained context; another context must revalidate.
+/// No mutable database access, serialization, or type substitution is exposed.
+pub struct SelectedImplEvidence<'db> {
+    db: &'db dyn HirAnalysisDb,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+    context: TraitSolveCx<'db>,
+    instance: ResolvedImplInstance<'db>,
+}
+
+impl<'db> SelectedImplEvidence<'db> {
+    pub fn selected(&self) -> ImplementorId<'db> {
+        self.candidate
+    }
+
+    pub fn goal(&self) -> TraitInstId<'db> {
+        self.goal
+    }
+
+    pub fn context(&self) -> TraitSolveCx<'db> {
+        self.context
+    }
+
+    /// Reads the selected application's binding without another impl search.
+    /// Missing names return `None`; unresolved bindings are unsupported.
+    pub fn associated_type(
+        &self,
+        name: IdentId<'db>,
+    ) -> Result<Option<TyId<'db>>, SelectedEvidenceError> {
+        let ty = self.instance.instantiated_assoc_ty(self.db, name);
+        if ty.is_some_and(|ty| !evidence_types_supported(self.db, ty)) {
+            return Err(SelectedEvidenceError::Unsupported);
+        }
+        Ok(ty)
+    }
+
+    /// Selects an explicit, safe, nullary const implementation body.
+    ///
+    /// Method-local trait bounds are instantiated and proved separately on both
+    /// declarations using ordinary constraint collection and trait solving.
+    /// Projections from this selected application use its concrete associated
+    /// bindings. The resulting bounds must be ground and projection-free.
+    /// Method-local generics, const predicates and effects remain unsupported.
+    /// It does not certify the body: execution clients must run ordinary source
+    /// and semantic checks before CTFE. Default bodies are not admitted here.
+    pub fn nullary_const_method(
+        &self,
+        name: IdentId<'db>,
+    ) -> Result<Option<(Func<'db>, CompleteSubst<'db>)>, SelectedEvidenceError> {
+        use crate::hir_def::WhereClauseOwner;
+        let selected = self.instance.selected();
+        let Some(&declaration) = selected.trait_def(self.db).method_defs(self.db).get(&name) else {
+            return Ok(None);
+        };
+        let Some(&method) = selected.methods(self.db).get(&name) else {
+            return Err(SelectedEvidenceError::Unsupported);
+        };
+        for func in [declaration, method] {
+            let clause = WhereClauseOwner::Func(func).clause(self.db).id;
+            if func.is_unsafe(self.db)
+                || func.params(self.db).next().is_some()
+                || func.has_effects(self.db)
+                || !clause.predicates(self.db).is_empty()
+                || !clause.const_predicates(self.db).is_empty()
+            {
+                return Err(SelectedEvidenceError::Unsupported);
+            }
+        }
+        if !method.is_const(self.db) || method.body(self.db).is_none() {
+            return Err(SelectedEvidenceError::Unsupported);
+        }
+        let Selection::Unique(resolved_method) =
+            resolved_method_instance(self.db, self.context, self.instance, name)
+        else {
+            return Err(SelectedEvidenceError::Unsupported);
+        };
+        let args = resolved_method.body_args();
+        if param_schema(self.db, method.into(), ParamBasis::Full)
+            .keys(self.db)
+            .len()
+            != args.len()
+            || param_schema(self.db, declaration.into(), ParamBasis::Full)
+                .keys(self.db)
+                .len()
+                != self.instance.trait_inst().args(self.db).len()
+        {
+            return Err(SelectedEvidenceError::Unsupported);
+        }
+        // Supply only concrete bindings from the proved application. Missing or
+        // unresolved bindings stay as projections and fail admission below;
+        // unrelated projections must not trigger another implementation search.
+        let mut bindings = IndexMap::new();
+        for assoc in selected.trait_def(self.db).assoc_types(self.db) {
+            if let Some(name) = assoc.name(self.db)
+                && let Some(ty) = self.instance.instantiated_assoc_ty(self.db, name)
+                && evidence_types_supported(self.db, ty)
+            {
+                bindings.insert(name, ty);
+            }
+        }
+        let selected_bindings = TraitInstId::new(
+            self.db,
+            selected.trait_def(self.db),
+            self.instance.trait_inst().args(self.db).clone(),
+            bindings,
+        );
+        // Impl evidence does not discharge a method's own requirements. Do
+        // not add these requirements as assumptions while proving them.
+        for (func, method_args) in [
+            (
+                declaration,
+                self.instance.trait_inst().args(self.db).as_slice(),
+            ),
+            (method, args),
+        ] {
+            let requirements = super::trait_resolution::constraint::collect_func_decl_constraints(
+                self.db,
+                func.into(),
+                false,
+            )
+            .instantiate(self.db, method_args);
+            for &requirement in requirements.list(self.db) {
+                use super::{
+                    normalize::normalize_with_trait_evidence, ty_def::TyFlags,
+                    visitor::collect_flags,
+                };
+                let requirement = normalize_with_trait_evidence(
+                    self.db,
+                    requirement,
+                    self.context
+                        .normalization_scope_for_trait_inst(self.db, selected_bindings),
+                    selected_bindings,
+                );
+                if !evidence_types_supported(self.db, requirement)
+                    || collect_flags(self.db, requirement).contains(TyFlags::HAS_PARAM)
+                {
+                    return Err(SelectedEvidenceError::Unsupported);
+                }
+                match is_goal_satisfiable(self.db, self.context, requirement) {
+                    GoalSatisfiability::Satisfied(_) => {}
+                    GoalSatisfiability::UnSat(_) => return Err(SelectedEvidenceError::NotProven),
+                    GoalSatisfiability::NeedsConfirmation { .. } => {
+                        return Err(SelectedEvidenceError::Incomplete);
+                    }
+                    GoalSatisfiability::ContainsInvalid => {
+                        return Err(SelectedEvidenceError::Unsupported);
+                    }
+                }
+            }
+        }
+        let args = resolved_method
+            .complete_body_args(
+                self.db,
+                self.instance.trait_inst().args(self.db),
+                None,
+                None,
+            )
+            .map_err(|_| SelectedEvidenceError::Unsupported)?;
+        Ok(Some((method, args)))
+    }
+
+    /// Reproves the same selected application under destination assumptions.
+    /// Rigid parameter identities are retained; this performs no substitution.
+    pub fn revalidate(
+        &self,
+        destination: TraitSolveCx<'db>,
+    ) -> Result<Self, SelectedEvidenceError> {
+        prove_selected_impl_evidence(self.db, destination, self.candidate, self.goal)
+    }
+}
+
+fn evidence_types_supported<'db>(db: &'db dyn HirAnalysisDb, value: impl TyVisitable<'db>) -> bool {
+    use super::{ty_def::TyFlags, visitor::collect_flags};
+    !collect_flags(db, value)
+        .intersects(TyFlags::HAS_INVALID | TyFlags::HAS_VAR | TyFlags::HAS_PROJECTION)
+}
+
+/// Proves an explicitly selected definition and reconstructs its application.
+///
+/// Goals and context assumptions may contain rigid parameters, but no
+/// inference variables, invalid types, or unresolved projections. The resulting
+/// handle borrows `db`, preventing safe mutation while it remains in use.
+pub fn prove_selected_impl_evidence<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
+    use super::trait_resolution::{TargetSolutionStatus, candidate_proves_goal};
+    if !evidence_types_supported(db, goal)
+        || !evidence_types_supported(db, context.assumptions())
+        || matches!(candidate.origin(db), ImplementorOrigin::Assumption)
+    {
+        return Err(SelectedEvidenceError::Unsupported);
+    }
+    match candidate_proves_goal(db, context, candidate, goal) {
+        TargetSolutionStatus::NotFound => return Err(SelectedEvidenceError::NotProven),
+        TargetSolutionStatus::Incomplete => return Err(SelectedEvidenceError::Incomplete),
+        TargetSolutionStatus::Found => {}
+    }
+    let selected =
+        complete_selected_impl(db, candidate).ok_or(SelectedEvidenceError::Unsupported)?;
+    let instance =
+        instantiate_selected_impl(db, selected, goal).ok_or(SelectedEvidenceError::Unsupported)?;
+    // Existential proof may leave impl arguments undetermined. Such an answer
+    // is not sufficient to expose one selected application's output meaning.
+    if !evidence_types_supported(db, instance.impl_args(db).to_vec()) {
+        return Err(SelectedEvidenceError::Unsupported);
+    }
+    Ok(SelectedImplEvidence {
+        db,
+        candidate,
+        goal,
+        context,
+        instance,
+    })
+}
+
+/// Constructs checked evidence for an authored impl item without exposing
+/// internal implementor construction to compiler clients.
+pub fn prove_selected_hir_impl_evidence<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    selected: ImplTrait<'db>,
+    goal: TraitInstId<'db>,
+) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
+    let candidate = super::trait_lower::lower_impl_trait(db, selected)
+        .ok_or(SelectedEvidenceError::Unsupported)?;
+    prove_selected_impl_evidence(db, context, candidate, goal)
+}
+
 pub(crate) fn resolve_trait_impl_instance<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
@@ -721,6 +968,16 @@ pub fn resolve_trait_method_instance<'db>(
         Selection::Ambiguous(_) => return Selection::Ambiguous(IndexSet::new()),
         Selection::NotFound => return Selection::NotFound,
     };
+    resolved_method_instance(db, solve_cx, resolved, method)
+}
+
+/// Builds the ordinary method record from an already checked selection.
+fn resolved_method_instance<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    resolved: ResolvedImplInstance<'db>,
+    method: IdentId<'db>,
+) -> Selection<ResolvedMethodInstance<'db>> {
     let Some(declaration) = resolved
         .selected()
         .trait_def(db)

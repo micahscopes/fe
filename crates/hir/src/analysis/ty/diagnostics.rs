@@ -870,6 +870,10 @@ pub enum BodyDiag<'db> {
     },
 
     // Const fn / const-check diagnostics -----------------------------------
+    RecordShapeAcquisition {
+        primary: DynLazySpan<'db>,
+        reason: &'static str,
+    },
     ConstFnEffectsNotAllowed(DynLazySpan<'db>),
     ConstFnNonConstCall {
         primary: DynLazySpan<'db>,
@@ -1051,6 +1055,7 @@ impl<'db> BodyDiag<'db> {
             Self::RecvFallbackOnlyInBareBlock { .. } => 78,
             Self::RecvDuplicateFallback { .. } => 79,
             Self::RecvFallbackReturnTypeNotAllowed { .. } => 80,
+            Self::RecordShapeAcquisition { .. } => 94,
             Self::ConstFnEffectsNotAllowed(_) => 55,
             Self::ConstFnNonConstCall { .. } => 62,
             Self::ConstFnEffectfulCall { .. } => 63,

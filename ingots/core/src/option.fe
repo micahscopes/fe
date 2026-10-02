@@ -1,3 +1,4 @@
+use ingot::Copy
 use ingot::Default
 use ingot::Fn
 use ingot::Functor
@@ -10,6 +11,8 @@ pub enum Option<T> {
     Some(T),
     None
 }
+
+impl<T> Copy for Option<T> where T: Copy {}
 
 impl<T> Option<T> {
     pub fn is_some(own self) -> bool {

@@ -184,6 +184,14 @@ where
             .unwrap_or_else(|| SemConstId::new(db, SemConstValue::Description(*term)));
     }
     let value = match value.value(db) {
+        SemConstValue::Structural { ty, handle } => SemConstValue::Structural {
+            ty: folder.fold_ty(db, *ty),
+            handle: *handle,
+        },
+        SemConstValue::TypeLevel { ty, const_ty } => SemConstValue::TypeLevel {
+            ty: folder.fold_ty(db, *ty),
+            const_ty: folder.fold_ty(db, *const_ty),
+        },
         SemConstValue::Unit => SemConstValue::Unit,
         SemConstValue::Scalar { ty, value } => SemConstValue::Scalar {
             ty: folder.fold_ty(db, *ty),

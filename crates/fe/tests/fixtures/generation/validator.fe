@@ -1,0 +1,6 @@
+pub const fn accepts(value: u256) -> bool {}
+#[test]
+fn generated_validator() {
+    assert!(accepts(value: 15))
+    assert!(!accepts(value: 16))
+}

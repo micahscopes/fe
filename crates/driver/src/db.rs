@@ -27,6 +27,45 @@ use crate::diagnostics::ToCsDiag;
 define_input_db!(DriverDataBase);
 
 impl DriverDataBase {
+    /// Create an independent input view for explicit elaboration.
+    ///
+    /// Unlike cloning a Salsa database handle, this creates new input identities
+    /// and does not share mutable inputs or query results. Resolve items again in
+    /// the returned database; only URLs and authored/configuration data cross.
+    /// No filesystem discovery or dependency resolution is repeated here.
+    pub fn fork_inputs(&self) -> Self {
+        use common::InputDb;
+        use salsa::Setter;
+
+        let mut target = Self::default();
+        // Default construction installs builtin files. Replace the complete set
+        // so this view also preserves removals and in-memory builtin edits.
+        let defaults: Vec<_> = target
+            .workspace()
+            .all_files(&target)
+            .iter()
+            .map(|(url, _)| url.clone())
+            .collect();
+        for url in defaults {
+            target.workspace().remove(&mut target, &url);
+        }
+        for (url, file) in self.workspace().all_files(self).iter() {
+            target
+                .workspace()
+                .update(&mut target, url.clone(), file.text(self).clone());
+        }
+        self.dependency_graph().copy_into(self, &mut target);
+        target
+            .compiler_options()
+            .set_recovery_mode(&mut target)
+            .to(self.compiler_options().recovery_mode(self));
+        target
+            .compilation_settings()
+            .set_profile(&mut target)
+            .to(self.compilation_settings().profile(self));
+        target
+    }
+
     // TODO: An temporary implementation for ui testing.
     pub fn run_on_top_mod<'db>(&'db self, top_mod: TopLevelMod<'db>) -> DiagnosticsCollection<'db> {
         self.run_on_file_with_pass_manager(top_mod, initialize_analysis_pass())

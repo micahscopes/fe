@@ -1235,8 +1235,10 @@ fn signed_mul_no_overflow_i8_neg_neg() {
 
 fn sem_const_has_type_level_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) -> bool {
     match value.value(db) {
-        SemConstValue::Unit | SemConstValue::Scalar { .. } => false,
-        SemConstValue::Description(..) => true,
+        SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Scalar { .. } => {
+            false
+        }
+        SemConstValue::Description(..) | SemConstValue::TypeLevel { .. } => true,
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems
             .iter()
             .copied()
@@ -1250,7 +1252,10 @@ fn sem_const_has_type_level_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) 
 
 fn sem_const_has_abstract_scalar_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) -> bool {
     match value.value(db) {
-        SemConstValue::Unit | SemConstValue::Description(..) => false,
+        SemConstValue::Structural { .. }
+        | SemConstValue::Unit
+        | SemConstValue::Description(..)
+        | SemConstValue::TypeLevel { .. } => false,
         SemConstValue::Scalar { ty, .. } => ty.pretty_print(db) == "{integer}",
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems
             .iter()

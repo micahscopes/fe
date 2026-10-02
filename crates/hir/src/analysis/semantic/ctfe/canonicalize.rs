@@ -501,7 +501,9 @@ fn canonicalize_const_value<'db>(
     value: SemConstId<'db>,
 ) -> SemConstId<'db> {
     match value.value(db) {
-        SemConstValue::Unit | SemConstValue::Scalar { .. } => value,
+        SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Scalar { .. } => {
+            value
+        }
         SemConstValue::Description(term) => {
             let evaluated = evaluate_type_level_const_ty(db, *term, Some(term.ty(db)));
             let Some(evaluated) = sem_const_from_ty(db, TyId::const_ty(db, evaluated)) else {
@@ -518,6 +520,7 @@ fn canonicalize_const_value<'db>(
                 evaluated
             }
         }
+        SemConstValue::TypeLevel { .. } => value,
         SemConstValue::Tuple { ty, elems } => tuple_const(
             db,
             *ty,

@@ -19,6 +19,7 @@ smol_str.workspace = true
 
 common.workspace = true
 hir.workspace = true
+parser.workspace = true
 resolver.workspace = true
 url.workspace = true
 tracing.workspace = true
@@ -29,3 +30,11 @@ glob.workspace = true
 dir-test.workspace = true
 tempfile = "3.13"
 test-utils.workspace = true
+
+[[example]]
+name = "generated_validator"
+test = true
+
+[[example]]
+name = "authorized_validator"
+test = true

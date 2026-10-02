@@ -1121,7 +1121,11 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
             SemConstValue::Enum {
                 variant, fields, ..
             } => (Some(*variant), fields),
-            SemConstValue::Scalar { .. } | SemConstValue::Unit | SemConstValue::Description(..) => {
+            SemConstValue::Structural { .. }
+            | SemConstValue::Scalar { .. }
+            | SemConstValue::Unit
+            | SemConstValue::Description(..)
+            | SemConstValue::TypeLevel { .. } => {
                 return Err(NormalizeError::UnresolvedHandleOrigin(ty));
             }
         };

@@ -1,0 +1,1 @@
+Add a driver API for checked execution of explicit selected nullary const methods, preserving impl prerequisites, ordinary source checking and coherence. Method-local requirements, generics, effects and default bodies remain outside this bounded entry.

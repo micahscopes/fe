@@ -1,0 +1,203 @@
+mod authors {
+    use core::abi::{AbiSize, AbiRecordLayout, abi_record_layout, abi_field_head_size}
+    use core::meta::{Record, FieldType, FieldQuery, query_field, field_count, field, field_type,
+        DeclarationName, DeclarationType, BodyExpr, FunctionDefinition,
+        FunctionCall, CallArgument, AssociatedConstant, RecordImplementation}
+
+    struct Head<T> {}
+    impl<T: AbiSize> FieldQuery<u256> for Head<T> {
+        const fn evaluate() -> u256 { abi_field_head_size<T>() }
+    }
+    struct Dynamic<T> {}
+    impl<T: AbiSize> FieldQuery<bool> for Dynamic<T> {
+        const fn evaluate() -> bool { <T as AbiSize>::IS_DYNAMIC }
+    }
+    const fn head(_ ty: FieldType) -> u256 {
+        query_field<Head, u256>(ty)
+    }
+    const fn dynamic(_ ty: FieldType) -> bool {
+        query_field<Dynamic, bool>(ty)
+    }
+    const fn layout(_ record: Record) -> AbiRecordLayout<32> {
+        assert!(field_count(record) <= 32)
+        let mut sizes: [u256; 32] = [0; 32]
+        let mut i: usize = 0
+        while i < field_count(record) {
+            sizes[i] = head(field_type(field(record, i)))
+            i += 1
+        }
+        abi_record_layout(sizes)
+    }
+    pub const fn size(_ record: Record) -> RecordImplementation<0, 1> {
+        let mut is_dynamic = false
+        let mut i: usize = 0
+        while i < field_count(record) {
+            is_dynamic = is_dynamic || dynamic(field_type(field(record, i)))
+            i += 1
+        }
+        let types: [Option<DeclarationType>; 2] = [Option::None; 2]
+        let method: Option<FunctionDefinition<0, 1>> = Option::None
+        RecordImplementation {
+            owner: record,
+            trait_path: "core::abi::AbiSize",
+            types,
+            constants: [
+                Option::Some(AssociatedConstant::U256(DeclarationName::Literal("HEAD_SIZE"), layout(record).head_size)),
+                Option::Some(AssociatedConstant::Bool(DeclarationName::Literal("IS_DYNAMIC"), is_dynamic)),
+            ],
+            method,
+        }
+    }
+    pub const fn offsets(_ record: Record) -> [Option<FunctionDefinition<0, 1>>; 32] {
+        let plan = layout(record)
+        let mut definitions: [Option<FunctionDefinition<0, 1>>; 32] = [Option::None; 32]
+        let mut i: usize = 0
+        while i < field_count(record) {
+            definitions[i] = Option::Some(FunctionDefinition {
+                name: DeclarationName::FieldPrefix("offset_", field(record, i)),
+                public: true,
+                const_function: true,
+                parameters: [],
+                return_type: DeclarationType::U256,
+                expressions: [BodyExpr::U256(plan.offsets[i])],
+                result: 0,
+            })
+            i += 1
+        }
+        definitions
+    }
+    pub const fn encoder(_ record: Record) -> RecordImplementation<2, 100> {
+        let plan = layout(record)
+        let no_label: Option<String<31>> = Option::None
+        let constants: [Option<AssociatedConstant>; 2] = [Option::None; 2]
+        let mut expressions: [BodyExpr; 100] = [BodyExpr::End; 100]
+        expressions[0] = BodyExpr::Parameter(0)
+        expressions[1] = BodyExpr::Parameter(1)
+        expressions[2] = BodyExpr::U256(plan.head_size)
+        expressions[3] = BodyExpr::Unit
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let f = field(record, i)
+            assert!(!dynamic(field_type(f)))
+            let base = 4 + i * 3
+            expressions[base] = BodyExpr::Field(0, f)
+            expressions[base + 1] = BodyExpr::U256(plan.offsets[i])
+            expressions[base + 2] = BodyExpr::Call(FunctionCall {
+                path: "core::abi::encode_field_at",
+                types: [Option::Some(DeclarationType::Named("std::abi::Sol")), Option::Some(DeclarationType::Field(field_type(f)))],
+                arguments: [
+                    Option::Some(CallArgument { label: no_label, expression: base }),
+                    Option::Some(CallArgument { label: no_label, expression: 1 }),
+                    Option::Some(CallArgument { label: Option::Some("head_pos"), expression: base + 1 }),
+                    Option::Some(CallArgument { label: no_label, expression: 2 }),
+                ],
+            })
+            i += 1
+        }
+        RecordImplementation {
+            owner: record,
+            trait_path: "core::abi::Encode",
+            types: [Option::Some(DeclarationType::Named("std::abi::Sol")), Option::None],
+            constants,
+            method: Option::Some(FunctionDefinition {
+                name: DeclarationName::Literal("encode"),
+                public: false,
+                const_function: false,
+                parameters: [DeclarationType::Record(record), DeclarationType::BytePointer],
+                return_type: DeclarationType::Unit,
+                expressions,
+                result: 3,
+            }),
+        }
+    }
+}
+
+mod empty {
+    #[generate(ingot::authors::size)]
+    #[generate(ingot::authors::encoder)]
+    #[generate(ingot::authors::offsets)]
+    pub struct Empty {}
+    pub fn sample() -> Empty { Empty {} }
+}
+mod single {
+    #[generate(ingot::authors::size)]
+    #[generate(ingot::authors::encoder)]
+    #[generate(ingot::authors::offsets)]
+    pub struct Single { value: u256 }
+    pub fn sample() -> Single { Single { value: 42 } }
+}
+mod packet {
+    #[generate(ingot::authors::size)]
+    #[generate(ingot::authors::encoder)]
+    #[generate(ingot::authors::offsets)]
+    pub struct Packet { nonce: u256, ready: bool, code: u64 }
+    pub fn sample() -> Packet { Packet { nonce: 42, ready: true, code: 258 } }
+}
+mod reordered {
+    #[generate(ingot::authors::size)]
+    #[generate(ingot::authors::encoder)]
+    #[generate(ingot::authors::offsets)]
+    pub struct Reordered { code: u64, active: bool, identifier: u256 }
+    pub fn sample() -> Reordered { Reordered { code: 258, active: false, identifier: 42 } }
+}
+
+use core::abi::{AbiSize, ByteInput, encode_alloc}
+use std::abi::Sol
+
+// Independent exact payload oracles: each raw 256-bit load covers all 32 bytes,
+// including leading zeros. No decoder or generated offset computes expectations.
+#[test]
+fn empty_payload() {
+    assert!(<empty::Empty as AbiSize>::HEAD_SIZE == 0)
+    assert!(!<empty::Empty as AbiSize>::IS_DYNAMIC)
+    let encoded = encode_alloc<Sol, empty::Empty>(empty::sample())
+    assert!(encoded.len() == 0)
+}
+#[test]
+fn single_payload() {
+    assert!(<single::Single as AbiSize>::HEAD_SIZE == 32)
+    assert!(!<single::Single as AbiSize>::IS_DYNAMIC)
+    assert!(single::offset_value() == 0)
+    let encoded = encode_alloc<Sol, single::Single>(single::sample())
+    assert!(encoded.len() == 32)
+    assert!(encoded.span().word_at(0) == 42)
+}
+#[test]
+fn heterogeneous_payload() {
+    assert!(<packet::Packet as AbiSize>::HEAD_SIZE == 96)
+    assert!(!<packet::Packet as AbiSize>::IS_DYNAMIC)
+    assert!(packet::offset_nonce() == 0)
+    assert!(packet::offset_ready() == 32)
+    assert!(packet::offset_code() == 64)
+    let encoded = encode_alloc<Sol, packet::Packet>(packet::sample())
+    assert!(encoded.len() == 96)
+    assert!(encoded.span().word_at(0) == 42)
+    assert!(encoded.span().word_at(32) == 1)
+    assert!(encoded.span().word_at(64) == 258)
+}
+#[test]
+fn reordered_payload() {
+    assert!(<reordered::Reordered as AbiSize>::HEAD_SIZE == 96)
+    assert!(!<reordered::Reordered as AbiSize>::IS_DYNAMIC)
+    assert!(reordered::offset_code() == 0)
+    assert!(reordered::offset_active() == 32)
+    assert!(reordered::offset_identifier() == 64)
+    let encoded = encode_alloc<Sol, reordered::Reordered>(reordered::sample())
+    assert!(encoded.len() == 96)
+    assert!(encoded.span().word_at(0) == 258)
+    assert!(encoded.span().word_at(32) == 0)
+    assert!(encoded.span().word_at(64) == 42)
+}
+
+msg AbiMessage {
+    #[selector = 0x12345678]
+    Code -> u256,
+}
+pub contract AbiContract {
+    recv AbiMessage {
+        Code -> u256 {
+            let encoded = encode_alloc<Sol, packet::Packet>(packet::sample())
+            return encoded.span().word_at(64)
+        }
+    }
+}

@@ -18,10 +18,10 @@ use crate::{
             BlockedInfo, ConstDemandKind, ConstDependency, EvalFailure, EvalOutcome, FieldIndex,
             PrimitiveFault, RuntimeSizeError, SConst, SEffectArgValue, SExpr, SLocalId, SOperand,
             SPlace, SStmt, SStmtKind, STerminatorKind, SemConstId, SemConstScalar, SemConstValue,
-            SemOrigin, SemanticBody, SemanticConstRef, VariantIndex, array_const, bool_const,
-            bytes_const, consts::instantiate_const_template, enum_const, execute_scalar_cast,
-            execute_source_int_binary, execute_source_int_unary, int_const, int_in_range,
-            int_ty_shape, normalize_int_to_shape, runtime_size_bytes, sem_const_eq,
+            SemOrigin, SemanticBody, SemanticConstRef, StructuralHandle, VariantIndex, array_const,
+            bool_const, bytes_const, consts::instantiate_const_template, enum_const,
+            execute_scalar_cast, execute_source_int_binary, execute_source_int_unary, int_const,
+            int_in_range, int_ty_shape, normalize_int_to_shape, runtime_size_bytes, sem_const_eq,
             sem_const_from_ty, sem_const_ty, struct_const, tuple_const, unit_const,
         },
         ty::{
@@ -537,7 +537,9 @@ impl<'db> CtfeConstValue<'db> {
                 ty: *ty,
                 bytes: Rc::from(bytes.as_slice()),
             },
-            SemConstValue::Tuple { .. }
+            SemConstValue::Structural { .. }
+            | SemConstValue::TypeLevel { .. }
+            | SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }
             | SemConstValue::Array { .. }
             | SemConstValue::Enum { .. } => CtfeConstKind::Interned(value),
@@ -571,6 +573,9 @@ impl<'db> CtfeConstValue<'db> {
                 bytes: Rc::from(bytes.as_slice()),
             },
             SemConstValue::Description(..) => unreachable!("verified CTFE value is dependent"),
+            SemConstValue::Structural { .. } | SemConstValue::TypeLevel { .. } => {
+                CtfeConstKind::Interned(value)
+            }
             SemConstValue::Tuple { ty, .. } => CtfeConstKind::Tuple {
                 ty: *ty,
                 elems: value
@@ -865,7 +870,10 @@ pub(super) fn sem_const_dependency<'db>(
             .iter()
             .copied()
             .find_map(|field| sem_const_dependency(db, field)),
-        SemConstValue::Unit | SemConstValue::Scalar { .. } => None,
+        SemConstValue::TypeLevel { const_ty, .. } => Some(ConstDependency::Value(*const_ty)),
+        SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Scalar { .. } => {
+            None
+        }
     }
 }
 
@@ -941,7 +949,7 @@ impl<'a, 'db> CtfeProjected<'a, 'db> {
                             .map(|byte| Self::Byte(*byte))
                             .ok_or(CtfeError::OutOfBounds { origin });
                     }
-                    _ => return Err(invalid()),
+                    _ => return Err(invalid().into()),
                 };
                 children
                     .get(idx)
@@ -973,7 +981,7 @@ impl<'a, 'db> CtfeProjected<'a, 'db> {
                             .map(|byte| Self::Byte(*byte))
                             .ok_or(CtfeError::OutOfBounds { origin });
                     }
-                    _ => return Err(invalid()),
+                    _ => return Err(invalid().into()),
                 };
                 value
                     .aggregate_child(db, idx)
@@ -1870,13 +1878,30 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
     }
 
     fn eval_extern_const_fn(
-        &self,
+        &mut self,
         instance: SemanticInstance<'db>,
         func: crate::hir_def::Func<'db>,
         result_ty: TyId<'db>,
         args: &[CtfeConstValue<'db>],
         origin: SemOrigin<'db>,
-    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+    ) -> EvalResult<'db, CtfeConstValue<'db>> {
+        if func.top_mod(self.db).ingot(self.db).kind(self.db) == common::ingot::IngotKind::Core
+            && let Some(name) = func.name(self.db).to_opt()
+            && matches!(
+                name.data(self.db).as_str(),
+                "field_count" | "field" | "field_type" | "type_is" | "query_field"
+            )
+        {
+            let operation = name.data(self.db).as_str();
+            if crate::analysis::ty::corelib::lib_func_matches(
+                self.db,
+                func,
+                &format!("core::meta::{operation}"),
+            ) {
+                return self
+                    .eval_structural_intrinsic(instance, operation, result_ty, args, origin);
+            }
+        }
         match ctfe_extern_intrinsic_kind(self.db, func) {
             Some(CtfeExternIntrinsic::AddMod) => {
                 self.eval_evm_modular_arithmetic(result_ty, args, EvmModularArithmetic::Add, origin)
@@ -1904,6 +1929,216 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             }
             None => Err(CtfeError::NotConstEvaluable { origin }),
         }
+        .map_err(Into::into)
+    }
+
+    fn eval_field_query(
+        &mut self,
+        invocation: SemanticInstance<'db>,
+        owner: crate::hir_def::Struct<'db>,
+        index: usize,
+        result_ty: TyId<'db>,
+        origin: SemOrigin<'db>,
+    ) -> EvalResult<'db, CtfeConstValue<'db>> {
+        use crate::analysis::ty::{
+            adt_def::AdtRef,
+            corelib::resolve_core_trait,
+            trait_def::{TraitInstId, prove_selected_impl_evidence, resolve_trait_impl_instance},
+            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+            ty_check::check_func_body,
+        };
+        let db = self.db;
+        let invalid = |message: &str| CtfeError::InvalidOperation {
+            origin,
+            message: format!("reflected field query: {message}"),
+        };
+        let adt = AdtRef::Struct(owner).as_adt(db);
+        if !adt.params(db).is_empty() || index >= adt.fields(db)[0].num_types() {
+            return Err(invalid("invalid record field").into());
+        }
+        let field_ty = adt.fields(db)[0].ty(db, index).instantiate_identity();
+        let arguments = invocation.key(db).subst(db).generic_args(db);
+        let [family, expected] = arguments else {
+            return Err(invalid("expected a unary query family and result type").into());
+        };
+        let query_ty = normalize_ty(
+            db,
+            TyId::app(db, *family, field_ty),
+            owner.scope(),
+            PredicateListId::empty_list(db),
+        );
+        for ty in [field_ty, query_ty, *expected, result_ty] {
+            if ty.has_invalid(db) || ty.has_param(db) || ty.has_var(db) || ty.has_projection(db) {
+                return Err(invalid("query types must be concrete and resolved").into());
+            }
+        }
+        let query_trait = resolve_core_trait(
+            db,
+            invocation.key(db).owner(db).scope(),
+            &["meta", "FieldQuery"],
+        )
+        .ok_or_else(|| invalid("builtin FieldQuery is missing"))?;
+        let goal = TraitInstId::new(
+            db,
+            query_trait,
+            vec![query_ty, *expected],
+            common::indexmap::IndexMap::<crate::hir_def::IdentId<'db>, TyId<'db>>::default(),
+        );
+        let context = TraitSolveCx::new(db, owner.scope());
+        let Selection::Unique(selected) = resolve_trait_impl_instance(db, context, goal) else {
+            return Err(invalid("no unique proven FieldQuery implementation").into());
+        };
+        let evidence = prove_selected_impl_evidence(db, context, selected.selected(), goal)
+            .map_err(|_| invalid("selected query prerequisites were not proved"))?;
+        let method = crate::hir_def::IdentId::new(db, "evaluate".to_owned());
+        let (function, generic_args) = evidence
+            .nullary_const_method(method)
+            .map_err(|_| invalid("query method is unsupported or has unproved requirements"))?
+            .ok_or_else(|| invalid("query method is missing"))?;
+        if !check_func_body(db, function).0.is_empty() {
+            return Err(invalid("query method failed ordinary source checking").into());
+        }
+        let body_owner = BodyOwner::Func(function);
+        let key = SemanticInstanceKey::new(
+            db,
+            body_owner,
+            GenericSubst::complete(db, generic_args),
+            crate::analysis::semantic::EffectProviderSubst::empty(db),
+            ImplEnv::empty(db, body_owner.scope()),
+        );
+        let instance = self.instance_for_key(key);
+        // Keep this call in the current machine: nested queries must share its
+        // step and recursion limits, and incomplete evaluation is not evidence.
+        let value = self
+            .eval_instance(instance, Vec::new(), Vec::new(), origin)
+            .map_err(|error| match error {
+                EvalStop::Failed(EvalFailure::Ctfe(CtfeError::NotConstEvaluable { .. })) => {
+                    invalid("query method is not const evaluable").into()
+                }
+                other => other,
+            })?;
+        let CtfeValue::Value(value) = value else {
+            return Err(invalid("query result must be a value").into());
+        };
+        if sem_const_ty(db, value.materialize(db)) != result_ty {
+            return Err(invalid("query result type differs from its declared result").into());
+        }
+        Ok(value)
+    }
+
+    fn eval_structural_intrinsic(
+        &mut self,
+        instance: SemanticInstance<'db>,
+        operation: &str,
+        result_ty: TyId<'db>,
+        args: &[CtfeConstValue<'db>],
+        origin: SemOrigin<'db>,
+    ) -> EvalResult<'db, CtfeConstValue<'db>> {
+        let invalid = || CtfeError::InvalidOperation {
+            origin,
+            message: "invalid structural reflection handle or operation".to_owned(),
+        };
+        let first = args.first().ok_or_else(invalid)?.materialize(self.db);
+        let SemConstValue::Structural { handle, .. } = first.value(self.db) else {
+            return Err(invalid().into());
+        };
+        let output = match (operation, *handle, args.len()) {
+            ("query_field", StructuralHandle::FieldType { owner, index }, 1) => {
+                return self.eval_field_query(instance, owner, index, result_ty, origin);
+            }
+            ("field_count", StructuralHandle::Record(owner), 1) => {
+                return Ok(CtfeConstValue::int(
+                    self.db,
+                    result_ty,
+                    BigInt::from(owner.hir_fields(self.db).data(self.db).len()),
+                ));
+            }
+            ("field", StructuralHandle::Record(owner), 2) => {
+                let SemConstValue::Scalar {
+                    value: SemConstScalar::Int { value },
+                    ..
+                } = args[1].materialize(self.db).value(self.db)
+                else {
+                    return Err(invalid().into());
+                };
+                let index = value.to_usize().ok_or_else(invalid)?;
+                if index >= owner.hir_fields(self.db).data(self.db).len() {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "record field index is out of bounds".to_owned(),
+                    }
+                    .into());
+                }
+                StructuralHandle::Field { owner, index }
+            }
+            ("field_type", StructuralHandle::Field { owner, index }, 1) => {
+                StructuralHandle::FieldType { owner, index }
+            }
+            ("type_is", StructuralHandle::FieldType { owner, index }, 1) => {
+                let adt = crate::analysis::ty::adt_def::AdtRef::Struct(owner).as_adt(self.db);
+                if !adt.params(self.db).is_empty() || index >= adt.fields(self.db)[0].num_types() {
+                    return Err(invalid().into());
+                }
+                let field_ty = adt.fields(self.db)[0]
+                    .ty(self.db, index)
+                    .instantiate_identity();
+                let key = instance.key(self.db);
+                let candidate = *key
+                    .subst(self.db)
+                    .generic_args(self.db)
+                    .first()
+                    .ok_or_else(invalid)?;
+                let normalize = |ty| {
+                    normalize_ty(
+                        self.db,
+                        ty,
+                        key.owner(self.db).scope(),
+                        key.instantiate_typed_body(self.db).assumptions(),
+                    )
+                };
+                let field_ty = normalize(field_ty);
+                let candidate = normalize(candidate);
+                // The first structural workload queries the existing static
+                // scalar codecs. Do not turn TyId equality into an accidental
+                // general reflected definitional-equality operation.
+                if !matches!(
+                    candidate.data(self.db),
+                    TyData::TyBase(TyBase::Prim(PrimTy::Bool | PrimTy::U64 | PrimTy::U256))
+                ) {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "type_is currently requires bool, u64 or u256".to_owned(),
+                    }
+                    .into());
+                }
+                for ty in [field_ty, candidate] {
+                    if ty.has_invalid(self.db)
+                        || ty.has_param(self.db)
+                        || ty.has_var(self.db)
+                        || ty.has_projection(self.db)
+                    {
+                        return Err(invalid().into());
+                    }
+                }
+                return Ok(CtfeConstValue::bool(field_ty == candidate));
+            }
+            _ => return Err(invalid().into()),
+        };
+        let value = SemConstId::new(
+            self.db,
+            SemConstValue::Structural {
+                ty: result_ty,
+                handle: output,
+            },
+        );
+        let verified =
+            VerifiedConstValueId::from_complete_execution(self.db, value).map_err(|message| {
+                CtfeError::InvalidOperation {
+                    origin,
+                    message: message.to_owned(),
+                }
+            })?;
+        Ok(CtfeConstValue::concrete(self.db, verified))
     }
 
     fn eval_numeric_extern_intrinsic(

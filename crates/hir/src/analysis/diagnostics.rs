@@ -3455,6 +3455,14 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 error_code,
             ),
 
+            Self::RecordShapeAcquisition { primary, reason } => primary_diag(
+                severity,
+                "record shape acquisition is not permitted",
+                *reason,
+                primary.resolve(db),
+                error_code,
+            ),
+
             Self::TypeSizeOverflow { primary, ty } => primary_diag(
                 severity,
                 "type is too large",

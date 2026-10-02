@@ -1,0 +1,1 @@
+Checked Fe providers can return `core::meta::FunctionEmission<T>` to select and fill one of a request's explicitly granted function templates. The driver checks authority independently of provider and output typing, preserves request identity, and shares existing generation budgets and validation.

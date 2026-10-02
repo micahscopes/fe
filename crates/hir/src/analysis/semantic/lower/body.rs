@@ -1223,7 +1223,19 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         callable: &Callable<'db>,
         kind: ConstIntrinsicKind,
     ) -> SValueId {
+        if let ConstIntrinsicKind::RecordFieldCount(count) = kind {
+            let result_ty = self.expr_ty(expr);
+            return self.emit_expr_with_origin(
+                SemOrigin::Expr(expr),
+                result_ty,
+                SExpr::Const(SConst::from_trusted_source(
+                    self.db,
+                    int_const(self.db, result_ty, BigInt::from(count)),
+                )),
+            );
+        }
         let ty = match kind {
+            ConstIntrinsicKind::RecordFieldCount(_) => unreachable!(),
             ConstIntrinsicKind::SizeOf => normalize_ty(
                 self.db,
                 *callable
@@ -1264,6 +1276,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             .expect("const intrinsic should resolve to a function")
             .key;
             let const_expr = match kind {
+                ConstIntrinsicKind::RecordFieldCount(_) => unreachable!(),
                 ConstIntrinsicKind::SizeOf => ConstExpr::Invocation(ConstInvocation {
                     key,
                     args: Vec::new(),

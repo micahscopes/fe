@@ -566,6 +566,15 @@ fn build_file(
 
     db.workspace().touch(db, url.clone(), Some(content));
 
+    let prepared = match driver::elaboration::prepare_target(db, &url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("{}: {}", error.url, error.message);
+            return true;
+        }
+    };
+    let db = prepared.as_ref().unwrap_or(db);
+
     let Some(file) = db.workspace().get(db, &url) else {
         eprintln!("Error: Could not process file {file_path}");
         return true;
@@ -946,6 +955,15 @@ fn analyze_ingot_build_artifacts(
     ingot_url: &Url,
     include_abi_artifact_names: bool,
 ) -> Result<IngotBuildAnalysis, ()> {
+    let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("{}: {}", error.url, error.message);
+            return Err(());
+        }
+    };
+    let db = prepared.as_ref().unwrap_or(db);
+
     let Some(ingot) = db.workspace().containing_ingot(db, ingot_url.clone()) else {
         eprintln!("Error: Could not resolve ingot from directory");
         return Err(());
@@ -1135,6 +1153,15 @@ fn build_ingot_url(
     missing_contract_is_error: bool,
     report_dir: Option<&Utf8PathBuf>,
 ) -> BuildSummary {
+    let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("{}: {}", error.url, error.message);
+            return BuildSummary { had_errors: true };
+        }
+    };
+    let db = prepared.as_ref().unwrap_or(db);
+
     let Some(ingot) = db.workspace().containing_ingot(db, ingot_url.clone()) else {
         eprintln!("Error: Could not resolve ingot from directory");
         return BuildSummary { had_errors: true };

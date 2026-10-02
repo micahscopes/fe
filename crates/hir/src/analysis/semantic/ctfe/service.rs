@@ -950,9 +950,14 @@ fn force_immutable_description<'db>(
         SemConstValue::Description(term) => {
             return force_const_term_operand(db, TyId::const_ty(db, *term), cx, origin, None);
         }
+        SemConstValue::TypeLevel { const_ty, .. } => {
+            return force_const_term_operand(db, *const_ty, cx, origin, None);
+        }
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems,
         SemConstValue::Struct { fields, .. } | SemConstValue::Enum { fields, .. } => fields,
-        SemConstValue::Unit | SemConstValue::Scalar { .. } => return Ok(value),
+        SemConstValue::Structural { .. } | SemConstValue::Unit | SemConstValue::Scalar { .. } => {
+            return Ok(value);
+        }
     };
     let fields = fields
         .iter()

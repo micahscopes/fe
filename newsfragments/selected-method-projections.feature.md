@@ -1,0 +1,1 @@
+Allow selected const-method obligations to use concrete associated-type bindings from the proved trait application. Substitution preserves trait identity and arguments; unresolved or unrelated projections remain unsupported.

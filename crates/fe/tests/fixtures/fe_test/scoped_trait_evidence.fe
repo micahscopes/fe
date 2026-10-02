@@ -1,0 +1,75 @@
+// Scoped trait witnesses use ordinary provider values and ordinary coherence.
+// The associated output is checked at both introduction and consumption.
+trait Compute: Copy {
+    type Item
+    fn compute(self) -> Self::Item
+}
+
+struct Number {
+    value: u256,
+}
+
+struct Flag {
+    value: bool,
+}
+
+impl Copy for Number {}
+impl Copy for Flag {}
+
+impl Compute for Number {
+    type Item = u256
+
+    fn compute(self) -> u256 {
+        self.value
+    }
+}
+
+impl Compute for Flag {
+    type Item = bool
+
+    fn compute(self) -> bool {
+        self.value
+    }
+}
+
+fn consume<T>() -> T uses (evidence: Compute<Item = T>) {
+    evidence.compute()
+}
+
+fn forward<T>() -> T uses (evidence: Compute<Item = T>) {
+    consume<T>()
+}
+
+#[test]
+fn associated_outputs_keep_their_types() {
+    with (Compute<Item = u256> = Number { value: 42 }) {
+        assert!(consume<u256>() == 42)
+        with (Compute<Item = bool> = Flag { value: true }) {
+            assert!(forward<bool>())
+            assert!(forward<u256>() == 42)
+        }
+        assert!(consume<u256>() == 42)
+    }
+}
+
+#[test]
+fn nested_selection_restores_the_outer_provider() {
+    with (Compute<Item = u256> = Number { value: 11 }) {
+        assert!(forward<u256>() == 11)
+        with (Compute<Item = u256> = Number { value: 22 }) {
+            assert!(forward<u256>() == 22)
+        }
+        assert!(forward<u256>() == 11)
+    }
+}
+
+#[test]
+fn provider_values_survive_control_flow() {
+    let mut total: u256 = 0
+    for i in 0..3 {
+        with (Compute<Item = u256> = Number { value: i as u256 }) {
+            total += forward<u256>()
+        }
+    }
+    assert!(total == 3)
+}

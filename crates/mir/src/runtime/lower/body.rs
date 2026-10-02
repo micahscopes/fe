@@ -1822,7 +1822,11 @@ impl<'db> RmirEmitter<'db> {
                 &RuntimeClass::AggregateValue { layout },
                 bindings,
             ),
-            SemConstValue::Unit | SemConstValue::Scalar { .. } | SemConstValue::Description(..) => {
+            SemConstValue::Structural { .. }
+            | SemConstValue::Unit
+            | SemConstValue::Scalar { .. }
+            | SemConstValue::Description(..)
+            | SemConstValue::TypeLevel { .. } => {
                 panic!("semantic const should lower as a natural runtime value: {value:?}")
             }
         }
@@ -2232,7 +2236,11 @@ impl<'db> RmirEmitter<'db> {
                 self.lower_enum_values(bb, dst, layout, *variant, &field_values);
                 dst
             }
-            SemConstValue::Unit | SemConstValue::Scalar { .. } | SemConstValue::Description(..) => {
+            SemConstValue::Structural { .. }
+            | SemConstValue::Unit
+            | SemConstValue::Scalar { .. }
+            | SemConstValue::Description(..)
+            | SemConstValue::TypeLevel { .. } => {
                 panic!("expected non-scalar semantic const, found {value:?}")
             }
         }

@@ -1,0 +1,1 @@
+Check method-local trait bounds before selected const-method execution, using ordinary constraint collection and trait solving for both trait and impl declarations. Ground, projection-free bounds are supported; unmet and incomplete obligations do not authorize execution.

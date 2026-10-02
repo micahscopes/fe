@@ -1,0 +1,98 @@
+// The acceptance harness prepends the unchanged authors module from abi.fe.
+// Both primitive and nominal records use that same Fe-authored provider.
+mod left {
+    use core::abi::{AbiSize, Encode, encode_field_at}
+    use std::abi::Sol
+    pub struct Inner { nonce: u256, ready: bool }
+    impl AbiSize for Inner {
+        const HEAD_SIZE: u256 = 64
+        const IS_DYNAMIC: bool = false
+    }
+    impl Encode<Sol> for Inner {
+        fn encode(own self, _ ptr: *u8) {
+            encode_field_at<Sol, u256>(self.nonce, ptr, head_pos: 0, 64)
+            encode_field_at<Sol, bool>(self.ready, ptr, head_pos: 32, 64)
+        }
+    }
+    pub fn sample() -> Inner { Inner { nonce: 42, ready: true } }
+}
+
+mod right {
+    use core::abi::{AbiSize, Encode, encode_field_at}
+    use std::abi::Sol
+    pub struct Inner { value: u256 }
+    impl AbiSize for Inner {
+        const HEAD_SIZE: u256 = 32
+        const IS_DYNAMIC: bool = false
+    }
+    impl Encode<Sol> for Inner {
+        fn encode(own self, _ ptr: *u8) {
+            encode_field_at<Sol, u256>(self.value, ptr, head_pos: 0, 32)
+        }
+    }
+    pub fn sample() -> Inner { Inner { value: 17 } }
+}
+
+mod packet {
+    type PairAlias = ingot::left::Inner
+    #[generate(ingot::authors::size)]
+    #[generate(ingot::authors::encoder)]
+    #[generate(ingot::authors::offsets)]
+    pub struct Packet { code: u64, inner: PairAlias, active: bool }
+    pub fn sample() -> Packet {
+        Packet { code: 258, inner: ingot::left::sample(), active: false }
+    }
+}
+
+mod other {
+    #[generate(ingot::authors::size)]
+    #[generate(ingot::authors::encoder)]
+    #[generate(ingot::authors::offsets)]
+    pub struct Other { inner: ingot::right::Inner, code: u64 }
+    pub fn sample() -> Other {
+        Other { inner: ingot::right::sample(), code: 258 }
+    }
+}
+
+use core::abi::{AbiSize, ByteInput, encode_alloc}
+use std::abi::Sol
+
+#[test]
+fn nested_alias_payload() {
+    assert!(<packet::Packet as AbiSize>::HEAD_SIZE == 128)
+    assert!(!<packet::Packet as AbiSize>::IS_DYNAMIC)
+    assert!(packet::offset_code() == 0)
+    assert!(packet::offset_inner() == 32)
+    assert!(packet::offset_active() == 96)
+    let encoded = encode_alloc<Sol, packet::Packet>(packet::sample())
+    assert!(encoded.len() == 128)
+    assert!(encoded.span().word_at(0) == 258)
+    assert!(encoded.span().word_at(32) == 42)
+    assert!(encoded.span().word_at(64) == 1)
+    assert!(encoded.span().word_at(96) == 0)
+}
+
+#[test]
+fn same_spelled_nominal_payload() {
+    assert!(<other::Other as AbiSize>::HEAD_SIZE == 64)
+    assert!(!<other::Other as AbiSize>::IS_DYNAMIC)
+    assert!(other::offset_inner() == 0)
+    assert!(other::offset_code() == 32)
+    let encoded = encode_alloc<Sol, other::Other>(other::sample())
+    assert!(encoded.len() == 64)
+    assert!(encoded.span().word_at(0) == 17)
+    assert!(encoded.span().word_at(32) == 258)
+}
+
+msg NestedMessage {
+    #[selector = 0x12345678]
+    Code -> u256,
+}
+pub contract NestedContract {
+    recv NestedMessage {
+        Code -> u256 {
+            let encoded = encode_alloc<Sol, packet::Packet>(packet::sample())
+            return encoded.span().word_at(64)
+        }
+    }
+}

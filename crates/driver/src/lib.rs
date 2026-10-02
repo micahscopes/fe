@@ -1,10 +1,14 @@
 #![allow(clippy::print_stderr)]
 
+mod checked_source;
 pub mod cli_target;
 pub mod db;
 pub mod diagnostics;
+pub mod elaboration;
 pub mod files;
+pub mod generation;
 mod ingot_handler;
+pub mod selected_methods;
 
 pub use common::dependencies::DependencyTree;
 

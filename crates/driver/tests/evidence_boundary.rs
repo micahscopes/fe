@@ -1,0 +1,225 @@
+use common::{
+    InputDb,
+    diagnostics::Severity,
+    file::File,
+    stdlib::{HasBuiltinCore, HasBuiltinStd},
+};
+use fe_driver::DriverDataBase;
+use hir::{
+    analysis::semantic::eval_body_owner_const_with_args, analysis::ty::ty_check::BodyOwner,
+    hir_def::Func,
+};
+use url::Url;
+
+fn database() -> DriverDataBase {
+    let mut db = DriverDataBase::default();
+    db.initialize_builtin_core();
+    db.initialize_builtin_std();
+    db
+}
+
+fn input(db: &mut DriverDataBase, name: &str, source: &str) -> File {
+    use salsa::Setter;
+    let file = db.workspace().touch(
+        db,
+        Url::parse(&format!("file:///const-where/{name}.fe")).unwrap(),
+        Some(source.to_owned()),
+    );
+    // touch reuses an existing input without replacing its source.
+    file.set_text(db).to(source.to_owned());
+    file
+}
+
+fn diagnostics(db: &DriverDataBase, file: File) -> String {
+    let ingot = db.top_mod(file).ingot(db);
+    let hir = db.run_on_ingot(ingot);
+    let mut errors = if hir.has_errors(db) {
+        hir.format_diags(db)
+    } else {
+        String::new()
+    };
+    let semantic = db.mir_diagnostics_for_ingot(ingot);
+    if semantic
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        errors.push_str(&db.format_complete_diagnostics(&semantic));
+    }
+    errors
+}
+
+fn checked(db: &mut DriverDataBase, name: &str, source: &str) -> File {
+    let file = input(db, name, source);
+    let errors = diagnostics(db, file);
+    assert!(errors.is_empty(), "unexpected diagnostics:\n{errors}");
+    file
+}
+
+fn named<'db>(db: &'db DriverDataBase, file: File, name: &str) -> Func<'db> {
+    db.top_mod(file)
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(db)
+                .to_opt()
+                .is_some_and(|ident| ident.data(db) == name)
+        })
+        .unwrap_or_else(|| panic!("missing function `{name}`"))
+}
+
+fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
+    (match eval_body_owner_const_with_args(
+        db,
+        BodyOwner::Func(named(db, file, name)),
+        hir::analysis::semantic::GenericSubst::for_body_owner(
+            db,
+            BodyOwner::Func(named(db, file, name)),
+            Vec::new(),
+        ),
+        Vec::new(),
+    ) {
+        hir::analysis::semantic::EvalOutcome::Ready(value) => Ok(value),
+        outcome => Err(outcome),
+    })
+    .unwrap_or_else(|error| panic!("failed to evaluate `{name}`: {error:?}"))
+    .pretty_print(db)
+}
+
+// These are ordinary Fe carrier probes, not a public evidence primitive.
+const BOOLEAN_CARRIER: &str = "struct Evidence<const P: bool> where P {}";
+
+#[test]
+fn boolean_carrier_checks_introduction_and_explicit_forwarding() {
+    let mut db = database();
+    let source = format!(
+        "{BOOLEAN_CARRIER}\nconst fn consume<const P: bool>(_ evidence: Evidence<P>) -> u256 where P {{ 42 }}\nconst fn answer() -> u256 {{ consume<true>(Evidence<true> {{}}) }}"
+    );
+    let file = checked(&mut db, "boolean-introduction", &source);
+    assert_eq!(evaluate(&db, file, "answer"), "42");
+    let file = input(
+        &mut db,
+        "boolean-introduction",
+        &source.replace("<true>", "<false>"),
+    );
+    let errors = diagnostics(&db, file);
+    assert!(
+        errors.contains("const requirement") && errors.contains("false"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn boolean_carrier_does_not_implicitly_open_its_requirement() {
+    let mut db = database();
+    let source = format!(
+        "{BOOLEAN_CARRIER}\nconst fn consume<const P: bool>(_ evidence: Evidence<P>) -> u256 {{ 42 }}"
+    );
+    let file = input(&mut db, "boolean-elimination", &source);
+    let errors = diagnostics(&db, file);
+    assert!(
+        !errors.is_empty(),
+        "an ordinary carrier unexpectedly established P"
+    );
+    assert!(errors.contains("const requirement"), "{errors}");
+}
+
+const TRAIT_CARRIER: &str = "trait Compute { const fn compute() -> u256 }\nstruct Evidence<T: Compute> {}\nstruct Subject {}\nimpl Compute for Subject { const fn compute() -> u256 { 42 } }";
+
+#[test]
+fn trait_carrier_checks_introduction_and_explicit_forwarding() {
+    let mut db = database();
+    let source = format!(
+        "{TRAIT_CARRIER}\nconst fn consume<T: Compute>(_ evidence: Evidence<T>) -> u256 {{ T::compute() }}\nconst fn answer() -> u256 {{ consume<Subject>(Evidence<Subject> {{}}) }}"
+    );
+    let file = checked(&mut db, "trait-introduction", &source);
+    assert_eq!(evaluate(&db, file, "answer"), "42");
+    let file = input(
+        &mut db,
+        "trait-introduction",
+        &source.replace(
+            "impl Compute for Subject { const fn compute() -> u256 { 42 } }",
+            "",
+        ),
+    );
+    let errors = diagnostics(&db, file);
+    assert!(!errors.is_empty() && errors.contains("Compute"), "{errors}");
+}
+
+#[test]
+fn trait_carrier_does_not_implicitly_open_its_requirement() {
+    let mut db = database();
+    let source = format!(
+        "{TRAIT_CARRIER}\nconst fn consume<T>(_ evidence: Evidence<T>) -> u256 {{ T::compute() }}"
+    );
+    let file = input(&mut db, "trait-elimination", &source);
+    let errors = diagnostics(&db, file);
+    assert!(
+        !errors.is_empty(),
+        "an ordinary carrier unexpectedly established Compute"
+    );
+    assert!(errors.contains("Compute"), "{errors}");
+}
+
+#[test]
+fn trait_carrier_keeps_nominal_type_but_does_not_select_an_alternate_impl() {
+    let mut db = database();
+    let source = "trait Compute { const fn compute() -> u256 }\nstruct Evidence<T: Compute> {}\nstruct A {}\nstruct B {}\nimpl Compute for A { const fn compute() -> u256 { 11 } }\nimpl Compute for B { const fn compute() -> u256 { 22 } }\nconst fn consume<T: Compute>(_ evidence: Evidence<T>) -> u256 { T::compute() }\nconst fn answer() -> u256 { consume<A>(Evidence<A> {}) + consume<B>(Evidence<B> {}) }";
+    let file = checked(&mut db, "nominal-carriers", source);
+    assert_eq!(evaluate(&db, file, "answer"), "33");
+    let file = input(
+        &mut db,
+        "nominal-carriers",
+        &source.replace("consume<A>(Evidence<A>", "consume<A>(Evidence<B>"),
+    );
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("type mismatch"), "{errors}");
+
+    // A marker carries no selection identity beyond its type parameter.
+    let file = input(
+        &mut db,
+        "nominal-carriers",
+        &source.replace("impl Compute for B", "impl Compute for A"),
+    );
+    let errors = diagnostics(&db, file);
+    assert!(
+        errors.contains("conflicting trait implementations"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn carrier_creation_cannot_assume_the_requirement_it_is_establishing() {
+    let mut db = database();
+    let source = format!(
+        "{BOOLEAN_CARRIER}\nconst fn manufacture<const P: bool>() -> Evidence<P> {{ Evidence<P> {{}} }}"
+    );
+    let file = input(&mut db, "manufacture", &source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("const requirement"), "{errors}");
+
+    let source =
+        format!("{TRAIT_CARRIER}\nconst fn manufacture<T>() -> Evidence<T> {{ Evidence<T> {{}} }}");
+    let file = input(&mut db, "manufacture-trait", &source);
+    let errors = diagnostics(&db, file);
+    assert!(!errors.is_empty() && errors.contains("Compute"), "{errors}");
+}
+
+#[test]
+fn carrier_validity_edits_do_not_survive_from_a_warm_database() {
+    let mut db = database();
+    for allowed in [true, false, true] {
+        let source = format!(
+            "{BOOLEAN_CARRIER}\nconst fn answer() -> u256 {{ let evidence = Evidence<{allowed}> {{}}\n42 }}"
+        );
+        let file = input(&mut db, "carrier-edits", &source);
+        let warm = diagnostics(&db, file);
+        assert_eq!(warm.is_empty(), allowed, "{warm}");
+        let mut fresh = database();
+        let fresh_file = input(&mut fresh, "carrier-edits", &source);
+        assert_eq!(warm, diagnostics(&fresh, fresh_file));
+        if allowed {
+            assert_eq!(evaluate(&db, file, "answer"), "42");
+        }
+    }
+}

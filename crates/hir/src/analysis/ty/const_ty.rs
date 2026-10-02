@@ -885,6 +885,10 @@ fn trait_inst_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, inst: TraitInstId
 
 fn sem_const_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, value: SemConstId<'db>) -> bool {
     match value.value(db) {
+        SemConstValue::Structural { ty, .. } => ty_is_fully_ground(db, *ty),
+        SemConstValue::TypeLevel { ty, const_ty } => {
+            ty_is_fully_ground(db, *ty) && ty_is_fully_ground(db, *const_ty)
+        }
         SemConstValue::Unit => true,
         SemConstValue::Scalar { ty, .. } => ty_is_fully_ground(db, *ty),
         SemConstValue::Description(term) => const_ty_is_fully_ground(db, *term),
@@ -1353,6 +1357,14 @@ fn canonicalize_sem_const_for_mode<'db>(
             .into_boxed_slice()
     };
     let value = match value.value(db) {
+        SemConstValue::Structural { ty, handle } => SemConstValue::Structural {
+            ty: canonicalize(*ty),
+            handle: *handle,
+        },
+        SemConstValue::TypeLevel { ty, const_ty } => SemConstValue::TypeLevel {
+            ty: canonicalize(*ty),
+            const_ty: canonicalize(*const_ty),
+        },
         SemConstValue::Unit => SemConstValue::Unit,
         SemConstValue::Scalar { ty, value } => SemConstValue::Scalar {
             ty: canonicalize(*ty),
@@ -2428,6 +2440,15 @@ pub(crate) fn const_ty_from_sem_const<'db>(
             return ConstTyId::invalid(db, InvalidCause::Other);
         }
         return term;
+    }
+    if let SemConstValue::TypeLevel { const_ty, .. } = value.value(db) {
+        let TyData::ConstTy(const_ty) = const_ty.data(db) else {
+            return ConstTyId::invalid(db, InvalidCause::Other);
+        };
+        return *const_ty;
+    }
+    if matches!(value.value(db), SemConstValue::Structural { .. }) {
+        return ConstTyId::invalid(db, InvalidCause::Other);
     }
     match SConst::from_trusted_source(db, value) {
         SConst::Value(value) => ConstTyId::new(db, ConstTyData::Value(value)),

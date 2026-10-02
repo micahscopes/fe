@@ -179,6 +179,11 @@ where
 {
     let db = visitor.db();
     match value.value(db) {
+        SemConstValue::Structural { ty, .. } => visitor.visit_ty(*ty),
+        SemConstValue::TypeLevel { ty, const_ty } => {
+            visitor.visit_ty(*ty);
+            visitor.visit_ty(*const_ty);
+        }
         SemConstValue::Description(term) => visitor.visit_ty(TyId::const_ty(db, *term)),
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => {
             for child in elems.iter().copied() {

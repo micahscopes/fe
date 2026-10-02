@@ -4020,6 +4020,7 @@ pub enum CodeRegionIntrinsicKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum ConstIntrinsicKind {
     SizeOf,
+    RecordFieldCount(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Update)]

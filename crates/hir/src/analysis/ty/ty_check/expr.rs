@@ -1,3 +1,4 @@
+use common::ingot::IngotKind;
 use either::Either;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
@@ -307,6 +308,15 @@ impl<'db> TyChecker<'db> {
         let CallableDef::Func(func) = callable_def else {
             return None;
         };
+        if func.top_mod(self.db).ingot(self.db).kind(self.db) == IngotKind::Core
+            && crate::analysis::ty::corelib::lib_func_matches(
+                self.db,
+                func,
+                "core::meta::record_field_count",
+            )
+        {
+            return Some(ConstIntrinsicKind::RecordFieldCount(0));
+        }
         (resolve_lib_func_path(self.db, self.env.scope(), "core::size_of") == Some(func))
             .then_some(ConstIntrinsicKind::SizeOf)
     }
@@ -315,10 +325,47 @@ impl<'db> TyChecker<'db> {
         &mut self,
         expr: ExprId,
         callable: Callable<'db>,
-        kind: ConstIntrinsicKind,
+        mut kind: ConstIntrinsicKind,
     ) -> bool {
+        if matches!(kind, ConstIntrinsicKind::RecordFieldCount(_)) {
+            let record = callable
+                .generic_args()
+                .first()
+                .copied()
+                .map(|ty| self.normalize_ty(ty))
+                .and_then(|ty| ty.adt_def(self.db))
+                .and_then(|adt| match adt.adt_ref(self.db) {
+                    AdtRef::Struct(record) if adt.params(self.db).is_empty() => Some(record),
+                    _ => None,
+                });
+            let reason = match record {
+                None => Some("requires a concrete nongeneric record"),
+                Some(record)
+                    if record.scope().parent_module(self.db)
+                        != self.body().scope().parent_module(self.db) =>
+                {
+                    Some("only the record's defining module may acquire its field count")
+                }
+                Some(record) => {
+                    kind = ConstIntrinsicKind::RecordFieldCount(
+                        record.hir_fields(self.db).data(self.db).len(),
+                    );
+                    None
+                }
+            };
+            if let Some(reason) = reason {
+                self.push_diag(BodyDiag::RecordShapeAcquisition {
+                    primary: expr.span(self.body()).into(),
+                    reason,
+                });
+                return false;
+            }
+            self.env.register_const_intrinsic(expr, callable, kind);
+            return true;
+        }
         let ty = match kind {
             ConstIntrinsicKind::SizeOf => callable.generic_args().first().copied(),
+            ConstIntrinsicKind::RecordFieldCount(_) => unreachable!(),
         };
         if let Some(ty) = ty {
             let ty = self.normalize_ty(ty);

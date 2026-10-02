@@ -4,7 +4,7 @@ use salsa::Accumulator as _;
 use super::{
     FileLowerCtxt,
     attr::{has_named_attr, lower_attrs_without_named, named_attr_specs},
-    hir_builder::{DecodeInputBindings, FuncBodySpec, HirBuilder},
+    hir_builder::{DecodeInputBindings, GeneratedFunctionSpec, HirBuilder},
     msg::{
         build_decode_head_pos_expr, create_head_size_assoc_const, create_is_dynamic_assoc_const,
         create_payload_size_func,
@@ -441,12 +441,14 @@ fn lower_decode_impl<'db>(
             builder.param_underscore_named(pos_ident, u256_ty),
             builder.param_underscore_named(input_len_ident, u256_ty),
         ]);
-        builder.func_with_body_spec(
-            FuncBodySpec {
+        builder.generated_func_with_body(
+            GeneratedFunctionSpec {
                 name: builder.ident("decode_from_prechecked_head"),
                 attrs: builder.empty_attrs(),
                 generic_params,
+                where_clause: builder.empty_where_clause(),
                 params,
+                effects: builder.empty_effect_params(),
                 ret_ty: Some(builder.self_ty()),
                 modifiers,
             },
@@ -483,12 +485,14 @@ fn lower_decode_impl<'db>(
                 params.push(builder.param_underscore_named(input_len_ident, u256_ty));
             }
             let params = builder.params(params);
-            builder.func_with_body_spec(
-                FuncBodySpec {
+            builder.generated_func_with_body(
+                GeneratedFunctionSpec {
                     name: builder.ident(name),
                     attrs: builder.empty_attrs(),
                     generic_params,
+                    where_clause: builder.empty_where_clause(),
                     params,
+                    effects: builder.empty_effect_params(),
                     ret_ty: Some(builder.self_ty()),
                     modifiers,
                 },

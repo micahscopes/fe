@@ -1639,6 +1639,22 @@ fn prepare_tests_single_file(
     };
 
     db.workspace().touch(db, file_url.clone(), Some(content));
+    let prepared = match driver::elaboration::prepare_target(db, &file_url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let message = format!("{}: {}", error.url, error.message);
+            let _ = writeln!(output, "{message}");
+            if let Some(report) = report {
+                write_report_error(report, "compilation_errors.txt", &message);
+            }
+            return SuitePreparation {
+                results: suite_error_result(suite, "compile", message),
+                single_jobs: Vec::new(),
+            };
+        }
+    };
+    let db = prepared.as_ref().unwrap_or(db);
+
     let Some(file) = db.workspace().get(db, &file_url) else {
         return SuitePreparation {
             results: suite_error_result(
@@ -1836,6 +1852,22 @@ fn prepare_tests_ingot(
             single_jobs: Vec::new(),
         };
     }
+
+    let prepared = match driver::elaboration::prepare_target(db, &ingot_url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let message = format!("{}: {}", error.url, error.message);
+            let _ = writeln!(output, "{message}");
+            if let Some(report) = report {
+                write_report_error(report, "compilation_errors.txt", &message);
+            }
+            return SuitePreparation {
+                results: suite_error_result(suite, "compile", message),
+                single_jobs: Vec::new(),
+            };
+        }
+    };
+    let db = prepared.as_ref().unwrap_or(db);
 
     let Some(ingot) = db.workspace().containing_ingot(db, ingot_url.clone()) else {
         return SuitePreparation {

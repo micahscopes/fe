@@ -85,6 +85,9 @@ const DESCRIBED: u256 = described()
 
 #[test]
 fn const_and_runtime_providers_agree() {
+    assert!(ACQUIRED_COUNT == 2)
+    assert!(acquired_count() == ACQUIRED_COUNT)
+    assert!(core::meta::record_field_count<ReflectedPacket>() == 2)
     assert!(ANSWER == 36)
     assert!(answer() == ANSWER)
 }
@@ -100,3 +103,6 @@ fn const_and_runtime_borrowed_providers_agree() {
     assert!(DESCRIBED == 84)
     assert!(described() == DESCRIBED)
 }
+struct ReflectedPacket { first: u256, second: bool }
+const fn acquired_count() -> u256 { core::meta::record_field_count<ReflectedPacket>() }
+const ACQUIRED_COUNT: u256 = acquired_count()
