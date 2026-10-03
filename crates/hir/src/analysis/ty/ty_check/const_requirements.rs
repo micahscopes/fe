@@ -1929,8 +1929,21 @@ fn check_selected_type_requirements<'db>(
         })
 }
 
-#[salsa::tracked(cycle_initial=requirement_cycle_initial, cycle_fn=requirement_cycle_recover)]
+// This boundary must run even when Salsa reuses a cached discharge result.
 fn discharge_selected_requirement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    declaration: WhereClauseOwner<'db>,
+    predicate: Body<'db>,
+    args: Vec<TyId<'db>>,
+    caller: Option<GenericParamOwner<'db>>,
+    selections: Vec<SelectedApplication<'db>>,
+) -> Discharge {
+    crate::analysis::ty::trait_resolution::assert_outside_proof_search();
+    discharge_selected_requirement_query(db, declaration, predicate, args, caller, selections)
+}
+
+#[salsa::tracked(cycle_initial=requirement_cycle_initial, cycle_fn=requirement_cycle_recover)]
+fn discharge_selected_requirement_query<'db>(
     db: &'db dyn HirAnalysisDb,
     declaration: WhereClauseOwner<'db>,
     predicate: Body<'db>,
@@ -2664,5 +2677,48 @@ mod recording_tests {
                 "{name}: each application must record its implementation condition once"
             );
         }
+    }
+
+    #[test]
+    fn cached_condition_discharge_cannot_run_during_proof_search() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/impl_const_requirements/recording_owners.fe"
+        ));
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("proof_boundary.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "one_call")
+            })
+            .expect("fixture function");
+        let (diagnostics, typed) = super::super::check_func_body(&db, function);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let obligation = &typed.tables.pending_const_obligations[0].obligation;
+        let discharge = || {
+            super::discharge_selected_requirement(
+                &db,
+                obligation.declaration,
+                obligation.predicate,
+                obligation.args.clone(),
+                obligation.caller,
+                obligation.selections.clone(),
+            )
+        };
+        assert!(matches!(discharge(), super::Discharge::Holds));
+        let proof = crate::analysis::ty::trait_resolution::enter_proof_search();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(discharge));
+        drop(proof);
+        assert!(
+            result.is_err(),
+            "cached condition discharge crossed the proof boundary"
+        );
     }
 }

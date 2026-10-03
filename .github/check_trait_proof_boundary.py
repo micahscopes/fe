@@ -19,6 +19,8 @@ FORBIDDEN_IN_SOLVER = (
     "check_pending_const_obligations",
     "pending_proof_const_obligations",
     "discharge_requirement",
+    "discharge_selected_requirement",
+    "discharge_selected_requirement_query",
     "prove_selected_impl_evidence",
     "eval_const_instance",
     "eval_body_owner_const",
@@ -26,7 +28,8 @@ FORBIDDEN_IN_SOLVER = (
 DISCHARGE = re.compile(
     r"\b(?:check_impl_const_requirements|check_proof_const_requirements|"
     r"check_pending_const_obligations|pending_proof_const_obligations|"
-    r"discharge_requirement)\b|\.discharge\s*\("
+    r"discharge_requirement|discharge_selected_requirement|"
+    r"discharge_selected_requirement_query)\b|\.discharge\s*\("
 )
 
 
@@ -57,6 +60,11 @@ def violations(solver_sources: dict[str, str], other_sources: dict[str, str]) ->
                 errors.append(f"{path}:{number}: condition discharge in proof search")
 
     for path, source in other_sources.items():
+        if path != "ty_check/const_requirements.rs":
+            for number, raw_line in enumerate(production(source).splitlines(), 1):
+                line = raw_line.split("//", 1)[0]
+                if re.search(r"\bdischarge_selected_requirement_query\b", line):
+                    errors.append(f"{path}:{number}: cached discharge bypasses its guarded entry")
         if path.startswith("ty_check/"):
             continue
         bridge_start = source.find("pub fn prove_selected_impl_evidence")
@@ -110,12 +118,14 @@ def main() -> int:
     discharge = other_sources.get("ty_check/const_requirements.rs", "")
     if not guarded_entry(
         discharge,
-        "fn discharge(&self, db:",
+        "fn discharge_selected_requirement<'db>(",
         "trait_resolution::assert_outside_proof_search()",
     ):
         errors.append("const_requirements.rs: obligation discharge lacks the runtime boundary")
-    if len(re.findall(r"\bdischarge_requirement\s*\(", production(discharge))) != 1:
+    if len(re.findall(r"\bdischarge_selected_requirement_query\s*\(", production(discharge))) != 1:
         errors.append("const_requirements.rs: condition discharge bypasses its guarded entry")
+    if len(re.findall(r"\bdischarge_selected_requirement_query\b", production(discharge))) != 2:
+        errors.append("const_requirements.rs: cached discharge has an unguarded reference")
     # Check that an old direct evaluator call and an indirect helper edge both
     # fail this gate, so a refactor cannot make the check vacuous.
     if not violations({"table_solver.rs": "check_impl_const_requirements(db);"}, {}):
@@ -127,6 +137,16 @@ def main() -> int:
         errors.append("self-check: indirect obligation discharge was not rejected")
     if guarded_entry("fn solve() { work(); }", "fn solve()", "enter_proof_search()"):
         errors.append("self-check: missing runtime guard was not rejected")
+    for name in ("discharge_selected_requirement", "discharge_selected_requirement_query"):
+        if not violations({"table_solver.rs": f"{name}(db);"}, {}):
+            errors.append(f"self-check: direct {name} hook was not rejected")
+        if not violations(
+            {"table_solver.rs": "helper(db);"},
+            {"normalize.rs": f"fn helper() {{ {name}(db); }}"},
+        ):
+            errors.append(f"self-check: indirect {name} hook was not rejected")
+    if not violations({}, {"ty_check/callable.rs": "discharge_selected_requirement_query(db);"}):
+        errors.append("self-check: checker-side cached discharge bypass was not rejected")
     if errors:
         print("trait proof boundary violations:\n" + "\n".join(errors), file=sys.stderr)
         return 1
