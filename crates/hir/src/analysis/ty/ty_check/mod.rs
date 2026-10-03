@@ -2557,14 +2557,7 @@ impl<'db> TyChecker<'db> {
             let mut directly_selected = None;
             for &required in requirements.list(db) {
                 let required = self.normalize_trait_goal(required);
-                let Some(selection) = obligation
-                    .context
-                    .selections(db)
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|selection| selection.matches(db, required))
-                else {
+                let Some(selection) = obligation.context.selection_for(db, required) else {
                     continue;
                 };
                 // Selection must satisfy implied requirements too. Otherwise a

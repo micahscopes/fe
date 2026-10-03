@@ -2023,9 +2023,12 @@ pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
 ) -> PredicateListId<'db> {
-    let typed_body = key.typed_body(db);
+    // Assumptions are an input to instance decisions, not a read of their output.
+    let template = &infer_body(db, key.owner(db)).1;
+    let assumptions = instantiate_checked(db, key.owner(db), template.assumptions(), key.subst(db))
+        .expect("body assumptions must use their semantic substitution domain");
     let impl_env = key.impl_env(db);
-    let mut predicates: IndexSet<_> = typed_body.assumptions().list(db).iter().copied().collect();
+    let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
     predicates.extend(impl_env.assumptions(db).list(db).iter().copied());
     predicates.extend(impl_env.witnesses(db).iter().copied());
     predicates.extend(
