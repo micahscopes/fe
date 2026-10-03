@@ -1029,7 +1029,10 @@ impl<'db> TyCheckEnv<'db> {
     /// expression types, and callables, all of which have been folded with
     /// the unification table.
     ///
-    pub(super) fn finish(mut self, table: &mut UnificationTable<'db>) -> TypedBody<'db> {
+    pub(super) fn finish(
+        mut self,
+        table: &mut UnificationTable<'db>,
+    ) -> (TypedBody<'db>, Vec<ConstConditionUse<'db>>) {
         let mut pending_const_obligations = self
             .deferred
             .drain(..)
@@ -1172,7 +1175,10 @@ impl<'db> TyCheckEnv<'db> {
         self.path_applications
             .iter_mut()
             .for_each(|(_, ty)| *ty = ty.fold_with(self.db, &mut prober));
-        self.decisions.condition_uses = pending_const_obligations;
+        let condition_inputs = pending_const_obligations
+            .into_iter()
+            .map(|use_| use_.fold_with(self.db, &mut prober))
+            .collect();
         self.decisions = self.decisions.fold_with(self.db, &mut prober);
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
@@ -1228,7 +1234,7 @@ impl<'db> TyCheckEnv<'db> {
         }
         .into();
         typed.decisions = std::sync::Arc::new(self.decisions);
-        typed
+        (typed, condition_inputs)
     }
 
     pub(super) fn expr_data(&self, expr: ExprId) -> &'db Partial<Expr<'db>> {
@@ -1853,7 +1859,9 @@ pub(super) enum TraitObligationOrigin<'db> {
 /// A call contributes one root obligation per constraint slot. Substitution
 /// changes that obligation's goal, not its slot: two declared bounds can become
 /// the same goal while retaining different supplied answers. A generic path
-/// confirmation belongs to the single trait reference at its expression span.
+/// confirmation belongs to the single trait reference at its expression or pattern
+/// span. Each producer discharges that root once; implied bounds are premises of
+/// its answer, not separate decisions. Goals are data and folding leaves keys intact.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DecisionSite<'db> {
     span: DynLazySpan<'db>,
@@ -1864,29 +1872,33 @@ pub struct DecisionSite<'db> {
 /// Choice keys use HIR sites, not rendered coordinates or an exporter index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Decisions<'db> {
-    pub(super) choices:
-        common::indexmap::IndexMap<(DecisionSite<'db>, TraitInstId<'db>), TraitChoice<'db>>,
+    pub(super) choices: common::indexmap::IndexMap<DecisionSite<'db>, TraitChoice<'db>>,
     pub(super) openings: common::indexmap::IndexMap<ExprId, WithChoice<'db>>,
-    pub(super) condition_uses: Vec<ConstConditionUse<'db>>,
-    pub(super) conditions_checked: bool,
+    pub(super) condition_uses: super::const_requirements::ConditionDecisions<'db>,
 }
 
 impl<'db> Decisions<'db> {
     /// Read the actual answer without resolving or checking its conditions again.
-    pub fn choice(
+    pub fn choice(&self, site: &DecisionSite<'db>) -> Option<&TraitChoice<'db>> {
+        self.choices.get(site)
+    }
+
+    pub fn condition(&self, site: &super::ConditionSite<'db>) -> Option<&ConstConditionUse<'db>> {
+        self.condition_uses.get(site)
+    }
+
+    pub fn condition_entries(
         &self,
-        site: &DecisionSite<'db>,
-        goal: TraitInstId<'db>,
-    ) -> Option<&TraitChoice<'db>> {
-        self.choices.get(&(site.clone(), goal))
+    ) -> impl ExactSizeIterator<Item = (&super::ConditionSite<'db>, &ConstConditionUse<'db>)> {
+        self.condition_uses.iter()
     }
 
     pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
-        let key = (choice.site(), choice.goal);
+        let key = choice.site();
         if let Some(previous) = self.choices.get(&key) {
             assert_eq!(
-                previous.via, choice.via,
-                "a choice key cannot acquire a different answer"
+                previous, &choice,
+                "a use site cannot acquire a different answer"
             );
         } else {
             self.choices.insert(key, choice);
@@ -1909,8 +1921,7 @@ impl<'db> Decisions<'db> {
         db: &'db dyn HirAnalysisDb,
         folder: &mut F,
     ) -> Self {
-        let choices = std::mem::take(&mut self.choices);
-        for (_, mut choice) in choices {
+        for choice in self.choices.values_mut() {
             choice.goal = choice.goal.fold_with(db, folder);
             choice.via = match choice.via {
                 TraitChoiceVia::Implementation(implementor) => {
@@ -1920,14 +1931,13 @@ impl<'db> Decisions<'db> {
                     TraitChoiceVia::Selected(selection.fold_with(db, folder))
                 }
             };
-            self.record_trait_choice(choice);
         }
         for choice in self.openings.values_mut() {
             if let Ok(selection) = &mut choice.outcome {
                 *selection = selection.fold_with(db, folder);
             }
         }
-        for use_ in &mut self.condition_uses {
+        for use_ in self.condition_uses.values_mut() {
             *use_ = use_.clone().fold_with(db, folder);
         }
         self
@@ -1949,7 +1959,7 @@ impl<'db> Decisions<'db> {
                 selection.visit_with(visitor);
             }
         }
-        for use_ in &self.condition_uses {
+        for use_ in self.condition_uses.values() {
             use_.visit_with(visitor);
         }
     }

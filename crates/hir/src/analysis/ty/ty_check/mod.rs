@@ -3,8 +3,8 @@ mod const_requirements;
 pub(crate) use const_requirements::check_declared_type_requirements;
 pub(crate) use const_requirements::selected_impl_requirements_hold;
 pub use const_requirements::{
-    ConstConditionUse, Discharge, EvaluationStop, PredicateKey, PredicateTerm, RequirementFailure,
-    RequirementProof, written_condition_uses,
+    ConditionSite, ConstConditionUse, Discharge, EvaluationStop, PredicateKey, PredicateTerm,
+    RequirementFailure, RequirementProof, written_condition_uses,
 };
 pub(crate) use const_requirements::{
     comparable_const_predicate_key, normalize_comparable_const_predicate_key,
@@ -1188,14 +1188,15 @@ pub(super) fn checked_body<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
 ) -> CheckedBody<'db> {
-    let (mut diags, mut typed) = infer_body(db, owner).clone();
+    let inferred = inferred_body_with_selections(db, owner, &[]);
+    let (mut diags, mut typed) = inferred.result.clone();
     let mut recursive = false;
     if diags_allow_evaluation(db, &diags) {
-        let requirements = const_requirements::check_body_requirements(db, owner, &typed);
+        let requirements =
+            const_requirements::check_body_requirements(db, owner, &typed, &inferred.conditions);
         recursive = requirements.recursive;
         let decisions = Arc::make_mut(&mut typed.decisions);
         decisions.condition_uses = requirements.conditions;
-        decisions.conditions_checked = true;
         diags.extend(requirements.diags);
     }
     CheckedBody {
@@ -1220,51 +1221,71 @@ pub(crate) fn infer_body<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
 ) -> &'db (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
-    infer_body_with_selections(db, owner, &[])
+    &inferred_body_with_selections(db, owner, &[]).result
+}
+
+/// Inference inputs stay with the query that produced them. Completed typed
+/// bodies contain only discharged condition decisions, never a pending queue.
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+struct InferredBody<'db> {
+    result: (Vec<FuncBodyDiag<'db>>, TypedBody<'db>),
+    conditions: Vec<ConstConditionUse<'db>>,
 }
 
 /// Reuse the inference authority with the lexical selections already recorded
 /// by the enclosing body. Context belongs in the cache key; obtaining it must
 /// not re-enter enclosing inference from the anonymous body's checker.
-fn infer_body_with_selections<'db>(
+fn inferred_body_with_selections<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
     selections: &[crate::analysis::semantic::SelectedApplication<'db>],
-) -> &'db (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
-    infer_body_query(db, BodyInferenceKey::new(db, owner, selections.to_vec()))
+) -> &'db InferredBody<'db> {
+    infer_body_query(
+        db,
+        BodyInferenceKey::new(
+            db,
+            owner,
+            const_requirements::selection_context(db, owner.scope(), selections),
+        ),
+    )
 }
 
 #[salsa::interned]
 struct BodyInferenceKey<'db> {
     owner: BodyOwner<'db>,
-    #[return_ref]
-    selections: Vec<crate::analysis::semantic::SelectedApplication<'db>>,
+    context: crate::analysis::semantic::ImplEnv<'db>,
 }
 
 #[salsa::tracked(return_ref, cycle_initial=infer_body_cycle_initial, cycle_fn=infer_body_cycle_recover)]
 fn infer_body_query<'db>(
     db: &'db dyn HirAnalysisDb,
     key: BodyInferenceKey<'db>,
-) -> (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
+) -> InferredBody<'db> {
     let owner = key.owner(db);
     let Ok(mut checker) = TyChecker::new(db, owner) else {
-        return (
-            Vec::new(),
-            match owner {
-                BodyOwner::Func(func) => typed_body_for_bodyless_func(db, func),
-                BodyOwner::Const(_)
-                | BodyOwner::AnonConstBody { .. }
-                | BodyOwner::ContractInit { .. }
-                | BodyOwner::ContractRecvArm { .. } => TypedBody::empty(db),
-            },
-        );
+        return InferredBody {
+            result: (
+                Vec::new(),
+                match owner {
+                    BodyOwner::Func(func) => typed_body_for_bodyless_func(db, func),
+                    BodyOwner::Const(_)
+                    | BodyOwner::AnonConstBody { .. }
+                    | BodyOwner::ContractInit { .. }
+                    | BodyOwner::ContractRecvArm { .. } => TypedBody::empty(db),
+                },
+            ),
+            conditions: Vec::new(),
+        };
     };
 
-    for &selection in key.selections(db) {
+    for &selection in key.context(db).selections(db) {
         checker.env.push_selection(selection);
     }
     checker.run();
-    let (mut diags, typed_body) = checker.finish();
+    let InferredBody {
+        result: (mut diags, typed_body),
+        conditions,
+    } = checker.finish();
     if let BodyOwner::Func(func) = owner
         && func.is_const(db)
         && !func.is_extern(db)
@@ -1293,7 +1314,10 @@ fn infer_body_query<'db>(
         );
     }
 
-    (diags, typed_body)
+    InferredBody {
+        result: (diags, typed_body),
+        conditions,
+    }
 }
 
 // A constant evaluated from a type expression can call the body currently
@@ -1302,7 +1326,7 @@ fn infer_body_query<'db>(
 fn infer_body_cycle_initial<'db>(
     db: &'db dyn HirAnalysisDb,
     key: BodyInferenceKey<'db>,
-) -> (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
+) -> InferredBody<'db> {
     let mut typed = TypedBody::empty(db);
     typed.tables_mut().result_ty = TyId::invalid(db, InvalidCause::TypeLoweringCycle);
     let span = key
@@ -1310,20 +1334,23 @@ fn infer_body_cycle_initial<'db>(
         .body(db)
         .map(|body| body.span().into())
         .unwrap_or_else(DynLazySpan::invalid);
-    (
-        vec![FuncBodyDiag::Ty(
-            TyLowerDiag::TypeLoweringCycle(span).into(),
-        )],
-        typed,
-    )
+    InferredBody {
+        result: (
+            vec![FuncBodyDiag::Ty(
+                TyLowerDiag::TypeLoweringCycle(span).into(),
+            )],
+            typed,
+        ),
+        conditions: Vec::new(),
+    }
 }
 
 fn infer_body_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _value: &(Vec<FuncBodyDiag<'db>>, TypedBody<'db>),
+    _value: &InferredBody<'db>,
     _count: u32,
     _key: BodyInferenceKey<'db>,
-) -> salsa::CycleRecoveryAction<(Vec<FuncBodyDiag<'db>>, TypedBody<'db>)> {
+) -> salsa::CycleRecoveryAction<InferredBody<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
 
@@ -2088,7 +2115,7 @@ impl<'db> TyChecker<'db> {
             }
         }
     }
-    fn finish(self) -> (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
+    fn finish(self) -> InferredBody<'db> {
         TyCheckerFinalizer::new(self).finish()
     }
 
@@ -4262,13 +4289,9 @@ pub struct TypedBody<'db> {
 
 impl<'db> TypedBody<'db> {
     /// Actual results attached by the shared condition checker.
-    pub fn checked_conditions(&self) -> &[ConstConditionUse<'db>] {
+    pub fn checked_conditions(&self) -> impl ExactSizeIterator<Item = &ConstConditionUse<'db>> {
         crate::analysis::ty::trait_resolution::assert_outside_proof_search();
-        if self.decisions.conditions_checked {
-            &self.decisions.condition_uses
-        } else {
-            &[]
-        }
+        self.decisions.condition_uses.values()
     }
 
     /// Actual with selection outcomes, retained after lexical provisions expire.
@@ -6652,6 +6675,7 @@ fn instantiate_trait_assoc_fn<'db>(
 struct TyCheckerFinalizer<'db> {
     db: &'db dyn HirAnalysisDb,
     body: TypedBody<'db>,
+    conditions: Vec<ConstConditionUse<'db>>,
     assumptions: PredicateListId<'db>,
     ty_vars: FxHashSet<InferenceKey<'db>>,
     effect_provider_keys: FxHashSet<InferenceKey<'db>>,
@@ -6734,7 +6758,7 @@ impl<'db> TyCheckerFinalizer<'db> {
     fn new(mut checker: TyChecker<'db>) -> Self {
         let assumptions = checker.env.assumptions();
         checker.resolve_deferred();
-        let mut body = checker.env.finish(&mut checker.table);
+        let (mut body, conditions) = checker.env.finish(&mut checker.table);
         body.tables_mut().return_borrow_provider = checker
             .first_return_borrow_provider
             .map(|(_, provider)| provider);
@@ -6752,6 +6776,7 @@ impl<'db> TyCheckerFinalizer<'db> {
         Self {
             db: checker.db,
             body,
+            conditions,
             assumptions,
             ty_vars: FxHashSet::default(),
             effect_provider_keys: checker.effect_provider_keys,
@@ -6760,9 +6785,12 @@ impl<'db> TyCheckerFinalizer<'db> {
         }
     }
 
-    fn finish(mut self) -> (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
+    fn finish(mut self) -> InferredBody<'db> {
         self.check_unknown_types();
-        (self.diags, self.body)
+        InferredBody {
+            result: (self.diags, self.body),
+            conditions: self.conditions,
+        }
     }
 
     fn check_unknown_types(&mut self) {
