@@ -2331,8 +2331,18 @@ fn written_type_check_query<'db>(
                 .iter()
                 .any(|(_, expr)| matches!(expr.borrowed().to_opt(), Some(Expr::With(..)))) =>
         {
-            body.containing_func(db)
-                .map(|func| &infer_body(db, BodyOwner::Func(func)).1)
+            let owner = match body.scope().parent(db) {
+                Some(ScopeId::Item(ItemKind::Func(func))) if func.body(db) == Some(body) => {
+                    Some(BodyOwner::Func(func))
+                }
+                Some(ScopeId::Item(ItemKind::Const(constant)))
+                    if constant.body(db).to_opt() == Some(body) =>
+                {
+                    Some(BodyOwner::Const(constant))
+                }
+                _ => None,
+            };
+            owner.map(|owner| &infer_body(db, owner).1)
         }
         _ => None,
     };

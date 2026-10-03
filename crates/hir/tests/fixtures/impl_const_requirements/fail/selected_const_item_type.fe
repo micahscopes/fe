@@ -1,0 +1,13 @@
+// Spot 4 (soundness side). Mirror of s4a: ordinary OK = true, selected OK = false.
+// Expected: reject. If the written type is checked with the ordinary impl, accepted.
+trait Compute { const OK: bool }
+struct Subject {}
+impl Compute for Subject { const OK: bool = true }
+impl Compute for Subject as Strict { const OK: bool = false }
+
+struct Gate<T: Compute> where T::OK { value: T }
+
+const X: u256 = with (Strict) {
+    let gate: Gate<Subject> = Gate<Subject> { value: Subject {} }
+    1
+}

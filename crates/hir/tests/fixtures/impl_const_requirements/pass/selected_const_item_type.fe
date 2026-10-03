@@ -1,0 +1,15 @@
+// Spot 4 (completeness side). selected_body_type_true.fe moved from a fn body into a
+// const item. Inside `with (Other)`, Subject::OK is true, so Gate<Subject> is well formed.
+// Expected: accept (as in the fn version). If written types outside fn bodies get no
+// selections, this is rejected (3-0057 or 8-0093).
+trait Compute { const OK: bool }
+struct Subject {}
+impl Compute for Subject { const OK: bool = false }
+impl Compute for Subject as Other { const OK: bool = true }
+
+struct Gate<T: Compute> where T::OK { value: T }
+
+const X: u256 = with (Other) {
+    let gate: Gate<Subject> = Gate<Subject> { value: Subject {} }
+    1
+}
