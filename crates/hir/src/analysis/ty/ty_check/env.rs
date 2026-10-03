@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Update;
 use thin_vec::ThinVec;
 
-use super::const_requirements::PendingConstObligation;
+use super::const_requirements::ConstConditionUse;
 use super::effect_env as keyed_effect_env;
 use super::owner::BodyOwner;
 use super::{
@@ -978,7 +978,7 @@ impl<'db> TyCheckEnv<'db> {
         self.deferred.push(DeferredTask::Obligation(obligation))
     }
 
-    pub(super) fn register_const_obligation(&mut self, obligation: PendingConstObligation<'db>) {
+    pub(super) fn register_const_obligation(&mut self, obligation: ConstConditionUse<'db>) {
         self.deferred.push(DeferredTask::Const(obligation));
     }
 
@@ -1216,7 +1216,7 @@ impl<'db> TyCheckEnv<'db> {
             |prop| prop.ty,
         );
 
-        TypedBodyTables {
+        let mut typed: TypedBody<'db> = TypedBodyTables {
             body: Some(self.body),
             result_ty,
             assumptions,
@@ -1240,14 +1240,15 @@ impl<'db> TyCheckEnv<'db> {
             pattern_store,
             pattern_status: self.pattern_status,
             for_loop_seq: self.for_loop_seq,
-            pending_const_obligations,
             trait_choices: self.trait_choices,
             with_choices: self.with_choices,
             expr_place,
             expr_places,
             path_applications: self.path_applications,
         }
-        .into()
+        .into();
+        typed.condition_uses = std::sync::Arc::new(pending_const_obligations);
+        typed
     }
 
     pub(super) fn expr_data(&self, expr: ExprId) -> &'db Partial<Expr<'db>> {
@@ -1853,7 +1854,7 @@ pub(super) enum DeferredTask<'db> {
         span: DynLazySpan<'db>,
     },
     Obligation(TraitObligation<'db>),
-    Const(PendingConstObligation<'db>),
+    Const(ConstConditionUse<'db>),
     Method(PendingMethod<'db>),
     PrimitiveOp(PendingPrimitiveOp),
 }

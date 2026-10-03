@@ -1170,15 +1170,6 @@ pub enum GoalSatisfiability<'db> {
     UnSat(Option<Solution<TraitInstId<'db>>>),
 }
 
-impl GoalSatisfiability<'_> {
-    pub fn is_satisfied(&self) -> bool {
-        matches!(
-            self,
-            Self::Satisfied(_) | Self::NeedsConfirmation { .. } | Self::ContainsInvalid
-        )
-    }
-}
-
 #[salsa::interned]
 #[derive(Debug)]
 pub struct PredicateListId<'db> {

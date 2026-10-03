@@ -42,55 +42,46 @@ pub enum PredicateTerm<'db> {
     Call(Vec<PredicateKey<'db>>),
 }
 
-/// A substituted const condition waiting for the checker, with the caller's
-/// lexical premises and recorded selections kept separate from proof search.
+/// A condition use, before or after its actual discharge. Checking replaces
+/// the pending state in the body's record rather than retaining a second queue.
 #[derive(Debug, Clone, PartialEq, Eq, Update)]
-pub(super) struct ConstObligation<'db> {
+pub struct ConstConditionUse<'db> {
     declaration: WhereClauseOwner<'db>,
     predicate: Body<'db>,
     args: Vec<TyId<'db>>,
     caller: Option<GenericParamOwner<'db>>,
     selections: Vec<SelectedApplication<'db>>,
+    use_span: Option<DynLazySpan<'db>>,
+    discharge: Option<RequirementDischarge<'db>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Update)]
-pub(super) struct PendingConstObligation<'db> {
-    obligation: ConstObligation<'db>,
-    use_span: crate::span::DynLazySpan<'db>,
-}
-
-/// A use and the result returned by its actual condition check.
-#[derive(Debug, Clone, PartialEq, Eq, Update)]
-pub struct CheckedConstObligation<'db> {
-    use_: PendingConstObligation<'db>,
-    outcome: Discharge<'db>,
-    predicate: Option<Arc<PredicateKey<'db>>>,
-}
-
-impl<'db> CheckedConstObligation<'db> {
+impl<'db> ConstConditionUse<'db> {
     pub fn declaration(&self) -> WhereClauseOwner<'db> {
-        self.use_.obligation.declaration
+        self.declaration
     }
     pub fn source_predicate(&self) -> Body<'db> {
-        self.use_.obligation.predicate
+        self.predicate
     }
     pub fn arguments(&self) -> &[TyId<'db>] {
-        &self.use_.obligation.args
+        &self.args
     }
     pub fn caller(&self) -> Option<GenericParamOwner<'db>> {
-        self.use_.obligation.caller
+        self.caller
     }
     pub fn selections(&self) -> &[SelectedApplication<'db>] {
-        &self.use_.obligation.selections
+        &self.selections
     }
     pub fn span(&self) -> &DynLazySpan<'db> {
-        &self.use_.use_span
+        self.use_span.as_ref().expect("condition has a use site")
     }
     pub fn outcome(&self) -> Discharge<'db> {
-        self.outcome
+        self.discharge
+            .as_ref()
+            .expect("condition has been checked")
+            .outcome
     }
     pub fn predicate(&self) -> Option<&PredicateKey<'db>> {
-        self.predicate.as_deref()
+        self.discharge.as_ref()?.predicate.as_deref()
     }
 }
 
@@ -111,29 +102,30 @@ impl<'db> PredicateKey<'db> {
 
 struct ConditionCapture<'a, 'db> {
     site: DynLazySpan<'db>,
-    conditions: &'a mut Vec<CheckedConstObligation<'db>>,
+    conditions: &'a mut Vec<ConstConditionUse<'db>>,
 }
 
 impl<'db> ConditionCapture<'_, 'db> {
-    fn record(&mut self, obligation: ConstObligation<'db>, result: RequirementDischarge<'db>) {
-        self.conditions.push(CheckedConstObligation {
-            use_: PendingConstObligation {
-                obligation,
-                use_span: self.site.clone(),
-            },
-            outcome: result.outcome,
-            predicate: result.predicate,
-        });
+    fn record(&mut self, mut use_: ConstConditionUse<'db>, result: RequirementDischarge<'db>) {
+        use_.use_span = Some(self.site.clone());
+        use_.discharge = Some(result);
+        self.conditions.push(use_);
     }
 }
 
-impl<'db> PendingConstObligation<'db> {
+impl<'db> ConstConditionUse<'db> {
     pub(super) fn fold_with<F>(mut self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
     where
         F: crate::analysis::ty::fold::TyFolder<'db>,
     {
-        self.obligation.args = self.obligation.args.fold_with(db, folder);
-        self.obligation.selections = self.obligation.selections.fold_with(db, folder);
+        self.args = self.args.fold_with(db, folder);
+        self.selections = self.selections.fold_with(db, folder);
+        if let Some(result) = &mut self.discharge {
+            result.predicate = result
+                .predicate
+                .take()
+                .map(|key| Arc::new(Arc::unwrap_or_clone(key).fold_with(db, folder)));
+        }
         self
     }
 
@@ -142,8 +134,13 @@ impl<'db> PendingConstObligation<'db> {
         V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
     {
         use crate::analysis::ty::visitor::TyVisitable;
-        self.obligation.args.visit_with(visitor);
-        self.obligation.selections.visit_with(visitor);
+        self.args.visit_with(visitor);
+        self.selections.visit_with(visitor);
+        if let Some(result) = &self.discharge
+            && let Some(predicate) = &result.predicate
+        {
+            predicate.visit_with(visitor);
+        }
     }
 }
 
@@ -153,12 +150,12 @@ pub(super) fn pending_owner_const_obligations<'db>(
     args: &[TyId<'db>],
     use_scope: ScopeId<'db>,
     use_span: crate::span::DynLazySpan<'db>,
-) -> Vec<PendingConstObligation<'db>> {
+) -> Vec<ConstConditionUse<'db>> {
     owner_const_obligations(db, declaration, args, use_scope)
         .into_iter()
-        .map(|obligation| PendingConstObligation {
-            obligation,
-            use_span: use_span.clone(),
+        .map(|mut use_| {
+            use_.use_span = Some(use_span.clone());
+            use_
         })
         .collect()
 }
@@ -168,19 +165,21 @@ fn owner_const_obligations<'db>(
     declaration: WhereClauseOwner<'db>,
     args: &[TyId<'db>],
     use_scope: ScopeId<'db>,
-) -> Vec<ConstObligation<'db>> {
+) -> Vec<ConstConditionUse<'db>> {
     let caller =
         premise_owner_in_scope(db, use_scope).filter(|_| args.iter().any(|ty| ty.has_param(db)));
     declaration
         .where_clause(db)
         .const_predicates(db)
         .iter()
-        .map(|&predicate| ConstObligation {
+        .map(|&predicate| ConstConditionUse {
             declaration,
             predicate,
             args: args.to_vec(),
             caller,
             selections: Vec::new(),
+            use_span: None,
+            discharge: None,
         })
         .collect()
 }
@@ -189,7 +188,7 @@ fn selected_impl_condition_obligations<'db>(
     db: &'db dyn HirAnalysisDb,
     conditions: crate::analysis::ty::trait_resolution::ImplConditionsId<'db>,
     use_scope: ScopeId<'db>,
-) -> Vec<ConstObligation<'db>> {
+) -> Vec<ConstConditionUse<'db>> {
     let mut obligations = Vec::new();
     for &goal in conditions.trait_goals(db) {
         for obligation in owner_const_obligations(
@@ -227,15 +226,13 @@ pub(super) fn selected_impl_condition_uses<'db>(
     use_scope: ScopeId<'db>,
     use_span: crate::span::DynLazySpan<'db>,
     selections: &[SelectedApplication<'db>],
-) -> Vec<PendingConstObligation<'db>> {
+) -> Vec<ConstConditionUse<'db>> {
     selected_impl_condition_obligations(db, conditions, use_scope)
         .into_iter()
-        .map(|mut obligation| {
-            obligation.selections = selections.to_vec();
-            PendingConstObligation {
-                obligation,
-                use_span: use_span.clone(),
-            }
+        .map(|mut use_| {
+            use_.selections = selections.to_vec();
+            use_.use_span = Some(use_span.clone());
+            use_
         })
         .collect()
 }
@@ -266,26 +263,23 @@ pub(crate) fn selected_impl_requirements_hold<'db>(
 
 fn check_recorded_condition_uses<'db>(
     db: &'db dyn HirAnalysisDb,
-    uses: &[PendingConstObligation<'db>],
+    uses: &[ConstConditionUse<'db>],
 ) -> RequirementCheck<'db> {
     let mut check = RequirementCheck::default();
     for use_ in uses {
-        let obligation = &use_.obligation;
         let outcome = discharge_selected_requirement(
             db,
-            obligation.declaration,
-            obligation.predicate,
-            obligation.args.clone(),
-            obligation.caller,
-            obligation.selections.clone(),
+            use_.declaration,
+            use_.predicate,
+            use_.args.clone(),
+            use_.caller,
+            use_.selections.clone(),
         );
-        check.conditions.push(CheckedConstObligation {
-            use_: use_.clone(),
-            outcome: outcome.outcome,
-            predicate: outcome.predicate,
-        });
+        let mut checked = use_.clone();
+        checked.discharge = Some(outcome.clone());
+        check.conditions.push(checked);
         if let Discharge::Fails(failure) = outcome.outcome {
-            check.unmet(use_.use_span.clone(), obligation.predicate, failure);
+            check.unmet(use_.span().clone(), use_.predicate, failure);
         }
     }
     check
@@ -797,7 +791,7 @@ impl<'db> PredicateFormation<'db> {
 pub(super) struct RequirementCheck<'db> {
     pub(super) diags: Vec<FuncBodyDiag<'db>>,
     pub(super) recursive: bool,
-    pub(super) conditions: Vec<CheckedConstObligation<'db>>,
+    pub(super) conditions: Vec<ConstConditionUse<'db>>,
 }
 
 impl<'db> RequirementCheck<'db> {
@@ -1103,10 +1097,7 @@ pub(super) fn check_body_requirements<'db>(
         }
     }
     let mut check = checker.check_inferred_types(&entered);
-    check.extend(check_recorded_condition_uses(
-        db,
-        &typed.tables.pending_const_obligations,
-    ));
+    check.extend(check_recorded_condition_uses(db, &typed.condition_uses));
     for (nested, expected) in expression_const_bodies(db, body, typed) {
         check.extend(anon_const_position_check(db, nested, expected, &[]));
     }
@@ -1393,15 +1384,14 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             .iter()
             .filter(|&&predicate| checked_at_uses(db, predicate))
         {
-            let use_ = PendingConstObligation {
-                obligation: ConstObligation {
-                    declaration: WhereClauseOwner::Func(func),
-                    predicate,
-                    args: args.to_vec(),
-                    caller: premise_owner,
-                    selections: selections.clone(),
-                },
-                use_span: expr.span(self.body).into(),
+            let use_ = ConstConditionUse {
+                declaration: WhereClauseOwner::Func(func),
+                predicate,
+                args: args.to_vec(),
+                caller: premise_owner,
+                selections: selections.clone(),
+                use_span: Some(expr.span(self.body).into()),
+                discharge: None,
             };
             self.check
                 .extend(check_recorded_condition_uses(db, &[use_]));
@@ -1934,7 +1924,7 @@ fn check_entered_header<'db>(
     headers: Vec<TyId<'db>>,
     scope: ScopeId<'db>,
     written: &FxHashSet<TyId<'db>>,
-    conditions: &mut Vec<CheckedConstObligation<'db>>,
+    conditions: &mut Vec<ConstConditionUse<'db>>,
 ) -> Option<TypeRequirementFailure<'db>> {
     let body = typed.body()?;
     let mut carried = vec![expr];
@@ -2061,12 +2051,14 @@ fn check_selected_type_requirements<'db>(
         .iter()
         .filter(|&&predicate| checked_at_uses(db, predicate))
         .find_map(|&predicate| {
-            let obligation = ConstObligation {
+            let obligation = ConstConditionUse {
                 declaration,
                 predicate,
                 args: args.to_vec(),
                 caller,
                 selections: selections.to_vec(),
+                use_span: None,
+                discharge: None,
             };
             let outcome = discharge_selected_requirement(
                 db,
@@ -2585,7 +2577,7 @@ fn written_types_query<'db>(
 pub fn written_condition_uses<'db>(
     db: &'db dyn HirAnalysisDb,
     item: ItemKind<'db>,
-) -> &'db [CheckedConstObligation<'db>] {
+) -> &'db [ConstConditionUse<'db>] {
     crate::analysis::ty::trait_resolution::assert_outside_proof_search();
     &written_type_check_query(db, WrittenTypeRegion::new(db, item)).conditions
 }
@@ -2875,7 +2867,7 @@ mod recording_tests {
             let (diagnostics, typed) = super::super::check_func_body(&db, function);
             assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
             assert_eq!(
-                typed.tables.pending_const_obligations.len(),
+                typed.checked_conditions().len(),
                 expected,
                 "{name}: each application must record its implementation condition once"
             );
@@ -2901,16 +2893,11 @@ mod recording_tests {
                 choice.via,
                 super::super::env::TraitChoiceVia::Implementation(_)
             )));
-            assert_eq!(typed.checked_const_obligations.len(), expected);
-            assert!(
-                typed
-                    .checked_const_obligations
-                    .iter()
-                    .all(|checked| matches!(
-                        checked.outcome,
-                        super::Discharge::Holds(super::RequirementProof::Evaluated)
-                    ))
-            );
+            assert_eq!(typed.checked_conditions().len(), expected);
+            assert!(typed.checked_conditions().iter().all(|checked| matches!(
+                checked.outcome(),
+                super::Discharge::Holds(super::RequirementProof::Evaluated)
+            )));
         }
     }
 
@@ -2957,7 +2944,7 @@ mod recording_tests {
                 failure.is_none(),
                 "{name}: {diagnostics:?}"
             );
-            assert_eq!(typed.checked_const_obligations.len(), 1, "{name}");
+            assert_eq!(typed.checked_conditions().len(), 1, "{name}");
             let checked = &typed.checked_conditions()[0];
             let predicate = checked
                 .predicate()
@@ -2978,23 +2965,66 @@ mod recording_tests {
             }
             match failure {
                 Some(failure) => {
-                    assert_eq!(checked.outcome, super::Discharge::Fails(failure), "{name}")
+                    assert_eq!(
+                        checked.outcome(),
+                        super::Discharge::Fails(failure),
+                        "{name}"
+                    )
                 }
                 None if name == "forward_premise" => {
                     let premise = super::WhereClauseOwner::Func(function)
                         .where_clause(&db)
                         .const_predicates(&db)[0];
                     assert_eq!(
-                        checked.outcome,
+                        checked.outcome(),
                         super::Discharge::Holds(super::RequirementProof::Premise(premise))
                     );
                 }
                 None => assert_eq!(
-                    checked.outcome,
+                    checked.outcome(),
                     super::Discharge::Holds(super::RequirementProof::Evaluated)
                 ),
             }
         }
+    }
+
+    #[test]
+    fn folded_body_preserves_checked_condition_records() {
+        use crate::analysis::ty::fold::{TyFoldable, TyFolder};
+        struct Identity;
+        impl<'db> TyFolder<'db> for Identity {
+            fn fold_ty(
+                &mut self,
+                _: &'db dyn crate::analysis::HirAnalysisDb,
+                ty: crate::analysis::ty::ty_def::TyId<'db>,
+            ) -> crate::analysis::ty::ty_def::TyId<'db> {
+                ty
+            }
+        }
+        let source = "fn read<const N: usize>() -> u256 where N > 0 { 7 }
+fn use_it() -> u256 { read<7>() }";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("folded_conditions.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|f| {
+                f.name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "use_it")
+            })
+            .unwrap();
+        let (_, inferred) = super::super::infer_body(&db, super::super::BodyOwner::Func(function));
+        assert!(inferred.checked_conditions().is_empty());
+        let (diags, typed) = super::super::check_func_body(&db, function);
+        assert!(std::sync::Arc::ptr_eq(&typed.tables, &inferred.tables));
+        assert!(inferred.checked_conditions().is_empty());
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(typed.checked_conditions().len(), 1);
+        let folded = typed.clone().fold_with(&db, &mut Identity);
+        assert_eq!(folded.checked_conditions(), typed.checked_conditions());
     }
 
     #[test]
@@ -3029,11 +3059,10 @@ mod recording_tests {
                 super::WrittenTypeRegion::new(&db, super::ItemKind::Func(function)),
             );
             assert_eq!(check.conditions.len(), 1, "argument {argument}");
-            assert_eq!(check.conditions[0].outcome, expected);
+            assert_eq!(check.conditions[0].outcome(), expected);
             assert_eq!(check.diags.is_empty(), argument > 0);
             let span = check.conditions[0]
-                .use_
-                .use_span
+                .span()
                 .resolve(&db)
                 .expect("authored type span");
             let start = u32::from(span.range.start()) as usize;
@@ -3234,8 +3263,8 @@ mod recording_tests {
             .expect("fixture function");
         let (diagnostics, typed) = super::super::check_func_body(&db, function);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert_eq!(typed.tables.pending_const_obligations.len(), 1);
-        let obligation = &typed.tables.pending_const_obligations[0].obligation;
+        assert_eq!(typed.checked_conditions().len(), 1);
+        let obligation = &typed.checked_conditions()[0];
         let result = super::discharge_selected_requirement(
             &db,
             obligation.declaration,
@@ -3275,7 +3304,7 @@ mod recording_tests {
             .expect("fixture function");
         let (diagnostics, typed) = super::super::check_func_body(&db, function);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let obligation = &typed.tables.pending_const_obligations[0].obligation;
+        let obligation = &typed.checked_conditions()[0];
         let discharge = || {
             super::discharge_selected_requirement(
                 &db,
