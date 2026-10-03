@@ -3305,6 +3305,97 @@ fn use_it() -> u256 { read<7>() }";
     }
 
     #[test]
+    fn folded_choices_preserve_distinct_declared_constraint_slots() {
+        use crate::analysis::HirAnalysisDb;
+        use crate::analysis::ty::{
+            TyId,
+            fold::{TyFoldable, TyFolder},
+            ty_def::TyData,
+        };
+        struct Replace<'db> {
+            from: TyId<'db>,
+            to: TyId<'db>,
+        }
+        impl<'db> TyFolder<'db> for Replace<'db> {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                if ty == self.from {
+                    self.to
+                } else {
+                    ty.super_fold_with(db, self)
+                }
+            }
+        }
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/impl_const_requirements/pass/choice_slots_collapse.fe"
+        ));
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("choice_slots_collapse.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "run")
+            })
+            .expect("run function");
+        let (diagnostics, typed) = super::super::check_func_body(&db, function);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let choices: Vec<_> = typed
+            .trait_choices()
+            .filter(|choice| choice.call_constraint().is_some())
+            .collect();
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].span(),
+            choices[1].span(),
+            "one rendered call site"
+        );
+        assert_ne!(choices[0].call_constraint(), choices[1].call_constraint());
+        let from = choices
+            .iter()
+            .flat_map(|choice| choice.goal().args(&db))
+            .copied()
+            .find(|ty| matches!(ty.data(&db), TyData::TyParam(_)))
+            .expect("generic argument");
+        let sites: Vec<_> = choices.iter().map(|choice| choice.site()).collect();
+        assert_ne!(sites[0], sites[1], "distinct semantic use sites");
+        let folded = typed.clone().fold_with(
+            &db,
+            &mut Replace {
+                from,
+                to: TyId::u8(&db),
+            },
+        );
+        let choices: Vec<_> = folded
+            .trait_choices()
+            .filter(|choice| choice.call_constraint().is_some())
+            .collect();
+        assert_eq!(choices.len(), 2, "both declared obligations survive");
+        assert_eq!(
+            choices[0].goal(),
+            choices[1].goal(),
+            "substitution merges the goals"
+        );
+        assert_ne!(
+            choices[0].via(),
+            choices[1].via(),
+            "preserve each actual supplied answer"
+        );
+        for site in sites {
+            let actual = folded
+                .decisions()
+                .choice(&site, choices[0].goal())
+                .expect("keyed slot answer");
+            assert_eq!(actual.site(), site);
+        }
+    }
+
+    #[test]
     fn folded_body_substitutes_retained_impl_choices() {
         use crate::analysis::HirAnalysisDb;
         use crate::analysis::ty::TyId;
@@ -3351,13 +3442,14 @@ fn use_it() -> u256 { read<7>() }";
             .expect("Read decision");
         let original_goal = original.goal();
         assert_eq!(
-            typed.decisions().choice(original.span(), original_goal),
+            typed.decisions().choice(&original.site(), original_goal),
             Some(original)
         );
         let from = original.goal().self_ty(&db);
         let to = TyId::u8(&db);
         assert_ne!(from, to);
         let span = original.span().clone();
+        let site = original.site();
         let folded = typed.clone().fold_with(&db, &mut Replace { from, to });
         let folded_choice = folded
             .trait_choices()
@@ -3369,11 +3461,11 @@ fn use_it() -> u256 { read<7>() }";
             "retained decisions must follow substitution"
         );
         assert_eq!(
-            folded.decisions().choice(&span, folded_choice.goal()),
+            folded.decisions().choice(&site, folded_choice.goal()),
             Some(folded_choice)
         );
         assert!(
-            folded.decisions().choice(&span, original_goal).is_none(),
+            folded.decisions().choice(&site, original_goal).is_none(),
             "old key must not remain after substitution"
         );
         assert_eq!(

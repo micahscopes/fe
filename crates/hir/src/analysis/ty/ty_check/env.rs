@@ -1839,7 +1839,7 @@ pub(super) enum DeferredTask<'db> {
     PrimitiveOp(PendingPrimitiveOp),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum TraitObligationOrigin<'db> {
     CallConstraint {
         call_expr: ExprId,
@@ -1849,12 +1849,23 @@ pub(super) enum TraitObligationOrigin<'db> {
     GenericConfirmation,
 }
 
+/// A semantic use site, including the declared obligation slot at a call.
+/// A call contributes one root obligation per constraint slot. Substitution
+/// changes that obligation's goal, not its slot: two declared bounds can become
+/// the same goal while retaining different supplied answers. A generic path
+/// confirmation belongs to the single trait reference at its expression span.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DecisionSite<'db> {
+    span: DynLazySpan<'db>,
+    origin: TraitObligationOrigin<'db>,
+}
+
 /// One body owns its accepted choices, opening outcomes and condition uses.
 /// Choice keys use HIR sites, not rendered coordinates or an exporter index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Decisions<'db> {
     pub(super) choices:
-        common::indexmap::IndexMap<(DynLazySpan<'db>, TraitInstId<'db>), TraitChoice<'db>>,
+        common::indexmap::IndexMap<(DecisionSite<'db>, TraitInstId<'db>), TraitChoice<'db>>,
     pub(super) openings: common::indexmap::IndexMap<ExprId, WithChoice<'db>>,
     pub(super) condition_uses: Vec<ConstConditionUse<'db>>,
     pub(super) conditions_checked: bool,
@@ -1864,14 +1875,14 @@ impl<'db> Decisions<'db> {
     /// Read the actual answer without resolving or checking its conditions again.
     pub fn choice(
         &self,
-        site: &DynLazySpan<'db>,
+        site: &DecisionSite<'db>,
         goal: TraitInstId<'db>,
     ) -> Option<&TraitChoice<'db>> {
         self.choices.get(&(site.clone(), goal))
     }
 
     pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
-        let key = (choice.span.clone(), choice.goal);
+        let key = (choice.site(), choice.goal);
         if let Some(previous) = self.choices.get(&key) {
             assert_eq!(
                 previous.via, choice.via,
@@ -1975,6 +1986,12 @@ pub struct TraitChoice<'db> {
 }
 
 impl<'db> TraitChoice<'db> {
+    pub fn site(&self) -> DecisionSite<'db> {
+        DecisionSite {
+            span: self.span.clone(),
+            origin: self.origin,
+        }
+    }
     pub fn goal(&self) -> TraitInstId<'db> {
         self.goal
     }

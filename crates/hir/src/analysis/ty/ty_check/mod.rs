@@ -9,7 +9,7 @@ pub use const_requirements::{
 pub(crate) use const_requirements::{
     comparable_const_predicate_key, normalize_comparable_const_predicate_key,
 };
-pub use env::{Decisions, TraitChoice, TraitChoiceVia, WithChoice};
+pub use env::{DecisionSite, Decisions, TraitChoice, TraitChoiceVia, WithChoice};
 mod contract;
 mod effect_env;
 pub(crate) mod env;
