@@ -34,6 +34,12 @@ fn lexical_selection_executes_receiver_calls_through_helpers_at_o0_and_o2() {
     let source =
         include_str!("../../driver/tests/fixtures/selected_helpers.fe").replace("const fn", "fn");
     for (extra, offset) in [("", 121), ("const Alternative: u256 = 999", 103)] {
+        // RD85 requires an explicit value path when a value and named impl collide.
+        let source = if extra.is_empty() {
+            source.clone()
+        } else {
+            source.replace("with (Alternative)", "with (ingot::Alternative)")
+        };
         execute(&format!(
             r#"
 use core::abi::ByteInput
