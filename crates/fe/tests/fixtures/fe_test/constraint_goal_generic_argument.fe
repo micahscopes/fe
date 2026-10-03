@@ -1,0 +1,10 @@
+use core::obligations::{Evidence, prove}
+trait Produce { const fn produce() -> u64 }
+struct Subject {}
+impl Produce for Subject { const fn produce() -> u64 { 42 } }
+const fn consume<T>(_ evidence: Evidence<Produce<T>>) -> u64 {
+    with (evidence) { T::produce() }
+}
+const ANSWER: u64 = consume(prove<Produce<Subject>>())
+#[test]
+fn goal_in_generic_argument_keeps_evidence() { assert!(ANSWER == 42) }

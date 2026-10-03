@@ -1,0 +1,18 @@
+// Spot 1 (soundness side). Mirror of s1a: the ordinary impl says OK = true and the
+// selected one says OK = false. Inside `with (Strict)`, Gate<Subject>'s condition is false.
+// Expected: reject (8-0093). If the condition is checked with the ordinary impl,
+// the program is accepted although the impl actually used has a false condition.
+trait Compute { const OK: bool }
+struct Subject {}
+impl Compute for Subject { const OK: bool = true }
+impl Compute for Subject as Strict { const OK: bool = false }
+
+trait Value { fn value() -> u256 }
+struct Gate<T> {}
+impl<T: Compute> Value for Gate<T> where T::OK {
+    fn value() -> u256 { 1 }
+}
+
+fn selected() -> u256 {
+    with (Strict) { <Gate<Subject> as Value>::value() }
+}

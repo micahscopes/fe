@@ -2566,6 +2566,7 @@ impl<'db> TyChecker<'db> {
                     conditions,
                     scope,
                     obligation.span.clone(),
+                    &obligation.selected_applications,
                 ) {
                     self.env.register_const_obligation(pending);
                 }

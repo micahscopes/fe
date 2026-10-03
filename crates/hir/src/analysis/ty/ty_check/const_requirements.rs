@@ -158,12 +158,16 @@ pub(super) fn selected_impl_condition_uses<'db>(
     conditions: crate::analysis::ty::trait_resolution::ImplConditionsId<'db>,
     use_scope: ScopeId<'db>,
     use_span: crate::span::DynLazySpan<'db>,
+    selections: &[SelectedApplication<'db>],
 ) -> Vec<PendingConstObligation<'db>> {
     selected_impl_condition_obligations(db, conditions, use_scope)
         .into_iter()
-        .map(|obligation| PendingConstObligation {
-            obligation,
-            use_span: use_span.clone(),
+        .map(|mut obligation| {
+            obligation.selections = selections.to_vec();
+            PendingConstObligation {
+                obligation,
+                use_span: use_span.clone(),
+            }
         })
         .collect()
 }
@@ -2368,11 +2372,9 @@ fn written_type_check_query<'db>(
                             conditions,
                             written.scope,
                             written.span.clone(),
+                            selections,
                         ));
                     }
-                }
-                for use_ in &mut uses {
-                    use_.obligation.selections = selections.to_vec();
                 }
                 diags.extend(check_recorded_condition_uses(db, &uses).diags);
                 let nested: FxHashSet<_> = reported[written.nested_from..]

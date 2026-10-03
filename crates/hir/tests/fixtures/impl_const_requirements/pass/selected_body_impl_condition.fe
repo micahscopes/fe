@@ -1,0 +1,19 @@
+// Spot 1 (completeness side). A condition recorded during body inference reads an
+// associated const whose value depends on the `with` selection.
+// Inside `with (Other)`, Subject::OK is true, so Gate<Subject>'s impl condition holds.
+// Expected: accept. If the recorded condition is checked without the block's
+// selections, the ordinary impl (OK = false) is used and this is rejected with 8-0093.
+trait Compute { const OK: bool }
+struct Subject {}
+impl Compute for Subject { const OK: bool = false }
+impl Compute for Subject as Other { const OK: bool = true }
+
+trait Value { fn value() -> u256 }
+struct Gate<T> {}
+impl<T: Compute> Value for Gate<T> where T::OK {
+    fn value() -> u256 { 1 }
+}
+
+fn selected() -> u256 {
+    with (Other) { <Gate<Subject> as Value>::value() }
+}

@@ -123,11 +123,7 @@ fn lower_hir_ty_impl<'db>(
         }
 
         HirTyKind::Path(path) => {
-            if let Some(goal) = lower_constraint_term(db, *path, scope, assumptions, minter) {
-                goal
-            } else {
-                lower_path_impl(db, scope, *path, assumptions, TypePosition::Type, minter)
-            }
+            lower_path_impl(db, scope, *path, assumptions, TypePosition::Type, minter)
         }
 
         HirTyKind::Primitive(primitive) => TyId::new(db, TyData::TyBase(TyBase::from(*primitive))),
@@ -620,6 +616,9 @@ fn lower_path_impl<'db>(
     position: TypePosition,
     minter: &LoweringContext<'db>,
 ) -> TyId<'db> {
+    if let Some(goal) = lower_constraint_term(db, path, scope, assumptions, minter) {
+        return goal;
+    }
     let Some(path) = path.to_opt() else {
         return TyId::invalid(db, InvalidCause::ParseError);
     };
