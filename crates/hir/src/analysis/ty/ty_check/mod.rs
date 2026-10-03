@@ -1194,10 +1194,9 @@ pub(super) fn checked_body<'db>(
     if diags_allow_evaluation(db, &diags) {
         let requirements =
             const_requirements::check_body_requirements(db, owner, &typed, &inferred.conditions);
-        recursive = requirements.recursive;
-        let decisions = Arc::make_mut(&mut typed.decisions);
-        decisions.condition_uses = requirements.conditions;
-        diags.extend(requirements.diags);
+        recursive = requirements.recursive();
+        diags.extend(requirements.diagnostics());
+        Arc::make_mut(&mut typed.decisions).condition_uses = requirements.conditions;
     }
     CheckedBody {
         diags,

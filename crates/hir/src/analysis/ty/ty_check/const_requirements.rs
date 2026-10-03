@@ -172,24 +172,23 @@ impl<'db> ConditionCapture<'_, 'db> {
         &mut self,
         db: &'db dyn HirAnalysisDb,
         mut use_: ConstConditionUse<'db>,
-    ) -> Discharge<'db> {
+    ) -> Option<RequirementReport<'db>> {
         crate::analysis::ty::trait_resolution::assert_outside_proof_search();
         use_.use_span = Some(self.site.clone());
-        if let Some(previous) = self.conditions.get(&use_.site()) {
-            return previous.outcome();
+        let site = use_.site();
+        if !self.conditions.contains_key(&site) {
+            use_.discharge = Some(discharge_selected_requirement(
+                db,
+                use_.declaration,
+                use_.predicate,
+                use_.args.clone(),
+                use_.caller,
+                use_.context,
+            ));
+            record_condition(self.conditions, use_);
         }
-        let result = discharge_selected_requirement(
-            db,
-            use_.declaration,
-            use_.predicate,
-            use_.args.clone(),
-            use_.caller,
-            use_.context,
-        );
-        let outcome = result.outcome;
-        use_.discharge = Some(result);
-        record_condition(self.conditions, use_);
-        outcome
+        matches!(self.conditions[&site].outcome(), Discharge::Fails(_))
+            .then_some(RequirementReport::Condition(site, None))
     }
 }
 
@@ -351,19 +350,13 @@ fn check_recorded_condition_uses<'db>(
         if check.conditions.contains_key(&use_.site()) {
             continue;
         }
-        let outcome = discharge_selected_requirement(
-            db,
-            use_.declaration,
-            use_.predicate,
-            use_.args.clone(),
-            use_.caller,
-            use_.context,
-        );
-        let mut checked = use_.clone();
-        checked.discharge = Some(outcome.clone());
-        record_condition(&mut check.conditions, checked);
-        if let Discharge::Fails(failure) = outcome.outcome {
-            check.unmet(use_.span().clone(), use_.predicate, failure);
+        if let Some(report) = (ConditionCapture {
+            site: use_.span().clone(),
+            conditions: &mut check.conditions,
+        })
+        .decide(db, use_.clone())
+        {
+            check.reports.push(report);
         }
     }
     check
@@ -384,7 +377,7 @@ pub(crate) fn check_impl_trait_header_const_requirements<'db>(
         implementation.scope(),
         implementation.span().trait_ref().into(),
     );
-    check_recorded_condition_uses(db, &uses).diags
+    check_recorded_condition_uses(db, &uses).diagnostics()
 }
 
 impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for PredicateKey<'db> {
@@ -869,54 +862,64 @@ impl<'db> PredicateFormation<'db> {
     }
 }
 
-/// A body's requirement check: its diagnostics, and whether a requirement it
-/// uses depends on itself, which makes a predicate's formation recursive.
+/// Reporting order and display metadata refer to the retained outcome;
+/// formation diagnostics have no discharged application to refer to.
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+enum RequirementReport<'db> {
+    Condition(ConditionSite<'db>, Option<TyId<'db>>),
+    Formation(FuncBodyDiag<'db>),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Update)]
 pub(super) struct RequirementCheck<'db> {
-    pub(super) diags: Vec<FuncBodyDiag<'db>>,
-    pub(super) recursive: bool,
+    reports: Vec<RequirementReport<'db>>,
     pub(super) conditions: ConditionDecisions<'db>,
 }
 
 impl<'db> RequirementCheck<'db> {
-    fn unmet(
-        &mut self,
-        primary: DynLazySpan<'db>,
-        predicate: Body<'db>,
-        failure: RequirementFailure,
-    ) {
-        self.recursive |= failure == RequirementFailure::Recursive;
-        self.diags
-            .push(unmet_requirement_diag(primary, predicate, failure, None));
+    pub(super) fn recursive(&self) -> bool {
+        self.reports.iter().any(|report| matches!(report,
+            RequirementReport::Condition(site, _) if self.conditions[site].outcome() == Discharge::Fails(RequirementFailure::Recursive)
+        ))
     }
 
-    /// Reports the unmet requirement of a type that only inference gives
-    /// at `primary`, naming the type.
-    fn unmet_inferred(&mut self, primary: DynLazySpan<'db>, unmet: &TypeRequirementFailure<'db>) {
-        self.recursive |= unmet.failure == RequirementFailure::Recursive;
-        self.diags.push(unmet_requirement_diag(
-            primary,
-            unmet.predicate,
-            unmet.failure,
-            Some(unmet.ty),
-        ));
+    pub(super) fn diagnostics(&self) -> Vec<FuncBodyDiag<'db>> {
+        crate::analysis::ty::trait_resolution::assert_outside_proof_search();
+        self.reports
+            .iter()
+            .filter_map(|report| match report {
+                RequirementReport::Condition(site, inferred) => {
+                    let use_ = &self.conditions[site];
+                    match use_.outcome() {
+                        Discharge::Holds(_) => None,
+                        Discharge::Fails(failure) => Some(unmet_requirement_diag(
+                            use_.span().clone(),
+                            use_.predicate,
+                            failure,
+                            *inferred,
+                        )),
+                    }
+                }
+                RequirementReport::Formation(diag) => Some(diag.clone()),
+            })
+            .collect()
     }
 
-    /// Reports a type application's unmet requirement, and keeps the
-    /// application in `entered`.
-    fn unmet_type(
-        &mut self,
-        primary: DynLazySpan<'db>,
-        unmet: TypeRequirementFailure<'db>,
-        entered: &mut FxHashSet<TyId<'db>>,
-    ) {
-        entered.insert(unmet.ty);
-        self.unmet(primary, unmet.predicate, unmet.failure);
+    fn report_type(&mut self, mut unmet: TypeRequirementFailure<'db>, inferred: bool) {
+        if inferred {
+            match &mut unmet.report {
+                RequirementReport::Condition(_, displayed) => *displayed = Some(unmet.ty),
+                RequirementReport::Formation(FuncBodyDiag::Body(
+                    BodyDiag::ConstRequirementNotSatisfied { inferred, .. },
+                )) => *inferred = Some(unmet.ty),
+                _ => unreachable!("type requirement failures have a type display slot"),
+            }
+        }
+        self.reports.push(unmet.report);
     }
 
     fn extend(&mut self, other: Self) {
-        self.recursive |= other.recursive;
-        self.diags.extend(other.diags);
+        self.reports.extend(other.reports);
         for (_, use_) in other.conditions {
             record_condition(&mut self.conditions, use_);
         }
@@ -1268,9 +1271,9 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             )
     }
 
-    fn unmet_type_at(&mut self, expr: ExprId, unmet: TypeRequirementFailure<'db>) {
-        self.check
-            .unmet_type(expr.span(self.body).into(), unmet, &mut self.entered);
+    fn report_entered_type(&mut self, unmet: TypeRequirementFailure<'db>) {
+        self.entered.insert(unmet.ty);
+        self.check.report_type(unmet, false);
     }
 
     /// Checks the applications that the body's paths pass through, once per
@@ -1292,8 +1295,8 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                     conditions: &mut self.check.conditions,
                 },
             ) {
-                self.check
-                    .unmet_type(site.clone(), unmet, &mut self.entered);
+                self.entered.insert(unmet.ty);
+                self.check.report_type(unmet, false);
             }
         }
         self.written
@@ -1319,7 +1322,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             )
         {
             failed = true;
-            self.unmet_type_at(expr, unmet);
+            self.report_entered_type(unmet);
         }
         if let Some(headers) = const_ref_headers(self.db, self.typed, expr)
             && let Some(unmet) = check_entered_header(
@@ -1332,7 +1335,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 &mut self.check.conditions,
             )
         {
-            self.unmet_type_at(expr, unmet);
+            self.report_entered_type(unmet);
         }
         self.check_callee(expr, data, ty);
         CheckedExpr { expr, ty, failed }
@@ -1401,7 +1404,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 },
             )
         {
-            self.unmet_type_at(expr, unmet);
+            self.report_entered_type(unmet);
         }
     }
 
@@ -1418,7 +1421,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                     &self.written,
                     &mut self.check.conditions,
                 ) {
-                    self.unmet_type_at(expr, unmet);
+                    self.report_entered_type(unmet);
                 }
             }
             // The instantiated headers are unknown, so a condition of a record
@@ -1431,11 +1434,14 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                     .chain(args.iter().copied())
                     .find_map(|ty| first_condition(self.db, ty))
                 {
-                    self.check.unmet(
-                        expr.span(self.body).into(),
-                        predicate,
-                        RequirementFailure::NotInstantiable,
-                    );
+                    self.check
+                        .reports
+                        .push(RequirementReport::Formation(unmet_requirement_diag(
+                            expr.span(self.body).into(),
+                            predicate,
+                            RequirementFailure::NotInstantiable,
+                            None,
+                        )));
                 }
             }
         }
@@ -1546,11 +1552,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                     },
                 ) {
                     reported.insert(unmet.ty);
-                    if inferred {
-                        check.unmet_inferred(expr.span(body).into(), &unmet);
-                    } else {
-                        check.unmet(expr.span(body).into(), unmet.predicate, unmet.failure);
-                    }
+                    check.report_type(unmet, inferred);
                 }
             }
         }
@@ -1589,7 +1591,9 @@ fn anon_const_position_check<'db>(
         typed.assumptions(),
     ) && let ConstBodyFailure::AtPosition(_) = const_body_failure(db, body, diags, typed)
     {
-        check.diags = diags.clone();
+        check
+            .reports
+            .extend(diags.iter().cloned().map(RequirementReport::Formation));
     }
     check
 }
@@ -2068,8 +2072,7 @@ fn ty_mentions<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, needle: TyId<'db>
 pub(super) struct TypeRequirementFailure<'db> {
     /// The failing application.
     ty: TyId<'db>,
-    predicate: Body<'db>,
-    failure: RequirementFailure,
+    report: RequirementReport<'db>,
 }
 
 /// Returns the first unmet requirement in `ty`. Failures of the
@@ -2127,8 +2130,12 @@ fn check_selected_type_requirements<'db>(
     if args.len() != collect_generic_params(db, generic_owner).params(db).len() {
         return Some(TypeRequirementFailure {
             ty,
-            predicate: predicates[0],
-            failure: partially_applied,
+            report: RequirementReport::Formation(unmet_requirement_diag(
+                capture.site.clone(),
+                predicates[0],
+                partially_applied,
+                None,
+            )),
         });
     }
     if args.iter().any(|arg| arg.has_var(db)) {
@@ -2148,15 +2155,9 @@ fn check_selected_type_requirements<'db>(
                 use_span: None,
                 discharge: None,
             };
-            let status = capture.decide(db, obligation);
-            match status {
-                Discharge::Holds(_) => None,
-                Discharge::Fails(failure) => Some(TypeRequirementFailure {
-                    ty,
-                    predicate,
-                    failure,
-                }),
-            }
+            capture
+                .decide(db, obligation)
+                .map(|report| TypeRequirementFailure { ty, report })
         })
 }
 
@@ -2394,7 +2395,7 @@ fn written_applications<'db>(
 /// Check every authored type position, including unused defaults and aliases,
 /// and the anonymous constants written directly in types and trait
 /// references. Each item and body of the module is checked on its own
-/// (`written_type_check`). Inferred expression types are checked separately
+/// (`written_type_check_query`). Inferred expression types are checked separately
 /// after body inference.
 pub(crate) fn check_declared_type_requirements<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -2404,7 +2405,8 @@ pub(crate) fn check_declared_type_requirements<'db>(
         .all_items(db)
         .iter()
         .flat_map(|&item| {
-            let mut diags = written_type_check(db, item).clone();
+            let mut diags =
+                written_type_check_query(db, WrittenTypeRegion::new(db, item)).diagnostics();
             if let ItemKind::ImplTrait(implementation) = item {
                 // Written types check applications in the header. The trait's
                 // own predicates are a distinct use of the same Discharge.
@@ -2664,19 +2666,6 @@ pub fn written_condition_uses<'db>(
         .values()
 }
 
-/// The unmet requirements of the types and anonymous constants written in
-/// `item` itself (`written_types`), each reported where it is written. A
-/// type's nested types are checked first. A failure one of them reported
-/// entered there, so the enclosing type does not repeat it; a failure
-/// reachable only through an alias expansion, or through a type its paths
-/// pass through, is reported at the enclosing type.
-fn written_type_check<'db>(
-    db: &'db dyn HirAnalysisDb,
-    item: ItemKind<'db>,
-) -> &'db Vec<FuncBodyDiag<'db>> {
-    &written_type_check_query(db, WrittenTypeRegion::new(db, item)).diags
-}
-
 #[salsa::tracked(return_ref)]
 fn written_type_check_query<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -2785,13 +2774,9 @@ fn written_type_check_query<'db>(
                         })
                     });
                 unmet.map(|unmet| {
-                    check.diags.push(unmet_requirement_diag(
-                        written.span.clone(),
-                        unmet.predicate,
-                        unmet.failure,
-                        None,
-                    ));
-                    unmet.ty
+                    let ty = unmet.ty;
+                    check.report_type(unmet, false);
+                    ty
                 })
             }
         };
@@ -2924,6 +2909,55 @@ fn written_const_args<'db>(
 #[cfg(test)]
 mod recording_tests {
     use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn requirement_reports_read_the_retained_outcome() {
+        let source = "fn read<const N: usize>() -> u256 where N > 0 { 7 }\nfn caller() -> u256 { read<0>() }\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("requirement_report.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "caller")
+            })
+            .expect("caller function");
+        let owner = super::super::BodyOwner::Func(function);
+        let inferred = super::super::inferred_body_with_selections(&db, owner, &[]);
+        assert!(inferred.result.0.is_empty());
+        let mut check =
+            super::check_body_requirements(&db, owner, &inferred.result.1, &inferred.conditions);
+        let use_ = check
+            .conditions
+            .values_mut()
+            .find(|use_| {
+                use_.outcome() == super::Discharge::Fails(super::RequirementFailure::False)
+            })
+            .expect("actual failed callee condition");
+        // An independent mutation control: consumers must read the one result,
+        // rather than a diagnostic and flag copied when it was first computed.
+        use_.discharge.as_mut().unwrap().outcome =
+            super::Discharge::Fails(super::RequirementFailure::Recursive);
+        assert!(
+            check.recursive(),
+            "recursion must project the retained outcome"
+        );
+        assert!(
+            check.diagnostics().iter().any(|diag| matches!(
+                diag,
+                super::FuncBodyDiag::Body(super::BodyDiag::ConstRequirementNotSatisfied {
+                    reason: super::RequirementFailure::Recursive,
+                    ..
+                })
+            )),
+            "diagnostics must project the retained outcome"
+        );
+    }
 
     #[test]
     fn unchecked_body_has_no_condition_decisions() {
@@ -3181,7 +3215,7 @@ fn use_it() -> u256 { read<7>() }";
             );
             assert_eq!(check.conditions.len(), 1, "argument {argument}");
             assert_eq!(check.conditions.get_index(0).unwrap().1.outcome(), expected);
-            assert_eq!(check.diags.is_empty(), argument > 0);
+            assert_eq!(check.diagnostics().is_empty(), argument > 0);
             let span = check
                 .conditions
                 .get_index(0)
