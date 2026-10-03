@@ -62,6 +62,26 @@ def production_code(source: str) -> str:
     # by inventory(); this handles inline unit-test modules and individual tests.
     test = re.compile(r"#\s*\[\s*(?:cfg\s*\(\s*test\s*\)|test)\s*\]")
     while match := test.search(source):
+        # A conditional field/value ends at its top-level comma, not at
+        # the next item body. Do not erase its enclosing struct or impl.
+        field = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?\w+\s*:(?!:)", source[match.end():])
+        if field:
+            end = match.end() + field.end()
+            nesting = 0
+            while end < len(source):
+                ch = source[end]
+                if ch in "<([{":
+                    nesting += 1
+                elif ch in ">)]}":
+                    if nesting == 0:
+                        break
+                    nesting -= 1
+                elif ch == "," and nesting == 0:
+                    end += 1
+                    break
+                end += 1
+            source = source[:match.start()] + " " * (end - match.start()) + source[end:]
+            continue
         # Semicolons in array argument types are not item terminators.
         end = match.end()
         nesting = 0
@@ -121,6 +141,9 @@ def main() -> int:
         ('#[cfg(test)] use x::Foo; TraitSolveCx::new(db);', 1),
         ('type Cx = TraitSolveCx; let ctor = Cx::new; ctor(db);', 1),
         ("TraitSolveCx::<'db>::new(db); TraitSolverQuery { goal };", 2),
+        ("struct A { #[cfg(test)] n: usize, } impl A { fn f() { TraitSolveCx::new(db); } }", 1),
+        ("struct A { #[cfg(test)] n: Option<Vec<(u8, u8)>> } fn f() { TraitSolveCx::new(db); }", 1),
+        ("let a = A { #[cfg(test)] n: Some((1, 2)), value: TraitSolveCx::new(db), };", 1),
     ]
     if any(count(source) != expected for source, expected in cases):
         raise AssertionError("solver construction counter self-check failed")
