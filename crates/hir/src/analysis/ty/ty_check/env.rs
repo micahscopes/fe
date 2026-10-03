@@ -45,6 +45,7 @@ use crate::analysis::{
         ty_is_copy,
         ty_lower::lower_hir_ty,
         unify::UnificationTable,
+        visitor::TyVisitable,
     },
 };
 use crate::core::semantic::{
@@ -91,8 +92,7 @@ pub(crate) struct TyCheckEnv<'db> {
     quotes: rustc_hash::FxHashMap<ExprId, super::CheckedQuote<'db>>,
 
     deferred: Vec<DeferredTask<'db>>,
-    trait_choices: Vec<TraitChoice<'db>>,
-    with_choices: Vec<WithChoice<'db>>,
+    decisions: Decisions<'db>,
 
     effect_env: keyed_effect_env::EffectEnv<'db>,
     effect_bounds: ThinVec<TraitInstId<'db>>,
@@ -173,8 +173,7 @@ impl<'db> TyCheckEnv<'db> {
             resolved_field_index: SecondaryMap::new(),
             quotes: Default::default(),
             deferred: Vec::new(),
-            trait_choices: Vec::new(),
-            with_choices: Vec::new(),
+            decisions: Decisions::default(),
             effect_env: keyed_effect_env::EffectEnv::new(),
             effect_bounds: ThinVec::new(),
             base_assumptions,
@@ -943,8 +942,8 @@ impl<'db> TyCheckEnv<'db> {
         self.pending_vars.clear();
     }
 
-    pub(super) fn with_choices(&self) -> &[WithChoice<'db>] {
-        &self.with_choices
+    pub(super) fn with_choices(&self) -> impl ExactSizeIterator<Item = &WithChoice<'db>> {
+        self.decisions.openings.values()
     }
 
     pub(super) fn record_with_choice(
@@ -952,26 +951,26 @@ impl<'db> TyCheckEnv<'db> {
         expression: ExprId,
         outcome: Result<crate::analysis::semantic::SelectedApplication<'db>, BodyDiag<'db>>,
     ) {
-        self.with_choices.push(WithChoice {
+        self.decisions.record_with_choice(WithChoice {
             expression,
             outcome,
         });
     }
 
     pub(super) fn truncate_with_choices(&mut self, len: usize) {
-        self.with_choices.truncate(len);
+        self.decisions.openings.truncate(len);
     }
 
-    pub(super) fn trait_choices(&self) -> &[TraitChoice<'db>] {
-        &self.trait_choices
+    pub(super) fn trait_choices(&self) -> impl ExactSizeIterator<Item = &TraitChoice<'db>> {
+        self.decisions.choices.values()
     }
 
     pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
-        self.trait_choices.push(choice);
+        self.decisions.record_trait_choice(choice);
     }
 
     pub(super) fn truncate_trait_choices(&mut self, len: usize) {
-        self.trait_choices.truncate(len);
+        self.decisions.choices.truncate(len);
     }
 
     pub(super) fn register_trait_obligation(&mut self, obligation: TraitObligation<'db>) {
@@ -1173,25 +1172,8 @@ impl<'db> TyCheckEnv<'db> {
         self.path_applications
             .iter_mut()
             .for_each(|(_, ty)| *ty = ty.fold_with(self.db, &mut prober));
-        pending_const_obligations.iter_mut().for_each(|obligation| {
-            *obligation = obligation.clone().fold_with(self.db, &mut prober);
-        });
-        for choice in &mut self.trait_choices {
-            choice.goal = choice.goal.fold_with(self.db, &mut prober);
-            choice.via = match choice.via {
-                TraitChoiceVia::Implementation(implementor) => {
-                    TraitChoiceVia::Implementation(implementor.fold_with(self.db, &mut prober))
-                }
-                TraitChoiceVia::Selected(selection) => {
-                    TraitChoiceVia::Selected(selection.fold_with(self.db, &mut prober))
-                }
-            };
-        }
-        for choice in &mut self.with_choices {
-            if let Ok(selection) = &mut choice.outcome {
-                *selection = selection.fold_with(self.db, &mut prober);
-            }
-        }
+        self.decisions.condition_uses = pending_const_obligations;
+        self.decisions = self.decisions.fold_with(self.db, &mut prober);
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -1240,14 +1222,12 @@ impl<'db> TyCheckEnv<'db> {
             pattern_store,
             pattern_status: self.pattern_status,
             for_loop_seq: self.for_loop_seq,
-            trait_choices: self.trait_choices,
-            with_choices: self.with_choices,
             expr_place,
             expr_places,
             path_applications: self.path_applications,
         }
         .into();
-        typed.condition_uses = std::sync::Arc::new(pending_const_obligations);
+        typed.decisions = std::sync::Arc::new(self.decisions);
         typed
     }
 
@@ -1867,6 +1847,101 @@ pub(super) enum TraitObligationOrigin<'db> {
         constraint_idx: usize,
     },
     GenericConfirmation,
+}
+
+/// One body owns its accepted choices, opening outcomes and condition uses.
+/// Choice keys use HIR sites, not rendered coordinates or an exporter index.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Decisions<'db> {
+    pub(super) choices:
+        common::indexmap::IndexMap<(DynLazySpan<'db>, TraitInstId<'db>), TraitChoice<'db>>,
+    pub(super) openings: common::indexmap::IndexMap<ExprId, WithChoice<'db>>,
+    pub(super) condition_uses: Vec<ConstConditionUse<'db>>,
+    pub(super) conditions_checked: bool,
+}
+
+impl<'db> Decisions<'db> {
+    /// Read the actual answer without resolving or checking its conditions again.
+    pub fn choice(
+        &self,
+        site: &DynLazySpan<'db>,
+        goal: TraitInstId<'db>,
+    ) -> Option<&TraitChoice<'db>> {
+        self.choices.get(&(site.clone(), goal))
+    }
+
+    pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
+        let key = (choice.span.clone(), choice.goal);
+        if let Some(previous) = self.choices.get(&key) {
+            assert_eq!(
+                previous.via, choice.via,
+                "a choice key cannot acquire a different answer"
+            );
+        } else {
+            self.choices.insert(key, choice);
+        }
+    }
+
+    pub(super) fn record_with_choice(&mut self, choice: WithChoice<'db>) {
+        if let Some(previous) = self.openings.get(&choice.expression) {
+            assert_eq!(
+                previous, &choice,
+                "an opening cannot acquire a different outcome"
+            );
+        } else {
+            self.openings.insert(choice.expression, choice);
+        }
+    }
+
+    pub(super) fn fold_with<F: TyFolder<'db>>(
+        mut self,
+        db: &'db dyn HirAnalysisDb,
+        folder: &mut F,
+    ) -> Self {
+        let choices = std::mem::take(&mut self.choices);
+        for (_, mut choice) in choices {
+            choice.goal = choice.goal.fold_with(db, folder);
+            choice.via = match choice.via {
+                TraitChoiceVia::Implementation(implementor) => {
+                    TraitChoiceVia::Implementation(implementor.fold_with(db, folder))
+                }
+                TraitChoiceVia::Selected(selection) => {
+                    TraitChoiceVia::Selected(selection.fold_with(db, folder))
+                }
+            };
+            self.record_trait_choice(choice);
+        }
+        for choice in self.openings.values_mut() {
+            if let Ok(selection) = &mut choice.outcome {
+                *selection = selection.fold_with(db, folder);
+            }
+        }
+        for use_ in &mut self.condition_uses {
+            *use_ = use_.clone().fold_with(db, folder);
+        }
+        self
+    }
+
+    pub(super) fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
+        &self,
+        visitor: &mut V,
+    ) {
+        for choice in self.choices.values() {
+            choice.goal.visit_with(visitor);
+            match choice.via {
+                TraitChoiceVia::Implementation(implementor) => implementor.visit_with(visitor),
+                TraitChoiceVia::Selected(selection) => selection.visit_with(visitor),
+            }
+        }
+        for choice in self.openings.values() {
+            if let Ok(selection) = choice.outcome {
+                selection.visit_with(visitor);
+            }
+        }
+        for use_ in &self.condition_uses {
+            use_.visit_with(visitor);
+        }
+    }
 }
 
 /// The actual selection result for a with binding, retained past scope exit.

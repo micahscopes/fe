@@ -1097,7 +1097,10 @@ pub(super) fn check_body_requirements<'db>(
         }
     }
     let mut check = checker.check_inferred_types(&entered);
-    check.extend(check_recorded_condition_uses(db, &typed.condition_uses));
+    check.extend(check_recorded_condition_uses(
+        db,
+        &typed.decisions.condition_uses,
+    ));
     for (nested, expected) in expression_const_bodies(db, body, typed) {
         check.extend(anon_const_position_check(db, nested, expected, &[]));
     }
@@ -2872,9 +2875,7 @@ mod recording_tests {
                 "{name}: each application must record its implementation condition once"
             );
             let choices: Vec<_> = typed
-                .tables
-                .trait_choices
-                .iter()
+                .trait_choices()
                 .filter(|choice| {
                     choice
                         .goal
@@ -3091,9 +3092,7 @@ fn use_it() -> u256 { read<7>() }";
             let (diagnostics, typed) = super::super::check_func_body(&db, function);
             assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
             let choices: Vec<_> = typed
-                .tables
-                .trait_choices
-                .iter()
+                .trait_choices()
                 .filter(|choice| {
                     choice
                         .goal
@@ -3106,7 +3105,12 @@ fn use_it() -> u256 { read<7>() }";
             assert_eq!(choices.len(), 1, "{name}");
             assert_eq!(typed.with_choices().len(), usize::from(name == "selected"));
             if name == "selected" {
-                let with_selection = typed.with_choices()[0].outcome().expect("accepted binding");
+                let with_selection = typed
+                    .with_choices()
+                    .next()
+                    .expect("with choice")
+                    .outcome()
+                    .expect("accepted binding");
                 assert_eq!(
                     choices[0].via,
                     super::super::env::TraitChoiceVia::Selected(with_selection)
@@ -3148,9 +3152,17 @@ fn use_it() -> u256 { read<7>() }";
         let root = checker.body().expr(&db);
         checker.check_expr_unknown(root);
         assert_eq!(checker.env.with_choices().len(), 1);
-        assert!(checker.env.with_choices()[0].outcome().is_ok());
+        assert!(
+            checker
+                .env
+                .with_choices()
+                .next()
+                .expect("with choice")
+                .outcome()
+                .is_ok()
+        );
         checker.rollback_state(snapshot);
-        assert!(checker.env.with_choices().is_empty());
+        assert!(checker.env.with_choices().len() == 0);
     }
 
     #[test]
@@ -3173,7 +3185,7 @@ fn use_it() -> u256 { read<7>() }";
         let (diagnostics, typed) = super::super::check_func_body(&db, function);
         assert!(!diagnostics.is_empty());
         assert_eq!(typed.with_choices().len(), 1);
-        let choice = &typed.with_choices()[0];
+        let choice = typed.with_choices().next().expect("with choice");
         assert_eq!(choice.error_code(), Some(99));
         assert!(matches!(
             choice.outcome(),
@@ -3227,7 +3239,153 @@ fn use_it() -> u256 { read<7>() }";
         ));
         assert_eq!(checker.env.trait_choices().len(), 1);
         checker.rollback_state(snapshot);
-        assert!(checker.env.trait_choices().is_empty());
+        assert!(checker.env.trait_choices().len() == 0);
+    }
+
+    #[test]
+    fn impl_choice_keys_distinguish_sites_and_preserve_prior_answers() {
+        let source = "trait Read { fn read() -> u256 }\nstruct S {}\nimpl Read for S { fn read() -> u256 { 1 } }\nfn use_it() -> u256 { 1 }\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("discarded_choice.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "use_it")
+            })
+            .expect("fixture function");
+        let implementation = top
+            .all_items(&db)
+            .iter()
+            .find_map(|item| match item {
+                super::ItemKind::ImplTrait(item) => Some(*item),
+                _ => None,
+            })
+            .expect("fixture implementation");
+        let goal = crate::analysis::ty::trait_lower::lower_impl_trait(&db, implementation)
+            .expect("lowered impl")
+            .trait_(&db);
+        let mut checker =
+            super::super::TyChecker::new(&db, super::BodyOwner::Func(function)).expect("checker");
+        let snapshot = checker.snapshot_state();
+        let obligation = super::super::env::TraitObligation {
+            goal,
+            assumptions: checker.env.assumptions(),
+            selected_applications: Vec::new(),
+            origin: super::super::env::TraitObligationOrigin::GenericConfirmation,
+            span: function.span().into(),
+        };
+        let outcome = checker.process_trait_obligation(obligation.clone(), true);
+        assert!(matches!(
+            outcome,
+            super::super::TraitObligationOutcome::Discharged
+                | super::super::TraitObligationOutcome::Progressed
+        ));
+        assert_eq!(checker.env.trait_choices().len(), 1);
+        let after_first = checker.snapshot_state();
+        checker.process_trait_obligation(obligation.clone(), true);
+        assert_eq!(checker.env.trait_choices().len(), 1, "one answer per key");
+        let mut other_site = obligation;
+        other_site.span = checker.body().expr(&db).span(checker.body()).into();
+        checker.process_trait_obligation(other_site, true);
+        assert_eq!(checker.env.trait_choices().len(), 2, "distinct use sites");
+        checker.rollback_state(after_first);
+        assert_eq!(
+            checker.env.trait_choices().len(),
+            1,
+            "prior answer survives"
+        );
+        checker.rollback_state(snapshot);
+        assert!(checker.env.trait_choices().len() == 0);
+    }
+
+    #[test]
+    fn folded_body_substitutes_retained_impl_choices() {
+        use crate::analysis::HirAnalysisDb;
+        use crate::analysis::ty::TyId;
+        use crate::analysis::ty::fold::{TyFoldable, TyFolder};
+        struct Replace<'db> {
+            from: TyId<'db>,
+            to: TyId<'db>,
+        }
+        impl<'db> TyFolder<'db> for Replace<'db> {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                if ty == self.from {
+                    self.to
+                } else {
+                    ty.super_fold_with(db, self)
+                }
+            }
+        }
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("folded_choice.fe".into(), "trait Read { fn read() -> u256 }\nfn bound<T: Read>() -> u256 { <T as Read>::read() }\n");
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "bound")
+            })
+            .expect("fixture function");
+        let (diagnostics, typed) = super::super::check_func_body(&db, function);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let original = typed
+            .trait_choices()
+            .find(|choice| {
+                choice
+                    .goal()
+                    .def(&db)
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "Read")
+            })
+            .expect("Read decision");
+        let original_goal = original.goal();
+        assert_eq!(
+            typed.decisions().choice(original.span(), original_goal),
+            Some(original)
+        );
+        let from = original.goal().self_ty(&db);
+        let to = TyId::u8(&db);
+        assert_ne!(from, to);
+        let span = original.span().clone();
+        let folded = typed.clone().fold_with(&db, &mut Replace { from, to });
+        let folded_choice = folded
+            .trait_choices()
+            .find(|choice| choice.span() == &span)
+            .expect("folded decision");
+        assert_eq!(
+            folded_choice.goal().self_ty(&db),
+            to,
+            "retained decisions must follow substitution"
+        );
+        assert_eq!(
+            folded.decisions().choice(&span, folded_choice.goal()),
+            Some(folded_choice)
+        );
+        assert!(
+            folded.decisions().choice(&span, original_goal).is_none(),
+            "old key must not remain after substitution"
+        );
+        assert_eq!(
+            typed
+                .trait_choices()
+                .find(|choice| choice.span() == &span)
+                .unwrap()
+                .goal()
+                .self_ty(&db),
+            from,
+            "shared inference record stays unchanged"
+        );
     }
 
     #[test]

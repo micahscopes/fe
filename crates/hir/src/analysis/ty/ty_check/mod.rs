@@ -9,7 +9,7 @@ pub use const_requirements::{
 pub(crate) use const_requirements::{
     comparable_const_predicate_key, normalize_comparable_const_predicate_key,
 };
-pub use env::{TraitChoice, TraitChoiceVia, WithChoice};
+pub use env::{Decisions, TraitChoice, TraitChoiceVia, WithChoice};
 mod contract;
 mod effect_env;
 pub(crate) mod env;
@@ -1193,8 +1193,9 @@ pub(super) fn checked_body<'db>(
     if diags_allow_evaluation(db, &diags) {
         let requirements = const_requirements::check_body_requirements(db, owner, &typed);
         recursive = requirements.recursive;
-        typed.condition_uses = Arc::new(requirements.conditions);
-        typed.conditions_checked = true;
+        let decisions = Arc::make_mut(&mut typed.decisions);
+        decisions.condition_uses = requirements.conditions;
+        decisions.conditions_checked = true;
         diags.extend(requirements.diags);
     }
     CheckedBody {
@@ -1745,8 +1746,6 @@ fn typed_body_for_bodyless_func<'db>(
         pattern_store: PatternStore::default(),
         pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
         for_loop_seq: SecondaryMap::new(),
-        trait_choices: Vec::new(),
-        with_choices: Vec::new(),
         expr_place: SecondaryMap::new(),
         expr_places: PrimaryMap::new(),
         path_applications: Vec::new(),
@@ -4258,30 +4257,32 @@ struct PathResolutionScopes<'db> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedBody<'db> {
     tables: Arc<TypedBodyTables<'db>>,
-    /// The shared checker's uses: pending in inference, discharged after checking.
-    condition_uses: Arc<Vec<ConstConditionUse<'db>>>,
-    conditions_checked: bool,
+    decisions: Arc<Decisions<'db>>,
 }
 
 impl<'db> TypedBody<'db> {
     /// Actual results attached by the shared condition checker.
     pub fn checked_conditions(&self) -> &[ConstConditionUse<'db>] {
         crate::analysis::ty::trait_resolution::assert_outside_proof_search();
-        if self.conditions_checked {
-            &self.condition_uses
+        if self.decisions.conditions_checked {
+            &self.decisions.condition_uses
         } else {
             &[]
         }
     }
 
     /// Actual with selection outcomes, retained after lexical provisions expire.
-    pub fn with_choices(&self) -> &[WithChoice<'db>] {
-        &self.tables.with_choices
+    pub fn with_choices(&self) -> impl ExactSizeIterator<Item = &WithChoice<'db>> {
+        self.decisions.openings.values()
     }
 
     /// Accepted solver/selection answers, finalized with this body's inference.
-    pub fn trait_choices(&self) -> &[TraitChoice<'db>] {
-        &self.tables.trait_choices
+    pub fn trait_choices(&self) -> impl ExactSizeIterator<Item = &TraitChoice<'db>> {
+        self.decisions.choices.values()
+    }
+
+    pub fn decisions(&self) -> &Decisions<'db> {
+        &self.decisions
     }
 }
 
@@ -4322,8 +4323,6 @@ mod typed_body_tables {
         pub(super) pattern_status: SecondaryMap<PatId, PatternAnalysisStatus>,
         /// Resolved Seq trait methods for for-loops
         pub(super) for_loop_seq: SecondaryMap<StmtId, Option<ForLoopSeq<'db>>>,
-        pub(super) trait_choices: Vec<env::TraitChoice<'db>>,
-        pub(super) with_choices: Vec<env::WithChoice<'db>>,
         pub(super) expr_place: SecondaryMap<ExprId, PackedOption<ExprPlaceId>>,
         pub(super) expr_places: PrimaryMap<ExprPlaceId, Place<'db>>,
         /// The constrained type applications that resolving the body's paths
@@ -4667,9 +4666,7 @@ impl<'db> TypedBody<'db> {
         for (_, ty) in &self.tables.path_applications {
             ty.visit_with(visitor);
         }
-        for obligation in self.condition_uses.iter() {
-            obligation.visit_with(visitor);
-        }
+        self.decisions.visit_with(visitor);
     }
 }
 
@@ -4740,13 +4737,7 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
             .for_each(|(_, ty)| *ty = ty.fold_with(db, folder));
         Self {
             tables: Arc::new(this),
-            condition_uses: Arc::new(
-                Arc::unwrap_or_clone(self.condition_uses)
-                    .into_iter()
-                    .map(|use_| use_.fold_with(db, folder))
-                    .collect(),
-            ),
-            conditions_checked: self.conditions_checked,
+            decisions: Arc::new(Arc::unwrap_or_clone(self.decisions).fold_with(db, folder)),
         }
     }
 }
@@ -4755,8 +4746,7 @@ impl<'db> From<TypedBodyTables<'db>> for TypedBody<'db> {
     fn from(tables: TypedBodyTables<'db>) -> Self {
         Self {
             tables: Arc::new(tables),
-            condition_uses: Arc::new(Vec::new()),
-            conditions_checked: false,
+            decisions: Arc::new(Decisions::default()),
         }
     }
 }
@@ -6403,8 +6393,6 @@ impl<'db> TypedBody<'db> {
             pattern_store: PatternStore::default(),
             pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
             for_loop_seq: SecondaryMap::new(),
-            trait_choices: Vec::new(),
-            with_choices: Vec::new(),
             expr_place: SecondaryMap::new(),
             expr_places: PrimaryMap::new(),
             path_applications: Vec::new(),
