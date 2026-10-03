@@ -4047,7 +4047,9 @@ impl<'db> TyChecker<'db> {
                             } else {
                                 inst
                             };
-                            if matches!(candidate, MethodCandidate::NeedsConfirmation(_)) {
+                            if !is_call_callee
+                                && matches!(candidate, MethodCandidate::NeedsConfirmation(_))
+                            {
                                 self.env.register_trait_obligation(TraitObligation {
                                     selected_applications: self.env.selected_applications(),
                                     assumptions: self.env.assumptions(),
@@ -4147,13 +4149,17 @@ impl<'db> TyChecker<'db> {
                         trait_inst
                     };
 
-                    self.env.register_trait_obligation(TraitObligation {
-                        selected_applications: self.env.selected_applications(),
-                        assumptions: self.env.assumptions(),
-                        goal: inst,
-                        origin: TraitObligationOrigin::GenericConfirmation,
-                        span: path_expr_span.clone().into(),
-                    });
+                    // Direct calls confirm their originating trait in process_constraints,
+                    // at the whole-call span. Standalone values own their path use here.
+                    if !is_call_callee {
+                        self.env.register_trait_obligation(TraitObligation {
+                            selected_applications: self.env.selected_applications(),
+                            assumptions: self.env.assumptions(),
+                            goal: inst,
+                            origin: TraitObligationOrigin::GenericConfirmation,
+                            span: path_expr_span.clone().into(),
+                        });
+                    }
 
                     let func_ty = self.instantiate_trait_assoc_fn_to_term(
                         method.as_callable(self.db).unwrap(),

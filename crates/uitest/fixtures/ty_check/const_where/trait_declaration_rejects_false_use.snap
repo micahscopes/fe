@@ -19,4 +19,4 @@ error[8-0093]: const requirement is not satisfied
    │                                 ------------- required by this predicate
    ·
 19 │ fn use_small() -> u256 { <Carrier as BigOnly<Small>>::big(Carrier {}) }
-   │                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`
+   │                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`

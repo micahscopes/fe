@@ -5,8 +5,8 @@ use salsa::Update;
 use crate::{
     HirDb, SpannedHirDb,
     core::hir_def::{
-        Body, Const, Contract, Enum, ExprId, Func, Impl, ImplTrait, Mod, StaticAssert, Struct,
-        TopLevelMod, Trait, TypeAlias, TypeFnDef, Use, scope_graph::ScopeId,
+        Body, Const, Contract, Enum, Func, Impl, ImplTrait, Mod, StaticAssert, Struct, TopLevelMod,
+        Trait, TypeAlias, TypeFnDef, Use, scope_graph::ScopeId,
     },
     core::lower::top_mod_ast,
 };
@@ -74,14 +74,6 @@ pub mod lazy_spans {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub struct DynLazySpan<'db>(pub(super) Option<SpanTransitionChain<'db>>);
 impl<'db> DynLazySpan<'db> {
-    /// The expression identity underlying this span, before syntax transitions.
-    pub(crate) fn expression_root(&self) -> Option<(Body<'db>, ExprId)> {
-        match self.0.as_ref()?.root {
-            transition::ChainRoot::Expr(root) => Some((root.body, root.expr)),
-            _ => None,
-        }
-    }
-
     pub fn invalid() -> Self {
         Self(None)
     }

@@ -1,0 +1,13 @@
+trait Read { fn read() -> u256 }
+struct S {}
+impl Read for S where 1 > 0 { fn read() -> u256 { 1 } }
+fn one_call() -> u256 { <S as Read>::read() }
+fn two_calls() -> u256 {
+    let first = <S as Read>::read()
+    let second = <S as Read>::read()
+    first + second
+}
+fn two_values() {
+    let first = <S as Read>::read
+    let second = <S as Read>::read
+}

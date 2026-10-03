@@ -200,35 +200,7 @@ fn check_recorded_condition_uses<'db>(
     uses: &[PendingConstObligation<'db>],
 ) -> RequirementCheck<'db> {
     let mut check = RequirementCheck::default();
-    let mut seen = Vec::new();
-    let mut call_owners = FxHashMap::default();
     for use_ in uses {
-        // Path selection and call checking can record the same application.
-        // Give a direct callee and its call one owner, while retaining distinct
-        // calls, standalone function values, arguments and lexical selections.
-        let site = if let Some((body, expr)) = use_.use_span.expression_root() {
-            let owners = call_owners.entry(body).or_insert_with(|| {
-                let mut owners = FxHashMap::default();
-                for (call, expression) in body.exprs(db).iter() {
-                    if let Some(Expr::Call(callee, _)) = expression.borrowed().to_opt() {
-                        owners.insert(*callee, call);
-                        owners.insert(call, call);
-                    }
-                }
-                owners
-            });
-            owners
-                .get(&expr)
-                .map(|call| call.span(body).into())
-                .unwrap_or_else(|| use_.use_span.clone())
-        } else {
-            use_.use_span.clone()
-        };
-        let key = (use_.obligation.clone(), site);
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
         let obligation = &use_.obligation;
         if let Discharge::Fails(failure) = discharge_selected_requirement(
             db,
@@ -2656,5 +2628,41 @@ fn written_const_args<'db>(
             segment_const_args(db, *path, &resolutions)
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn implementation_conditions_have_one_record_per_use() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/impl_const_requirements/recording_owners.fe"
+        ));
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("recording_owners.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        for (name, expected) in [("one_call", 1), ("two_calls", 2), ("two_values", 2)] {
+            let function = top
+                .all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|function| {
+                    function
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|id| id.data(&db) == name)
+                })
+                .expect("fixture function");
+            let (diagnostics, typed) = super::super::check_func_body(&db, function);
+            assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+            assert_eq!(
+                typed.tables.pending_const_obligations.len(),
+                expected,
+                "{name}: each application must record its implementation condition once"
+            );
+        }
     }
 }
