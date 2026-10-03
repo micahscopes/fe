@@ -25,7 +25,10 @@ use super::{
         GoalSatisfiability, PredicateListId, TraitSolveCx,
         constraint::collect_func_def_constraints, is_goal_satisfiable,
     },
-    ty_check::{ConstRef, PredicateKey, check_anon_const_body, comparable_const_predicate_key},
+    ty_check::{
+        ConstRef, PredicateKey, check_anon_const_body, comparable_const_predicate_key,
+        normalize_comparable_const_predicate_key,
+    },
     ty_def::{InvalidCause, TyData, TyId},
     ty_lower::{CompleteSubst, ParamDomainId, ParamSchemaId, PartialSubst},
     unify::UnificationTable,
@@ -139,7 +142,12 @@ fn compare_const_predicates<'db>(
             .collect::<Result<Vec<_>, _>>()
             .ok()
     });
-    let equal = match (impl_keys, trait_keys) {
+    let normalize = |keys: Vec<_>| {
+        keys.into_iter()
+            .map(|key| normalize_comparable_const_predicate_key(db, key, impl_m.scope()))
+            .collect::<Vec<_>>()
+    };
+    let equal = match (impl_keys.map(normalize), trait_keys.map(normalize)) {
         (Some(impl_keys), Some(trait_keys)) => {
             impl_keys.iter().all(|key| trait_keys.contains(key))
                 && trait_keys.iter().all(|key| impl_keys.contains(key))

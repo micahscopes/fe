@@ -1,0 +1,3 @@
+trait Read<const N: usize> { fn read() -> u256 where N > 0 }
+struct S {}
+impl Read<7> for S { fn read() -> u256 where (7 as u8) > 0 { 1 } }

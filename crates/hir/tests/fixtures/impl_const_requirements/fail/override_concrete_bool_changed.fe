@@ -1,0 +1,3 @@
+trait Read<const B: bool> { fn read() -> u256 where B }
+struct S {}
+impl Read<true> for S { fn read() -> u256 where false { 1 } }

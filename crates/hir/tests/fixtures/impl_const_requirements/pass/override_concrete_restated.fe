@@ -1,0 +1,9 @@
+// The impl is for a concrete trait argument and restates the substituted condition.
+// Expected: accept.
+trait Read<const N: usize> {
+    fn read() -> u256 where N > 0
+}
+struct S {}
+impl Read<7> for S {
+    fn read() -> u256 where 7 > 0 { 1 }
+}

@@ -3,7 +3,9 @@ mod const_requirements;
 pub(crate) use const_requirements::check_declared_type_requirements;
 pub(crate) use const_requirements::selected_impl_requirements_hold;
 pub use const_requirements::{EvaluationStop, RequirementFailure};
-pub(crate) use const_requirements::{PredicateKey, comparable_const_predicate_key};
+pub(crate) use const_requirements::{
+    PredicateKey, comparable_const_predicate_key, normalize_comparable_const_predicate_key,
+};
 mod contract;
 mod effect_env;
 pub(crate) mod env;

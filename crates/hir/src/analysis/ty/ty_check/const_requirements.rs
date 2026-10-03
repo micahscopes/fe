@@ -346,6 +346,120 @@ pub(crate) fn comparable_const_predicate_key<'db>(
     predicate_key(db, body, typed, &subst).ok().flatten()
 }
 
+/// Canonicalize operands without evaluating the predicate itself: a restated
+/// condition must retain its operators, casts and selected applications.
+pub(crate) fn normalize_comparable_const_predicate_key<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: PredicateKey<'db>,
+    scope: ScopeId<'db>,
+) -> PredicateKey<'db> {
+    use super::expr::TraitOps;
+    use crate::analysis::ty::const_ty::{ConstCanonEnv, ConstCanonMode, canonicalize_ty_for_mode};
+    use crate::analysis::ty::ty_def::{PrimTy, TyBase};
+
+    struct CanonicalOperands<'db> {
+        env: ConstCanonEnv<'db>,
+    }
+    impl<'db> TyFolder<'db> for CanonicalOperands<'db> {
+        fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+            let ty = canonicalize_ty_for_mode(db, ty, self.env, ConstCanonMode::Identity);
+            // Integer value identity uses the shared runtime width/sign shape.
+            // usize/isize have the same shape as u256/i256 in Fe.
+            match ty.data(db) {
+                TyData::TyBase(TyBase::Prim(PrimTy::Usize)) => TyId::u256(db),
+                TyData::TyBase(TyBase::Prim(PrimTy::Isize)) => {
+                    TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::I256)))
+                }
+                TyData::ConstTy(_) => ty.super_fold_with(db, self),
+                _ => ty,
+            }
+        }
+    }
+    fn primitive_operand<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
+        ty == TyId::bool(db) || crate::analysis::semantic::consts::int_ty_shape(db, ty).is_some()
+    }
+    fn normalize_primitive_operation<'db>(
+        db: &'db dyn HirAnalysisDb,
+        operation: &mut Option<Callable<'db>>,
+        op: &impl TraitOps,
+        operands: &[TyId<'db>],
+        scope: ScopeId<'db>,
+    ) {
+        // Keep evidence and user-defined operator authorities. Only closed
+        // core operations on primitive values share the syntax representation.
+        if let Some(callable) = operation
+            && callable.selected_applications.is_empty()
+            && callable.opened_provisions.is_empty()
+            && callable.effect_providers().is_empty()
+            && let Some(inst) = callable.trait_inst()
+            && crate::analysis::ty::corelib::resolve_core_trait(
+                db,
+                scope,
+                &op.trait_path_segments(),
+            ) == Some(inst.def(db))
+            && let CallableDef::Func(func) = callable.callable_def()
+            && func.name(db).to_opt() == Some(op.trait_method(db))
+            && inst.args(db).iter().all(|ty| primitive_operand(db, *ty))
+            && operands.iter().all(|ty| primitive_operand(db, *ty))
+        {
+            *operation = None;
+        }
+    }
+    fn normalize<'db>(
+        db: &'db dyn HirAnalysisDb,
+        mut key: PredicateKey<'db>,
+        scope: ScopeId<'db>,
+    ) -> PredicateKey<'db> {
+        key.term = match key.term {
+            PredicateTerm::Literal(LitKind::Int(value)) => {
+                if key.ty.is_integral_var(db) {
+                    key.ty = TyId::u256(db);
+                }
+                PredicateTerm::TypeConst(TyId::const_ty(
+                    db,
+                    ConstTyId::integer(db, key.ty, value.data(db).clone().into()),
+                ))
+            }
+            PredicateTerm::Literal(LitKind::Bool(value)) => {
+                PredicateTerm::TypeConst(TyId::const_ty(
+                    db,
+                    crate::analysis::ty::const_ty::const_ty_from_sem_const(
+                        db,
+                        crate::analysis::semantic::consts::bool_const(db, value),
+                    ),
+                ))
+            }
+            PredicateTerm::Binary(op, lhs, rhs) => {
+                let lhs = normalize(db, *lhs, scope);
+                let rhs = normalize(db, *rhs, scope);
+                normalize_primitive_operation(
+                    db,
+                    &mut key.operation,
+                    &op,
+                    &[lhs.ty, rhs.ty],
+                    scope,
+                );
+                PredicateTerm::Binary(op, Box::new(lhs), Box::new(rhs))
+            }
+            PredicateTerm::Unary(op, arg) => {
+                let arg = normalize(db, *arg, scope);
+                normalize_primitive_operation(db, &mut key.operation, &op, &[arg.ty], scope);
+                PredicateTerm::Unary(op, Box::new(arg))
+            }
+            PredicateTerm::Cast(arg) => PredicateTerm::Cast(Box::new(normalize(db, *arg, scope))),
+            PredicateTerm::Call(args) => PredicateTerm::Call(
+                args.into_iter()
+                    .map(|arg| normalize(db, arg, scope))
+                    .collect(),
+            ),
+            term => term,
+        };
+        key
+    }
+    let env = ConstCanonEnv::new(scope, PredicateListId::empty_list(db), None);
+    normalize(db, key.fold_with(db, &mut CanonicalOperands { env }), scope)
+}
+
 // A declaration's full parameter schema also resolves the parameters that
 // lexical lookup keeps owned by an enclosing impl, so one simultaneous
 // substitution instantiates a method's requirement with its callable arguments.
