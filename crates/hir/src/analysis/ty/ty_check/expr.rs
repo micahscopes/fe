@@ -1543,18 +1543,26 @@ impl<'db> TyChecker<'db> {
                             self.env.provision_for_goal(selection.goal()),
                             Some(ScopedProvision::Evidence(..))
                         ) {
-                            self.push_diag(BodyDiag::ObligationOpening {
+                            let diagnostic = BodyDiag::ObligationOpening {
                                 primary: binding.value.span(self.body()).into(),
                                 reason: "evidence and a named selection cannot choose the same trait goal",
-                            });
+                            };
+                            self.env
+                                .record_with_choice(binding.value, Err(diagnostic.clone()));
+                            self.push_diag(diagnostic);
                             continue;
                         }
                         self.env
                             .type_expr(binding.value, ExprProp::new(TyId::unit(self.db), false));
                         self.env.static_selection_exprs.insert(binding.value);
+                        self.env.record_with_choice(binding.value, Ok(selection));
                         self.env.push_selection(selection);
                     }
-                    Err(diag) => self.push_diag(diag),
+                    Err(diag) => {
+                        self.env
+                            .record_with_choice(binding.value, Err(diag.clone()));
+                        self.push_diag(diag);
+                    }
                 }
                 continue;
             }
@@ -1583,10 +1591,13 @@ impl<'db> TyChecker<'db> {
                             self.env.provision_for_goal(*goal),
                             Some(ScopedProvision::Selection(_))
                         ) {
-                            self.push_diag(BodyDiag::ObligationOpening {
+                            let diagnostic = BodyDiag::ObligationOpening {
                                 primary: binding.value.span(self.body()).into(),
                                 reason: "evidence and a named selection cannot choose the same trait goal",
-                            });
+                            };
+                            self.env
+                                .record_with_choice(binding.value, Err(diagnostic.clone()));
+                            self.push_diag(diagnostic);
                             continue;
                         }
                         self.env.push_evidence(binding.value, *goal);

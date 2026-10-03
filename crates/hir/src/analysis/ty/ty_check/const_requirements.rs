@@ -17,16 +17,16 @@ use crate::analysis::ty::{
 };
 use crate::hir_def::{GenericArg, GenericArgListId, ItemKind, UnOp, scope_graph::ScopeId};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PredicateKey<'db> {
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+pub struct PredicateKey<'db> {
     ty: TyId<'db>,
     arithmetic: crate::hir_def::attr::ArithmeticMode,
     operation: Option<Callable<'db>>,
     term: PredicateTerm<'db>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PredicateTerm<'db> {
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+pub enum PredicateTerm<'db> {
     Literal(LitKind<'db>),
     TypeConst(TyId<'db>),
     Const(Const<'db>),
@@ -44,7 +44,7 @@ enum PredicateTerm<'db> {
 
 /// A substituted const condition waiting for the checker, with the caller's
 /// lexical premises and recorded selections kept separate from proof search.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
 pub(super) struct ConstObligation<'db> {
     declaration: WhereClauseOwner<'db>,
     predicate: Body<'db>,
@@ -53,10 +53,78 @@ pub(super) struct ConstObligation<'db> {
     selections: Vec<SelectedApplication<'db>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
 pub(super) struct PendingConstObligation<'db> {
     obligation: ConstObligation<'db>,
     use_span: crate::span::DynLazySpan<'db>,
+}
+
+/// A use and the result returned by its actual condition check.
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+pub struct CheckedConstObligation<'db> {
+    use_: PendingConstObligation<'db>,
+    outcome: Discharge<'db>,
+    predicate: Option<Arc<PredicateKey<'db>>>,
+}
+
+impl<'db> CheckedConstObligation<'db> {
+    pub fn declaration(&self) -> WhereClauseOwner<'db> {
+        self.use_.obligation.declaration
+    }
+    pub fn source_predicate(&self) -> Body<'db> {
+        self.use_.obligation.predicate
+    }
+    pub fn arguments(&self) -> &[TyId<'db>] {
+        &self.use_.obligation.args
+    }
+    pub fn caller(&self) -> Option<GenericParamOwner<'db>> {
+        self.use_.obligation.caller
+    }
+    pub fn selections(&self) -> &[SelectedApplication<'db>] {
+        &self.use_.obligation.selections
+    }
+    pub fn span(&self) -> &DynLazySpan<'db> {
+        &self.use_.use_span
+    }
+    pub fn outcome(&self) -> Discharge<'db> {
+        self.outcome
+    }
+    pub fn predicate(&self) -> Option<&PredicateKey<'db>> {
+        self.predicate.as_deref()
+    }
+}
+
+impl<'db> PredicateKey<'db> {
+    pub fn ty(&self) -> TyId<'db> {
+        self.ty
+    }
+    pub fn term(&self) -> &PredicateTerm<'db> {
+        &self.term
+    }
+    pub fn arithmetic_mode(&self) -> crate::hir_def::attr::ArithmeticMode {
+        self.arithmetic
+    }
+    pub fn operation(&self) -> Option<&Callable<'db>> {
+        self.operation.as_ref()
+    }
+}
+
+struct ConditionCapture<'a, 'db> {
+    site: DynLazySpan<'db>,
+    conditions: &'a mut Vec<CheckedConstObligation<'db>>,
+}
+
+impl<'db> ConditionCapture<'_, 'db> {
+    fn record(&mut self, obligation: ConstObligation<'db>, result: RequirementDischarge<'db>) {
+        self.conditions.push(CheckedConstObligation {
+            use_: PendingConstObligation {
+                obligation,
+                use_span: self.site.clone(),
+            },
+            outcome: result.outcome,
+            predicate: result.predicate,
+        });
+    }
 }
 
 impl<'db> PendingConstObligation<'db> {
@@ -189,8 +257,9 @@ pub(crate) fn selected_impl_requirements_hold<'db>(
                     use_.args.clone(),
                     use_.caller,
                     use_.selections.clone()
-                ),
-                Discharge::Holds
+                )
+                .outcome,
+                Discharge::Holds(_)
             )
         })
 }
@@ -202,14 +271,20 @@ fn check_recorded_condition_uses<'db>(
     let mut check = RequirementCheck::default();
     for use_ in uses {
         let obligation = &use_.obligation;
-        if let Discharge::Fails(failure) = discharge_selected_requirement(
+        let outcome = discharge_selected_requirement(
             db,
             obligation.declaration,
             obligation.predicate,
             obligation.args.clone(),
             obligation.caller,
             obligation.selections.clone(),
-        ) {
+        );
+        check.conditions.push(CheckedConstObligation {
+            use_: use_.clone(),
+            outcome: outcome.outcome,
+            predicate: outcome.predicate,
+        });
+        if let Discharge::Fails(failure) = outcome.outcome {
             check.unmet(use_.use_span.clone(), obligation.predicate, failure);
         }
     }
@@ -659,9 +734,34 @@ impl RequirementFailure {
 
 /// Whether a use's const requirement holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
-pub(super) enum Discharge {
-    Holds,
+pub enum Discharge<'db> {
+    Holds(RequirementProof<'db>),
     Fails(RequirementFailure),
+}
+
+/// The actual reason the shared checker established a condition.
+/// Keep the matching predicate identity rather than reconstructing a premise
+/// index from the caller's flattened inherited conditions during export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub enum RequirementProof<'db> {
+    Evaluated,
+    Premise(Body<'db>),
+}
+
+/// The outcome and substituted predicate retained by the same discharge query.
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+pub(super) struct RequirementDischarge<'db> {
+    outcome: Discharge<'db>,
+    predicate: Option<Arc<PredicateKey<'db>>>,
+}
+
+impl RequirementDischarge<'_> {
+    fn failure(failure: RequirementFailure) -> Self {
+        Self {
+            outcome: Discharge::Fails(failure),
+            predicate: None,
+        }
+    }
 }
 
 /// Whether a predicate can be discharged.
@@ -693,10 +793,11 @@ impl<'db> PredicateFormation<'db> {
 
 /// A body's requirement check: its diagnostics, and whether a requirement it
 /// uses depends on itself, which makes a predicate's formation recursive.
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Update)]
 pub(super) struct RequirementCheck<'db> {
     pub(super) diags: Vec<FuncBodyDiag<'db>>,
     pub(super) recursive: bool,
+    pub(super) conditions: Vec<CheckedConstObligation<'db>>,
 }
 
 impl<'db> RequirementCheck<'db> {
@@ -738,6 +839,7 @@ impl<'db> RequirementCheck<'db> {
     fn extend(&mut self, other: Self) {
         self.recursive |= other.recursive;
         self.diags.extend(other.diags);
+        self.conditions.extend(other.conditions);
     }
 }
 
@@ -1101,9 +1203,17 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             if !reported_paths.insert((site, *application)) {
                 continue;
             }
-            if let Some(unmet) =
-                check_path_application(self.db, *application, self.scope, &self.written, &[])
-            {
+            if let Some(unmet) = check_path_application(
+                self.db,
+                *application,
+                self.scope,
+                &self.written,
+                &[],
+                &mut ConditionCapture {
+                    site: site.clone(),
+                    conditions: &mut self.check.conditions,
+                },
+            ) {
                 self.check
                     .unmet_type(site.clone(), unmet, &mut self.entered);
             }
@@ -1119,7 +1229,16 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
         let ty = self.typed.expr_ty(self.db, expr);
         let mut failed = false;
         if !is_function_ty(self.db, ty)
-            && let Some(unmet) = check_type_requirements(self.db, ty, self.scope, &self.written)
+            && let Some(unmet) = check_type_requirements(
+                self.db,
+                ty,
+                self.scope,
+                &self.written,
+                &mut ConditionCapture {
+                    site: expr.span(self.body).into(),
+                    conditions: &mut self.check.conditions,
+                },
+            )
         {
             failed = true;
             self.unmet_type_at(expr, unmet);
@@ -1132,6 +1251,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 headers,
                 self.scope,
                 &self.written,
+                &mut self.check.conditions,
             )
         {
             self.unmet_type_at(expr, unmet);
@@ -1197,6 +1317,10 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 definition.ret_ty(self.db).instantiate(self.db, args),
                 self.scope,
                 &self.written,
+                &mut ConditionCapture {
+                    site: expr.span(self.body).into(),
+                    conditions: &mut self.check.conditions,
+                },
             )
         {
             self.unmet_type_at(expr, unmet);
@@ -1214,6 +1338,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                     headers,
                     self.scope,
                     &self.written,
+                    &mut self.check.conditions,
                 ) {
                     self.unmet_type_at(expr, unmet);
                 }
@@ -1268,17 +1393,18 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             .iter()
             .filter(|&&predicate| checked_at_uses(db, predicate))
         {
-            if let Discharge::Fails(failure) = discharge_selected_requirement(
-                db,
-                WhereClauseOwner::Func(func),
-                predicate,
-                args.to_vec(),
-                premise_owner,
-                selections.clone(),
-            ) {
-                self.check
-                    .unmet(expr.span(self.body).into(), predicate, failure);
-            }
+            let use_ = PendingConstObligation {
+                obligation: ConstObligation {
+                    declaration: WhereClauseOwner::Func(func),
+                    predicate,
+                    args: args.to_vec(),
+                    caller: premise_owner,
+                    selections: selections.clone(),
+                },
+                use_span: expr.span(self.body).into(),
+            };
+            self.check
+                .extend(check_recorded_condition_uses(db, &[use_]));
         }
     }
 
@@ -1332,7 +1458,16 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 .into_iter()
                 .chain(callable_args.iter().map(|&ty| (ty, true)));
             for (ty, inferred) in types {
-                while let Some(unmet) = check_type_requirements(db, ty, scope, &reported) {
+                while let Some(unmet) = check_type_requirements(
+                    db,
+                    ty,
+                    scope,
+                    &reported,
+                    &mut ConditionCapture {
+                        site: expr.span(body).into(),
+                        conditions: &mut check.conditions,
+                    },
+                ) {
                     reported.insert(unmet.ty);
                     if inferred {
                         check.unmet_inferred(expr.span(body).into(), &unmet);
@@ -1543,6 +1678,7 @@ fn check_path_application<'db>(
     scope: ScopeId<'db>,
     reported: &FxHashSet<TyId<'db>>,
     selections: &[SelectedApplication<'db>],
+    capture: &mut ConditionCapture<'_, 'db>,
 ) -> Option<TypeRequirementFailure<'db>> {
     let declaration = adt_declaration(db, ty)?;
     let arity = collect_generic_params(db, declaration.into())
@@ -1551,7 +1687,7 @@ fn check_path_application<'db>(
     if ty.decompose_ty_app(db).1.len() != arity {
         return None;
     }
-    check_selected_type_requirements(db, ty, scope, reported, selections)
+    check_selected_type_requirements(db, ty, scope, reported, selections, capture)
 }
 
 /// The anonymous constants a body writes in expression and pattern
@@ -1798,6 +1934,7 @@ fn check_entered_header<'db>(
     headers: Vec<TyId<'db>>,
     scope: ScopeId<'db>,
     written: &FxHashSet<TyId<'db>>,
+    conditions: &mut Vec<CheckedConstObligation<'db>>,
 ) -> Option<TypeRequirementFailure<'db>> {
     let body = typed.body()?;
     let mut carried = vec![expr];
@@ -1825,7 +1962,18 @@ fn check_entered_header<'db>(
     headers
         .into_iter()
         .filter(|&header| !carried.iter().any(|&ty| ty_mentions(db, ty, header)))
-        .find_map(|header| check_type_requirements(db, header, scope, written))
+        .find_map(|header| {
+            check_type_requirements(
+                db,
+                header,
+                scope,
+                written,
+                &mut ConditionCapture {
+                    site: expr.span(body).into(),
+                    conditions,
+                },
+            )
+        })
 }
 
 /// Whether `needle` occurs in `ty`.
@@ -1854,8 +2002,9 @@ fn check_type_requirements<'db>(
     ty: TyId<'db>,
     scope: ScopeId<'db>,
     reported: &FxHashSet<TyId<'db>>,
+    capture: &mut ConditionCapture<'_, 'db>,
 ) -> Option<TypeRequirementFailure<'db>> {
-    check_selected_type_requirements(db, ty, scope, reported, &[])
+    check_selected_type_requirements(db, ty, scope, reported, &[], capture)
 }
 
 fn check_selected_type_requirements<'db>(
@@ -1864,11 +2013,12 @@ fn check_selected_type_requirements<'db>(
     scope: ScopeId<'db>,
     reported: &FxHashSet<TyId<'db>>,
     selections: &[SelectedApplication<'db>],
+    capture: &mut ConditionCapture<'_, 'db>,
 ) -> Option<TypeRequirementFailure<'db>> {
     let (base, args) = ty.decompose_ty_app(db);
     for &arg in args {
         if let Some(failure) =
-            check_selected_type_requirements(db, arg, scope, reported, selections)
+            check_selected_type_requirements(db, arg, scope, reported, selections, capture)
         {
             return Some(failure);
         }
@@ -1911,15 +2061,25 @@ fn check_selected_type_requirements<'db>(
         .iter()
         .filter(|&&predicate| checked_at_uses(db, predicate))
         .find_map(|&predicate| {
-            match discharge_selected_requirement(
+            let obligation = ConstObligation {
+                declaration,
+                predicate,
+                args: args.to_vec(),
+                caller,
+                selections: selections.to_vec(),
+            };
+            let outcome = discharge_selected_requirement(
                 db,
                 declaration,
                 predicate,
-                args.to_vec(),
+                obligation.args.clone(),
                 caller,
-                selections.to_vec(),
-            ) {
-                Discharge::Holds => None,
+                obligation.selections.clone(),
+            );
+            let status = outcome.outcome;
+            capture.record(obligation, outcome);
+            match status {
+                Discharge::Holds(_) => None,
                 Discharge::Fails(failure) => Some(TypeRequirementFailure {
                     ty,
                     predicate,
@@ -1937,7 +2097,7 @@ fn discharge_selected_requirement<'db>(
     args: Vec<TyId<'db>>,
     caller: Option<GenericParamOwner<'db>>,
     selections: Vec<SelectedApplication<'db>>,
-) -> Discharge {
+) -> RequirementDischarge<'db> {
     crate::analysis::ty::trait_resolution::assert_outside_proof_search();
     discharge_selected_requirement_query(db, declaration, predicate, args, caller, selections)
 }
@@ -1950,15 +2110,17 @@ fn discharge_selected_requirement_query<'db>(
     args: Vec<TyId<'db>>,
     caller: Option<GenericParamOwner<'db>>,
     selections: Vec<SelectedApplication<'db>>,
-) -> Discharge {
+) -> RequirementDischarge<'db> {
     let typed = match &check_predicate_formation(db, predicate).status {
         FormationStatus::WellFormed(typed) => typed,
         FormationStatus::IllFormed => {
-            return Discharge::Fails(RequirementFailure::NotEstablished);
+            return RequirementDischarge::failure(RequirementFailure::NotEstablished);
         }
-        FormationStatus::Recursive => return Discharge::Fails(RequirementFailure::Recursive),
+        FormationStatus::Recursive => {
+            return RequirementDischarge::failure(RequirementFailure::Recursive);
+        }
     };
-    let not_instantiable = Discharge::Fails(RequirementFailure::NotInstantiable);
+    let not_instantiable = RequirementDischarge::failure(RequirementFailure::NotInstantiable);
     let args = match caller {
         Some(caller) => match caller_args(db, caller, args) {
             Ok(args) => args,
@@ -1982,6 +2144,7 @@ fn discharge_selected_requirement_query<'db>(
         let Ok(key) = predicate_key(db, predicate, typed, &subst) else {
             return not_instantiable;
         };
+        let key = key.map(Arc::new);
         if let (Some(key), Some(caller)) = (&key, caller) {
             let Ok(premises) = caller_premises(db, caller) else {
                 return not_instantiable;
@@ -1995,17 +2158,29 @@ fn discharge_selected_requirement_query<'db>(
                 else {
                     return not_instantiable;
                 };
-                if premise_key.as_ref() == Some(key) {
-                    return Discharge::Holds;
+                if premise_key.as_ref() == Some(key.as_ref()) {
+                    return RequirementDischarge {
+                        outcome: Discharge::Holds(RequirementProof::Premise(premise)),
+                        predicate: Some(key.clone()),
+                    };
                 }
             }
         }
-        return Discharge::Fails(if key.is_some() {
-            RequirementFailure::NoMatchingPremise
-        } else {
-            RequirementFailure::NotForwardable
-        });
+        return RequirementDischarge {
+            outcome: Discharge::Fails(if key.is_some() {
+                RequirementFailure::NoMatchingPremise
+            } else {
+                RequirementFailure::NotForwardable
+            }),
+            predicate: key,
+        };
     }
+    // This is a view of the checked predicate before CTFE, not its truth value.
+    // Unsupported views do not change concrete discharge behavior.
+    let captured_predicate = predicate_key(db, predicate, typed, &subst)
+        .ok()
+        .flatten()
+        .map(Arc::new);
     let owner = BodyOwner::const_predicate(db, predicate);
     let subst = GenericSubst::for_body_owner(db, owner, args);
     let outcome = if selections.is_empty() {
@@ -2030,8 +2205,8 @@ fn discharge_selected_requirement_query<'db>(
             eval_const_instance(db, get_or_build_semantic_instance(db, key)),
         )
     };
-    match outcome {
-        ConditionOutcome::True => Discharge::Holds,
+    let outcome = match outcome {
+        ConditionOutcome::True => Discharge::Holds(RequirementProof::Evaluated),
         ConditionOutcome::False => Discharge::Fails(RequirementFailure::False),
         ConditionOutcome::NotBool | ConditionOutcome::Blocked(_) => {
             Discharge::Fails(RequirementFailure::NotEstablished)
@@ -2039,6 +2214,10 @@ fn discharge_selected_requirement_query<'db>(
         ConditionOutcome::Failed(cause) => {
             Discharge::Fails(RequirementFailure::from_evaluation(&cause))
         }
+    };
+    RequirementDischarge {
+        outcome,
+        predicate: captured_predicate,
     }
 }
 
@@ -2050,8 +2229,8 @@ fn requirement_cycle_initial<'db>(
     _args: Vec<TyId<'db>>,
     _caller: Option<GenericParamOwner<'db>>,
     _selections: Vec<SelectedApplication<'db>>,
-) -> Discharge {
-    Discharge::Fails(RequirementFailure::Recursive)
+) -> RequirementDischarge<'db> {
+    RequirementDischarge::failure(RequirementFailure::Recursive)
 }
 
 #[expect(
@@ -2060,14 +2239,14 @@ fn requirement_cycle_initial<'db>(
 )]
 fn requirement_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _value: &Discharge,
+    _value: &RequirementDischarge<'db>,
     _count: u32,
     _declaration: WhereClauseOwner<'db>,
     _predicate: Body<'db>,
     _args: Vec<TyId<'db>>,
     _caller: Option<GenericParamOwner<'db>>,
     _selections: Vec<SelectedApplication<'db>>,
-) -> salsa::CycleRecoveryAction<Discharge> {
+) -> salsa::CycleRecoveryAction<RequirementDischarge<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
 
@@ -2401,6 +2580,16 @@ fn written_types_query<'db>(
     collector.entries
 }
 
+/// Read the actual results retained by authored-type checking.
+/// The boundary applies even when the tracked query is already cached.
+pub fn written_condition_uses<'db>(
+    db: &'db dyn HirAnalysisDb,
+    item: ItemKind<'db>,
+) -> &'db [CheckedConstObligation<'db>] {
+    crate::analysis::ty::trait_resolution::assert_outside_proof_search();
+    &written_type_check_query(db, WrittenTypeRegion::new(db, item)).conditions
+}
+
 /// The unmet requirements of the types and anonymous constants written in
 /// `item` itself (`written_types`), each reported where it is written. A
 /// type's nested types are checked first. A failure one of them reported
@@ -2411,14 +2600,14 @@ fn written_type_check<'db>(
     db: &'db dyn HirAnalysisDb,
     item: ItemKind<'db>,
 ) -> &'db Vec<FuncBodyDiag<'db>> {
-    written_type_check_query(db, WrittenTypeRegion::new(db, item))
+    &written_type_check_query(db, WrittenTypeRegion::new(db, item)).diags
 }
 
 #[salsa::tracked(return_ref)]
 fn written_type_check_query<'db>(
     db: &'db dyn HirAnalysisDb,
     region: WrittenTypeRegion<'db>,
-) -> Vec<FuncBodyDiag<'db>> {
+) -> RequirementCheck<'db> {
     let entries = written_types(db, region.item(db));
     // Listing written types remains independent of inference: the body's
     // requirement check reads that list itself. Discharge alone reads the
@@ -2445,7 +2634,7 @@ fn written_type_check_query<'db>(
         }
         _ => None,
     };
-    let mut diags = Vec::new();
+    let mut check = RequirementCheck::default();
     // The failing application each entry reported, if any.
     let mut reported: Vec<Option<TyId<'db>>> = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -2457,7 +2646,7 @@ fn written_type_check_query<'db>(
                     })
                     .unwrap_or(&[]);
                 for &(body, expected) in bodies {
-                    diags.extend(anon_const_position_check(db, body, expected, selections).diags);
+                    check.extend(anon_const_position_check(db, body, expected, selections));
                 }
                 None
             }
@@ -2485,7 +2674,7 @@ fn written_type_check_query<'db>(
                         ));
                     }
                 }
-                diags.extend(check_recorded_condition_uses(db, &uses).diags);
+                check.extend(check_recorded_condition_uses(db, &uses));
                 let nested: FxHashSet<_> = reported[written.nested_from..]
                     .iter()
                     .flatten()
@@ -2494,7 +2683,17 @@ fn written_type_check_query<'db>(
                 let unmet = written
                     .lowered
                     .and_then(|ty| {
-                        check_selected_type_requirements(db, ty, written.scope, &nested, selections)
+                        check_selected_type_requirements(
+                            db,
+                            ty,
+                            written.scope,
+                            &nested,
+                            selections,
+                            &mut ConditionCapture {
+                                site: written.span.clone(),
+                                conditions: &mut check.conditions,
+                            },
+                        )
                     })
                     .or_else(|| {
                         written.applications.iter().find_map(|&application| {
@@ -2504,11 +2703,15 @@ fn written_type_check_query<'db>(
                                 written.scope,
                                 &nested,
                                 selections,
+                                &mut ConditionCapture {
+                                    site: written.span.clone(),
+                                    conditions: &mut check.conditions,
+                                },
                             )
                         })
                     });
                 unmet.map(|unmet| {
-                    diags.push(unmet_requirement_diag(
+                    check.diags.push(unmet_requirement_diag(
                         written.span.clone(),
                         unmet.predicate,
                         unmet.failure,
@@ -2520,7 +2723,7 @@ fn written_type_check_query<'db>(
         };
         reported.push(report);
     }
-    diags
+    check
 }
 
 /// The anonymous constants written in `hir_ty` and in every type and trait
@@ -2676,7 +2879,378 @@ mod recording_tests {
                 expected,
                 "{name}: each application must record its implementation condition once"
             );
+            let choices: Vec<_> = typed
+                .tables
+                .trait_choices
+                .iter()
+                .filter(|choice| {
+                    choice
+                        .goal
+                        .def(&db)
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(&db) == "Read")
+                })
+                .collect();
+            assert_eq!(
+                choices.len(),
+                expected,
+                "{name}: one accepted choice per use"
+            );
+            assert!(choices.iter().all(|choice| matches!(
+                choice.via,
+                super::super::env::TraitChoiceVia::Implementation(_)
+            )));
+            assert_eq!(typed.checked_const_obligations.len(), expected);
+            assert!(
+                typed
+                    .checked_const_obligations
+                    .iter()
+                    .all(|checked| matches!(
+                        checked.outcome,
+                        super::Discharge::Holds(super::RequirementProof::Evaluated)
+                    ))
+            );
         }
+    }
+
+    #[test]
+    fn checked_body_retains_successful_and_failed_callee_conditions() {
+        let cases = [
+            ("concrete_true", "fn use_it() -> u256 { read<7>() }", None),
+            (
+                "concrete_false",
+                "fn use_it() -> u256 { read<0>() }",
+                Some(super::RequirementFailure::False),
+            ),
+            (
+                "forward_premise",
+                "fn use_it<const N: usize>() -> u256 where N > 0 { read<N>() }",
+                None,
+            ),
+            (
+                "missing_premise",
+                "fn use_it<const N: usize>() -> u256 { read<N>() }",
+                Some(super::RequirementFailure::NoMatchingPremise),
+            ),
+        ];
+        for (name, caller, failure) in cases {
+            let source =
+                format!("fn read<const N: usize>() -> u256 where N > 0 {{ 7 }}\n{caller}\n");
+            let mut db = HirAnalysisTestDb::default();
+            let file = db.new_stand_alone(format!("{name}.fe").into(), &source);
+            let (top, _) = db.top_mod(file);
+            let function = top
+                .all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|function| {
+                    function
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|id| id.data(&db) == "use_it")
+                })
+                .expect("fixture function");
+            let (diagnostics, typed) = super::super::check_func_body(&db, function);
+            assert_eq!(
+                diagnostics.is_empty(),
+                failure.is_none(),
+                "{name}: {diagnostics:?}"
+            );
+            assert_eq!(typed.checked_const_obligations.len(), 1, "{name}");
+            let checked = &typed.checked_conditions()[0];
+            let predicate = checked
+                .predicate()
+                .expect("substituted predicate before evaluation");
+            let super::PredicateTerm::Binary(
+                super::BinOp::Comp(crate::hir_def::CompBinOp::Gt),
+                lhs,
+                _,
+            ) = &predicate.term
+            else {
+                panic!("{name}: predicate was replaced by its truth value");
+            };
+            if name.starts_with("concrete") {
+                let super::PredicateTerm::TypeConst(ty) = lhs.term else {
+                    panic!("{name}: missing substituted operand");
+                };
+                assert!(!ty.has_param(&db), "{name}: argument was not substituted");
+            }
+            match failure {
+                Some(failure) => {
+                    assert_eq!(checked.outcome, super::Discharge::Fails(failure), "{name}")
+                }
+                None if name == "forward_premise" => {
+                    let premise = super::WhereClauseOwner::Func(function)
+                        .where_clause(&db)
+                        .const_predicates(&db)[0];
+                    assert_eq!(
+                        checked.outcome,
+                        super::Discharge::Holds(super::RequirementProof::Premise(premise))
+                    );
+                }
+                None => assert_eq!(
+                    checked.outcome,
+                    super::Discharge::Holds(super::RequirementProof::Evaluated)
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn written_type_query_retains_success_and_failure_at_the_authored_span() {
+        use crate::span::LazySpan;
+        for (argument, expected) in [
+            (
+                7,
+                super::Discharge::Holds(super::RequirementProof::Evaluated),
+            ),
+            (0, super::Discharge::Fails(super::RequirementFailure::False)),
+        ] {
+            let source = format!(
+                "struct Bounded<const N: usize> where N > 0 {{}}\nfn use_it(_ value: Bounded<{argument}>) {{}}\n"
+            );
+            let mut db = HirAnalysisTestDb::default();
+            let file = db.new_stand_alone("written_capture.fe".into(), &source);
+            let (top, _) = db.top_mod(file);
+            let function = top
+                .all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|function| {
+                    function
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|id| id.data(&db) == "use_it")
+                })
+                .expect("fixture function");
+            let check = super::written_type_check_query(
+                &db,
+                super::WrittenTypeRegion::new(&db, super::ItemKind::Func(function)),
+            );
+            assert_eq!(check.conditions.len(), 1, "argument {argument}");
+            assert_eq!(check.conditions[0].outcome, expected);
+            assert_eq!(check.diags.is_empty(), argument > 0);
+            let span = check.conditions[0]
+                .use_
+                .use_span
+                .resolve(&db)
+                .expect("authored type span");
+            let start = u32::from(span.range.start()) as usize;
+            assert!(span.file.text(&db)[start..].starts_with("Bounded<"));
+        }
+    }
+
+    #[test]
+    fn selected_and_bound_goals_retain_the_actual_answer() {
+        let source = "trait Read { fn read() -> u256 }\nstruct S {}\nimpl Read for S { fn read() -> u256 { 1 } }\nimpl Read for S as Alternative { fn read() -> u256 { 2 } }\nfn selected() -> u256 { with (Alternative) { <S as Read>::read() } }\nfn bound<T: Read>() -> u256 { <T as Read>::read() }\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("actual_choices.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        for name in ["selected", "bound"] {
+            let function = top
+                .all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|function| {
+                    function
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|id| id.data(&db) == name)
+                })
+                .expect("fixture function");
+            let (diagnostics, typed) = super::super::check_func_body(&db, function);
+            assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+            let choices: Vec<_> = typed
+                .tables
+                .trait_choices
+                .iter()
+                .filter(|choice| {
+                    choice
+                        .goal
+                        .def(&db)
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|id| id.data(&db) == "Read")
+                })
+                .collect();
+            assert_eq!(choices.len(), 1, "{name}");
+            assert_eq!(typed.with_choices().len(), usize::from(name == "selected"));
+            if name == "selected" {
+                let with_selection = typed.with_choices()[0].outcome().expect("accepted binding");
+                assert_eq!(
+                    choices[0].via,
+                    super::super::env::TraitChoiceVia::Selected(with_selection)
+                );
+            }
+            match (name, choices[0].via) {
+                ("selected", super::super::env::TraitChoiceVia::Selected(_)) => {}
+                ("bound", super::super::env::TraitChoiceVia::Implementation(implementor)) => {
+                    assert_eq!(
+                        implementor.origin(&db),
+                        super::ImplementorOrigin::Assumption
+                    )
+                }
+                _ => panic!("{name}: wrong actual proof"),
+            }
+        }
+    }
+
+    #[test]
+    fn discarded_probe_does_not_retain_a_with_choice() {
+        let source = "trait Read { fn read() -> u256 }\nstruct S {}\nimpl Read for S as Alternative { fn read() -> u256 { 2 } }\nfn use_it() -> u256 { with (Alternative) { 0 } }\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("discarded_with_capture.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "use_it")
+            })
+            .expect("fixture function");
+        let mut checker =
+            super::super::TyChecker::new(&db, super::BodyOwner::Func(function)).expect("checker");
+        let snapshot = checker.snapshot_state();
+        let root = checker.body().expr(&db);
+        checker.check_expr_unknown(root);
+        assert_eq!(checker.env.with_choices().len(), 1);
+        assert!(checker.env.with_choices()[0].outcome().is_ok());
+        checker.rollback_state(snapshot);
+        assert!(checker.env.with_choices().is_empty());
+    }
+
+    #[test]
+    fn rejected_with_binding_retains_its_actual_error() {
+        let source = "trait Read { fn read() -> u256 }\nstruct S {}\nimpl Read for S as Alternative { fn read() -> u256 { 2 } }\nfn use_it() -> u256 { with (Missing) { 0 } }\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("rejected_with_capture.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "use_it")
+            })
+            .expect("fixture function");
+        let (diagnostics, typed) = super::super::check_func_body(&db, function);
+        assert!(!diagnostics.is_empty());
+        assert_eq!(typed.with_choices().len(), 1);
+        let choice = &typed.with_choices()[0];
+        assert_eq!(choice.error_code(), Some(99));
+        assert!(matches!(
+            choice.outcome(),
+            Err(crate::analysis::ty::diagnostics::BodyDiag::UnknownNamedSelection { .. })
+        ));
+    }
+
+    #[test]
+    fn discarded_probe_does_not_retain_an_impl_choice() {
+        let source = "trait Read { fn read() -> u256 }\nstruct S {}\nimpl Read for S { fn read() -> u256 { 1 } }\nfn use_it() -> u256 { 1 }\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("discarded_choice.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "use_it")
+            })
+            .expect("fixture function");
+        let implementation = top
+            .all_items(&db)
+            .iter()
+            .find_map(|item| match item {
+                super::ItemKind::ImplTrait(item) => Some(*item),
+                _ => None,
+            })
+            .expect("fixture implementation");
+        let goal = crate::analysis::ty::trait_lower::lower_impl_trait(&db, implementation)
+            .expect("lowered impl")
+            .trait_(&db);
+        let mut checker =
+            super::super::TyChecker::new(&db, super::BodyOwner::Func(function)).expect("checker");
+        let snapshot = checker.snapshot_state();
+        let obligation = super::super::env::TraitObligation {
+            goal,
+            assumptions: checker.env.assumptions(),
+            selected_applications: Vec::new(),
+            origin: super::super::env::TraitObligationOrigin::GenericConfirmation,
+            span: function.span().into(),
+        };
+        let outcome = checker.process_trait_obligation(obligation, true);
+        assert!(matches!(
+            outcome,
+            super::super::TraitObligationOutcome::Discharged
+                | super::super::TraitObligationOutcome::Progressed
+        ));
+        assert_eq!(checker.env.trait_choices().len(), 1);
+        checker.rollback_state(snapshot);
+        assert!(checker.env.trait_choices().is_empty());
+    }
+
+    #[test]
+    fn symbolic_discharge_retains_the_actual_matching_premise() {
+        let source = "trait Read { fn read() -> u256 }
+\
+                      struct S<const N: usize> {}
+\
+                      impl<const N: usize> Read for S<N> where N > 0 {
+\
+                          fn read() -> u256 { 7 }
+\
+                      }
+\
+                      fn use_it<const N: usize>() -> u256 where N > 0 {
+\
+                          <S<N> as Read>::read()
+\
+                      }";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("matching_premise.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|id| id.data(&db) == "use_it")
+            })
+            .expect("fixture function");
+        let (diagnostics, typed) = super::super::check_func_body(&db, function);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(typed.tables.pending_const_obligations.len(), 1);
+        let obligation = &typed.tables.pending_const_obligations[0].obligation;
+        let result = super::discharge_selected_requirement(
+            &db,
+            obligation.declaration,
+            obligation.predicate,
+            obligation.args.clone(),
+            obligation.caller,
+            obligation.selections.clone(),
+        );
+        let premise = super::WhereClauseOwner::Func(function)
+            .where_clause(&db)
+            .const_predicates(&db)[0];
+        assert_eq!(
+            result.outcome,
+            super::Discharge::Holds(super::RequirementProof::Premise(premise))
+        );
     }
 
     #[test]
@@ -2712,10 +3286,26 @@ mod recording_tests {
                 obligation.selections.clone(),
             )
         };
-        assert!(matches!(discharge(), super::Discharge::Holds));
+        assert!(matches!(
+            discharge().outcome,
+            super::Discharge::Holds(super::RequirementProof::Evaluated)
+        ));
         let proof = crate::analysis::ty::trait_resolution::enter_proof_search();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(discharge));
+        let body_view =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| typed.checked_conditions()));
+        let written_view = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::written_condition_uses(&db, super::ItemKind::Func(function))
+        }));
         drop(proof);
+        assert!(
+            body_view.is_err(),
+            "cached checked-condition view crossed the proof boundary"
+        );
+        assert!(
+            written_view.is_err(),
+            "cached authored-condition view crossed the proof boundary"
+        );
         assert!(
             result.is_err(),
             "cached condition discharge crossed the proof boundary"

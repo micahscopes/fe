@@ -2,10 +2,14 @@ mod callable;
 mod const_requirements;
 pub(crate) use const_requirements::check_declared_type_requirements;
 pub(crate) use const_requirements::selected_impl_requirements_hold;
-pub use const_requirements::{EvaluationStop, RequirementFailure};
-pub(crate) use const_requirements::{
-    PredicateKey, comparable_const_predicate_key, normalize_comparable_const_predicate_key,
+pub use const_requirements::{
+    CheckedConstObligation, Discharge, EvaluationStop, PredicateKey, PredicateTerm,
+    RequirementFailure, RequirementProof, written_condition_uses,
 };
+pub(crate) use const_requirements::{
+    comparable_const_predicate_key, normalize_comparable_const_predicate_key,
+};
+pub use env::{TraitChoice, TraitChoiceVia, WithChoice};
 mod contract;
 mod effect_env;
 pub(crate) mod env;
@@ -1184,11 +1188,12 @@ pub(super) fn checked_body<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
 ) -> CheckedBody<'db> {
-    let (mut diags, typed) = infer_body(db, owner).clone();
+    let (mut diags, mut typed) = infer_body(db, owner).clone();
     let mut recursive = false;
     if diags_allow_evaluation(db, &diags) {
         let requirements = const_requirements::check_body_requirements(db, owner, &typed);
         recursive = requirements.recursive;
+        typed.checked_const_obligations = Arc::new(requirements.conditions);
         diags.extend(requirements.diags);
     }
     CheckedBody {
@@ -1740,6 +1745,8 @@ fn typed_body_for_bodyless_func<'db>(
         pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
         for_loop_seq: SecondaryMap::new(),
         pending_const_obligations: Vec::new(),
+        trait_choices: Vec::new(),
+        with_choices: Vec::new(),
         expr_place: SecondaryMap::new(),
         expr_places: PrimaryMap::new(),
         path_applications: Vec::new(),
@@ -1789,6 +1796,8 @@ pub struct TyChecker<'db> {
 pub(crate) struct TyCheckerSnapshot<'db> {
     table: Snapshot<InPlace<InferenceKey<'db>>>,
     deferred_len: usize,
+    trait_choices_len: usize,
+    with_choices_len: usize,
 }
 
 enum TraitObligationOutcome<'db> {
@@ -2088,12 +2097,16 @@ impl<'db> TyChecker<'db> {
         TyCheckerSnapshot {
             table: self.table.snapshot(),
             deferred_len: self.env.deferred_len(),
+            trait_choices_len: self.env.trait_choices().len(),
+            with_choices_len: self.env.with_choices().len(),
         }
     }
 
     pub(crate) fn rollback_state(&mut self, snapshot: TyCheckerSnapshot<'db>) {
         self.table.rollback_to(snapshot.table);
         self.env.truncate_deferred_tasks(snapshot.deferred_len);
+        self.env.truncate_trait_choices(snapshot.trait_choices_len);
+        self.env.truncate_with_choices(snapshot.with_choices_len);
     }
 
     fn commit_state(&mut self, snapshot: TyCheckerSnapshot<'db>) {
@@ -2518,7 +2531,7 @@ impl<'db> TyChecker<'db> {
         if !obligation.selected_applications.is_empty() {
             let requirements = PredicateListId::new(db, vec![goal]).extend_all_bounds(db);
             let snapshot = self.table.snapshot();
-            let mut directly_selected = false;
+            let mut directly_selected = None;
             for &required in requirements.list(db) {
                 let required = self.normalize_trait_goal(required);
                 let Some(selection) = obligation
@@ -2536,7 +2549,9 @@ impl<'db> TyChecker<'db> {
                 let compatible = self.table.unify(selection.goal(), required).is_ok();
                 let instantiated = required.fold_with(db, &mut self.table);
                 if compatible && selection.revalidate(db, solve_cx, instantiated).is_ok() {
-                    directly_selected |= required == goal;
+                    if required == goal {
+                        directly_selected = Some(selection);
+                    }
                     continue;
                 }
                 self.table.rollback_to(snapshot);
@@ -2549,8 +2564,15 @@ impl<'db> TyChecker<'db> {
                 });
                 return TraitObligationOutcome::Discharged;
             }
-            if directly_selected {
-                return if goal.fold_with(db, &mut self.table) != goal {
+            if let Some(selection) = directly_selected {
+                let answered_goal = goal.fold_with(db, &mut self.table);
+                self.env.record_trait_choice(env::TraitChoice {
+                    goal: answered_goal,
+                    via: env::TraitChoiceVia::Selected(selection),
+                    origin: obligation.origin,
+                    span: obligation.span.clone(),
+                });
+                return if answered_goal != goal {
                     TraitObligationOutcome::Progressed
                 } else {
                     TraitObligationOutcome::Discharged
@@ -2600,7 +2622,16 @@ impl<'db> TyChecker<'db> {
                 ) {
                     self.env.register_const_obligation(pending);
                 }
-                if self.normalize_trait_goal(goal) != goal {
+                let answered_goal = self.normalize_trait_goal(goal);
+                self.env.record_trait_choice(env::TraitChoice {
+                    goal: answered_goal,
+                    via: env::TraitChoiceVia::Implementation(
+                        solved.implementor.fold_with(db, &mut self.table),
+                    ),
+                    origin: obligation.origin,
+                    span: obligation.span.clone(),
+                });
+                if answered_goal != goal {
                     TraitObligationOutcome::Progressed
                 } else {
                     TraitObligationOutcome::Discharged
@@ -4227,6 +4258,26 @@ struct PathResolutionScopes<'db> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedBody<'db> {
     tables: Arc<TypedBodyTables<'db>>,
+    /// Results attached by checking without copying the shared inference tables.
+    checked_const_obligations: Arc<Vec<const_requirements::CheckedConstObligation<'db>>>,
+}
+
+impl<'db> TypedBody<'db> {
+    /// Actual results attached by the shared condition checker.
+    pub fn checked_conditions(&self) -> &[CheckedConstObligation<'db>] {
+        crate::analysis::ty::trait_resolution::assert_outside_proof_search();
+        &self.checked_const_obligations
+    }
+
+    /// Actual with selection outcomes, retained after lexical provisions expire.
+    pub fn with_choices(&self) -> &[WithChoice<'db>] {
+        &self.tables.with_choices
+    }
+
+    /// Accepted solver/selection answers, finalized with this body's inference.
+    pub fn trait_choices(&self) -> &[TraitChoice<'db>] {
+        &self.tables.trait_choices
+    }
 }
 
 // A private module keeps the shared tables type out of the crate's public
@@ -4267,6 +4318,8 @@ mod typed_body_tables {
         /// Resolved Seq trait methods for for-loops
         pub(super) for_loop_seq: SecondaryMap<StmtId, Option<ForLoopSeq<'db>>>,
         pub(super) pending_const_obligations: Vec<const_requirements::PendingConstObligation<'db>>,
+        pub(super) trait_choices: Vec<env::TraitChoice<'db>>,
+        pub(super) with_choices: Vec<env::WithChoice<'db>>,
         pub(super) expr_place: SecondaryMap<ExprId, PackedOption<ExprPlaceId>>,
         pub(super) expr_places: PrimaryMap<ExprPlaceId, Place<'db>>,
         /// The constrained type applications that resolving the body's paths
@@ -4692,6 +4745,7 @@ impl<'db> From<TypedBodyTables<'db>> for TypedBody<'db> {
     fn from(tables: TypedBodyTables<'db>) -> Self {
         Self {
             tables: Arc::new(tables),
+            checked_const_obligations: Arc::new(Vec::new()),
         }
     }
 }
@@ -6339,6 +6393,8 @@ impl<'db> TypedBody<'db> {
             pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
             for_loop_seq: SecondaryMap::new(),
             pending_const_obligations: Vec::new(),
+            trait_choices: Vec::new(),
+            with_choices: Vec::new(),
             expr_place: SecondaryMap::new(),
             expr_places: PrimaryMap::new(),
             path_applications: Vec::new(),

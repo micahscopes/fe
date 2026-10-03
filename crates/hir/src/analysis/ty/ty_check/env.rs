@@ -29,6 +29,7 @@ use crate::analysis::{
     ty::{
         const_ty::{CallableInputLayoutHoleOrigin, const_body_assumptions},
         corelib::resolve_lib_type_path,
+        diagnostics::BodyDiag,
         effects::{
             EffectKeyKind,
             elaborate::{build_pattern_from_requirement_decl, seed_forwarder_from_requirement},
@@ -90,6 +91,8 @@ pub(crate) struct TyCheckEnv<'db> {
     quotes: rustc_hash::FxHashMap<ExprId, super::CheckedQuote<'db>>,
 
     deferred: Vec<DeferredTask<'db>>,
+    trait_choices: Vec<TraitChoice<'db>>,
+    with_choices: Vec<WithChoice<'db>>,
 
     effect_env: keyed_effect_env::EffectEnv<'db>,
     effect_bounds: ThinVec<TraitInstId<'db>>,
@@ -170,6 +173,8 @@ impl<'db> TyCheckEnv<'db> {
             resolved_field_index: SecondaryMap::new(),
             quotes: Default::default(),
             deferred: Vec::new(),
+            trait_choices: Vec::new(),
+            with_choices: Vec::new(),
             effect_env: keyed_effect_env::EffectEnv::new(),
             effect_bounds: ThinVec::new(),
             base_assumptions,
@@ -938,6 +943,37 @@ impl<'db> TyCheckEnv<'db> {
         self.pending_vars.clear();
     }
 
+    pub(super) fn with_choices(&self) -> &[WithChoice<'db>] {
+        &self.with_choices
+    }
+
+    pub(super) fn record_with_choice(
+        &mut self,
+        expression: ExprId,
+        outcome: Result<crate::analysis::semantic::SelectedApplication<'db>, BodyDiag<'db>>,
+    ) {
+        self.with_choices.push(WithChoice {
+            expression,
+            outcome,
+        });
+    }
+
+    pub(super) fn truncate_with_choices(&mut self, len: usize) {
+        self.with_choices.truncate(len);
+    }
+
+    pub(super) fn trait_choices(&self) -> &[TraitChoice<'db>] {
+        &self.trait_choices
+    }
+
+    pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
+        self.trait_choices.push(choice);
+    }
+
+    pub(super) fn truncate_trait_choices(&mut self, len: usize) {
+        self.trait_choices.truncate(len);
+    }
+
     pub(super) fn register_trait_obligation(&mut self, obligation: TraitObligation<'db>) {
         self.deferred.push(DeferredTask::Obligation(obligation))
     }
@@ -1140,6 +1176,22 @@ impl<'db> TyCheckEnv<'db> {
         pending_const_obligations.iter_mut().for_each(|obligation| {
             *obligation = obligation.clone().fold_with(self.db, &mut prober);
         });
+        for choice in &mut self.trait_choices {
+            choice.goal = choice.goal.fold_with(self.db, &mut prober);
+            choice.via = match choice.via {
+                TraitChoiceVia::Implementation(implementor) => {
+                    TraitChoiceVia::Implementation(implementor.fold_with(self.db, &mut prober))
+                }
+                TraitChoiceVia::Selected(selection) => {
+                    TraitChoiceVia::Selected(selection.fold_with(self.db, &mut prober))
+                }
+            };
+        }
+        for choice in &mut self.with_choices {
+            if let Ok(selection) = &mut choice.outcome {
+                *selection = selection.fold_with(self.db, &mut prober);
+            }
+        }
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -1189,6 +1241,8 @@ impl<'db> TyCheckEnv<'db> {
             pattern_status: self.pattern_status,
             for_loop_seq: self.for_loop_seq,
             pending_const_obligations,
+            trait_choices: self.trait_choices,
+            with_choices: self.with_choices,
             expr_place,
             expr_places,
             path_applications: self.path_applications,
@@ -1812,6 +1866,73 @@ pub(super) enum TraitObligationOrigin<'db> {
         constraint_idx: usize,
     },
     GenericConfirmation,
+}
+
+/// The actual selection result for a with binding, retained past scope exit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithChoice<'db> {
+    expression: ExprId,
+    outcome: Result<crate::analysis::semantic::SelectedApplication<'db>, BodyDiag<'db>>,
+}
+
+impl<'db> WithChoice<'db> {
+    pub fn expression(&self) -> ExprId {
+        self.expression
+    }
+    pub fn outcome(
+        &self,
+    ) -> Result<crate::analysis::semantic::SelectedApplication<'db>, &BodyDiag<'db>> {
+        self.outcome.as_ref().copied()
+    }
+    pub fn error_code(&self) -> Option<u16> {
+        self.outcome.as_ref().err().map(BodyDiag::local_code)
+    }
+}
+
+/// An accepted obligation's actual solver answer, before final inference folding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitChoice<'db> {
+    pub(super) goal: TraitInstId<'db>,
+    pub(super) via: TraitChoiceVia<'db>,
+    pub(super) origin: TraitObligationOrigin<'db>,
+    pub(super) span: DynLazySpan<'db>,
+}
+
+impl<'db> TraitChoice<'db> {
+    pub fn goal(&self) -> TraitInstId<'db> {
+        self.goal
+    }
+    pub fn via(&self) -> TraitChoiceVia<'db> {
+        self.via
+    }
+    pub fn span(&self) -> &DynLazySpan<'db> {
+        &self.span
+    }
+    pub fn answer_origin(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> crate::analysis::ty::trait_def::ImplementorOrigin<'db> {
+        match self.via {
+            TraitChoiceVia::Implementation(implementor) => implementor.origin(db),
+            TraitChoiceVia::Selected(selection) => selection.origin(db),
+        }
+    }
+    pub fn call_constraint(&self) -> Option<(ExprId, CallableDef<'db>, usize)> {
+        match self.origin {
+            TraitObligationOrigin::CallConstraint {
+                call_expr,
+                callable_def,
+                constraint_idx,
+            } => Some((call_expr, callable_def, constraint_idx)),
+            TraitObligationOrigin::GenericConfirmation => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraitChoiceVia<'db> {
+    Implementation(crate::analysis::ty::trait_def::ImplementorId<'db>),
+    Selected(crate::analysis::semantic::SelectedApplication<'db>),
 }
 
 #[derive(Debug, Clone)]
