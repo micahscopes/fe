@@ -9,7 +9,7 @@ pub use const_requirements::{
 pub(crate) use const_requirements::{
     comparable_const_predicate_key, normalize_comparable_const_predicate_key,
 };
-pub use env::{DecisionSite, Decisions, TraitChoice, TraitChoiceVia, WithChoice};
+pub use env::{DecisionSite, Decisions, TraitChoice, TraitChoiceId, TraitChoiceVia, WithChoice};
 mod contract;
 mod effect_env;
 pub(crate) mod env;
@@ -4291,8 +4291,14 @@ impl<'db> TypedBody<'db> {
     }
 
     /// Accepted solver/selection answers, finalized with this body's inference.
-    pub fn trait_choices(&self) -> impl ExactSizeIterator<Item = &TraitChoice<'db>> {
-        self.decisions.choices.values()
+    pub fn trait_choices(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl ExactSizeIterator<Item = &'db TraitChoice<'db>> {
+        self.decisions
+            .choices
+            .values()
+            .map(|choice| choice.data(db))
     }
 
     pub fn decisions(&self) -> &Decisions<'db> {

@@ -959,11 +959,14 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn trait_choices(&self) -> impl ExactSizeIterator<Item = &TraitChoice<'db>> {
-        self.decisions.choices.values()
+        self.decisions
+            .choices
+            .values()
+            .map(|choice| choice.data(self.db))
     }
 
     pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
-        self.decisions.record_trait_choice(choice);
+        self.decisions.record_trait_choice(self.db, choice);
     }
 
     pub(super) fn truncate_trait_choices(&mut self, len: usize) {
@@ -1882,7 +1885,7 @@ pub struct DecisionSite<'db> {
 /// Choice keys use HIR sites, not rendered coordinates or an exporter index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Decisions<'db> {
-    pub(super) choices: common::indexmap::IndexMap<DecisionSite<'db>, TraitChoice<'db>>,
+    pub(super) choices: common::indexmap::IndexMap<DecisionSite<'db>, TraitChoiceId<'db>>,
     pub(super) openings: common::indexmap::IndexMap<ExprId, WithChoice<'db>>,
     pub(super) condition_uses: super::const_requirements::ConditionDecisions<'db>,
     pub(super) contexts: SecondaryMap<ExprId, Option<crate::analysis::semantic::ImplEnv<'db>>>,
@@ -1890,8 +1893,17 @@ pub struct Decisions<'db> {
 
 impl<'db> Decisions<'db> {
     /// Read the actual answer without resolving or checking its conditions again.
-    pub fn choice(&self, site: &DecisionSite<'db>) -> Option<&TraitChoice<'db>> {
-        self.choices.get(site)
+    pub fn choice(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        site: &DecisionSite<'db>,
+    ) -> Option<&'db TraitChoice<'db>> {
+        self.choice_ref(site).map(|choice| choice.data(db))
+    }
+
+    /// Transport the accepted record itself, retaining its declared use identity.
+    pub fn choice_ref(&self, site: &DecisionSite<'db>) -> Option<TraitChoiceId<'db>> {
+        self.choices.get(site).copied()
     }
 
     pub fn condition(&self, site: &super::ConditionSite<'db>) -> Option<&ConstConditionUse<'db>> {
@@ -1904,15 +1916,20 @@ impl<'db> Decisions<'db> {
         self.condition_uses.iter()
     }
 
-    pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
+    pub(super) fn record_trait_choice(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        choice: TraitChoice<'db>,
+    ) {
         let key = choice.site();
         if let Some(previous) = self.choices.get(&key) {
             assert_eq!(
-                previous, &choice,
+                previous.data(db),
+                &choice,
                 "a use site cannot acquire a different answer"
             );
         } else {
-            self.choices.insert(key, choice);
+            self.choices.insert(key, TraitChoiceId::new(db, choice));
         }
     }
 
@@ -1932,7 +1949,8 @@ impl<'db> Decisions<'db> {
         db: &'db dyn HirAnalysisDb,
         folder: &mut F,
     ) -> Self {
-        for choice in self.choices.values_mut() {
+        for record in self.choices.values_mut() {
+            let mut choice = record.data(db).clone();
             choice.goal = choice.goal.fold_with(db, folder);
             choice.via = match choice.via {
                 TraitChoiceVia::Implementation(implementor) => {
@@ -1942,6 +1960,7 @@ impl<'db> Decisions<'db> {
                     TraitChoiceVia::Selected(selection.fold_with(db, folder))
                 }
             };
+            *record = TraitChoiceId::new(db, choice);
         }
         for choice in self.openings.values_mut() {
             if let Ok(selection) = &mut choice.outcome {
@@ -1961,7 +1980,8 @@ impl<'db> Decisions<'db> {
         &self,
         visitor: &mut V,
     ) {
-        for choice in self.choices.values() {
+        for record in self.choices.values() {
+            let choice = record.data(visitor.db());
             choice.goal.visit_with(visitor);
             match choice.via {
                 TraitChoiceVia::Implementation(implementor) => implementor.visit_with(visitor),
@@ -2003,8 +2023,17 @@ impl<'db> WithChoice<'db> {
     }
 }
 
+/// Shared identity for the actual answer. Body tables and bound arguments can
+/// refer to this record without owning another copy of its decision.
+#[salsa::interned]
+#[derive(Debug)]
+pub struct TraitChoiceId<'db> {
+    #[return_ref]
+    pub data: TraitChoice<'db>,
+}
+
 /// An accepted obligation's actual solver answer, before final inference folding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TraitChoice<'db> {
     pub(super) goal: TraitInstId<'db>,
     pub(super) via: TraitChoiceVia<'db>,
@@ -2049,7 +2078,7 @@ impl<'db> TraitChoice<'db> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TraitChoiceVia<'db> {
     Implementation(crate::analysis::ty::trait_def::ImplementorId<'db>),
     Selected(crate::analysis::semantic::SelectedApplication<'db>),

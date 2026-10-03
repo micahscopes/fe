@@ -3022,7 +3022,7 @@ mod recording_tests {
                 "{name}: each application must record its implementation condition once"
             );
             let choices: Vec<_> = typed
-                .trait_choices()
+                .trait_choices(&db)
                 .filter(|choice| {
                     choice
                         .goal
@@ -3246,7 +3246,7 @@ fn use_it() -> u256 { read<7>() }";
             let (diagnostics, typed) = super::super::check_func_body(&db, function);
             assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
             let choices: Vec<_> = typed
-                .trait_choices()
+                .trait_choices(&db)
                 .filter(|choice| {
                     choice
                         .goal
@@ -3595,7 +3595,7 @@ fn use_it() -> u256 { read<7>() }";
         let (diagnostics, typed) = super::super::check_func_body(&db, function);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let choices: Vec<_> = typed
-            .trait_choices()
+            .trait_choices(&db)
             .filter(|choice| choice.call_constraint().is_some())
             .collect();
         assert_eq!(choices.len(), 2);
@@ -3621,7 +3621,7 @@ fn use_it() -> u256 { read<7>() }";
             },
         );
         let choices: Vec<_> = folded
-            .trait_choices()
+            .trait_choices(&db)
             .filter(|choice| choice.call_constraint().is_some())
             .collect();
         assert_eq!(choices.len(), 2, "both declared obligations survive");
@@ -3636,7 +3636,10 @@ fn use_it() -> u256 { read<7>() }";
             "preserve each actual supplied answer"
         );
         for site in sites {
-            let actual = folded.decisions().choice(&site).expect("keyed slot answer");
+            let actual = folded
+                .decisions()
+                .choice(&db, &site)
+                .expect("keyed slot answer");
             assert_eq!(actual.site(), site);
         }
     }
@@ -3676,7 +3679,7 @@ fn use_it() -> u256 { read<7>() }";
         let (diagnostics, typed) = super::super::check_func_body(&db, function);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let original = typed
-            .trait_choices()
+            .trait_choices(&db)
             .find(|choice| {
                 choice
                     .goal()
@@ -3686,7 +3689,10 @@ fn use_it() -> u256 { read<7>() }";
                     .is_some_and(|id| id.data(&db) == "Read")
             })
             .expect("Read decision");
-        assert_eq!(typed.decisions().choice(&original.site()), Some(original));
+        assert_eq!(
+            typed.decisions().choice(&db, &original.site()),
+            Some(original)
+        );
         let from = original.goal().self_ty(&db);
         let to = TyId::u8(&db);
         assert_ne!(from, to);
@@ -3694,7 +3700,7 @@ fn use_it() -> u256 { read<7>() }";
         let site = original.site();
         let folded = typed.clone().fold_with(&db, &mut Replace { from, to });
         let folded_choice = folded
-            .trait_choices()
+            .trait_choices(&db)
             .find(|choice| choice.span() == &span)
             .expect("folded decision");
         assert_eq!(
@@ -3702,7 +3708,7 @@ fn use_it() -> u256 { read<7>() }";
             to,
             "retained decisions must follow substitution"
         );
-        assert_eq!(folded.decisions().choice(&site), Some(folded_choice));
+        assert_eq!(folded.decisions().choice(&db, &site), Some(folded_choice));
         assert_eq!(
             typed.decisions().choices.keys().collect::<Vec<_>>(),
             folded.decisions().choices.keys().collect::<Vec<_>>(),
@@ -3710,7 +3716,7 @@ fn use_it() -> u256 { read<7>() }";
         );
         assert_eq!(
             typed
-                .trait_choices()
+                .trait_choices(&db)
                 .find(|choice| choice.span() == &span)
                 .unwrap()
                 .goal()
