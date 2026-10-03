@@ -278,6 +278,8 @@ pub struct Callable<'db> {
     /// Open evidence values needed by this call's trait requirements, including
     /// direct trait calls. CTFE revalidates their selected applications.
     pub opened_provisions: Vec<(ExprId, TraitInstId<'db>)>,
+    /// Predicate equality is decided in the declaring scope; captured selections
+    /// retain their original scope and assumptions.
     pub context: crate::analysis::semantic::ImplEnv<'db>,
 }
 
