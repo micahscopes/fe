@@ -474,6 +474,7 @@ fn provisional_call_site<'db>(
         nominal_effect_args,
         assumptions,
         inherit_trait_selection,
+        origin,
     )
     .unwrap_or_else(|error| {
         report(error);
@@ -915,6 +916,7 @@ fn replan_call_site<'db>(
         &refined_nominal_effect_args,
         &effect_providers,
         inherit_trait_selection,
+        origin,
     )
     .map_err(mapping_diag)?;
     if let Some(callee) = callee {

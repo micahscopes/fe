@@ -1319,6 +1319,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     &[],
                     callable.effect_providers(),
                     false,
+                    SemOrigin::Expr(expr),
                 ),
                 BindingRoleMode::Provisional => provisional_semantic_callee_key(
                     self.db,
@@ -1327,6 +1328,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     &[],
                     self.assumptions,
                     false,
+                    SemOrigin::Expr(expr),
                 ),
             }
             .ok()

@@ -21,17 +21,19 @@ use crate::{
             method_cmp::{normalize_compare_assoc_consts, normalize_predicate_for_comparison},
             normalize::normalize_ty,
             trait_def::{
-                ImplementorOrigin, MethodArgMapError, ResolvedImplInstance, TraitInstId,
-                assoc_const_body_template_for_trait_inst, resolve_trait_method_instance,
+                ImplementorOrigin, MethodArgMapError, ResolvedImplInstance, ResolvedMethodInstance,
+                SelectedEvidenceError, TraitInstId, assoc_const_body_template_for_trait_inst,
+                instantiate_selected_impl, resolve_trait_method_instance, resolved_method_instance,
                 selected_assoc_const_body_template,
             },
+            trait_lower::complete_selected_impl,
             trait_resolution::{
                 GoalSatisfiability, PredicateListId, Selection, TraitSolveCx,
                 constraint::collect_func_decl_constraints, is_goal_satisfiable,
             },
             ty_check::{
-                BodyOwner, Callable, ConstRef, EffectParamSite, EffectProviderSpecialization,
-                ResolvedEffectArg,
+                BodyOwner, Callable, ConstRef, DecisionSite, EffectParamSite,
+                EffectProviderSpecialization, ResolvedEffectArg, TraitChoiceId, TraitChoiceVia,
             },
             ty_def::{TyFlags, TyId},
             ty_lower::{
@@ -322,6 +324,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
     effect_args: &[ResolvedEffectArg<'db>],
     effect_providers: &[EffectProviderSpecialization<'db>],
     inherit_trait_selection: bool,
+    origin: SemOrigin<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let caller = SemanticInstance::new(db, caller_key);
     semantic_callee_key_with_assumptions(
@@ -334,6 +337,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
         caller.assumptions(db),
         ProviderResolutionMode::Final,
         inherit_trait_selection,
+        source_trait_choice(db, caller_key, callable, inherit_trait_selection, origin),
     )
 }
 
@@ -344,6 +348,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
     effect_args: &[ResolvedEffectArg<'db>],
     assumptions: PredicateListId<'db>,
     inherit_trait_selection: bool,
+    origin: SemOrigin<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     semantic_callee_key_with_assumptions(
         db,
@@ -355,6 +360,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
         assumptions,
         ProviderResolutionMode::Provisional,
         inherit_trait_selection,
+        source_trait_choice(db, caller_key, callable, inherit_trait_selection, origin),
     )
 }
 
@@ -403,12 +409,58 @@ pub fn generated_callee_key<'db>(
         assumptions,
         ProviderResolutionMode::Final,
         false,
+        None,
     )?
     .expect("function callee");
     if !callee.concrete_dispatch {
         return Err(MethodArgMapError::MissingBody);
     }
     Ok(callee.key)
+}
+
+// Bound choices still need slot-indexed transport before they can use this path.
+fn source_trait_choice<'db>(
+    db: &'db dyn HirAnalysisDb,
+    caller: SemanticInstanceKey<'db>,
+    callable: &Callable<'db>,
+    inherit_trait_selection: bool,
+    origin: SemOrigin<'db>,
+) -> Option<TraitChoiceId<'db>> {
+    if inherit_trait_selection || callable.trait_inst().is_none() {
+        return None;
+    }
+    let SemOrigin::Expr(expr) = origin else {
+        return None;
+    };
+    let typed = caller.typed_body(db);
+    let site = DecisionSite::trait_reference(expr.span(typed.body()?).into());
+    let choice = typed.decisions().choice_ref(&site)?;
+    (!matches!(
+        choice.data(db).answer_origin(db),
+        ImplementorOrigin::Assumption
+    ))
+    .then_some(choice)
+}
+
+fn recorded_method_instance<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    choice: TraitChoiceId<'db>,
+    method: crate::hir_def::IdentId<'db>,
+) -> Result<Selection<ResolvedMethodInstance<'db>>, SelectedEvidenceError> {
+    let choice = choice.data(db);
+    let instance = match choice.via() {
+        TraitChoiceVia::Implementation(selected) => {
+            let selected =
+                complete_selected_impl(db, selected).ok_or(SelectedEvidenceError::Unsupported)?;
+            instantiate_selected_impl(db, selected, choice.goal())
+                .ok_or(SelectedEvidenceError::Unsupported)?
+        }
+        TraitChoiceVia::Selected(selected) => selected
+            .revalidate(db, context, choice.goal())?
+            .resolved_instance(),
+    };
+    Ok(resolved_method_instance(db, context, instance, method))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,6 +474,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
     inherit_trait_selection: bool,
+    source_choice: Option<TraitChoiceId<'db>>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
@@ -469,17 +522,24 @@ fn semantic_callee_key_with_assumptions<'db>(
     let body_func = if !opened_symbolic
         && let Some(inst) = callable.trait_inst()
         && let Some(name) = nominal_func.name(db).to_opt()
-        && let Selection::Unique(method) = resolve_trait_method_with_selections(
-            db,
-            TraitSolveCx::new(db, impl_env.normalization_scope(db)).with_assumptions(assumptions),
-            inst,
-            name,
-            if inherit_trait_selection {
-                impl_env
-            } else {
-                callable.context
-            },
-        )
+        && let Selection::Unique(method) = {
+            let context = TraitSolveCx::new(db, impl_env.normalization_scope(db))
+                .with_assumptions(assumptions);
+            match source_choice {
+                Some(choice) => recorded_method_instance(db, context, choice, name),
+                None => resolve_trait_method_with_selections(
+                    db,
+                    context,
+                    inst,
+                    name,
+                    if inherit_trait_selection {
+                        impl_env
+                    } else {
+                        callable.context
+                    },
+                ),
+            }
+        }
         .map_err(MethodArgMapError::SelectedEvidence)?
         && let Some(impl_func) = method.body()
     {
@@ -1027,6 +1087,67 @@ mod tests {
         hir_def::params::FuncParamMode,
         test_db::HirAnalysisTestDb,
     };
+
+    #[test]
+    fn recorded_method_uses_the_accepted_choice_instead_of_ordinary_lookup() {
+        use crate::{
+            analysis::ty::{
+                trait_def::resolve_trait_method_instance,
+                trait_resolution::{Selection, TraitSolveCx},
+                ty_check::check_func_body,
+            },
+            hir_def::IdentId,
+        };
+        let mut db = HirAnalysisTestDb::default();
+        let source = "trait Read { fn read() -> u256 }
+struct S {}
+impl Read for S { fn read() -> u256 { 1 } }
+impl Read for S as Alternative { fn read() -> u256 { 2 } }
+fn selected() -> u256 { with (Alternative) { <S as Read>::read() } }
+";
+        let file = db.new_stand_alone("recorded_method.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "selected")
+            })
+            .expect("selected function");
+        let (diagnostics, typed) = check_func_body(&db, function);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let accepted = typed.trait_choices(&db).next().expect("accepted choice");
+        let record = typed
+            .decisions()
+            .choice_ref(&accepted.site())
+            .expect("record identity");
+        let context = TraitSolveCx::new(&db, function.scope());
+        let name = IdentId::new(&db, "read".to_owned());
+        let Selection::Unique(ordinary) =
+            resolve_trait_method_instance(&db, context, accepted.goal(), name)
+        else {
+            panic!("ordinary control must resolve");
+        };
+        let Selection::Unique(recorded) =
+            super::recorded_method_instance(&db, context, record, name).expect("accepted record")
+        else {
+            panic!("accepted method must resolve");
+        };
+        assert_ne!(
+            ordinary.resolved().selected().origin(&db),
+            accepted.answer_origin(&db),
+            "ordinary lookup is the negative control"
+        );
+        assert_eq!(
+            recorded.resolved().selected().origin(&db),
+            accepted.answer_origin(&db),
+            "the consumer reads the accepted answer"
+        );
+    }
 
     #[test]
     fn selected_signature_comparison_preserves_cross_input_layout_sharing() {

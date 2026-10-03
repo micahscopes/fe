@@ -543,7 +543,7 @@ impl<'db> TyVisitable<'db> for ResolvedImplInstance<'db> {
     }
 }
 
-fn instantiate_selected_impl<'db>(
+pub(crate) fn instantiate_selected_impl<'db>(
     db: &'db dyn HirAnalysisDb,
     selected: ImplementorId<'db>,
     inst: TraitInstId<'db>,

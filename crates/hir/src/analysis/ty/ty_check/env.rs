@@ -1881,6 +1881,15 @@ pub struct DecisionSite<'db> {
     origin: TraitObligationOrigin<'db>,
 }
 
+impl<'db> DecisionSite<'db> {
+    pub(crate) fn trait_reference(span: DynLazySpan<'db>) -> Self {
+        Self {
+            span,
+            origin: TraitObligationOrigin::GenericConfirmation,
+        }
+    }
+}
+
 /// One body owns its accepted choices, opening outcomes and condition uses.
 /// Choice keys use HIR sites, not rendered coordinates or an exporter index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
