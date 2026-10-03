@@ -125,9 +125,17 @@ fn compare_const_predicates<'db>(
         return true;
     };
     let impl_keys = method_const_predicate_keys(db, impl_func);
+    // Comparable condition keys use the method identity, while the declaration
+    // correspondence retains parent parameters for signature/call transport.
+    let impl_identity =
+        CompleteSubst::for_owner(db, impl_m.generic_owner(), impl_m.params(db).to_vec())
+            .expect("method identity uses its complete parameter schema");
     let trait_keys = method_const_predicate_keys(db, trait_func).and_then(|keys| {
         keys.into_iter()
-            .map(|key| super::subst::substitute_complete(db, key, param_subst))
+            .map(|key| {
+                let key = super::subst::substitute_complete(db, key, param_subst)?;
+                super::subst::substitute_complete(db, key, &impl_identity)
+            })
             .collect::<Result<Vec<_>, _>>()
             .ok()
     });

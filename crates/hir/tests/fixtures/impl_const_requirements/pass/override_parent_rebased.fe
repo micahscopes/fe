@@ -1,0 +1,9 @@
+// An impl overrides a trait method and restates its condition exactly.
+// Expected: accept (6-0024 requires the conditions to match exactly, and they do).
+trait Read<const N: usize> {
+    fn read() -> u256 where N > 0
+}
+struct S {}
+impl<const N: usize> Read<N> for S {
+    fn read() -> u256 where N > 0 { 1 }
+}

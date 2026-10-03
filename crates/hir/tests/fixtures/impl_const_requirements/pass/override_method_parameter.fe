@@ -1,0 +1,9 @@
+// Control: the condition is on the method's own const parameter, restated in the impl.
+// Expected: accept.
+trait Read {
+    fn read<const M: usize>() -> u256 where M > 0
+}
+struct S {}
+impl Read for S {
+    fn read<const M: usize>() -> u256 where M > 0 { 1 }
+}

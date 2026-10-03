@@ -1,0 +1,8 @@
+// Control: the impl leaves the condition out. Expected: reject 6-0024 (by design).
+trait Read<const N: usize> {
+    fn read() -> u256 where N > 0
+}
+struct S {}
+impl<const N: usize> Read<N> for S {
+    fn read() -> u256 { 1 }
+}
