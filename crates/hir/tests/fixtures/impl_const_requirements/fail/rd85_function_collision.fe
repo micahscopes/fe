@@ -1,0 +1,5 @@
+trait Greet { fn greet() -> u32 }
+struct U {}
+impl Greet for U as Casual { fn greet() -> u32 { 2 } }
+fn Casual() -> u32 { 7 }
+fn check() -> u32 { with (Casual) { 1 } }

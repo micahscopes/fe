@@ -970,6 +970,12 @@ pub enum BodyDiag<'db> {
         name: IdentId<'db>,
         available: Vec<(IdentId<'db>, ImplTrait<'db>)>,
     },
+    ValueAndNamedSelection {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+        value_span: DynLazySpan<'db>,
+        candidates: Vec<ImplTrait<'db>>,
+    },
     AmbiguousNamedSelection {
         primary: DynLazySpan<'db>,
         name: IdentId<'db>,
@@ -1111,6 +1117,7 @@ impl<'db> BodyDiag<'db> {
             Self::ObligationOpening { .. } => 97,
             Self::UnknownNamedSelection { .. } => 99,
             Self::AmbiguousNamedSelection { .. } => 100,
+            Self::ValueAndNamedSelection { .. } => 116,
             Self::NamedSelectionFailed { .. } => 101,
             Self::GoalSelectionFailed { .. } => 102,
             Self::InvalidCast { .. } => 55,

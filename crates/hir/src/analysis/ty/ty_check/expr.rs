@@ -1401,20 +1401,51 @@ impl<'db> TyChecker<'db> {
         if !path.is_bare_ident(self.db) {
             return None;
         }
-        if !matches!(
-            resolve_ident_expr(
-                self.db,
-                &self.env,
-                *path,
-                expr.span(self.body()).into(),
-                &minter
-            ),
-            ResolvedPathInBody::NewBinding(_)
-        ) {
-            return None;
-        }
+        let resolved = resolve_ident_expr(
+            self.db,
+            &self.env,
+            *path,
+            expr.span(self.body()).into(),
+            &minter,
+        );
         let name = path.ident(self.db).to_opt()?;
         let candidates = named_impl_candidates(self.db, self.env.scope(), name);
+        let value_span = match &resolved {
+            ResolvedPathInBody::Binding(binding) => Some(binding.def_span(&self.env)),
+            ResolvedPathInBody::Reso(value) => {
+                let is_value = match value {
+                    PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => ty.const_ty_ty(self.db).is_some(),
+                    PathRes::EnumVariant(variant) => {
+                        matches!(
+                            variant.kind(self.db),
+                            VariantKind::Unit | VariantKind::Tuple(_)
+                        )
+                    }
+                    PathRes::Func(_)
+                    | PathRes::TraitMethod(..)
+                    | PathRes::Const(..)
+                    | PathRes::Method(..)
+                    | PathRes::TraitConst(..)
+                    | PathRes::InherentConst(..) => true,
+                    PathRes::Mod(_) | PathRes::Trait(_) | PathRes::FuncParam(..) => false,
+                };
+                is_value.then(|| value.name_span(self.db)).flatten()
+            }
+            _ => None,
+        };
+        if let Some(value_span) = value_span
+            && !candidates.is_empty()
+        {
+            return Some(Err(BodyDiag::ValueAndNamedSelection {
+                primary,
+                name,
+                value_span,
+                candidates,
+            }));
+        }
+        if !matches!(resolved, ResolvedPathInBody::NewBinding(_)) {
+            return None;
+        }
         if candidates.is_empty() {
             let available = named_impl_aliases(self.db, self.env.scope());
             return (!available.is_empty()).then_some(Err(BodyDiag::UnknownNamedSelection {

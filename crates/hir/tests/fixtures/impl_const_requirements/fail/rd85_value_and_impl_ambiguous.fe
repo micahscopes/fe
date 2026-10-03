@@ -1,0 +1,24 @@
+// Target: RD85. `with (Casual)` where `Casual` names both a constant and a named impl is an ambiguity error; the program is the audit's N1 (`cascade_with_alias_value_precision.fe`).
+// expect: rejected at line 23 (the `with` path), because `Casual` resolves to the constant (line 19) and to the named impl
+//   (line 15); the error names both candidates and says how to write each unambiguously. Today both mb2 and mb3 pick the
+//   constant silently (the call returns 1).
+trait Greet {
+    fn greet(self) -> u32
+}
+
+struct U { id: u256 }
+
+impl Greet for U {
+    fn greet(self) -> u32 { return 1 }
+}
+
+impl Greet for U as Casual {
+    fn greet(self) -> u32 { return 2 }
+}
+
+const Casual: u32 = 7
+
+fn check() -> u32 {
+    let u = U { id: 1 }
+    with (Casual) { u.greet() } // <- here
+}

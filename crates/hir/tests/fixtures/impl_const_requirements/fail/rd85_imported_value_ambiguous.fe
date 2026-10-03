@@ -1,0 +1,27 @@
+// Target: RD85 in another module (PR_HYGIENE 26). The ambiguity holds when the constant comes in through a `use`.
+// expect: rejected at line 26, because `Casual` resolves to the imported `cfg::Casual` constant and to the named impl
+//   `as Casual`; both candidates named, with their definition sites.
+trait Greet {
+    fn greet(self) -> u32
+}
+
+struct U { id: u256 }
+
+impl Greet for U {
+    fn greet(self) -> u32 { return 1 }
+}
+
+impl Greet for U as Casual {
+    fn greet(self) -> u32 { return 2 }
+}
+
+mod cfg {
+    pub const Casual: u32 = 7
+}
+
+use cfg::Casual
+
+fn check() -> u32 {
+    let u = U { id: 1 }
+    with (Casual) { u.greet() } // <- here
+}

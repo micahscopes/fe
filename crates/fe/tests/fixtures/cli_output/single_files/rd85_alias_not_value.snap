@@ -1,0 +1,27 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/rd85_alias_not_value.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/rd85_alias_not_value.fe
+
+error[2-0022]: `greet` requires named implementation `Casual`
+  ┌─ rd85_alias_not_value.fe:5:40
+  │
+3 │ impl Greet for U as Casual { fn greet() -> u32 { 2 } }
+  │                     ------ `Casual` is defined here
+4 │ type Casual = u32
+5 │ fn check() -> u32 { with (Casual) { U::greet() } }
+  │                                        ^^^^^ `greet` is not available through ordinary lookup
+  │
+  = hint: select it with `with (Casual) { ... }`; its prerequisites are checked when selected
+
+error[8-0030]: value is expected
+  ┌─ rd85_alias_not_value.fe:5:27
+  │
+5 │ fn check() -> u32 { with (Casual) { U::greet() } }
+  │                           ^^^^^^ `type` cannot be used as a value
+
+
+=== EXIT CODE: 1 ===

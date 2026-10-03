@@ -1,0 +1,30 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/rd85_struct_not_value.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/rd85_struct_not_value.fe
+
+error[2-0022]: `greet` requires named implementation `Casual`
+  ┌─ rd85_struct_not_value.fe:5:40
+  │
+3 │ impl Greet for U as Casual { fn greet() -> u32 { 2 } }
+  │                     ------ `Casual` is defined here
+4 │ struct Casual {}
+5 │ fn check() -> u32 { with (Casual) { U::greet() } }
+  │                                        ^^^^^ `greet` is not available through ordinary lookup
+  │
+  = hint: select it with `with (Casual) { ... }`; its prerequisites are checked when selected
+
+error[8-0004]: expected unit variant
+  ┌─ rd85_struct_not_value.fe:5:27
+  │
+5 │ fn check() -> u32 { with (Casual) { U::greet() } }
+  │                           ^^^^^^
+  │                           │
+  │                           expected unit variant here, but found struct
+  │                           Consider using `Casual {  }` instead
+
+
+=== EXIT CODE: 1 ===

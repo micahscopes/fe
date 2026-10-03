@@ -1,0 +1,25 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/rd85_value_and_impl_ambiguous.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/rd85_value_and_impl_ambiguous.fe
+
+error[8-0116]: `Casual` is an ambiguous `with` binding
+   ┌─ rd85_value_and_impl_ambiguous.fe:23:11
+   │
+15 │ impl Greet for U as Casual {
+   │                     ------ the implementation `Casual` for `U: Greet` is named here
+   ·
+19 │ const Casual: u32 = 7
+   │       ------ the value `Casual` is defined here
+   ·
+23 │     with (Casual) { u.greet() } // <- here
+   │           ^^^^^^ `Casual` names both a value and an implementation
+   │
+   = to provide the value, write `let supplied_value = Casual` on its own line, then use `with (supplied_value) { ... }`
+   = to select the implementation, give it a distinct `as Name` name and use that name in `with (Name)`
+
+
+=== EXIT CODE: 1 ===

@@ -3693,6 +3693,49 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                     error_code,
                 )
             }
+            Self::ValueAndNamedSelection {
+                primary,
+                name,
+                value_span,
+                candidates,
+            } => {
+                let name = name.data(db);
+                let mut labels = vec![
+                    SubDiagnostic::new(
+                        LabelStyle::Primary,
+                        format!("`{name}` names both a value and an implementation"),
+                        primary.resolve(db),
+                    ),
+                    SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("the value `{name}` is defined here"),
+                        value_span.resolve(db),
+                    ),
+                ];
+                let mut candidates = candidates.to_vec();
+                candidates.sort_by_key(|item| item.trait_inst(db).map(|goal| goal.pretty_print(db, true)));
+                for item in candidates {
+                    let goal = item
+                        .trait_inst(db)
+                        .map(|goal| goal.pretty_print(db, true))
+                        .unwrap_or_else(|| "invalid implementation".to_string());
+                    labels.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("the implementation `{name}` for `{goal}` is named here"),
+                        item.span().selection_name().resolve(db),
+                    ));
+                }
+                CompleteDiagnostic::new(
+                    severity,
+                    format!("`{name}` is an ambiguous `with` binding"),
+                    labels,
+                    vec![
+                        format!("to provide the value, write `let supplied_value = {name}` on its own line, then use `with (supplied_value) {{ ... }}`"),
+                        "to select the implementation, give it a distinct `as Name` name and use that name in `with (Name)`".to_string(),
+                    ],
+                    error_code,
+                )
+            }
             Self::AmbiguousNamedSelection {
                 primary,
                 name,
