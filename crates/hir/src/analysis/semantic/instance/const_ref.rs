@@ -409,7 +409,7 @@ pub fn generated_callee_key<'db>(
         assumptions,
         ProviderResolutionMode::Final,
         false,
-        None,
+        TraitCallChoice::Synthetic,
     )?
     .expect("function callee");
     if !callee.concrete_dispatch {
@@ -418,28 +418,40 @@ pub fn generated_callee_key<'db>(
     Ok(callee.key)
 }
 
-// Bound choices still need slot-indexed transport before they can use this path.
+// Each unresolved category is ratcheted by check_trait_choice_fallback_budget.py.
+// Remove these variants as bound transport and generation-time recording land.
+enum TraitCallChoice<'db> {
+    NotTrait,
+    Recorded(TraitChoiceId<'db>),
+    UntransportedBound,
+    Synthetic,
+}
+
 fn source_trait_choice<'db>(
     db: &'db dyn HirAnalysisDb,
     caller: SemanticInstanceKey<'db>,
     callable: &Callable<'db>,
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
-) -> Option<TraitChoiceId<'db>> {
-    if inherit_trait_selection || callable.trait_inst().is_none() {
-        return None;
+) -> TraitCallChoice<'db> {
+    if callable.trait_inst().is_none() {
+        return TraitCallChoice::NotTrait;
+    }
+    if inherit_trait_selection {
+        return TraitCallChoice::UntransportedBound;
     }
     let SemOrigin::Expr(expr) = origin else {
-        return None;
+        return TraitCallChoice::Synthetic;
     };
     let typed = caller.typed_body(db);
-    let site = DecisionSite::trait_reference(expr.span(typed.body()?).into());
-    let choice = typed.decisions().choice_ref(&site)?;
-    (!matches!(
-        choice.data(db).answer_origin(db),
-        ImplementorOrigin::Assumption
-    ))
-    .then_some(choice)
+    let body = typed.body().expect("a source trait call has a body");
+    let site = DecisionSite::trait_reference(expr.span(body).into());
+    TraitCallChoice::Recorded(
+        typed
+            .decisions()
+            .choice_ref(&site)
+            .expect("a source trait call must retain its accepted choice"),
+    )
 }
 
 fn recorded_method_instance<'db>(
@@ -474,7 +486,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
     inherit_trait_selection: bool,
-    source_choice: Option<TraitChoiceId<'db>>,
+    source_choice: TraitCallChoice<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
@@ -526,18 +538,23 @@ fn semantic_callee_key_with_assumptions<'db>(
             let context = TraitSolveCx::new(db, impl_env.normalization_scope(db))
                 .with_assumptions(assumptions);
             match source_choice {
-                Some(choice) => recorded_method_instance(db, context, choice, name),
-                None => resolve_trait_method_with_selections(
-                    db,
-                    context,
-                    inst,
-                    name,
-                    if inherit_trait_selection {
-                        impl_env
-                    } else {
-                        callable.context
-                    },
-                ),
+                TraitCallChoice::Recorded(choice) => {
+                    recorded_method_instance(db, context, choice, name)
+                }
+                TraitCallChoice::NotTrait => unreachable!("trait call requires a choice"),
+                TraitCallChoice::UntransportedBound | TraitCallChoice::Synthetic => {
+                    resolve_trait_method_with_selections(
+                        db,
+                        context,
+                        inst,
+                        name,
+                        if inherit_trait_selection {
+                            impl_env
+                        } else {
+                            callable.context
+                        },
+                    )
+                }
             }
         }
         .map_err(MethodArgMapError::SelectedEvidence)?

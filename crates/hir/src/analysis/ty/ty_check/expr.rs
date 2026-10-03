@@ -5723,15 +5723,6 @@ impl<'db> TyChecker<'db> {
                 1 => {
                     let candidate = viable.pop().unwrap();
                     let inst = c_lhs_ty.extract_solution(&mut self.table, candidate.cand.inst);
-                    if candidate.needs_confirmation {
-                        self.env.register_trait_obligation(TraitObligation {
-                            context: self.env.selection_context(),
-                            assumptions: self.env.assumptions(),
-                            goal: inst,
-                            origin: TraitObligationOrigin::GenericConfirmation,
-                            span: expr.span(self.body()).into(),
-                        });
-                    }
                     let func_ty = self.instantiate_trait_method_to_term(
                         candidate.cand.method,
                         selected_lhs_ty,
@@ -5809,19 +5800,9 @@ impl<'db> TyChecker<'db> {
             match method_candidate {
                 Ok(MethodCandidate::InherentMethod(_)) => unreachable!(),
                 Ok(
-                    res @ (MethodCandidate::TraitMethod(cand)
-                    | MethodCandidate::NeedsConfirmation(cand)),
+                    MethodCandidate::TraitMethod(cand) | MethodCandidate::NeedsConfirmation(cand),
                 ) => {
                     let inst = c_lhs_ty.extract_solution(&mut self.table, cand.inst);
-                    if matches!(res, MethodCandidate::NeedsConfirmation(_)) {
-                        self.env.register_trait_obligation(TraitObligation {
-                            context: self.env.selection_context(),
-                            assumptions: self.env.assumptions(),
-                            goal: inst,
-                            origin: TraitObligationOrigin::GenericConfirmation,
-                            span: expr.span(self.body()).into(),
-                        });
-                    }
 
                     let func_ty =
                         self.instantiate_trait_method_to_term(cand.method, selected_lhs_ty, inst);
@@ -5870,6 +5851,7 @@ impl<'db> TyChecker<'db> {
         }
         callable.set_checked_input_tys(checked_inputs);
 
+        callable.process_constraints(self, expr, expr.span(self.body()).into());
         let ret_ty = self.normalize_ty(callable.ret_ty(self.db));
         self.env.register_semantic_call(expr, callable);
         ExprProp::new(ret_ty, true)

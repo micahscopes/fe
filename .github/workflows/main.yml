@@ -67,6 +67,8 @@ jobs:
         run: python3 .github/check_trait_solver_setup_budget.py
       - name: Guard owned trait-selection context budget
         run: python3 .github/check_owned_selection_budget.py
+      - name: Guard callee choice fallback budget
+        run: python3 .github/check_trait_choice_fallback_budget.py
       - name: Lint with rustfmt
         run: cargo fmt --all -- --check
       - name: Lint with clippy
