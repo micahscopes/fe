@@ -1,3 +1,4 @@
+// Adopts master 4d8ec2073: the condition is checked at the written type.
 enum Choice<const N: usize> where N > 0 { Value(u256) }
 fn ignore<T>(_ item: T) {}
 fn unused() { ignore(Choice<1>::Value) }

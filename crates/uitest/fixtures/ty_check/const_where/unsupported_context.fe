@@ -1,3 +1,4 @@
+// RD95: mb3 retains trait and impl conditions; stricter impl methods still receive a diagnostic.
 // Ground conditions are valid here; an impl method must match its trait method.
 trait Marker where true {}
 

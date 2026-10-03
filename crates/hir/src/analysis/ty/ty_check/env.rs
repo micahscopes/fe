@@ -1766,7 +1766,6 @@ pub(super) struct PendingMethod<'db> {
 pub(super) struct PendingMethodCandidate<'db> {
     pub inst: TraitInstId<'db>,
     pub method: Func<'db>,
-    pub needs_confirmation: bool,
 }
 
 #[derive(Debug, Clone)]

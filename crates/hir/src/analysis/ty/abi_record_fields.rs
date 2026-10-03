@@ -11,7 +11,8 @@ use crate::AbiFieldContext;
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::diagnostics::DiagnosticVoucher;
 use crate::analysis::ty::abi_ty::{
-    AbiTypeError, semantic_ty_to_abi_desc, semantic_ty_to_abi_desc_with_source,
+    AbiTypeError, non_copy_fixed_array_elem, semantic_ty_to_abi_desc,
+    semantic_ty_to_abi_desc_with_source,
 };
 use crate::analysis::ty::adt_def::{
     AdtRef, ConcreteTypeView, instantiate_adt_field_source_for_concrete_demand,
@@ -64,16 +65,25 @@ pub struct AbiRecordFieldDiag<'db> {
 }
 
 /// Invalid field types and recursive ones are diagnosed by the analyses that
-/// own them, and so is a tuple field of an `#[error]` or `#[event]` struct
-/// (`AbiFieldDiagnostic`), so record field analysis reports nothing more for
-/// them.
+/// own them, as are tuple fields and non-Copy fixed-array elements in
+/// `#[error]` or `#[event]` structs. Record field analysis adds nothing for
+/// these fields.
 fn field_abi_reported_elsewhere<'db>(
     db: &'db dyn HirAnalysisDb,
+    record: Struct<'db>,
     kind: AbiRecordKind,
     field_ty: TyId<'db>,
 ) -> bool {
     field_ty.has_invalid(db)
-        || (kind != AbiRecordKind::MsgVariant && field_ty.is_tuple(db))
+        || (kind != AbiRecordKind::MsgVariant
+            && (field_ty.is_tuple(db)
+                || non_copy_fixed_array_elem(
+                    db,
+                    record.scope(),
+                    field_ty,
+                    crate::semantic::constraints_for(db, record.into()),
+                )
+                .is_some()))
         || matches!(
             semantic_ty_to_abi_desc(db, field_ty),
             Err(AbiTypeError::Recursive(_))
@@ -123,7 +133,7 @@ pub(crate) fn abi_record_field_issues<'db>(
     let adt = AdtRef::from(record).as_adt(db);
     let mut issues = Vec::new();
     for (idx, field_ty) in abi_record_field_tys(db, record, kind) {
-        if field_abi_reported_elsewhere(db, kind, field_ty) {
+        if field_abi_reported_elsewhere(db, record, kind, field_ty) {
             continue;
         }
 
@@ -205,7 +215,7 @@ pub(crate) fn abi_record_fields_pass<'db>(
     }
     abi_record_field_tys(db, record, kind)
         .into_iter()
-        .all(|(_, field_ty)| !field_abi_reported_elsewhere(db, kind, field_ty))
+        .all(|(_, field_ty)| !field_abi_reported_elsewhere(db, record, kind, field_ty))
         && abi_record_field_issues(db, record, kind).is_empty()
 }
 

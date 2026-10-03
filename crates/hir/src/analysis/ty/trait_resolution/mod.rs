@@ -550,6 +550,7 @@ pub(crate) fn check_ty_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     ty: TyId<'db>,
 ) -> WellFormedness<'db> {
+    let mut formation = WellFormedness::WellFormed;
     // Check arguments before their enclosing application without nesting a
     // tracked Salsa query for every node in a deep finite type. The base's
     // constraints are not checked as a partial application: that would
@@ -578,6 +579,7 @@ pub(crate) fn check_ty_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
             TyData::ConstraintTerm(goal) => {
                 for &arg in goal
@@ -589,6 +591,7 @@ pub(crate) fn check_ty_wf<'db>(
                     if !wf.is_wf() {
                         return wf;
                     }
+                    formation = formation.merge(db, wf);
                 }
             }
             TyData::QualifiedTy(inst) => {
@@ -596,12 +599,14 @@ pub(crate) fn check_ty_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
             TyData::ConstTy(const_ty) => {
                 let wf = check_const_ty_wf(db, solve_cx, *const_ty);
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
             TyData::TyApp(..)
             | TyData::TyVar(_)
@@ -644,7 +649,7 @@ pub(crate) fn check_ty_wf<'db>(
         }
     }
 
-    WellFormedness::WellFormed
+    formation
 }
 
 fn check_const_ty_wf<'db>(
@@ -652,28 +657,36 @@ fn check_const_ty_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     const_ty: super::const_ty::ConstTyId<'db>,
 ) -> WellFormedness<'db> {
+    let mut formation = WellFormedness::WellFormed;
     let wf = check_ty_wf(db, solve_cx, const_ty.ty(db));
     if !wf.is_wf() {
         return wf;
     }
+    formation = formation.merge(db, wf);
 
     match const_ty.data(db) {
         ConstTyData::Computation { description, .. } => {
             let evaluated = const_ty.evaluate(db, Some(description.ty()));
             if evaluated != const_ty {
-                return check_ty_wf(db, solve_cx, TyId::const_ty(db, evaluated));
+                return formation
+                    .merge(db, check_ty_wf(db, solve_cx, TyId::const_ty(db, evaluated)));
             }
             if let ConstRepr::Term(term) = description.repr() {
-                return check_ty_wf(db, solve_cx, TyId::const_ty(db, *term));
+                return formation.merge(db, check_ty_wf(db, solve_cx, TyId::const_ty(db, *term)));
             }
         }
-        ConstTyData::Value(value) => return check_sem_const_wf(db, solve_cx, value.value()),
-        ConstTyData::Description(value) => return check_sem_const_wf(db, solve_cx, *value),
+        ConstTyData::Value(value) => {
+            return formation.merge(db, check_sem_const_wf(db, solve_cx, value.value()));
+        }
+        ConstTyData::Description(value) => {
+            return formation.merge(db, check_sem_const_wf(db, solve_cx, *value));
+        }
         ConstTyData::Abstract(expr, _) => {
             let wf = check_const_expr_wf(db, solve_cx, *expr);
             if !wf.is_wf() {
                 return wf;
             }
+            formation = formation.merge(db, wf);
         }
         ConstTyData::TyVar(..)
         | ConstTyData::TyParam(..)
@@ -682,7 +695,7 @@ fn check_const_ty_wf<'db>(
         | ConstTyData::UnEvaluated { .. } => {}
     }
 
-    WellFormedness::WellFormed
+    formation
 }
 
 fn check_sem_const_wf<'db>(
@@ -690,6 +703,7 @@ fn check_sem_const_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     value: SemConstId<'db>,
 ) -> WellFormedness<'db> {
+    let mut formation = WellFormedness::WellFormed;
     match value.value(db) {
         SemConstValue::Structural { ty, .. } => check_ty_wf(db, solve_cx, *ty),
         SemConstValue::Description(term) => check_ty_wf(db, solve_cx, TyId::const_ty(db, *term)),
@@ -699,12 +713,14 @@ fn check_sem_const_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
                 let wf = check_sem_const_wf(db, solve_cx, child);
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
-            WellFormedness::WellFormed
+            formation
         }
         SemConstValue::Struct { fields, .. } | SemConstValue::Enum { fields, .. } => {
             for child in fields.iter().copied() {
@@ -712,14 +728,16 @@ fn check_sem_const_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
                 let wf = check_sem_const_wf(db, solve_cx, child);
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
-            WellFormedness::WellFormed
+            formation
         }
-        SemConstValue::Unit | SemConstValue::Scalar { .. } => WellFormedness::WellFormed,
+        SemConstValue::Unit | SemConstValue::Scalar { .. } => formation,
     }
 }
 
@@ -728,6 +746,7 @@ fn check_const_expr_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     expr: super::const_expr::ConstExprId<'db>,
 ) -> WellFormedness<'db> {
+    let mut formation = WellFormedness::WellFormed;
     struct TyCollector<'db> {
         db: &'db dyn HirAnalysisDb,
         tys: Vec<TyId<'db>>,
@@ -756,6 +775,7 @@ fn check_const_expr_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
         }
         ConstExpr::ArithBinOp { lhs, rhs, .. }
@@ -772,6 +792,7 @@ fn check_const_expr_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
         }
         ConstExpr::UnOp { expr, .. } | ConstExpr::Field { value: expr, .. } => {
@@ -779,6 +800,7 @@ fn check_const_expr_wf<'db>(
             if !wf.is_wf() {
                 return wf;
             }
+            formation = formation.merge(db, wf);
         }
         ConstExpr::Cast { expr, to } => {
             for ty in [*expr, *to] {
@@ -786,6 +808,7 @@ fn check_const_expr_wf<'db>(
                 if !wf.is_wf() {
                     return wf;
                 }
+                formation = formation.merge(db, wf);
             }
         }
         ConstExpr::TraitConst(assoc) => {
@@ -793,16 +816,18 @@ fn check_const_expr_wf<'db>(
             if !wf.is_wf() {
                 return wf;
             }
+            formation = formation.merge(db, wf);
         }
         ConstExpr::InherentConst(use_) => {
             let wf = check_ty_wf(db, solve_cx, use_.receiver_ty());
             if !wf.is_wf() {
                 return wf;
             }
+            formation = formation.merge(db, wf);
         }
     }
 
-    WellFormedness::WellFormed
+    formation
 }
 
 /// Check formation before normalization can erase a computed type or family. This
@@ -844,44 +869,56 @@ fn check_projected_trait_use_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     inst: TraitInstId<'db>,
 ) -> WellFormedness<'db> {
+    let mut formation = WellFormedness::WellFormed;
     for &arg in inst.args(db) {
         let wf = check_ty_wf(db, solve_cx, arg);
         if !wf.is_wf() {
             return wf;
         }
+        formation = formation.merge(db, wf);
     }
     for &ty in inst.assoc_type_bindings(db).values() {
         let wf = check_ty_wf(db, solve_cx, ty);
         if !wf.is_wf() {
             return wf;
         }
+        formation = formation.merge(db, wf);
     }
 
-    unsatisfied_goal(db, solve_cx, inst).unwrap_or(WellFormedness::WellFormed)
+    formation.merge(db, unsatisfied_goal(db, solve_cx, inst))
 }
 
 fn unsatisfied_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     goal: TraitInstId<'db>,
-) -> Option<WellFormedness<'db>> {
-    let assumptions = solve_cx.assumptions();
+) -> WellFormedness<'db> {
+    let query = CanonicalGoalQuery::new(db, goal, solve_cx.assumptions());
     let mut table = UnificationTable::new(db);
-    let query = CanonicalGoalQuery::new(db, goal, assumptions);
-    if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query) {
-        if super::type_fn::induction::discharge(db, solve_cx, goal) {
-            return None;
+    match is_goal_query_satisfiable(db, solve_cx, &query) {
+        GoalSatisfiability::Satisfied(solution) => {
+            let conditions = query.extract_solution(&mut table, solution).impl_conditions;
+            if conditions.instances(db).is_empty() && conditions.trait_goals(db).is_empty() {
+                WellFormedness::WellFormed
+            } else {
+                WellFormedness::WithConditions(conditions)
+            }
         }
-        let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-        Some(WellFormedness::IllFormed { goal, subgoal })
-    } else {
-        None
+        GoalSatisfiability::UnSat(subgoal) => {
+            if super::type_fn::induction::discharge(db, solve_cx, goal) {
+                return WellFormedness::WellFormed;
+            }
+            let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
+            WellFormedness::IllFormed { goal, subgoal }
+        }
+        _ => WellFormedness::WellFormed,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Update)]
 pub(crate) enum WellFormedness<'db> {
     WellFormed,
+    WithConditions(ImplConditionsId<'db>),
     UnsaturatedGuardedFamily,
     IllFormed {
         goal: TraitInstId<'db>,
@@ -890,8 +927,46 @@ pub(crate) enum WellFormedness<'db> {
 }
 
 impl<'db> WellFormedness<'db> {
+    pub(crate) fn conditions(self) -> Option<ImplConditionsId<'db>> {
+        match self {
+            Self::WithConditions(conditions) => Some(conditions),
+            _ => None,
+        }
+    }
+
+    fn merge(self, db: &'db dyn HirAnalysisDb, other: Self) -> Self {
+        if !self.is_wf() {
+            return self;
+        }
+        if !other.is_wf() {
+            return other;
+        }
+        match (self.conditions(), other.conditions()) {
+            (None, _) => other,
+            (_, None) => self,
+            (Some(lhs), Some(rhs)) => {
+                let mut instances = lhs.instances(db).clone();
+                let mut goals = lhs.trait_goals(db).clone();
+                for &instance in rhs.instances(db) {
+                    if !instances.contains(&instance) {
+                        instances.push(instance);
+                    }
+                }
+                for &goal in rhs.trait_goals(db) {
+                    if !goals.contains(&goal) {
+                        goals.push(goal);
+                    }
+                }
+                Self::WithConditions(ImplConditionsId::new(db, instances, goals))
+            }
+        }
+    }
+
     pub(crate) fn is_wf(self) -> bool {
-        matches!(self, WellFormedness::WellFormed)
+        matches!(
+            self,
+            WellFormedness::WellFormed | WellFormedness::WithConditions(_)
+        )
     }
 
     pub(crate) fn without_subgoal(self) -> Self {
@@ -910,7 +985,7 @@ impl<'db> WellFormedness<'db> {
     ) -> Option<super::diagnostics::TyDiagCollection<'db>> {
         use super::diagnostics::{AssociatedFamilyError, TraitConstraintDiag, TyLowerDiag};
         match self {
-            Self::WellFormed => None,
+            Self::WellFormed | Self::WithConditions(_) => None,
             Self::IllFormed { goal, subgoal } => Some(
                 TraitConstraintDiag::TraitBoundNotSat {
                     span,
@@ -962,17 +1037,20 @@ fn check_trait_inst_wf_inner<'db>(
     trait_inst: TraitInstId<'db>,
     defer_self_constraints: bool,
 ) -> WellFormedness<'db> {
+    let mut formation = WellFormedness::WellFormed;
     for &arg in trait_inst.args(db) {
         let wf = check_ty_wf(db, solve_cx, arg);
         if !wf.is_wf() {
             return wf;
         }
+        formation = formation.merge(db, wf);
     }
     for &ty in trait_inst.assoc_type_bindings(db).values() {
         let wf = check_ty_wf(db, solve_cx, ty);
         if !wf.is_wf() {
             return wf;
         }
+        formation = formation.merge(db, wf);
     }
 
     let declared = collect_constraints(db, trait_inst.def(db).into());
@@ -1021,7 +1099,7 @@ fn check_trait_inst_wf_inner<'db>(
         }
     }
 
-    WellFormedness::WellFormed
+    formation
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Update)]
@@ -1384,10 +1462,7 @@ mod tests {
     ) -> Vec<ImplementorId<'db>> {
         let solve_cx = TraitSolveCx::new(db, top_mod.scope());
         let (primary, secondary) = solve_cx.search_ingots_for_trait_inst(db, goal);
-        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, goal), None)
-            .iter()
-            .copied()
-            .collect()
+        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, goal), None).to_vec()
     }
 
     #[test]

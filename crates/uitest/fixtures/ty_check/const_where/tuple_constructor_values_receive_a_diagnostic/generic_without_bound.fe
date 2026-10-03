@@ -1,0 +1,3 @@
+// Constructor values still require proof of the written type condition.
+enum Choice<const N: usize> where N > 0 { Value(u256) }
+fn unused<const N: usize>() { let constructor = Choice<N>::Value }

@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_binder_foreign_variant_field.fe
 ---
 === STDERR ===
-error[18-0001]: `.at` field belongs to another owner or variant
+error[19-0001]: `.at` field belongs to another owner or variant
    ┌─ quote_binder_foreign_variant_field.fe:13:41
    │
 13 │                 match left { ${lp} => ${lp.at(w)} == 0, _ => false }

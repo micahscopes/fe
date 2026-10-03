@@ -3,10 +3,11 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/const_where/generic_scopes_are_rejected_instead_of_dropping_obligations/inherited.fe
 ---
-error[8-0092]: const where predicates are not supported here yet
-  ┌─ inherited.fe:3:42
+error[6-0024]: method has different const conditions than trait
+  ┌─ inherited.fe:4:27
   │
-3 │ impl<T> Has for S<T> { fn unused() where true {} }
-  │                                          ^^^^ not yet supported in traits, trait impls with generic parameters, generic `impl` blocks, or items nested in generic items
-  │
-  = const where predicates are supported on functions, structs, enums, and inherent methods, including methods of generic `impl` blocks; inside an `impl`, the conditions of the types in its header hold without restating them
+2 │ trait Has { fn unused() }
+  │                ------ trait method declares these conditions
+3 │ struct S<T> { value: T }
+4 │ impl<T> Has for S<T> { fn unused() where true {} }
+  │                           ^^^^^^ implementation must use the trait method's const conditions

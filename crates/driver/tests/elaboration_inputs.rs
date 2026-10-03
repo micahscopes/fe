@@ -1344,6 +1344,52 @@ fn quoted_call_syntax_rejects_bad_paths_names_and_arguments() {
     }
 }
 
+#[test]
+fn quoted_trait_invalid_provider_arguments_do_not_use_template_recovery() {
+    let source = include_str!("fixtures/generic_derive/owner_binders.fe");
+    for argument in ["MissingProviderType", "u256, u8"] {
+        let invalid = source.replace("ingot::Value<${ty}>", &format!("ingot::Value<{argument}>"));
+        let mut db = DriverDataBase::default();
+        put(&mut db, "file:///owner_binders.fe", &invalid);
+        let error = fe_driver::elaboration::prepare(&db)
+            .err()
+            .expect("invalid trait arguments must fail in the provider");
+        assert!(
+            matches!(
+                error.kind,
+                fe_driver::elaboration::ElaborationErrorKind::ProviderDiagnostics(_)
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn quoted_nominal_invalid_provider_arguments_do_not_use_template_recovery() {
+    let source = include_str!(
+        "../../fe/tests/fixtures/fe_test_runner/quote_impl_method_nominal_args_shadow.fe"
+    );
+    let (declarations, quote) = source.split_once("        quote {").unwrap();
+    for argument in ["MissingProviderType", "Payload, u8"] {
+        let invalid = format!(
+            "{declarations}        quote {{{}",
+            quote.replacen("Envelope<Payload>", &format!("Envelope<{argument}>"), 2)
+        );
+        let mut db = DriverDataBase::default();
+        put(&mut db, "file:///nominal_arguments.fe", &invalid);
+        let error = fe_driver::elaboration::prepare(&db)
+            .err()
+            .expect("invalid nominal arguments must fail in the provider");
+        assert!(
+            matches!(
+                error.kind,
+                fe_driver::elaboration::ElaborationErrorKind::ProviderDiagnostics(_)
+            ),
+            "{error:?}"
+        );
+    }
+}
+
 const ABI_SOURCE: &str = include_str!("../../fe/tests/fixtures/structural_generation/abi.fe");
 
 #[test]

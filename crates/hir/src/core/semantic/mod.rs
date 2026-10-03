@@ -5045,20 +5045,23 @@ impl<'db> ImplementorAssocTypeView<'db> {
         let subject = match self.impl_ty.data(db) {
             TyData::TypeFamily { owner, body, .. } => {
                 let params = self.assoc.family_parameters(db);
-                crate::analysis::ty::subst::substitute_complete(
-                    db,
-                    *body,
-                    &crate::analysis::ty::ty_lower::CompleteSubst::for_associated_type(
-                        db, *owner, params,
-                    )
-                    .expect("associated family parameters"),
+                // Signature diagnostics own mismatched family parameters.
+                // A malformed definition has no pointwise subject on which
+                // the declaration's bounds can be checked.
+                crate::analysis::ty::ty_lower::CompleteSubst::for_associated_type(
+                    db, *owner, params,
                 )
-                .expect("associated family parameter substitution")
+                .ok()
+                .and_then(|subst| {
+                    crate::analysis::ty::subst::substitute_complete(db, *body, &subst).ok()
+                })
             }
-            _ => self.impl_ty,
+            _ => Some(self.impl_ty),
         };
-        self.assoc
-            .bounds_on_subject_with_owner(db, subject, self.implementor.self_ty(db))
+        subject.into_iter().flat_map(move |subject| {
+            self.assoc
+                .bounds_on_subject_with_owner(db, subject, self.implementor.self_ty(db))
+        })
     }
 
     pub fn impl_ty(self) -> TyId<'db> {
@@ -5560,7 +5563,7 @@ impl<'db> FieldView<'db> {
                 .field_errors_for_id(field)
                 .and_then(|errors| errors.first())
         {
-            if let ContractLayoutError::InvalidConcreteArrayLength { invalid } = error {
+            if let ContractLayoutError::InvalidConcreteLayoutConst { invalid } = error {
                 if let Some(diag) = invalid
                     .invalid_cause(db)
                     .and_then(|cause| diag_from_invalid_cause(span.clone(), &cause))
@@ -5650,7 +5653,7 @@ impl<'db> FieldView<'db> {
                             crate::analysis::ty::diagnostics::ContractFieldLayoutIssue::InternalGraph
                         }
                         ContractLayoutError::InvalidFieldType
-                        | ContractLayoutError::InvalidConcreteArrayLength { .. }
+                        | ContractLayoutError::InvalidConcreteLayoutConst { .. }
                         | ContractLayoutError::ExplicitContractLayoutHole { .. }
                         | ContractLayoutError::NonSlotContractLayoutHole { .. }
                         | ContractLayoutError::UnresolvedConcreteLayoutRoot { .. }
@@ -5667,7 +5670,7 @@ impl<'db> FieldView<'db> {
                     };
                     TyLowerDiag::ContractFieldLayoutInvariant { span, ty, issue }
                 }
-                ContractLayoutError::InvalidConcreteArrayLength { .. } => unreachable!(),
+                ContractLayoutError::InvalidConcreteLayoutConst { .. } => unreachable!(),
             };
             out.push(diag.into());
             return out;

@@ -89,7 +89,7 @@ impl std::fmt::Display for GeneratedQuoteFailure {
 #[derive(Debug)]
 pub(super) struct QuoteConstructionError {
     failure: GeneratedQuoteFailure,
-    source: Option<crate::core::meta::FrozenQuoteSpan>,
+    source: Option<Box<crate::core::meta::FrozenQuoteSpan>>,
 }
 
 impl QuoteConstructionError {
@@ -126,7 +126,7 @@ impl QuoteConstructionError {
     }
     pub(super) fn at(mut self, source: Option<crate::core::meta::FrozenQuoteSpan>) -> Self {
         if self.source.is_none() {
-            self.source = source;
+            self.source = source.map(Box::new);
         }
         self
     }
@@ -383,12 +383,13 @@ fn quoted_function_generics<'db>(
     function: &crate::hir_def::QuoteFunc<'db>,
     func_index: u32,
     inherited: GenericParamListId<'db>,
-    bound_sites: &[Vec<Option<u32>>],
-    type_defaults: &[Option<FrozenQuoteSignatureType>],
-    const_types: &[Option<SemPrimTy>],
+    function_types: &crate::core::meta::FrozenQuoteFunctionTypes,
     roots: &[FrozenQuoteTrait],
 ) -> Result<(GenericParamListId<'db>, Vec<IdentId<'db>>), QuoteConstructionError> {
     let db = paths.db;
+    let bound_sites = &function_types.generic_bound_sites;
+    let type_defaults = &function_types.generic_type_defaults;
+    let const_types = &function_types.generic_const_types;
     let mut params = inherited.data(db).to_vec();
     let mut names = Vec::new();
     if bound_sites.len() != function.generic_params.data(db).len()
@@ -837,8 +838,7 @@ fn quoted_fragment_sources<'db>(
                         || qualified.member != QuoteMember::CheckedBody
                     {
                         return Err(
-                            QuoteConstructionFault::QualifiedFragmentConstantNeedsACheckedBody
-                                .into(),
+                            QuoteConstructionFault::QualifiedFragmentConstantNeedsACheckedBody,
                         );
                     }
                     let path = bound_quote_qualified_const_path(paths, template, node, qualified)?;
@@ -992,7 +992,7 @@ pub(super) fn reify_quote_nominal_constructor<'db>(
         path,
         QuoteConstructorIdentity {
             owner,
-            variant_index: variant_index,
+            variant_index,
         },
     ))
 }
@@ -1458,9 +1458,7 @@ fn emit_quoted_function<'db>(
         function,
         func_index,
         generic_params,
-        &function_types.generic_bound_sites,
-        &function_types.generic_type_defaults,
-        &function_types.generic_const_types,
+        function_types,
         &emit.node.rooted_traits,
     )?;
     if function.effects.data(db).len() != function_types.effects.len() {
@@ -1761,9 +1759,12 @@ fn emit_quoted_function<'db>(
                         emit.quote.template,
                         *expr,
                         emit.provider_scope,
-                        &emit.node.holes,
-                        &rooted_paths,
-                        &generics,
+                        QuoteBodyBindings {
+                            holes: &emit.node.holes,
+                            rooted_funcs: &rooted_paths,
+                            generic_uses: &generics,
+                            ..Default::default()
+                        },
                     )?;
                     const_hygiene.push(QuoteConstHygiene {
                         body,
@@ -2736,7 +2737,7 @@ pub(crate) fn generated_functions_impl<'db>(
                     hygiene.extend(quote);
                 }
                 Err(error) => errors.push(GeneratedHirError {
-                    quote_source: error.source,
+                    quote_source: error.source.map(|source| *source),
                     failure: error.failure,
                     site_span: request.site_span.clone(),
                 }),

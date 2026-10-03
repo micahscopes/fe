@@ -2097,10 +2097,14 @@ fn quotation_corpus_output(
                 .find("error[")
                 .expect("rejected fixture names its diagnostic");
             let end = snapshot[start..].find(']').expect("diagnostic code ends") + start + 1;
-            let actual = error
-                .rendered()
-                .clone()
-                .unwrap_or_else(|| format!("error[18-{:04}]: {}", error.code(), error.message()));
+            let actual = error.rendered().clone().unwrap_or_else(|| {
+                format!(
+                    "error[{}-{:04}]: {}",
+                    common::diagnostics::DiagnosticPass::Generation.code(),
+                    error.code(),
+                    error.message()
+                )
+            });
             assert!(
                 actual.contains(&snapshot[start..end]),
                 "wrong rejection: {actual}"

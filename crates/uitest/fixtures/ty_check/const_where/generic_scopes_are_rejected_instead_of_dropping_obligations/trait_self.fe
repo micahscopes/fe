@@ -1,1 +1,2 @@
+// RD95: mb3 retains trait conditions; this valid condition is accepted.
 trait Marker where true {}

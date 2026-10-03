@@ -17,7 +17,8 @@ use super::{
 use crate::analysis::{
     HirAnalysisDb,
     ty::const_ty::{
-        ConstTyData, normalize_const_tys_for_comparison, normalize_const_tys_for_comparison_checked,
+        ConstCaptureEnv, ConstTyData, normalize_const_tys_for_comparison,
+        normalize_const_tys_for_comparison_checked,
     },
 };
 
@@ -441,6 +442,7 @@ where
             &mut FreshVarFolder {
                 table: self,
                 params: FxHashMap::default(),
+                family_scopes: Vec::new(),
             },
         )
     }
@@ -825,13 +827,46 @@ where
     table: &'a mut UnificationTableBase<'db, U>,
     // Keyed by full parameter identity: different owners can reuse an index.
     params: FxHashMap<TyId<'db>, TyId<'db>>,
+    family_scopes: Vec<crate::hir_def::scope_graph::ScopeId<'db>>,
 }
 
 impl<'db, U> TyFolder<'db> for FreshVarFolder<'_, 'db, U>
 where
     U: UnificationStore<'db>,
 {
+    fn fold_const_capture(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        capture: &ConstCaptureEnv<'db>,
+    ) -> ConstCaptureEnv<'db> {
+        if matches!(capture, ConstCaptureEnv::Identity(_)) {
+            let identity = capture.complete(db).expect("identity capture has a domain");
+            let fresh = identity.map_values(|formal| self.fold_ty(db, formal));
+            return capture
+                .bind_identity_with(db, &fresh)
+                .transpose()
+                .expect("fresh substitution has every capture argument")
+                .unwrap_or_else(|| capture.clone());
+        }
+        capture.fold_ranges(db, self)
+    }
+
     fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        // A family binds its own parameters. Freshen the enclosing impl's
+        // parameters, while retaining the formals needed when the family is
+        // subsequently applied at the use site.
+        if let TyData::TypeFamily { owner, .. } = ty.data(db) {
+            self.family_scopes.push(owner.scope());
+            let folded = ty.super_fold_with(db, self);
+            self.family_scopes.pop();
+            return folded;
+        }
+        if ty
+            .as_generic_param(db)
+            .is_some_and(|param| self.family_scopes.contains(&param.owner))
+        {
+            return ty;
+        }
         let is_param = match ty.data(db) {
             TyData::TyParam(param) => !param.is_effect(),
             TyData::ConstTy(const_ty) => matches!(const_ty.data(db), ConstTyData::TyParam(..)),

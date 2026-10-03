@@ -1374,31 +1374,53 @@ pub(crate) fn impls_for_ty_with_satisfied_constraints<'db>(
     ty: Canonical<TyId<'db>>,
     assumptions: PredicateListId<'db>,
 ) -> Vec<ImplementorId<'db>> {
-    impls_for_ty_with_constraint_mode(db, ingot, None, ty, assumptions, false)
+    impls_for_ty_with_constraint_mode(
+        db,
+        ingot,
+        ImplConstraintQuery::SelfType(ty),
+        assumptions,
+        false,
+    )
 }
 
-/// Returns implementors of `trait_def` whose self type can apply to `ty` and
+/// Returns implementors whose full trait instance can apply to `inst` and
 /// whose constraints are not known to be unsatisfied.
-pub(crate) fn impls_for_trait_and_ty_with_possible_constraints<'db>(
+pub(crate) fn impls_for_trait_inst_with_possible_constraints<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-    trait_def: Trait<'db>,
-    ty: Canonical<TyId<'db>>,
+    inst: Canonical<TraitInstId<'db>>,
     assumptions: PredicateListId<'db>,
 ) -> Vec<ImplementorId<'db>> {
-    impls_for_ty_with_constraint_mode(db, ingot, Some(trait_def), ty, assumptions, true)
+    impls_for_ty_with_constraint_mode(
+        db,
+        ingot,
+        ImplConstraintQuery::TraitInstance(inst),
+        assumptions,
+        true,
+    )
+}
+
+enum ImplConstraintQuery<'db> {
+    SelfType(Canonical<TyId<'db>>),
+    TraitInstance(Canonical<TraitInstId<'db>>),
 }
 
 fn impls_for_ty_with_constraint_mode<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-    trait_def: Option<Trait<'db>>,
-    ty: Canonical<TyId<'db>>,
+    query: ImplConstraintQuery<'db>,
     assumptions: PredicateListId<'db>,
     allow_needs_confirmation: bool,
 ) -> Vec<ImplementorId<'db>> {
     let mut table = UnificationTable::new(db);
-    let ty = ty.extract_identity(&mut table);
+    let (ty, trait_inst) = match query {
+        ImplConstraintQuery::SelfType(ty) => (ty.extract_identity(&mut table), None),
+        ImplConstraintQuery::TraitInstance(inst) => {
+            let inst = inst.extract_identity(&mut table);
+            (inst.self_ty(db), Some(inst))
+        }
+    };
+    let trait_def = trait_inst.map(|inst| inst.def(db));
 
     let solve_cx = TraitSolveCx::new(db, ingot.root_mod(db).scope()).with_assumptions(assumptions);
     if ty.has_invalid(db) || ty.base_ty(db).is_never(db) {
@@ -1424,7 +1446,10 @@ fn impls_for_ty_with_constraint_mode<'db>(
             let inst = table.instantiate_with_fresh_vars(*impl_);
             let impl_ty = table.instantiate_to_term(inst.self_ty(db));
             let ty_term = table.instantiate_to_term(ty);
-            let unifies = table.unify(impl_ty, ty_term).is_ok();
+            // Bind the trait arguments before checking impl constraints. Matching
+            // only Self leaves parameters used by nested projections unresolved.
+            let unifies = table.unify(impl_ty, ty_term).is_ok()
+                && trait_inst.is_none_or(|goal| table.unify(inst.trait_(db), goal).is_ok());
 
             if unifies {
                 let impl_constraints = inst.constraints(db);

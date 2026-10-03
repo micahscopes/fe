@@ -35,6 +35,7 @@ module.exports = grammar({
     $._block_comment_end,
     $._generic_open,
     $._comparison_lt,
+    $._key_generic_open,
   ],
 
   word: $ => $.identifier,
@@ -580,11 +581,9 @@ module.exports = grammar({
     // before any token that can't appear in generics (like '{' or ';'),
     // it's a generic; otherwise it's comparison and the parser's built-in
     // lexer matches '<' for binary_expression.
-    generic_arg_list: $ => seq(
-      $._generic_open,
-      sepTrailing($._generic_arg, ','),
-      '>',
-    ),
+    generic_arg_list: $ => genericArgList($, $._generic_open),
+
+    _key_generic_arg_list: $ => genericArgList($, $._key_generic_open),
 
     _generic_arg: $ => choice(
       $.assoc_type_generic_arg,
@@ -1176,7 +1175,7 @@ module.exports = grammar({
       // Key = Value, where Key can be a generic type like Storage<u8>
       seq(
         field('key', $.path),
-        optional($.generic_arg_list),
+        optional(alias($._key_generic_arg_list, $.generic_arg_list)),
         '=',
         field('value', $._expression),
       ),
@@ -1307,17 +1306,23 @@ module.exports = grammar({
       ')',
     ),
 
-    path_pattern: $ => prec(1, $.path),
+    _generic_pattern_path: $ => prec.right(seq(
+      $.path,
+      $.generic_arg_list,
+      repeat(seq('::', $.path, optional($.generic_arg_list))),
+    )),
+
+    path_pattern: $ => prec(1, choice($.path, alias($._generic_pattern_path, $.path))),
 
     path_tuple_pattern: $ => prec(2, seq(
-      $.path,
+      choice($.path, alias($._generic_pattern_path, $.path)),
       '(',
       sepTrailing($._pattern, ','),
       ')',
     )),
 
     record_pattern: $ => prec(3, seq(
-      $.path,
+      choice($.path, alias($._generic_pattern_path, $.path)),
       '{',
       sepTrailing($.record_pattern_field, ','),
       '}',
@@ -1503,4 +1508,8 @@ function sepTrailing(rule, sep) {
 // Helper: one or more separated by separator
 function sep1(rule, sep) {
   return seq(rule, repeat(seq(sep, rule)));
+}
+
+function genericArgList($, open) {
+  return seq(open, sepTrailing($._generic_arg, ','), '>');
 }

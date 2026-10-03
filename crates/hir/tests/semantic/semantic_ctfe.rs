@@ -340,7 +340,7 @@ fn semantic_ctfe_provider_edits_match_fresh_databases() {
         }
     }
     let mut warm = HirAnalysisTestDb::default();
-    let file = warm.new_stand_alone(path.clone(), &original);
+    let file = warm.new_stand_alone(path.clone(), original);
     for (provider, number, expected) in [
         ("Twice", 7, "36"),
         ("Number", 7, "29"),
@@ -1820,4 +1820,71 @@ const fn answer() -> u32 {
         panic!("expected scalar");
     };
     assert_eq!(value.to_usize(), Some(5));
+}
+
+#[test]
+fn runtime_const_reification_compares_string_capacity_by_const_identity() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "runtime_string_identity.fe".into(),
+        r#"
+type One = String<1>
+const fn value() -> One { "(" }
+fn target(same: One, different: String<2>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let value_func = named_func(&db, top_mod, "value");
+    let owner = BodyOwner::Func(value_func);
+    let value = eval_body_owner_const(&db, owner, GenericSubst::for_body_owner(&db, owner, vec![]))
+        .into_ready()
+        .expect("string literal must evaluate");
+    let instance = get_or_build_semantic_instance(&db, identity_semantic_instance_key(&db, owner));
+    let target = named_func(&db, top_mod, "target");
+    let expected = target.arg_tys(&db);
+    assert!(
+        reify_runtime_const_for_ty(&db, instance, expected[0].instantiate_identity(), value)
+            .is_some()
+    );
+    assert!(
+        reify_runtime_const_for_ty(&db, instance, expected[1].instantiate_identity(), value)
+            .is_none()
+    );
+}
+
+#[test]
+fn semantic_ctfe_impl_condition_diagnostics_preserve_distinct_uses() {
+    for (uses, expected) in [
+        ("<Wrapped<0> as Value>::value()", 1),
+        (
+            "let first = <Wrapped<0> as Value>::value()\n <Wrapped<0> as Value>::value()",
+            2,
+        ),
+        (
+            "let first = <Wrapped<0> as Value>::value\n let second = <Wrapped<0> as Value>::value\n 41",
+            2,
+        ),
+    ] {
+        let source = format!(
+            "trait Value {{ const fn value() -> u256 {{ 41 }} }}\n\
+             struct Wrapped<const N: usize> {{}}\n\
+             impl<const N: usize> Value for Wrapped<N> where N > 0 {{}}\n\
+             const fn answer() -> u256 {{ {uses} }}"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("condition_uses.fe".into(), &source);
+        let (top_mod, _) = db.top_mod(file);
+        let answer = named_func(&db, top_mod, "answer");
+        let (diags, _) = check_func_body(&db, answer);
+        let count = diags
+            .iter()
+            .filter(|diag| {
+                matches!(
+                    diag,
+                    FuncBodyDiag::Body(BodyDiag::ConstRequirementNotSatisfied { .. })
+                )
+            })
+            .count();
+        assert_eq!(count, expected, "uses: {uses}\n{diags:?}");
+    }
 }

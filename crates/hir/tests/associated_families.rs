@@ -785,3 +785,56 @@ fn guarded_families_cannot_escape_through_constructor_parameters() {
         }
     }
 }
+
+#[test]
+fn associated_const_captures_follow_impl_arguments_without_crossing_instances() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("associated_const_capture.fe"), "");
+    for (argument, output, valid) in [(2, 3, true), (5, 6, true), (2, 6, false), (2, 3, true)] {
+        let source = format!(
+            "struct Slot<const N: usize> {{}}\n\
+             struct S<const N: usize> {{}}\n\
+             trait Step {{ type Out }}\n\
+             impl<const N: usize> Step for S<N> {{ type Out = Slot<{{ N + 1 }}> }}\n\
+             fn probe(x: <S<{argument}> as Step>::Out) -> Slot<{output}> {{ x }}"
+        );
+        file.set_text(&mut db).to(source);
+        let diags = diagnostics(&db, file);
+        if valid {
+            assert!(diags.is_empty(), "{diags}");
+        } else {
+            assert!(diags.contains("type mismatch"), "{diags}");
+        }
+    }
+}
+
+#[test]
+fn composed_projection_constraints_use_the_full_trait_instance() {
+    let template = include_str!("fixtures/associated_families/composed_projection_constraints.fe");
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("composed_projection.fe"), "");
+    for (input, output, expected_error) in [
+        ("u256", "u256", None),
+        ("u256", "bool", Some("type mismatch")),
+        ("u8", "u256", Some("trait bound is not satisfied")),
+        ("u256", "u256", None),
+    ] {
+        let source = template
+            .replace(
+                "<Program as Eval<u256>>",
+                &format!("<Program as Eval<{input}>>"),
+            )
+            .replace("-> u256 { x }", &format!("-> {output} {{ x }}"));
+        file.set_text(&mut db).to(source.clone());
+        let result = diagnostics(&db, file);
+        if let Some(message) = expected_error {
+            assert!(result.contains(message), "{result}");
+        } else {
+            assert!(result.is_empty(), "{result}");
+        }
+        let mut fresh = HirAnalysisTestDb::default();
+        let fresh_file =
+            fresh.new_stand_alone(Utf8PathBuf::from("composed_projection.fe"), &source);
+        assert_eq!(result, diagnostics(&fresh, fresh_file));
+    }
+}

@@ -627,9 +627,9 @@ define_runtime_intrinsics! {
 
 // One declaration table owns reflection names, typed dispatch and memory contracts.
 macro_rules! define_meta_intrinsics {
-    ($($group:ident { $($operation:ident => $name:literal),+ $(,)? }),+ $(,)?) => {
+    ($($variant:ident($group:ident) { $($operation:ident => $name:literal),+ $(,)? }),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
-        pub(crate) enum MetaIntrinsic { $($group($group)),+ }
+        pub(crate) enum MetaIntrinsic { $($variant($group)),+ }
         $(
             #[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
             pub(crate) enum $group { $($operation),+ }
@@ -645,34 +645,34 @@ macro_rules! define_meta_intrinsics {
             let name = func.name(db).to_opt()?.data(db).as_str();
             match name {
                 $($($name => lib_func_matches(db, func, concat!("core::meta::", $name))
-                    .then_some(MetaIntrinsic::$group($group::$operation)),)+)+
+                    .then_some(MetaIntrinsic::$variant($group::$operation)),)+)+
                 _ => None,
             }
         }
         impl MetaIntrinsic {
             pub(crate) fn name(self) -> &'static str {
-                match self { $($(Self::$group($group::$operation) => $name,)+)+ }
+                match self { $($(Self::$variant($group::$operation) => $name,)+)+ }
             }
         }
     };
 }
 
 define_meta_intrinsics! {
-    CodeOp {
-        NodeKind => "node_kind",
-        NodeChildCount => "node_child_count",
-        NodeChild => "node_child",
-        NodeParameterIndex => "node_parameter_index",
-        NodeSameBinding => "node_same_binding",
-        NodeSameCheckedCall => "node_same_checked_call",
-        NodeTypeIs => "node_type_is",
-        NodeFieldIndex => "node_field_index",
-        NodeRecordFieldIndex => "node_record_field_index",
-        NodeLiteral => "node_literal",
-        NodeAssignmentOperator => "node_assignment_operator",
-        NodeArrayLength => "node_array_length",
+    Code(CodeOp) {
+        Kind => "node_kind",
+        ChildCount => "node_child_count",
+        Child => "node_child",
+        ParameterIndex => "node_parameter_index",
+        SameBinding => "node_same_binding",
+        SameCheckedCall => "node_same_checked_call",
+        TypeIs => "node_type_is",
+        FieldIndex => "node_field_index",
+        RecordFieldIndex => "node_record_field_index",
+        Literal => "node_literal",
+        AssignmentOperator => "node_assignment_operator",
+        ArrayLength => "node_array_length",
     },
-    StructuralOp {
+    Structural(StructuralOp) {
         FieldCount => "field_count",
         VariantCount => "variant_count",
         Variant => "variant",
@@ -683,7 +683,7 @@ define_meta_intrinsics! {
         TypeIs => "type_is",
         QueryField => "query_field",
     },
-    CodeValueOp { Empty => "empty", Root => "code_root" },
+    CodeValue(CodeValueOp) { Empty => "empty", Root => "code_root" },
 }
 
 #[derive(Clone, Copy)]

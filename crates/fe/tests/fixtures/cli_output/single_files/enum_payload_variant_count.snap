@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_payload_variant_count.fe
 ---
 === STDERR ===
-error[18-0001]: `variant_count` needs a whole enum input; a struct or selected payload has no variants
+error[19-0001]: `variant_count` needs a whole enum input; a struct or selected payload has no variants
   ┌─ enum_payload_variant_count.fe:4:21
   │
 4 │         let value = variant_count(variant(record, 0))

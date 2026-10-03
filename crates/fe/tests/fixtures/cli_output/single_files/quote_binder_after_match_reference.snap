@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_binder_after_match_reference.fe
 ---
 === STDERR ===
-error[18-0004]: invalid generated declaration: binder group is not bound in this scope
+error[19-0004]: invalid generated declaration: binder group is not bound in this scope
    ┌─ quote_binder_after_match_reference.fe:14:17
    │
 14 │                 ${lr.at(w)} == 0

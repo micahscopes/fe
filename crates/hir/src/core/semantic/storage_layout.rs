@@ -37,6 +37,7 @@ use crate::{
             trait_def::{ImplementorId, ImplementorOrigin, ResolvedImplInstance},
             trait_resolution::PredicateListId,
             ty_def::{PrimTy, TyBase, TyData, TyId},
+            ty_error::demanded_ground_const_cause,
             ty_lower::{
                 CompleteSubst, ParamBasis, ParamDomainId, ParamSchemaId,
                 lower_layout_root_uses_in_hir_ty, lower_opt_hir_ty,
@@ -491,7 +492,7 @@ pub struct AssignedRootValue<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum ContractLayoutError<'db> {
     InvalidFieldType,
-    InvalidConcreteArrayLength { invalid: TyId<'db> },
+    InvalidConcreteLayoutConst { invalid: TyId<'db> },
     InconsistentConcreteArrayLength { array: TyId<'db> },
     ExplicitContractLayoutHole { placeholder: TyId<'db> },
     NonSlotContractLayoutHole { placeholder: TyId<'db> },
@@ -517,7 +518,7 @@ impl ContractLayoutError<'_> {
     pub fn summary(&self) -> &'static str {
         match self {
             Self::InvalidFieldType => "field type is invalid",
-            Self::InvalidConcreteArrayLength { .. } => "array length const evaluation failed",
+            Self::InvalidConcreteLayoutConst { .. } => "layout const evaluation failed",
             Self::InconsistentConcreteArrayLength { .. } => {
                 "canonical and source array lengths disagree"
             }
@@ -1365,14 +1366,14 @@ impl<'db> FieldCollector<'db> {
         }
         let position = match &error {
             ContractLayoutError::NonRegularProviderCycle => 0,
-            ContractLayoutError::InvalidConcreteArrayLength { .. } => self
+            ContractLayoutError::InvalidConcreteLayoutConst { .. } => self
                 .errors
                 .iter()
                 .position(|prior| {
                     !matches!(
                         prior,
                         ContractLayoutError::NonRegularProviderCycle
-                            | ContractLayoutError::InvalidConcreteArrayLength { .. }
+                            | ContractLayoutError::InvalidConcreteLayoutConst { .. }
                     )
                 })
                 .unwrap_or(self.errors.len()),
@@ -1674,9 +1675,21 @@ impl<'db> FieldCollector<'db> {
             return WalkOutput::scalar(ty, place, dimensions);
         }
 
-        let provider = ty
-            .adt_def(self.db)
-            .map(|_| resolve_effect_handle_layout(self.db, self.scope, self.assumptions, ty));
+        // An ADT's concrete arguments must be valid before proof search can
+        // select a provider. The source view retains faulting anonymous bodies
+        // that optional canonical reduction leaves as arithmetic terms.
+        let adt = ty.adt_def(self.db);
+        if adt.is_some()
+            && let Some(cause) = demanded_ground_const_cause(self.db, views.source)
+        {
+            self.push_error(ContractLayoutError::InvalidConcreteLayoutConst {
+                invalid: TyId::invalid(self.db, cause),
+            });
+            self.visiting.remove(&(ty, place));
+            return WalkOutput::empty();
+        }
+        let provider =
+            adt.map(|_| resolve_effect_handle_layout(self.db, self.scope, self.assumptions, ty));
         let output = match provider {
             Some(ProviderLayoutResolution::Resolved {
                 impl_instance,
@@ -1997,7 +2010,7 @@ impl<'db> FieldCollector<'db> {
             Ok(Some(len)) => len.to_usize(),
             Ok(None) => None,
             Err(ConcreteArrayLengthError::Invalid(cause)) => {
-                self.push_error(ContractLayoutError::InvalidConcreteArrayLength {
+                self.push_error(ContractLayoutError::InvalidConcreteLayoutConst {
                     invalid: TyId::invalid(self.db, cause),
                 });
                 return WalkOutput::empty();
@@ -2013,7 +2026,7 @@ impl<'db> FieldCollector<'db> {
                 ConcreteTypeView::new(element, source_element),
             )
         {
-            self.push_error(ContractLayoutError::InvalidConcreteArrayLength {
+            self.push_error(ContractLayoutError::InvalidConcreteLayoutConst {
                 invalid: TyId::invalid(self.db, cause),
             });
             return WalkOutput::empty();

@@ -1180,7 +1180,11 @@ fn const_ty_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, const_ty: ConstTyId
             ty.is_some_and(|ty| ty_is_fully_ground(db, ty))
                 && match capture {
                     ConstCaptureEnv::Empty => true,
-                    ConstCaptureEnv::Identity(_) => false,
+                    // A deferred domain with no slots carries no symbolic input.
+                    // Nonempty identity captures still retain their formal parameters.
+                    ConstCaptureEnv::Identity(_) => capture
+                        .complete(db)
+                        .is_some_and(|subst| subst.values().is_empty()),
                     ConstCaptureEnv::Bound(subst) => subst
                         .values()
                         .iter()
@@ -1617,13 +1621,43 @@ pub(crate) fn normalize_const_tys_for_comparison_checked<'db>(
     let TyData::ConstTy(const_ty) = ty.data(db) else {
         return Ok(ty);
     };
-    if let Some(env) = const_canon_env(db, *const_ty) {
-        let canonical = canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity);
-        return if canonical.has_invalid(db) {
-            Err(())
-        } else {
-            Ok(canonical)
+    // Resolve declaration-coordinate captures before demanding a ground term.
+    // Associated defaults can still carry trait formals in their raw bodies.
+    let canonical = const_canon_env(db, *const_ty)
+        .map(|env| canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity));
+    let ty = canonical.unwrap_or(ty);
+    if ty.has_invalid(db) {
+        return Err(());
+    }
+    let TyData::ConstTy(const_ty) = ty.data(db) else {
+        return Ok(ty);
+    };
+    // General identity canonicalization may retain a deferred term after a
+    // failed reduction. Proof matching must observe that fault before it can
+    // turn into a candidate mismatch. Symbolic terms stay on the normal path.
+    if const_ty_is_fully_ground(db, *const_ty)
+        && matches!(
+            const_ty.data(db),
+            ConstTyData::UnEvaluated { .. }
+                | ConstTyData::Abstract(..)
+                | ConstTyData::Computation { .. }
+        )
+    {
+        return match force_const_term_value(
+            db,
+            *const_ty,
+            CtfeConfig::default(),
+            SemOrigin::Synthetic,
+        ) {
+            EvalOutcome::Ready(value) => Ok(TyId::const_ty(
+                db,
+                const_ty_from_sem_const(db, value.value()),
+            )),
+            EvalOutcome::Blocked(_) | EvalOutcome::Failed(_) => Err(()),
         };
+    }
+    if canonical.is_some() {
+        return Ok(ty);
     }
 
     match const_ty.data(db) {
@@ -3843,6 +3877,58 @@ mod tests {
             ConstCanonMode::Stored,
         );
         assert_eq!(stored, raw);
+    }
+
+    #[test]
+    fn empty_identity_capture_is_ground_but_symbolic_capture_is_not() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("empty_identity_capture.fe"),
+            "fn one<const N: usize = 1>() {}",
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let func = find_func(&db, module, "one");
+        let GenericDefault::Const {
+            value: ConstGenericArgValue::Expr(Partial::Present(body)),
+            ..
+        } = generic_default(&db, func.into(), 0)
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected const expression default")
+        };
+        let make_const = |capture| {
+            ConstTyId::new(
+                &db,
+                ConstTyData::UnEvaluated {
+                    body: *body,
+                    ty: Some(TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)))),
+                    template_ty: Some(TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)))),
+                    const_def: None,
+                    capture,
+                    policy: UnevaluatedConstPolicy::DeferValidation,
+                    impl_env: None,
+                },
+            )
+        };
+        let empty = make_const(ConstCaptureEnv::Identity(ConstCaptureDomain::before(
+            func.into(),
+            ParamBasis::Full,
+            SourceParamIndex(0),
+        )));
+        let symbolic = make_const(ConstCaptureEnv::Identity(ConstCaptureDomain::full(
+            func.into(),
+            ParamBasis::Full,
+        )));
+        assert!(const_ty_is_fully_ground(&db, empty));
+        assert!(!const_ty_is_fully_ground(&db, symbolic));
+        let env = ConstCanonEnv::new(func.scope(), PredicateListId::empty_list(&db), None);
+        let reduced = concretize_const_ty_if_ground(&db, empty, env).unwrap();
+        assert_eq!(reduced.integer_value(&db), Some(BigInt::from(1)));
+        assert!(concretize_const_ty_if_ground(&db, symbolic, env).is_none());
     }
 
     #[test]

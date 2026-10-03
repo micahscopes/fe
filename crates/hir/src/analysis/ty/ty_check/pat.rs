@@ -6,7 +6,7 @@ use crate::core::hir_def::{
 use either::Either;
 
 use super::{
-    ConstRef, PatternLayoutContext, RecordLike, TyChecker, env::LocalBinding,
+    ConstRef, PathResolutionScopes, PatternLayoutContext, RecordLike, TyChecker, env::LocalBinding,
     path::RecordInitChecker,
 };
 use crate::analysis::{
@@ -443,8 +443,10 @@ impl<'db> TyChecker<'db> {
             span.clone().path(),
             span.clone().into(),
             &minter,
-            self.env.scope(),
-            scope,
+            PathResolutionScopes {
+                lookup: self.env.scope(),
+                visibility: scope,
+            },
         );
 
         // Bare identifiers that don't resolve to a type/variant are local bindings,
@@ -832,8 +834,10 @@ impl<'db> TyChecker<'db> {
             span.clone().path(),
             span.clone().into(),
             &minter,
-            self.env.scope(),
-            scope,
+            PathResolutionScopes {
+                lookup: self.env.scope(),
+                visibility: scope,
+            },
         ) {
             Ok(res) => match res {
                 PathRes::Ty(ty)
@@ -1021,8 +1025,10 @@ impl<'db> TyChecker<'db> {
             span.clone().path(),
             span.clone().into(),
             &minter,
-            self.env.scope(),
-            scope,
+            PathResolutionScopes {
+                lookup: self.env.scope(),
+                visibility: scope,
+            },
         );
         let (actual, analysis) = match resolved {
             Ok(reso) => match reso {

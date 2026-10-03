@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/fe_test_runner/quote_invalid_declaration_name.fe
 ---
 === STDOUT ===
-error[18-0004]: invalid generated declaration: generated name must be an identifier
+error[19-0004]: invalid generated declaration: generated name must be an identifier
    ┌─ quote_invalid_declaration_name.fe:6:9
    │
  6 │ ╭         quote {
@@ -16,7 +16,7 @@ error[18-0004]: invalid generated declaration: generated name must be an identif
    │   -------------------------------- generated here
 
 
-ERROR [<time>] error[18-0004]: invalid generated declaration: generated name must be an identifier
+ERROR [<time>] error[19-0004]: invalid generated declaration: generated name must be an identifier
 
 test result: FAILED. 0 passed; 1 failed
 

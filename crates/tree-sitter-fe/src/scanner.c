@@ -8,6 +8,7 @@ enum TokenType {
   BLOCK_COMMENT_END,
   GENERIC_OPEN,
   COMPARISON_LT,
+  KEY_GENERIC_OPEN,
 };
 
 void *tree_sitter_fe_external_scanner_create(void) { return NULL; }
@@ -370,10 +371,15 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
     // Automatic semicolon not needed -- fall through to check other tokens
   }
 
+  // A with-key is a type path, even when an expression branch also exists.
+  const bool key_generic = valid_symbols[KEY_GENERIC_OPEN];
+  const bool generic_open = valid_symbols[GENERIC_OPEN] || key_generic;
+  const enum TokenType generic_symbol = key_generic ? KEY_GENERIC_OPEN : GENERIC_OPEN;
+
   // Disambiguate '<': generic open vs comparison less-than.
   // When both are valid, try generic first (lookahead for matching '>').
   // If no matching '>' found, fall back to comparison.
-  if ((valid_symbols[GENERIC_OPEN] || valid_symbols[COMPARISON_LT]) &&
+  if ((generic_open || valid_symbols[COMPARISON_LT]) &&
       !lexer->eof(lexer)) {
     // Skip whitespace before checking for '<'
     while (!lexer->eof(lexer) &&
@@ -395,13 +401,13 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
 
       if (next == '<') {
         // Could be << (shift), <<= (shift-assign), or nested generics <<T as...
-        if (valid_symbols[GENERIC_OPEN]) {
+        if (generic_open) {
           lexer->mark_end(lexer);  // mark end after first '<'
           // In a type position COMPARISON_LT is not valid, so nothing else the
           // '<<' could be: this is the start of a qualified path such as
           // <<T as Trait>::Item as ...>.
           if (!valid_symbols[COMPARISON_LT]) {
-            lexer->result_symbol = GENERIC_OPEN;
+            lexer->result_symbol = generic_symbol;
             return true;
           }
           // In an expression position both are valid, so apply the same rule
@@ -409,11 +415,11 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
           // '<<'. Without this, `Wrapped<<M as Model>::Point>::new(p)` lexes a
           // shift and fails to parse even though the compiler accepts it.
           if (scan_qualified_path_after_lshift(lexer)) {
-            lexer->result_symbol = GENERIC_OPEN;
+            lexer->result_symbol = generic_symbol;
             return true;
           }
         }
-        if (valid_symbols[GENERIC_OPEN]) {
+        if (generic_open) {
           // In an ambiguous context, a nested qualified argument such as
           // Wrapped<<T as Trait>::Item> has both a completed inner `>::`
           // path and a closing outer `>`. A plain `value<<amount` has neither.
@@ -433,7 +439,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
               advance(lexer);
               if (depth == 0) {
                 if (qualified_inner) {
-                  lexer->result_symbol = GENERIC_OPEN;
+                  lexer->result_symbol = generic_symbol;
                   return true;
                 }
                 break;
@@ -457,7 +463,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
       // Single '<' -- decide between generic and comparison.
       lexer->mark_end(lexer);  // mark end after '<'
 
-      if (valid_symbols[GENERIC_OPEN]) {
+      if (generic_open) {
         // Continue scanning ahead to find matching '>' for generic.
         // We already consumed '<'; now lookahead for balanced '>'.
         // Track angle depth, plus paren/bracket/brace depth so we don't
@@ -557,7 +563,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                   // In an expression both are valid, so apply the compiler's
                   // rule: what follows the '>' must be able to follow a path.
                   advance(lexer);
-                  is_generic = !valid_symbols[COMPARISON_LT] ||
+                  is_generic = key_generic || !valid_symbols[COMPARISON_LT] ||
                                can_follow_generic_path_expr(lexer);
                   goto done_scanning;
                 }
@@ -597,7 +603,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
         done_scanning:
 
         if (is_generic) {
-          lexer->result_symbol = GENERIC_OPEN;
+          lexer->result_symbol = generic_symbol;
           return true;
         }
       }

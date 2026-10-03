@@ -459,7 +459,14 @@ fn semantic_callee_key_with_assumptions<'db>(
         })
         .collect::<Vec<_>>();
     let mut subst_args = callable.generic_args().to_vec();
-    let body_func = if callable.opened_obligation(db).is_none()
+    // Public evidence proves a unique ordinary implementation. A ground
+    // opened call can therefore use the shared static callee planner; CTFE
+    // still validates the supplied evidence value before dispatch. Symbolic
+    // opened calls retain their deferred implementation.
+    let opened_symbolic = callable
+        .opened_obligation(db)
+        .is_some_and(|(_, goal)| !is_ground(collect_flags(db, goal)));
+    let body_func = if !opened_symbolic
         && let Some(inst) = callable.trait_inst()
         && let Some(name) = nominal_func.name(db).to_opt()
         && let Selection::Unique(method) = resolve_trait_method_with_selections(

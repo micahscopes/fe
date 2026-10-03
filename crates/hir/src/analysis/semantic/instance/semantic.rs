@@ -371,10 +371,12 @@ fn provisional_call_sites<'db>(
             callable,
             typed_body.call_effect_args(expr).unwrap_or(&[]),
             assumptions,
-            SemOrigin::Expr(expr),
-            matches!(template.semantic_expr_lowering(expr),
+            CallSiteContext {
+                origin: SemOrigin::Expr(expr),
+                inherit_trait_selection: matches!(template.semantic_expr_lowering(expr),
                 Some(SemanticExprLowering::Call { callable })
                     if template_trait_goal_uses_owner_param(db, callable)),
+            },
             &mut diagnostic,
         );
         site.receiver =
@@ -413,10 +415,12 @@ fn provisional_for_loop_call_sites<'db>(
                 &seq.len_callable,
                 &seq.len_effect_args,
                 assumptions,
-                origin,
-                template
-                    .for_loop_seq(stmt)
-                    .is_some_and(|seq| template_trait_goal_uses_owner_param(db, &seq.len_callable)),
+                CallSiteContext {
+                    origin,
+                    inherit_trait_selection: template.for_loop_seq(stmt).is_some_and(|seq| {
+                        template_trait_goal_uses_owner_param(db, &seq.len_callable)
+                    }),
+                },
                 &mut diagnostic,
             ),
             get: provisional_call_site(
@@ -425,15 +429,23 @@ fn provisional_for_loop_call_sites<'db>(
                 &seq.get_callable,
                 &seq.get_effect_args,
                 assumptions,
-                origin,
-                template
-                    .for_loop_seq(stmt)
-                    .is_some_and(|seq| template_trait_goal_uses_owner_param(db, &seq.get_callable)),
+                CallSiteContext {
+                    origin,
+                    inherit_trait_selection: template.for_loop_seq(stmt).is_some_and(|seq| {
+                        template_trait_goal_uses_owner_param(db, &seq.get_callable)
+                    }),
+                },
                 &mut diagnostic,
             ),
         });
     }
     ProvisionalCallSiteData { sites, diagnostic }
+}
+
+#[derive(Clone, Copy)]
+struct CallSiteContext<'db> {
+    origin: SemOrigin<'db>,
+    inherit_trait_selection: bool,
 }
 
 /// Plans a call before provider refinement. The first argument-mapping
@@ -445,10 +457,13 @@ fn provisional_call_site<'db>(
     callable: &Callable<'db>,
     nominal_effect_args: &[ResolvedEffectArg<'db>],
     assumptions: PredicateListId<'db>,
-    origin: SemOrigin<'db>,
-    inherit_trait_selection: bool,
+    context: CallSiteContext<'db>,
     diagnostic: &mut Option<SemanticDiagnosticId<'db>>,
 ) -> CallSiteLowering<'db> {
+    let CallSiteContext {
+        origin,
+        inherit_trait_selection,
+    } = context;
     let mut report = |error| {
         diagnostic.get_or_insert_with(|| method_arg_map_diagnostic(db, instance, error, origin));
     };
@@ -830,8 +845,10 @@ fn finalize_call_site<'db>(
         site,
         nominal_effect_args,
         refinements,
-        origin,
-        inherit_trait_selection,
+        CallSiteContext {
+            origin,
+            inherit_trait_selection,
+        },
     )
 }
 
@@ -842,9 +859,12 @@ fn replan_call_site<'db>(
     site: &mut CallSiteLowering<'db>,
     nominal_effect_args: &[ResolvedEffectArg<'db>],
     refinements: Option<&[CallSiteProviderRefinement]>,
-    origin: SemOrigin<'db>,
-    inherit_trait_selection: bool,
+    context: CallSiteContext<'db>,
 ) -> Result<(), SemanticDiagnosticId<'db>> {
+    let CallSiteContext {
+        origin,
+        inherit_trait_selection,
+    } = context;
     let mut effect_providers = callable.effect_providers().to_vec();
     let mapping_diag = |error| method_arg_map_diagnostic(db, instance, error, origin);
     let mut refined_nominal_effect_args = nominal_effect_args.to_vec();
@@ -2500,8 +2520,10 @@ mod tests {
                 &mut replanned,
                 typed_body.call_effect_args(expr).unwrap_or(&[]),
                 None,
-                SemOrigin::Expr(expr),
-                false,
+                CallSiteContext {
+                    origin: SemOrigin::Expr(expr),
+                    inherit_trait_selection: false,
+                },
             )
             .unwrap();
             let Partial::Present(expr_data) = expr_data else {
@@ -2569,10 +2591,12 @@ mod tests {
             &callable,
             &[],
             instance.assumptions(db),
-            SemOrigin::Expr(expr),
-            matches!(typed_body.semantic_expr_lowering(expr),
+            CallSiteContext {
+                origin: SemOrigin::Expr(expr),
+                inherit_trait_selection: matches!(typed_body.semantic_expr_lowering(expr),
                 Some(SemanticExprLowering::Call { callable })
                     if template_trait_goal_uses_owner_param(db, callable)),
+            },
             &mut diagnostic,
         );
         assert!(diagnostic.is_none());
@@ -2647,7 +2671,7 @@ mod tests {
             Some(&[refinement]),
             SemOrigin::Expr(expr),
             true,
-            template_trait_goal_uses_owner_param(db, &callable),
+            template_trait_goal_uses_owner_param(db, callable),
         )
         .unwrap();
         assert_eq!(

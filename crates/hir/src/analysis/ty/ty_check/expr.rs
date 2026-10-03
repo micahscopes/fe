@@ -14,7 +14,7 @@ use crate::span::DynLazySpan;
 
 use super::{
     CodeRegionIntrinsicKind, ConstIntrinsicKind, ConstRef, EffectArgLayoutView,
-    PatternLayoutContext, RecordLike, Typeable, ValuePathRef,
+    PathResolutionScopes, PatternLayoutContext, RecordLike, Typeable, ValuePathRef,
     effect_env::{
         FamilyKeyedEntry, FrameLookupResult, MatchedForwarder, MatchedKeyedEntry, MatchedWitness,
     },
@@ -3639,7 +3639,6 @@ impl<'db> TyChecker<'db> {
                             super::env::PendingMethodCandidate {
                                 inst,
                                 method: candidate.cand.method,
-                                needs_confirmation: candidate.needs_confirmation,
                             }
                         })
                         .collect();
@@ -3694,13 +3693,6 @@ impl<'db> TyChecker<'db> {
             MethodCandidate::NeedsConfirmation(cand) => {
                 let inst = canonical_r_ty.extract_solution(&mut self.table, cand.inst);
                 let inst = self.specialize_same_trait_method_inst(method_name, inst);
-                self.env.register_trait_obligation(TraitObligation {
-                    selected_applications: self.env.selected_applications(),
-                    assumptions: self.env.assumptions(),
-                    goal: inst,
-                    origin: TraitObligationOrigin::GenericConfirmation,
-                    span: call_span.clone().into(),
-                });
                 let func_ty =
                     self.instantiate_trait_method_to_term(cand.method, selected_receiver_ty, inst);
                 (func_ty, Some(inst))
@@ -3843,8 +3835,10 @@ impl<'db> TyChecker<'db> {
                 path_span.clone(),
                 path_expr_span.clone().into(),
                 &minter,
-                self.env.scope(),
-                quote_scope.unwrap_or(self.env.scope()),
+                PathResolutionScopes {
+                    lookup: self.env.scope(),
+                    visibility: quote_scope.unwrap_or(self.env.scope()),
+                },
             ) {
                 Ok(r) => ResolvedPathInBody::Reso(r),
                 Err(err) => {
@@ -4305,8 +4299,10 @@ impl<'db> TyChecker<'db> {
             path_span.clone(),
             span.clone().into(),
             &minter,
-            self.env.scope(),
-            scope,
+            PathResolutionScopes {
+                lookup: self.env.scope(),
+                visibility: scope,
+            },
         ) {
             Ok(reso) => reso,
             Err(err) => {

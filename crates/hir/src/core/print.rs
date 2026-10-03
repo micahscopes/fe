@@ -1799,6 +1799,11 @@ fn print_items_with_extern_blocks<'db>(
     };
 
     for item in items {
+        // Anonymous const arguments can be direct scope children. Their
+        // owning type expression prints them; they are not declarations.
+        if matches!(item, ItemKind::Body(_)) {
+            continue;
+        }
         // Check if this is an extern function (function declared within an `extern { ... }` block)
         if let ItemKind::Func(func) = item
             && func.is_extern(db)

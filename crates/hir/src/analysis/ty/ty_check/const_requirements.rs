@@ -197,11 +197,34 @@ fn check_recorded_condition_uses<'db>(
 ) -> RequirementCheck<'db> {
     let mut check = RequirementCheck::default();
     let mut seen = Vec::new();
+    let mut call_owners = FxHashMap::default();
     for use_ in uses {
-        if seen.contains(use_) {
+        // Path selection and call checking can record the same application.
+        // Give a direct callee and its call one owner, while retaining distinct
+        // calls, standalone function values, arguments and lexical selections.
+        let site = if let Some((body, expr)) = use_.use_span.expression_root() {
+            let owners = call_owners.entry(body).or_insert_with(|| {
+                let mut owners = FxHashMap::default();
+                for (call, expression) in body.exprs(db).iter() {
+                    if let Some(Expr::Call(callee, _)) = expression.borrowed().to_opt() {
+                        owners.insert(*callee, call);
+                        owners.insert(call, call);
+                    }
+                }
+                owners
+            });
+            owners
+                .get(&expr)
+                .map(|call| call.span(body).into())
+                .unwrap_or_else(|| use_.use_span.clone())
+        } else {
+            use_.use_span.clone()
+        };
+        let key = (use_.obligation.clone(), site);
+        if seen.contains(&key) {
             continue;
         }
-        seen.push(use_.clone());
+        seen.push(key);
         let obligation = &use_.obligation;
         if let Discharge::Fails(failure) = discharge_selected_requirement(
             db,
@@ -712,13 +735,12 @@ fn premise_owner_in_scope<'db>(
     let mut current = Some(origin);
     while let Some(scope) = current {
         match scope.item() {
-            // A trait method can neither state conditions nor assume a header's.
-            ItemKind::Func(func)
-                if matches!(func.scope().parent_item(db), Some(ItemKind::Trait(_))) =>
-            {
-                return None;
-            }
-            item @ (ItemKind::Func(_) | ItemKind::Struct(_) | ItemKind::Enum(_)) => {
+            item @ (ItemKind::Func(_)
+            | ItemKind::Struct(_)
+            | ItemKind::Enum(_)
+            | ItemKind::Trait(_)
+            | ItemKind::Impl(_)
+            | ItemKind::ImplTrait(_)) => {
                 let candidate = WhereClauseOwner::from_item_opt(item)?;
                 if candidate
                     .where_clause(db)
@@ -730,7 +752,7 @@ fn premise_owner_in_scope<'db>(
                 }
                 return GenericParamOwner::from_item_opt(item);
             }
-            item @ (ItemKind::Impl(_) | ItemKind::ImplTrait(_) | ItemKind::TypeAlias(_)) => {
+            item @ ItemKind::TypeAlias(_) => {
                 return GenericParamOwner::from_item_opt(item);
             }
             ItemKind::Body(_) => current = scope.parent(db),
@@ -751,26 +773,31 @@ fn premise_owner_in_scope<'db>(
 /// - in a type alias, the conditions of the aliased type, since every
 ///   application of the alias is checked after expansion.
 ///
-/// An impl's own `where` conditions are not premises: they are rejected at
-/// the impl, and no use checks them. Nor are the conditions of a trait impl's
-/// trait arguments: trait solving can select the impl with arguments that no
-/// written or checked type holds, as `call(Holder<0> {})` selects
-/// `impl<const N: usize> Tr<Bounded<N>> for Holder<N>` for a bound `T: Tr<U>`.
-/// So `Bounded<N>` in that header needs a condition the impl cannot state, and
-/// the impl is rejected where it writes it.
+/// Trait and impl conditions are checked at their uses and are premises inside
+/// their declarations. A method also inherits its immediate trait or impl's
+/// premises, stated in the method's full parameter basis. Other enclosing
+/// declarations do not supply premises to a nested declaration.
 fn caller_premises<'db>(
     db: &'db dyn HirAnalysisDb,
     caller: GenericParamOwner<'db>,
 ) -> Result<Vec<(Body<'db>, CompleteSubst<'db>)>, SubstError<'db>> {
     let item = ItemKind::from(caller);
     let mut premises = Vec::new();
-    let own = match caller {
-        GenericParamOwner::Func(func) => func.is_free_or_inherent(db),
-        GenericParamOwner::Struct(_) | GenericParamOwner::Enum(_) => true,
-        _ => false,
-    };
-    if own && let Some(owner) = WhereClauseOwner::from_item_opt(item) {
-        let subst = requirement_subst(db, owner, collect_generic_params(db, caller).params(db))?;
+    let mut declarations = Vec::new();
+    if let Some(owner) = WhereClauseOwner::from_item_opt(item) {
+        declarations.push(owner);
+    }
+    if let GenericParamOwner::Func(func) = caller
+        && let Some(parent @ (ItemKind::Impl(_) | ItemKind::ImplTrait(_) | ItemKind::Trait(_))) =
+            func.scope().parent_item(db)
+        && let Some(owner) = WhereClauseOwner::from_item_opt(parent)
+    {
+        declarations.push(owner);
+    }
+    for owner in declarations {
+        let identity = collect_generic_params(db, owner.into()).params(db).to_vec();
+        let args = caller_args(db, caller, identity)?;
+        let subst = requirement_subst(db, owner, &args)?;
         premises.extend(
             owner
                 .where_clause(db)
@@ -889,7 +916,7 @@ pub(super) fn check_body_requirements<'db>(
         &typed.tables.pending_const_obligations,
     ));
     for (nested, expected) in expression_const_bodies(db, body, typed) {
-        check.extend(anon_const_position_check(db, nested, expected));
+        check.extend(anon_const_position_check(db, nested, expected, &[]));
     }
     check
 }
@@ -985,7 +1012,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 continue;
             }
             if let Some(unmet) =
-                check_path_application(self.db, *application, self.scope, &self.written)
+                check_path_application(self.db, *application, self.scope, &self.written, &[])
             {
                 self.check
                     .unmet_type(site.clone(), unmet, &mut self.entered);
@@ -1123,9 +1150,8 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
 
     /// Discharges the conditions of `func` for a use with `args`.
     ///
-    /// Conditions are supported on free functions and inherent methods.
-    /// Other associated or generic owner contexts are rejected at their
-    /// declarations. Inherent calls keep ordinary method resolution:
+    /// Method conditions are checked with the same instantiated callable
+    /// arguments as free-function conditions. Calls keep ordinary resolution:
     /// requirements constrain the resolved call and do not take part in
     /// candidate selection.
     fn discharge_callee_conditions(&mut self, expr: ExprId, func: Func<'db>, args: &[TyId<'db>]) {
@@ -1133,7 +1159,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
         let predicates = WhereClauseOwner::Func(func)
             .where_clause(db)
             .const_predicates(db);
-        if predicates.is_empty() || !func.is_free_or_inherent(db) {
+        if predicates.is_empty() {
             return;
         }
         // Only a use whose arguments mention the owner's parameters can be
@@ -1141,16 +1167,24 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
         let premise_owner = self
             .premise_owner
             .filter(|_| args.iter().any(|ty| ty.has_param(db)));
+        // Conditions must see the same lexical implementation choices as
+        // the resolved call, including choices introduced by `with`.
+        let selections = self
+            .typed
+            .callable_expr(expr)
+            .map(|callable| callable.selected_applications.clone())
+            .unwrap_or_default();
         for &predicate in predicates
             .iter()
             .filter(|&&predicate| checked_at_uses(db, predicate))
         {
-            if let Discharge::Fails(failure) = discharge_requirement(
+            if let Discharge::Fails(failure) = discharge_selected_requirement(
                 db,
                 WhereClauseOwner::Func(func),
                 predicate,
                 args.to_vec(),
                 premise_owner,
+                selections.clone(),
             ) {
                 self.check
                     .unmet(expr.span(self.body).into(), predicate, failure);
@@ -1233,10 +1267,11 @@ fn anon_const_position_check<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
     expected: TyId<'db>,
+    selections: &[SelectedApplication<'db>],
 ) -> RequirementCheck<'db> {
     use crate::analysis::ty::const_ty::{ConstBodyFailure, const_body_failure};
     let owner = BodyOwner::AnonConstBody { body, expected };
-    let (diags, typed) = infer_body(db, owner);
+    let (diags, typed) = infer_body_with_selections(db, owner, selections);
     if diags_allow_evaluation(db, diags) {
         return check_body_requirements(db, owner, typed);
     }
@@ -1417,6 +1452,7 @@ fn check_path_application<'db>(
     ty: TyId<'db>,
     scope: ScopeId<'db>,
     reported: &FxHashSet<TyId<'db>>,
+    selections: &[SelectedApplication<'db>],
 ) -> Option<TypeRequirementFailure<'db>> {
     let declaration = adt_declaration(db, ty)?;
     let arity = collect_generic_params(db, declaration.into())
@@ -1425,7 +1461,7 @@ fn check_path_application<'db>(
     if ty.decompose_ty_app(db).1.len() != arity {
         return None;
     }
-    check_type_requirements(db, ty, scope, reported)
+    check_selected_type_requirements(db, ty, scope, reported, selections)
 }
 
 /// The anonymous constants a body writes in expression and pattern
@@ -1729,9 +1765,21 @@ fn check_type_requirements<'db>(
     scope: ScopeId<'db>,
     reported: &FxHashSet<TyId<'db>>,
 ) -> Option<TypeRequirementFailure<'db>> {
+    check_selected_type_requirements(db, ty, scope, reported, &[])
+}
+
+fn check_selected_type_requirements<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    scope: ScopeId<'db>,
+    reported: &FxHashSet<TyId<'db>>,
+    selections: &[SelectedApplication<'db>],
+) -> Option<TypeRequirementFailure<'db>> {
     let (base, args) = ty.decompose_ty_app(db);
     for &arg in args {
-        if let Some(failure) = check_type_requirements(db, arg, scope, reported) {
+        if let Some(failure) =
+            check_selected_type_requirements(db, arg, scope, reported, selections)
+        {
             return Some(failure);
         }
     }
@@ -1773,7 +1821,14 @@ fn check_type_requirements<'db>(
         .iter()
         .filter(|&&predicate| checked_at_uses(db, predicate))
         .find_map(|&predicate| {
-            match discharge_requirement(db, declaration, predicate, args.to_vec(), caller) {
+            match discharge_selected_requirement(
+                db,
+                declaration,
+                predicate,
+                args.to_vec(),
+                caller,
+                selections.to_vec(),
+            ) {
                 Discharge::Holds => None,
                 Discharge::Fails(failure) => Some(TypeRequirementFailure {
                     ty,
@@ -1782,16 +1837,6 @@ fn check_type_requirements<'db>(
                 }),
             }
         })
-}
-
-fn discharge_requirement<'db>(
-    db: &'db dyn HirAnalysisDb,
-    declaration: WhereClauseOwner<'db>,
-    predicate: Body<'db>,
-    args: Vec<TyId<'db>>,
-    caller: Option<GenericParamOwner<'db>>,
-) -> Discharge {
-    discharge_selected_requirement(db, declaration, predicate, args, caller, Vec::new())
 }
 
 #[salsa::tracked(cycle_initial=requirement_cycle_initial, cycle_fn=requirement_cycle_recover)]
@@ -1906,6 +1951,10 @@ fn requirement_cycle_initial<'db>(
     Discharge::Fails(RequirementFailure::Recursive)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Salsa recovery adds value and iteration count to the query arguments"
+)]
 fn requirement_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
     _value: &Discharge,
@@ -2021,7 +2070,10 @@ pub(crate) fn check_declared_type_requirements<'db>(
 enum WrittenEntry<'db> {
     /// Anonymous constants written in a type or trait reference, each with
     /// the type its position checks it against.
-    ConstBodies(Vec<(Body<'db>, TyId<'db>)>),
+    ConstBodies {
+        bodies: Vec<(Body<'db>, TyId<'db>)>,
+        expr: Option<ExprId>,
+    },
     /// A written type, listed after the types nested in it.
     Type(WrittenType<'db>),
 }
@@ -2030,6 +2082,8 @@ enum WrittenEntry<'db> {
 struct WrittenType<'db> {
     span: DynLazySpan<'db>,
     scope: ScopeId<'db>,
+    /// The enclosing expression, whose inferred lexical selections apply here.
+    expr: Option<ExprId>,
     /// Its lowering, unless that is invalid.
     lowered: Option<TyId<'db>>,
     /// The constrained applications its paths passed through.
@@ -2074,6 +2128,7 @@ fn written_types_query<'db>(
         /// and finds them with the same rule (`written_type_const_args`).
         defaults: FxHashSet<crate::hir_def::TypeId<'db>>,
         default_depth: usize,
+        expr: Option<ExprId>,
     }
     impl<'db> Visitor<'db> for Collector<'db> {
         // Nested items and bodies are their own regions.
@@ -2118,7 +2173,10 @@ fn written_types_query<'db>(
                 let bodies =
                     trait_ref_const_args(self.db, path, scope, assumptions_at(self.db, scope));
                 if !bodies.is_empty() {
-                    self.entries.push(WrittenEntry::ConstBodies(bodies));
+                    self.entries.push(WrittenEntry::ConstBodies {
+                        bodies,
+                        expr: self.expr,
+                    });
                 }
             }
             walk_trait_ref(self, ctxt, trait_ref);
@@ -2142,6 +2200,7 @@ fn written_types_query<'db>(
             expr: ExprId,
             expr_data: &Expr<'db>,
         ) {
+            let saved_expr = self.expr.replace(expr);
             if let Expr::With(bindings, _) = expr_data {
                 for (idx, binding) in bindings.iter().enumerate() {
                     let Some(Partial::Present(key)) = binding.key_path else {
@@ -2161,6 +2220,7 @@ fn written_types_query<'db>(
                 }
             }
             walk_expr(self, ctxt, expr);
+            self.expr = saved_expr;
         }
     }
     impl<'db> Collector<'db> {
@@ -2204,7 +2264,10 @@ fn written_types_query<'db>(
             if self.default_depth == 0 {
                 let bodies = written_const_args(db, hir_ty, scope, assumptions);
                 if !bodies.is_empty() {
-                    self.entries.push(WrittenEntry::ConstBodies(bodies));
+                    self.entries.push(WrittenEntry::ConstBodies {
+                        bodies,
+                        expr: self.expr,
+                    });
                 }
             }
             let nested_from = self.entries.len();
@@ -2213,6 +2276,7 @@ fn written_types_query<'db>(
                 self.entries.push(WrittenEntry::Type(WrittenType {
                     span,
                     scope,
+                    expr: self.expr,
                     lowered: (!ty.has_invalid(db)).then_some(ty),
                     applications,
                     nested_from,
@@ -2228,6 +2292,7 @@ fn written_types_query<'db>(
         entries: Vec::new(),
         defaults: FxHashSet::default(),
         default_depth: 0,
+        expr: None,
     };
     collector.visit_item(&mut VisitorCtxt::with_item(db, root), root);
     collector.entries
@@ -2252,18 +2317,64 @@ fn written_type_check_query<'db>(
     region: WrittenTypeRegion<'db>,
 ) -> Vec<FuncBodyDiag<'db>> {
     let entries = written_types(db, region.item(db));
+    // Listing written types remains independent of inference: the body's
+    // requirement check reads that list itself. Discharge alone reads the
+    // completed inference template for lexical implementation selections.
+    let typed = match region.item(db) {
+        ItemKind::Body(body)
+            if body
+                .exprs(db)
+                .iter()
+                .any(|(_, expr)| matches!(expr.borrowed().to_opt(), Some(Expr::With(..)))) =>
+        {
+            body.containing_func(db)
+                .map(|func| &infer_body(db, BodyOwner::Func(func)).1)
+        }
+        _ => None,
+    };
     let mut diags = Vec::new();
     // The failing application each entry reported, if any.
     let mut reported: Vec<Option<TyId<'db>>> = Vec::with_capacity(entries.len());
     for entry in entries {
         let report = match entry {
-            WrittenEntry::ConstBodies(bodies) => {
+            WrittenEntry::ConstBodies { bodies, expr } => {
+                let selections = expr
+                    .and_then(|expr| {
+                        typed.and_then(|typed| typed.tables.expr_selections[expr].as_deref())
+                    })
+                    .unwrap_or(&[]);
                 for &(body, expected) in bodies {
-                    diags.extend(anon_const_position_check(db, body, expected).diags);
+                    diags.extend(anon_const_position_check(db, body, expected, selections).diags);
                 }
                 None
             }
             WrittenEntry::Type(written) => {
+                let selections = written
+                    .expr
+                    .and_then(|expr| {
+                        typed.and_then(|typed| typed.tables.expr_selections[expr].as_deref())
+                    })
+                    .unwrap_or_default();
+                let solve_cx = TraitSolveCx::new(db, written.scope)
+                    .with_assumptions(assumptions_at(db, written.scope));
+                let mut uses = Vec::new();
+                for ty in written.lowered.iter().chain(&written.applications) {
+                    if let Some(conditions) =
+                        crate::analysis::ty::trait_resolution::check_ty_wf(db, solve_cx, *ty)
+                            .conditions()
+                    {
+                        uses.extend(selected_impl_condition_uses(
+                            db,
+                            conditions,
+                            written.scope,
+                            written.span.clone(),
+                        ));
+                    }
+                }
+                for use_ in &mut uses {
+                    use_.obligation.selections = selections.to_vec();
+                }
+                diags.extend(check_recorded_condition_uses(db, &uses).diags);
                 let nested: FxHashSet<_> = reported[written.nested_from..]
                     .iter()
                     .flatten()
@@ -2271,10 +2382,18 @@ fn written_type_check_query<'db>(
                     .collect();
                 let unmet = written
                     .lowered
-                    .and_then(|ty| check_type_requirements(db, ty, written.scope, &nested))
+                    .and_then(|ty| {
+                        check_selected_type_requirements(db, ty, written.scope, &nested, selections)
+                    })
                     .or_else(|| {
                         written.applications.iter().find_map(|&application| {
-                            check_path_application(db, application, written.scope, &nested)
+                            check_path_application(
+                                db,
+                                application,
+                                written.scope,
+                                &nested,
+                                selections,
+                            )
                         })
                     });
                 unmet.map(|unmet| {

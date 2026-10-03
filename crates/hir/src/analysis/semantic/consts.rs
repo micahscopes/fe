@@ -11,8 +11,7 @@ use crate::analysis::{
         adt_def::{AdtDef, ConcreteTypeView, instantiate_adt_field_for_concrete_demand},
         const_ty::{
             ConcreteArrayLengthError, ConstTyData, ConstTyId, const_ty_from_sem_const,
-            demand_concrete_array_length, evaluate_type_level_const_ty,
-            normalize_const_tys_for_comparison, ty_is_fully_ground,
+            demand_concrete_array_length, evaluate_type_level_const_ty, ty_is_fully_ground,
         },
         fold::{TyFoldable, TyFolder},
         subst::substitute_complete,
@@ -271,16 +270,35 @@ pub(crate) fn fixed_string_capacity_bytes<'db>(
 
 /// Compares types by their const identities, so a deferred extent and the
 /// value it evaluates to name the same type.
-fn const_identity_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
-    struct ConstIdentity;
+fn const_identity_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<TyId<'db>> {
+    struct ConstIdentity {
+        failed: bool,
+    }
 
     impl<'db> TyFolder<'db> for ConstIdentity {
         fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
-            normalize_const_tys_for_comparison(db, ty.super_fold_with(db, self))
+            let ty = ty.super_fold_with(db, self);
+            match crate::analysis::ty::const_ty::normalize_const_tys_for_comparison_checked(db, ty)
+            {
+                Ok(ty) => ty,
+                Err(()) => {
+                    self.failed = true;
+                    ty
+                }
+            }
         }
     }
 
-    ty.fold_with(db, &mut ConstIdentity)
+    let mut folder = ConstIdentity { failed: false };
+    let ty = ty.fold_with(db, &mut folder);
+    (!folder.failed).then_some(ty)
+}
+
+fn same_const_identity<'db>(db: &'db dyn HirAnalysisDb, lhs: TyId<'db>, rhs: TyId<'db>) -> bool {
+    lhs == rhs
+        || const_identity_ty(db, lhs)
+            .zip(const_identity_ty(db, rhs))
+            .is_some_and(|(lhs, rhs)| lhs == rhs)
 }
 
 fn verify_sem_const_children<'db>(
@@ -301,27 +319,9 @@ fn verify_sem_const_children<'db>(
             && !expected_ty.has_var(db)
             && !expected_ty.has_projection(db)
             && !expected_ty.has_hole(db)
-            && actual_ty != expected_ty
-            && const_identity_ty(db, actual_ty) != const_identity_ty(db, expected_ty)
+            && !same_const_identity(db, actual_ty, expected_ty)
         {
-            // A fixed string length can arrive as either a sealed value or a
-            // checked expression. Compare only lengths reduced without faults.
-            let same_ground_string = if actual_ty.is_string(db) && expected_ty.is_string(db) {
-                let (_, actual_args) = actual_ty.decompose_ty_app(db);
-                let (_, expected_args) = expected_ty.decompose_ty_app(db);
-                actual_args.first().zip(expected_args.first()).is_some_and(
-                    |(&actual, &expected)| {
-                        let actual = crate::analysis::ty::const_ty::normalize_const_tys_for_comparison_checked(db, actual);
-                        let expected = crate::analysis::ty::const_ty::normalize_const_tys_for_comparison_checked(db, expected);
-                        matches!((actual, expected), (Ok(actual), Ok(expected)) if actual == expected)
-                    },
-                )
-            } else {
-                false
-            };
-            if !same_ground_string {
-                return Err("constant child type differs from its aggregate field type");
-            }
+            return Err("constant child type differs from its aggregate field type");
         }
     }
     Ok(())
@@ -886,9 +886,13 @@ fn reify_runtime_const_impl<'db>(
     let actual_ty = sem_const_ty(db, reified);
     let actual_ty = actual_ty.as_view(db).unwrap_or(actual_ty);
     let expected_ty = expected_ty.as_view(db).unwrap_or(expected_ty);
-    (actual_ty == expected_ty
+    (same_const_identity(db, actual_ty, expected_ty)
         || instance.is_some_and(|instance| {
-            instance.normalized_ty(db, actual_ty) == instance.normalized_ty(db, expected_ty)
+            same_const_identity(
+                db,
+                instance.normalized_ty(db, actual_ty),
+                instance.normalized_ty(db, expected_ty),
+            )
         }))
     .then_some(reified)
 }

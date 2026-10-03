@@ -15,7 +15,17 @@ fn test_fmt_fe_test_fixtures_semantic_roundtrip(fixture: Fixture<&str>) {
     let mut db = DriverDataBase::default();
     let file_url = Url::from_file_path(fixture.path())
         .unwrap_or_else(|_| panic!("fixture path should be absolute: {}", fixture.path()));
-    let file = db.workspace().touch(&mut db, file_url, Some(formatted));
+    db.workspace()
+        .touch(&mut db, file_url.clone(), Some(formatted));
+    let db = driver::elaboration::prepare(&db)
+        .unwrap_or_else(|err| {
+            panic!(
+                "formatted output failed generation for {}: {err:?}",
+                fixture.path()
+            )
+        })
+        .unwrap_or(db);
+    let file = db.workspace().get(&db, &file_url).expect("formatted file");
     let top_mod = db.top_mod(file);
 
     let diagnostics = db.run_on_top_mod(top_mod);

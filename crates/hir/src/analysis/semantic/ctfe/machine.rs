@@ -36,7 +36,8 @@ use crate::{
             provider::ProviderAddressSpace,
             ty_check::{
                 BodyOwner, EffectArgLayoutView, EffectParamSite, EffectPassMode, LocalBinding,
-                ParamSite, infer_body, inference_met_lowering_cycle,
+                ParamSite, checked_body_allows_evaluation, infer_body,
+                inference_met_lowering_cycle,
             },
             ty_def::{InvalidCause, PrimTy, TyBase, TyData, TyId},
         },
@@ -221,6 +222,17 @@ pub fn eval_body_owner_const<'db>(
     owner: BodyOwner<'db>,
     subst: GenericSubst<'db>,
 ) -> EvalOutcome<'db, SemConstId<'db>> {
+    // Anonymous constants are checked by their enclosing source position.
+    // Type lowering can evaluate them while forming a requirement, before
+    // discharging it, so checking them here would re-enter that discharge.
+    // Direct named-body requests retain the shared checker's rejection.
+    if matches!(owner, BodyOwner::Func(_) | BodyOwner::Const(_))
+        && !checked_body_allows_evaluation(db, owner)
+    {
+        return EvalOutcome::Failed(EvalFailure::Ctfe(CtfeError::InvalidBody {
+            origin: SemOrigin::Body(owner),
+        }));
+    }
     let key = SemanticInstanceKey::new(
         db,
         owner,
@@ -940,7 +952,7 @@ impl<'a, 'db> CtfeProjected<'a, 'db> {
                             .map(|byte| Self::Byte(*byte))
                             .ok_or(CtfeError::OutOfBounds { origin });
                     }
-                    _ => return Err(invalid().into()),
+                    _ => return Err(invalid()),
                 };
                 children
                     .get(idx)
@@ -972,7 +984,7 @@ impl<'a, 'db> CtfeProjected<'a, 'db> {
                             .map(|byte| Self::Byte(*byte))
                             .ok_or(CtfeError::OutOfBounds { origin });
                     }
-                    _ => return Err(invalid().into()),
+                    _ => return Err(invalid()),
                 };
                 value
                     .aggregate_child(db, idx)
@@ -1548,8 +1560,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                             &value_args,
                             origin,
                         )
-                        .map(CtfeValue::Value)
-                        .map_err(Into::into);
+                        .map(CtfeValue::Value);
                 }
                 if let BodyOwner::Func(func) = instance.key(self.db).owner(self.db)
                     && !func.is_const(self.db)
@@ -1931,19 +1942,19 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
     ) -> EvalResult<'db, CtfeConstValue<'db>> {
         if let Some(operation) = meta_intrinsic_kind(self.db, func) {
             return Ok(match operation {
-                MetaIntrinsic::CodeOp(operation) => {
+                MetaIntrinsic::Code(operation) => {
                     self.eval_code_intrinsic(instance, operation, result_ty, args, origin)?
                 }
-                MetaIntrinsic::StructuralOp(operation) => {
+                MetaIntrinsic::Structural(operation) => {
                     self.eval_structural_intrinsic(instance, operation, result_ty, args, origin)?
                 }
-                MetaIntrinsic::CodeValueOp(CodeValueOp::Empty) => self.code_value(
+                MetaIntrinsic::CodeValue(CodeValueOp::Empty) => self.code_value(
                     result_ty,
                     crate::analysis::semantic::CodeSource::Empty,
                     Vec::new(),
                     origin,
                 )?,
-                MetaIntrinsic::CodeValueOp(CodeValueOp::Root) => {
+                MetaIntrinsic::CodeValue(CodeValueOp::Root) => {
                     let Some(arg) = args.first() else {
                         return Err(CtfeError::InvalidOperation {
                             origin,
@@ -2367,9 +2378,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 })
         };
         let output = match operation {
-            CodeOp::NodeKind | CodeOp::NodeAssignmentOperator => {
+            CodeOp::Kind | CodeOp::AssignmentOperator => {
                 let kind =
-                    if operation == CodeOp::NodeAssignmentOperator {
+                    if operation == CodeOp::AssignmentOperator {
                         let CodeNodeSite::Expr(expr) = site else {
                             return Err(invalid("node is not a compound assignment"));
                         };
@@ -2401,14 +2412,14 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     Vec::new(),
                 ));
             }
-            CodeOp::NodeChildCount => {
+            CodeOp::ChildCount => {
                 return Ok(CtfeConstValue::int(
                     db,
                     result_ty,
                     description.children.len().into(),
                 ));
             }
-            CodeOp::NodeChild => {
+            CodeOp::Child => {
                 let index = child_index("code")?;
                 let site = description.children.get(index).ok_or_else(|| {
                     invalid(&format!(
@@ -2418,7 +2429,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 })?;
                 StructuralHandle::CodeNode { code, site }
             }
-            CodeOp::NodeParameterIndex => {
+            CodeOp::ParameterIndex => {
                 let CodeNodeSite::Expr(expr) = site else {
                     return Err(invalid("node is not a parameter use"));
                 };
@@ -2427,7 +2438,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 };
                 return Ok(CtfeConstValue::int(db, result_ty, idx.into()));
             }
-            CodeOp::NodeSameBinding => {
+            CodeOp::SameBinding => {
                 let (_, rhs, rhs_body, rhs_typed, _) = node(&args[1])?;
                 let binding =
                     |typed: &crate::analysis::ty::ty_check::TypedBody<'db>, site| match site {
@@ -2441,7 +2452,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     .ok_or_else(|| invalid("node has no checked binding"))?;
                 return Ok(CtfeConstValue::bool(body == rhs_body && lhs == rhs));
             }
-            CodeOp::NodeSameCheckedCall => {
+            CodeOp::SameCheckedCall => {
                 let (_, rhs, _, rhs_typed, _) = node(&args[1])?;
                 let (CodeNodeSite::Expr(lhs), CodeNodeSite::Expr(rhs)) = (site, rhs) else {
                     return Err(invalid("node has no checked call record"));
@@ -2454,7 +2465,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     .ok_or_else(|| invalid("node has no checked call record"))?;
                 return Ok(CtfeConstValue::bool(lhs == rhs));
             }
-            CodeOp::NodeTypeIs => {
+            CodeOp::TypeIs => {
                 let ty = match site {
                     CodeNodeSite::Expr(expr) => typed.expr_ty(db, expr),
                     CodeNodeSite::Pat(pat) => typed.pat_ty(db, pat),
@@ -2482,7 +2493,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     ),
                 );
             }
-            CodeOp::NodeFieldIndex => {
+            CodeOp::FieldIndex => {
                 let CodeNodeSite::Expr(expr) = site else {
                     return Err(invalid("node is not a field projection"));
                 };
@@ -2491,7 +2502,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     .ok_or_else(|| invalid("node is not a checked field projection"))?;
                 return Ok(CtfeConstValue::int(db, result_ty, index.into()));
             }
-            CodeOp::NodeArrayLength => {
+            CodeOp::ArrayLength => {
                 let CodeNodeSite::Expr(expr) = site else {
                     return Err(invalid("node is not an array construction"));
                 };
@@ -2511,7 +2522,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     .ok_or_else(|| invalid("array length is not a checked concrete value"))?;
                 return Ok(CtfeConstValue::int(db, result_ty, length.into()));
             }
-            CodeOp::NodeRecordFieldIndex => {
+            CodeOp::RecordFieldIndex => {
                 let CodeNodeSite::Expr(expr) = site else {
                     return Err(invalid("node is not a record constructor"));
                 };
@@ -2535,7 +2546,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                         .ok_or_else(|| invalid("record child has no declared field"))?;
                 return Ok(CtfeConstValue::int(db, result_ty, index.into()));
             }
-            CodeOp::NodeLiteral => {
+            CodeOp::Literal => {
                 let CodeNodeSite::Expr(expr) = site else {
                     return Err(invalid("node is not a scalar literal"));
                 };
@@ -2564,7 +2575,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 });
             }
         };
-        Ok(self.structural_value(result_ty, output, origin, "")?)
+        self.structural_value(result_ty, output, origin, "")
     }
 
     fn eval_structural_intrinsic(
@@ -2593,7 +2604,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             )),
             _ => None,
         };
-        let name = MetaIntrinsic::StructuralOp(operation).name();
+        let name = MetaIntrinsic::Structural(operation).name();
         let output = match (operation, handle) {
             (StructuralOp::Binders, StructuralHandle::Variant(variant)) => {
                 if usize::from(variant.idx) >= variant.enum_.len_variants(self.db) {

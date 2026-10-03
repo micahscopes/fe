@@ -2007,7 +2007,7 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             Self::UnknownKindBound { span, name } => primary_diag(
                 Severity::Error,
                 "unknown kind marker",
-                &format!("`{name}` does not resolve to a kind marker"),
+                format!("`{name}` does not resolve to a kind marker"),
                 span.resolve(db),
                 error_code,
             ),
@@ -3860,10 +3860,8 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                     error_code,
                 );
                 diag.notes.push(
-                    "const where predicates are supported on functions, structs, enums, and \
-                     inherent methods, including methods of generic `impl` blocks; inside an \
-                     `impl`, the conditions of the types in its header hold without restating \
-                     them"
+                    "const where predicates are supported on functions, structs, enums, traits, \
+                     trait methods, trait-impl methods, and generic inherent impls"
                         .to_string(),
                 );
                 diag

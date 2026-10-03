@@ -17,10 +17,9 @@ use smallvec1::SmallVec;
 use trait_def::impls_for_trait_def;
 use trait_resolution::constraint::super_trait_cycle;
 use ty_def::{BorrowKind, InvalidCause, TyData, TyId};
-use ty_lower::{collect_generic_params, lower_hir_ty, lower_type_alias};
+use ty_lower::{lower_hir_ty, lower_type_alias};
 
 use crate::analysis::name_resolution::{PathRes, resolve_path};
-use crate::analysis::semantic::ConstUsePolicy;
 use crate::analysis::{
     HirAnalysisDb, analysis_pass::ModuleAnalysisPass, diagnostics::DiagnosticVoucher,
 };
@@ -691,28 +690,17 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
         // Trait impl consts are checked separately above according to each
         // constant's body-checking policy.
         for &impl_ in top_mod.all_impls(db) {
-            // Consts on generic impls have legitimately parametric values
-            // (e.g. `256 / BITS`), validated per instantiation; only flag a
-            // non-evaluable body, not a type-level result.
-            let policy = if collect_generic_params(db, impl_.into())
-                .params(db)
-                .is_empty()
-            {
-                ConstUsePolicy::RequireValue
-            } else {
-                ConstUsePolicy::AllowDependent
-            };
             for c in impl_.assoc_consts(db) {
                 let (Some(body), Some(expected_ty)) = (c.value_body(db), c.ty(db)) else {
                     continue;
                 };
-                let (body_diags, _) = ty_check::check_anon_const_body(db, body, expected_ty);
+                let (body_diags, typed_body) =
+                    ty_check::check_anon_const_body(db, body, expected_ty);
                 diags.extend(body_diags.iter().map(|diag| diag.to_voucher()));
-                // CTFE-validate the value, but only when it type-checks cleanly
-                // (otherwise the type error is the real diagnostic).
+                // Validate constness at declaration; execute on value demand.
                 if body_diags.is_empty() {
                     diags.extend(
-                        ty_check::const_body_ctfe_diags(db, body, expected_ty, policy)
+                        ty_check::check_associated_const_declaration(db, body, typed_body)
                             .iter()
                             .map(|diag| diag.to_voucher()),
                     );

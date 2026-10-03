@@ -343,10 +343,15 @@ impl<'db> Borrowck<'db> {
         // would rejoin the same edges into its successors.
         let mut dirty = vec![false; self.body.blocks.len()];
         dirty[self.body.entry.index()] = true;
+        // Generated short-circuit joins can precede their predecessors in the
+        // block table. Share the solver's traversal order so forward facts
+        // propagate in one sweep instead of one sweep per nested join.
+        let order = self.inventory.loops.reverse_postorder();
         while dirty.contains(&true) {
             #[cfg(feature = "borrowck-profile")]
             profile.sweep(self.inventory.loans.len(), self.source_generation);
-            for (block_index, block) in self.body.blocks.iter().enumerate() {
+            for &block_index in order {
+                let block = &self.body.blocks[block_index];
                 if !std::mem::take(&mut dirty[block_index]) {
                     continue;
                 }

@@ -671,7 +671,7 @@ fn quote_field_label_ahead<S: TokenStream>(parser: &mut Parser<S>) -> bool {
     let mut count = 8;
     loop {
         let tokens = parser.peek_n_non_trivia(count);
-        if tokens.get(0) != Some(&SyntaxKind::Dollar) || tokens.get(1) != Some(&SyntaxKind::LBrace)
+        if tokens.first() != Some(&SyntaxKind::Dollar) || tokens.get(1) != Some(&SyntaxKind::LBrace)
         {
             return false;
         }

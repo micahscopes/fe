@@ -2684,6 +2684,14 @@ impl<'db> Borrowck<'db> {
         }
         if let Some(postcondition) = &call.summary.scalar_result {
             let (_, returned) = BinderScope::default().bind(IndexNamespace::Result);
+            // Keep facts about arguments, but do not accumulate a relation for
+            // an unused scalar result. Repeated calls otherwise multiply their
+            // return alternatives even when no selector or assertion needs them.
+            let postcondition = if self.scalar.indices.contains(&IndexExpr::Runtime(result)) {
+                postcondition.clone()
+            } else {
+                postcondition.forget_indices(|index| index == returned)
+            };
             let subst = IndexSubst::new(
                 postcondition.scope(),
                 &BinderScope::default(),

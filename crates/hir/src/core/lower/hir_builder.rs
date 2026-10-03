@@ -932,9 +932,7 @@ where
         template: Body<'db>,
         root: ExprId,
         provider_scope: ScopeId<'db>,
-        holes: &[FrozenCodeHole],
-        rooted_funcs: &[(ExprId, PathId<'db>)],
-        generic_uses: &[(ExprId, IdentId<'db>)],
+        bindings: QuoteBodyBindings<'_, 'db>,
     ) -> Result<(Body<'db>, Vec<(ExprId, IdentId<'db>)>), QuoteConstructionError> {
         let mut body = BodyBuilder::new(
             self.ctxt,
@@ -944,18 +942,8 @@ where
             TrackedItemVariant::WhereConstPredicate(index),
         );
         let budget = body.body.f_ctxt.quote_budget.clone();
-        let (root, copied) = body.copy_closed_quote_body(
-            template,
-            root,
-            provider_scope,
-            budget,
-            QuoteBodyBindings {
-                holes,
-                rooted_funcs,
-                generic_uses,
-                ..Default::default()
-            },
-        )?;
+        let (root, copied) =
+            body.copy_closed_quote_body(template, root, provider_scope, budget, bindings)?;
         Ok((
             body.body.build(None, root, BodyKind::Anonymous),
             copied.generics,

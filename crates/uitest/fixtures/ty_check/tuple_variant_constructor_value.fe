@@ -1,3 +1,4 @@
+// Adopts master 4d8ec2073: the condition is checked at the written type.
 enum Choice {
     Value(u256),
 }
@@ -9,7 +10,7 @@ fn bind() {
 }
 
 fn pair() {
-    let pair = (Choice::Value, 0)
+    let pair = (Choice::Value, 0 as u256)
 }
 
 fn pass() {

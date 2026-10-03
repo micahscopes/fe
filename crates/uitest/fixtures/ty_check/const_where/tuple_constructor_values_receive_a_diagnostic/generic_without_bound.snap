@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/const_where/tuple_constructor_values_receive_a_diagnostic/generic_without_bound.fe
+---
+error[8-0093]: const requirement is not satisfied
+  ┌─ generic_without_bound.fe:3:49
+  │
+2 │ enum Choice<const N: usize> where N > 0 { Value(u256) }
+  │                                   ----- required by this predicate
+3 │ fn unused<const N: usize>() { let constructor = Choice<N>::Value }
+  │                                                 ^^^^^^^^^^^^^^^^ no matching const requirement in the caller after substitution

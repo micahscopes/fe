@@ -1,4 +1,4 @@
-error[18-0003]: invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+error[19-0003]: invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
    ┌─ quote_budget.fe:7:17
    │
  7 │           items = quote {

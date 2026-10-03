@@ -1,3 +1,4 @@
+// RD95: mb3 checks impl-method conditions against the trait instead of rejecting this context.
 trait Read<const N: usize> { fn read(self) }
 struct S {}
 impl<const N: usize> Read<N> for S { fn read(self) where N > 0 {} }

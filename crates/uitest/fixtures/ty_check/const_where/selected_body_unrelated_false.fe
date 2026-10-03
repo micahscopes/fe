@@ -1,3 +1,4 @@
+// A written annotation owns the condition error; the literal does not repeat it.
 trait Compute { const OK: bool }
 struct Subject {}
 

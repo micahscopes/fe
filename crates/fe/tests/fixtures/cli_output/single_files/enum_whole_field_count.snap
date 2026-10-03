@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_whole_field_count.fe
 ---
 === STDERR ===
-error[18-0001]: `field_count` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
+error[19-0001]: `field_count` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
   ┌─ enum_whole_field_count.fe:4:17
   │
 4 │         let n = field_count(record)

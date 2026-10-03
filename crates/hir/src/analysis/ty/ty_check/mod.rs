@@ -86,7 +86,7 @@ use super::{
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
     generic_defaults::{GenericDefault, default_assumptions, generic_default},
     layout_holes::merge_equated_layout_holes,
-    trait_def::{TraitInstId, resolve_trait_method_instance},
+    trait_def::TraitInstId,
     trait_resolution::{
         CanonicalGoalQuery, GoalSatisfiability, PredicateListId, Selection, TraitSolveCx,
         goal_query_has_no_distinct_solution, is_goal_query_satisfiable, is_goal_satisfiable,
@@ -109,7 +109,8 @@ use crate::analysis::semantic::{
     EvalOutcome, GenericSubst, ImplEnv, RuntimeSizeError, SemConstId, SemConstScalar,
     SemConstValue, SemOrigin, SemanticInstanceKey, const_computation_for_instance,
     describe_const_computation, eval_body_owner_const, get_or_build_semantic_instance,
-    reify_runtime_const_for_ty, runtime_size_bytes_with_source,
+    reify_runtime_const_for_ty, resolve_trait_method_with_selections,
+    runtime_size_bytes_with_source,
 };
 use crate::analysis::semantic::{CtfeError, SemanticCodeRegionRef};
 use crate::analysis::ty::ty_def::{TyBase, TyData};
@@ -218,13 +219,6 @@ pub fn check_impl_trait_const_bodies<'db>(
     };
     let trait_hir = implementor.trait_def(db);
     let trait_args = implementor.trait_(db).args(db);
-    let policy = if generated_origin.is_some() {
-        ConstUsePolicy::RequireValue
-    } else {
-        // Associated values may retain a contextual selection until use.
-        // Reached body failures still report under AllowDependent.
-        ConstUsePolicy::AllowDependent
-    };
 
     // The record whose generated ABI metadata these constants are, if any.
     let record = match implementor.self_ty(db).adt_ref(db) {
@@ -267,11 +261,15 @@ pub fn check_impl_trait_const_bodies<'db>(
         if expected_ty.has_invalid(db) {
             continue;
         }
-        let body_diags = &check_anon_const_body(db, body, expected_ty).0;
+        let (body_diags, typed_body) = check_anon_const_body(db, body, expected_ty);
         if body_check_policy != AssocConstBodyCheckPolicy::ExpansionSourceCompatibility {
             diags.extend(body_diags.iter().cloned());
         }
         if body_diags.is_empty() {
+            if generated_origin.is_none() {
+                diags.extend(check_associated_const_declaration(db, body, typed_body));
+                continue;
+            }
             // Generated record metadata reports an evaluation failure where it
             // occurs, as ordinary constants do, so a failing field constant is
             // reported once, at its own body. Other generated constants name
@@ -287,18 +285,37 @@ pub fn check_impl_trait_const_bodies<'db>(
                 }),
             };
             diags.extend(
-                const_body_ctfe_diags_with_context(db, body, expected_ty, policy, context)
-                    .into_iter()
-                    .filter(|diag| {
-                        // ImplTrait::diags_assoc_const_evaluability owns the
-                        // dedicated cycle diagnostic for these declarations.
-                        !matches!(
-                            diag,
-                            FuncBodyDiag::Ty(TyDiagCollection::Ty(
-                                TyLowerDiag::ConstEvalRecursiveConst(_)
-                            ))
-                        )
-                    }),
+                const_body_ctfe_diags_with_context(
+                    db,
+                    body,
+                    expected_ty,
+                    ConstUsePolicy::RequireValue,
+                    context,
+                )
+                .into_iter()
+                .filter(|diag| {
+                    // ImplTrait::diags_assoc_const_evaluability owns the
+                    // dedicated cycle diagnostic for these declarations.
+                    !matches!(
+                        diag,
+                        FuncBodyDiag::Ty(TyDiagCollection::Ty(
+                            TyLowerDiag::ConstEvalRecursiveConst(_)
+                        ))
+                    )
+                })
+                .map(|diag| match (body_check_policy, diag) {
+                    // A record's metadata demand is compiler generated.
+                    // Keep the field constant's fault as the diagnostic
+                    // owner, rather than anchoring it in an ABI helper.
+                    (
+                        AssocConstBodyCheckPolicy::AbiRecordFields(_),
+                        FuncBodyDiag::Ty(TyDiagCollection::Ty(TyLowerDiag::ConstEvalAtUse {
+                            fault,
+                            ..
+                        })),
+                    ) => FuncBodyDiag::Ty((*fault).into()),
+                    (_, diag) => diag,
+                }),
             );
         }
     }
@@ -330,7 +347,7 @@ pub fn check_trait_const_default_bodies<'db>(
         if flags.contains(TyFlags::HAS_INVALID) {
             continue;
         }
-        let body_diags = &check_anon_const_body(db, body, expected_ty).0;
+        let (body_diags, typed_body) = check_anon_const_body(db, body, expected_ty);
         if flags.contains(TyFlags::HAS_PARAM) {
             // A declared type mentioning `Self` or generic params (`const C:
             // T = 1`) types the default per instantiation: impl overrides are
@@ -348,15 +365,29 @@ pub fn check_trait_const_default_bodies<'db>(
             diags.extend(body_diags.iter().cloned());
         }
         if body_diags.is_empty() {
-            diags.extend(const_body_ctfe_diags(
-                db,
-                body,
-                expected_ty,
-                ConstUsePolicy::AllowDependent,
-            ));
+            diags.extend(check_associated_const_declaration(db, body, typed_body));
         }
     }
     diags
+}
+
+/// RD77: validate an associated declaration's const language without
+/// executing it. Trait defaults and trait/inherent implementations share this
+/// policy; a value demand retains strict execution and its fault provenance.
+pub(crate) fn check_associated_const_declaration<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    typed_body: &TypedBody<'db>,
+) -> Vec<FuncBodyDiag<'db>> {
+    crate::analysis::ty::const_check::check_const_body_expressions(db, body, typed_body)
+        .into_iter()
+        .map(|diag| match diag {
+            FuncBodyDiag::Body(BodyDiag::ConstFnNonConstCall { primary, .. }) => {
+                TyDiagCollection::Ty(TyLowerDiag::ConstEvalNonConstCall(primary)).into()
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Checks const bodies in generic defaults at their declarations: a const
@@ -830,9 +861,7 @@ pub(crate) fn check_where_const_predicates<'db>(
         return diags;
     }
     let generic_declaration = match owner {
-        WhereClauseOwner::Func(func) if func.is_free_or_inherent(db) => {
-            Some(GenericParamOwner::Func(func))
-        }
+        WhereClauseOwner::Func(func) => Some(GenericParamOwner::Func(func)),
         WhereClauseOwner::Struct(record) => Some(GenericParamOwner::Struct(record)),
         WhereClauseOwner::Enum(enum_) => Some(GenericParamOwner::Enum(enum_)),
         WhereClauseOwner::Trait(trait_) => Some(GenericParamOwner::Trait(trait_)),
@@ -1167,6 +1196,13 @@ pub(super) fn checked_body<'db>(
     }
 }
 
+pub(crate) fn checked_body_allows_evaluation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+) -> bool {
+    diags_allow_evaluation(db, &checked_body(db, owner).diags)
+}
+
 /// Inference and const-language checking, without requirement discharge.
 /// CTFE consumes this completed template. It must not re-enter the enclosing
 /// discharge query by requesting a checked body while evaluating a predicate.
@@ -1175,12 +1211,25 @@ pub(crate) fn infer_body<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
 ) -> &'db (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
-    infer_body_query(db, BodyInferenceKey::new(db, owner))
+    infer_body_with_selections(db, owner, &[])
+}
+
+/// Reuse the inference authority with the lexical selections already recorded
+/// by the enclosing body. Context belongs in the cache key; obtaining it must
+/// not re-enter enclosing inference from the anonymous body's checker.
+fn infer_body_with_selections<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+    selections: &[crate::analysis::semantic::SelectedApplication<'db>],
+) -> &'db (Vec<FuncBodyDiag<'db>>, TypedBody<'db>) {
+    infer_body_query(db, BodyInferenceKey::new(db, owner, selections.to_vec()))
 }
 
 #[salsa::interned]
 struct BodyInferenceKey<'db> {
     owner: BodyOwner<'db>,
+    #[return_ref]
+    selections: Vec<crate::analysis::semantic::SelectedApplication<'db>>,
 }
 
 #[salsa::tracked(return_ref, cycle_initial=infer_body_cycle_initial, cycle_fn=infer_body_cycle_recover)]
@@ -1202,6 +1251,9 @@ fn infer_body_query<'db>(
         );
     };
 
+    for &selection in key.selections(db) {
+        checker.env.push_selection(selection);
+    }
     checker.run();
     let (mut diags, typed_body) = checker.finish();
     if let BodyOwner::Func(func) = owner
@@ -2894,16 +2946,6 @@ impl<'db> TyChecker<'db> {
                                     }
                                 };
 
-                                if candidate.needs_confirmation {
-                                    self.env.register_trait_obligation(env::TraitObligation {
-                                        selected_applications: self.env.selected_applications(),
-                                        assumptions: self.env.assumptions(),
-                                        goal: inst,
-                                        origin: env::TraitObligationOrigin::GenericConfirmation,
-                                        span: call_span.clone().into(),
-                                    });
-                                }
-
                                 if !callable.unify_generic_args(
                                     self,
                                     generic_args,
@@ -3833,8 +3875,10 @@ impl<'db> TyChecker<'db> {
             span,
             site,
             minter,
-            scope,
-            scope,
+            PathResolutionScopes {
+                lookup: scope,
+                visibility: scope,
+            },
         )
     }
 
@@ -3847,9 +3891,12 @@ impl<'db> TyChecker<'db> {
         span: LazyPathSpan<'db>,
         site: DynLazySpan<'db>,
         minter: &LoweringContext<'db>,
-        lookup_scope: ScopeId<'db>,
-        visibility_scope: ScopeId<'db>,
+        scopes: PathResolutionScopes<'db>,
     ) -> Result<PathRes<'db>, PathResError<'db>> {
+        let PathResolutionScopes {
+            lookup: lookup_scope,
+            visibility: visibility_scope,
+        } = scopes;
         let visibility_scope = if path
             .segment(self.db, 0)
             .and_then(|root| root.ident(self.db).to_opt())
@@ -4132,6 +4179,12 @@ pub(crate) enum SmirLoweringReadiness {
     Ready,
     BlockedByInvalidProgram,
     IncompletePlan,
+}
+
+/// Lookup and access-check scopes differ for transported quotation paths.
+struct PathResolutionScopes<'db> {
+    lookup: ScopeId<'db>,
+    visibility: ScopeId<'db>,
 }
 
 /// The result of type checking one body.
@@ -5467,12 +5520,14 @@ impl<'db> TypedBody<'db> {
         };
         if let Some(inst) = callable.trait_inst()
             && let Some(name) = func.name(db).to_opt()
-            && let Selection::Unique(method) = resolve_trait_method_instance(
+            && let Selection::Unique(method) = resolve_trait_method_with_selections(
                 db,
                 TraitSolveCx::new(db, body.scope()).with_assumptions(self.assumptions()),
                 inst,
                 name,
+                &callable.selected_applications,
             )
+            .ok()?
             && let Some(body_func) = method.body()
         {
             func = body_func;

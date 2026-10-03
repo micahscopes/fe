@@ -1,0 +1,27 @@
+// Rebase checklist: ref-self trait providers keep their const conditions
+// inside quote-producing generation providers (#1576 and #1582).
+use core::meta::{Code, Item, Record}
+
+trait Lookup {
+    const fn get(ref self, _ index: usize) -> u256
+}
+struct Table { values: [u256; 2] }
+impl Lookup for Table {
+    const fn get(ref self, _ index: usize) -> u256 { self.values[index] }
+}
+const fn at<const N: usize>() -> u256 uses (table: Lookup) where N < 2 {
+    table.get(N)
+}
+trait Answer { fn answer() -> u256 }
+const fn emit(record: Record) -> Code<Item> {
+    let number = with (Lookup = Table { values: [40, 2] }) { at<0>() + at<1>() }
+    quote {
+        impl ingot::Answer for ${record} {
+            fn answer() -> u256 { ${number} }
+        }
+    }
+}
+#[generate(emit)]
+struct Generated {}
+#[test]
+fn generated_answer() { assert!(Generated::answer() == 42) }

@@ -19,7 +19,7 @@ error[10-0007]: unsupported ABI field type
    │
    = event data fields must implement `AbiSize` and `Encode<Sol>`
 
-error[16-0004]: unsupported ABI field type
+error[13-0004]: unsupported ABI field type
    ┌─ abi_record_nested_unsupported_field.fe:13:12
    │
 13 │     value: Option<StorageMap<Address, u256, 0>>,

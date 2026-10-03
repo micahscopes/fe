@@ -1,0 +1,21 @@
+// Consolidation pending: pre-rebase test fails InvalidReturnClass; master 7c1c98564 passes.
+use std::evm::{Ctx, Evm}
+msg StringReturnMsg {
+    #[selector = sol("label()")]
+    Label -> String<7>,
+}
+
+pub contract StringReturnBox uses (ctx: Ctx) {
+    recv StringReturnMsg {
+        #[payable]
+        Label -> String<7> { "deposit" }
+    }
+}
+
+#[test]
+fn string_return_round_trip() uses (evm: mut Evm) {
+    let addr = evm.create2<StringReturnBox>(value: 0, args: (), salt: 0)
+    let received = evm.call(addr, gas: 100000, value: 0, message: StringReturnMsg::Label {})
+    let expected: String<7> = "deposit"
+    assert!(received == expected)
+}

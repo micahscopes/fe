@@ -125,14 +125,12 @@ fn compare_const_predicates<'db>(
         return true;
     };
     let impl_keys = method_const_predicate_keys(db, impl_func);
-    let trait_keys = method_const_predicate_keys(db, trait_func)
-        .map(|keys| {
-            keys.into_iter()
-                .map(|key| super::subst::substitute_complete(db, key, param_subst))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()
-        })
-        .flatten();
+    let trait_keys = method_const_predicate_keys(db, trait_func).and_then(|keys| {
+        keys.into_iter()
+            .map(|key| super::subst::substitute_complete(db, key, param_subst))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    });
     let equal = match (impl_keys, trait_keys) {
         (Some(impl_keys), Some(trait_keys)) => {
             impl_keys.iter().all(|key| trait_keys.contains(key))

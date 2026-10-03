@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_variant_index.fe
 ---
 === STDERR ===
-error[18-0001]: variant index is out of bounds
+error[19-0001]: variant index is out of bounds
   ┌─ enum_variant_index.fe:4:33
   │
 4 │         let value = field_count(variant(record, 99))

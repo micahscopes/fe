@@ -49,7 +49,11 @@ fn ordinary_types_cannot_fill_constraint_parameters() {
     assert!(diagnostics.has_errors(&db));
     let rendered = diagnostics.format_diags(&db);
     assert!(
-        rendered.contains("error[8-0000]: type mismatch"),
+        rendered.contains("error[3-0001]: invalid type argument kind"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("expected `Constraint` kind"),
         "{rendered}"
     );
     assert!(rendered.contains("u256"), "{rendered}");

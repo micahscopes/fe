@@ -1,0 +1,15 @@
+struct Leaf {}
+struct Pair<F> {}
+struct Sum {}
+struct Comp<G, F> {}
+trait Eval<A> { type Out }
+impl Eval<u256> for Leaf { type Out = u256 }
+impl<A, F: Eval<A>> Eval<A> for Pair<F> {
+    type Out = (<F as Eval<A>>::Out, <F as Eval<A>>::Out)
+}
+impl Eval<(u256, u256)> for Sum { type Out = u256 }
+impl<A, F: Eval<A>, G: Eval<<F as Eval<A>>::Out>> Eval<A> for Comp<G, F> {
+    type Out = <G as Eval<<F as Eval<A>>::Out>>::Out
+}
+type Program = Comp<Sum, Pair<Leaf>>
+fn value(_ x: <Program as Eval<u256>>::Out) -> u256 { x }

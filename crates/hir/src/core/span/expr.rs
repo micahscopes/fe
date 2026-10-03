@@ -276,7 +276,7 @@ define_lazy_span_node!(
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
 pub(crate) struct ExprRoot<'db> {
-    expr: ExprId,
+    pub(super) expr: ExprId,
     pub(crate) body: Body<'db>,
 }
 

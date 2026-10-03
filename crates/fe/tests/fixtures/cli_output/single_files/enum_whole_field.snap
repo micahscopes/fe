@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_whole_field.fe
 ---
 === STDERR ===
-error[18-0001]: `field` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
+error[19-0001]: `field` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
   ┌─ enum_whole_field.fe:4:46
   │
 4 │         let value = type_is<bool>(field_type(field(record, 0)))

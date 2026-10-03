@@ -1,6 +1,6 @@
 // A braced condition followed by a `,` stays a condition, also where the
-// block could be a function's body. Trait functions cannot state
-// conditions, so the trait's is rejected.
+// block could be a function's body. RD95 retains trait-method conditions;
+// only the false free-function condition is rejected.
 trait Checked {
     fn after_bound<T>() -> bool where T: Copy, { true },
 }

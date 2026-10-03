@@ -1,2 +1,3 @@
+// Adopts master 4d8ec2073: the condition is checked at the written type.
 enum Choice<const N: usize> where N > 0 { Value(u256) }
-fn unused() { let pair = (Choice<1>::Value, 0) }
+fn unused() { let pair = (Choice<1>::Value, 0 as u256) }

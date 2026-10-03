@@ -1517,12 +1517,12 @@ impl<'db> RecordInput<'db> {
                         let TypeKind::Hole(slot) = ty.data(self.db) else {
                             return None;
                         };
-                        match code.holes(self.db).get(*slot as usize)?.value(self.db) {
-                            &SemConstValue::Structural {
+                        match *code.holes(self.db).get(*slot as usize)?.value(self.db) {
+                            SemConstValue::Structural {
                                 handle: StructuralHandle::Record(owner),
                                 ..
                             } if owner == self.owner => Some(owner),
-                            &SemConstValue::Structural {
+                            SemConstValue::Structural {
                                 handle:
                                     StructuralHandle::FieldType {
                                         owner,

@@ -569,6 +569,21 @@ impl<'db> Callable<'db> {
             Err(CallGenericArgUnifyError::InvalidArgument(error)) => {
                 // Invalid declarations are diagnosed once, at their default.
                 if error.diagnostic_owner.is_none() {
+                    if !error.from_default && args.is_given(tc.db) {
+                        let diags = crate::analysis::ty::ty_error::collect_generic_arg_errors(
+                            tc.db,
+                            tc.env.scope(),
+                            &args.data(tc.db)[error.index],
+                            span.clone().arg(error.index),
+                            tc.env.assumptions(),
+                        );
+                        if !diags.is_empty() {
+                            for diag in diags {
+                                tc.push_diag(diag);
+                            }
+                            return false;
+                        }
+                    }
                     let error_span = if error.from_default {
                         span.into()
                     } else {
@@ -1165,6 +1180,25 @@ impl<'db> Callable<'db> {
             .with_assumptions(definition_assumptions);
 
         let mut pending_obligations = Vec::new();
+        // A resolved method's originating trait is itself a selected-impl
+        // use, even when the method declares no additional trait bounds.
+        // Record its conditions through the ordinary obligation path.
+        if let Some(goal) = self.trait_inst {
+            let obligation = super::env::TraitObligation {
+                selected_applications: tc.env.selected_applications(),
+                assumptions: tc.env.assumptions(),
+                goal: tc.normalize_trait_goal(goal),
+                origin: super::env::TraitObligationOrigin::GenericConfirmation,
+                span: call_expr.span(tc.body()).into(),
+            };
+            match tc.process_trait_obligation(obligation, false) {
+                TraitObligationOutcome::Discharged => {}
+                TraitObligationOutcome::Progressed => progressed = true,
+                TraitObligationOutcome::Requeue(obligation) => {
+                    pending_obligations.push(obligation);
+                }
+            }
+        }
         for (constraint_idx, (&constraint, &declared_constraint)) in instantiated
             .list(db)
             .iter()

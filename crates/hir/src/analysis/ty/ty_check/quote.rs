@@ -973,6 +973,93 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             )
         })
         .ok()
+        .filter(|resolved| {
+            // Completion can publish an invalid nominal application rather
+            // than a resolution error when its arguments are quote binders.
+            // Its declaration still supplies the captured type identity.
+            tail_as_value
+                || !matches!(resolved, PathRes::Ty(ty) if ty.has_invalid(db))
+                || !self.has_template_arguments(path)
+        })
+        .or_else(|| {
+            // Quoted type arguments can contain holes and fragment binders.
+            // At this stage resolve the declaration, leaving the generated
+            // application's arguments to destination type checking.
+            if tail_as_value || !self.has_template_arguments(path) {
+                return None;
+            }
+            let crate::analysis::name_resolution::NameResKind::Scope(scope) =
+                crate::analysis::name_resolution::resolve_type_path_definition(
+                    db,
+                    path,
+                    self.tc.env.scope(),
+                )?
+            else {
+                return None;
+            };
+            let resolved = match scope.item() {
+                crate::hir_def::ItemKind::Trait(trait_) => {
+                    PathRes::Trait(crate::core::semantic::trait_self_predicate(db, trait_))
+                }
+                crate::hir_def::ItemKind::Struct(record) => PathRes::Ty(TyId::adt(
+                    db,
+                    crate::analysis::ty::adt_def::AdtRef::Struct(record).as_adt(db),
+                )),
+                crate::hir_def::ItemKind::Enum(enum_) => PathRes::Ty(TyId::adt(
+                    db,
+                    crate::analysis::ty::adt_def::AdtRef::Enum(enum_).as_adt(db),
+                )),
+                _ => return None,
+            };
+            resolved
+                .is_visible_from(db, self.tc.env.scope())
+                .then_some(resolved)
+        })
+    }
+
+    fn has_template_arguments(&self, path: PathId<'db>) -> bool {
+        let db = self.db();
+        let mut paths = vec![path];
+        let mut types = Vec::new();
+        while !paths.is_empty() || !types.is_empty() {
+            while let Some(path) = paths.pop() {
+                for index in 0..path.len(db) {
+                    let Some(segment) = path.segment(db, index) else {
+                        continue;
+                    };
+                    for argument in segment.generic_args(db).data(db) {
+                        match argument {
+                            GenericArg::Type(argument) => types.extend(argument.ty.to_opt()),
+                            GenericArg::AssocType(argument) => types.extend(argument.ty.to_opt()),
+                            GenericArg::Const(_) => {}
+                        }
+                    }
+                }
+            }
+            let Some(ty) = types.pop() else {
+                continue;
+            };
+            match ty.data(db) {
+                TypeKind::Hole(_) => return true,
+                TypeKind::Path(Partial::Present(path)) => {
+                    if let Some(root) = path.segment(db, 0)
+                        && let Some(name) = root.ident(db).to_opt()
+                        && self.lookup_type(name).is_some()
+                    {
+                        return true;
+                    }
+                    paths.push(*path);
+                }
+                TypeKind::Ptr(inner) | TypeKind::Mode(_, inner) | TypeKind::Array(inner, _) => {
+                    types.extend(inner.to_opt());
+                }
+                TypeKind::Tuple(tuple) => {
+                    types.extend(tuple.data(db).iter().filter_map(|ty| ty.to_opt()));
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn span_at(&self, site: QuoteNameSite) -> DynLazySpan<'db> {
@@ -1126,7 +1213,25 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             });
         }
         match self.resolve_in_provider(path, tail_as_value) {
-            Some(res) => self.push(site, QuoteNameClass::Rooted(res)),
+            Some(res) => {
+                if self.has_template_arguments(path)
+                    && let PathRes::Ty(ty) = &res
+                    && let TyData::TyBase(crate::analysis::ty::ty_def::TyBase::Adt(adt)) =
+                        ty.base_ty(db).data(db)
+                    && path.generic_args(db).data(db).len() > adt.params(db).len()
+                    && let Partial::Present(ident) = path.ident(db)
+                {
+                    return self.tc.push_diag(
+                        crate::analysis::name_resolution::diagnostics::PathResDiag::ArgNumMismatch {
+                            span: self.span_at(site),
+                            ident,
+                            expected: adt.params(db).len(),
+                            given: path.generic_args(db).data(db).len(),
+                        },
+                    );
+                }
+                self.push(site, QuoteNameClass::Rooted(res));
+            }
             None => {
                 let span = self.span_at(site);
                 self.tc.push_diag(BodyDiag::QuoteUnresolvedName {

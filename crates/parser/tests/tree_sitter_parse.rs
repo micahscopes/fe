@@ -806,3 +806,64 @@ fn type_functions_parse_in_both_frontends() {
         );
     }
 }
+
+#[test]
+fn generic_effect_keys_and_shorthand_values_agree_in_both_frontends() {
+    use fe_parser::ast::{self, prelude::*};
+
+    fn keyed_params(node: tree_sitter::Node, out: &mut Vec<bool>) {
+        if node.kind() == "with_param" {
+            out.push(node.child_by_field_name("key").is_some());
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            keyed_params(child, out);
+        }
+    }
+
+    let mut parser = new_parser();
+    for source in [
+        "fn f() { with (Key<u8> = value) {} }",
+        "fn f() { with (Key<Key<u8>> = value) {} }",
+        "fn f() { with (Key<<T as Trait>::Item> = value) {} }",
+        "fn f() { with (Key<{ 1 + 2 }> = value, other) {} }",
+        "fn f() { with (n < 8, m >= 1) {} }",
+        "fn f() { with (n < 8) {} }",
+        "fn f() { with (n <= 8, m << bits) {} }",
+    ] {
+        let (root, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let root = fe_parser::SyntaxNode::new_root(root);
+        let expected = root
+            .descendants()
+            .filter_map(ast::WithParam::cast)
+            .map(|param| param.path().is_some())
+            .collect::<Vec<_>>();
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let tree = parser.parse(source, None).expect("tree-sitter parse");
+        let mut found = Vec::new();
+        keyed_params(tree.root_node(), &mut found);
+        assert_eq!(found, expected, "{source}");
+    }
+}
+
+#[test]
+fn generic_match_pattern_paths_keep_the_function_body() {
+    let mut parser = new_parser();
+    for source in [
+        "fn f(choice: Choice<1>) { match choice { Choice<{ length<0>() }>::Value(value) => value, Choice::Empty => 0 } }",
+        "fn f(choice: Choice<1>) { match choice { Choice<1>::Empty => 0, Choice::Value(value) => value } }",
+        "fn f(value: Record<1>) { match value { Record<{ 1 + 2 }> { field } => field } }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        assert_eq!(
+            parser_item_shapes(source),
+            tree_sitter_item_shapes(&mut parser, source),
+            "{source}"
+        );
+    }
+}

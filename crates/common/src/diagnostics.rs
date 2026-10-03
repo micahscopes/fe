@@ -68,8 +68,9 @@ pub fn cmp_complete_diagnostics(
     }
 }
 
-/// Present one error per code and primary source span while retaining every
-/// distinct reason, secondary label, and note from contributing checks.
+/// Coalesce reports of the same error at a source span, retaining their notes.
+/// Distinct secondary source sites identify distinct obligations, even when
+/// their failures have the same code and primary use span.
 pub fn sort_and_coalesce_complete_diagnostics(diags: &mut Vec<CompleteDiagnostic>) {
     fn display_key_span(code: &GlobalErrorCode, span: Span) -> Span {
         if code.pass == DiagnosticPass::Parse {
@@ -84,15 +85,31 @@ pub fn sort_and_coalesce_complete_diagnostics(diags: &mut Vec<CompleteDiagnostic
     }
 
     diags.sort_by(cmp_complete_diagnostics);
-    let mut positions: HashMap<(Severity, GlobalErrorCode, Span), usize> = HashMap::new();
+    type DisplayKey = (Severity, GlobalErrorCode, Span, Vec<Span>);
+    let mut positions: HashMap<DisplayKey, usize> = HashMap::new();
     let mut result: Vec<CompleteDiagnostic> = Vec::with_capacity(diags.len());
 
     for diag in diags.drain(..) {
         let key = diag.primary_span().map(|span| {
+            // Parser recovery reports describe one syntax fault at the start
+            // of a token. Semantic failures at different declaration sites
+            // remain separate, such as three predicates on one call.
+            let mut secondary_sites = if diag.error_code.pass == DiagnosticPass::Parse {
+                Vec::new()
+            } else {
+                diag.sub_diagnostics
+                    .iter()
+                    .filter(|sub| !sub.is_primary())
+                    .filter_map(|sub| sub.span.clone())
+                    .collect::<Vec<_>>()
+            };
+            secondary_sites.sort();
+            secondary_sites.dedup();
             (
                 diag.severity,
                 diag.error_code.clone(),
                 display_key_span(&diag.error_code, span),
+                secondary_sites,
             )
         });
         if let Some(&index) = key.as_ref().and_then(|key| positions.get(key)) {
@@ -308,7 +325,7 @@ impl DiagnosticPass {
             Self::Mir => 11,
             Self::SemanticBorrowck => 16,
             Self::SemanticLayoutEvidence => 17,
-            Self::Generation => 18,
+            Self::Generation => 19,
 
             Self::ExternalAnalysis(_) => u16::MAX,
         }
