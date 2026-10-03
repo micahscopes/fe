@@ -1,0 +1,11 @@
+// Gap 5' twin: the associated const as a match pattern (pat.rs:514 has the same sequence).
+// Expected: reject (8-0093).
+trait Tr { const C: u256 }
+struct Wrapped<const N: usize> {}
+impl<const N: usize> Tr for Wrapped<N> where N > 0 { const C: u256 = 1 }
+fn f(x: u256) -> u256 {
+    match x {
+        <Wrapped<0> as Tr>::C => 1
+        _ => 0
+    }
+}

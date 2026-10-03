@@ -2440,6 +2440,20 @@ impl<'db> TyChecker<'db> {
         }
     }
 
+    fn register_trait_const_obligation(&mut self, goal: TraitInstId<'db>, span: DynLazySpan<'db>) {
+        // Binder parameters outside this body's scope await receiver inference.
+        if trait_const_goal_has_foreign_params(self.db, goal, self.env.scope()) {
+            return;
+        }
+        self.env.register_trait_obligation(env::TraitObligation {
+            selected_applications: self.env.selected_applications(),
+            assumptions: self.env.assumptions(),
+            goal,
+            origin: env::TraitObligationOrigin::GenericConfirmation,
+            span,
+        });
+    }
+
     fn process_trait_obligation(
         &mut self,
         obligation: env::TraitObligation<'db>,

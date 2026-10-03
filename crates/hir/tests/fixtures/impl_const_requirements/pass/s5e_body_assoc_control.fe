@@ -1,0 +1,7 @@
+// Spot 5 control: the s5c associated-const read inside a fn body.
+// Expected: reject (8-0093).
+trait Tr { const C: u256 }
+struct Wrapped<const N: usize> {}
+impl<const N: usize> Tr for Wrapped<N> where N > 0 { const C: u256 = 1 }
+
+fn f() -> u256 { <Wrapped<1> as Tr>::C }

@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOLVER = ROOT / "crates/hir/src/analysis/ty/trait_resolution"
-BASELINE = 70  # RD102 inventory at 2c94a5add, 2026-10-03; ratchet down.
+BASELINE = 68  # L19: expression/pattern const reads share obligation registration.
 TYPES = ("TraitSolveCx", "CanonicalGoalQuery", "TraitSolverQuery")
 RAW = re.compile(r'(?:br|cr|r)(#*)"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")

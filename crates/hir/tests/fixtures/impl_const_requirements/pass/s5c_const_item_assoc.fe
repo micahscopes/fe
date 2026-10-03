@@ -1,0 +1,8 @@
+// Spot 5. An associated const read in a const item initializer selects the impl for
+// Wrapped<1>, whose condition N > 0 is false.
+// Expected: reject (8-0093). Gap: accepted.
+trait Tr { const C: u256 }
+struct Wrapped<const N: usize> {}
+impl<const N: usize> Tr for Wrapped<N> where N > 0 { const C: u256 = 1 }
+
+const X: u256 = <Wrapped<1> as Tr>::C

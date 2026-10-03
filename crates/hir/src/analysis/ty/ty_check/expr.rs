@@ -36,7 +36,7 @@ use crate::analysis::ty::{
         is_core_evidence_ty, resolve_core_range_types, resolve_core_trait, resolve_lib_func_path,
         resolve_lib_type_path,
     },
-    diagnostics::{BodyDiag, FuncBodyDiag, MustUseSubject, TraitConstraintDiag, TyDiagCollection},
+    diagnostics::{BodyDiag, FuncBodyDiag, MustUseSubject},
     effects::{
         BarrierReason, EffectBarrier, EffectKeyKind, EffectPatternKey, EffectQuery,
         EffectRequirementDecl, EffectRequirementKey, EffectWitness, ForwardedEffectKey,
@@ -63,9 +63,7 @@ use crate::analysis::ty::{
         provider_semantics_for_specialized_call,
     },
     trait_def::{TraitInstId, named_impls_for_member},
-    trait_resolution::{
-        GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx, is_goal_satisfiable,
-    },
+    trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx},
     ty_check::callable::{Callable, EffectProviderProvenance, EffectProviderSpecialization},
     ty_def::{CapabilityKind, PrimTy, TyBase, TyData, prim_int_bits},
     unify::UnificationTable,
@@ -4158,32 +4156,7 @@ impl<'db> TyChecker<'db> {
                     );
 
                     let selection = self.env.selection_for_goal(inst);
-                    let context = TraitSolveCx::new(self.db, self.env.scope())
-                        .with_assumptions(self.env.assumptions());
-                    let unsatisfied = !super::trait_const_goal_has_foreign_params(
-                        self.db,
-                        inst,
-                        self.env.scope(),
-                    ) && if let Some(selection) = selection {
-                        selection.revalidate(self.db, context, inst).is_err()
-                    } else {
-                        matches!(
-                            is_goal_satisfiable(self.db, context, inst),
-                            GoalSatisfiability::UnSat(_)
-                        )
-                    };
-                    if unsatisfied {
-                        self.push_diag(TyDiagCollection::from(
-                            TraitConstraintDiag::TraitBoundNotSat {
-                                span: path_expr_span.clone().into(),
-                                primary_goal: inst,
-                                unsat_subgoal: None,
-                                required_by: None,
-                                capability_hint: None,
-                            },
-                        ));
-                        return ExprProp::invalid(self.db);
-                    }
+                    self.register_trait_const_obligation(inst, path_expr_span.clone().into());
 
                     self.env.register_const_ref(
                         expr,
