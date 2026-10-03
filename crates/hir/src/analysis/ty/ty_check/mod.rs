@@ -1244,7 +1244,7 @@ fn inferred_body_with_selections<'db>(
         BodyInferenceKey::new(
             db,
             owner,
-            const_requirements::selection_context(db, owner.scope(), selections),
+            const_requirements::selection_context(db, owner.scope(), selections.to_vec()),
         ),
     )
 }
@@ -1754,8 +1754,6 @@ fn typed_body_for_bodyless_func<'db>(
         assumptions,
         pat_ty: SecondaryMap::new(),
         expr_ty: SecondaryMap::new(),
-        pat_selections: SecondaryMap::new(),
-        expr_selections: SecondaryMap::new(),
         implicit_moves: FxHashSet::default(),
         static_selection_exprs: FxHashSet::default(),
         const_refs: SecondaryMap::new(),
@@ -2491,7 +2489,7 @@ impl<'db> TyChecker<'db> {
             return true;
         }
         let obligation = env::TraitObligation {
-            selected_applications: self.env.selected_applications(),
+            context: self.env.selection_context(),
             assumptions: self.env.assumptions(),
             goal,
             origin: env::TraitObligationOrigin::GenericConfirmation,
@@ -2553,14 +2551,15 @@ impl<'db> TyChecker<'db> {
         }
 
         let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
-        if !obligation.selected_applications.is_empty() {
+        if !obligation.context.selections(db).is_empty() {
             let requirements = PredicateListId::new(db, vec![goal]).extend_all_bounds(db);
             let snapshot = self.table.snapshot();
             let mut directly_selected = None;
             for &required in requirements.list(db) {
                 let required = self.normalize_trait_goal(required);
                 let Some(selection) = obligation
-                    .selected_applications
+                    .context
+                    .selections(db)
                     .iter()
                     .rev()
                     .copied()
@@ -2643,7 +2642,7 @@ impl<'db> TyChecker<'db> {
                     conditions,
                     scope,
                     obligation.span.clone(),
-                    &obligation.selected_applications,
+                    obligation.context.selections(db),
                 ) {
                     self.env.register_const_obligation(pending);
                 }
@@ -3655,7 +3654,7 @@ impl<'db> TyChecker<'db> {
                 scope: self.env.scope(),
                 assumptions: lookup_assumptions,
             })
-            .with_selections(self.env.selected_applications(), self.env.assumptions());
+            .with_context(self.env.selection_context(), self.env.assumptions());
             super::ty_lower::lower_hir_ty_with_minter(
                 self.db,
                 hir_ty,
@@ -4306,6 +4305,14 @@ impl<'db> TypedBody<'db> {
     pub fn decisions(&self) -> &Decisions<'db> {
         &self.decisions
     }
+
+    pub(super) fn selections_for_expr(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        expr: ExprId,
+    ) -> &'db [crate::analysis::semantic::SelectedApplication<'db>] {
+        self.decisions.contexts[expr].map_or(&[], |context| context.selections(db))
+    }
 }
 
 // A private module keeps the shared tables type out of the crate's public
@@ -4321,10 +4328,6 @@ mod typed_body_tables {
         pub(super) assumptions: PredicateListId<'db>,
         pub(super) pat_ty: SecondaryMap<PatId, Option<TyId<'db>>>,
         pub(super) expr_ty: SecondaryMap<ExprId, Option<ExprProp<'db>>>,
-        pub(super) pat_selections:
-            SecondaryMap<PatId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
-        pub(super) expr_selections:
-            SecondaryMap<ExprId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
         pub(super) implicit_moves: FxHashSet<ExprId>,
         pub(super) static_selection_exprs: FxHashSet<ExprId>,
         pub(super) const_refs: SecondaryMap<ExprId, Option<ConstRef<'db>>>,
@@ -4653,12 +4656,6 @@ impl<'db> TypedBody<'db> {
         for prop in self.tables.expr_ty.values().flatten() {
             prop.visit_with(visitor);
         }
-        for selections in self.tables.pat_selections.values().flatten() {
-            selections.visit_with(visitor);
-        }
-        for selections in self.tables.expr_selections.values().flatten() {
-            selections.visit_with(visitor);
-        }
         for cref in self.tables.const_refs.values().flatten() {
             cref.visit_with(visitor);
         }
@@ -4710,14 +4707,6 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
             .values_mut()
             .flatten()
             .for_each(|prop| *prop = prop.clone().fold_with(db, folder));
-        this.pat_selections
-            .values_mut()
-            .flatten()
-            .for_each(|selections| *selections = selections.clone().fold_with(db, folder));
-        this.expr_selections
-            .values_mut()
-            .flatten()
-            .for_each(|selections| *selections = selections.clone().fold_with(db, folder));
         this.const_refs
             .values_mut()
             .flatten()
@@ -5634,7 +5623,7 @@ impl<'db> TypedBody<'db> {
                 TraitSolveCx::new(db, body.scope()).with_assumptions(self.assumptions()),
                 inst,
                 name,
-                &callable.selected_applications,
+                callable.context,
             )
             .ok()?
             && let Some(body_func) = method.body()
@@ -6397,8 +6386,6 @@ impl<'db> TypedBody<'db> {
             assumptions: PredicateListId::empty_list(db),
             pat_ty: SecondaryMap::new(),
             expr_ty: SecondaryMap::new(),
-            pat_selections: SecondaryMap::new(),
-            expr_selections: SecondaryMap::new(),
             implicit_moves: FxHashSet::default(),
             static_selection_exprs: FxHashSet::default(),
             const_refs: SecondaryMap::new(),

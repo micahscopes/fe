@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Update;
 use thin_vec::ThinVec;
 
-use super::const_requirements::ConstConditionUse;
+use super::const_requirements::{ConstConditionUse, selection_context};
 use super::effect_env as keyed_effect_env;
 use super::owner::BodyOwner;
 use super::{
@@ -78,10 +78,6 @@ pub(crate) struct TyCheckEnv<'db> {
     /// Owned-context moves and the type each value is moved as. Whether that
     /// type is `Copy` is decided in `finish`, once inference has resolved it.
     implicit_moves: FxHashMap<ExprId, TyId<'db>>,
-    pat_selections:
-        SecondaryMap<PatId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
-    expr_selections:
-        SecondaryMap<ExprId, Option<Vec<crate::analysis::semantic::SelectedApplication<'db>>>>,
     pub(super) static_selection_exprs: FxHashSet<ExprId>,
     const_refs: SecondaryMap<ExprId, Option<ConstRef<'db>>>,
     value_path_refs: SecondaryMap<ExprId, Option<ValuePathRef<'db>>>,
@@ -162,8 +158,6 @@ impl<'db> TyCheckEnv<'db> {
             pat_ty: SecondaryMap::new(),
             expr_ty: SecondaryMap::new(),
             implicit_moves: FxHashMap::default(),
-            pat_selections: SecondaryMap::new(),
-            expr_selections: SecondaryMap::new(),
             static_selection_exprs: FxHashSet::default(),
             const_refs: SecondaryMap::new(),
             value_path_refs: SecondaryMap::new(),
@@ -544,7 +538,13 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn register_semantic_call(&mut self, expr: ExprId, mut callable: Callable<'db>) {
-        callable.selected_applications = self.selected_applications();
+        // Callable equality already includes its declaration, not the caller's
+        // scope. Keep the added wrapper scope a function of that declaration.
+        callable.context = selection_context(
+            self.db,
+            callable.callable_def.scope(),
+            self.selections().collect(),
+        );
         let requirements = callable.selection_requirements(self.db);
         callable.opened_provisions = self
             .opened_obligations()
@@ -650,10 +650,8 @@ impl<'db> TyCheckEnv<'db> {
             })
     }
 
-    pub(super) fn selected_applications(
-        &self,
-    ) -> Vec<crate::analysis::semantic::SelectedApplication<'db>> {
-        self.selections().collect()
+    pub(super) fn selection_context(&self) -> crate::analysis::semantic::ImplEnv<'db> {
+        selection_context(self.db, self.owner_scope, self.selections().collect())
     }
 
     pub(super) fn provision_for_goal(
@@ -868,14 +866,13 @@ impl<'db> TyCheckEnv<'db> {
 
     pub(super) fn type_expr(&mut self, expr: ExprId, typed: ExprProp<'db>) {
         self.expr_ty[expr] = Some(typed);
-        let selections = self.selected_applications();
-        self.expr_selections[expr] = (!selections.is_empty()).then_some(selections);
+        let context = self.selection_context();
+        self.decisions.contexts[expr] =
+            (!context.selections(self.db).is_empty()).then_some(context);
     }
 
     pub(super) fn type_pat(&mut self, pat: PatId, ty: TyId<'db>) {
         self.pat_ty[pat] = Some(ty);
-        let selections = self.selected_applications();
-        self.pat_selections[pat] = (!selections.is_empty()).then_some(selections);
     }
 
     pub(super) fn alloc_validated_pat(&mut self, pat: ValidatedPat<'db>) -> ValidatedPatId {
@@ -1122,17 +1119,28 @@ impl<'db> TyCheckEnv<'db> {
                 let (SemanticExprLowering::Call { callable }
                 | SemanticExprLowering::CodeRegionIntrinsic { callable, .. }
                 | SemanticExprLowering::ConstIntrinsic { callable, .. }) = lowering;
-                if !callable.selected_applications.is_empty() {
+                let context = callable.context;
+                if !context.selections(self.db).is_empty() {
                     // Freeze applicability after inference, before generic
                     // specialization. An unrelated concrete lexical choice must
                     // not become applicable to a rigid type parameter later.
                     let required = callable.selection_requirements(self.db);
-                    callable.selected_applications.retain(|selection| {
-                        required
-                            .list(self.db)
-                            .iter()
-                            .any(|goal| selection.matches(self.db, *goal))
-                    });
+                    let selections = context
+                        .selections(self.db)
+                        .iter()
+                        .copied()
+                        .filter(|selection| {
+                            required
+                                .list(self.db)
+                                .iter()
+                                .any(|goal| selection.matches(self.db, *goal))
+                        })
+                        .collect::<Vec<_>>();
+                    callable.context = selection_context(
+                        self.db,
+                        context.normalization_scope(self.db),
+                        selections,
+                    );
                 }
             });
         for (expr, lowering) in self.semantic_expr_lowering.iter() {
@@ -1179,7 +1187,11 @@ impl<'db> TyCheckEnv<'db> {
             .into_iter()
             .map(|use_| use_.fold_with(self.db, &mut prober))
             .collect();
+        // Preserve lexical capture's inference stage. Completed-body
+        // substitution folds these references, just as it folded the old lists.
+        let contexts = std::mem::take(&mut self.decisions.contexts);
         self.decisions = self.decisions.fold_with(self.db, &mut prober);
+        self.decisions.contexts = contexts;
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -1211,8 +1223,6 @@ impl<'db> TyCheckEnv<'db> {
             pat_ty: self.pat_ty,
             expr_ty: self.expr_ty,
             implicit_moves,
-            pat_selections: self.pat_selections,
-            expr_selections: self.expr_selections,
             static_selection_exprs: self.static_selection_exprs,
             const_refs: self.const_refs,
             value_path_refs: self.value_path_refs,
@@ -1875,6 +1885,7 @@ pub struct Decisions<'db> {
     pub(super) choices: common::indexmap::IndexMap<DecisionSite<'db>, TraitChoice<'db>>,
     pub(super) openings: common::indexmap::IndexMap<ExprId, WithChoice<'db>>,
     pub(super) condition_uses: super::const_requirements::ConditionDecisions<'db>,
+    pub(super) contexts: SecondaryMap<ExprId, Option<crate::analysis::semantic::ImplEnv<'db>>>,
 }
 
 impl<'db> Decisions<'db> {
@@ -1940,6 +1951,9 @@ impl<'db> Decisions<'db> {
         for use_ in self.condition_uses.values_mut() {
             *use_ = use_.clone().fold_with(db, folder);
         }
+        for context in self.contexts.values_mut().flatten() {
+            *context = context.fold_with(db, folder);
+        }
         self
     }
 
@@ -1961,6 +1975,9 @@ impl<'db> Decisions<'db> {
         }
         for use_ in self.condition_uses.values() {
             use_.visit_with(visitor);
+        }
+        for context in self.contexts.values().flatten() {
+            context.visit_with(visitor);
         }
     }
 }
@@ -2043,7 +2060,7 @@ pub(super) struct TraitObligation<'db> {
     pub goal: TraitInstId<'db>,
     /// Premises at the use site, retained when solving is deferred past a scope.
     pub assumptions: PredicateListId<'db>,
-    pub selected_applications: Vec<crate::analysis::semantic::SelectedApplication<'db>>,
+    pub context: crate::analysis::semantic::ImplEnv<'db>,
     pub origin: TraitObligationOrigin<'db>,
     pub span: DynLazySpan<'db>,
 }

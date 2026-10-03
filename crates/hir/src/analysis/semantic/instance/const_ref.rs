@@ -432,7 +432,7 @@ fn semantic_callee_key_with_assumptions<'db>(
             .selections(db)
             .iter()
             .copied()
-            .chain(callable.selected_applications.iter().copied())
+            .chain(callable.context.selections(db).iter().copied())
             .collect(),
     );
     let requirements = callable.selection_requirements(db);
@@ -475,9 +475,9 @@ fn semantic_callee_key_with_assumptions<'db>(
             inst,
             name,
             if inherit_trait_selection {
-                impl_env.selections(db)
+                impl_env
             } else {
-                &callable.selected_applications
+                callable.context
             },
         )
         .map_err(MethodArgMapError::SelectedEvidence)?

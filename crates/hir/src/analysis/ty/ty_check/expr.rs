@@ -4062,7 +4062,7 @@ impl<'db> TyChecker<'db> {
                                 && matches!(candidate, MethodCandidate::NeedsConfirmation(_))
                             {
                                 self.env.register_trait_obligation(TraitObligation {
-                                    selected_applications: self.env.selected_applications(),
+                                    context: self.env.selection_context(),
                                     assumptions: self.env.assumptions(),
                                     goal: inst,
                                     origin: TraitObligationOrigin::GenericConfirmation,
@@ -4164,7 +4164,7 @@ impl<'db> TyChecker<'db> {
                     // at the whole-call span. Standalone values own their path use here.
                     if !is_call_callee {
                         self.env.register_trait_obligation(TraitObligation {
-                            selected_applications: self.env.selected_applications(),
+                            context: self.env.selection_context(),
                             assumptions: self.env.assumptions(),
                             goal: inst,
                             origin: TraitObligationOrigin::GenericConfirmation,
@@ -5725,7 +5725,7 @@ impl<'db> TyChecker<'db> {
                     let inst = c_lhs_ty.extract_solution(&mut self.table, candidate.cand.inst);
                     if candidate.needs_confirmation {
                         self.env.register_trait_obligation(TraitObligation {
-                            selected_applications: self.env.selected_applications(),
+                            context: self.env.selection_context(),
                             assumptions: self.env.assumptions(),
                             goal: inst,
                             origin: TraitObligationOrigin::GenericConfirmation,
@@ -5815,7 +5815,7 @@ impl<'db> TyChecker<'db> {
                     let inst = c_lhs_ty.extract_solution(&mut self.table, cand.inst);
                     if matches!(res, MethodCandidate::NeedsConfirmation(_)) {
                         self.env.register_trait_obligation(TraitObligation {
-                            selected_applications: self.env.selected_applications(),
+                            context: self.env.selection_context(),
                             assumptions: self.env.assumptions(),
                             goal: inst,
                             origin: TraitObligationOrigin::GenericConfirmation,

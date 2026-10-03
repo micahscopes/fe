@@ -174,14 +174,9 @@ pub fn resolve_trait_method_with_selections<'db>(
     context: TraitSolveCx<'db>,
     goal: TraitInstId<'db>,
     method: IdentId<'db>,
-    selections: &[SelectedApplication<'db>],
+    impl_env: ImplEnv<'db>,
 ) -> Result<Selection<ResolvedMethodInstance<'db>>, SelectedEvidenceError> {
-    if let Some(selection) = selections
-        .iter()
-        .rev()
-        .copied()
-        .find(|selection| selection.matches(db, goal))
-    {
+    if let Some(selection) = impl_env.selection_for(db, goal) {
         let evidence = selection.revalidate(db, context, goal)?;
         Ok(resolved_method_instance(
             db,

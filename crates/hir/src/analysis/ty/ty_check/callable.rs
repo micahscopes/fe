@@ -12,6 +12,7 @@ use crate::{
 use common::indexmap::IndexMap;
 use salsa::Update;
 
+use super::const_requirements::selection_context;
 use super::{BodyOwner, ExprProp, LocalBinding, TraitObligationOutcome, TyChecker};
 use crate::analysis::{
     HirAnalysisDb,
@@ -277,7 +278,7 @@ pub struct Callable<'db> {
     /// Open evidence values needed by this call's trait requirements, including
     /// direct trait calls. CTFE revalidates their selected applications.
     pub opened_provisions: Vec<(ExprId, TraitInstId<'db>)>,
-    pub selected_applications: Vec<crate::analysis::semantic::SelectedApplication<'db>>,
+    pub context: crate::analysis::semantic::ImplEnv<'db>,
 }
 
 impl<'db> TyVisitable<'db> for Callable<'db> {
@@ -286,7 +287,7 @@ impl<'db> TyVisitable<'db> for Callable<'db> {
         V: TyVisitor<'db> + ?Sized,
     {
         self.generic_args.visit_with(visitor);
-        self.selected_applications.visit_with(visitor);
+        self.context.visit_with(visitor);
         self.effect_providers.visit_with(visitor);
         if let Some(inputs) = &self.checked_input_tys {
             inputs.visit_with(visitor);
@@ -307,7 +308,7 @@ impl<'db> TyFoldable<'db> for Callable<'db> {
     {
         Self {
             callable_def: self.callable_def,
-            selected_applications: self.selected_applications.fold_with(db, folder),
+            context: self.context.fold_with(db, folder),
             base_ty: self.base_ty,
             generic_args: self.generic_args.fold_with(db, folder),
             effect_providers: self.effect_providers.fold_with(db, folder),
@@ -415,7 +416,7 @@ impl<'db> Callable<'db> {
             checked_input_tys: None,
             trait_inst,
             opened_provisions: Vec::new(),
-            selected_applications: Vec::new(),
+            context: selection_context(db, callable_def.scope(), Vec::new()),
         })
     }
 
@@ -434,7 +435,7 @@ impl<'db> Callable<'db> {
             checked_input_tys: None,
             trait_inst,
             opened_provisions: Vec::new(),
-            selected_applications: Vec::new(),
+            context: selection_context(db, callable_def.scope(), Vec::new()),
         }
     }
 
@@ -1185,7 +1186,7 @@ impl<'db> Callable<'db> {
         // Record its conditions through the ordinary obligation path.
         if let Some(goal) = self.trait_inst {
             let obligation = super::env::TraitObligation {
-                selected_applications: tc.env.selected_applications(),
+                context: tc.env.selection_context(),
                 assumptions: tc.env.assumptions(),
                 goal: tc.normalize_trait_goal(goal),
                 origin: super::env::TraitObligationOrigin::GenericConfirmation,
@@ -1219,7 +1220,7 @@ impl<'db> Callable<'db> {
             }
 
             let obligation = super::env::TraitObligation {
-                selected_applications: tc.env.selected_applications(),
+                context: tc.env.selection_context(),
                 assumptions: tc.env.assumptions(),
                 goal: constraint,
                 origin: super::env::TraitObligationOrigin::CallConstraint {

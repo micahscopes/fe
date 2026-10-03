@@ -135,7 +135,7 @@ impl<'db> ConstFnChecker<'db, '_> {
                     .with_assumptions(self.typed_body.assumptions()),
                 inst,
                 name,
-                &callable.selected_applications,
+                callable.context,
             )
             .ok()?
             && let Some(impl_func) = method.body()

@@ -12,7 +12,7 @@ import sys
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = 9
+BASELINE = 2
 spec = importlib.util.spec_from_file_location(
     "solver_budget", ROOT / ".github/check_trait_solver_setup_budget.py"
 )

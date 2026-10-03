@@ -120,7 +120,7 @@ pub(super) type ConditionDecisions<'db> =
 pub(super) fn selection_context<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
-    selections: &[SelectedApplication<'db>],
+    selections: Vec<SelectedApplication<'db>>,
 ) -> ImplEnv<'db> {
     // This is the existing interned context authority. Preserve the ordered
     // lexical inputs here; evaluator normalization still happens at its boundary.
@@ -129,7 +129,7 @@ pub(super) fn selection_context<'db>(
         scope,
         PredicateListId::empty_list(db),
         Vec::new(),
-        selections.to_vec(),
+        selections,
     )
 }
 
@@ -256,7 +256,7 @@ fn owner_const_obligations<'db>(
             predicate,
             args: args.to_vec(),
             caller,
-            context: selection_context(db, use_scope, &[]),
+            context: selection_context(db, use_scope, Vec::new()),
             use_span: None,
             discharge: None,
         })
@@ -309,7 +309,7 @@ pub(super) fn selected_impl_condition_uses<'db>(
     selected_impl_condition_obligations(db, conditions, use_scope)
         .into_iter()
         .map(|mut use_| {
-            use_.context = selection_context(db, use_scope, selections);
+            use_.context = selection_context(db, use_scope, selections.to_vec());
             use_.use_span = Some(use_span.clone());
             use_
         })
@@ -506,7 +506,7 @@ pub(crate) fn normalize_comparable_const_predicate_key<'db>(
         // Keep evidence and user-defined operator authorities. Only closed
         // core operations on primitive values share the syntax representation.
         if let Some(callable) = operation
-            && callable.selected_applications.is_empty()
+            && callable.context.selections(db).is_empty()
             && callable.opened_provisions.is_empty()
             && callable.effect_providers().is_empty()
             && let Some(inst) = callable.trait_inst()
@@ -1471,7 +1471,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
         let selections = self
             .typed
             .callable_expr(expr)
-            .map(|callable| callable.selected_applications.clone())
+            .map(|callable| callable.context.selections(db).as_slice())
             .unwrap_or_default();
         for &predicate in predicates
             .iter()
@@ -1482,7 +1482,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 predicate,
                 args: args.to_vec(),
                 caller: premise_owner,
-                context: selection_context(self.db, self.scope, &selections),
+                context: selection_context(self.db, self.scope, selections.to_vec()),
                 use_span: Some(expr.span(self.body).into()),
                 discharge: None,
             };
@@ -2151,7 +2151,7 @@ fn check_selected_type_requirements<'db>(
                 predicate,
                 args: args.to_vec(),
                 caller,
-                context: selection_context(db, scope, selections),
+                context: selection_context(db, scope, selections.to_vec()),
                 use_span: None,
                 discharge: None,
             };
@@ -2704,9 +2704,7 @@ fn written_type_check_query<'db>(
         let report = match entry {
             WrittenEntry::ConstBodies { bodies, expr } => {
                 let selections = expr
-                    .and_then(|expr| {
-                        typed.and_then(|typed| typed.tables.expr_selections[expr].as_deref())
-                    })
+                    .and_then(|expr| typed.map(|typed| typed.selections_for_expr(db, expr)))
                     .unwrap_or(&[]);
                 for &(body, expected) in bodies {
                     check.extend(anon_const_position_check(db, body, expected, selections));
@@ -2716,9 +2714,7 @@ fn written_type_check_query<'db>(
             WrittenEntry::Type(written) => {
                 let selections = written
                     .expr
-                    .and_then(|expr| {
-                        typed.and_then(|typed| typed.tables.expr_selections[expr].as_deref())
-                    })
+                    .and_then(|expr| typed.map(|typed| typed.selections_for_expr(db, expr)))
                     .unwrap_or_default();
                 let solve_cx = TraitSolveCx::new(db, written.scope)
                     .with_assumptions(assumptions_at(db, written.scope));
@@ -3385,7 +3381,7 @@ fn use_it() -> u256 { read<7>() }";
         let obligation = super::super::env::TraitObligation {
             goal,
             assumptions: checker.env.assumptions(),
-            selected_applications: Vec::new(),
+            context: checker.env.selection_context(),
             origin: super::super::env::TraitObligationOrigin::GenericConfirmation,
             span: function.span().into(),
         };
@@ -3434,7 +3430,7 @@ fn use_it() -> u256 { read<7>() }";
         let obligation = super::super::env::TraitObligation {
             goal,
             assumptions: checker.env.assumptions(),
-            selected_applications: Vec::new(),
+            context: checker.env.selection_context(),
             origin: super::super::env::TraitObligationOrigin::GenericConfirmation,
             span: function.span().into(),
         };

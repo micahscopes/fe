@@ -465,7 +465,7 @@ impl<'db> HoleMinter<'db> {
 pub(crate) struct LoweringContext<'db> {
     holes: HoleMinter<'db>,
     const_bodies: ConstBodyLowering,
-    selections: Vec<SelectedApplication<'db>>,
+    selection_context: Option<ImplEnv<'db>>,
     selected_const_assumptions: Option<PredicateListId<'db>>,
     source_params: Option<GenericParamOwner<'db>>,
     default_capture: Option<(GenericParamOwner<'db>, SourceParamIndex)>,
@@ -496,7 +496,7 @@ impl<'db> LoweringContext<'db> {
         Self {
             holes: HoleMinter::new(anchor),
             const_bodies,
-            selections: Vec::new(),
+            selection_context: None,
             selected_const_assumptions: None,
             source_params: None,
             default_capture: None,
@@ -505,12 +505,12 @@ impl<'db> LoweringContext<'db> {
         }
     }
 
-    pub(crate) fn with_selections(
+    pub(crate) fn with_context(
         mut self,
-        selections: Vec<SelectedApplication<'db>>,
+        context: ImplEnv<'db>,
         assumptions: PredicateListId<'db>,
     ) -> Self {
-        self.selections = selections;
+        self.selection_context = Some(context);
         self.selected_const_assumptions = Some(assumptions);
         self
     }
@@ -524,11 +524,7 @@ impl<'db> LoweringContext<'db> {
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
     ) -> Option<SelectedApplication<'db>> {
-        self.selections
-            .iter()
-            .rev()
-            .copied()
-            .find(|selection| selection.matches(db, goal))
+        self.selection_context?.selection_for(db, goal)
     }
 
     pub(crate) fn const_impl_env(
@@ -536,10 +532,11 @@ impl<'db> LoweringContext<'db> {
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
     ) -> Option<ImplEnv<'db>> {
+        let context = self.selection_context?;
         let assumptions = self.selected_const_assumptions?;
         Some(
             ImplEnv::new(db, scope, assumptions, Vec::new())
-                .with_selections(db, self.selections.clone()),
+                .with_selections(db, context.selections(db).to_vec()),
         )
     }
 
