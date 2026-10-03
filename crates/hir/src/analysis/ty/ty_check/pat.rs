@@ -524,7 +524,14 @@ impl<'db> TyChecker<'db> {
 
                 let trait_ = inst.def(self.db);
                 let selection = self.env.selection_for_goal(inst);
-                self.register_trait_const_obligation(inst, span.clone().into());
+                if !self.check_trait_const_obligation(inst, span.clone().into()) {
+                    return self.finish_pat_check(
+                        pat,
+                        expected,
+                        TyId::invalid(self.db, InvalidCause::Other),
+                        PatternAnalysisStatus::Invalid,
+                    );
+                }
 
                 if let Some(const_view) = trait_.const_(self.db, name)
                     && let Some(ty_binder) = const_view.ty_binder(self.db)

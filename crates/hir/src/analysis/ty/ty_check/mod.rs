@@ -1791,6 +1791,7 @@ pub(crate) struct TyCheckerSnapshot<'db> {
 
 enum TraitObligationOutcome<'db> {
     Discharged,
+    Rejected,
     Progressed,
     Requeue(env::TraitObligation<'db>),
 }
@@ -2440,18 +2441,31 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn register_trait_const_obligation(&mut self, goal: TraitInstId<'db>, span: DynLazySpan<'db>) {
+    fn check_trait_const_obligation(
+        &mut self,
+        goal: TraitInstId<'db>,
+        span: DynLazySpan<'db>,
+    ) -> bool {
         // Binder parameters outside this body's scope await receiver inference.
         if trait_const_goal_has_foreign_params(self.db, goal, self.env.scope()) {
-            return;
+            return true;
         }
-        self.env.register_trait_obligation(env::TraitObligation {
+        let obligation = env::TraitObligation {
             selected_applications: self.env.selected_applications(),
             assumptions: self.env.assumptions(),
             goal,
             origin: env::TraitObligationOrigin::GenericConfirmation,
             span,
-        });
+        };
+        let final_pass = !collect_flags(self.db, goal).contains(TyFlags::HAS_VAR);
+        match self.process_trait_obligation(obligation, final_pass) {
+            TraitObligationOutcome::Rejected => false,
+            TraitObligationOutcome::Requeue(obligation) => {
+                self.env.register_trait_obligation(obligation);
+                true
+            }
+            TraitObligationOutcome::Discharged | TraitObligationOutcome::Progressed => true,
+        }
     }
 
     fn process_trait_obligation(
@@ -2691,19 +2705,19 @@ impl<'db> TyChecker<'db> {
                             capability_hint,
                         },
                     ));
-                    TraitObligationOutcome::Discharged
+                    TraitObligationOutcome::Rejected
                 } else if final_pass {
-                    TraitObligationOutcome::Discharged
+                    TraitObligationOutcome::Rejected
                 } else {
                     TraitObligationOutcome::Requeue(obligation)
                 }
             }
-            GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Discharged,
+            GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Rejected,
             GoalSatisfiability::NormalizationFault => {
                 self.push_diag(TyDiagCollection::from(
                     TraitConstraintDiag::NormalizationFault(obligation.span),
                 ));
-                TraitObligationOutcome::Discharged
+                TraitObligationOutcome::Rejected
             }
         }
     }
@@ -2871,7 +2885,8 @@ impl<'db> TyChecker<'db> {
                     }
                     env::DeferredTask::Obligation(obligation) => {
                         match self.process_trait_obligation(obligation, false) {
-                            TraitObligationOutcome::Discharged => {}
+                            TraitObligationOutcome::Discharged
+                            | TraitObligationOutcome::Rejected => {}
                             TraitObligationOutcome::Progressed => progressed = true,
                             TraitObligationOutcome::Requeue(obligation) => {
                                 self.env.register_trait_obligation(obligation);

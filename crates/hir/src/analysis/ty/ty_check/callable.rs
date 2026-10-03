@@ -1192,7 +1192,7 @@ impl<'db> Callable<'db> {
                 span: call_expr.span(tc.body()).into(),
             };
             match tc.process_trait_obligation(obligation, false) {
-                TraitObligationOutcome::Discharged => {}
+                TraitObligationOutcome::Discharged | TraitObligationOutcome::Rejected => {}
                 TraitObligationOutcome::Progressed => progressed = true,
                 TraitObligationOutcome::Requeue(obligation) => {
                     pending_obligations.push(obligation);
@@ -1231,7 +1231,7 @@ impl<'db> Callable<'db> {
             };
 
             match tc.process_trait_obligation(obligation, false) {
-                TraitObligationOutcome::Discharged => {}
+                TraitObligationOutcome::Discharged | TraitObligationOutcome::Rejected => {}
                 TraitObligationOutcome::Progressed => progressed = true,
                 TraitObligationOutcome::Requeue(obligation) => {
                     pending_obligations.push(obligation);
@@ -1244,7 +1244,7 @@ impl<'db> Callable<'db> {
             round_progressed = false;
             for obligation in std::mem::take(&mut pending_obligations) {
                 match tc.process_trait_obligation(obligation, false) {
-                    TraitObligationOutcome::Discharged => {}
+                    TraitObligationOutcome::Discharged | TraitObligationOutcome::Rejected => {}
                     TraitObligationOutcome::Progressed => {
                         progressed = true;
                         round_progressed = true;

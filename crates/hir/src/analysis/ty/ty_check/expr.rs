@@ -4156,7 +4156,9 @@ impl<'db> TyChecker<'db> {
                     );
 
                     let selection = self.env.selection_for_goal(inst);
-                    self.register_trait_const_obligation(inst, path_expr_span.clone().into());
+                    if !self.check_trait_const_obligation(inst, path_expr_span.clone().into()) {
+                        return ExprProp::invalid(self.db);
+                    }
 
                     self.env.register_const_ref(
                         expr,
