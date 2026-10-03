@@ -1,4 +1,4 @@
-"""Reject repeated error codes at the same primary highlight in snapshots."""
+"""Reject repeated diagnostic obligations at the same primary highlight."""
 
 from pathlib import Path
 import re
@@ -14,6 +14,7 @@ HEADER = re.compile(r"^(error|warning)\[([^]]+)\]:", re.MULTILINE)
 LOCATION = re.compile(r"^\s*┌─ (.+:\d+:\d+)", re.MULTILINE)
 SOURCE_LINE = re.compile(r"^\s*(\d+)\s+│")
 HIGHLIGHT = re.compile(r"\^+")
+SECONDARY = re.compile(r"^\s*│\s*(?P<mark>-+)(?=\s|$)")
 
 
 def primary_highlights(body: str) -> tuple[tuple[str, int, int], ...]:
@@ -25,6 +26,22 @@ def primary_highlights(body: str) -> tuple[tuple[str, int, int], ...]:
             source_line = numbered.group(1)
         if line.lstrip().startswith("│") and (mark := HIGHLIGHT.search(line)):
             result.append((source_line, mark.start(), mark.end()))
+    return tuple(result)
+
+
+def obligation_sites(body: str) -> tuple[tuple[str, str, int, int], ...]:
+    """Distinct bounds/predicates can fail at one call's primary highlight."""
+    filename = source_line = ""
+    result = []
+    for line in body.splitlines():
+        if location := LOCATION.match(line):
+            filename = location.group(1).rsplit(":", 2)[0]
+            source_line = ""
+        if numbered := SOURCE_LINE.match(line):
+            source_line = numbered.group(1)
+        if mark := SECONDARY.match(line):
+            column = mark.start("mark") - line.index("│") - 1
+            result.append((filename, source_line, column, len(mark.group("mark"))))
     return tuple(result)
 
 
@@ -47,6 +64,7 @@ def violations(source: str) -> list[str]:
             header.group(2),
             location.group(1),
             highlights,
+            obligation_sites(body),
         )
         if key in seen:
             errors.append(f"{header.group(1)}[{header.group(2)}] at {location.group(1)}")
@@ -73,6 +91,25 @@ error[6-0003]: second
 """
     if not violations(sample):
         errors.append("self-check: repeated rendered diagnostic was not rejected")
+
+    cause = """error[8-0093]: const requirement is not satisfied
+  ┌─ example.fe:10:1
+  │
+4 │ predicate
+  │ ----- required by this predicate
+10 │ call
+   │ ^^^^ condition evaluated to false
+"""
+    distinct = cause + cause.replace("4 │ predicate", "7 │ predicate")
+    if violations(distinct):
+        errors.append("self-check: distinct predicate sites were conflated")
+    if not violations(cause + cause):
+        errors.append("self-check: duplicate predicate report was accepted")
+    if not violations(cause + cause.replace("required by this predicate", "required here")):
+        errors.append("self-check: relabeling hid a repeated obligation")
+    other_file = cause.replace("example.fe:10:1", "other.fe:10:1")
+    if violations(cause + other_file):
+        errors.append("self-check: distinct source files were conflated")
 
     if errors:
         print("repeated rendered diagnostics:\n" + "\n".join(errors), file=sys.stderr)
