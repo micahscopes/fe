@@ -1296,17 +1296,61 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
     /// Checks the applications that the body's paths pass through, once per
     /// site, and adds them to the written applications.
     fn check_path_applications(&mut self) {
+        // A written type suppresses only the path in its own expression.
+        // The body-wide set remains useful for inferred types, but another
+        // expression spelling the same type still needs its own decision.
+        let written_sites: Vec<_> = written_types(self.db, ItemKind::Body(self.body))
+            .iter()
+            .filter_map(|entry| {
+                let WrittenEntry::Type(written) = entry else {
+                    return None;
+                };
+                let expr = written.expr?;
+                let span = expr.span(self.body);
+                let region: DynLazySpan<'db> =
+                    match expr.data(self.db, self.body).borrowed().to_opt()? {
+                        Expr::Path(..) => span.into_path_expr().into(),
+                        Expr::RecordInit(..) => span.into_record_init_expr().into(),
+                        _ => span.into(),
+                    };
+                Some((region, written))
+            })
+            .collect();
+        let expression_sites: FxHashMap<_, _> = self
+            .body
+            .exprs(self.db)
+            .iter()
+            .filter_map(|(expr, data)| {
+                let span = expr.span(self.body);
+                let site: DynLazySpan<'db> = match data.borrowed().to_opt()? {
+                    Expr::Path(..) => span.into_path_expr().into(),
+                    Expr::RecordInit(..) => span.into_record_init_expr().into(),
+                    _ => return None,
+                };
+                Some((site, expr))
+            })
+            .collect();
         let mut reported_paths = FxHashSet::default();
         for (site, application) in self.typed.path_applications() {
             if !reported_paths.insert((site, *application)) {
                 continue;
             }
+            let reported = written_sites
+                .iter()
+                .filter(|(region, written)| region == site || &written.span == site)
+                .flat_map(|(_, written)| {
+                    written.lowered.iter().chain(&written.applications).copied()
+                })
+                .collect();
             if let Some(unmet) = check_path_application(
                 self.db,
                 *application,
                 self.scope,
-                &self.written,
-                &[],
+                &reported,
+                expression_sites
+                    .get(site)
+                    .map(|&expr| self.typed.selections_for_expr(self.db, expr))
+                    .unwrap_or_default(),
                 &mut ConditionCapture {
                     site: site.clone(),
                     conditions: &mut self.check.conditions,

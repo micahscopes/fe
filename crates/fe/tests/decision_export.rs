@@ -624,3 +624,33 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
         fe::decision_export::diagnostic_records(&db, std::slice::from_ref(body_error)).unwrap();
     assert!(!aliases.contains(&errors[0]["site"]));
 }
+
+#[test]
+fn export_keeps_successful_path_receiver_conditions() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///path_receiver_condition.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some("trait Helper { const X: usize\nfn helper() -> u256 }\nstruct Bounded<const N: usize> where N > 0 {}\nimpl<T> Helper for T { const X: usize = 1\nfn helper() -> u256 { 1 } }\nfn allowed() -> u256 { let _first: u256 = Bounded<1>::helper()\nlet _second: usize = <Bounded<1> as Helper>::X\n0 }\n".into()));
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(
+        !diagnostics.has_errors(&db),
+        "{}",
+        diagnostics.format_diags(&db)
+    );
+    let function = module
+        .all_funcs(&db)
+        .iter()
+        .find(|f| f.name(&db).to_opt().unwrap().data(&db) == "allowed")
+        .copied()
+        .unwrap();
+    let (_, typed) = check_func_body(&db, function);
+    let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+    assert_eq!(
+        conditions
+            .iter()
+            .filter(|r| r["source"] == "struct Bounded" && r["outcome"] == "eval-true")
+            .count(),
+        2,
+        "each receiver site must retain its check: {conditions:#?}"
+    );
+}
