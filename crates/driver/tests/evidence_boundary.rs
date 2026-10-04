@@ -84,6 +84,27 @@ fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
     .pretty_print(db)
 }
 
+#[test]
+#[ignore = "Step 2: pass the selected bound to both the impl condition and body"]
+fn selected_impl_bound_agrees_between_condition_and_body() {
+    let mut db = database();
+    let file = checked(
+        &mut db,
+        "selected-bound-condition-body",
+        "trait Compute { const OK: bool }
+struct Subject {}
+impl Compute for Subject { const OK: bool = false }
+impl Compute for Subject as Relaxed { const OK: bool = true }
+trait Value { const fn value() -> u256 }
+struct Gate<T> {}
+impl<T: Compute> Value for Gate<T> where T::OK {
+    const fn value() -> u256 { if T::OK { 1 } else { 2 } }
+}
+const fn run() -> u256 { with (Relaxed) { <Gate<Subject> as Value>::value() } }",
+    );
+    assert_eq!(evaluate(&db, file, "run"), "1");
+}
+
 // These are ordinary Fe carrier probes, not a public evidence primitive.
 const BOOLEAN_CARRIER: &str = "struct Evidence<const P: bool> where P {}";
 
