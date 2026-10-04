@@ -526,6 +526,11 @@ fn export_keeps_written_type_conditions_in_generic_const_paths() {
         );
         let (_, typed) = check_func_body(&db, function);
         let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+        assert_eq!(
+            conditions.len(),
+            1,
+            "one authored type application should retain one check, {name}: {conditions:#?}"
+        );
         let program =
             fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
         let function = program

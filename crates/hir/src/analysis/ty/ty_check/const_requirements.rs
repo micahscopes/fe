@@ -2759,8 +2759,8 @@ fn written_type_check_query<'db>(
         _ => None,
     };
     let mut check = RequirementCheck::default();
-    // The failing application each entry reported, if any.
-    let mut reported: Vec<Option<TyId<'db>>> = Vec::with_capacity(entries.len());
+    // Applications completed by each nested entry, including successful checks.
+    let mut reported: Vec<Vec<TyId<'db>>> = Vec::with_capacity(entries.len());
     for entry in entries {
         let report = match entry {
             WrittenEntry::ConstBodies { bodies, expr } => {
@@ -2770,7 +2770,7 @@ fn written_type_check_query<'db>(
                 for &(body, expected) in bodies {
                     check.extend(anon_const_position_check(db, body, expected, selections));
                 }
-                None
+                Vec::new()
             }
             WrittenEntry::Type(written) => {
                 let selections = written
@@ -2830,11 +2830,18 @@ fn written_type_check_query<'db>(
                             )
                         })
                     });
-                unmet.map(|unmet| {
+                if let Some(unmet) = unmet {
                     let ty = unmet.ty;
                     check.report_type(unmet, false);
-                    ty
-                })
+                    vec![ty]
+                } else {
+                    written
+                        .lowered
+                        .iter()
+                        .chain(&written.applications)
+                        .copied()
+                        .collect()
+                }
             }
         };
         reported.push(report);
