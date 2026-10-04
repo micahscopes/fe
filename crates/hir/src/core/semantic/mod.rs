@@ -874,6 +874,21 @@ impl<'db> Func<'db> {
     }
 }
 
+/// Find the innermost provision for a trait slot. Associated equalities are
+/// checked against the accepted answer, rather than selecting another slot.
+/// The caller supplies the full ordered stream, including evidence entries.
+pub(crate) fn lookup_trait_goal<'db, T: Copy>(
+    db: &'db dyn HirAnalysisDb,
+    goal: crate::analysis::ty::trait_def::TraitInstId<'db>,
+    entries: impl DoubleEndedIterator<Item = T>,
+    goal_of: impl Fn(T) -> crate::analysis::ty::trait_def::TraitInstId<'db>,
+) -> Option<T> {
+    entries.rev().find(|entry| {
+        let provided = goal_of(*entry);
+        provided.def(db) == goal.def(db) && provided.args(db) == goal.args(db)
+    })
+}
+
 // Call site analysis --------------------------------------------------------
 
 /// A call site found inside a function body.

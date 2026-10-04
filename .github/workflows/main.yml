@@ -69,6 +69,10 @@ jobs:
         run: python3 .github/check_owned_selection_budget.py
       - name: Guard callee choice fallback budget
         run: python3 .github/check_trait_choice_fallback_budget.py
+      - name: Check shared trait-goal lookup
+        run: python3 .github/check_trait_goal_lookup_budget.py
+      - name: Check with-scope stack budget
+        run: python3 .github/check_with_scope_stack_budget.py
       - name: Lint with rustfmt
         run: cargo fmt --all -- --check
       - name: Lint with clippy

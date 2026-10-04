@@ -283,11 +283,12 @@ impl<'db> ImplEnv<'db> {
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
     ) -> Option<SelectedApplication<'db>> {
-        self.selections(db)
-            .iter()
-            .rev()
-            .copied()
-            .find(|selection| selection.matches(db, goal))
+        crate::core::semantic::lookup_trait_goal(
+            db,
+            goal,
+            self.selections(db).iter().copied(),
+            SelectedApplication::goal,
+        )
     }
 
     pub fn empty(db: &'db dyn HirAnalysisDb, normalization_scope: ScopeId<'db>) -> Self {

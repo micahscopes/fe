@@ -1,0 +1,72 @@
+"""L19: selection and provision readers share one ordered goal lookup."""
+from pathlib import Path
+import importlib.util
+import re
+import sys
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+BASELINE = 1
+spec = importlib.util.spec_from_file_location(
+    'solver_budget', ROOT / '.github/check_trait_solver_setup_budget.py'
+)
+solver_budget = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(solver_budget)
+
+
+def bodies(source, name):
+    code = solver_budget.production_code(source)
+    result = []
+    for match in re.finditer(r'\bfn\s+' + name + r'\b', code):
+        start = code.index('{', match.end())
+        depth = 1
+        end = start + 1
+        while depth:
+            depth += (code[end] == '{') - (code[end] == '}')
+            end += 1
+        result.append(code[start:end])
+    return result
+
+
+def inventory(sources):
+    searches = bodies(sources['semantic'], 'lookup_trait_goal')
+    if len(searches) != BASELINE or '.rev()' not in searches[0] or '.find(' not in searches[0]:
+        raise ValueError('expected one ordered trait-goal lookup')
+    for file, name, delegate in [
+        ('impl', 'selection_for', 'lookup_trait_goal'),
+        ('env', 'provision_for_goal', 'lookup_trait_goal'),
+        ('env', 'selection_for_goal', 'provision_for_goal'),
+        ('const', 'selection_for', 'selection_for'),
+    ]:
+        readers = bodies(sources[file], name)
+        if len(readers) != 1 or delegate + '(' not in readers[0]:
+            raise ValueError(f'{file}::{name} must delegate to {delegate}')
+        if re.search(r'\.(?:find|position|rposition)\s*\(|\b(?:for|while|loop)\b', readers[0]):
+            raise ValueError(f'{file}::{name} reintroduced an independent lookup')
+    return len(searches)
+
+
+if __name__ == '__main__':
+    paths = {
+        'semantic': 'crates/hir/src/core/semantic/mod.rs',
+        'impl': 'crates/hir/src/analysis/semantic/instance/template.rs',
+        'env': 'crates/hir/src/analysis/ty/ty_check/env.rs',
+        'const': 'crates/hir/src/analysis/ty/const_ty.rs',
+    }
+    sources = {name: (ROOT / path).read_text() for name, path in paths.items()}
+    try:
+        count = inventory(sources)
+    except ValueError as error:
+        sys.exit(str(error))
+    # Mutations must not turn adapters back into independent lookup authorities.
+    for file, name in [('impl', 'selection_for'), ('env', 'provision_for_goal')]:
+        mutant = dict(sources)
+        body = bodies(sources[file], name)[0]
+        mutant[file] = sources[file].replace(body, '{ entries.rev().find(|entry| true) }')
+        assert mutant[file] != sources[file], "mutation must modify actual source"
+        try:
+            inventory(mutant)
+        except ValueError:
+            continue
+        sys.exit('independent-lookup mutation escaped the guard')
+    print(f'trait-goal lookup implementations: {count} (ceiling {BASELINE})')

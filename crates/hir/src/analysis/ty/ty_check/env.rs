@@ -658,11 +658,12 @@ impl<'db> TyCheckEnv<'db> {
         &self,
         goal: TraitInstId<'db>,
     ) -> Option<ScopedProvision<'db>> {
-        self.provisions.iter().rev().copied().find(|provision| {
-            let provided = provision.goal();
-            provided.def(self.db) == goal.def(self.db)
-                && provided.args(self.db) == goal.args(self.db)
-        })
+        crate::core::semantic::lookup_trait_goal(
+            self.db,
+            goal,
+            self.provisions.iter().copied(),
+            ScopedProvision::goal,
+        )
     }
 
     pub(super) fn selection_for_goal(
