@@ -2417,7 +2417,10 @@ fn assumptions_at<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Predi
         };
         enclosing = parent;
     }
-    crate::semantic::constraints_for(db, enclosing.item())
+    match enclosing.item() {
+        ItemKind::Func(_) => crate::semantic::param_env(db, enclosing.item()),
+        item => crate::semantic::constraints_for(db, item),
+    }
 }
 
 /// The applications that the types written in `owner`'s signature and body
@@ -2977,6 +2980,62 @@ fn written_const_args<'db>(
 #[cfg(test)]
 mod recording_tests {
     use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn authored_types_and_param_env_share_trait_method_self_premise() {
+        use crate::analysis::ty::trait_resolution::{
+            GoalSatisfiability, TraitSolveCx, is_goal_satisfiable,
+        };
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "trait_method_context.fe".into(),
+            "trait HasSize { const N: usize
+fn inspect() { let _: [u8; Self::N] } }",
+        );
+        let (top, _) = db.top_mod(file);
+        let method = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|f| {
+                f.name(&db)
+                    .to_opt()
+                    .is_some_and(|n| n.data(&db) == "inspect")
+            })
+            .expect("trait method");
+        let Some(super::ItemKind::Trait(trait_)) = method.scope().parent_item(&db) else {
+            panic!("expected enclosing trait");
+        };
+        let goal = crate::semantic::trait_self_predicate(&db, trait_);
+        let scope = method.body(&db).unwrap().scope();
+        let written = super::assumptions_at(&db, scope);
+        let parameter = crate::semantic::param_env(&db, method.into());
+        let solve = |assumptions| {
+            is_goal_satisfiable(
+                &db,
+                TraitSolveCx::new(&db, scope).with_assumptions(assumptions),
+                goal,
+            )
+        };
+        let const_body = crate::analysis::ty::const_ty::const_body_assumptions(&db, scope);
+        let declared = crate::analysis::ty::trait_resolution::constraint::collect_constraints(
+            &db,
+            method.into(),
+        )
+        .instantiate_identity();
+        assert!(matches!(solve(parameter), GoalSatisfiability::Satisfied(_)));
+        assert!(matches!(
+            solve(const_body),
+            GoalSatisfiability::Satisfied(_)
+        ));
+        // Declaration bounds alone do not establish the implicit body premise.
+        assert!(matches!(solve(declared), GoalSatisfiability::UnSat(_)));
+        assert!(
+            matches!(solve(written), GoalSatisfiability::Satisfied(_)),
+            "authored type context lost the trait method's Self premise: {:?}",
+            solve(written)
+        );
+    }
 
     #[test]
     fn requirement_reports_read_the_retained_outcome() {
