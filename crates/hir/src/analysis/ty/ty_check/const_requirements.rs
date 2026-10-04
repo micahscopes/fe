@@ -83,6 +83,20 @@ impl<'db> ConstConditionUse<'db> {
     pub fn predicate(&self) -> Option<&PredicateKey<'db>> {
         self.discharge.as_ref()?.predicate.as_deref()
     }
+
+    /// Locate the actual retained proof in the caller's declared conditions.
+    /// Inherited premises have no local v1 index; do not reconstruct a proof.
+    pub fn premise_index(&self, db: &'db dyn HirAnalysisDb) -> Option<usize> {
+        let Discharge::Holds(RequirementProof::Premise(predicate)) = self.outcome() else {
+            return None;
+        };
+        self.caller?
+            .where_clause_owner()?
+            .where_clause(db)
+            .const_predicates(db)
+            .iter()
+            .position(|candidate| *candidate == predicate)
+    }
 }
 
 impl<'db> PredicateKey<'db> {
