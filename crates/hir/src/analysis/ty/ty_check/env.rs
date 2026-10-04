@@ -27,7 +27,7 @@ use crate::analysis::ty::pattern_ir::{
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
-        const_ty::{CallableInputLayoutHoleOrigin, const_body_assumptions},
+        const_ty::CallableInputLayoutHoleOrigin,
         corelib::resolve_lib_type_path,
         diagnostics::BodyDiag,
         effects::{
@@ -140,7 +140,7 @@ impl<'db> TyCheckEnv<'db> {
                 (preds, assumptions)
             }
             BodyOwner::AnonConstBody { .. } | BodyOwner::Const(_) => {
-                let preds = const_body_assumptions(db, owner_scope);
+                let preds = crate::semantic::body_assumptions_at(db, owner_scope);
                 let assumptions = preds.extend_all_bounds(db);
                 (preds, assumptions)
             }

@@ -2332,7 +2332,7 @@ fn discharge_selected_requirement_query<'db>(
             ImplEnv::new(
                 db,
                 owner.scope(),
-                crate::analysis::ty::const_ty::const_body_assumptions(db, owner.scope()),
+                crate::semantic::body_assumptions_at(db, owner.scope()),
                 Vec::new(),
             )
             .with_selections(db, selections.clone()),
@@ -3017,7 +3017,7 @@ fn inspect() { let _: [u8; Self::N] } }",
                 goal,
             )
         };
-        let const_body = crate::analysis::ty::const_ty::const_body_assumptions(&db, scope);
+        let const_body = crate::semantic::body_assumptions_at(&db, scope);
         let declared = crate::analysis::ty::trait_resolution::constraint::collect_constraints(
             &db,
             method.into(),

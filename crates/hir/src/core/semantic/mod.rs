@@ -192,35 +192,62 @@ pub fn constraints_for<'db>(
 /// while the trait's own interface is still being lowered can recurse through
 /// the in-progress definition.
 pub fn param_env<'db>(db: &'db dyn HirAnalysisDb, item: ItemKind<'db>) -> PredicateListId<'db> {
-    let preds = constraints_for(db, item);
-    let preds = match item {
-        // The trait's own self-predicate is added by `constraints_for`.
-        ItemKind::Trait(_) => preds,
-        _ => match item.scope().parent_item(db) {
-            Some(ItemKind::Trait(trait_)) => {
-                push_predicate(db, preds, trait_self_predicate(db, trait_))
-            }
-            _ => preds,
-        },
-    };
-    preds.extend_all_bounds(db)
+    item_body_assumptions(db, item, true).extend_all_bounds(db)
 }
 
-/// Unelaborated assumptions for checking `func`'s body: the declared
-/// constraints (including the parent item's) plus the implicit `Self: Trait`
-/// predicate for trait methods. Effect-derived bounds are layered on
-/// separately by the body checker.
+/// Unelaborated assumptions before effect-provider bounds are available.
 pub(crate) fn func_body_assumptions<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> PredicateListId<'db> {
-    let preds = collect_func_decl_constraints(db, func.into(), true).instantiate_identity();
-    match func.scope().parent_item(db) {
-        Some(ItemKind::Trait(trait_)) => {
-            push_predicate(db, preds, trait_self_predicate(db, trait_))
+    item_body_assumptions(db, func.into(), false)
+}
+
+/// The single body-premise builder. During inference, effect-provider bounds
+/// are supplied by the checker; completed item contexts collect them here.
+/// Header formation uses declaration constraints instead of this body view.
+fn item_body_assumptions<'db>(
+    db: &'db dyn HirAnalysisDb,
+    item: ItemKind<'db>,
+    include_effect_bounds: bool,
+) -> PredicateListId<'db> {
+    let preds = match item {
+        ItemKind::Func(func) if include_effect_bounds => {
+            collect_func_def_constraints(db, func.into(), true).instantiate_identity()
         }
-        _ => preds,
+        ItemKind::Func(func) => {
+            collect_func_decl_constraints(db, func.into(), true).instantiate_identity()
+        }
+        item => GenericParamOwner::from_item_opt(item).map_or_else(
+            || PredicateListId::empty_list(db),
+            |owner| collect_constraints(db, owner).instantiate_identity(),
+        ),
+    };
+    let trait_ = match item {
+        ItemKind::Trait(trait_) => Some(trait_),
+        _ => match item.scope().parent_item(db) {
+            Some(ItemKind::Trait(trait_)) => Some(trait_),
+            _ => None,
+        },
+    };
+    trait_.map_or(preds, |trait_| {
+        push_predicate(db, preds, trait_self_predicate(db, trait_))
+    })
+}
+
+/// Declared body premises at an anonymous constant's source position.
+pub(crate) fn body_assumptions_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> PredicateListId<'db> {
+    let mut item = scope.parent_item(db);
+    while let Some(ItemKind::Body(body)) = item {
+        item = body.scope().parent_item(db);
     }
+    item.map_or_else(
+        || PredicateListId::empty_list(db),
+        |item| item_body_assumptions(db, item, false),
+    )
 }
 
 /// Trait header validation must not assume `Self: Trait` yet.

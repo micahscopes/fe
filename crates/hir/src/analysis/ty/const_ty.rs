@@ -22,7 +22,7 @@ use super::{
         ImplementorId, ResolvedImplInstance, TraitInstId, resolve_trait_impl_instance,
         selected_assoc_const_body_template,
     },
-    trait_resolution::{Selection, TraitSolveCx, constraint::collect_constraints},
+    trait_resolution::{Selection, TraitSolveCx},
     ty_check::{BodyOwner, infer_body},
     ty_def::{InvalidCause, TyId, TyParam, TyVar},
     ty_error::first_invalid_ty_cause,
@@ -2665,32 +2665,7 @@ pub(crate) fn assumptions_for_body<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
 ) -> PredicateListId<'db> {
-    const_body_assumptions(db, body.scope()).extend_all_bounds(db)
-}
-
-/// Base predicates available to a const body, shared by type checking and CTFE.
-pub(crate) fn const_body_assumptions<'db>(
-    db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-) -> PredicateListId<'db> {
-    let mut parent_item = scope.parent_item(db);
-    while let Some(ItemKind::Body(parent)) = parent_item {
-        parent_item = parent.scope().parent_item(db);
-    }
-
-    match parent_item {
-        Some(ItemKind::Func(func)) => crate::semantic::func_body_assumptions(db, func),
-        Some(ItemKind::Trait(trait_)) => {
-            let declared = collect_constraints(db, trait_.into()).instantiate_identity();
-            let self_predicate =
-                PredicateListId::new(db, vec![crate::semantic::trait_self_predicate(db, trait_)]);
-            declared.merge(db, self_predicate)
-        }
-        item => item.and_then(GenericParamOwner::from_item_opt).map_or_else(
-            || PredicateListId::empty_list(db),
-            |owner| collect_constraints(db, owner).instantiate_identity(),
-        ),
-    }
+    crate::semantic::body_assumptions_at(db, body.scope()).extend_all_bounds(db)
 }
 
 fn evaluate_const_ty_cycle_initial<'db>(
