@@ -4353,7 +4353,7 @@ impl<'db> TypedBody<'db> {
         &self.decisions
     }
 
-    pub(super) fn selections_for_expr(
+    pub(crate) fn selections_for_expr(
         &self,
         db: &'db dyn HirAnalysisDb,
         expr: ExprId,

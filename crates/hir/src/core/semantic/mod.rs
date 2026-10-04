@@ -253,6 +253,40 @@ pub(crate) fn body_assumptions_at<'db>(
     )
 }
 
+/// Read the item premises and retained lexical selections at a source position.
+/// A position outside a body has only its canonical item context. Body choices
+/// are read from the existing decision record, never solved again here.
+pub(crate) fn context_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    position: Option<(
+        &crate::analysis::ty::ty_check::TypedBody<'db>,
+        crate::hir_def::ExprId,
+    )>,
+) -> crate::analysis::semantic::ImplEnv<'db> {
+    let mut enclosing = scope;
+    while matches!(enclosing.item(), ItemKind::Body(_)) {
+        let Some(parent) = enclosing.parent(db) else {
+            break;
+        };
+        enclosing = parent;
+    }
+    let assumptions = match enclosing.item() {
+        ItemKind::Func(_) => param_env(db, enclosing.item()),
+        item => constraints_for(db, item),
+    };
+    let selections = position
+        .map(|(typed, expr)| typed.selections_for_expr(db, expr).to_vec())
+        .unwrap_or_default();
+    crate::analysis::semantic::ImplEnv::new_with_selections(
+        db,
+        scope,
+        assumptions,
+        Vec::new(),
+        selections,
+    )
+}
+
 /// Trait header validation must not assume `Self: Trait` yet.
 ///
 /// The synthetic self-predicate from [`constraints_for`] is only valid once the trait

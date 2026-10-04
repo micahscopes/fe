@@ -1349,7 +1349,11 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 &reported,
                 expression_sites
                     .get(site)
-                    .map(|&expr| self.typed.selections_for_expr(self.db, expr))
+                    .map(|&expr| {
+                        crate::semantic::context_at(self.db, self.scope, Some((self.typed, expr)))
+                            .selections(self.db)
+                            .as_slice()
+                    })
                     .unwrap_or_default(),
                 &mut ConditionCapture {
                     site: site.clone(),
@@ -2408,21 +2412,6 @@ fn formation_cycle_recover<'db>(
     salsa::CycleRecoveryAction::Iterate
 }
 
-/// The assumptions a type written at `scope` is lowered with.
-fn assumptions_at<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> PredicateListId<'db> {
-    let mut enclosing = scope;
-    while matches!(enclosing.item(), ItemKind::Body(_)) {
-        let Some(parent) = enclosing.parent(db) else {
-            break;
-        };
-        enclosing = parent;
-    }
-    match enclosing.item() {
-        ItemKind::Func(_) => crate::semantic::param_env(db, enclosing.item()),
-        item => crate::semantic::constraints_for(db, item),
-    }
-}
-
 /// The applications that the types written in `owner`'s signature and body
 /// carry, as `written_types` lists them for `written_type_check`. That check
 /// reports a written type's unmet requirement where the type is written, so a
@@ -2594,8 +2583,12 @@ fn written_types_query<'db>(
                 && self.default_depth == 0
             {
                 let scope = ctxt.scope();
-                let bodies =
-                    trait_ref_const_args(self.db, path, scope, assumptions_at(self.db, scope));
+                let bodies = trait_ref_const_args(
+                    self.db,
+                    path,
+                    scope,
+                    crate::semantic::context_at(self.db, scope, None).assumptions(self.db),
+                );
                 if !bodies.is_empty() {
                     self.entries.push(WrittenEntry::ConstBodies {
                         bodies,
@@ -2659,7 +2652,7 @@ fn written_types_query<'db>(
             walk_nested: impl FnOnce(&mut Self),
         ) {
             let db = self.db;
-            let assumptions = assumptions_at(db, scope);
+            let assumptions = crate::semantic::context_at(db, scope, None).assumptions(db);
             let (ty, applications) = match hir_ty.data(db) {
                 // Only a path of two or more segments passes through types
                 // that its lowering does not hold. A one-segment path lowers
@@ -2772,7 +2765,17 @@ fn written_type_check_query<'db>(
         let report = match entry {
             WrittenEntry::ConstBodies { bodies, expr } => {
                 let selections = expr
-                    .and_then(|expr| typed.map(|typed| typed.selections_for_expr(db, expr)))
+                    .and_then(|expr| {
+                        typed.map(|typed| {
+                            crate::semantic::context_at(
+                                db,
+                                region.item(db).scope(),
+                                Some((typed, expr)),
+                            )
+                            .selections(db)
+                            .as_slice()
+                        })
+                    })
                     .unwrap_or(&[]);
                 for &(body, expected) in bodies {
                     check.extend(anon_const_position_check(db, body, expected, selections));
@@ -2780,12 +2783,11 @@ fn written_type_check_query<'db>(
                 Vec::new()
             }
             WrittenEntry::Type(written) => {
-                let selections = written
-                    .expr
-                    .and_then(|expr| typed.map(|typed| typed.selections_for_expr(db, expr)))
-                    .unwrap_or_default();
-                let solve_cx = TraitSolveCx::new(db, written.scope)
-                    .with_assumptions(assumptions_at(db, written.scope));
+                let context =
+                    crate::semantic::context_at(db, written.scope, typed.zip(written.expr));
+                let selections = context.selections(db);
+                let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
+                    .with_assumptions(context.assumptions(db));
                 let mut uses = Vec::new();
                 for ty in written.lowered.iter().chain(&written.applications) {
                     if let Some(conditions) =
@@ -3008,7 +3010,7 @@ fn inspect() { let _: [u8; Self::N] } }",
         };
         let goal = crate::semantic::trait_self_predicate(&db, trait_);
         let scope = method.body(&db).unwrap().scope();
-        let written = super::assumptions_at(&db, scope);
+        let written = crate::semantic::context_at(&db, scope, None).assumptions(&db);
         let parameter = crate::semantic::param_env(&db, method.into());
         let solve = |assumptions| {
             is_goal_satisfiable(
@@ -3035,6 +3037,79 @@ fn inspect() { let _: [u8; Self::N] } }",
             "authored type context lost the trait method's Self premise: {:?}",
             solve(written)
         );
+    }
+
+    #[test]
+    fn context_view_reads_nested_choices_and_restores_the_outer_position() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "context_positions.fe".into(),
+            "trait Compute {}
+struct Subject {}
+impl Compute for Subject {}
+impl Compute for Subject as First {}
+impl Compute for Subject as Second {}
+fn outer<T: Compute>() {}
+fn inner<T: Compute>() {}
+fn restored<T: Compute>() {}
+fn outside<T: Compute>() {}
+fn caller() {
+    with (First) {
+        outer<Subject>()
+        with (Second) { inner<Subject>() }
+        restored<Subject>()
+    }
+    outside<Subject>()
+}",
+        );
+        let (top, _) = db.top_mod(file);
+        let caller = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|func| {
+                func.name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "caller")
+            })
+            .unwrap();
+        let owner = super::super::BodyOwner::Func(caller);
+        let inferred = super::super::inferred_body_with_selections(&db, owner, &[]);
+        assert!(inferred.result.0.is_empty(), "{:?}", inferred.result.0);
+        let typed = &inferred.result.1;
+        let openings = typed
+            .with_choices()
+            .map(|choice| match choice.outcome().unwrap() {
+                crate::core::semantic::Provision::Named(selection) => selection,
+                _ => panic!("expected named opening"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(openings.len(), 2);
+        let body = caller.body(&db).unwrap();
+        let mut checked = 0;
+        for expr in body.exprs(&db).keys() {
+            let Some(callable) = typed.callable_expr(expr) else {
+                continue;
+            };
+            let crate::hir_def::CallableDef::Func(func) = callable.callable_def() else {
+                continue;
+            };
+            let name = func.name(&db).to_opt().unwrap();
+            let context = crate::semantic::context_at(&db, body.scope(), Some((typed, expr)));
+            let expected = match name.data(&db).as_str() {
+                "outer" | "restored" => &openings[..1],
+                "inner" => &openings[1..],
+                "outside" => &[],
+                _ => continue,
+            };
+            assert_eq!(context.selections(&db), expected, "{}", name.data(&db));
+            assert_eq!(
+                context.assumptions(&db),
+                crate::semantic::param_env(&db, caller.into())
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
     }
 
     #[test]
