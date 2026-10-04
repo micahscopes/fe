@@ -25,9 +25,11 @@ def inventory(source):
         'push_selection': 'provisions',
         'push_evidence': 'provisions',
         'truncate_provisions': 'provisions',
+        'enter_provision_frame': 'provisions',
+        'leave_provision_frame': 'provisions',
     }
     for operation in re.findall(
-        r'\bself\s*\.\s*env\s*\.\s*((?:push|pop|truncate|replace)_\w+)\s*\(', body
+        r'\bself\s*\.\s*env\s*\.\s*((?:push|pop|truncate|replace|enter|leave)_\w+)\s*\(', body
     ):
         stacks.add(direct.get(operation, operation))
     for receiver in re.findall(

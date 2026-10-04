@@ -49,23 +49,9 @@ use crate::analysis::{
     },
 };
 use crate::core::semantic::{
-    EffectEnvView, EffectRequirement, ProviderBinding, ResolvedEffectBindingInfo,
+    Chain, EffectEnvView, EffectRequirement, Frame, ProviderBinding, Provision, ProvisionSource,
+    ResolvedEffectBindingInfo,
 };
-
-#[derive(Clone, Copy)]
-pub(super) enum ScopedProvision<'db> {
-    Evidence(ExprId, TraitInstId<'db>),
-    Selection(crate::analysis::semantic::SelectedApplication<'db>),
-}
-
-impl<'db> ScopedProvision<'db> {
-    pub(super) fn goal(self) -> TraitInstId<'db> {
-        match self {
-            Self::Evidence(_, goal) => goal,
-            Self::Selection(selection) => selection.goal(),
-        }
-    }
-}
 
 pub(crate) struct TyCheckEnv<'db> {
     db: &'db dyn HirAnalysisDb,
@@ -94,7 +80,7 @@ pub(crate) struct TyCheckEnv<'db> {
     effect_bounds: ThinVec<TraitInstId<'db>>,
     base_assumptions: PredicateListId<'db>,
     assumptions: PredicateListId<'db>,
-    provisions: Vec<ScopedProvision<'db>>,
+    provisions: Chain<'db>,
     var_env: Vec<BlockEnv<'db>>,
     pending_vars: FxHashMap<IdentId<'db>, LocalBinding<'db>>,
     loop_stack: Vec<StmtId>,
@@ -172,7 +158,7 @@ impl<'db> TyCheckEnv<'db> {
             effect_bounds: ThinVec::new(),
             base_assumptions,
             assumptions: base_assumptions,
-            provisions: Vec::new(),
+            provisions: Chain::default(),
             var_env: vec![BlockEnv::new(owner_scope, 0)],
             pending_vars: FxHashMap::default(),
             loop_stack: Vec::new(),
@@ -608,33 +594,36 @@ impl<'db> TyCheckEnv<'db> {
         self.assumptions
     }
 
-    pub(super) fn provision_count(&self) -> usize {
-        self.provisions.len()
+    pub(super) fn enter_provision_frame(&mut self) {
+        self.provisions.within(Frame::default());
     }
 
-    pub(super) fn truncate_provisions(&mut self, count: usize) {
-        self.provisions.truncate(count);
+    pub(super) fn leave_provision_frame(&mut self) {
+        self.provisions.leave();
     }
 
-    pub(super) fn push_evidence(&mut self, value: ExprId, goal: TraitInstId<'db>) {
-        self.provisions.push(ScopedProvision::Evidence(value, goal));
+    pub(super) fn insert_provision(&mut self, provision: Provision<'db>) -> Result<(), ()> {
+        self.provisions.insert(self.db, provision)
     }
 
     pub(super) fn push_selection(
         &mut self,
         selection: crate::analysis::semantic::SelectedApplication<'db>,
     ) {
-        self.provisions.push(ScopedProvision::Selection(selection));
+        assert!(
+            self.insert_provision(Provision::named(selection)).is_ok(),
+            "inherited selections must have one choice per trait goal"
+        );
     }
 
     pub(super) fn opened_obligations(
         &self,
     ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
         self.provisions
-            .iter()
-            .filter_map(|provision| match *provision {
-                ScopedProvision::Evidence(value, goal) => Some((value, goal)),
-                ScopedProvision::Selection(_) => None,
+            .visible(self.db)
+            .filter_map(|provision| match provision.source {
+                ProvisionSource::Evidence(value) => Some((value, provision.goal)),
+                ProvisionSource::Named(_) => None,
             })
     }
 
@@ -643,10 +632,10 @@ impl<'db> TyCheckEnv<'db> {
     ) -> impl DoubleEndedIterator<Item = crate::analysis::semantic::SelectedApplication<'db>> + '_
     {
         self.provisions
-            .iter()
-            .filter_map(|provision| match *provision {
-                ScopedProvision::Evidence(..) => None,
-                ScopedProvision::Selection(selection) => Some(selection),
+            .visible(self.db)
+            .filter_map(|provision| match provision.source {
+                ProvisionSource::Evidence(..) => None,
+                ProvisionSource::Named(selection) => Some(selection),
             })
     }
 
@@ -654,16 +643,8 @@ impl<'db> TyCheckEnv<'db> {
         selection_context(self.db, self.owner_scope, self.selections().collect())
     }
 
-    pub(super) fn provision_for_goal(
-        &self,
-        goal: TraitInstId<'db>,
-    ) -> Option<ScopedProvision<'db>> {
-        crate::core::semantic::lookup_trait_goal(
-            self.db,
-            goal,
-            self.provisions.iter().copied(),
-            ScopedProvision::goal,
-        )
+    pub(super) fn provision_for_goal(&self, goal: TraitInstId<'db>) -> Option<Provision<'db>> {
+        self.provisions.lookup(self.db, goal)
     }
 
     pub(super) fn selection_for_goal(
@@ -671,14 +652,20 @@ impl<'db> TyCheckEnv<'db> {
         goal: TraitInstId<'db>,
     ) -> Option<crate::analysis::semantic::SelectedApplication<'db>> {
         match self.provision_for_goal(goal) {
-            Some(ScopedProvision::Selection(selection)) => Some(selection),
+            Some(Provision {
+                source: ProvisionSource::Named(selection),
+                ..
+            }) => Some(selection),
             _ => None,
         }
     }
 
     pub(super) fn opened_for_goal(&self, goal: TraitInstId<'db>) -> Option<ExprId> {
         match self.provision_for_goal(goal) {
-            Some(ScopedProvision::Evidence(value, _)) => Some(value),
+            Some(Provision {
+                source: ProvisionSource::Evidence(value),
+                ..
+            }) => Some(value),
             _ => None,
         }
     }

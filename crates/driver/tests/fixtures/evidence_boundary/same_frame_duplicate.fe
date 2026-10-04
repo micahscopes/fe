@@ -1,0 +1,16 @@
+// Q10 BUG (decided, not yet implemented): one `with` list names two impls for the same goal.
+// The decision is that this is an error. Today it is accepted and the last name written wins, so
+// reordering the list changes the answer. Sound result: compile error for both functions.
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+impl Compute for Subject { const fn compute() -> u256 { 0 } }
+impl Compute for Subject as One { const fn compute() -> u256 { 1 } }
+impl Compute for Subject as Two { const fn compute() -> u256 { 2 } }
+const fn h<T: Compute>() -> u256 { T::compute() }
+const ONE_TWO: u256 = with (One, Two) { h<Subject>() }
+const TWO_ONE: u256 = with (Two, One) { h<Subject>() }
+#[test]
+fn today_last_wins() {
+    assert!(ONE_TWO == 2)
+    assert!(TWO_ONE == 1)
+}

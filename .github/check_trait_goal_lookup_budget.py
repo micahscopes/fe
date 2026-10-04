@@ -34,7 +34,9 @@ def inventory(sources):
         raise ValueError('expected one ordered trait-goal lookup')
     for file, name, delegate in [
         ('impl', 'selection_for', 'lookup_trait_goal'),
-        ('env', 'provision_for_goal', 'lookup_trait_goal'),
+        ('env', 'provision_for_goal', 'lookup'),
+        ('chain', 'lookup', 'lookup_trait_goal'),
+        ('chain', 'visible', 'lookup_trait_goal'),
         ('env', 'selection_for_goal', 'provision_for_goal'),
         ('const', 'selection_for', 'selection_for'),
     ]:
@@ -51,6 +53,7 @@ if __name__ == '__main__':
         'semantic': 'crates/hir/src/core/semantic/mod.rs',
         'impl': 'crates/hir/src/analysis/semantic/instance/template.rs',
         'env': 'crates/hir/src/analysis/ty/ty_check/env.rs',
+        'chain': 'crates/hir/src/core/semantic/provision.rs',
         'const': 'crates/hir/src/analysis/ty/const_ty.rs',
     }
     sources = {name: (ROOT / path).read_text() for name, path in paths.items()}
@@ -59,7 +62,7 @@ if __name__ == '__main__':
     except ValueError as error:
         sys.exit(str(error))
     # Mutations must not turn adapters back into independent lookup authorities.
-    for file, name in [('impl', 'selection_for'), ('env', 'provision_for_goal')]:
+    for file, name in [('impl', 'selection_for'), ('env', 'provision_for_goal'), ('chain', 'lookup'), ('chain', 'visible')]:
         mutant = dict(sources)
         body = bodies(sources[file], name)[0]
         mutant[file] = sources[file].replace(body, '{ entries.rev().find(|entry| true) }')

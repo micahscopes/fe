@@ -7,4 +7,4 @@ error[8-0097]: trait evidence opening failed
    ┌─ conflicting_evidence.fe:10:16
    │
 10 │     with (Alt, e) { <Subject as Compute>::compute() * 100 + helper<Subject>() }
-   │                ^ evidence and a named selection cannot choose the same trait goal
+   │                ^ one frame cannot provide the same trait goal twice

@@ -7,4 +7,4 @@ error[8-0097]: trait evidence opening failed
   ┌─ conflicting_evidence_reversed.fe:9:14
   │
 9 │     with (e, Alt) { Subject::compute() }
-  │              ^^^ evidence and a named selection cannot choose the same trait goal
+  │              ^^^ one frame cannot provide the same trait goal twice

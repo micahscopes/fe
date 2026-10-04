@@ -1,3 +1,4 @@
+use crate::core::semantic::Provision;
 use common::ingot::IngotKind;
 use either::Either;
 use num_bigint::{BigInt, BigUint, Sign};
@@ -20,7 +21,7 @@ use super::{
     },
     env::{
         EffectOrigin, EffectParamSite, ExprProp, LocalBinding, ParamSite, PendingPrimitiveOp,
-        ProvidedEffect, ScopedProvision, TraitObligation, TraitObligationOrigin, TyCheckEnv,
+        ProvidedEffect, TraitObligation, TraitObligationOrigin, TyCheckEnv,
     },
     path::ResolvedPathInBody,
     ty_may_be_code_region_token,
@@ -1522,6 +1523,19 @@ impl<'db> TyChecker<'db> {
         Ok(SelectedApplication::from_evidence(&proof))
     }
 
+    fn insert_with_provision(&mut self, value: ExprId, provision: Provision<'db>) -> bool {
+        if self.env.insert_provision(provision).is_ok() {
+            return true;
+        }
+        let diagnostic = BodyDiag::ObligationOpening {
+            primary: value.span(self.body()).into(),
+            reason: "one frame cannot provide the same trait goal twice",
+        };
+        self.env.record_with_choice(value, Err(diagnostic.clone()));
+        self.push_diag(diagnostic);
+        false
+    }
+
     fn check_with(
         &mut self,
         bindings: &[WithBinding<'db>],
@@ -1531,7 +1545,7 @@ impl<'db> TyChecker<'db> {
     ) -> ExprProp<'db> {
         self.env.effect_env_mut().push_frame();
         let saved_assumptions = self.env.assumptions();
-        let saved_provisions = self.env.provision_count();
+        self.env.enter_provision_frame();
 
         for binding in bindings {
             if binding.key_path.is_none()
@@ -1539,24 +1553,13 @@ impl<'db> TyChecker<'db> {
             {
                 match selection {
                     Ok(selection) => {
-                        if matches!(
-                            self.env.provision_for_goal(selection.goal()),
-                            Some(ScopedProvision::Evidence(..))
-                        ) {
-                            let diagnostic = BodyDiag::ObligationOpening {
-                                primary: binding.value.span(self.body()).into(),
-                                reason: "evidence and a named selection cannot choose the same trait goal",
-                            };
-                            self.env
-                                .record_with_choice(binding.value, Err(diagnostic.clone()));
-                            self.push_diag(diagnostic);
+                        if !self.insert_with_provision(binding.value, Provision::named(selection)) {
                             continue;
                         }
                         self.env
                             .type_expr(binding.value, ExprProp::new(TyId::unit(self.db), false));
                         self.env.static_selection_exprs.insert(binding.value);
                         self.env.record_with_choice(binding.value, Ok(selection));
-                        self.env.push_selection(selection);
                     }
                     Err(diag) => {
                         self.env
@@ -1587,20 +1590,12 @@ impl<'db> TyChecker<'db> {
                     if let [term] = args
                         && let TyData::ConstraintTerm(goal) = term.data(self.db)
                     {
-                        if matches!(
-                            self.env.provision_for_goal(*goal),
-                            Some(ScopedProvision::Selection(_))
+                        if !self.insert_with_provision(
+                            binding.value,
+                            Provision::evidence(binding.value, *goal),
                         ) {
-                            let diagnostic = BodyDiag::ObligationOpening {
-                                primary: binding.value.span(self.body()).into(),
-                                reason: "evidence and a named selection cannot choose the same trait goal",
-                            };
-                            self.env
-                                .record_with_choice(binding.value, Err(diagnostic.clone()));
-                            self.push_diag(diagnostic);
                             continue;
                         }
-                        self.env.push_evidence(binding.value, *goal);
                         let mut premises = self.env.assumptions().list(self.db).to_vec();
                         premises.push(*goal);
                         let assumptions =
@@ -1679,7 +1674,7 @@ impl<'db> TyChecker<'db> {
         };
         self.env.effect_env_mut().pop_frame();
         self.env.replace_assumptions(saved_assumptions);
-        self.env.truncate_provisions(saved_provisions);
+        self.env.leave_provision_frame();
         result
     }
 

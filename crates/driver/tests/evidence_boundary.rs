@@ -323,3 +323,102 @@ fn storage_write_capability_and_read_only_operations_remain_available() {
         assert!(errors.is_empty(), "{errors}");
     }
 }
+
+#[test]
+fn one_frame_rejects_duplicate_trait_provisions_in_both_orders() {
+    let source = include_str!("fixtures/evidence_boundary/same_frame_duplicate.fe");
+    let mut db = database();
+    let file = input(&mut db, "same-frame-duplicates", source);
+    let errors = diagnostics(&db, file);
+    assert_eq!(
+        errors.matches("error[8-0097]").count(),
+        2,
+        "each ordering must reject its second provision: {errors}"
+    );
+}
+
+const PROVISION_CONTROLS: &str = "
+use core::obligations::prove
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+impl Compute for Subject { const fn compute() -> u256 { 1 } }
+impl Compute for Subject as Flag { const fn compute() -> u256 { 10 } }
+impl Compute for Subject as Flag2 { const fn compute() -> u256 { 20 } }
+const fn h<T: Compute>() -> u256 { T::compute() }
+";
+
+#[test]
+fn same_frame_rejects_evidence_and_mixed_provision_duplicates() {
+    for bindings in [
+        "e1, e2",
+        "e2, e1",
+        "e1, e1",
+        "Flag, Flag",
+        "e1, Flag",
+        "Flag, e1",
+    ] {
+        let source = format!("{PROVISION_CONTROLS}
+const fn answer() -> u256 {{ let e1 = prove<Compute<Subject>>()\n let e2 = prove<Compute<Subject>>()\n with ({bindings}) {{ h<Subject>() }} }}");
+        let mut db = database();
+        let file = input(&mut db, "duplicate-spellings", &source);
+        let errors = diagnostics(&db, file);
+        assert_eq!(
+            errors.matches("error[8-0097]").count(),
+            1,
+            "{bindings}: {errors}"
+        );
+    }
+}
+
+#[test]
+fn nested_provision_frames_choose_inner_and_restore_outer() {
+    for (expression, expected) in [
+        (
+            "with (Flag) { let inner = with (Flag2) { h<Subject>() }\n inner * 100 + h<Subject>() }",
+            "2010",
+        ),
+        (
+            "with (Flag2) { let inner = with (Flag) { h<Subject>() }\n inner * 100 + h<Subject>() }",
+            "1020",
+        ),
+        ("with (Flag) { with (e) { h<Subject>() } }", "1"),
+        ("with (e) { with (Flag) { h<Subject>() } }", "10"),
+        (
+            "with (Flag) { let inner = with (e) { h<Subject>() }\n inner * 100 + h<Subject>() }",
+            "110",
+        ),
+        (
+            "with (e) { let inner = with (Flag) { h<Subject>() }\n inner * 100 + h<Subject>() }",
+            "1001",
+        ),
+        ("with (e) { with (e) { h<Subject>() } }", "1"),
+    ] {
+        let source = format!(
+            "{PROVISION_CONTROLS}
+const fn answer() -> u256 {{ let e = prove<Compute<Subject>>()\n {expression} }}"
+        );
+        let mut db = database();
+        let file = checked(&mut db, "nested-provision-spellings", &source);
+        assert_eq!(evaluate(&db, file, "answer"), expected, "{expression}");
+    }
+}
+
+#[test]
+fn one_frame_keeps_distinct_trait_arguments_in_separate_slots() {
+    let source = "
+trait Compute<T> { const fn compute() -> u256 }
+struct Subject {}
+impl Compute<u8> for Subject { const fn compute() -> u256 { 1 } }
+impl Compute<u16> for Subject { const fn compute() -> u256 { 2 } }
+impl Compute<u8> for Subject as Narrow { const fn compute() -> u256 { 10 } }
+impl Compute<u16> for Subject as Wide { const fn compute() -> u256 { 20 } }
+const fn answer() -> u256 {
+    with (Narrow, Wide) {
+        <Subject as Compute<u8>>::compute() * 100 + <Subject as Compute<u16>>::compute()
+    }
+}
+";
+    let mut db = database();
+    let file = checked(&mut db, "distinct-provision-slots", source);
+    assert_eq!(evaluate(&db, file, "answer"), "1020");
+}
