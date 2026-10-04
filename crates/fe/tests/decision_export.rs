@@ -291,6 +291,13 @@ fn cli_export_preserves_check_results_and_source_provenance() {
             json!(format!("{:x}", Sha256::digest(source.as_bytes())))
         );
         assert_ne!(records[0]["compiler_commit"], json!("unknown"));
+        let call = records
+            .iter()
+            .find(|row| row["kind"] == "item" && row["item"] == "fn" && row["name"] == "call")
+            .unwrap();
+        assert_eq!(call["body"][0]["use"], "call");
+        assert_eq!(call["body"][0]["fn"], "need");
+        assert_eq!(call["body"][0]["span"], json!({"line":2,"col":13}));
         assert!(
             records
                 .iter()

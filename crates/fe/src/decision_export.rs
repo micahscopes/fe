@@ -242,8 +242,8 @@ pub fn with_records<'db>(
     }).collect()
 }
 
-/// Write the checked module's retained body records. Program/item encoding is
-/// still being completed; the explicit v1 note keeps that limitation visible.
+/// Write program structure and the checked module's retained body records.
+/// The explicit v1 note identifies the remaining export limitations.
 pub fn write_module(
     db: &driver::DriverDataBase,
     module: hir::hir_def::TopLevelMod<'_>,
@@ -253,8 +253,9 @@ pub fn write_module(
     use sha2::{Digest, Sha256};
     let mut records = vec![
         json!({"v":1,"kind":"header","schema":"fe-decisions/1","compiler_commit":option_env!("FE_GIT_COMMIT").unwrap_or("unknown"),"source_sha256":format!("{:x}",Sha256::digest(file.text(db).as_bytes()))}),
-        json!({"v":1,"kind":"note","text":"Body decisions only: program items, diagnostics and overlap records are pending; this is not a complete model export."}),
+        json!({"v":1,"kind":"note","text":"Diagnostics and overlap records are pending; unsupported program shapes are explicit out_of_fragment items. This is not a complete model export."}),
     ];
+    records.extend(declaration_records(db, module));
     for func in module.all_funcs(db) {
         let Some(owner) = func.body(db) else { continue };
         let (_, body) = hir::analysis::ty::ty_check::check_func_body(db, *func);
