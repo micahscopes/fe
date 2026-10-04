@@ -195,3 +195,44 @@ fn export_reads_the_condition_selection_used_for_discharge() {
         json!({"assoc":{"con":"Subject","args":[]},"trait":"Compute","targs":[],"c":"OK"})
     );
 }
+
+#[test]
+fn export_reads_successful_and_failed_named_openings() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///opening_decision_export.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(
+            r#"
+trait Read { fn read() }
+struct Word {}
+impl Read for Word as Other { fn read() {} }
+fn selected() { with (Other) {} }
+fn unknown() { with (Missing) {} }
+"#
+            .into(),
+        ),
+    );
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(!diagnostics.is_empty(), "unknown opening must fail");
+    for (func_name, name, outcome) in [
+        ("selected", "Other", json!({"impl":0})),
+        ("unknown", "Missing", json!({"error":"8-0099"})),
+    ] {
+        let func = module
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|func| func.name(&db).to_opt().unwrap().data(&db) == func_name)
+            .unwrap();
+        let (_, body) = check_func_body(&db, func);
+        let records =
+            fe::decision_export::with_records(&db, func.body(&db).unwrap(), body).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["name"], json!(name));
+        assert_eq!(records[0]["outcome"], outcome);
+        assert!(records[0]["site"]["col"].as_u64().unwrap() > 20);
+    }
+}
