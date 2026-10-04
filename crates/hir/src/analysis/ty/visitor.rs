@@ -5,7 +5,9 @@ use super::{
     const_expr::ConstExpr,
     const_ty::{ConstCaptureEnv, ConstTyData, ConstTyId},
     trait_def::{ImplementorId, TraitInstId, TraitRefId},
-    trait_resolution::{ImplConditionsId, PredicateListId, TraitGoalSolution, TraitSolverQuery},
+    trait_resolution::{
+        ImplConditionsId, PredicateListId, TraitGoalPremisesId, TraitGoalSolution, TraitSolverQuery,
+    },
     ty_check::{EffectArg, ExprProp, LocalBinding, ResolvedEffectArg},
     ty_def::{AssocTy, InvalidCause, PrimTy, TyBase, TyData, TyFlags, TyId, TyParam, TyVar},
 };
@@ -340,6 +342,19 @@ impl<'db> TyVisitable<'db> for TraitGoalSolution<'db> {
         self.inst.visit_with(visitor);
         self.implementor.visit_with(visitor);
         self.impl_conditions.visit_with(visitor);
+        self.premises.visit_with(visitor);
+    }
+}
+
+impl<'db> TyVisitable<'db> for TraitGoalPremisesId<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        for &(_, goal, implementor) in self.choices(visitor.db()) {
+            goal.visit_with(visitor);
+            implementor.visit_with(visitor);
+        }
     }
 }
 

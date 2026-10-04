@@ -18,7 +18,7 @@ use tablesolve::{
 
 use super::{
     CanonicalGoalQuery, GoalSatisfiability, ImplConditionsId, TRAIT_SOLVER_ROOT_ANSWER_LIMIT,
-    TraitGoalSolution, TraitSolveCompletion, TraitSolveCx, TraitSolverQuery,
+    TraitGoalPremisesId, TraitGoalSolution, TraitSolveCompletion, TraitSolveCx, TraitSolverQuery,
 };
 use crate::analysis::{
     HirAnalysisDb,
@@ -214,7 +214,9 @@ enum Clause<'db> {
 struct Branch<'db> {
     table: PersistentUnificationTable<'db>,
     root_goal: TraitInstId<'db>,
-    remaining_goals: Vec<TraitInstId<'db>>,
+    remaining_goals: Vec<(usize, TraitInstId<'db>)>,
+    pending_slot: Option<usize>,
+    premise_choices: Vec<(usize, TraitInstId<'db>, ImplementorId<'db>)>,
     selected_impl: ImplementorId<'db>,
     establishes_goal: bool,
     impl_conditions: Vec<ImplementorId<'db>>,
@@ -362,6 +364,9 @@ impl<'db> TraitResolutionContext<'db> {
                 .collect::<Vec<_>>(),
             trait_conditions,
         );
+        branch.premise_choices.sort_by_key(|&(slot, _, _)| slot);
+        let premises = TraitGoalPremisesId::new(self.db, branch.premise_choices.clone())
+            .fold_with(self.db, &mut branch.table);
         parent.query.canonicalize_solution(
             self.db,
             &mut branch.table,
@@ -369,6 +374,7 @@ impl<'db> TraitResolutionContext<'db> {
                 inst: goal,
                 implementor: branch.selected_impl,
                 impl_conditions,
+                premises,
             },
         )
     }
@@ -404,13 +410,14 @@ impl<'db> TraitResolutionContext<'db> {
         mut branch: Branch<'db>,
         assumptions: super::PredicateListId<'db>,
     ) -> ContextTransition<Self> {
-        let Some(next_goal) = branch.remaining_goals.pop() else {
+        let Some((slot, next_goal)) = branch.remaining_goals.pop() else {
             return self.finish_branch(parent, branch);
         };
 
         // `tablesolve` keys a suspension before retaining its branch state. Fold
         // through every substitution accumulated so far so table sharing never
         // sees a stale, pre-unification subgoal.
+        branch.pending_slot = Some(slot);
         let next_goal = next_goal.fold_with(self.db, &mut branch.table);
         let assumptions = assumptions.fold_with(self.db, &mut branch.table);
         Transition::Suspend {
@@ -432,7 +439,9 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
     type Key = Query<'db>;
     type Clause = Clause<'db>;
     type Answer = GoalSolution<'db>;
-    type AnswerKey = GoalSolution<'db>;
+    // Premise derivations are witnesses, not additional root proof identities.
+    // Keep the first accepted witness for each established root answer.
+    type AnswerKey = (TraitInstId<'db>, ImplementorId<'db>, ImplConditionsId<'db>);
     type Output = GoalSolution<'db>;
     type State = Branch<'db>;
     type Rebase = CanonicalGoalQuery<'db>;
@@ -571,7 +580,8 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 let remaining_goals = requirements
                     .list(self.db)
                     .iter()
-                    .map(|goal| goal.fold_with(self.db, &mut table))
+                    .enumerate()
+                    .map(|(slot, goal)| (slot, goal.fold_with(self.db, &mut table)))
                     .collect();
                 return Ok(self.continue_branch(
                     key,
@@ -579,6 +589,8 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                         table,
                         root_goal: query.goal,
                         remaining_goals,
+                        pending_slot: None,
+                        premise_choices: Vec::new(),
                         selected_impl,
                         establishes_goal: false,
                         impl_conditions: Vec::new(),
@@ -624,12 +636,15 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 let remaining_goals = constraints
                     .list(self.db)
                     .iter()
-                    .map(|constraint| constraint.fold_with(self.db, &mut table))
+                    .enumerate()
+                    .map(|(slot, constraint)| (slot, constraint.fold_with(self.db, &mut table)))
                     .collect();
                 let branch = Branch {
                     table,
                     root_goal: query.goal,
                     remaining_goals,
+                    pending_slot: None,
+                    premise_choices: Vec::new(),
                     selected_impl,
                     establishes_goal: true,
                     impl_conditions: if let crate::analysis::ty::trait_def::ImplementorOrigin::Hir(
@@ -676,6 +691,8 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             table,
             root_goal: query.goal,
             remaining_goals: Vec::new(),
+            pending_slot: None,
+            premise_choices: Vec::new(),
             selected_impl,
             establishes_goal: false,
             impl_conditions: Vec::new(),
@@ -704,6 +721,7 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 branch.trait_conditions.push(goal);
             }
         }
+        let child_implementor = solution.implementor;
         let solution = solution.inst;
 
         let normalized_pending = {
@@ -765,6 +783,13 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             return Ok(Transition::Stop(StopReason::MaximumTypeDepth));
         }
 
+        let slot = branch
+            .pending_slot
+            .take()
+            .expect("resumed branch has a pending premise");
+        branch
+            .premise_choices
+            .push((slot, solution, child_implementor));
         Ok(self.continue_branch(parent, branch, rebase.assumptions()))
     }
 
@@ -780,7 +805,11 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
     }
 
     fn answer_key(&self, _key: &Self::Key, answer: &Self::Answer) -> Self::AnswerKey {
-        *answer
+        (
+            answer.value.inst,
+            answer.value.implementor,
+            answer.value.impl_conditions,
+        )
     }
 }
 
