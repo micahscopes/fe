@@ -466,14 +466,11 @@ impl<'db> Trait<'db> {
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<TyDiagCollection<'db>> {
         let mut diags = Vec::new();
-        let trait_inst = crate::semantic::trait_self_predicate(db, self);
         for assoc in self.assoc_types(db) {
-            let Some(name) = assoc.name(db) else { continue };
-            let subject = TyId::foldl(
-                db,
-                TyId::assoc_ty(db, trait_inst.trait_ref(db), name),
-                &assoc.family_parameters(db),
-            );
+            if assoc.name(db).is_none() {
+                continue;
+            }
+            let subject = assoc.formal_subject(db);
             let assumptions = assoc.with_declared_guards(db, param_env(db, self.into()));
             let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, assoc.scope())
                 .with_assumptions(assumptions);

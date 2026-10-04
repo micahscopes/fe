@@ -838,3 +838,61 @@ fn composed_projection_constraints_use_the_full_trait_instance() {
         assert_eq!(result, diagnostics(&fresh, fresh_file));
     }
 }
+
+/// Checks each source in a fresh database and in one edited database, and
+/// expects no diagnostics (`None`) or a diagnostic containing the text.
+fn check_cases(cases: &[(&str, Option<&str>)]) {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("cases.fe"), "");
+    for &(source, expected) in cases {
+        file.set_text(&mut db).to(source.to_owned());
+        let result = diagnostics(&db, file);
+        match expected {
+            None => assert!(result.is_empty(), "{source}\n{result}"),
+            Some(text) => assert!(
+                result.contains(text),
+                "expected `{text}`\n{source}\n{result}"
+            ),
+        }
+        let mut fresh = HirAnalysisTestDb::default();
+        let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("cases.fe"), source);
+        assert_eq!(result, diagnostics(&fresh, fresh_file), "{source}");
+    }
+}
+
+#[test]
+fn family_bounds_hold_on_another_instance_of_the_trait() {
+    check_cases(&[
+        (
+            r#"
+trait Show { fn show(self) -> u8 }
+trait Tr {
+    type Next: Tr
+    type Out<T>: Show
+    fn get<T>(_ x: <Self::Next as Tr>::Out<T>) -> u8 { x.show() }
+}
+"#,
+            None,
+        ),
+        (
+            r#"
+trait Show { fn show(self) -> u8 }
+trait Tr {
+    type Next: Tr
+    type Out<T: Show>: Show = <Self::Next as Tr>::Out<T>
+}
+"#,
+            None,
+        ),
+        (
+            r#"
+trait Show { fn show(self) -> u8 }
+trait Tr {
+    type Next: Tr
+    type Out<T: Show>: Show = <Self::Next as Tr>::Out<bool>
+}
+"#,
+            Some("trait bound is not satisfied"),
+        ),
+    ]);
+}

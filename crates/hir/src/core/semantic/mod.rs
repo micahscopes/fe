@@ -4921,6 +4921,18 @@ pub struct AssocTypeBoundView<'db> {
 }
 
 impl<'db> TraitAssocTypeView<'db> {
+    /// `<Self as Trait<..>>::Name<P..>` over the trait's and the family's own
+    /// formal parameters.
+    pub(crate) fn formal_subject(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
+        let trait_inst = trait_self_predicate(db, self.owner);
+        let name = self.name(db).expect("a family has a name");
+        TyId::foldl(
+            db,
+            TyId::assoc_ty(db, trait_inst.trait_ref(db), name),
+            &self.family_parameters(db),
+        )
+    }
+
     pub(crate) fn family_parameters(self, db: &'db dyn HirAnalysisDb) -> Vec<TyId<'db>> {
         let owner = self.scope().assoc_type_owner().unwrap();
         (0..self.generic_params(db).data(db).len())
@@ -5245,7 +5257,13 @@ impl<'db> TyId<'db> {
         };
         let mut requirements = vec![inst];
         requirements.extend_from_slice(self.associated_family_requirements(db)?.list(db));
-        let bounds: Vec<_> = decl.bounds_on_subject(db, self).map(instantiate).collect();
+        // Lower the bounds on the declaration's own formal subject, so the
+        // substitutions above only ever replace formals. The actual subject
+        // can mention `Self` or the family's parameters itself.
+        let bounds: Vec<_> = decl
+            .bounds_on_subject(db, decl.formal_subject(db))
+            .map(instantiate)
+            .collect();
         Some((
             PredicateListId::new(db, requirements),
             PredicateListId::new(db, bounds).extend_all_bounds(db),
